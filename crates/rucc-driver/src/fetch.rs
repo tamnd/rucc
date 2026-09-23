@@ -159,7 +159,33 @@ enum Ran {
 /// the hash, and those are deleted rather than kept, because a file under the name of an artifact it
 /// is not would be worse than no file. Anything the filesystem refuses.
 pub fn fetch(url: &str, sha256: &str, into: &Path) -> Result<Fetched, CliError> {
-    fetch_with(url, sha256, into, &mut run)
+    fetch_with(url, Some(sha256), into, &mut run)
+}
+
+/// Get the file at `url` to `into` with nothing to hold it against but the connection it came over.
+///
+/// This exists for exactly two files and they are the two documents at the top of
+/// `spec/cross-compile/13-distribution.md` section 13.4's chain. Microsoft's channel manifest is the
+/// root of that chain, so there is nothing above it that could name its hash, and Microsoft's
+/// installer manifest has a hash published for it in the channel that does not match the file served
+/// at the URL the channel names in the same breath, which was measured rather than assumed and is
+/// written down in that section. Every file named by the installer manifest goes through [`fetch`]
+/// above with the hash the manifest gives for it, and those hashes are exact.
+///
+/// So the trust a hash would have carried is carried by the downloader's connection to a Microsoft
+/// host instead, which is a weaker claim than the one [`fetch`] makes and is why this is a second
+/// function with its own name rather than a `None` somebody could pass to the first one by accident.
+///
+/// A file already at `into` is downloaded over rather than trusted, because with no hash there is no
+/// way to ask whether the one sitting there is the file. Nothing is written under `into` until the
+/// download finished, the same as above.
+///
+/// # Errors
+///
+/// The same three as [`fetch`] minus the hash: no downloader, a downloader that ran and failed, or
+/// a filesystem that refused.
+pub fn trusted(url: &str, into: &Path) -> Result<Fetched, CliError> {
+    fetch_with(url, None, into, &mut run)
 }
 
 /// The same, from a function that says what running a downloader did.
@@ -171,11 +197,13 @@ pub fn fetch(url: &str, sha256: &str, into: &Path) -> Result<Fetched, CliError> 
 /// downloader would have written.
 fn fetch_with(
     url: &str,
-    sha256: &str,
+    sha256: Option<&str>,
     into: &Path,
     run: &mut dyn FnMut(Downloader, &Path, &[String]) -> Ran,
 ) -> Result<Fetched, CliError> {
-    if into.exists() {
+    // With no hash there is no question to ask about the file that is there, so it is downloaded
+    // over rather than believed. That is [`trusted`] above and its two documents only.
+    if let (true, Some(sha256)) = (into.exists(), sha256) {
         verify(into, sha256)?;
         return Ok(Fetched::AlreadyThere);
     }
@@ -206,7 +234,9 @@ fn fetch_with(
                 // What a downloader reports is that the transfer finished, and what has to be true
                 // is that the bytes are the artifact. Those are different claims and only the
                 // second one is ours.
-                if let Err(why) = verify(&partial, sha256) {
+                if let Some(sha256) = sha256
+                    && let Err(why) = verify(&partial, sha256)
+                {
                     let _ = fs::remove_file(&partial);
                     return Err(err(format!(
                         "the download of {url} was deleted rather than kept: {}",
@@ -221,10 +251,14 @@ fn fetch_with(
     }
 
     let tried: Vec<&str> = absent.iter().map(|downloader| downloader.program()).collect();
+    let check = match sha256 {
+        Some(sha256) => format!("check that its sha256 is {sha256}, "),
+        // Nothing to check it against, which is the whole of what [`trusted`] gives up.
+        None => String::new(),
+    };
     Err(err(format!(
         "none of {} can be run on this machine and rucc has no downloader of its own, so \
-         download {url}, check that its sha256 is {sha256}, put it at {}, and run this again, \
-         which carries on from the check",
+         download {url}, {check}put it at {}, and run this again, which carries on from the check",
         tried.join(", "),
         into.display()
     )))
@@ -343,7 +377,7 @@ mod tests {
         let into = tree.0.join("musl.tar.gz");
         let tried = RefCell::new(Vec::new());
 
-        let done = fetch_with(URL, &hash(), &into, &mut |downloader, partial, _| {
+        let done = fetch_with(URL, Some(&hash()), &into, &mut |downloader, partial, _| {
             tried.borrow_mut().push(downloader);
             if downloader == Downloader::Curl {
                 return Ran::Absent;
@@ -365,7 +399,7 @@ mod tests {
         let into = tree.0.join("musl.tar.gz");
         let tried = RefCell::new(Vec::new());
 
-        let why = fetch_with(URL, &hash(), &into, &mut |downloader, _, _| {
+        let why = fetch_with(URL, Some(&hash()), &into, &mut |downloader, _, _| {
             tried.borrow_mut().push(downloader);
             Ran::Failed("curl: (22) The requested URL returned error: 404".to_owned())
         })
@@ -383,7 +417,7 @@ mod tests {
         let into = tree.0.join("musl.tar.gz");
         let tried = RefCell::new(Vec::new());
 
-        let why = fetch_with(URL, &hash(), &into, &mut |downloader, _, _| {
+        let why = fetch_with(URL, Some(&hash()), &into, &mut |downloader, _, _| {
             tried.borrow_mut().push(downloader);
             Ran::Absent
         })
@@ -406,7 +440,7 @@ mod tests {
         let into = tree.0.join("musl.tar.gz");
         let written = RefCell::new(PathBuf::new());
 
-        let why = fetch_with(URL, &hash(), &into, &mut |_, partial, _| {
+        let why = fetch_with(URL, Some(&hash()), &into, &mut |_, partial, _| {
             *written.borrow_mut() = partial.to_path_buf();
             std::fs::write(partial, b"half of it\n").expect("a downloader writes the file");
             Ran::Worked
@@ -427,7 +461,7 @@ mod tests {
         let into = tree.0.join("musl.tar.gz");
         std::fs::write(&into, BYTES).expect("the file");
 
-        let done = fetch_with(URL, &hash(), &into, &mut |_, _, _| {
+        let done = fetch_with(URL, Some(&hash()), &into, &mut |_, _, _| {
             panic!("nothing should have been run");
         })
         .expect("it is already here");
@@ -443,12 +477,47 @@ mod tests {
         let into = tree.0.join("musl.tar.gz");
         std::fs::write(&into, b"something else\n").expect("the file");
 
-        let why = fetch_with(URL, &hash(), &into, &mut |_, _, _| {
+        let why = fetch_with(URL, Some(&hash()), &into, &mut |_, _, _| {
             panic!("nothing should have been run");
         })
         .expect_err("that is not the artifact");
         assert!(why.message.contains("where this release pins"), "{}", why.message);
         assert!(into.exists(), "a file somebody placed should still be there");
+    }
+
+    #[test]
+    fn with_no_hash_a_file_that_is_already_there_is_downloaded_over_rather_than_believed() {
+        // Which is the whole of what `trusted` gives up. There is nothing to ask about the file
+        // sitting there, so the question is not asked and the answer is not guessed at either.
+        let tree = Tree::new("trusted-again");
+        let into = tree.0.join("VisualStudio.vsman");
+        std::fs::write(&into, b"half a manifest from a run that was interrupted\n").expect("it");
+        let ran = RefCell::new(0);
+
+        let done = fetch_with(URL, None, &into, &mut |_, partial, _| {
+            *ran.borrow_mut() += 1;
+            std::fs::write(partial, BYTES).expect("a downloader writes the file");
+            Ran::Worked
+        })
+        .expect("nothing was held against it");
+
+        assert_eq!(done, Fetched::Downloaded(Downloader::Curl));
+        assert_eq!(ran.into_inner(), 1);
+        assert_eq!(std::fs::read(&into).expect("the file"), BYTES);
+    }
+
+    #[test]
+    fn with_no_hash_a_machine_with_no_downloader_is_not_told_to_check_one() {
+        // The message is the same instruction minus the half of it that cannot be given.
+        let tree = Tree::new("trusted-none");
+        let into = tree.0.join("VisualStudio.vsman");
+
+        let why = fetch_with(URL, None, &into, &mut |_, _, _| Ran::Absent)
+            .expect_err("there is nothing to download with");
+
+        assert!(why.message.contains(URL), "{}", why.message);
+        assert!(!why.message.contains("sha256"), "{}", why.message);
+        assert!(why.message.contains(&into.display().to_string()), "{}", why.message);
     }
 
     #[test]
@@ -470,7 +539,7 @@ mod tests {
         let tree = Tree::new("parent");
         let into = tree.0.join("downloads").join("musl.tar.gz");
 
-        let done = fetch_with(URL, &hash(), &into, &mut |_, partial, _| {
+        let done = fetch_with(URL, Some(&hash()), &into, &mut |_, partial, _| {
             assert!(partial.parent().expect("a parent").is_dir(), "the directory should be there");
             std::fs::write(partial, BYTES).expect("a downloader writes the file");
             Ran::Worked
