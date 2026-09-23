@@ -23,4 +23,13 @@ print early
 echo names\n
 info locals
 echo done\n
+# The second stop, which is in `reuse`, called with 1. The elements printed are the ones written:
+# `spent[2]` is 8 and `later[12]` is 18.
+continue
+frame 1
+echo ask later\n
+print later[12]
+echo ask spent\n
+print spent[2]
+echo done\n
 quit

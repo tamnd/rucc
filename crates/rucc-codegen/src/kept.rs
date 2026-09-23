@@ -45,6 +45,7 @@
 use rucc_mir::{Func, Inst, Kept, Where};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
+use rucc_regalloc::live::Range;
 use rucc_regalloc::order::Point;
 
 use crate::frame::Frame;
@@ -62,9 +63,20 @@ pub fn before(func: &Func) -> Vec<Inst> {
 
 /// Which declaration is where, over which instructions, or nothing at all for a function the
 /// answer cannot be given about. See the module documentation for which those are.
+///
+/// `framed` is the locals in the frame whose bytes they share with something else, as the
+/// declaration, how far the bytes are from the call frame address and where the local is wanted.
+/// Each of them is in the frame over that area and nowhere outside it, which is the same question
+/// as a spilled value and gets the same answer.
 #[must_use]
-pub fn of(func: &Func, before: &[Inst], allocation: &Allocation, frame: &Frame) -> Vec<Kept> {
-    if func.named.is_empty() {
+pub fn of(
+    func: &Func,
+    before: &[Inst],
+    allocation: &Allocation,
+    frame: &Frame,
+    framed: &[(u32, i32, &[Range])],
+) -> Vec<Kept> {
+    if func.named.is_empty() && framed.is_empty() {
         return Vec::new();
     }
     let Some(line) = line(func, before, allocation) else { return Vec::new() };
@@ -80,22 +92,36 @@ pub fn of(func: &Func, before: &[Inst], allocation: &Allocation, frame: &Frame) 
             None => continue,
         };
         let Some(area) = allocation.live.area(reg) else { continue };
-        for piece in area.pieces() {
-            for run in &line {
-                // Strictly after where the value is written and up to and including where it is
-                // last read. Both ends of a piece are points the value is live at, and the front
-                // one is the instruction writing it, which is the one instruction in the piece the
-                // register does not hold the value at the start of.
-                let lo = run.partition_point(|&(point, _)| point <= piece.start);
-                let hi = run.partition_point(|&(point, _)| point <= piece.end);
-                if lo >= hi {
-                    continue;
-                }
-                out.push(Kept { decl, at, from: run[lo].1, to: run[hi - 1].1 });
-            }
-        }
+        over(decl, at, area.pieces(), &line, &mut out);
+    }
+    for &(decl, at, area) in framed {
+        over(decl, Where::Frame(at), area.iter().copied(), &line, &mut out);
     }
     out
+}
+
+/// The stretches one declaration is in one place over, a piece of where it is wanted at a time.
+fn over(
+    decl: u32,
+    at: Where,
+    pieces: impl Iterator<Item = Range>,
+    line: &[Vec<(Point, Inst)>],
+    out: &mut Vec<Kept>,
+) {
+    for piece in pieces {
+        for run in line {
+            // Strictly after where the value is written and up to and including where it is last
+            // read. Both ends of a piece are points the value is live at, and the front one is the
+            // instruction writing it, which is the one instruction in the piece the register does
+            // not hold the value at the start of.
+            let lo = run.partition_point(|&(point, _)| point <= piece.start);
+            let hi = run.partition_point(|&(point, _)| point <= piece.end);
+            if lo >= hi {
+                continue;
+            }
+            out.push(Kept { decl, at, from: run[lo].1, to: run[hi - 1].1 });
+        }
+    }
 }
 
 /// The instructions the function still has that the liveness knows a point for, one list per block
@@ -172,7 +198,7 @@ mod tests {
         let env = Env::new().with(GPR, &SYSV.int_order[..4], &SYSV.int_order[4..]);
         let allocation = rucc_regalloc::run(func, &env, "test", true);
         let frame = Frame::of(func, &allocation, &Layout::new(&SYSV, REGS));
-        of(func, line, &allocation, &frame)
+        of(func, line, &allocation, &frame, &[])
     }
 
     #[test]
@@ -233,6 +259,21 @@ mod tests {
     }
 
     #[test]
+    fn a_local_that_shares_its_frame_bytes_is_there_over_its_area_and_nowhere_else() {
+        let (mut func, line) = three(&[]);
+        let env = Env::new().with(GPR, &SYSV.int_order[..4], &SYSV.int_order[4..]);
+        let allocation = rucc_regalloc::run(&mut func, &env, "test", true);
+        let frame = Frame::of(&func, &allocation, &Layout::new(&SYSV, REGS));
+
+        // Wanted from the first instruction to the second, so in its bytes over the second only,
+        // and the third is where whatever it shares them with may have written over it.
+        let order = &allocation.order;
+        let area = [Range { start: order.early(line[0]), end: order.late(line[1]) }];
+        let kept = of(&func, &line, &allocation, &frame, &[(41, -24, &area)]);
+        assert_eq!(kept, [Kept { decl: 41, at: Where::Frame(-24), from: line[1], to: line[1] }]);
+    }
+
+    #[test]
     fn a_function_the_front_end_named_nothing_in_says_nothing() {
         let (mut func, line) = three(&[]);
         let kept = about(&mut func, &line);
@@ -245,13 +286,13 @@ mod tests {
         let env = Env::new().with(GPR, &SYSV.int_order[..4], &SYSV.int_order[4..]);
         let allocation = rucc_regalloc::run(&mut func, &env, "test", true);
         let frame = Frame::of(&func, &allocation, &Layout::new(&SYSV, REGS));
-        assert!(!of(&func, &line, &allocation, &frame).is_empty(), "something to say first");
+        assert!(!of(&func, &line, &allocation, &frame, &[]).is_empty(), "something to say first");
 
         // The same function with its first two instructions the other way round, which is what a
         // scheduler leaves behind and is the shape the allocator's liveness can no longer be read
         // against, since it is counted along the order the function was in.
         func.remove_inst(line[0]);
         func.insert_after(line[1], line[0]);
-        assert!(of(&func, &line, &allocation, &frame).is_empty(), "no longer the order");
+        assert!(of(&func, &line, &allocation, &frame, &[]).is_empty(), "no longer the order");
     }
 }

@@ -1122,6 +1122,15 @@ fn describe(
         let mut sig = known.and_then(|known| known.sig.clone());
         let mut placed: Vec<(u32, i32)> = built.locals.clone();
         let mut spots = stretches(extent, rows, built, target);
+        // And a local in the frame that shares its bytes and has no stretch at all, which still
+        // gets its entry so that a debugger says it is not available rather than that there is no
+        // such name. That is a function whose instructions were scheduled, where no stretch can be
+        // given, and the whole of it is then somewhere the local may not be.
+        for &decl in &built.sharing {
+            if !spots.iter().any(|(at, _)| *at == decl) {
+                spots.push((decl, Vec::new()));
+            }
+        }
         if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
             for (param, decl) in sig.params.iter_mut().zip(&known.params) {
                 let Some(decl) = *decl else { continue };
