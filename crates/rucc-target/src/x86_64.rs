@@ -42,7 +42,8 @@ pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding,
 };
 pub use crate::x86_64::insts::{
-    ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, address, form, packed, unpacked,
+    ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,
+    form, packed, template_filled, template_name, unpacked,
 };
 pub use crate::x86_64::read::{At, Disp, Line, Piece, Step, read, read_in};
 pub use crate::x86_64::text::{

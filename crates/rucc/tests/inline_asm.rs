@@ -455,14 +455,13 @@ int f(int n) {
 }
 
 #[test]
-fn an_alignment_this_cannot_promise_says_so_rather_than_dropping_it() {
-    // A second argument is a fill byte or a number of bytes to stop after, and both are things this
-    // does not do. Quietly writing the boundary without the rest of what was asked for is a program
-    // that builds and is not the one that was written.
+fn an_alignment_with_a_limit_is_kept_as_the_text_it_was() {
+    // A third argument is the most padding worth writing, which the instruction this reads an
+    // alignment into has no room for. So the template is kept as text and the assembler that
+    // reads the listing does all of what it says, the way gcc's does.
     let source = "void f(void) { asm volatile (\".p2align 4, 0x90, 8\"); }\n";
-    let (ok, _, said) = run("align-fill", source);
-    assert!(!ok, "an alignment with more in it than a boundary was accepted");
-    assert!(said.contains("which nothing here assembles"), "{said}");
+    let text = asm("align-fill", source);
+    assert!(body(&text, "f").contains("\t.p2align 4, 0x90, 8\n"), "{text}");
 }
 
 /// What a program writes when its assembler was older than the instruction it wants. libwebp writes
@@ -495,15 +494,14 @@ unsigned long long f(unsigned int n) {
     );
 }
 
-/// A number that is not a byte is refused rather than truncated, for the reason a fill byte on an
-/// alignment is: a program that wrote one meant something this does not do, and writing the low
-/// eight bits of it would be a program that builds and is not the one that was written.
+/// A number that is not a byte is not read into an instruction, and the template is kept as the
+/// text it was. What becomes of the number is then the assembler's answer, which is the same
+/// answer gas gives: the low eight bits.
 #[test]
-fn a_byte_directive_that_is_not_bytes_says_so_rather_than_truncating() {
+fn a_byte_directive_that_is_not_bytes_is_kept_as_the_text_it_was() {
     let source = "void f(void) { __asm__ volatile (\".byte 0x0f01\"); }\n";
-    let (ok, _, said) = run("byte-wide", source);
-    assert!(!ok, "a number wider than a byte was accepted");
-    assert!(said.contains("which nothing here assembles"), "{said}");
+    let text = asm("byte-wide", source);
+    assert!(body(&text, "f").contains("\t.byte 0x0f01\n"), "{text}");
 }
 
 #[test]
@@ -598,14 +596,13 @@ fn landing<'a>(body: &'a str, label: &str) -> Option<&'a str> {
 }
 
 #[test]
-fn a_jump_with_no_condition_on_it_says_what_is_missing() {
-    // Nothing reaches whatever the jump goes past, and a template that writes one is asking for a
-    // shape this does not build yet. Saying so is the point: the alternative is a listing that keeps
-    // the instructions and drops the jump, which is a program that builds and does not run.
+fn a_jump_with_no_condition_on_it_is_kept_as_the_text_it_was() {
+    // Nothing reaches whatever the jump goes past, which is a shape the blocks this reads a template
+    // into do not have. The text has it, so the text is kept, jump and label both.
     let source = "void f(void) { asm volatile (\"jmp .Lgone\\n.Lgone:\"); }\n";
-    let (ok, _, said) = run("template-jump", source);
-    assert!(!ok, "an unconditional jump inside a template was accepted");
-    assert!(said.contains("which nothing here assembles"), "{said}");
+    let text = asm("template-jump", source);
+    let f = body(&text, "f");
+    assert!(f.contains("\tjmp .Lgone\n\t.Lgone:\n"), "{text}");
 }
 
 #[test]
@@ -732,4 +729,69 @@ fn a_call_from_a_template_is_a_call_and_reads_the_input_sharing_its_output() {
     let body = body(&asm("call-out", source), "f");
     assert!(body.contains("call\tgetenv"), "the call never reached the listing:\n{body}");
     assert!(!zeroed(&body), "the output was read as nothing rather than as the input:\n{body}");
+}
+
+/// What the compiler makes of that source as an object, and what it said.
+fn object(what: &str, source: &str, flags: &[&str]) -> (bool, Vec<u8>, String) {
+    let path = fixture(what, source);
+    let out = path.with_extension("o");
+    let ran = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .args(flags)
+        .arg("-c")
+        .arg("-o")
+        .arg(&out)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let bytes = std::fs::read(&out).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    (ran.status.success(), bytes, String::from_utf8_lossy(&ran.stderr).into_owned())
+}
+
+#[test]
+fn a_template_kept_as_text_names_a_local_by_where_it_is_in_the_frame() {
+    // tcc's `asm_pcrel_test`. The template counts between two labels of its own, which nothing
+    // here reads into instructions, so it is kept as text. The object it stores to is a local, and
+    // is named by its place in the frame rather than by a register its address was put in, since
+    // the next statement writes `%ecx` without saying so and gcc's listing survives that.
+    let source = "unsigned f(void) { unsigned o; \
+                  asm (\"1: mov $2f-1b,%%eax; mov %%eax,%0\\n2:\" : \"=m\" (o)); return o; }\n";
+    let f = body(&asm("kept-local", source), "f");
+    assert!(f.contains("1: mov $2f-1b,%eax; mov %eax,"), "{f}");
+    assert!(f.contains("(%rsp)\n") || f.contains("(%rbp)\n"), "{f}");
+}
+
+#[test]
+fn a_template_kept_as_text_spells_a_constant_and_a_name_the_way_gcc_does() {
+    // The Linux kernel's bug table, which is what tcc's `get_asm_string` copies. `%c0` is the
+    // operand without the `$` gcc would put in front of a constant, and the operand is the address
+    // of a string, so it is the string's name.
+    let source = "void f(void) { asm volatile (\".pushsection .data\\n.long %c0, %1, %c1\\n\
+                  .popsection\" : : \"i\" (\"A string\"), \"i\" (7)); }\n";
+    let f = body(&asm("kept-names", source), "f");
+    assert!(f.contains("\t.long .L"), "{f}");
+    assert!(f.contains(", $7, 7\n"), "{f}");
+}
+
+#[test]
+fn a_unit_with_a_template_kept_as_text_is_assembled_from_its_listing() {
+    // A jump from one statement to a label another one defines, which only an assembler reading
+    // the whole unit can resolve.
+    let source = "int f(void) { int r; asm (\".text; jmp kept_there\"); \
+                  asm (\"movl $1, %%eax\\nkept_there: movl $5, %%eax\" ::: \"eax\"); \
+                  asm (\"mov %%eax,%0\" : \"=m\" (r)); return r; }\n";
+    let (ok, bytes, said) = object("kept-object", source, &[]);
+    assert!(ok, "{said}");
+    assert!(bytes.windows(10).any(|at| at == b"kept_there"), "the label never reached the object");
+}
+
+#[test]
+fn a_unit_with_a_template_kept_as_text_asked_for_debug_information_says_so() {
+    // The listing has no line table in it yet, and an object without one is not what `-g` asked
+    // for, so it is refused rather than written.
+    let source = "void f(void) { asm volatile (\"jmp .Lgone\\n.Lgone:\"); }\n";
+    let (ok, _, said) = object("kept-debug", source, &["-g"]);
+    assert!(!ok, "an object without the line table -g asked for was written");
+    assert!(said.contains("debug information"), "{said}");
 }

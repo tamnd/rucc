@@ -59,6 +59,23 @@ pub use crate::source::{Trouble, read};
 
 use std::fmt;
 
+use rucc_base::Interner;
+use rucc_mir::Func;
+use rucc_target::x86_64;
+
+/// Whether any of these functions holds a template kept as text, which is what decides that the
+/// unit is assembled from its listing rather than written out as bytes directly. See
+/// [`x86_64::Form::Template`].
+#[must_use]
+pub fn kept(funcs: &[Func], names: &Interner) -> bool {
+    let wanted = format!("x64.{}", x86_64::TEMPLATE);
+    funcs.iter().any(|func| {
+        func.blocks().any(|block| {
+            func.insts(block).any(|inst| names.resolve(func[inst].opcode.name()) == wanted)
+        })
+    })
+}
+
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
 

@@ -214,7 +214,7 @@ fn plain(form: Form) -> Timing {
         // half of that more than anything else here does: what it is about is which instruction
         // comes after it, so an instruction moved across one is an alignment of something other
         // than what the program pointed at.
-        Barrier | Trap | Landing | Nop | Spin | Align | Literal => (1, Unit::Fixed),
+        Barrier | Trap | Landing | Nop | Spin | Align | Literal | Template => (1, Unit::Fixed),
         Prefetch => (1, Unit::Load),
         // Asking the processor about itself, which drains it first. It is the most expensive
         // instruction in this table by a long way, in the hundreds of cycles on every machine

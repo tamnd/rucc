@@ -359,6 +359,13 @@ impl Assembler<'_> {
             }
             return Ok(());
         }
+        // A template kept as text has no bytes until an assembler reads the text, and a unit with
+        // one in it goes to the assembler as a listing rather than coming here. See
+        // [`crate::kept`]. Refused rather than written as nothing, which is what its empty row in
+        // the table would give.
+        if opcode == x86_64::TEMPLATE {
+            return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
         };
