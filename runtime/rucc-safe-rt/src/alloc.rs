@@ -484,37 +484,50 @@ pub(crate) unsafe fn publish(watch: Watch) -> bool {
 ///
 /// The walk is the length of the table and the table is nearly always one entry long, which is why
 /// this is a loop over an array rather than anything cleverer. It is on the path of every check.
+///
+/// The slots below the count are read with plain loads rather than relaxed atomic ones. That is
+/// what lets the compiler drop the fields a caller never looks at once this is inlined into it, and
+/// a check that asks two planes was loading all eight fields and throwing half of them away,
+/// because a relaxed load is one the compiler keeps. It is race free for the reason the relaxed
+/// loads were enough: [`publish`] stores every field of a slot once, under its lock, before the
+/// release that makes the count cover it, and nothing stores to that slot again.
 #[must_use]
 pub fn covering(addr: usize) -> Option<Region> {
     let filled = FILLED.load(Ordering::Acquire);
     for (at, slot) in SPACE[..filled].iter().enumerate() {
-        let base = slot.base.load(Ordering::Relaxed);
-        let end = slot.end.load(Ordering::Relaxed);
+        // SAFETY: the slot is below the count acquired above, so it is published and never stored
+        // to again, and every read of it below is ordered after the stores that filled it.
+        let (base, end) = unsafe { (fixed(&slot.base), fixed(&slot.end)) };
         if addr >= base && addr < end {
             // SAFETY: a published region is mapped for as long as the program runs, along with the
             // shadow each origin names, so all three planes cover every address between the two
-            // above.
-            let plane = unsafe { Lifetime::new(slot.origin.load(Ordering::Relaxed)) };
+            // above. The reads are the ones above.
+            let plane = unsafe { Lifetime::new(fixed(&slot.origin)) };
             // SAFETY: as above, and the side table at this index was mapped before the count
             // that got us here grew.
-            let types = unsafe { Types::new(slot.typing.load(Ordering::Relaxed), &SIDES[at]) };
+            let types = unsafe { Types::new(fixed(&slot.typing), &SIDES[at]) };
             // SAFETY: as above.
-            let init = unsafe { Init::new(slot.initing.load(Ordering::Relaxed)) };
+            let init = unsafe { Init::new(fixed(&slot.initing)) };
             // SAFETY: as above.
-            let epochs = unsafe { Epochs::new(slot.epoching.load(Ordering::Relaxed)) };
-            return Some(Region {
-                plane,
-                types,
-                init,
-                epochs,
-                base,
-                end,
-                class: slot.class.load(Ordering::Relaxed),
-                carved: slot.carved.load(Ordering::Relaxed),
-            });
+            let epochs = unsafe { Epochs::new(fixed(&slot.epoching)) };
+            // SAFETY: as above.
+            let (class, carved) =
+                unsafe { (slot.class.as_ptr().read(), slot.carved.as_ptr().read()) };
+            return Some(Region { plane, types, init, epochs, base, end, class, carved });
         }
     }
     None
+}
+
+/// A field of a published slot, read as the constant it has become.
+///
+/// # Safety
+///
+/// The slot is below a count this thread acquired, so nothing stores to `cell` any more.
+unsafe fn fixed(cell: &AtomicUsize) -> usize {
+    // SAFETY: the caller's contract. Every store to the cell happened before the release this
+    // thread acquired, and no store follows it, so a plain read races with nothing.
+    unsafe { cell.as_ptr().read() }
 }
 
 /// How many regions are being watched, for the summary and for the tests.
