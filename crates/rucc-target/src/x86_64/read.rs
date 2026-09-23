@@ -120,9 +120,19 @@
 //! gcc's way of writing a number that differs for every copy of a statement, needs no expanding
 //! here: it is part of a name whose whole job is to say which jump goes with which label.
 //!
-//! Ten conditions, each in every spelling an assembler takes for it. A condition ends a block with
-//! two arms and that is a shape the machine IR already has. Not a jump on the sign, the overflow or
-//! the parity, for the plainer reason that this backend has no opcode for those.
+//! Sixteen conditions, each in every spelling an assembler takes for it. A condition ends a block
+//! with two arms and that is a shape the machine IR already has. Ten are the ones a comparison
+//! answers and six are one bit on its own, the sign, the overflow and the parity each way round,
+//! which only a template asks about.
+//!
+//! A label may share its line with the instruction behind it, `1:\tdec %0` being the same two
+//! steps as the label on one line and the instruction on the next. A label that is only digits is
+//! an assembler's local label, which may be written as often as a template likes: `1b` is the
+//! nearest one of that number behind the jump and `1f` the nearest one in front of it. Each one
+//! written gets a name of its own here, the number and how many of that number came before it, so
+//! what comes back is the same thing a template with a different name on every label gives and
+//! nothing past this function needs to know the difference. tcc's tests count down a string that
+//! way, `1:\tdec %0\n\tjs 2f\n\tjne 1b\n2:`.
 //!
 //! # The one unconditional jump
 //!
@@ -325,23 +335,25 @@ pub fn read(template: &str, widths: &[Option<Width>]) -> Option<Vec<Step>> {
 pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Option<Vec<Step>> {
     let mut steps = Vec::new();
     let mut carried = false;
+    let mut locals = Locals::default();
     for text in template.split(['\n', ';']) {
-        let text = uncommented(text).trim();
-        if text.is_empty() {
-            continue;
-        }
+        let mut text = uncommented(text).trim();
         // A label and a jump to one, both before the mnemonics, because a label carries punctuation
         // a mnemonic never does and a jump's argument is a name rather than anything an operand is
         // written as. A repeat prefix in front of either is half an instruction, which is what the
-        // refusal on the flag says wherever it appears.
-        if let Some(name) = text.strip_suffix(':') {
-            if carried || !is_label(name) {
+        // refusal on the flag says wherever it appears. What follows a label on its line is read as
+        // a line of its own.
+        while let Some((name, rest)) = labelled(text) {
+            if carried {
                 return None;
             }
-            steps.push(Step::Label(name.to_owned()));
+            steps.push(Step::Label(locals.define(name)));
+            text = rest.trim_start();
+        }
+        if text.is_empty() {
             continue;
         }
-        if let Some(step) = jumped(text) {
+        if let Some(step) = jumped(text, &locals) {
             if carried {
                 return None;
             }
@@ -429,9 +441,17 @@ fn settled(steps: &[Step]) -> bool {
 /// may not be one the template writes a label on and the rest of the template is not in hand here.
 /// It is read as the one that goes away and [`settled`] decides, which is the same place the other
 /// jumps are decided and for the same reason.
-fn jumped(text: &str) -> Option<Step> {
+///
+/// A jump to a local label is always a jump inside the template, so a `jmp` to one is not read as
+/// going away. It falls through to the mnemonics and is refused there, which is what `jmp` to a
+/// label in the same template is refused as when the label has a name.
+fn jumped(text: &str, locals: &Locals) -> Option<Step> {
     let (mnemonic, rest) = text.split_once(char::is_whitespace)?;
     let to = rest.trim();
+    if let Some(local) = locals.find(to) {
+        let opcode = condition(mnemonic)?;
+        return Some(Step::Jump { opcode, to: local? });
+    }
     if !is_label(to) {
         return None;
     }
@@ -442,9 +462,67 @@ fn jumped(text: &str) -> Option<Step> {
     Some(Step::Jump { opcode, to: to.to_owned() })
 }
 
+/// The label a line starts with and the rest of the line behind it, or nothing for a line that
+/// does not start with one.
+///
+/// What is in front of the colon has to be the whole of a name, so an instruction with a segment
+/// in one of its operands is not mistaken for a label: the mnemonic and a space come before the
+/// colon there.
+fn labelled(text: &str) -> Option<(&str, &str)> {
+    let (name, rest) = text.split_once(':')?;
+    (is_label(name) || is_local(name)).then_some((name, rest))
+}
+
+/// Whether that is an assembler's local label, which is a number and nothing else.
+fn is_local(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|digit| digit.is_ascii_digit())
+}
+
+/// How many times each local label has been written so far in one template.
+///
+/// The name a local label is given here is its number, a `#` and how many of that number came
+/// before it. No name a program writes has a `#` in it, so these never meet one of those.
+#[derive(Default)]
+struct Locals {
+    written: Vec<(String, usize)>,
+}
+
+impl Locals {
+    /// The name the label written as that is known by from here on.
+    fn define(&mut self, name: &str) -> String {
+        if !is_local(name) {
+            return name.to_owned();
+        }
+        let Some(entry) = self.written.iter_mut().find(|(number, _)| number == name) else {
+            self.written.push((name.to_owned(), 1));
+            return format!("{name}#0");
+        };
+        entry.1 += 1;
+        format!("{name}#{}", entry.1 - 1)
+    }
+
+    /// What a jump's argument names if it is a local label, which is nothing if it is not one and
+    /// nothing inside if it is `1b` with no `1` behind it. A label in front that never arrives is
+    /// left for [`settled`] to find, since it is a name no label carries.
+    fn find(&self, to: &str) -> Option<Option<String>> {
+        let (number, backwards) = match to.strip_suffix('b') {
+            Some(number) => (number, true),
+            None => (to.strip_suffix('f')?, false),
+        };
+        if !is_local(number) {
+            return None;
+        }
+        let behind = self.written.iter().find(|(written, _)| written == number).map_or(0, |e| e.1);
+        if backwards {
+            return Some(behind.checked_sub(1).map(|last| format!("{number}#{last}")));
+        }
+        Some(Some(format!("{number}#{behind}")))
+    }
+}
+
 /// The opcode a conditional jump's mnemonic names, in every spelling an assembler takes for it.
 ///
-/// Ten conditions and twenty six spellings, because a machine that answers a comparison with a
+/// Sixteen conditions and thirty four spellings, because a machine that answers a comparison with a
 /// handful of bits lets a program name the same bits from either side: `jb` and `jnae` are the one
 /// instruction and a program writes whichever reads better where it stands. `jc` and `jnc` are the
 /// two libgmp writes, and they are the same pair again named after the bit rather than after the
@@ -461,6 +539,12 @@ fn condition(mnemonic: &str) -> Option<&'static str> {
         "jbe" | "jna" => "jcc_be",
         "ja" | "jnbe" => "jcc_a",
         "jae" | "jnc" | "jnb" => "jcc_ae",
+        "js" => "jcc_s",
+        "jns" => "jcc_ns",
+        "jo" => "jcc_o",
+        "jno" => "jcc_no",
+        "jp" | "jpe" => "jcc_p",
+        "jnp" | "jpo" => "jcc_np",
         _ => return None,
     })
 }
@@ -1356,8 +1440,9 @@ mod tests {
             "an instruction with the wrong number of arguments"
         );
         assert_eq!(plain("idivb %0", &[]), None, "an opcode the machine writes as more than one");
-        assert_eq!(read("1:", &[]), None, "a local label, which the direction on a jump names");
-        assert_eq!(read("js again", &[]), None, "a condition this backend has no opcode for");
+        assert_eq!(read("jne 1b\n1:", &[]), None, "a local label behind a jump that has none");
+        assert_eq!(read("jne 1f", &[]), None, "a local label in front that never comes");
+        assert_eq!(read("1:\njmp 1b", &[]), None, "an unconditional jump to a local label");
         assert_eq!(read("jc away", &[]), None, "a jump to a label the template does not define");
         assert_eq!(read("again:\njc again\nagain:", &[]), None, "one name on two labels");
         assert_eq!(plain(".skip 16", &[]), None, "a directive that is not one of the two read");
@@ -1400,6 +1485,12 @@ mod tests {
             ("jbe", "jna", "jcc_be"),
             ("ja", "jnbe", "jcc_a"),
             ("jae", "jnc", "jcc_ae"),
+            ("js", "js", "jcc_s"),
+            ("jns", "jns", "jcc_ns"),
+            ("jo", "jo", "jcc_o"),
+            ("jno", "jno", "jcc_no"),
+            ("jp", "jpe", "jcc_p"),
+            ("jnp", "jpo", "jcc_np"),
         ];
         for (one, other, opcode) in cases {
             for written in [one, other] {
@@ -1409,6 +1500,26 @@ mod tests {
                 assert_eq!(steps[1], want, "{text}");
             }
         }
+    }
+
+    /// The loop out of tcc's `strncat1`, which counts down with `dec` on the label's own line and
+    /// jumps both ways on local labels. Each `1` and each `2` is a label of its own, and the jumps
+    /// go to the nearest one in the direction they say.
+    #[test]
+    fn a_local_label_is_the_nearest_one_the_direction_names() {
+        let widths = [Some(Width::Long)];
+        let template = "1:\tdec %0\n\tjs 2f\n\tjne 1b\n2:\n1:\tjne 1b";
+        let steps = read(template, &widths).expect("the loop tcc counts down with");
+        let label = |name: &str| Step::Label(name.to_owned());
+        let jump = |opcode, to: &str| Step::Jump { opcode, to: to.to_owned() };
+        assert_eq!(steps[0], label("1#0"), "the label in front of the instruction");
+        let Step::Line(ref dec) = steps[1] else { panic!("the count down: {steps:?}") };
+        assert_eq!(dec.opcode, "dec_r_32");
+        assert_eq!(steps[2], jump("jcc_s", "2#0"), "the first 2 in front");
+        assert_eq!(steps[3], jump("jcc_ne", "1#0"), "the first 1 behind");
+        assert_eq!(steps[4], label("2#0"));
+        assert_eq!(steps[5], label("1#1"), "a second 1, which is a label of its own");
+        assert_eq!(steps[6], jump("jcc_ne", "1#1"), "the nearest 1 behind is the second one");
     }
 
     /// The end of micropython's `nlr_push`, cut down to the last save and the jump, which is the

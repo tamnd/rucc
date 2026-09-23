@@ -1961,6 +1961,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("jcc_be", Jcc),
     ("jcc_a", Jcc),
     ("jcc_ae", Jcc),
+    ("jcc_s", Jcc),
+    ("jcc_ns", Jcc),
+    ("jcc_o", Jcc),
+    ("jcc_no", Jcc),
+    ("jcc_p", Jcc),
+    ("jcc_np", Jcc),
     ("jmp", Jmp),
     ("jmp_away", JmpAway),
     // The same jump through a register, which is where a computed goto ends up. It is a separate
@@ -2259,7 +2265,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 654);
+        assert_eq!(described, 660);
     }
 
     #[test]

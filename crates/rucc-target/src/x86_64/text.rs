@@ -996,6 +996,12 @@ static TEXT: &[(&str, &[Written])] = &[
     ("jcc_be", &[spell("jbe", &[Label])]),
     ("jcc_a", &[spell("ja", &[Label])]),
     ("jcc_ae", &[spell("jae", &[Label])]),
+    ("jcc_s", &[spell("js", &[Label])]),
+    ("jcc_ns", &[spell("jns", &[Label])]),
+    ("jcc_o", &[spell("jo", &[Label])]),
+    ("jcc_no", &[spell("jno", &[Label])]),
+    ("jcc_p", &[spell("jp", &[Label])]),
+    ("jcc_np", &[spell("jnp", &[Label])]),
     ("jmp", &[spell("jmp", &[Label])]),
     ("jmp_away", &[spell("jmp", &[Symbol])]),
     // A jump through a register, which is the same mnemonic and a different instruction, the way

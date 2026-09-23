@@ -146,6 +146,13 @@ pub enum Reads {
     /// there is and will go on saying no to every entry added later, which is what keeps a
     /// comparison in front of one of these where the program put it.
     Carry,
+    /// One bit read on its own, the sign, the overflow or the parity, which is what a jump an `asm`
+    /// template writes as `js`, `jo` or `jp` asks about.
+    ///
+    /// No comparison against zero is asked that question, so nothing this pass could put in front
+    /// of one is known to answer it, and [`Zeroing::covers`] says no here for the reason it says no
+    /// to [`Reads::Carry`].
+    Bit,
 }
 
 /// One instruction that leaves behind the comparison of what it wrote against zero.
@@ -205,7 +212,7 @@ impl Zeroing {
             Reads::Zero => true,
             Reads::Signed => self.signed,
             Reads::Unsigned => self.unsigned,
-            Reads::Carry => false,
+            Reads::Carry | Reads::Bit => false,
         }
     }
 }
