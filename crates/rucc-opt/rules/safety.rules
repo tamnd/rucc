@@ -276,6 +276,47 @@
                     0)
                (result))))
 
+;; A range a loop has written so far and the next iteration's write, as one range.
+;;
+;; `at` is where the first write went, `span` is how long the range written so far is, `step` is
+;; how far the address moves each time round and `reach` is how many bytes one write covers. The
+;; next write starts `span - reach + step` bytes past `at`, and `byte` is any address. The claim is
+;; the one the head says, which is that the range and the write together are the range `step` bytes
+;; longer, and it is the step of the induction `crates/rucc-opt/src/sink.rs` takes over every
+;; iteration of the loop.
+;;
+;; The guard is that the writes leave no gaps, which is the step being no wider than the write, and
+;; that the step moves at all. A step wider than the write leaves bytes between two writes that no
+;; store touched, and one write over the whole range would tell the init plane they hold something.
+;; `span` is a value and not a number because it is every iteration's range at once.
+;;
+;; The bound on the width is the file comment's.
+(rule (discharge (grown.i64 (value.i64 at)
+                            (value.i64 span)
+                            (iconst.i64 step)
+                            (iconst.i64 reach)
+                            (value.i64 byte)))
+      (if (and (>= step 1) (<= step reach) (<= reach 4294967296)))
+      (iconst.i64 1)
+      (spec (= (ite (or (bvult (bvadd span step) span)
+                        (bvugt at (bvadd at (bvadd span step)))
+                        (bvult span reach)
+                        (and (or (not (or (and (bvuge byte at)
+                                               (bvult byte (bvadd at span)))
+                                          (and (bvuge byte (bvadd at (bvadd (bvsub span reach) step)))
+                                               (bvult byte (bvadd at (bvadd span step))))))
+                                 (and (bvuge byte at)
+                                      (bvult byte (bvadd at (bvadd span step)))))
+                             (or (not (and (bvuge byte at)
+                                           (bvult byte (bvadd at (bvadd span step)))))
+                                 (or (and (bvuge byte at)
+                                          (bvult byte (bvadd at span)))
+                                     (and (bvuge byte (bvadd at (bvadd (bvsub span reach) step)))
+                                          (bvult byte (bvadd at (bvadd span step))))))))
+                    1
+                    0)
+               (result))))
+
 ;; The alignment conjunct of a bounds check, for an address the walk found a divisor of.
 ;;
 ;; `at` is the address, `known` is what the walk over where the pointer came from worked out the

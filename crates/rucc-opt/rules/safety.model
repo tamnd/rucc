@@ -9,9 +9,11 @@
 ;; what it has is a range of distances rather than one. The next two are the question the split pass
 ;; asks about a loop whose extent is a value the program works out rather than a number, once for a
 ;; walk that goes up and once for a walk that goes down. The next is the question the coalescing
-;; pass asks about two writes to one plane that sit next to each other, which is the one head here
-;; that is not about a check at all. The last is the alignment half of a bounds check, which is a
-;; different question about the same address and is asked of the same pass.
+;; pass asks about two writes to one plane that sit next to each other, which is the first of the two
+;; heads here that are not about a check at all. The second is the loop form of that, which the
+;; sinking pass asks about the range a loop has written so far and the write the next iteration
+;; makes. The last is the alignment half of a bounds check, which is a different question about the
+;; same address and is asked of the same pass.
 
 (include crates/rucc-ir/rules/ir.model)
 
@@ -193,6 +195,43 @@
                              (bvult byte (bvadd at span)))
                         (and (bvuge byte (bvadd at delta))
                              (bvult byte (bvadd (bvadd at delta) reach)))))))
+       1
+       0))
+
+;; Whether a range a loop has written so far and the write the next iteration makes are one range.
+;;
+;; The loop half of the head above. A loop that writes `reach` bytes each time round at an address
+;; that moves `step` bytes each time has, after some number of iterations, written a range from `at`
+;; that ends where its last write ended, and `span` is how long that range is. The next write starts
+;; `span - reach + step` bytes past `at`, which is `step` past where the last one started, and it is
+;; `reach` bytes long. `byte` is any address, as above.
+;;
+;; It answers one when `byte` is in the range or in the next write exactly when it is in the range
+;; `step` bytes longer. That is the step of an induction whose base is the first write on its own,
+;; so a loop that goes round any number of times has written exactly one range, and the pass that
+;; asks this puts one write over that range after the loop in place of the one in it. Equality for
+;; the reason the head above gives: one direction is a hole and the other is a false positive.
+;;
+;; The first two disjuncts are the no wrap assumption the other heads make, said about the longer
+;; range, and the first is there because `span + step` can wrap on its own before `at` is added. The
+;; third is a hypothesis about `span` and not a claim: a range shorter than one write is not one any
+;; loop left behind, and the pass never has one.
+(semantics (grown.i64 at span step reach byte)
+  (ite (or (bvult (bvadd span step) span)
+           (bvugt at (bvadd at (bvadd span step)))
+           (bvult span reach)
+           (and (or (not (or (and (bvuge byte at)
+                                  (bvult byte (bvadd at span)))
+                             (and (bvuge byte (bvadd at (bvadd (bvsub span reach) step)))
+                                  (bvult byte (bvadd at (bvadd span step))))))
+                    (and (bvuge byte at)
+                         (bvult byte (bvadd at (bvadd span step)))))
+                (or (not (and (bvuge byte at)
+                              (bvult byte (bvadd at (bvadd span step)))))
+                    (or (and (bvuge byte at)
+                             (bvult byte (bvadd at span)))
+                        (and (bvuge byte (bvadd at (bvadd (bvsub span reach) step)))
+                             (bvult byte (bvadd at (bvadd span step))))))))
        1
        0))
 

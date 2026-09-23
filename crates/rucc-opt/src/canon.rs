@@ -631,7 +631,7 @@ fn computed(func: &Func) -> HashSet<Block> {
 /// [`crate::simplify_cfg`] takes the parameters back out when they turn out to be one value, which
 /// is the ordinary case and is section 26.7's point that the cost of the extra parameters is paid
 /// back by a pass that exists anyway.
-fn route(func: &mut Func, from: &[Block], to: Block) {
+pub(crate) fn route(func: &mut Func, from: &[Block], to: Block) -> Block {
     let types: Vec<Type> = func[to].params.iter().map(|&param| func[param].ty).collect();
     let fresh = func.create_block();
     let params: Vec<Value> = types.iter().map(|&ty| func.append_param(fresh, ty)).collect();
@@ -645,6 +645,7 @@ fn route(func: &mut Func, from: &[Block], to: Block) {
             }
         }
     }
+    fresh
 }
 
 /// Every terminator in the function, as a list so the function can be edited while it is walked.

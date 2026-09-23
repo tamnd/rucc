@@ -279,6 +279,7 @@ const O1: &[&str] = &[
     "discharge",
     "dead-plane",
     "coalesce",
+    "plane-sink",
     "dce",
     "loop-delete",
 ];
@@ -351,6 +352,7 @@ const O2: &[&str] = &[
     "discharge",
     "dead-plane",
     "coalesce",
+    "plane-sink",
     "dce",
     "loop-delete",
 ];
@@ -390,6 +392,7 @@ const O3: &[&str] = &[
     "discharge",
     "dead-plane",
     "coalesce",
+    "plane-sink",
     "dce",
     "loop-delete",
 ];
@@ -446,6 +449,7 @@ const OS: &[&str] = &[
     "discharge",
     "dead-plane",
     "coalesce",
+    "plane-sink",
     "dce",
     "loop-delete",
 ];
@@ -480,6 +484,7 @@ const OZ: &[&str] = &[
     "discharge",
     "dead-plane",
     "coalesce",
+    "plane-sink",
     "dce",
     "loop-delete",
 ];

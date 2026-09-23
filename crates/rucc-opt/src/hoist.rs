@@ -500,7 +500,7 @@ fn writes(func: &Func, loops: &Loops, id: LoopId) -> Written {
 /// iteration that starts an iteration that finishes, which is what turns how many times the loop
 /// goes round into how many times the check runs, and it is also what makes the preheader a place a
 /// check may go, since a loop that always runs once is a loop whose first access always happens.
-fn shaped(
+pub(crate) fn shaped(
     func: &Func,
     cfg: &Cfg,
     doms: &Dominators,
@@ -709,7 +709,7 @@ fn planned(
 /// eight times a value the loop does not change, and that is not a number here but it is a number by
 /// the time the preheader has run, which is where the check in front is going. See `starting` for
 /// what is built and [`plain_enough`] for which shapes of it can be.
-fn anchored(inv: Invariant) -> Option<(Anchor, Plain)> {
+pub(crate) fn anchored(inv: Invariant) -> Option<(Anchor, Plain)> {
     if let Some(at @ Plain { value: Some(base), scale: 1, .. }) = inv.plain() {
         let past = Plain { value: None, read: None, scale: 0, offset: at.offset };
         return Some((Anchor::Value(base), past));
@@ -724,7 +724,7 @@ fn anchored(inv: Invariant) -> Option<(Anchor, Plain)> {
 /// invariant carries the widening that gets it there. Anything else is refused rather than
 /// truncated, since a start address worked out narrow and used wide is a check about the wrong
 /// bytes.
-fn plain_enough(func: &Func, start: Plain) -> Result<(), &'static str> {
+pub(crate) fn plain_enough(func: &Func, start: Plain) -> Result<(), &'static str> {
     let Some(value) = start.value.filter(|_| start.scale != 0) else { return Ok(()) };
     let ty = match start.read {
         Some(read) => read.to,
@@ -753,7 +753,7 @@ fn plain_enough(func: &Func, start: Plain) -> Result<(), &'static str> {
 /// `size_t` indices needs, and it is a bound the ranges usually have, because the count of such a
 /// loop is almost always a length something already established: a parameter with a range on it, a
 /// field narrower than the type holding it, or a value the loop guard just compared.
-fn fits(
+pub(crate) fn fits(
     func: &Func,
     ranges: &mut Ranges<'_>,
     preheader: Block,
@@ -885,7 +885,12 @@ fn swept_sym(reach: i128) -> bool {
 /// round, so whatever it does is what the program already does, but saying `nsw` about it would be
 /// a claim about the program's own arithmetic that nothing here established. [`covered`] earns its
 /// `nsw` from [`fits`], and there is no [`fits`] for a value the pass cannot see.
-fn starting(build: &mut Builder<'_>, made: &mut Vec<Value>, base: Value, start: Plain) -> Value {
+pub(crate) fn starting(
+    build: &mut Builder<'_>,
+    made: &mut Vec<Value>,
+    base: Value,
+    start: Plain,
+) -> Value {
     let word = Type::int(64);
     let past = match start.value.filter(|_| start.scale != 0) {
         None => {
