@@ -30,9 +30,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use rucc_mir::CfiOp;
 use rucc_object::{
-    Array, Assembled, Binding, Held, Name, Part, Reference, Reloc, Shape, Sort, Visibility,
+    Array, Assembled, Binding, Extent, Held, Name, Part, Reference, Reloc, Shape, Sort, Visibility,
 };
+use rucc_target::ObjectFormat;
+use rucc_target::x86_64::{SYSV, gpr_named};
 
 /// What an instruction says about the place in it that names something, under a name that does not
 /// collide with the [`Sort`] an ELF symbol has.
@@ -101,6 +104,23 @@ struct Fixup {
     line: usize,
 }
 
+/// One function's frame rules, as `.cfi_` directives said them.
+#[derive(Debug)]
+struct Frame {
+    part: usize,
+    start: u64,
+    len: u64,
+    /// The entry the record points at, made where `.cfi_startproc` was written, since that is the
+    /// first instruction the rules are about whether or not a label is there.
+    sym: usize,
+    rows: crate::unwind::Rows,
+    /// How far the end of the frame is from the register it is counted from, which a directive
+    /// that says a slot relative to that register or adjusts the distance has to know.
+    cfa: i32,
+    /// What `.cfi_remember_state` put away, for `.cfi_restore_state` to bring back.
+    remembered: Vec<i32>,
+}
+
 /// The file, as it is being read.
 #[derive(Debug, Default)]
 struct Reader {
@@ -134,6 +154,13 @@ struct Reader {
     /// relocation has something to point at. That is a numbered local label or a set name reached
     /// from another section, and is rare.
     relocated: std::collections::HashSet<usize>,
+    /// The function whose frame rules are being read, between `.cfi_startproc` and `.cfi_endproc`.
+    frame: Option<Frame>,
+    /// Every function that has had its frame rules read, in the order the file wrote them.
+    frames: Vec<Frame>,
+    /// Whether `.cfi_sections` left the unwind table out, which a file does when it wants the rules
+    /// for a debugger only.
+    no_unwind: bool,
     /// What the file said it was called. Kept apart from the rest because it is not a name anything
     /// refers to, and a file whose own name is also the name of something in it would otherwise be
     /// one symbol where it should be two.
@@ -391,6 +418,138 @@ impl Reader {
         Ok(())
     }
 
+    /// A frame rule, which says what an unwinder standing at this instruction should believe.
+    ///
+    /// What the rules say is the same [`CfiOp`] the compiler's own functions are described with,
+    /// and the table is written from them by the same code, so a function read from text and the
+    /// same function compiled straight to an object unwind the same way. The directives that say
+    /// something this table has no row for, a personality routine and the rest, are passed over as
+    /// they were before any of this was read, which leaves those functions described as well as a
+    /// C function needs.
+    fn cfi(&mut self, word: &str, args: &[String]) -> Result<(), Trouble> {
+        match word {
+            "cfi_startproc" => {
+                if self.frame.is_some() {
+                    return Err(self.bad("a '.cfi_startproc' inside another one"));
+                }
+                let sym = self.sym(&format!("\u{1}frame{}", self.frames.len()));
+                let (part, start) = (self.here, self.at());
+                self.syms[sym].at = Held::In { part, offset: start };
+                // Where every function starts, which is what the table's header says: the frame
+                // ends one word above the stack pointer because the call pushed a return address.
+                let frame = Frame {
+                    part,
+                    start,
+                    len: 0,
+                    sym,
+                    rows: Vec::new(),
+                    cfa: 8,
+                    remembered: Vec::new(),
+                };
+                self.frame = Some(frame);
+                return Ok(());
+            }
+            "cfi_sections" => {
+                self.no_unwind = !args.iter().any(|arg| arg.trim() == ".eh_frame");
+                return Ok(());
+            }
+            "cfi_endproc"
+            | "cfi_def_cfa"
+            | "cfi_def_cfa_offset"
+            | "cfi_adjust_cfa_offset"
+            | "cfi_def_cfa_register"
+            | "cfi_offset"
+            | "cfi_rel_offset"
+            | "cfi_restore"
+            | "cfi_remember_state"
+            | "cfi_restore_state" => {}
+            _ => return Ok(()),
+        }
+        let (here, at) = (self.here, self.at());
+        let line = self.line;
+        let bad = |why: &str| Trouble { line, why: why.to_owned() };
+        let Some(mut frame) = self.frame.take() else {
+            return Err(bad("a frame rule outside '.cfi_startproc' and '.cfi_endproc'"));
+        };
+        if frame.part != here {
+            return Err(bad("a frame rule in another section from the function it is about"));
+        }
+        let op = match word {
+            "cfi_endproc" => {
+                frame.len = at - frame.start;
+                self.frames.push(frame);
+                return Ok(());
+            }
+            "cfi_def_cfa" => {
+                let [reg, offset] = self.two(args, ".cfi_def_cfa")?;
+                frame.cfa = self.distance(&offset)?;
+                CfiOp::DefCfa { reg: self.dwarf(&reg)?, offset: frame.cfa }
+            }
+            "cfi_def_cfa_offset" | "cfi_adjust_cfa_offset" => {
+                let by = self.distance(args.first().map_or("", |arg| arg.as_str()))?;
+                frame.cfa = if word == "cfi_def_cfa_offset" { by } else { frame.cfa + by };
+                CfiOp::DefCfaOffset(frame.cfa)
+            }
+            "cfi_def_cfa_register" => {
+                CfiOp::DefCfaRegister(self.dwarf(args.first().map_or("", |arg| arg.as_str()))?)
+            }
+            "cfi_offset" | "cfi_rel_offset" => {
+                let [reg, offset] = self.two(args, &format!(".{word}"))?;
+                let mut offset = self.distance(&offset)?;
+                // Counted from the register the frame is counted from rather than from the end of
+                // the frame, which is the same slot once the distance between the two is taken off.
+                if word == "cfi_rel_offset" {
+                    offset -= frame.cfa;
+                }
+                if offset >= 0 || offset % 8 != 0 {
+                    return Err(bad(
+                        "a register saved somewhere that is not a whole slot below the end of the \
+                         frame, which is the only place this writes a rule for",
+                    ));
+                }
+                CfiOp::Offset { reg: self.dwarf(&reg)?, offset }
+            }
+            "cfi_restore" => {
+                CfiOp::Restore(self.dwarf(args.first().map_or("", |arg| arg.as_str()))?)
+            }
+            "cfi_remember_state" => {
+                frame.remembered.push(frame.cfa);
+                CfiOp::RememberState
+            }
+            "cfi_restore_state" => {
+                frame.cfa = frame.remembered.pop().ok_or_else(|| {
+                    bad("a '.cfi_restore_state' with nothing remembered to restore")
+                })?;
+                CfiOp::RestoreState
+            }
+            _ => unreachable!("every other word returned above"),
+        };
+        frame.rows.push(((at - frame.start) as usize, op));
+        self.frame = Some(frame);
+        Ok(())
+    }
+
+    /// A distance in a frame rule, which is a number and not negative for the end of the frame.
+    fn distance(&mut self, text: &str) -> Result<i32, Trouble> {
+        let value = self.number(text)?;
+        i32::try_from(value).map_err(|_| self.bad(&format!("{value} is not a distance in a frame")))
+    }
+
+    /// The number DWARF gives a register a frame rule names, which a file may write either way.
+    fn dwarf(&self, text: &str) -> Result<u16, Trouble> {
+        let text = text.trim();
+        if let Ok(number) = text.parse::<u16>() {
+            return Ok(number);
+        }
+        let name = text.strip_prefix('%').unwrap_or(text);
+        if name == "rip" {
+            return Ok(SYSV.dwarf_return_address);
+        }
+        gpr_named(name)
+            .and_then(|(reg, _)| SYSV.dwarf(SYSV.int_class, reg))
+            .ok_or_else(|| self.bad(&format!("'{text}' is not a register a frame rule can name")))
+    }
+
     /// Everything that starts with a dot.
     #[allow(clippy::too_many_lines)]
     fn directive(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
@@ -526,7 +685,7 @@ impl Reader {
             // refusing would turn a note into a failure.
             "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64" | "att_syntax"
             | "intel_syntax" | "warning" => {}
-            _ if word.starts_with("cfi_") => {}
+            _ if word.starts_with("cfi_") => self.cfi(word, &args)?,
 
             _ => {
                 let what = format!(
@@ -943,6 +1102,10 @@ impl Reader {
 
     /// Work out everything that was waiting for the end of the file.
     fn finish(mut self) -> Result<Assembled, Trouble> {
+        if self.frame.is_some() {
+            return Err(self.bad("a '.cfi_startproc' that is never ended"));
+        }
+        self.unwind_table();
         self.resolve_sets()?;
         self.resolve_sizes()?;
         self.resolve_fixups()?;
@@ -1004,6 +1167,46 @@ impl Reader {
             });
         }
         Ok(Assembled { parts, names })
+    }
+
+    /// The unwind table the frame rules describe, as a section of its own.
+    ///
+    /// Written only when a file said some rules, which is every function the compiler emits and
+    /// every function gcc does. A file of assembly written by hand with none gets no table, the same
+    /// as it does from gas.
+    fn unwind_table(&mut self) {
+        if self.frames.is_empty() || self.no_unwind {
+            return;
+        }
+        let funcs: Vec<Extent> = self
+            .frames
+            .iter()
+            .map(|frame| Extent {
+                name: self.syms[frame.sym].name.clone(),
+                start: frame.start as usize,
+                len: frame.len as usize,
+                align: 1,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+                patch: None,
+            })
+            .collect();
+        let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
+        let Ok(table) = crate::unwind::table(&funcs, &rows, &SYSV, ObjectFormat::Elf) else {
+            return;
+        };
+        for frame in &self.frames {
+            self.relocated.insert(frame.sym);
+        }
+        let size = table.bytes.len() as u64;
+        self.parts.push(Part {
+            name: ".eh_frame".to_owned(),
+            bytes: table.bytes,
+            size,
+            align: 8,
+            shape: Shape { alloc: true, bits: true, ..Shape::default() },
+            relocs: table.relocs,
+        });
     }
 
     /// `.set` and its spellings, which may name each other and so are worked at until they stop
@@ -2448,5 +2651,47 @@ mod tests {
         let target = name(&out, &reloc.symbol);
         let data = out.parts.iter().position(|part| part.name == ".data").unwrap();
         assert_eq!(target.at, Held::In { part: data, offset: 4 });
+    }
+
+    #[test]
+    fn frame_rules_are_an_unwind_table_pointing_at_the_function() {
+        let out = assembled(
+            "f:\n\t.cfi_startproc\n\tpush %rbp\n\t.cfi_def_cfa_offset 16\n\t.cfi_offset %rbp, \
+             -16\n\tpop %rbp\n\t.cfi_def_cfa_offset 8\n\tret\n\t.cfi_endproc\n",
+        );
+        let table = out.parts.iter().find(|part| part.name == ".eh_frame").expect("a table");
+        // One byte in, the push: the frame is sixteen deep and the caller's rbp is at the bottom.
+        // One byte later, the pop, and it is eight deep again.
+        let rows = [0x41, 0x0e, 0x10, 0x86, 0x02, 0x41, 0x0e, 0x08];
+        assert!(table.bytes.windows(rows.len()).any(|at| at == rows), "{:x?}", table.bytes);
+        let [reloc] = table.relocs.as_slice() else { panic!("one record, one relocation") };
+        let text = out.parts.iter().position(|part| part.name == ".text").unwrap();
+        assert_eq!(name(&out, &reloc.symbol).at, Held::In { part: text, offset: 0 });
+    }
+
+    #[test]
+    fn a_frame_rule_relative_to_the_register_is_the_same_slot() {
+        let out = assembled(
+            "\t.cfi_startproc\n\tpush %rbx\n\t.cfi_adjust_cfa_offset 8\n\t.cfi_rel_offset \
+             %rbx, 0\n\t.cfi_endproc\n",
+        );
+        let table = out.parts.iter().find(|part| part.name == ".eh_frame").expect("a table");
+        let rows = [0x41, 0x0e, 0x10, 0x83, 0x02];
+        assert!(table.bytes.windows(rows.len()).any(|at| at == rows), "{:x?}", table.bytes);
+    }
+
+    #[test]
+    fn frame_rules_for_a_debugger_only_are_no_unwind_table() {
+        let out =
+            assembled("\t.cfi_sections .debug_frame\n\t.cfi_startproc\n\tret\n\t.cfi_endproc\n");
+        assert!(out.parts.iter().all(|part| part.name != ".eh_frame"));
+    }
+
+    #[test]
+    fn a_frame_rule_outside_a_function_or_a_function_never_ended_is_refused() {
+        let why = refused("\t.cfi_def_cfa_offset 16\n");
+        assert!(why.why.contains("outside"), "{why}");
+        let why = refused("\t.cfi_startproc\n\tret\n");
+        assert!(why.why.contains("never ended"), "{why}");
     }
 }
