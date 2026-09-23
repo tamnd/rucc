@@ -482,10 +482,8 @@ fn incoming(func: &Func, block: Block, index: usize) -> Vec<Value> {
     for pred in func.blocks() {
         let Some(term) = func.terminator(pred) else { continue };
         for call in func.successors(term) {
-            if call.block == block
-                && let Some(&value) = func[call.args].get(index)
-            {
-                found.push(value);
+            if call.block == block {
+                found.extend(func[call.args].get(index).copied());
             }
         }
     }

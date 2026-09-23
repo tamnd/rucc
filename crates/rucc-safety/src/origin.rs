@@ -264,9 +264,8 @@ fn joinable(func: &Func, pointer: Value) -> Option<(Block, usize)> {
                 return None;
             }
             let &passed = func[call.args].get(index)?;
-            if let Def::Result { inst, .. } = func[root(func, passed)].def
-                && func.is_terminator(inst)
-            {
+            let def = func[root(func, passed)].def;
+            if matches!(def, Def::Result { inst, .. } if func.is_terminator(inst)) {
                 return None;
             }
             reached = true;
