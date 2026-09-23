@@ -613,8 +613,7 @@ pub unsafe fn stepped(
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else { return };
     let last = addr.saturating_add(span);
-    let mut at = addr;
-    while at < region.end && at.saturating_add(width) <= last {
+    let ask = |at: usize| {
         // An access inside one granule is one slot of each plane, and a slot that answers for the
         // whole granule answers for every access inside it, which is one load and one compare a
         // plane for the array of one type that a strided walk nearly always is. A granule written
@@ -638,6 +637,59 @@ pub unsafe fn stepped(
             // SAFETY: as in `bounds`.
             unsafe { crate::fail::report(descriptor, Some(at)) }
         }
+    };
+    let mut at = addr;
+    // A step of whole granules keeps every access where the first is in its granule, so when the
+    // first is inside one granule they all are, and each plane can walk its own slots for the
+    // column with the address moving on by the step rather than asking about each access from
+    // scratch. The accesses that end inside both the span and the region are walked that way, a
+    // plane at a time, and one either plane cannot answer from its slot alone is asked the long
+    // way on its own and the walk goes on after it, so the answers and the reports are the ones
+    // the loop below would give.
+    if step != 0
+        && step % types::GRANULE == 0
+        && step % init::SPAN == 0
+        && addr % types::GRANULE + width <= types::GRANULE
+        && addr % init::SPAN + width <= init::SPAN
+    {
+        let limit = last.min(region.end);
+        let count = match limit.checked_sub(addr).and_then(|room| room.checked_sub(width)) {
+            Some(room) => room / step + 1,
+            None => 0,
+        };
+        let typed = |k: usize| {
+            ty.map_or(count, |ty| {
+                // SAFETY: every access before `count` ends inside the region, so its slots are
+                // mapped.
+                k + unsafe { region.types.column(addr + k * step, step, count - k, ty) }
+            })
+        };
+        let written = |k: usize| {
+            if init {
+                // SAFETY: as above.
+                k + unsafe { region.init.column(addr + k * step, step, count - k) }
+            } else {
+                count
+            }
+        };
+        let (mut t, mut i) = (typed(0), written(0));
+        loop {
+            let k = t.min(i);
+            if k == count {
+                break;
+            }
+            ask(addr + k * step);
+            if t == k {
+                t = typed(k + 1);
+            }
+            if i == k {
+                i = written(k + 1);
+            }
+        }
+        at = addr.saturating_add(count.saturating_mul(step));
+    }
+    while at < region.end && at.saturating_add(width) <= last {
+        ask(at);
         // A step of zero is not something the compiler writes, and it would be one access asked
         // about over and over, so it is that one access asked about once.
         if step == 0 {

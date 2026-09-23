@@ -151,6 +151,28 @@ impl Init {
         unsafe { self.slot(at).read() == 0 }
     }
 
+    /// How many of `count` accesses, one every `step` bytes from `lo`, [`Init::whole`] says yes to
+    /// before the first it does not.
+    ///
+    /// `crate::types::Types::column` for this plane, with a shadow byte for a slot and `step / 8`
+    /// of them between one access and the next.
+    ///
+    /// # Safety
+    ///
+    /// Every access's shadow byte is inside the mapping this plane was built for.
+    #[must_use]
+    pub unsafe fn column(&self, lo: usize, step: usize, count: usize) -> usize {
+        let mut slot = self.slot(lo);
+        for k in 0..count {
+            // SAFETY: the shadow byte of access `k`, which the caller says is mapped.
+            if unsafe { slot.read() } != 0 {
+                return k;
+            }
+            slot = slot.wrapping_add(step / SPAN);
+        }
+        count
+    }
+
     /// [`Init::allows`] for a long range, which is what a check taken out of a loop asks about.
     ///
     /// Once the walk reaches the start of a shadow byte it reads a word of shadow at a time, so the
@@ -372,6 +394,16 @@ mod tests {
             unsafe { self.plane().sweep(self.base + offset, len) }
         }
 
+        fn column(&self, offset: usize, step: usize, count: usize) -> usize {
+            // SAFETY: as above.
+            unsafe { self.plane().column(self.base + offset, step, count) }
+        }
+
+        fn whole(&self, offset: usize) -> bool {
+            // SAFETY: as above.
+            unsafe { self.plane().whole(self.base + offset) }
+        }
+
         fn set(&self, offset: usize, len: usize) {
             // SAFETY: as above.
             unsafe { self.plane().set(self.base + offset, len) }
@@ -533,6 +565,28 @@ mod tests {
                     let plain = (lo..lo + len).all(|at| fake.read(at));
                     assert_eq!(fake.sweep(lo, len), plain, "hole at {hole}, {len} bytes from {lo}");
                     assert_eq!(fake.allows(lo, len), plain, "hole at {hole}, {len} from {lo}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_stops_where_asking_each_access_would() {
+        // The walk a strided check goes down, held against asking each access's shadow byte on its
+        // own, with one unwritten byte moved through the column and around it.
+        let fake = Fake::new(640);
+        for hole in [0, 3, 8, 64, 100, 131, 257, 600] {
+            fake.set(0, 640);
+            fake.forget(hole, 1);
+            for lo in [0, 1, 4, 8, 13, 16] {
+                for step in [8, 16, 24, 64] {
+                    let most = (640 - lo - 1) / step + 1;
+                    for count in [0, 1, 2, 7, most] {
+                        let plain =
+                            (0..count).find(|k| !fake.whole(lo + k * step)).unwrap_or(count);
+                        let said = fake.column(lo, step, count);
+                        assert_eq!(said, plain, "hole {hole}, {count} every {step} from {lo}");
+                    }
                 }
             }
         }
