@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A strided plane check walks each plane down the column rather than starting over for each access. When the step is a whole number of granules every access sits where the first one does in its own granule, so the tests that an access is inside one granule are made once, and the type plane and the init plane each walk their slots with the slot address moving on by the step. The first access either one cannot answer from its slot alone is asked the long way and reported if refused, and the walk goes on after it, so the answers and the reports are the ones the per access loop gave. `a-matrix-multiply` goes from 679,469,817 to 474,989,831 instructions under callgrind, and the strided entry points in it from 362.8 to 158.3 million. Part of tamnd/rucc#1711.
 - A type or init check over a loop that reads every Nth element now comes out of the loop too. The check in front of the loop gets the step, and the runtime checks each element the loop reads and never the bytes between them, one load and one compare a plane when the element sits inside one granule. The type check and the init check of one read are written with the same operands, so they lower to one call. `a-matrix-multiply` goes from 1206.6 to 679.5 million instructions under callgrind and the other safety benches do not move. tamnd/rucc#1711.
 
 ## 0.10.79

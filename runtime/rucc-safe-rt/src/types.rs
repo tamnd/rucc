@@ -322,6 +322,30 @@ impl<'a> Types<'a> {
         slot & HETEROGENEOUS == 0 && compatible(wanted, slot)
     }
 
+    /// How many of `count` accesses, one every `step` bytes from `lo`, [`Types::plain`] says yes to
+    /// before the first it does not.
+    ///
+    /// The column a strided check walks, with the slot address moved on by `step / 8` each time
+    /// rather than worked out again from the address. `step` is a whole number of granules, so every
+    /// access is at the same place in its own granule as the first is in its.
+    ///
+    /// # Safety
+    ///
+    /// Every access's granule is inside the mapping this plane was built for.
+    #[must_use]
+    pub unsafe fn column(&self, lo: usize, step: usize, count: usize, wanted: TypeId) -> usize {
+        let mut slot = self.slot(lo);
+        for k in 0..count {
+            // SAFETY: the granule of access `k`, which the caller says is mapped.
+            let held = unsafe { slot.read() };
+            if held & HETEROGENEOUS != 0 || !compatible(wanted, held) {
+                return k;
+            }
+            slot = slot.wrapping_add(step / GRANULE);
+        }
+        count
+    }
+
     /// [`Types::allows`] for a long range, which is what a check taken out of a loop asks about.
     ///
     /// Read a run of eight granules at a time rather than one. A run whose slots all say the one
@@ -593,6 +617,16 @@ mod tests {
         fn allows(&self, offset: usize, len: usize, ty: TypeId) -> bool {
             // SAFETY: as above.
             unsafe { self.plane().allows(self.base + offset, len, ty) }
+        }
+
+        fn column(&self, offset: usize, step: usize, count: usize, ty: TypeId) -> usize {
+            // SAFETY: as above.
+            unsafe { self.plane().column(self.base + offset, step, count, ty) }
+        }
+
+        fn plain(&self, offset: usize, ty: TypeId) -> bool {
+            // SAFETY: as above.
+            unsafe { self.plane().plain(self.base + offset, ty) }
         }
 
         fn sweep(&self, offset: usize, len: usize, ty: TypeId) -> bool {
@@ -896,6 +930,33 @@ mod tests {
                         let said = fake.sweep(lo, len, A);
                         assert_eq!(said, plain, "case {n} at granule {granule}, {len} from {lo}");
                         assert_eq!(fake.allows(lo, len, A), plain, "case {n}, {len} from {lo}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_stops_where_asking_each_access_would() {
+        // The walk a strided check goes down, held against asking each access's slot on its own,
+        // with the odd granules the sweep is tried against moved through the column and around it.
+        const GRANULES: usize = 48;
+        const LEN: usize = GRANULES * GRANULE;
+        let fake = Fake::new(GRANULES, 16);
+        let odd = [(0, GRANULE, B), (0, GRANULE, UNTYPED), (3, 1, B)];
+        for (n, &(off, width, ty)) in odd.iter().enumerate() {
+            for granule in [0, 1, 7, 8, 13, 31, 47] {
+                fake.set(0, LEN, A);
+                fake.set(granule * GRANULE + off, width, ty);
+                for lo in [0, 1, 4, 8, 13, 16] {
+                    for step in [8, 16, 24, 64] {
+                        let most = (LEN - lo - 1) / step + 1;
+                        for count in [0, 1, 2, 7, most] {
+                            let plain =
+                                (0..count).find(|k| !fake.plain(lo + k * step, A)).unwrap_or(count);
+                            let said = fake.column(lo, step, count, A);
+                            assert_eq!(said, plain, "case {n} at {granule}, {count} every {step}");
+                        }
                     }
                 }
             }
