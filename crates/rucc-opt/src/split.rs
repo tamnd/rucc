@@ -945,9 +945,7 @@ fn walked(
             },
         },
     };
-    if let Some(named) = carried
-        && (ahead.is_some() || !started(base, apart, named))
-    {
+    if carried.is_some_and(|named| ahead.is_some() || !started(base, apart, named)) {
         return Err(NOT_FROM_THE_START);
     }
     // Whether an offset inside the window means an access inside the object, which is what dropping
