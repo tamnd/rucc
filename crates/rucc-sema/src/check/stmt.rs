@@ -46,7 +46,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, Remarks, StringLiteral};
 use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
 
-use crate::asm::{Asm, AsmOperand, AsmOperandList, LabelList, in_a_register};
+use crate::asm::{Asm, AsmOperand, AsmOperandList, FileAsm, LabelList, in_a_register};
 use crate::check::expr::Target;
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclList};
@@ -979,6 +979,21 @@ impl Checker<'_> {
         let labels = self.tast.add_label_refs(&labels);
         let template = self.asm_template(node.template, outputs, inputs, labels, span);
 
+        // A statement that only says things about names, which is the same statement at file
+        // scope wherever in a function it was written: `.weak` and `.set` name symbols of the
+        // object file and not places in the code. tcc's test writes one inside a function to
+        // check that the name it equates to is the global one rather than a local of that name,
+        // and handing it to the file is what makes that true here.
+        let bare = [node.outputs, node.inputs].iter().all(|&list| self.ast[list].is_empty())
+            && self.ast[node.clobbers].is_empty()
+            && self.ast[node.labels].is_empty();
+        let text: String =
+            self.tast[template].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+        if bare && only_names(&text) {
+            self.tast.add_file_asm(FileAsm { template, span });
+            return Stmt::Empty;
+        }
+
         // A statement with no outputs is `volatile` whether it said so or not, since one whose
         // results nothing reads is otherwise one that may be dropped, and an `asm goto` is
         // volatile for the same reason: what it does is jump, and no output records that.
@@ -1324,6 +1339,32 @@ fn memory_only(constraint: &str) -> bool {
     !letters.is_empty() && letters.iter().all(|ch| "moV<>".contains(*ch))
 }
 
+/// Whether a template is nothing but directives about names, with at least one of them.
+///
+/// `.set` and `.equ` count only when what they equate the name to is another name. One that
+/// equates it to `.` or to a sum is about a place in the code, and moving it out of the function
+/// would change which place.
+fn only_names(text: &str) -> bool {
+    let name = |word: &str| {
+        let word = word.trim();
+        word.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+            && word.chars().all(|letter| letter.is_ascii_alphanumeric() || "_$.".contains(letter))
+    };
+    let mut lines =
+        text.split(['\n', ';']).map(str::trim).filter(|line| !line.is_empty()).peekable();
+    lines.peek().is_some()
+        && lines.all(|line| {
+            let (directive, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            match directive {
+                ".weak" | ".globl" | ".global" | ".hidden" | ".protected" | ".internal" => {
+                    rest.split(',').all(name)
+                }
+                ".set" | ".equ" => rest.split_once(',').is_some_and(|(a, b)| name(a) && name(b)),
+                _ => false,
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_ast::{
@@ -1337,6 +1378,17 @@ mod tests {
     use rucc_types::IntKind;
 
     use super::*;
+
+    /// A template of directives about names is one, and a directive about a place is not.
+    #[test]
+    fn directives_about_names_are_told_from_directives_about_places() {
+        assert!(only_names(".weak override_func3\n.set override_func3, base_func"));
+        assert!(only_names(".globl a, b; .hidden a"));
+        assert!(!only_names(".set here, ."));
+        assert!(!only_names(".set here, there+4"));
+        assert!(!only_names(".weak a\n\tnop"));
+        assert!(!only_names(""));
+    }
     use crate::check::Context;
     use crate::print::Printer;
 

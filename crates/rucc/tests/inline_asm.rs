@@ -651,6 +651,37 @@ fn the_two_halves_of_a_word_are_exchanged_in_the_register_that_has_both() {
 }
 
 #[test]
+fn a_truth_value_is_the_byte_it_is_kept_in() {
+    // tcc's test that the width of a `_Bool` output is a byte: `sete` writes one and that byte is
+    // the answer.
+    let source = "_Bool f(void) { _Bool b; \
+                  asm volatile (\"cmp %1,%2; sete %0\" : \"=a\" (b) : \"r\" (1), \"r\" (2)); \
+                  return b; }\n";
+    let body = body(&asm("truth-byte", source), "f");
+    assert!(body.contains("sete\t%al"), "the byte never reached the listing:\n{body}");
+}
+
+#[test]
+fn a_constant_an_assembler_works_out_is_the_number_it_comes_to() {
+    // tcc checks that its assembler reads `0x1E-1` as three tokens rather than one number.
+    let source = "void f(void) { asm volatile (\"mov $0x1E-1,%eax\"); }\n";
+    let body = body(&asm("sum-immediate", source), "f");
+    assert!(body.contains("$29, %eax"), "the constant was not worked out:\n{body}");
+}
+
+#[test]
+fn directives_about_names_in_a_function_are_directives_of_the_file() {
+    // tcc's `asm_test` equates a weak name to a function from inside another function, and the
+    // name it equates to is the global one whatever the function has in scope.
+    let source = "void base_func(void) {} \
+                  void f(void) { int base_func = 42; (void)base_func; \
+                  asm volatile (\".weak alias3\\n.set alias3, base_func\"); }\n";
+    let text = asm("names-in-function", source);
+    assert!(text.contains(".weak\talias3"), "the weak name is missing:\n{text}");
+    assert!(text.contains("alias3,base_func"), "the equate is missing:\n{text}");
+}
+
+#[test]
 fn an_operand_in_memory_is_written_where_it_is_and_four_bytes_past_it() {
     // `mconstraint_test` in tcc's `tcctest.c`. The template takes the address of an `"m"` operand,
     // loads the word four bytes in through it into a `long` with `movl 4(%0),%k0`, and then

@@ -1089,8 +1089,20 @@ fn base(text: &str) -> Option<Piece> {
     (width == Width::Quad).then_some(Piece::Reg { reg, width })
 }
 
-/// One number, in the two spellings an assembler writes them in.
+/// One number, or numbers added and taken away from each other, which an assembler works out
+/// before anything else sees them. tcc writes `$0x1E-1` to check that its own assembler does not
+/// read the whole of it as one hexadecimal number.
 fn number(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let split = text.char_indices().skip(1).filter(|&(_, sign)| sign == '+' || sign == '-').last();
+    let Some((at, sign)) = split else { return term(text) };
+    let front = number(&text[..at])?;
+    let back = term(&text[at + 1..])?;
+    if sign == '+' { front.checked_add(back) } else { front.checked_sub(back) }
+}
+
+/// One number, in the two spellings an assembler writes them in.
+fn term(text: &str) -> Option<i64> {
     let (negative, digits) = match text.strip_prefix('-') {
         Some(rest) => (true, rest.trim()),
         None => (false, text.strip_prefix('+').unwrap_or(text).trim()),
@@ -1418,6 +1430,15 @@ mod tests {
         assert_eq!(given("4%0", &[true]), Some(Given::Mem(at(4))));
         assert_eq!(given("%0", &[true]), Some(Given::Mem(at(0))));
         assert_eq!(given("4%0", &[false]), None);
+    }
+
+    /// An immediate an assembler works out from more than one number.
+    #[test]
+    fn a_sum_of_numbers_is_the_number_it_comes_to() {
+        assert_eq!(number("0x1E-1"), Some(29));
+        assert_eq!(number("-4+10"), Some(6));
+        assert_eq!(number("8-2-1"), Some(5));
+        assert_eq!(number("0x1E-"), None);
     }
 
     /// Halves of two different registers is not that instruction. This machine exchanges the two
