@@ -157,7 +157,7 @@ pub const fn base_of(tag: u32) -> u16 {
 }
 
 /// Where this thread's innermost live scope is.
-static SCOPES: Slot = Slot::new();
+static SCOPES: Slot = Slot::new(crate::tls::SCOPES);
 
 /// This thread's innermost live scope, or null.
 #[must_use]

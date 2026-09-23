@@ -108,7 +108,7 @@ impl Frame {
 /// A thread local slot rather than a variable, for the reason the module comment gives. The value
 /// is a `*mut Frame` that points into the publishing function's own stack frame, which is why
 /// taking one unlinks it: the storage stops being a frame the moment that function returns.
-static FRAMES: Slot = Slot::new();
+static FRAMES: Slot = Slot::new(crate::tls::FRAMES);
 
 /// This thread's innermost published frame, or null.
 #[must_use]
