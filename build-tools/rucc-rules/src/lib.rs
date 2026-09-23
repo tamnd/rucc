@@ -128,7 +128,7 @@
 //! it lands in `M3` because `spec/10-backend.md` says retrofitting verification onto an existing
 //! rule set is the thing not to do.
 
-#![doc(html_root_url = "https://docs.rs/rucc-rules/0.10.76")]
+#![doc(html_root_url = "https://docs.rs/rucc-rules/0.10.77")]
 
 mod ast;
 mod emit;
