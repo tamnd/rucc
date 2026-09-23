@@ -121,8 +121,8 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::Interner;
 use rucc_ir::{
-    Block, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Restrict, Type,
-    Value,
+    Block, BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
+    Opcode, Restrict, Type, Value,
 };
 
 /// How many bytes a capability takes, which is section 5.2.1's four words.
@@ -153,9 +153,9 @@ const WORD: u64 = 8;
 /// pointed at another. Reserving is the half that can happen before anything has been rewritten, and
 /// a slot is only an `alloca` and a name for it, so nothing is lost by deciding all of them first.
 ///
-/// Retyping the block parameters goes between the substitution and the second walk, because a
-/// capability carried along an edge is a value nothing here gives a slot to and everything here has
-/// just been taught to read as an address.
+/// Taking the block parameters out goes between the substitution and the second walk, because a
+/// capability carried along an edge is a value the first walk gives no slot to, and [`parameters`]
+/// needs every edge already carrying an address to decide which slot each parameter reads.
 pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     prune(func);
     if !placeable(func) {
@@ -177,7 +177,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
         return;
     }
     substitute(func, &moved);
-    parameters(func);
+    parameters(func, word);
     let mut frame: Option<Value> = None;
     let mut given: Option<Value> = None;
     for inst in walk(func) {
@@ -251,14 +251,14 @@ fn walk(func: &Func) -> Vec<Inst> {
 }
 
 /// Takes out every capability nothing reads, until there are none of those left.
+///
+/// A `cap` block parameter counts as a capability here, and handing one along an edge only counts
+/// as reading it when the parameter on the other end is read. Otherwise a join whose every check
+/// the optimizer discharged would keep a producer alive on each edge into it, and the producer on
+/// one of those edges is often the plane walk.
 fn prune(func: &mut Func) {
     loop {
-        let mut read: HashSet<Value> = HashSet::new();
-        for inst in walk(func) {
-            operands(func, inst, |value| {
-                read.insert(value);
-            });
-        }
+        let read = reads(func);
         let mut again = false;
         for inst in walk(func) {
             if !func[inst].opcode.makes_capability() {
@@ -270,8 +270,54 @@ fn prune(func: &mut Func) {
             func.remove_inst(inst);
             again = true;
         }
+        for block in func.blocks().collect::<Vec<Block>>() {
+            let params = func[block].params.clone();
+            let gone: HashSet<usize> = params
+                .iter()
+                .enumerate()
+                .filter(|&(_, &param)| func[param].ty.is_cap() && !read.contains(&param))
+                .map(|(index, _)| index)
+                .collect();
+            if gone.is_empty() {
+                continue;
+            }
+            joined(func, block, &gone, &[], Type::int(64));
+            let dropped: HashSet<Value> = gone.iter().map(|&index| params[index]).collect();
+            func.retain_params(block, |value| !dropped.contains(&value));
+            again = true;
+        }
         if !again {
             return;
+        }
+    }
+}
+
+/// Every value something reads, where an edge reads what it hands a `cap` parameter only if that
+/// parameter is read in turn.
+fn reads(func: &Func) -> HashSet<Value> {
+    let mut read: HashSet<Value> = HashSet::new();
+    let mut carried: Vec<(Value, Value)> = Vec::new();
+    for inst in walk(func) {
+        read.extend(func[func[inst].args].iter().copied());
+        for call in func.successors(inst) {
+            for (&value, &param) in func[call.args].iter().zip(&func[call.block].params) {
+                if func[param].ty.is_cap() {
+                    carried.push((param, value));
+                } else {
+                    read.insert(value);
+                }
+            }
+        }
+    }
+    loop {
+        let before = read.len();
+        for &(param, value) in &carried {
+            if read.contains(&param) {
+                read.insert(value);
+            }
+        }
+        if read.len() == before {
+            return read;
         }
     }
 }
@@ -377,34 +423,179 @@ fn expecting(func: &Func, inst: Inst) -> bool {
 /// functions, and a function this pass gives up on keeps every `cap_of` in it, which the back end
 /// has no rule for.
 ///
-/// There is nothing to place here, only something to rename. Every capability in the function is in
-/// a slot by the time this runs and a slot is an address, so the parameter carries the address of
-/// whichever slot the incoming capability is in and its type says so. [`substitute`] has already
-/// rewritten the arguments on every edge into the block, so what arrives is an address on all of
-/// them, and every reader of the parameter is a consumer that wants an address by now.
+/// Every capability in the function is in a slot by the time this runs and a slot is an address, and
+/// [`substitute`] has already rewritten the arguments on every edge into the block, so what arrives
+/// on each edge is the address of the slot the incoming capability is in. There are two cases, and
+/// what separates them is how many different slots can arrive.
 ///
-/// The slot being an `alloca` in the entry block is what makes this sound rather than clever. It is
-/// live wherever the branch can go, so handing its address along an edge outlives nothing, and the
-/// producer wrote the four words before the branch was taken.
-fn parameters(func: &mut Func) {
+/// One, not counting the parameter handed back to itself round a loop, is a parameter standing for a
+/// single capability. Its readers are pointed at that slot and the parameter goes. The slot is an
+/// `alloca` in the entry block, so it is live wherever the branch can go, and the producer wrote the
+/// four words before the branch was taken.
+///
+/// More than one is a join, and that cannot be done the same way. Passing the incoming slot's
+/// address along would leave the parameter naming a slot whose producer may run again before the
+/// parameter's last reader, and inside a loop it does: in `next = cur->next; free(cur); cur = next`
+/// the `cap_load` for `next` writes the slot that `cur` arrived as, and the check in front of the
+/// free would then read the wrong object's capability. So a join gets a slot of its own and every
+/// edge into it copies the four words across, which is [`joined`].
+fn parameters(func: &mut Func, word: Type) {
     for block in func.blocks().collect::<Vec<Block>>() {
-        for value in func[block].params.clone() {
-            if func[value].ty.is_cap() {
-                func.retype(value, Type::PTR);
+        let params = func[block].params.clone();
+        let mut copied: Vec<(usize, Value)> = Vec::new();
+        for (index, &param) in params.iter().enumerate() {
+            if !func[param].ty.is_cap() {
+                continue;
             }
+            let arriving: HashSet<Value> =
+                incoming(func, block, index).into_iter().filter(|&value| value != param).collect();
+            let to = match arriving.iter().next() {
+                Some(&only) if arriving.len() == 1 => only,
+                _ => {
+                    let first = func.insts(block).next().or_else(|| func.terminator(block));
+                    let Some(at) = first else { continue };
+                    let Some(own) = reserve(func, at) else { continue };
+                    copied.push((index, own));
+                    own
+                }
+            };
+            renamed(func, param, to);
+        }
+        let gone: HashSet<usize> = params
+            .iter()
+            .enumerate()
+            .filter(|&(_, &param)| func[param].ty.is_cap())
+            .map(|(index, _)| index)
+            .collect();
+        if gone.is_empty() {
+            continue;
+        }
+        joined(func, block, &gone, &copied, word);
+        let dropped: HashSet<Value> = gone.iter().map(|&index| params[index]).collect();
+        func.retain_params(block, |value| !dropped.contains(&value));
+    }
+}
+
+/// What every edge into `block` passes as the parameter at `index`.
+fn incoming(func: &Func, block: Block, index: usize) -> Vec<Value> {
+    let mut found = Vec::new();
+    for pred in func.blocks() {
+        let Some(term) = func.terminator(pred) else { continue };
+        for call in func.successors(term) {
+            if call.block == block
+                && let Some(&value) = func[call.args].get(index)
+            {
+                found.push(value);
+            }
+        }
+    }
+    found
+}
+
+/// Points everything that reads `from`, operands and edge arguments alike, at `to` instead.
+fn renamed(func: &mut Func, from: Value, to: Value) {
+    let with = |value: Value| if value == from { to } else { value };
+    for inst in walk(func) {
+        let args = func[inst].args;
+        func.rewrite(args, with);
+        for call in func.successors(inst).collect::<Vec<_>>() {
+            func.rewrite(call.args, with);
         }
     }
 }
 
-/// Every value an instruction reads, counting the arguments it passes to the blocks it branches to.
-fn operands(func: &Func, inst: Inst, mut each: impl FnMut(Value)) {
-    for &value in &func[func[inst].args] {
-        each(value);
-    }
-    for call in func.successors(inst) {
-        for &value in &func[call.args] {
-            each(value);
+/// Takes the parameters at the positions in `gone` off every edge into `block`, copying the ones in
+/// `copied` into their own slots on the way.
+///
+/// Every word is read before any is written, because an edge round a loop can hand one join's slot
+/// to another join of the same block, and writing the first before reading the second would copy
+/// what this edge just put there rather than what the last iteration left. An edge out of a branch
+/// with more than one target gets a block of its own to do the copying in, since copying in front of
+/// the branch would overwrite the slot on the way out of the loop as well as on the way round it.
+/// A computed `goto` and an `asm goto` are the exception, because a block put on one of their edges
+/// is one the jump goes straight past, and those copy in front of the branch.
+fn joined(
+    func: &mut Func,
+    block: Block,
+    gone: &HashSet<usize>,
+    copied: &[(usize, Value)],
+    word: Type,
+) {
+    for pred in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(pred) else { continue };
+        let targets = func.target_list(term);
+        let many = targets.as_usize_range().len() > 1;
+        for at in targets.iter() {
+            let call = func[at];
+            if call.block != block {
+                continue;
+            }
+            let passed = func[call.args].to_vec();
+            let kept: Vec<Value> = passed
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !gone.contains(index))
+                .map(|(_, &value)| value)
+                .collect();
+            let pairs: Vec<(Value, Value)> = copied
+                .iter()
+                .filter_map(|&(index, own)| passed.get(index).map(|&from| (from, own)))
+                .filter(|&(from, own)| from != own)
+                .collect();
+            let splittable = !matches!(func[term].opcode, Opcode::IndirectBr | Opcode::InlineAsm);
+            if pairs.is_empty() || !many || !splittable {
+                let args = func.push_values(&kept);
+                func.set_block_call(at, BlockCall { args, ..call });
+                if !pairs.is_empty() {
+                    copy(func, term, &pairs, word);
+                }
+                continue;
+            }
+            let edge = func.create_block();
+            let span = func.span(term);
+            let jump = Builder::new(func, edge).at(span).jump(block, &kept);
+            let args = func.push_values(&[]);
+            func.set_block_call(at, BlockCall { block: edge, args, ..call });
+            copy(func, jump, &pairs, word);
         }
+    }
+}
+
+/// Copies the four words of each `(from, to)` pair of slots, in front of `inst`, reads first.
+fn copy(func: &mut Func, inst: Inst, pairs: &[(Value, Value)], word: Type) {
+    let span = func.span(inst);
+    let mut read = Vec::new();
+    for &(from, to) in pairs {
+        for step in 0..BYTES / WORD {
+            let at = offset(func, inst, from, step * WORD, word);
+            let args = func.push_values(&[at]);
+            let extra = Extra::Mem(func.add_mem(plain()));
+            let data = InstData { args, extra, ..InstData::new(Opcode::Load) };
+            let made = func.create_inst(data, &[word], span);
+            func.insert_before(made, inst);
+            let Some(value) = func[made].results().next() else { continue };
+            read.push((to, step, value));
+        }
+    }
+    for (to, step, value) in read {
+        let at = offset(func, inst, to, step * WORD, word);
+        let args = func.push_values(&[value, at]);
+        let extra = Extra::Mem(func.add_mem(plain()));
+        let data = InstData { args, extra, ..InstData::new(Opcode::Store) };
+        let made = func.create_inst(data, &[], span);
+        func.insert_before(made, inst);
+    }
+}
+
+/// What one word of a slot is to the back end: eight bytes, aligned, and nothing more to say.
+fn plain() -> MemInfo {
+    MemInfo {
+        size: WORD,
+        align: ALIGN,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
     }
 }
 
@@ -1474,18 +1665,120 @@ mod tests {
     }
 
     #[test]
-    fn a_capability_handed_along_an_edge_carries_the_address_of_its_slot_instead() {
-        // The parameter is the one value here that has no slot of its own, and it does not need
-        // one: what arrives on the edge is the address of the slot the producer filled, so the
-        // parameter goes on carrying whichever of them the branch came from.
+    fn a_capability_handed_along_an_edge_is_read_out_of_the_slot_it_was_made_in() {
+        // One capability arrives, so the parameter stands for it and goes: what reads it reads the
+        // slot the producer filled, and nothing is copied anywhere.
         let mut names = Interner::new();
         let mut func = handed_along(&mut names, false);
         frames(&mut func, &mut names, Type::int(64));
         assert_eq!(count(&func, Opcode::CapOf), 0);
         assert_eq!(count(&func, Opcode::CapStore), 0);
+        assert_eq!(count(&func, Opcode::Alloca), 1, "one slot for the one capability");
         let next = func.blocks().nth(1).expect("the function has three blocks");
-        let held = func[next].params[0];
-        assert_eq!(func[held].ty, Type::PTR, "the parameter says what it now carries");
+        assert!(func[next].params.is_empty(), "the parameter went");
+        believed(&module(&mut names), &func, &names);
+    }
+
+    /// A loop whose header joins two capabilities, the one made in front of it and the one the body
+    /// makes each time round, with the body reading the header's after it has made its own.
+    ///
+    /// `next = cur->next; free(cur); cur = next` is the program. The body's `cap_of` stands for the
+    /// `cap_load` of `next` and the `cap_store` after it for the check in front of the free, so the
+    /// store has to read what `cur` arrived with and not what the body just wrote. `exit` is whether
+    /// the back edge is one arm of a branch that can also leave, which is the edge that has to be a
+    /// block of its own.
+    fn joining(names: &mut Interner, exit: bool) -> Func {
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let held = func.append_param(head, Type::CAP);
+
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[at]);
+        let first = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        b.jump(head, &[first]);
+
+        let mut b = Builder::new(&mut func, head);
+        let args = b.func().push_values(&[at]);
+        let next = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = b.func().push_values(&[held, at, at, held]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        if exit {
+            let again = b.iconst(Type::I1, 1);
+            let done = b.func().create_block();
+            b.br_if(again, head, &[next], done, &[]);
+            Builder::new(&mut func, done).ret(&[]);
+        } else {
+            b.jump(head, &[next]);
+        }
+        func
+    }
+
+    /// The slot each call in the function is handed as its first operand, in order.
+    fn handed(func: &Func) -> Vec<Value> {
+        walk(func)
+            .into_iter()
+            .filter(|&inst| func[inst].opcode == Opcode::Call)
+            .filter_map(|inst| func[func[inst].args].first().copied())
+            .collect()
+    }
+
+    #[test]
+    fn a_join_of_two_capabilities_gets_a_slot_of_its_own_that_each_edge_copies_into() {
+        // Three slots: the one in front of the loop, the one the body makes, and the header's. The
+        // store reads the header's, which is what makes the body's `cap_of` running first harmless.
+        let mut names = Interner::new();
+        let mut func = joining(&mut names, false);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::Alloca), 3);
+        let head = func.blocks().nth(1).expect("the function has two blocks");
+        assert!(func[head].params.is_empty(), "the parameter went");
+        let calls = handed(&func);
+        let (made, stored) = (calls[1], calls[2]);
+        assert_ne!(made, stored, "the store reads the join's slot and not the body's");
+        // Four words each way on each of the two edges in.
+        assert_eq!(count(&func, Opcode::Load), 8);
+        assert_eq!(count(&func, Opcode::Store), 8);
+        believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn a_join_nothing_reads_goes_and_takes_what_fed_it_along() {
+        // Only the edges read the parameter, and the one round the loop reads it only to hand it
+        // back to itself, so neither producer has a reader and the function holds no capability.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[Type::PTR]));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let at = func.append_param(entry, Type::PTR);
+        let held = func.append_param(head, Type::CAP);
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[at]);
+        let first = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        b.jump(head, &[first]);
+        let mut b = Builder::new(&mut func, head);
+        let again = b.iconst(Type::I1, 1);
+        let done = b.func().create_block();
+        b.br_if(again, head, &[held], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(count(&func, Opcode::CapOf), 0);
+        assert_eq!(count(&func, Opcode::Call), 0);
+        assert!(func[head].params.is_empty(), "the parameter went");
+        believed(&module(&mut names), &func, &names);
+    }
+
+    #[test]
+    fn a_join_reached_from_a_branch_that_can_also_leave_copies_on_a_block_of_its_own() {
+        // The back edge is one arm of a branch, so the copy goes on a block put on that arm rather
+        // than in front of the branch, where it would run on the way out as well.
+        let mut names = Interner::new();
+        let mut func = joining(&mut names, true);
+        frames(&mut func, &mut names, Type::int(64));
+        assert_eq!(func.blocks().count(), 4, "one more block, for the back edge");
+        let edge = func.blocks().last().expect("the edge block is the last one made");
+        assert_eq!(func.insts(edge).filter(|&inst| func[inst].opcode == Opcode::Store).count(), 4);
         believed(&module(&mut names), &func, &names);
     }
 
