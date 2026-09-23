@@ -123,6 +123,9 @@ fn one(func: &mut Func, names: &Interner, defined: &HashSet<&str>) -> usize {
         func.insert_before(made, inst);
         done += 1;
     }
+    // A free of a pointer that came round a loop asks for the capability at a block parameter,
+    // which is a join the edges into it still have to be handed their half of.
+    origins.join(func);
     done
 }
 
@@ -152,7 +155,8 @@ fn handed(func: &Func, names: &Interner, defined: &HashSet<&str>, inst: Inst) ->
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Builder, CallInfo, Extra, Func, FuncId, InstData, Module, Opcode, Signature, Type,
+        Builder, CallInfo, Extra, Func, FuncId, InstData, IntPred, Module, Opcode, Signature, Type,
+        verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -298,5 +302,49 @@ mod tests {
             .expect("the check went in");
         let cap = func[made[0]].results().next().expect("a cap_of produces one value");
         assert_eq!(func[func[check].args].first(), Some(&cap));
+    }
+
+    #[test]
+    fn a_free_of_a_pointer_two_ways_in_hands_each_edge_its_capability() {
+        // `free(x)` where x is a block parameter fed a different object down each edge, so the
+        // capability is a join and each edge has to pass the one for the pointer it passes. A join
+        // nobody finished leaves the block taking an argument its branches do not give it.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        declares(&mut names, &mut module, "free", false);
+        let i64_ = Type::int(64);
+        let signature = Signature::new().with_params(&[Type::PTR, Type::PTR, i64_]);
+        let mut func = Func::new(names.intern("caller"), signature);
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let q = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, i64_);
+        let (left, right) = (func.create_block(), func.create_block());
+        let join = func.create_block();
+        let x = func.append_param(join, Type::PTR);
+        let mut b = Builder::new(&mut func, entry);
+        let zero = b.iconst(i64_, 0);
+        let taken = b.icmp(IntPred::Slt, n, zero);
+        b.br_if(taken, left, &[], right, &[]);
+        Builder::new(&mut func, left).jump(join, &[p]);
+        Builder::new(&mut func, right).jump(join, &[q]);
+        let sig = func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let varargs = func.push_abis(&[]);
+        let info =
+            func.add_call(CallInfo { callee: Some(names.intern("free")), signature: sig, varargs });
+        let mut b = Builder::new(&mut func, join);
+        let args = b.func().push_values(&[x]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.ret(&[]);
+        module.add_func(func);
+
+        assert_eq!(checks(&mut module, &names), 1);
+        let id = module
+            .funcs()
+            .find(|&id| !module[id].is_declaration())
+            .expect("the module defines one function");
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
     }
 }

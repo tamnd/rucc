@@ -874,10 +874,17 @@ fn walked(
     // from and shared down the walk. The second is what `rucc_safety::origin` produces, and it asks
     // the same question a derivation check asks, so it is answered by the same three rules below
     // rather than by a fourth written for it.
-    let source = match source {
-        Some(from) if named != from => return Err(NOT_A_SWEEP),
-        Some(from) => Some(from),
-        None => (named != pointer).then_some(named),
+    //
+    // A derivation check whose capability is not the old pointer's is the same shape one step on.
+    // `rucc_safety::origin` carries a capability through a loop's block parameter, so the old
+    // pointer is the parameter and the capability names the pointer the walk started from. The
+    // window below is still worked out round the old pointer, and it answers for the capability
+    // only when the old pointer's first iteration is the very pointer the capability names, which
+    // is asked once the window is known.
+    let (source, carried) = match source {
+        Some(from) if named != from => (Some(from), Some(named)),
+        Some(from) => (Some(from), None),
+        None => ((named != pointer).then_some(named), None),
     };
     // A liveness check reads no bytes, so the window it needs is the one byte its address is in.
     // A bounds check carries how many it reads in its payload. A derivation check reads no bytes
@@ -938,6 +945,11 @@ fn walked(
             },
         },
     };
+    if let Some(named) = carried
+        && (ahead.is_some() || !started(base, apart, named))
+    {
+        return Err(NOT_FROM_THE_START);
+    }
     // Whether an offset inside the window means an access inside the object, which is what dropping
     // this check rests on and is not something this file decides. The direction goes with it,
     // because a walk from high to low is a different claim about addresses and has its own rule.
@@ -2982,10 +2994,16 @@ mod tests {
     /// Built at the end of the block and then moved in front of the terminator, which is what the
     /// builder makes easy and is where a check on an address the block works out belongs anyway.
     fn deriving(func: &mut Func, block: Block, from: Value, derived: Value) {
+        deriving_naming(func, block, from, from, derived);
+    }
+
+    /// [`deriving`] with the capability taken at `named` rather than at the pointer that went in,
+    /// which is what a capability carried through a block parameter leaves.
+    fn deriving_naming(func: &mut Func, block: Block, named: Value, from: Value, derived: Value) {
         let term = func.terminator(block).expect("the block ends in a branch");
         let held: Vec<Inst> = func.insts(block).collect();
         let mut build = Builder::new(func, block);
-        let args = build.func().push_values(&[from]);
+        let args = build.func().push_values(&[named]);
         let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
         let stride = build.iconst(Type::int(64), WIDTH);
         let args = build.func().push_values(&[capability, from, derived, stride]);
@@ -3351,6 +3369,41 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
         assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "the fast half lost the check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_derivation_check_whose_capability_names_where_the_walk_begins_is_taken() {
+        // `p + 1` round a loop where `p` starts on `a` and the capability was taken at `a` and
+        // carried in. The window goes round `p` as it would for a capability taken at `p`, and it
+        // starts on `a` on the first iteration, so it is about the instance the capability names.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let head = blocks[1];
+        let (array, walked) = arithmetic(&func, head);
+        let past = stepped(&mut func, head, walked);
+        deriving_naming(&mut func, head, array, walked, past);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 1, "the fast half lost the check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_derivation_check_whose_capability_names_somewhere_the_walk_does_not_begin_stays() {
+        // The same walk with the capability taken a stride past `a`. The window starts on `a`,
+        // and what owns `a` need not be what owns the pointer the capability names.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let head = blocks[1];
+        let (array, walked) = arithmetic(&func, head);
+        let above = stepped(&mut func, head, array);
+        let past = stepped(&mut func, head, walked);
+        deriving_naming(&mut func, head, above, walked, past);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 1);
+        assert_eq!(all(&func, Opcode::CheckDeriv).len(), 2, "the check is in both halves");
         sound(&func, &mut names);
     }
 
