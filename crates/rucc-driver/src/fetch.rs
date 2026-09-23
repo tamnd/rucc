@@ -234,9 +234,7 @@ fn fetch_with(
                 // What a downloader reports is that the transfer finished, and what has to be true
                 // is that the bytes are the artifact. Those are different claims and only the
                 // second one is ours.
-                if let Some(sha256) = sha256
-                    && let Err(why) = verify(&partial, sha256)
-                {
+                if let Some(Err(why)) = sha256.map(|sha256| verify(&partial, sha256)) {
                     let _ = fs::remove_file(&partial);
                     return Err(err(format!(
                         "the download of {url} was deleted rather than kept: {}",

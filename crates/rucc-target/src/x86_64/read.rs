@@ -955,9 +955,9 @@ fn given(text: &str, memory: &[bool]) -> Option<Given> {
     // A distance written in front of an operand in memory, which is `4%2` and means four bytes
     // past the object: tcc writes the second word of a structure that way. It is only an address
     // when the operand is in memory, since the same text in front of a register is nothing.
-    if let Some((front, rest)) = text.trim().split_once('%')
-        && !front.is_empty()
-        && let Some(index) = rest.parse().ok().filter(|&index| held(index))
+    let distance = text.trim().split_once('%').filter(|(front, _)| !front.is_empty());
+    if let Some((front, index)) = distance
+        .and_then(|(front, rest)| Some((front, rest.parse().ok().filter(|&index| held(index))?)))
     {
         let disp = i32::try_from(number(front)?).ok()?;
         return Some(Given::Mem(At { disp: Disp::Number(disp), ..object(index) }));
