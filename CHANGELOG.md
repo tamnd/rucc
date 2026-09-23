@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.77
+
 ### Added
 
 - `-std=c2y` and `-std=gnu2y` are accepted, with `__STDC_VERSION__` at `202500L` as gcc 16 has it. The plain names of the integer absolute value family now follow the dialect the way gcc does: every name is the library's under a GNU dialect, and under a strict one only from the standard that added it, so `uabs`, `ulabs`, `ullabs` and `umaxabs` expand inline under `c2y` and stay calls under `c23`. `gcc.c-torture/execute/builtins/uabs-2.c` builds and passes.
