@@ -768,7 +768,7 @@ fn carried(func: &Func, inst: Inst, now: Opcode, lhs: Operand, rhs: Operand) -> 
     let both = data.flags.intersection(Flags::NSW.union(Flags::NUW));
     match (now, lhs, rhs) {
         (Opcode::Mul, Operand::Value(v), Operand::Constant { number, bits })
-            if v == x && bits < 128 && (number ^ k) & ((1 << bits) - 1) == 0 =>
+            if v == x && bits < i128::BITS && (number ^ k) & ((1 << bits) - 1) == 0 =>
         {
             both
         }

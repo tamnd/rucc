@@ -260,6 +260,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
+    let reachable = reach::reachable(reach::Decide::new(tast, types, target, names));
     let mut unit = Unit {
         tast,
         types,
@@ -287,7 +288,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         aliased: HashSet::new(),
         starts: Vec::new(),
         renamed: HashMap::new(),
-        reachable: reach::reachable(tast),
+        reachable,
     };
     unit.run();
     Lowered { module: unit.module, diagnostics: unit.diagnostics }
@@ -822,13 +823,21 @@ impl Unit<'_> {
         if self.no_address(name, target, span) {
             return;
         }
-        if self.module.lookup(name).is_some() {
+        // A name the file only declared is one the `.set` gives an address to, and tcc's test
+        // calls a function declared `extern` in C and defined by `.set` in a file-scope `asm`.
+        let declared = match self.module.lookup(name) {
+            None => true,
+            Some(SymbolRef::Func(id)) => self.module[id].is_declaration(),
+            Some(SymbolRef::Global(id)) => self.module[id].is_declaration(),
+            Some(SymbolRef::Alias(_)) => false,
+        };
+        if !declared {
             return;
         }
         let mut alias = Alias::new(name, target);
         alias.linkage = set.linkage;
         alias.visibility = set.visibility;
-        self.module.add_alias(alias);
+        self.module.add_alias_over(alias);
     }
 
     /// Whether there is no address for a second name to be at, reporting why when there is not.

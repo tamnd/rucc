@@ -33,9 +33,11 @@
 //! that is when the operands are walked, once each, over the original names the copies are still
 //! holding.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use rucc_ir::{Block, BlockCall, Extra, ExtraKind, Func, Inst, InstData, Type, Value, ValueList};
+use rucc_ir::{
+    Block, BlockCall, Extra, ExtraKind, Func, Inst, InstData, Opcode, Type, Value, ValueList,
+};
 
 /// Copies `body` into fresh blocks, filling `map` in with what the copy calls everything it defines.
 ///
@@ -126,6 +128,32 @@ fn one(
         map.insert(old, new);
     }
     fresh
+}
+
+/// Every block some `block_addr` names, and every block an image names.
+///
+/// The second kind is the one with nothing in the function to find. An image is in another section
+/// and what it holds is a relocation, so the `goto *p` that arrives at the block can be in a
+/// function this one cannot see, and a block merged into the one above it would be a name pointing
+/// at the wrong instruction.
+///
+/// Nor can one of these be copied by a pass that then gives the original a part of the work, which
+/// is what unrolling and splitting a loop do. The address still names the original, so a `goto *p`
+/// in the third copy of the body arrives in the first. tcc's `goto_test` jumps through a table of
+/// three labels in a loop that runs three times, and at `-O2` it never stopped.
+pub(crate) fn addressed(func: &Func) -> HashSet<Block> {
+    let mut taken: HashSet<Block> = func.named_blocks().map(|(block, _)| block).collect();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::BlockAddr {
+                continue;
+            }
+            for call in func.successors(inst) {
+                taken.insert(call.block);
+            }
+        }
+    }
+    taken
 }
 
 /// Whether this instruction is one [`blocks`] can copy.

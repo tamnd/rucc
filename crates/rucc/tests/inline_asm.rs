@@ -678,6 +678,18 @@ fn directives_about_names_in_a_function_are_directives_of_the_file() {
 }
 
 #[test]
+fn an_equate_at_file_scope_defines_a_name_the_file_only_declared() {
+    // tcc's `asm_test` calls `override_func1`, which C declares `extern` and a file-scope `asm`
+    // defines with `.set`. The declaration was in the module first, and the equate was dropped.
+    let source = "void base_func(void) {} extern void over(void); \
+                  asm(\".weak over\\n.set over, base_func\"); \
+                  void f(void) { over(); }\n";
+    let text = asm("equate-declared", source);
+    assert!(text.contains(".weak\tover"), "the weak name is missing:\n{text}");
+    assert!(text.contains("over,base_func"), "the equate is missing:\n{text}");
+}
+
+#[test]
 fn an_operand_in_memory_is_written_where_it_is_and_four_bytes_past_it() {
     // `mconstraint_test` in tcc's `tcctest.c`. The template takes the address of an `"m"` operand,
     // loads the word four bytes in through it into a `long` with `movl 4(%0),%k0`, and then

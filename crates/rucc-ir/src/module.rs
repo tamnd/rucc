@@ -652,6 +652,26 @@ impl Module {
         id
     }
 
+    /// Adds an alias under a name the module so far only declared, which it then stands for.
+    ///
+    /// The declaration stays where it was and is still a declaration, so whatever refers to it
+    /// goes on naming the same symbol, and the symbol is now the alias. That is what an assembler
+    /// does with `.set f, g` below a C declaration of `f`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the module already defines that name.
+    pub fn add_alias_over(&mut self, alias: Alias) -> AliasId {
+        let declared = match self.symbols.remove(&alias.name) {
+            None => true,
+            Some(SymbolRef::Func(id)) => self[id].is_declaration(),
+            Some(SymbolRef::Global(id)) => self[id].is_declaration(),
+            Some(SymbolRef::Alias(_)) => false,
+        };
+        assert!(declared, "an alias can only take the place of a declaration");
+        self.add_alias(alias)
+    }
+
     /// What that name refers to, or `None` if this module does not define or declare it.
     #[must_use]
     pub fn lookup(&self, name: Symbol) -> Option<SymbolRef> {

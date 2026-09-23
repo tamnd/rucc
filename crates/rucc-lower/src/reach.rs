@@ -43,9 +43,14 @@
 
 use std::collections::HashSet;
 
+use rucc_ast::{BinaryOp, UnaryOp};
+use rucc_base::Interner;
 use rucc_sema::{
-    Decl, DeclFlags, DeclId, DeclKind, ExprId, ExprKind, InitList, Linkage, Stmt, StmtId, Tast,
+    Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Eval, ExprId, ExprKind, InitList,
+    Linkage, Stmt, StmtId, Tast,
 };
+use rucc_target::TargetInfo;
+use rucc_types::Types;
 
 /// The declarations something in the file reaches, given the file.
 ///
@@ -54,8 +59,9 @@ use rucc_sema::{
 /// with an initializer that names a function is how a reference reaches this from a place that is
 /// neither a body nor a file-scope image, so the two kinds travel the same worklist.
 #[must_use]
-pub(crate) fn reachable(tast: &Tast) -> HashSet<DeclId> {
-    let mut walk = Reach { tast, seen: HashSet::new(), work: Vec::new() };
+pub(crate) fn reachable(decide: Decide<'_>) -> HashSet<DeclId> {
+    let tast = decide.tast;
+    let mut walk = Reach { tast, decide, seen: HashSet::new(), work: Vec::new() };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
         if is_root(&tast[decl]) {
@@ -89,6 +95,7 @@ fn is_root(node: &Decl) -> bool {
 /// The walk, and what it has reached so far.
 struct Reach<'a> {
     tast: &'a Tast,
+    decide: Decide<'a>,
     seen: HashSet<DeclId>,
     work: Vec<DeclId>,
 }
@@ -161,7 +168,23 @@ impl Reach<'_> {
                     self.mark(decl);
                 }
             }
+            // The arm lowering drops is not a reference, or a `static inline` called only from
+            // it is emitted with a call in it to a function nothing defines. Unless a label is in
+            // it, since a `goto` from outside reaches that and lowering keeps what follows it.
             Stmt::If { cond, then, otherwise } => {
+                if let Some((effects, taken)) = self.decide.condition(cond) {
+                    for effect in effects {
+                        self.expr(effect);
+                    }
+                    let (live, dead) =
+                        if taken { (Some(then), otherwise) } else { (otherwise, Some(then)) };
+                    for arm in
+                        [live, dead.filter(|&dead| self.labelled(dead))].into_iter().flatten()
+                    {
+                        self.stmt(arm);
+                    }
+                    return;
+                }
                 self.expr(cond);
                 self.stmt(then);
                 if let Some(otherwise) = otherwise {
@@ -216,6 +239,14 @@ impl Reach<'_> {
             // not asked, because a definition has to exist for all three.
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => self.mark(decl),
             ExprKind::StmtExpr(body) => self.stmt(body),
+            // The right side of a chain its left side already ended is not lowered either.
+            ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {
+                self.expr(lhs);
+                let ends = op == BinaryOp::LogOr;
+                if self.decide.condition(lhs).is_none_or(|(_, answer)| answer != ends) {
+                    self.expr(rhs);
+                }
+            }
             ExprKind::Alloca { size } => self.expr(size),
             ExprKind::Member { base, .. }
             | ExprKind::Cast(base)
@@ -270,6 +301,119 @@ impl Reach<'_> {
                     self.expr(answer);
                 }
             }
+        }
+    }
+}
+
+impl Reach<'_> {
+    /// Whether a statement has a place in it that control can arrive at from outside.
+    ///
+    /// A `case` counts as well as a label, since the `switch` it belongs to may be outside the
+    /// statement. A label anywhere in it is enough, which is more than lowering keeps and never
+    /// less.
+    fn labelled(&self, id: StmtId) -> bool {
+        match self.tast[id] {
+            Stmt::Case { .. } | Stmt::Default { .. } | Stmt::Label { .. } => true,
+            Stmt::Block(body) => {
+                (0..self.tast[body].len()).any(|index| self.labelled(self.tast[body][index]))
+            }
+            Stmt::If { then, otherwise, .. } => {
+                self.labelled(then) || otherwise.is_some_and(|otherwise| self.labelled(otherwise))
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Switch { body, .. } => self.labelled(body),
+            _ => false,
+        }
+    }
+}
+
+/// What a condition is known to be before the program runs, which lowering and the walk above
+/// both ask so that they agree on which code is never lowered.
+#[derive(Clone, Copy)]
+pub(crate) struct Decide<'a> {
+    tast: &'a Tast,
+    types: &'a Types,
+    target: &'a TargetInfo,
+    names: &'a Interner,
+}
+
+impl<'a> Decide<'a> {
+    pub(crate) fn new(
+        tast: &'a Tast,
+        types: &'a Types,
+        target: &'a TargetInfo,
+        names: &'a Interner,
+    ) -> Self {
+        Self { tast, types, target, names }
+    }
+
+    /// Which way a condition goes when nothing it reads can change the answer, and the parts of
+    /// it that still have to run. See `Body::decided_condition`.
+    pub(crate) fn condition(&self, cond: ExprId) -> Option<(Vec<ExprId>, bool)> {
+        if let Some(answer) = self.folded(cond) {
+            return Some((Vec::new(), answer));
+        }
+        let tast = self.tast;
+        match tast[cond].kind {
+            ExprKind::Convert { kind: Conversion::Bool, operand } => self.condition(operand),
+            ExprKind::Unary { op: UnaryOp::Not, operand } => {
+                let (effects, answer) = self.condition(operand)?;
+                Some((effects, !answer))
+            }
+            ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {
+                let ends = op == BinaryOp::LogOr;
+                if let Some((mut effects, answer)) = self.condition(lhs) {
+                    if answer == ends {
+                        return Some((effects, ends));
+                    }
+                    let (rest, answer) = self.condition(rhs)?;
+                    effects.extend(rest);
+                    return Some((effects, answer));
+                }
+                let (rest, answer) = self.condition(rhs)?;
+                if answer != ends {
+                    return None;
+                }
+                let mut effects = vec![lhs];
+                effects.extend(rest);
+                Some((effects, ends))
+            }
+            _ => None,
+        }
+    }
+
+    /// Which way the condition of an `if` goes when it is a constant, and nothing when it is not.
+    ///
+    /// A program that asks a question about the compiler rather than about its own data writes the
+    /// answer as a constant and puts the call that only the other answer supports inside the arm
+    /// that is never taken. `if (sizeof (void *) == 4) use_the_32_bit_helper();` in a build for a
+    /// 64 bit target is that, and so is every `if (0)` a configure script leaves behind. Emitting
+    /// the branch leaves the call referenced, the linker goes looking for a function nobody
+    /// defined, and the program does not link. gcc folds the branch away in the front end, so it
+    /// links at every level including `-O0`, and this is where rucc does the same. The optimizer
+    /// already removed these at `-O1` and above, which is why the failure was only ever seen in a
+    /// build that did not ask for optimization.
+    ///
+    /// Only a number answers, and a fold that went looking for an address does not, even when
+    /// what came back is a number. The folder assumes no object is at zero, which is what turns
+    /// `if (&a)` into a true it never was asked to prove, and the assumption is wrong for exactly
+    /// the symbol a program writes this about: a weak one is at zero when nothing defined it, and
+    /// `if (&pthread_create)` is the idiom. That question belongs to the linker and to run time,
+    /// so it keeps its branch. A condition the folder had something to say about does not answer
+    /// either, since the ordinary path is the one that reports, and taking the answer here would
+    /// drop what it reported on the floor.
+    fn folded(&self, cond: ExprId) -> Option<bool> {
+        let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
+        let folded = eval.constant(cond);
+        if eval.addressed() || !eval.finish().is_empty() {
+            return None;
+        }
+        match folded {
+            Ok(Const::Int(value)) => Some(value != 0),
+            Ok(Const::Float(value)) => Some(!value.is_zero()),
+            _ => None,
         }
     }
 }
