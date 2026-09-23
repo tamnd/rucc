@@ -135,6 +135,22 @@ impl Init {
         unsafe { self.bytes(lo, lo + len) }
     }
 
+    /// Whether every byte the shadow byte for `at` answers for has been written.
+    ///
+    /// A no is not a refusal, because the bytes an access wants may be the written ones of a
+    /// partly written eight. A caller with an access inside one shadow byte asks this first and
+    /// asks [`Init::allows`] when it says no, and the answer is the same.
+    ///
+    /// # Safety
+    ///
+    /// `at` is inside the mapping this plane was built for.
+    #[must_use]
+    #[inline]
+    pub unsafe fn whole(&self, at: usize) -> bool {
+        // SAFETY: as in `read`.
+        unsafe { self.slot(at).read() == 0 }
+    }
+
     /// [`Init::allows`] for a long range, which is what a check taken out of a loop asks about.
     ///
     /// Once the walk reaches the start of a shadow byte it reads a word of shadow at a time, so the

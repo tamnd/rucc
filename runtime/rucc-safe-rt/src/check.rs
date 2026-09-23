@@ -63,6 +63,7 @@ use core::ffi::c_void;
 use crate::alloc::{self, Region};
 use crate::aux_slot;
 use crate::fail::Descriptor;
+use crate::init;
 use crate::layout::{AUX_PER_WORD, Cap, Class, Meta, WORD};
 use crate::plane::{self, Version};
 use crate::recover;
@@ -577,6 +578,72 @@ pub unsafe fn swept(
     if !held {
         // SAFETY: as in `bounds`.
         unsafe { crate::fail::report(descriptor, Some(addr)) }
+    }
+}
+
+/// The plane checks over a walk that leaves gaps, which is the other check `rucc_opt::hoist` puts in
+/// front of a loop.
+///
+/// The accesses are `width` bytes each, at `addr` and at every `step` along from it that still ends
+/// inside `span` bytes of `addr`, and each is asked the question [`allowed`] asks of one access,
+/// with the type plane first when it is asked at all. What [`swept`] would do with the same loop is
+/// ask about every byte between the first access and the last, and the loop this is for reads eight
+/// bytes out of every sixteen hundred, so that is two hundred times the plane it needs to read. Here
+/// the region is found once, which is the expensive half of every one of these calls, and each
+/// access costs what the plane read for it costs.
+///
+/// Clipped to the region the way the others are, so an access past its end is not asked about and
+/// one that straddles it is asked about as far as it goes. That is [`bounds`]'s refusal, as it is
+/// for the dense forms.
+///
+/// # Panics
+///
+/// As [`bounds`].
+///
+/// # Safety
+///
+/// As [`bounds`]. `ty` is a plane vocabulary entry and is not an address.
+pub unsafe fn stepped(
+    addr: *const c_void,
+    (span, step, width): (usize, usize, usize),
+    ty: Option<TypeId>,
+    init: bool,
+    descriptor: *const Descriptor,
+) {
+    let addr = addr as usize;
+    let Some(region) = alloc::covering(addr) else { return };
+    let last = addr.saturating_add(span);
+    let mut at = addr;
+    while at < region.end && at.saturating_add(width) <= last {
+        // An access inside one granule is one slot of each plane, and a slot that answers for the
+        // whole granule answers for every access inside it, which is one load and one compare a
+        // plane for the array of one type that a strided walk nearly always is. A granule written
+        // in parts, or an access across two, is asked the long way, which gives the same answer.
+        let inside = at % types::GRANULE + width <= types::GRANULE
+            && at % init::SPAN + width <= init::SPAN
+            && width <= region.end - at;
+        // SAFETY: as in `allowed`, for the access at `at`, which is inside the region.
+        let quick = inside
+            && unsafe {
+                ty.is_none_or(|ty| region.types.plain(at, ty)) && (!init || region.init.whole(at))
+            };
+        let size = clipped(&region, at, width);
+        // SAFETY: as above.
+        let held = quick
+            || unsafe {
+                ty.is_none_or(|ty| region.types.allows(at, size, ty))
+                    && (!init || region.init.allows(at, size))
+            };
+        if !held {
+            // SAFETY: as in `bounds`.
+            unsafe { crate::fail::report(descriptor, Some(at)) }
+        }
+        // A step of zero is not something the compiler writes, and it would be one access asked
+        // about over and over, so it is that one access asked about once.
+        if step == 0 {
+            break;
+        }
+        at = at.saturating_add(step);
     }
 }
 
@@ -1402,6 +1469,63 @@ pub mod exports {
         unsafe { super::swept(addr, size, Some(ty), true, descriptor) };
     }
 
+    /// [`__rucc_check_type`] over the accesses of a walk that leaves gaps, which is what
+    /// `rucc_opt::hoist` writes for one: `width` bytes at `addr` and at every `step` along from it
+    /// that still ends inside `span` bytes of `addr`.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_check_type`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_type_strided(
+        addr: *const c_void,
+        span: usize,
+        step: usize,
+        width: usize,
+        ty: u32,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::stepped(addr, (span, step, width), Some(ty), false, descriptor) };
+    }
+
+    /// [`__rucc_check_init`] over the accesses of a walk that leaves gaps, as
+    /// [`__rucc_check_type_strided`] has them.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_check_init`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_init_strided(
+        addr: *const c_void,
+        span: usize,
+        step: usize,
+        width: usize,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::stepped(addr, (span, step, width), None, true, descriptor) };
+    }
+
+    /// [`__rucc_check_typed_init`] over the accesses of a walk that leaves gaps, as
+    /// [`__rucc_check_type_strided`] has them.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_check_type`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_typed_init_strided(
+        addr: *const c_void,
+        span: usize,
+        step: usize,
+        width: usize,
+        ty: u32,
+        descriptor: *const Descriptor,
+    ) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::stepped(addr, (span, step, width), Some(ty), true, descriptor) };
+    }
+
     /// # Safety
     ///
     /// `addr` is whatever the program computed and is never read through. No descriptor, for the
@@ -1623,6 +1747,12 @@ mod tests {
     fn raced(addr: *const c_void, size: usize) {
         // SAFETY: as in `bounds`.
         unsafe { super::raced(addr, size, &raw const ROW) }
+    }
+
+    /// The strided plane checks, asking both planes, with the descriptor argument filled in.
+    fn strided(addr: *const c_void, span: usize, step: usize, width: usize, ty: TypeId) {
+        // SAFETY: as in `bounds`.
+        unsafe { super::stepped(addr, (span, step, width), Some(ty), true, &raw const ROW) }
     }
 
     /// Two types out of the compiler's universe, in the spelling the plane gives them.
@@ -2014,6 +2144,55 @@ mod tests {
         assert!(!refused(|| typed(at(ptr, 0), 8, A)));
         assert!(!refused(|| typed(at(ptr, 0), 8, B)));
         // SAFETY: as above.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn a_strided_check_asks_about_the_accesses_and_not_the_bytes_between_them() {
+        let _turn = turn();
+        // A column of four byte elements sixteen bytes apart, which is `b[k * N + j]` in small. The
+        // twelve bytes after each element are never written and never read, and the check over the
+        // column is about the elements alone, so a check over the whole span would refuse where
+        // this passes.
+        let ptr = alloc(256);
+        for k in 0..16 {
+            judge(at(ptr, k * 16), 4, A);
+            wrote(at(ptr, k * 16), 4);
+        }
+        assert!(!refused(|| strided(at(ptr, 0), 15 * 16 + 4, 16, 4, A)));
+        assert!(refused(|| filled(at(ptr, 0), 15 * 16 + 4)), "the dense form reads the gaps");
+        // Eight bytes at each element is four more than anything wrote.
+        assert!(refused(|| strided(at(ptr, 0), 15 * 16 + 8, 16, 8, A)));
+        // An element stored as another type is refused, and so is one that was never written, and
+        // both only when it is one the walk reaches.
+        judge(at(ptr, 7 * 16), 4, B);
+        assert!(refused(|| strided(at(ptr, 0), 15 * 16 + 4, 16, 4, A)));
+        assert!(!refused(|| strided(at(ptr, 0), 6 * 16 + 4, 16, 4, A)));
+        assert!(!refused(|| strided(at(ptr, 8 * 16), 7 * 16 + 4, 16, 4, A)));
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+
+        let ptr = alloc(256);
+        for k in (0..16).filter(|&k| k != 9) {
+            judge(at(ptr, k * 16), 4, A);
+            wrote(at(ptr, k * 16), 4);
+        }
+        judge(at(ptr, 9 * 16), 4, A);
+        assert!(refused(|| strided(at(ptr, 0), 15 * 16 + 4, 16, 4, A)), "nine is unwritten");
+        assert!(!refused(|| strided(at(ptr, 0), 15 * 16 + 4, 32, 4, A)), "and every other one");
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+
+        // Eight byte elements over storage written as one type from end to end, where one slot of
+        // each plane answers for each element, and the same refusals from there.
+        let ptr = alloc(256);
+        judge(at(ptr, 0), 256, A);
+        wrote(at(ptr, 0), 256);
+        assert!(!refused(|| strided(at(ptr, 0), 15 * 16 + 8, 16, 8, A)));
+        judge(at(ptr, 5 * 16), 8, B);
+        assert!(refused(|| strided(at(ptr, 0), 15 * 16 + 8, 16, 8, A)), "five is another type");
+        assert!(!refused(|| strided(at(ptr, 8), 15 * 16, 16, 8, A)), "and in no other column");
+        // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
 

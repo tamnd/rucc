@@ -353,10 +353,17 @@ pub enum Opcode {
     /// applied to this plane rather than to the bounds. The plane entry stays in the payload, since
     /// the checks a hoisted one stands for all asked at the same type or it would not have been
     /// written.
+    ///
+    /// A fourth operand is a step, and then the check is not about a range. It asks about one
+    /// access of the payload's width at the pointer and at every step along from it that still
+    /// fits in the third operand's span, which is a loop's checks over a walk that leaves gaps
+    /// written in front of it. Nothing may read one of these as saying anything about the bytes
+    /// between the accesses.
     CheckType,
     /// The bytes the access reads have been written.
     ///
-    /// A third operand overrides how many bytes are asked about, as on [`Opcode::CheckType`].
+    /// A third operand overrides how many bytes are asked about, and a fourth is a step, both as on
+    /// [`Opcode::CheckType`].
     CheckInit,
     /// A pointer derived from another stays inside the capability the first one had.
     ///

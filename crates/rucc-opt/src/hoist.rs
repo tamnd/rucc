@@ -168,9 +168,14 @@
 //! that leaves gaps hands them bytes nobody touched. `b[k * N + j]` round `k` reads two hundred
 //! eight byte elements with three hundred and eighteen kilobytes between the first and the last,
 //! and one check over the lot of it was measured at thirty three times the whole program. So a
-//! plane check comes out of a loop only where the step is no wider than the access, which is to say
-//! only where the range in front is the bytes the loop reads rather than the ground it covers.
-//! A bounds check keeps the old condition, because for it the two are the same price.
+//! plane check over a walk whose step is wider than its access is written with the step as a fourth
+//! operand, and it asks about each access the loop makes rather than about every byte between the
+//! first and the last. That is not a claim about a range, so none of the reasoning above is needed
+//! for it: the check in front asks the questions the checks inside were going to ask, one per
+//! iteration at the same addresses, and the conditions that let the dense check move let this one
+//! move. What it saves is the call and the region lookup at every iteration, and what it still
+//! costs is a plane read per access (tamnd/rucc#1711). A bounds check keeps the dense form, because
+//! for it the two are the same price.
 //!
 //! What the hoisted check does not do is report further out than the object it starts in. The
 //! runtime finds the region the first address is in and clips the range to it, so a walk that runs
@@ -255,10 +260,6 @@ const NOT_EVERY_TIME: &str = "check kept, an iteration can finish without reachi
 /// What is reported for a check whose step does not keep its alignment.
 const MISALIGNED: &str = "check kept, its step is not a whole number of its alignment";
 
-/// What is reported for a plane check over a walk that leaves gaps.
-const LEAVES_GAPS: &str =
-    "plane check kept, the range in front would be wider than the bytes the loop reads";
-
 /// What is reported when the rule declines the range the loop sweeps.
 const TOO_WIDE: &str = "check kept, the range the loop sweeps is too wide for the rule";
 
@@ -322,6 +323,7 @@ impl Pass for Hoist {
             }
         }
 
+        let mut written = Vec::new();
         for plan in plans {
             if !fuel.take() {
                 stats.missed(NO_FUEL);
@@ -332,7 +334,7 @@ impl Pass for Hoist {
                 Opcode::CheckInit => HOISTED_INIT,
                 _ => HOISTED,
             };
-            apply(func, &plan);
+            apply(func, &plan, &mut written);
             stats.optimized(done);
         }
         stats
@@ -356,6 +358,9 @@ struct Plan {
     start: Plain,
     /// How many bytes from there the whole loop covers.
     span: Extent,
+    /// The step between the accesses where it is wider than one of them, which is a plane check
+    /// over a walk that leaves gaps and is written with the step as a fourth operand.
+    stride: Option<i128>,
     /// The payload of the check being removed, which the new one keeps everything of but the size.
     info: MemInfo,
     /// Which of the three kinds of check this is, since the one in front is the same kind.
@@ -365,7 +370,7 @@ struct Plan {
 }
 
 /// How many bytes the loop covers, which the pass has either as a number or as a recipe.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Extent {
     /// This many, worked out here, and written on the check as its size.
     Bytes(u64),
@@ -584,6 +589,7 @@ fn planned(
     let info = func[held];
 
     let reach = i128::from(info.size);
+    let mut stride = None;
     let (base, start, span) = match scev.evolution(id, pointer) {
         // An address that does not move at all. Every iteration checks the same bytes, so the one
         // in front covers all of them and there is no arithmetic to write: the extent is one
@@ -630,9 +636,10 @@ fn planned(
             // work nobody needed. `b[k * N + j]` round `k` is the shape that says so: two hundred
             // reads of eight bytes each, three hundred and eighteen kilobytes between the first and
             // the last, and one check over all of it is thirty three times the whole program. So a
-            // plane check comes out only where the walk covers what it spans.
+            // plane check over a walk that leaves gaps is handed the step as well, and asks about
+            // the accesses the loop makes rather than about the ground between them.
             if matches!(func[check].opcode, Opcode::CheckInit | Opcode::CheckType) && step > reach {
-                return Err(LEAVES_GAPS);
+                stride = Some(step);
             }
             // The check runs once before the loop goes round for the first time and once more each
             // time it does, so the furthest address it sees is the one it is at after the last of
@@ -695,7 +702,7 @@ fn planned(
             return Err(NOT_ITS_CAPABILITY);
         }
     }
-    Ok(Plan { preheader, base, start, span, info, opcode, check })
+    Ok(Plan { preheader, base, start, span, stride, info, opcode, check })
 }
 
 /// The pointer an invariant is an address off, and how far past it, when it is one.
@@ -934,10 +941,66 @@ pub(crate) fn starting(
     sum
 }
 
-/// Puts the one check in front of the loop and takes the one inside it out.
-fn apply(func: &mut Func, plan: &Plan) {
-    let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
+/// The operands one check in front of a loop was written with, kept so that a second check asking
+/// about the same walk from the same preheader is written with the same ones.
+///
+/// That is the type check and the init check of one read, which the front end writes side by side
+/// and which come out of a loop together. Written with operands of their own they are two checks
+/// about equal values, and `rucc_safety::lower` pairs the two of one read into one call only where
+/// the operands are the same values, which is the one test of sameness it can make without
+/// arithmetic. Nothing after this pass numbers values, so this is where they have to be made the
+/// same, and a pair that lowers as two calls finds the region twice and walks the step twice.
+struct Operands {
+    preheader: Block,
+    base: Anchor,
+    start: Plain,
+    span: Extent,
+    stride: Option<i128>,
+    size: u64,
+    operands: Vec<Value>,
+}
 
+/// Puts the one check in front of the loop and takes the one inside it out.
+fn apply(func: &mut Func, plan: &Plan, written: &mut Vec<Operands>) {
+    let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
+    let same = |w: &&Operands| {
+        (w.preheader, w.base, w.start, w.span, w.stride)
+            == (plan.preheader, plan.base, plan.start, plan.span, plan.stride)
+    };
+    let (size, operands) = match written.iter().find(same) {
+        Some(w) => (w.size, w.operands.clone()),
+        None => {
+            let (size, operands) = operands(func, plan, term);
+            written.push(Operands {
+                preheader: plan.preheader,
+                base: plan.base,
+                start: plan.start,
+                span: plan.span,
+                stride: plan.stride,
+                size,
+                operands: operands.clone(),
+            });
+            (size, operands)
+        }
+    };
+
+    let info = MemInfo { size, ..plan.info };
+    let extra = Extra::Mem(func.add_mem(info));
+    let args = func.push_values(&operands);
+    let data = InstData { args, extra, ..InstData::new(plan.opcode) };
+    let check = Builder::new(func, plan.preheader).inst(data, &[]);
+    func.remove_inst(check);
+    func.insert_before(check, term);
+
+    // The `cap_of` the removed check was reading is left where it is. Nothing reads it now, and
+    // `dce` after this pass is what makes that a smaller function rather than a dangling
+    // instruction, which is the same arrangement `crate::discharge` is in.
+    func.remove_inst(plan.check);
+}
+
+/// Writes what the check in front of a loop is asked about into the preheader, in front of its
+/// terminator, and says what the check's payload size and operands are.
+fn operands(func: &mut Func, plan: &Plan, term: Inst) -> (u64, Vec<Value>) {
     // A builder appends to the end of a block, which in a block that already has its terminator is
     // after it. So everything is built first and then moved in front of the terminator in the order
     // it was built, which is one pass over a list of at most four rather than a rearrangement.
@@ -971,27 +1034,34 @@ fn apply(func: &mut Func, plan: &Plan) {
             Some(covered(&mut build, &mut made, count, step, reach, reading, Flags::NSW)),
         ),
     };
-    let info = MemInfo { size, ..plan.info };
-    let extra = Extra::Mem(build.func().add_mem(info));
-    let operands: Vec<Value> = match extent {
-        Some(bytes) => vec![capability, first, bytes],
-        None => vec![capability, first],
+    // A walk that leaves gaps is the third shape. The payload has to keep the width of one access,
+    // since that is what the runtime reads at each step, so the span goes in the third operand even
+    // where it is a number and the step goes in a fourth.
+    let (size, operands) = match (plan.stride, extent) {
+        (Some(step), extent) => {
+            let word = Type::int(64);
+            let span = match extent {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = build.iconst(word, i128::from(size));
+                    made.push(bytes);
+                    bytes
+                }
+            };
+            let step = build.iconst(word, step);
+            made.push(step);
+            (plan.info.size, vec![capability, first, span, step])
+        }
+        (None, Some(bytes)) => (size, vec![capability, first, bytes]),
+        (None, None) => (size, vec![capability, first]),
     };
-    let args = build.func().push_values(&operands);
-    let check = build.inst(InstData { args, extra, ..InstData::new(plan.opcode) }, &[]);
 
     for value in made {
         let inst = inst_of(func, value);
         func.remove_inst(inst);
         func.insert_before(inst, term);
     }
-    func.remove_inst(check);
-    func.insert_before(check, term);
-
-    // The `cap_of` the removed check was reading is left where it is. Nothing reads it now, and
-    // `dce` after this pass is what makes that a smaller function rather than a dangling
-    // instruction, which is the same arrangement `crate::discharge` is in.
-    func.remove_inst(plan.check);
+    (size, operands)
 }
 
 #[cfg(test)]
@@ -1000,7 +1070,7 @@ mod tests {
     use rucc_ir::{Flags, IntPred, MemInfo, MemOrder, Module, Restrict, Signature, verify_func};
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{HOISTED, Hoist};
+    use super::{HOISTED, HOISTED_INIT, HOISTED_TYPE, Hoist};
     use crate::canon::Canon;
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
@@ -1905,7 +1975,7 @@ mod tests {
         // bounds check takes, and the rule the pass asks is the same rule.
         let (mut names, mut func) = planed(Opcode::CheckType, None);
         let stats = hoisted(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::HOISTED_TYPE), 1);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED_TYPE), 1);
 
         let left = kinds(&func, Opcode::CheckType);
         assert_eq!(left.len(), 1);
@@ -1918,7 +1988,7 @@ mod tests {
         // And the same for the other plane, where the claim is that every byte has been written.
         let (mut names, mut func) = planed(Opcode::CheckInit, None);
         let stats = hoisted(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::HOISTED_INIT), 1);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED_INIT), 1);
 
         let left = kinds(&func, Opcode::CheckInit);
         assert_eq!(left.len(), 1);
@@ -2061,24 +2131,73 @@ mod tests {
     }
 
     #[test]
-    fn a_plane_check_over_a_walk_that_leaves_gaps_stays_where_it_is() {
-        // Four bytes read out of every sixteen. The bounds check comes out, because two comparisons
-        // are two comparisons whatever range they are handed. The two plane checks do not, because
-        // what they cost goes up with the range, and one check over a hundred and sixteen bytes is
-        // more work than eight checks over four when only thirty two of those bytes are ever read.
+    fn a_plane_check_over_a_walk_that_leaves_gaps_is_handed_the_step() {
+        // Four bytes read out of every sixteen. The bounds check comes out over the hundred and
+        // sixteen bytes the walk spans, because two comparisons are two comparisons whatever range
+        // they are handed. The two plane checks come out over the same span with the step beside
+        // it and the payload still four bytes wide, so what they ask about is the eight accesses
+        // and not the eighty four bytes between them nobody reads.
         let (mut names, mut func, _) = walking(8, 16, 4, 4);
         assert_eq!(hoisted(&mut func).count(Kind::Optimized, HOISTED), 1);
+        let left = checks(&func);
+        assert_eq!(func[func[left[0].1].args].len(), 2);
+        assert_eq!(extent(&func, left[0].1), 116);
         sound(&func, &mut names);
-        for kind in [Opcode::CheckInit, Opcode::CheckType] {
-            let (_, mut func, blocks) = walking(8, 16, 4, 4);
+        for (kind, done) in [(Opcode::CheckInit, HOISTED_INIT), (Opcode::CheckType, HOISTED_TYPE)] {
+            let (mut names, mut func, blocks) = walking(8, 16, 4, 4);
             let check = func
                 .insts(blocks[1])
                 .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
                 .expect("the loop checks the address it works out");
             func[check].opcode = kind;
+            assert_eq!(hoisted(&mut func).count(Kind::Optimized, done), 1, "{kind:?}");
+            let left: Vec<Inst> = func
+                .blocks()
+                .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                .filter(|&inst| func[inst].opcode == kind)
+                .collect();
+            assert_eq!(left.len(), 1, "{kind:?}");
+            assert_ne!(func.block_of(left[0]), Some(blocks[1]), "{kind:?}");
+            let &[_, _, span, step] = &func[func[left[0]].args] else {
+                panic!("{kind:?} carries the span and the step");
+            };
+            assert_eq!(crate::discharge::constant(&func, span), Some(116), "{kind:?}");
+            assert_eq!(crate::discharge::constant(&func, step), Some(16), "{kind:?}");
+            assert_eq!(extent(&func, left[0]), 4, "{kind:?}");
+            sound(&func, &mut names);
+        }
+    }
+
+    #[test]
+    fn the_type_check_and_the_init_check_of_one_read_come_out_with_the_same_operands() {
+        // The pair the front end writes in front of every read. Lowering makes the two one call
+        // only where their operands are the same values, so the second one out of the loop is
+        // written with the operands the first one was, rather than with arithmetic of its own
+        // that works out the same numbers.
+        for (trips, step) in [(8, 16), (8, 4)] {
+            let (mut names, mut func, blocks) = walking(trips, step, 4, 4);
+            let check = func
+                .insts(blocks[1])
+                .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+                .expect("the loop checks the address it works out");
+            func[check].opcode = Opcode::CheckType;
+            let data = func[check];
+            let args = func[data.args].to_vec();
+            let args = func.push_values(&args);
+            let init = InstData { args, opcode: Opcode::CheckInit, ..data };
+            let init = func.create_inst(init, &[], func.span(check));
+            func.insert_after(init, check);
             let stats = hoisted(&mut func);
-            assert!(!stats.changed(), "{kind:?}");
-            assert_eq!(stats.count(Kind::Missed, super::LEAVES_GAPS), 1, "{kind:?}");
+            assert_eq!(stats.count(Kind::Optimized, HOISTED_TYPE), 1);
+            assert_eq!(stats.count(Kind::Optimized, HOISTED_INIT), 1);
+            let out: Vec<Inst> = func
+                .blocks()
+                .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                .filter(|&inst| matches!(func[inst].opcode, Opcode::CheckType | Opcode::CheckInit))
+                .collect();
+            assert_eq!(out.len(), 2);
+            assert_eq!(func[func[out[0]].args], func[func[out[1]].args], "step {step}");
+            sound(&func, &mut names);
         }
     }
 

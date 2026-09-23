@@ -12,6 +12,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A division or a remainder of two `unsigned char` or two `unsigned short` values that is stored back at that width is done at that width. C divides them at `int`, so `unsigned char q = a / b;` was two widenings, a sign extension and an `idivl`, and it is now a `divb`. The `narrow` pass in `crates/rucc-opt/src/narrow.rs` takes a divide of two zero extensions from the width it is truncated to as the unsigned divide at that width, whichever of the four division opcodes it was, since a zero extension is never negative. The rules for `udiv` and `urem` at one and two bytes are back, with a test that fires each. A division of sign extensions stays wide, because the most negative value over minus one raises at the narrow width. Nothing in the torture corpus or the SQLite amalgamation has the shape, so both compile to the same text, and a program that divides every pair of bytes runs 11% fewer instructions in the same number of cycles and prints what gcc 16 prints at every level. Part of tamnd/rucc#375.
 
+### Changed
+
+- A type or init check over a loop that reads every Nth element now comes out of the loop too. The check in front of the loop gets the step, and the runtime checks each element the loop reads and never the bytes between them, one load and one compare a plane when the element sits inside one granule. The type check and the init check of one read are written with the same operands, so they lower to one call. `a-matrix-multiply` goes from 1206.6 to 679.5 million instructions under callgrind and the other safety benches do not move. tamnd/rucc#1711.
+
 ## 0.10.79
 
 ### Added
