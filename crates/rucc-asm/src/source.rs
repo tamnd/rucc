@@ -126,6 +126,14 @@ struct Reader {
     sets: Vec<(usize, Sum, usize)>,
     /// `.size`, the same way.
     sizes: Vec<(usize, Sum, usize)>,
+    /// Which entry a name that has been set means from here on. A file may set one name as many
+    /// times as it likes, and each use means the value it had where the use was written, so a
+    /// second setting is a second entry and this says which one is current.
+    current: HashMap<String, String>,
+    /// The numbered entries a relocation names, which are kept in the symbol table so that the
+    /// relocation has something to point at. That is a numbered local label or a set name reached
+    /// from another section, and is rare.
+    relocated: std::collections::HashSet<usize>,
     /// What the file said it was called. Kept apart from the rest because it is not a name anything
     /// refers to, and a file whose own name is also the name of something in it would otherwise be
     /// one symbol where it should be two.
@@ -231,6 +239,9 @@ impl Reader {
             Some(cut) => (&text[..cut], text[cut..].trim()),
             None => (text, ""),
         };
+        if let Some((name, what)) = assigned(text) {
+            return self.assign(name, what);
+        }
         if let Some(directive) = word.strip_prefix('.') {
             return self.directive(directive, rest);
         }
@@ -261,16 +272,29 @@ impl Reader {
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
         for hole in written.holes {
-            let name = self.numbered(&hole.name)?.unwrap_or(hole.name);
-            // Written down as a name the file mentions, which is what a call to something in
-            // another object is and the only way it gets into the symbol table at all.
-            self.sym(&name);
-            let sum = Sum {
-                constant: hole.addend,
-                terms: vec![
-                    Term { coeff: 1, what: What::Symbol(name) },
-                    Term { coeff: -1, what: What::Here { part, at: end as i64 } },
-                ],
+            // `.` in an instruction is where the instruction starts, which is what gas means by it
+            // and what `mov .-4(%rip), %eax` counts back from.
+            let here = (part, at as i64);
+            let sum = if hole.sort == Reach::Value {
+                // The number itself, with nothing taken off for where the instruction ends.
+                self.expression_at(&hole.name, here)?
+            } else {
+                let what = if hole.name == "." {
+                    What::Here { part, at: here.1 }
+                } else {
+                    // Written down as a name the file mentions, which is what a call to something
+                    // in another object is and the only way it gets into the symbol table at all.
+                    let name = self.named(&hole.name)?;
+                    self.sym(&name);
+                    What::Symbol(name)
+                };
+                Sum {
+                    constant: hole.addend,
+                    terms: vec![
+                        Term { coeff: 1, what },
+                        Term { coeff: -1, what: What::Here { part, at: end as i64 } },
+                    ],
+                }
             };
             self.fixups.push(Fixup {
                 part,
@@ -331,6 +355,40 @@ impl Reader {
             return Ok(Some(counted(number, count)));
         }
         Ok(Some(counted(number, count + 1)))
+    }
+
+    /// The entry a name the file wrote means where it was written.
+    ///
+    /// That is the place a numbered label refers to, the current setting of a name that has been
+    /// set more than once, and otherwise the name.
+    fn named(&self, word: &str) -> Result<String, Trouble> {
+        if let Some(place) = self.numbered(word)? {
+            return Ok(place);
+        }
+        Ok(self.current.get(word).cloned().unwrap_or_else(|| word.to_owned()))
+    }
+
+    /// `name = value`, and `.set` and `.equ` which say the same thing.
+    ///
+    /// The first setting is the name itself, so that a use further up the file which reached
+    /// forward to it finds it. A setting after that is a new entry, because a use written between
+    /// the two means the value the name had then: gas does the same by copying the symbol when it
+    /// is set again, and a file can count on it. The value is read before the new entry is made,
+    /// so `x = x + 1` means the one before.
+    fn assign(&mut self, name: &str, what: &str) -> Result<(), Trouble> {
+        let sum = self.expression(what)?;
+        let held = match self.current.get(name) {
+            Some(_) => format!("{name}\u{1}={}", self.syms.len()),
+            None => name.to_owned(),
+        };
+        let sym = self.sym(&held);
+        if self.syms[sym].at != Held::Undefined {
+            let what = format!("'{name}' is defined twice");
+            return Err(self.bad(&what));
+        }
+        self.current.insert(name.to_owned(), held);
+        self.sets.push((sym, sum, self.line));
+        Ok(())
     }
 
     /// Everything that starts with a dot.
@@ -449,9 +507,7 @@ impl Reader {
             }
             "set" | "equ" | "equiv" => {
                 let [name, what] = self.two(&args, &format!(".{word}"))?;
-                let sum = self.expression(&what)?;
-                let sym = self.sym(&name);
-                self.sets.push((sym, sum, self.line));
+                self.assign(&name, &what)?;
             }
             "comm" | "lcomm" => self.common(&args, word == "lcomm")?,
 
@@ -861,15 +917,20 @@ impl Reader {
 
     /// Parse one, with `.` meaning where the file has got to.
     fn expression(&mut self, text: &str) -> Result<Sum, Trouble> {
-        let here = (self.here, self.at() as i64);
+        self.expression_at(text, (self.here, self.at() as i64))
+    }
+
+    /// The same, with `.` meaning `here`.
+    fn expression_at(&mut self, text: &str, here: (usize, i64)) -> Result<Sum, Trouble> {
         let mut parser = Parser { text: text.trim(), at: 0, here };
-        let sum = parser.whole().map_err(|why| Trouble { line: self.line, why })?;
+        let mut sum = parser.whole().map_err(|why| Trouble { line: self.line, why })?;
         // Every name it mentioned gets a symbol table entry, so that a relocation against one has
         // something to point at and so that an undefined one is asked of the linker.
-        for term in &sum.terms {
+        for term in &mut sum.terms {
             if let What::Symbol(name) = &term.what {
-                let name = name.clone();
+                let name = self.named(name)?;
                 self.sym(&name);
+                term.what = What::Symbol(name);
             }
         }
         Ok(sum)
@@ -917,12 +978,12 @@ impl Reader {
                 visibility: Visibility::Default,
             });
         }
-        for sym in self.syms {
+        for (index, sym) in self.syms.into_iter().enumerate() {
             // A numbered local label is a place and not a name. Everything that went to one has been
             // resolved to a number in the bytes by now, and gas writes no symbol for one either, so
             // an object this assembles has the same table as an object gas assembles from the same
             // file rather than a table with a made up name in it.
-            if sym.numbered {
+            if sym.numbered && !self.relocated.contains(&index) {
                 continue;
             }
             let at = match sym.at {
@@ -1047,6 +1108,13 @@ impl Reader {
                 continue;
             }
             let residue = self.reduce(&fixup.sum).map_err(|why| Trouble { line, why })?;
+            if fixup.reach == Reach::Value && !residue.left.is_empty() {
+                return Err(bad(
+                    "a number in an instruction that names something outside this section, \
+                     which wants a relocation this compiler does not write yet"
+                        .to_owned(),
+                ));
+            }
             let (symbol, kind, addend, after) = match residue.left.as_slice() {
                 [] => {
                     // A distance a branch carries is signed and nothing else, so a byte of it
@@ -1142,7 +1210,9 @@ impl Reader {
             // way of getting it wrong that nothing above can see: the file said go to the next `1:`
             // and there was no next one. It is not a name, so there is nothing to ask the linker.
             if let Some(&sym) = self.known.get(&symbol) {
-                if self.syms[sym].numbered {
+                if self.syms[sym].numbered && self.syms[sym].at != Held::Undefined {
+                    self.relocated.insert(sym);
+                } else if self.syms[sym].numbered {
                     let number = symbol.split('\u{1}').next().unwrap_or(&symbol);
                     return Err(bad(format!(
                         "'{number}f' goes on to a '{number}:' and there is none below it"
@@ -1444,6 +1514,17 @@ impl Parser<'_> {
             return self.character();
         }
         if first.is_ascii_digit() {
+            // `1b` and `2f`, which are a numbered label above and below rather than a number.
+            // Told apart from `0b1010` by what comes after the letter, which ends a label and
+            // carries on a binary number.
+            let end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+            let bytes = rest.as_bytes();
+            if matches!(bytes.get(end), Some(b'b' | b'f'))
+                && !bytes.get(end + 1).is_some_and(|byte| carries_on(*byte))
+            {
+                self.at += end + 1;
+                return Ok(Sum::of(What::Symbol(rest[..=end].to_owned())));
+            }
             return self.digits();
         }
         if starts(first) {
@@ -1689,6 +1770,22 @@ fn labelled(text: &str) -> Option<String> {
         return None;
     }
     Some(text[..end].to_owned())
+}
+
+/// `name = value`, as the name and the value, when the statement is one.
+///
+/// Not `==`, which is a comparison, and not a label, which was taken off before this is asked.
+fn assigned(text: &str) -> Option<(&str, &str)> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || !starts(bytes[0]) {
+        return None;
+    }
+    let end = text.find(|ch: char| !carries_on(ch as u8)).unwrap_or(text.len());
+    let rest = text[end..].trim_start().strip_prefix('=')?;
+    if rest.starts_with('=') {
+        return None;
+    }
+    Some((&text[..end], rest.trim()))
 }
 
 /// Whether a name may start with this.
@@ -2299,5 +2396,57 @@ mod tests {
     fn an_error_directive_is_the_file_saying_it_refuses_itself() {
         let why = refused("\t.error \"this is not the machine for it\"\n");
         assert!(why.why.contains("not the machine for it"), "{why}");
+    }
+
+    #[test]
+    fn a_jump_counted_from_itself_is_the_short_one_gas_writes() {
+        // What tcc's own tests do: jump over four bytes of data and load them back by counting
+        // from the load. Both only land where they mean to if the jump is two bytes long.
+        let out = assembled("\tjmp .+6\n\t.int 123\n\tmov .-4(%rip), %eax\n");
+        assert_eq!(
+            bytes(&out, ".text"),
+            vec![0xeb, 0x04, 123, 0, 0, 0, 0x8b, 0x05, 0xf6, 0xff, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn a_numbered_label_in_an_expression_is_a_place() {
+        let out =
+            assembled("2:\n\tjmp .+6\n1:\n\t.pushsection .data\n\t.long 1b - 2b\n\t.popsection\n");
+        assert_eq!(bytes(&out, ".data"), vec![2, 0, 0, 0]);
+        // And a binary number is still a number, because the digits go on after the letter.
+        let out = assembled("\t.data\n\t.byte 0b101\n");
+        assert_eq!(bytes(&out, ".data"), vec![5]);
+    }
+
+    #[test]
+    fn a_number_an_instruction_carries_may_be_an_expression_over_labels() {
+        let out = assembled("3:\tmov $4f-3b, %eax\n4:\n");
+        assert_eq!(bytes(&out, ".text"), vec![0xb8, 5, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_number_an_instruction_carries_may_not_name_something_elsewhere() {
+        let why = refused("\tmov $elsewhere, %eax\n");
+        assert!(why.why.contains("relocation"), "{why}");
+    }
+
+    #[test]
+    fn a_name_set_twice_means_what_it_was_where_it_is_used() {
+        let out = assembled(
+            "\t.data\n\t.byte early\n\tearly = 3\n\tx = 1\n\t.byte x\n\tx = x + 1\n\t.byte x\n",
+        );
+        assert_eq!(bytes(&out, ".data"), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn a_place_set_twice_and_reached_from_another_section_is_relocated_against() {
+        let out = assembled(
+            "\t.data\n\tx = .\n\t.int 1\n\tx = .\n\t.int 2\n\t.text\n\tmov x(%rip), %eax\n",
+        );
+        let reloc = &out.parts.iter().find(|part| part.name == ".text").unwrap().relocs[0];
+        let target = name(&out, &reloc.symbol);
+        let data = out.parts.iter().position(|part| part.name == ".data").unwrap();
+        assert_eq!(target.at, Held::In { part: data, offset: 4 });
     }
 }

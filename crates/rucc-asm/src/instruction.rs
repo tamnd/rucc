@@ -58,6 +58,10 @@ pub(crate) enum Sort {
     Branch,
     /// A datum reached from the instruction pointer, which is what `message(%rip)` is.
     Near,
+    /// A number the instruction carries that the file wrote as an expression, which is what
+    /// `$4f-3b` is. The name is the whole of the expression and the bytes are the value of it,
+    /// worked out once the labels in it have places, and never a relocation.
+    Value,
     /// An entry in the global offset table, which is what `message@GOTPCREL(%rip)` is. The bytes
     /// hold the distance to a word the linker makes and fills with the address, so the instruction
     /// loads the address rather than computing it, and what it names has to be relocated even when
@@ -114,9 +118,20 @@ enum Operand {
     Mem(Addr, Option<Named>),
     /// A number the instruction carries.
     Imm(i64),
-    /// A name to jump or call to.
-    Dest(String),
+    /// A number the instruction carries that is an expression over labels, as the file wrote it.
+    Expr(String),
+    /// A name to jump or call to, and whatever was added to it. The name is `.` when the file
+    /// counted from the instruction itself, which is what `jmp .+6` does.
+    Dest(Named),
 }
+
+/// What an expression the instruction carries stands for while the row is being chosen.
+///
+/// Big enough that no row which holds only a byte is chosen for it, since what the expression comes
+/// to is not known yet and four bytes hold whatever it turns out to be. An instruction that has no
+/// row for a number that size, which is a shift or `int`, is tried again with nothing, and then the
+/// value is checked against the byte it has once it is known.
+const STANDING: i64 = 0x1000_0000;
 
 /// That instruction, as bytes.
 ///
@@ -130,18 +145,33 @@ enum Operand {
 pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
     let operands: Vec<Operand> =
         args.iter().map(|arg| operand(arg.trim())).collect::<Result<_, _>>()?;
-    let values: Vec<Value> = operands.iter().map(value).collect();
-    let (mnemonic, row) = spelled(word, &operands, &values)?;
+    let mut values: Vec<Value> = operands.iter().map(|op| value(op, STANDING)).collect();
+    let (mnemonic, row) = match spelled(word, &operands, &values) {
+        Ok(found) => found,
+        Err(_) if operands.iter().any(|op| matches!(op, Operand::Expr(_))) => {
+            values = operands.iter().map(|op| value(op, 0)).collect();
+            spelled(word, &operands, &values)?
+        }
+        Err(why) => return Err(why),
+    };
 
     let mut bytes = Vec::with_capacity(16);
     let holes = encode(&mnemonic, &values, &mut bytes).map_err(|why| why.to_string())?;
 
     let mut wanted = Vec::new();
     if let Some(at) = holes.dest {
-        let Some(Operand::Dest(name)) = operands.iter().find(|op| matches!(op, Operand::Dest(_)))
+        let Some(Operand::Dest(Named { name, addend })) =
+            operands.iter().find(|op| matches!(op, Operand::Dest(_)))
         else {
             return Err(format!("'{word}' left room for somewhere to go and was given nowhere"));
         };
+        // Counted from the start of this instruction, which is known now and is not a name, so
+        // the distance goes straight into the bytes. gas takes the two byte form of a jump when
+        // the distance fits in one, and a file that counts its own bytes is counting that form:
+        // `jmp .+6` in front of four bytes of data is a jump over them and nothing else.
+        if name == "." {
+            return Ok(Written { bytes: counted(bytes, at, *addend)?, holes: Vec::new() });
+        }
         // How much room the instruction left, which is four for every branch but one. `jrcxz` has
         // a single byte and no longer form, so a destination further away than that is a mistake
         // in the file rather than something to relax, and the caller is the one that can tell.
@@ -160,7 +190,7 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
                 return Err(format!("'@{how}' is not a way of reaching somewhere to go"));
             }
         };
-        wanted.push(Hole { at, width, name, addend: 0, sort: Sort::Branch });
+        wanted.push(Hole { at, width, name, addend: *addend, sort: Sort::Branch });
     }
     if let Some(at) = holes.rip {
         // Only when the source put a name there. `8(%rip)` is a number the machine counts from the
@@ -174,7 +204,44 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             wanted.push(Hole { at, width: 4, name, addend: named.addend, sort });
         }
     }
+    // A number is the last thing in an instruction on this machine, so an expression the
+    // instruction carries is the last bytes of it, however many the row gave it.
+    if let Some(text) = operands.iter().find_map(|op| match op {
+        Operand::Expr(text) => Some(text.clone()),
+        _ => None,
+    }) {
+        let width = match row.imm {
+            ImmSize::Ib => 1,
+            ImmSize::Iw => 2,
+            ImmSize::Id => 4,
+            _ => return Err(format!("'{word}' carries '{text}' somewhere this cannot write one")),
+        };
+        let at = bytes.len() - width;
+        wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort: Sort::Value });
+    }
     Ok(Written { bytes, holes: wanted })
+}
+
+/// A branch whose distance is counted from its own first byte, written with that distance in it.
+///
+/// `long` is the four byte form the encoder wrote and `at` is where its distance starts. The two
+/// byte form is the same condition with a one byte distance, `E9` becoming `EB` for a plain jump
+/// and `0F 8x` becoming `7x` for a conditional one, and it is taken whenever the distance fits.
+fn counted(mut long: Vec<u8>, at: usize, from_start: i64) -> Result<Vec<u8>, String> {
+    let short = match long.as_slice() {
+        [0xE9, ..] if at == 1 => Some(0xEB),
+        [0x0F, code @ 0x80..=0x8F, ..] if at == 2 => Some(code - 0x10),
+        _ => None,
+    };
+    if let Some(code) = short {
+        if let Ok(distance) = i8::try_from(from_start - 2) {
+            return Ok(vec![code, distance as u8]);
+        }
+    }
+    let distance = i32::try_from(from_start - long.len() as i64)
+        .map_err(|_| format!("'.+{from_start}' is further than a branch reaches"))?;
+    long[at..at + 4].copy_from_slice(&distance.to_le_bytes());
+    Ok(long)
 }
 
 /// The mnemonic with the width letter on it that the encoder knows this instruction by.
@@ -329,14 +396,15 @@ fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
     Ok(width)
 }
 
-/// What the encoder is handed for one of these.
-fn value(operand: &Operand) -> Value {
+/// What the encoder is handed for one of these, with `standing` for an expression not worked out.
+fn value(operand: &Operand, standing: i64) -> Value {
     match operand {
         Operand::Reg(reg, width) => Value::Reg(*reg, *width),
         Operand::High(reg) => Value::High(*reg),
         Operand::Xmm(reg) => Value::Xmm(*reg),
         Operand::Mem(addr, _) => Value::Mem(*addr),
         Operand::Imm(number) => Value::Imm(*number),
+        Operand::Expr(_) => Value::Imm(standing),
         Operand::Dest(_) => Value::Dest,
     }
 }
@@ -355,7 +423,10 @@ fn operand(text: &str) -> Result<Operand, String> {
         };
     }
     if let Some(rest) = text.strip_prefix('$') {
-        return Ok(Operand::Imm(number(rest.trim())?));
+        // A number where it is one, and otherwise an expression the file works out once its
+        // labels have places, which is what `$4f-3b` is.
+        return Ok(number(rest.trim())
+            .map_or_else(|_| Operand::Expr(rest.trim().to_owned()), Operand::Imm));
     }
     if text.starts_with('%') && !text.contains('(') && !text.contains(':') {
         return register(&text[1..]);
@@ -367,7 +438,11 @@ fn operand(text: &str) -> Result<Operand, String> {
     // as a bare name is refused inside `address` rather than here, so that the message is about
     // the address rather than about a jump the line never was.
     if text.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$' | '@')) {
-        return Ok(Operand::Dest(text.to_owned()));
+        return Ok(Operand::Dest(Named { name: text.to_owned(), addend: 0 }));
+    }
+    // Somewhere counted from a name, which is `.+6` as often as it is anything.
+    if let Ok((addend, Some(name))) = parted(text) {
+        return Ok(Operand::Dest(Named { name, addend }));
     }
     Err(format!("'{text}' is not an operand this compiler reads"))
 }
@@ -553,15 +628,19 @@ fn number(text: &str) -> Result<i64, String> {
         Some(rest) => (-1i64, rest.trim()),
         None => (1, text.strip_prefix('+').map_or(text, str::trim)),
     };
-    let value = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
-        // As unsigned first, because a file writes a sixty four bit mask as a positive hex number
-        // and that number is negative when it is read as signed, which is the same bits.
-        u64::from_str_radix(hex, 16).map(|value| value as i64)
-    } else if digits.len() > 1 && digits.starts_with('0') {
-        i64::from_str_radix(&digits[1..], 8)
-    } else {
-        digits.parse::<i64>()
-    };
+    // As unsigned first, because a file writes a sixty four bit mask as a positive hex number and
+    // that number is negative when it is read as signed, which is the same bits. The same goes for
+    // the most negative number there is, whose digits are one more than the largest positive one
+    // and which a compiler writes as a minus sign in front of them.
+    let value =
+        if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16)
+        } else if digits.len() > 1 && digits.starts_with('0') {
+            u64::from_str_radix(&digits[1..], 8)
+        } else {
+            digits.parse::<u64>()
+        }
+        .map(|value| value as i64);
     value.map(|value| sign.wrapping_mul(value)).map_err(|_| format!("'{text}' is not a number"))
 }
 
@@ -591,6 +670,20 @@ mod tests {
         one(word, &args)
             .err()
             .unwrap_or_else(|| panic!("'{line}' was read and should not have been"))
+    }
+
+    #[test]
+    fn the_most_negative_number_is_a_number() {
+        assert_eq!(
+            bytes("movabsq $-9223372036854775808, %rax"),
+            [0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0x80]
+        );
+    }
+
+    #[test]
+    fn a_conditional_jump_counted_from_itself_is_short_when_it_fits() {
+        assert_eq!(bytes("jne .+2"), [0x75, 0x00]);
+        assert_eq!(bytes("jmp .+1000"), [0xe9, 0xe3, 0x03, 0x00, 0x00]);
     }
 
     #[test]
