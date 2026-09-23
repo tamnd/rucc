@@ -1001,17 +1001,17 @@ fn generate(
             }
             let assembled = rucc_asm::assemble(&funcs, names, target, unwind, opts.debug_info)
                 .map_err(refused)?;
-            let text = assembled.text;
             let data = globals.image();
             // The line table, from the spans the assembler kept beside the bytes. Empty when the
             // build asked for no debug information, which is the case the rows above are not even
             // recorded in.
             let info = if opts.debug_info {
-                describe(&text, &data, &assembled.lines, &funcs, origin, opts, target)
+                describe(&assembled, &data, &funcs, origin, opts, target)
                     .map_err(|why| vec![internal(&why)])?
             } else {
                 rucc_object::Info::default()
             };
+            let text = assembled.text;
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
             let bytes =
@@ -1047,14 +1047,14 @@ fn generate(
 /// Whatever the DWARF writer refused, which is a bug here rather than a program this compiler is
 /// behind on.
 fn describe(
-    text: &rucc_object::Text,
+    assembled: &rucc_asm::Assembled,
     data: &rucc_object::Data,
-    lines: &[Vec<rucc_asm::Row>],
     machine: &[rucc_mir::Func],
     origin: Origin<'_>,
     opts: &Options,
     target: &TargetInfo,
 ) -> Result<rucc_object::Info, String> {
+    let rucc_asm::Assembled { text, lines, frames } = assembled;
     let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
     // The file table, built as the rows are walked rather than up front, because what belongs in it
     // is the files the code came from and not the files the preprocessor opened. A header that
@@ -1226,12 +1226,15 @@ fn describe(
         funcs,
         globals,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
-        // Whether a function can say where its frame base is, which it can when the build writes
-        // the unwind table that answers the question. The same request decides both, so the two
-        // cannot disagree about whether the table a frame base is read through is there.
-        frames: opts.unwinds(),
+        // Whether a function can say where its frame base is, which it can when the build writes a
+        // table that answers the question: the unwind table, or `.debug_frame` in its place. Read
+        // off what was written rather than asked again, so the two cannot disagree about whether
+        // the table a frame base is read through is there.
+        frames: opts.unwinds() || frames.is_some(),
     };
-    rucc_debug::write(&unit).map_err(|why| why.to_string())
+    let mut info = rucc_debug::write(&unit).map_err(|why| why.to_string())?;
+    info.chunks.extend(frames.clone());
+    Ok(info)
 }
 
 /// Where each local the back end kept in a register is, as stretches of the function's addresses.

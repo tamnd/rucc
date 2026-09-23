@@ -48,7 +48,7 @@
 //! image that Windows wants instead.
 
 use rucc_mir::CfiOp;
-use rucc_object::{Extent, Marker, Reference, Reloc, Unwind};
+use rucc_object::{Chunk, Extent, Marker, Reference, Reloc, Unwind};
 use rucc_target::{CallRegs, ObjectFormat};
 
 use crate::Error;
@@ -130,12 +130,41 @@ pub(crate) fn table(
     }
 }
 
+/// The same rows as a debugger's copy of the table, which is `.debug_frame` rather than
+/// `.eh_frame`, for a build that asked for debug information and for no unwind table.
+///
+/// A debugger reads a frame base through a table like this one, and without one it has no way to
+/// say where a local on the stack is. The unwind table would answer it, but it is loaded with the
+/// program, and a build that turned it off asked for that not to happen. This is what gcc writes
+/// in the same case: the same rules, in a section the loader never maps, so the program costs the
+/// same as one with no table at all.
+///
+/// Nothing on a format other than ELF, for the reason [`table`] gives nothing there.
+pub(crate) fn debug_frame(
+    funcs: &[Extent],
+    rows: &[Rows],
+    conv: &CallRegs,
+    format: ObjectFormat,
+) -> Option<Chunk> {
+    debug_assert_eq!(funcs.len(), rows.len(), "a record per function");
+    if funcs.is_empty() || format != ObjectFormat::Elf {
+        return None;
+    }
+    let mut table = Table::new(conv, true);
+    table.header(conv);
+    for (func, rows) in funcs.iter().zip(rows) {
+        table.record(func, rows);
+    }
+    Some(Chunk { name: DEBUG_FRAME.to_owned(), bytes: table.out.bytes, relocs: table.out.relocs })
+}
+
+/// What the debugger's copy of the table is called, which is also what its records name to say
+/// where their header is.
+const DEBUG_FRAME: &str = ".debug_frame";
+
 /// The table the two formats that read DWARF want: one header, then one record per function.
 fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Unwind {
-    // Negative because every slot is below the end of the frame, and dividing by it is what makes
-    // the number written for one positive, which is a byte shorter than a signed one.
-    let align = usize::try_from(conv.word).expect("a pointer width").max(1);
-    let mut table = Table { out: Unwind::default(), cie: 0, slot: -i64::from(conv.word), align };
+    let mut table = Table::new(conv, false);
     table.header(conv);
     for (func, rows) in funcs.iter().zip(rows) {
         table.record(func, rows);
@@ -158,27 +187,46 @@ struct Table {
     /// is what gas does, so a table this compiler wrote and one an assembler wrote for the same
     /// instructions come out the same length.
     align: usize,
+    /// Whether this is the debugger's copy, which spells three things differently: what marks the
+    /// header, how a record says where its header is, and how it says where its function is.
+    debug: bool,
 }
 
 impl Table {
+    /// An empty table for the target, in one shape or the other.
+    fn new(conv: &CallRegs, debug: bool) -> Self {
+        let align = usize::try_from(conv.word).expect("a pointer width").max(1);
+        // Negative because every slot is below the end of the frame, and dividing by it is what
+        // makes the number written for one positive, which is a byte shorter than a signed one.
+        let slot = -i64::from(conv.word);
+        Self { out: Unwind::default(), cie: 0, slot, align, debug }
+    }
+
     /// The header every record in this object points back at.
     fn header(&mut self, conv: &CallRegs) {
         let start = self.out.bytes.len();
         self.cie = start;
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
-        // Zero is what says this is the header rather than a record. A record puts the distance
-        // back to its header here, and a distance of zero would be a record pointing at itself.
-        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        // What says this is the header rather than a record. Zero in the unwind table, where a
+        // record puts the distance back to its header here and a distance of zero would be a
+        // record pointing at itself. All ones in the debugger's copy, where a record puts the
+        // header's offset from the front of the section here and zero is an offset one can be at.
+        let id = if self.debug { u32::MAX } else { 0 };
+        self.out.bytes.extend_from_slice(&id.to_le_bytes());
         self.out.bytes.push(1);
         // `z` says an augmentation section follows whose length is given, so a reader that does not
         // know the rest of the string can skip it. `R` says the augmentation holds how a record
-        // spells the address of its function.
-        self.out.bytes.extend_from_slice(b"zR\0");
+        // spells the address of its function. The debugger's copy has none, since a record there
+        // spells it the one way DWARF has, as an address the width of a pointer.
+        let augmentation: &[u8] = if self.debug { b"\0" } else { b"zR\0" };
+        self.out.bytes.extend_from_slice(augmentation);
         uleb(&mut self.out.bytes, CODE_ALIGN);
         sleb(&mut self.out.bytes, self.slot);
         uleb(&mut self.out.bytes, u64::from(conv.dwarf_return_address));
-        uleb(&mut self.out.bytes, 1);
-        self.out.bytes.push(PCREL_SDATA4);
+        if !self.debug {
+            uleb(&mut self.out.bytes, 1);
+            self.out.bytes.push(PCREL_SDATA4);
+        }
         // The state a call leaves behind, which is where every function on this machine starts: the
         // frame ends one word above the stack pointer, because the call pushed a return address,
         // and that return address is the word below the end.
@@ -197,6 +245,51 @@ impl Table {
     fn record(&mut self, func: &Extent, rows: &Rows) {
         let start = self.out.bytes.len();
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        if self.debug {
+            self.debug_record(func);
+        } else {
+            self.eh_record(func);
+        }
+        let mut at = 0;
+        for &(offset, op) in rows {
+            self.advance(offset - at);
+            at = offset;
+            self.row(op);
+        }
+        self.pad(start);
+    }
+
+    /// Where the header and the function are, in the debugger's copy.
+    ///
+    /// Both are addresses rather than distances and both are left to the linker. The header is an
+    /// offset into this section, which moves when a link puts another object's section in front
+    /// of it, so it is a relocation against the section itself. The function is its address and
+    /// its length, each the width of a pointer, with no augmentation after them because the
+    /// header asked for none.
+    fn debug_record(&mut self, func: &Extent) {
+        let word = self.align;
+        self.out.relocs.push(Reloc {
+            at: self.out.bytes.len(),
+            symbol: DEBUG_FRAME.to_owned(),
+            kind: Reference::Address { bytes: 4 },
+            addend: i64::try_from(self.cie).expect("an object this size"),
+            after: 0,
+        });
+        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.out.relocs.push(Reloc {
+            at: self.out.bytes.len(),
+            symbol: func.name.clone(),
+            kind: Reference::Address { bytes: u8::try_from(word).expect("a pointer width") },
+            addend: 0,
+            after: 0,
+        });
+        self.out.bytes.resize(self.out.bytes.len() + word, 0);
+        let len = u64::try_from(func.len).expect("a function this size").to_le_bytes();
+        self.out.bytes.extend_from_slice(&len[..word]);
+    }
+
+    /// Where the header and the function are, in the unwind table.
+    fn eh_record(&mut self, func: &Extent) {
         // The distance back to the header, counted from this field rather than from the record,
         // which is how a reader that has just read the length knows where to look.
         let back = u32::try_from(self.out.bytes.len() - self.cie).expect("an object this size");
@@ -219,13 +312,6 @@ impl Table {
         // left for a record is a length of zero, which still has to be written because `z`
         // promised a length would be there.
         uleb(&mut self.out.bytes, 0);
-        let mut at = 0;
-        for &(offset, op) in rows {
-            self.advance(offset - at);
-            at = offset;
-            self.row(op);
-        }
-        self.pad(start);
     }
 
     /// One row, as the opcode DWARF spells it.
@@ -680,7 +766,7 @@ fn sleb(bytes: &mut Vec<u8>, mut value: i64) {
 #[cfg(test)]
 mod tests {
     use rucc_object::{Binding, Visibility};
-    use rucc_target::x86_64::WIN64;
+    use rucc_target::x86_64::{SYSV, WIN64};
 
     use super::*;
 
@@ -900,5 +986,51 @@ mod tests {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
         let mach = table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::MachO).expect("nothing");
         assert_eq!(mach, Unwind::default());
+    }
+
+    /// The debugger's copy of a function that pushes its frame pointer: a header marked with all
+    /// ones and no augmentation, and a record whose header and function are both addresses the
+    /// linker fills in, the function's the width of a pointer and followed by its length.
+    ///
+    /// Byte for byte, because the layout is the whole of the difference from the unwind table and a
+    /// reader given the wrong one reads every field after the first one it disagrees on as garbage.
+    #[test]
+    fn the_debuggers_copy_spells_the_header_and_the_function_as_addresses() {
+        let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
+        let frames =
+            debug_frame(&[func("f", 9)], &rows, &SYSV, ObjectFormat::Elf).expect("a table");
+        assert_eq!(frames.name, ".debug_frame");
+        #[rustfmt::skip]
+        let want: &[u8] = &[
+            // The header: length, all ones, version one, no augmentation, the two alignments and
+            // the return address column, then the frame ending at rsp+8 and the return address
+            // the word below it, and nops out to eight bytes.
+            20, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 1, 0x78, 16,
+            DEF_CFA, 7, 8, OFFSET | 16, 1, NOP, NOP, NOP, NOP, NOP, NOP,
+            // The record: length, where the header is, where the function is and how long it is,
+            // then one byte in the frame is sixteen bytes long.
+            28, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            9, 0, 0, 0, 0, 0, 0, 0,
+            ADVANCE_LOC | 1, DEF_CFA_OFFSET, 16, NOP, NOP, NOP, NOP, NOP,
+        ];
+        assert_eq!(frames.bytes, want);
+        let relocs: Vec<_> =
+            frames.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (28, ".debug_frame", Reference::Address { bytes: 4 }),
+                (32, "f", Reference::Address { bytes: 8 }),
+            ]
+        );
+    }
+
+    /// Nothing on a format that has no `.debug_frame`, for the reason the unwind table is nothing
+    /// there either.
+    #[test]
+    fn the_debuggers_copy_is_only_written_on_elf() {
+        let rows = vec![Vec::new()];
+        assert_eq!(debug_frame(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Coff), None);
     }
 }

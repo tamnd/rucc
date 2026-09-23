@@ -98,3 +98,20 @@ fn the_table_names_the_file_the_way_the_prefix_map_says() {
     assert!(holds(&mapped, &file), "the mapping did not reach the table");
     assert!(!holds(&mapped, &here), "the build directory is still in the object");
 }
+
+#[test]
+fn a_build_with_no_unwind_table_keeps_its_frame_rules_where_a_debugger_looks() {
+    let dir = fixture("frames");
+    let off = ["-g", "-fno-asynchronous-unwind-tables", "-fno-unwind-tables"];
+    let quiet = build(&dir, &off, "quiet.o");
+    let loud = build(&dir, &["-g"], "loud.o");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Without an unwind table the rules go in `.debug_frame`, which is what the frame base of
+    // every function is read through. With one they stay where they were and are not written a
+    // second time, since a debugger reads either.
+    assert!(holds(&quiet, ".debug_frame"), "no table for the frame base to be read through");
+    assert!(!holds(&quiet, ".eh_frame"), "an unwind table nobody asked for");
+    assert!(holds(&loud, ".eh_frame"), "the unwind table went missing");
+    assert!(!holds(&loud, ".debug_frame"), "the frame rules were written twice");
+}

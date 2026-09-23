@@ -224,31 +224,26 @@ fn a_local_with_a_frame_slot_comes_out_named_and_placed() {
     assert!(holds(&object, ".debug_info", &FBREG), "the location is not an offset in the frame");
 }
 
-/// A build with no unwind table says nothing about where a local is.
+/// A build with no unwind table still says where a local is, through `.debug_frame`.
 ///
 /// The offset is from the frame base, the frame base is the call frame address, and the call frame
-/// address is what the unwind table resolves. Without one the location is an expression a debugger
-/// cannot evaluate, so it is not written, and the name goes with it rather than standing there
-/// with nothing under it.
+/// address is what a table of frame rules resolves. Without an unwind table the same rules go in
+/// `.debug_frame`, so the location is one a debugger can evaluate and is written as it is in any
+/// other build.
 #[test]
-fn a_build_with_nothing_to_resolve_the_frame_base_against_places_nothing() {
+fn a_build_with_no_unwind_table_places_a_local_through_the_debug_frame() {
     let dir = fixture("loose", SOURCE);
     let flags = ["-g", "-fno-asynchronous-unwind-tables", "-fno-unwind-tables"];
     let object = build(&dir, &flags, "loose.o");
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(!holds(&object, ".debug_str", b"running"), "a name with nowhere to be");
-    assert!(!holds(&object, ".debug_abbrev", &LOCATION), "a location nothing can resolve");
+    assert!(section(&object, ".debug_frame").is_some(), "no table to resolve the frame base");
+    assert!(holds(&object, ".debug_str", b"running"), "the local is not named");
+    assert!(holds(&object, ".debug_info", &FBREG), "the location is not an offset in the frame");
 
-    // The rest of the unit is still there, which is what says the flag took the locations out
-    // rather than the debug information.
-    assert!(holds(&object, ".debug_str", b"total"), "the function went with them");
-
-    // And so are the locals that are in a register, which is the point of the rule rather than an
-    // accident of it: a register is not measured from the frame base, so nothing about one needs a
-    // frame base to be there.
-    assert!(holds(&object, ".debug_str", b"index"), "a register location went with them");
-    assert!(holds(&object, ".debug_abbrev", &LISTED), "a register location went with them");
+    // And the locals that are in a register, which never needed a frame base to begin with.
+    assert!(holds(&object, ".debug_str", b"index"), "a register location went missing");
+    assert!(holds(&object, ".debug_abbrev", &LISTED), "a register location went missing");
 }
 
 /// A local the program kept in a register comes out named and placed stretch by stretch.

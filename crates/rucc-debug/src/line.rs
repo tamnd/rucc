@@ -91,11 +91,12 @@ pub struct Unit {
     /// through.
     ///
     /// A function's `DW_AT_frame_base` is `DW_OP_call_frame_cfa`, and what answers that operation
-    /// is the unwind table the build already writes for every function. A build that turns the
-    /// table off, which is a kernel or a freestanding image, leaves a reader with nothing to
-    /// evaluate the operation against, so the attribute is left off there rather than written as
-    /// something no debugger can follow. The locations that would be measured from it are left off
-    /// with it.
+    /// is the unwind table the build already writes for every function, or `.debug_frame` in a
+    /// build that turned the unwind table off, which is a kernel or a freestanding image. The
+    /// caller writes that section and says here whether it did. A build with neither leaves a
+    /// reader with nothing to evaluate the operation against, so the attribute is left off there
+    /// rather than written as something no debugger can follow. The locations that would be
+    /// measured from it are left off with it.
     pub frames: bool,
 }
 
