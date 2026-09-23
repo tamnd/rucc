@@ -29,6 +29,7 @@ mod gate;
 mod implib;
 mod libraries;
 mod lines;
+mod msrv;
 mod pressure;
 mod quad;
 mod real_libc;
@@ -55,6 +56,7 @@ tasks:
   style             check documentation and specification prose against the house rules
   thresholds        check that no pass compares against a number it made up
   chains            check that no Rust in the tree uses a let chain, which 1.85 refuses
+  msrv              check the workspace with the Rust version it says it builds with
   malformed         check that the written list of malformed IR forms still names real tests
   paths             check that every tracked path can be checked out on Windows
   version           check that every version number in the tree agrees with the workspace's
@@ -110,6 +112,7 @@ fn main() -> ExitCode {
         Some("style") => style(),
         Some("thresholds") => thresholds(),
         Some("chains") => chains::chains(),
+        Some("msrv") => msrv::msrv(),
         Some("malformed") => malformed(),
         Some("paths") => paths(),
         Some("interpose") => interpose(),

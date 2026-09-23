@@ -16,7 +16,7 @@ cargo xtask ci
 
 That runs the checks the per-commit CI job runs, cheapest first, so a formatting mistake costs you seconds rather than a full test run.
 
-The last thing it prints is what it did not run. The memory safety suite, the differential accounting, the shared library check and the unwind table check are all x86-64 Linux programs, so on a machine that is not one they need a working docker, and rather than fail there they say they were skipped and why. Read that line. A green run that skipped them is not the same claim as a green run that did not, and the line is there so you never have to guess which one you got.
+The last thing it prints is what it did not run. The memory safety suite, the differential accounting, the shared library check and the unwind table check are all x86-64 Linux programs, so on a machine that is not one they need a working docker, and rather than fail there they say they were skipped and why. Read that line. A green run that skipped them is not the same claim as a green run that did not, and the line is there so you never have to guess which one you got. The same goes for `msrv`, which checks the workspace with the `rust-version` in `Cargo.toml` and is skipped on a machine without that toolchain. `rustup toolchain install 1.85.0 --profile minimal` gets it, and it is worth having, since the newest compiler takes code the oldest one we promise refuses.
 
 The individual pieces:
 
@@ -28,6 +28,7 @@ cargo xtask unwind      # walk a stack through frames we wrote and count what ca
 cargo xtask lines       # our line table against the system compiler's, function by function
 cargo xtask safety      # tests/safety, each program against the verdict written in it
 cargo xtask accounting  # the same programs at -O2, with the check elimination on and off
+cargo xtask msrv        # the workspace with the Rust version Cargo.toml says it builds with
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
