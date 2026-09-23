@@ -147,6 +147,19 @@ two:
   return total + 2;
 }
 
+// The same table written as distances from one label, which is how a table stays four bytes a
+// cell and needs nothing relocated when the program is loaded. The distance is a number once the
+// function is laid out, so the image holds two labels and the writer fills in the difference.
+int apart(int n) {
+  static const int table[] = {&&one - &&one, &&two - &&one};
+  int total = 0;
+  goto *(&&one + table[n & 1]);
+one:
+  total = n;
+two:
+  return total + 3;
+}
+
 // Assembly with no operands, which is implicitly `volatile` because there is no result to say
 // it was needed and dropping it would drop the only thing it did.
 void barrier(void) { __asm__("mfence" ::: "memory"); }

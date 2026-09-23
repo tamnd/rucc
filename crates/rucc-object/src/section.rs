@@ -288,6 +288,33 @@ pub struct Data {
     /// then read a zero address. A name here is not an object and carries no bytes, which is why
     /// it is a list of names beside the objects rather than one of them.
     pub weak: Vec<String>,
+    /// Every distance between two labels an image holds, which the writer fills in once it knows
+    /// where the labels are. See [`Apart`].
+    pub apart: Vec<Apart>,
+}
+
+/// How far one label is from another, written into a variable's image.
+///
+/// What `static int b[] = { &&l1 - &&l0 };` asks for. Neither label has an address until the
+/// link, and yet both are in the one function's code and the code moves as one piece, so the
+/// distance is known as soon as the code is laid out. That makes it a number the writer puts in
+/// the bytes itself rather than a relocation it asks the linker for, which is what gas does with
+/// `.long .L1-.L0` too, and it is why a label in another function is refused: the two could land
+/// in different sections and then no number is right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Apart {
+    /// Which of [`Data::objects`] the distance is written into.
+    pub object: usize,
+    /// How far into that object's image.
+    pub at: usize,
+    /// The label measured to, as the image named it.
+    pub to: String,
+    /// The label measured from.
+    pub from: String,
+    /// What to add to the distance.
+    pub addend: i64,
+    /// How many bytes the distance is written in.
+    pub bytes: u8,
 }
 
 /// A second name for something the same file defines.

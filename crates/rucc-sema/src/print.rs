@@ -445,6 +445,9 @@ impl<'a> Printer<'a> {
                     };
                     format!("const address {base} + {}", address.offset)
                 }
+                Const::Apart { to, from } => {
+                    format!("const label {} - label {}", self.label(to), self.label(from))
+                }
             },
             ExprKind::Str(value) => format!("string {}", self.tast[value].spell()),
             ExprKind::Decl(decl) => {

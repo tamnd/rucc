@@ -371,6 +371,8 @@ impl Checker<'_> {
                 Const::Int(_) | Const::Float(_) | Const::Complex { .. } | Const::ComplexInt { .. },
             ) => true,
             Ok(Const::Address(address)) => matches!(address.base, Base::Str(_)),
+            // A number only once the function is laid out, which is after gcc has answered.
+            Ok(Const::Apart { .. }) => false,
             Err(_) => self.shaped(arg).is_some(),
         }
     }

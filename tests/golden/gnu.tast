@@ -351,130 +351,176 @@ decl #38 threaded : int(int) function external defined
             convert lvalue : int
               decl #40 total : int lvalue
             const 2 : int
-decl #41 barrier : void(void) function external defined
+decl #42 apart : int(int) function external defined
+  params
+    decl #41 n : int object automatic defined
+  body
+    block
+      decls
+        decl #43 table : const int[2] object static defined
+          init
+            +0
+              convert arithmetic : int
+                binary - : long
+                  label-addr #8 one : void *
+                  label-addr #8 one : void *
+            +4
+              convert arithmetic : int
+                binary - : long
+                  label-addr #9 two : void *
+                  label-addr #8 one : void *
+      decls
+        decl #44 total : int object automatic defined
+          init
+            +0
+              const 0 : int
+      indirect-goto
+        binary + : void *
+          label-addr #8 one : void *
+          convert lvalue : int
+            subscript : const int lvalue
+              convert array-decay : const int *
+                decl #43 table : const int[2] lvalue
+              binary & : int
+                convert lvalue : int
+                  decl #41 n : int lvalue
+                const 1 : int
+      label #8 one
+        expr
+          assign = : int
+            decl #44 total : int lvalue
+            convert lvalue : int
+              decl #41 n : int lvalue
+      label #9 two
+        return
+          binary + : int
+            convert lvalue : int
+              decl #44 total : int lvalue
+            const 3 : int
+decl #45 barrier : void(void) function external defined
   body
     block
       asm volatile
         template "mfence"
         clobber "memory"
-decl #43 add_one : int(int) function external defined
+decl #47 add_one : int(int) function external defined
   params
-    decl #42 x : int object automatic defined
+    decl #46 x : int object automatic defined
   body
     block
       decls
-        decl #44 r : int object automatic defined
+        decl #48 r : int object automatic defined
       asm
         template "addl $1, %1"
         output "=r"
-          decl #44 r : int lvalue
+          decl #48 r : int lvalue
         input "r"
           convert lvalue : int
-            decl #42 x : int lvalue
+            decl #46 x : int lvalue
       return
         convert lvalue : int
-          decl #44 r : int lvalue
-decl #46 twice : int(int) function external defined
+          decl #48 r : int lvalue
+decl #50 twice : int(int) function external defined
   params
-    decl #45 x : int object automatic defined
+    decl #49 x : int object automatic defined
   body
     block
       asm
         template "addl %0, %0"
         output "+r"
-          decl #45 x : int lvalue
+          decl #49 x : int lvalue
       return
         convert lvalue : int
-          decl #45 x : int lvalue
-decl #48 in_memory : int(int) function external defined
+          decl #49 x : int lvalue
+decl #52 in_memory : int(int) function external defined
   params
-    decl #47 x : int object automatic defined
+    decl #51 x : int object automatic defined
   body
     block
       decls
-        decl #49 slot : int object automatic defined
+        decl #53 slot : int object automatic defined
           init
             +0
               convert lvalue : int
-                decl #47 x : int lvalue
+                decl #51 x : int lvalue
       asm
         template "incl %0"
         output "+m" memory
-          decl #49 slot : int lvalue
+          decl #53 slot : int lvalue
       return
         convert lvalue : int
-          decl #49 slot : int lvalue
-decl #51 in_a_register : unsigned long(struct word) function external defined
+          decl #53 slot : int lvalue
+decl #55 in_a_register : unsigned long(struct word) function external defined
   params
-    decl #50 w : struct word object automatic defined
+    decl #54 w : struct word object automatic defined
   body
     block
       decls
-        decl #52 r : unsigned long object automatic defined
+        decl #56 r : unsigned long object automatic defined
       asm
         template ""
         output "=r"
-          decl #52 r : unsigned long lvalue
+          decl #56 r : unsigned long lvalue
         input "0"
-          decl #50 w : struct word lvalue
+          decl #54 w : struct word lvalue
       return
         convert lvalue : unsigned long
-          decl #52 r : unsigned long lvalue
-decl #53 out_of_a_register : struct word(void) function external defined
+          decl #56 r : unsigned long lvalue
+decl #57 out_of_a_register : struct word(void) function external defined
   body
     block
       decls
-        decl #54 w : struct word object automatic defined
+        decl #58 w : struct word object automatic defined
       asm
         template ""
         output "=r"
-          decl #54 w : struct word lvalue
+          decl #58 w : struct word lvalue
       return
         convert lvalue : struct word
-          decl #54 w : struct word lvalue
-decl #56 named : int(int) function external defined
+          decl #58 w : struct word lvalue
+decl #60 named : int(int) function external defined
   params
-    decl #55 x : int object automatic defined
+    decl #59 x : int object automatic defined
   body
     block
       decls
-        decl #57 r : int object automatic defined
+        decl #61 r : int object automatic defined
       asm
         template "movl %1, %0"
         output [out] "=r"
-          decl #57 r : int lvalue
+          decl #61 r : int lvalue
         input [in] "r"
           convert lvalue : int
-            decl #55 x : int lvalue
+            decl #59 x : int lvalue
       return
         convert lvalue : int
-          decl #57 r : int lvalue
-decl #59 jumps : int(int) function external defined
+          decl #61 r : int lvalue
+decl #63 jumps : int(int) function external defined
   params
-    decl #58 x : int object automatic defined
+    decl #62 x : int object automatic defined
   body
     block
       decls
-        decl #60 r : int object automatic defined
+        decl #64 r : int object automatic defined
           init
             +0
               const 7 : int
       asm volatile goto
         template "cbnz %0, %l1"
         output "=r"
-          decl #60 r : int lvalue
+          decl #64 r : int lvalue
         input "r"
           convert lvalue : int
-            decl #58 x : int lvalue
-        label #8 away
+            decl #62 x : int lvalue
+        label #10 away
       return
         convert lvalue : int
-          decl #60 r : int lvalue
-      label #8 away
+          decl #64 r : int lvalue
+      label #10 away
         return
           convert lvalue : int
-            decl #60 r : int lvalue
-decl #61 three_names : int(void) function external defined
+            decl #64 r : int lvalue
+decl #65 three_names : int(void) function external defined
   body
     block
       return
@@ -491,156 +537,156 @@ decl #61 three_names : int(void) function external defined
                 string "three_names" : const char[12] lvalue
               convert array-decay : const char *
                 string "three_names" : const char[12] lvalue
-decl #63 promised : int(int) function external defined
+decl #67 promised : int(int) function external defined
   params
-    decl #62 x : int object automatic defined
+    decl #66 x : int object automatic defined
   body
     block
       if
         cond
           convert bool : _Bool
             convert lvalue : int
-              decl #62 x : int lvalue
+              decl #66 x : int lvalue
         then
           block
             return
               const 1 : int
       expr
         unreachable : void
-decl #66 promised_early : int(int) function external defined
+decl #70 promised_early : int(int) function external defined
   params
-    decl #65 x : int object automatic defined
+    decl #69 x : int object automatic defined
   body
     block
       expr
         unreachable : void
       return
         convert lvalue : int
-          decl #65 x : int lvalue
-decl #68 renamed : int(int) function internal defined asm "elsewhere"
+          decl #69 x : int lvalue
+decl #72 renamed : int(int) function internal defined asm "elsewhere"
   params
-    decl #69 a : int object automatic defined
+    decl #73 a : int object automatic defined
   body
     block
       return
         binary + : int
           convert lvalue : int
-            decl #69 a : int lvalue
+            decl #73 a : int lvalue
           const 1 : int
-decl #71 calls_the_renamed : int(int) function external defined
-  params
-    decl #70 a : int object automatic defined
-  body
-    block
-      return
-        call : int
-          convert function-decay : int (*)(int)
-            decl #68 renamed : int(int) function
-          convert lvalue : int
-            decl #70 a : int lvalue
-decl #73 elsewhere_too : int(int) function external declared asm "also_named"
-decl #75 also_named : int(int) function external defined
+decl #75 calls_the_renamed : int(int) function external defined
   params
     decl #74 a : int object automatic defined
   body
     block
       return
-        binary + : int
+        call : int
+          convert function-decay : int (*)(int)
+            decl #72 renamed : int(int) function
           convert lvalue : int
             decl #74 a : int lvalue
-          const 2 : int
-decl #77 calls_both_names : int(int) function external defined
+decl #77 elsewhere_too : int(int) function external declared asm "also_named"
+decl #79 also_named : int(int) function external defined
   params
-    decl #76 a : int object automatic defined
+    decl #78 a : int object automatic defined
   body
     block
       return
         binary + : int
-          call : int
-            convert function-decay : int (*)(int)
-              decl #73 elsewhere_too : int(int) function
-            convert lvalue : int
-              decl #76 a : int lvalue
-          call : int
-            convert function-decay : int (*)(int)
-              decl #75 also_named : int(int) function
-            convert lvalue : int
-              decl #76 a : int lvalue
-decl #79 held_back : int(int) function external defined inline-definition
+          convert lvalue : int
+            decl #78 a : int lvalue
+          const 2 : int
+decl #81 calls_both_names : int(int) function external defined
   params
     decl #80 a : int object automatic defined
   body
     block
       return
         binary + : int
+          call : int
+            convert function-decay : int (*)(int)
+              decl #77 elsewhere_too : int(int) function
+            convert lvalue : int
+              decl #80 a : int lvalue
+          call : int
+            convert function-decay : int (*)(int)
+              decl #79 also_named : int(int) function
+            convert lvalue : int
+              decl #80 a : int lvalue
+decl #83 held_back : int(int) function external defined inline-definition
+  params
+    decl #84 a : int object automatic defined
+  body
+    block
+      return
+        binary + : int
           convert lvalue : int
-            decl #80 a : int lvalue
+            decl #84 a : int lvalue
           const 1 : int
-decl #82 emitted_anyway : int(int) function external defined
+decl #86 emitted_anyway : int(int) function external defined
   params
-    decl #81 a : int object automatic defined
+    decl #85 a : int object automatic defined
   body
     block
       return
         binary + : int
           convert lvalue : int
-            decl #81 a : int lvalue
+            decl #85 a : int lvalue
           const 2 : int
-decl #84 calls_both_readings : int(int) function external defined
+decl #88 calls_both_readings : int(int) function external defined
   params
-    decl #83 a : int object automatic defined
+    decl #87 a : int object automatic defined
   body
     block
       return
         binary + : int
           call : int
             convert function-decay : int (*)(int)
-              decl #79 held_back : int(int) function
+              decl #83 held_back : int(int) function
             convert lvalue : int
-              decl #83 a : int lvalue
+              decl #87 a : int lvalue
           call : int
             convert function-decay : int (*)(int)
-              decl #82 emitted_anyway : int(int) function
+              decl #86 emitted_anyway : int(int) function
             convert lvalue : int
-              decl #83 a : int lvalue
-decl #86 bail : void(int) function external declared noreturn
-decl #88 give_up : void(int) function external declared noreturn
-decl #90 stops_here : void(int) function external defined
+              decl #87 a : int lvalue
+decl #90 bail : void(int) function external declared noreturn
+decl #92 give_up : void(int) function external declared noreturn
+decl #94 stops_here : void(int) function external defined
   params
-    decl #91 a : int object automatic defined
+    decl #95 a : int object automatic defined
   body
     block
       expr
         call : void
           convert function-decay : void (*)(int)
-            decl #86 bail : void(int) function
+            decl #90 bail : void(int) function
           convert lvalue : int
-            decl #91 a : int lvalue
-decl #93 weigh : int(int) function external declared const
-decl #95 look : int(const int *) function external declared pure
-decl #98 asks_both : int(int, const int *) function external defined
+            decl #95 a : int lvalue
+decl #97 weigh : int(int) function external declared const
+decl #99 look : int(const int *) function external declared pure
+decl #102 asks_both : int(int, const int *) function external defined
   params
-    decl #96 a : int object automatic defined
-    decl #97 at : const int * object automatic defined
+    decl #100 a : int object automatic defined
+    decl #101 at : const int * object automatic defined
   body
     block
       return
         binary + : int
           call : int
             convert function-decay : int (*)(int)
-              decl #93 weigh : int(int) function
+              decl #97 weigh : int(int) function
             convert lvalue : int
-              decl #96 a : int lvalue
+              decl #100 a : int lvalue
           call : int
             convert function-decay : int (*)(const int *)
-              decl #95 look : int(const int *) function
+              decl #99 look : int(const int *) function
             convert lvalue : const int *
-              decl #97 at : const int * lvalue
-decl #99 table : const int[] object external static declared
-decl #100 table_count : const int object external static declared
-decl #102 reads_the_table : int(int) function external defined
+              decl #101 at : const int * lvalue
+decl #103 table : const int[] object external static declared
+decl #104 table_count : const int object external static declared
+decl #106 reads_the_table : int(int) function external defined
   params
-    decl #101 i : int object automatic defined
+    decl #105 i : int object automatic defined
   body
     block
       return
@@ -648,12 +694,12 @@ decl #102 reads_the_table : int(int) function external defined
           convert lvalue : int
             subscript : const int lvalue
               convert array-decay : const int *
-                decl #99 table : const int[] lvalue
+                decl #103 table : const int[] lvalue
               convert lvalue : int
-                decl #101 i : int lvalue
+                decl #105 i : int lvalue
           convert lvalue : int
-            decl #100 table_count : const int lvalue
-decl #103 the_default : void(void) function internal defined
+            decl #104 table_count : const int lvalue
+decl #107 the_default : void(void) function internal defined
   body
     block
       expr
@@ -661,10 +707,10 @@ decl #103 the_default : void(void) function internal defined
           convert function-decay : int (*)(int)
             decl #1 use : int(int) function
           const 0 : int
-decl #104 stuff : unsigned char[] object external static declared
-decl #106 reads_the_stuff : int(int) function external defined
+decl #108 stuff : unsigned char[] object external static declared
+decl #110 reads_the_stuff : int(int) function external defined
   params
-    decl #105 i : int object automatic defined
+    decl #109 i : int object automatic defined
   body
     block
       return
@@ -672,11 +718,11 @@ decl #106 reads_the_stuff : int(int) function external defined
           convert lvalue : unsigned char
             subscript : unsigned char lvalue
               convert array-decay : unsigned char *
-                decl #104 stuff : unsigned char[] lvalue
+                decl #108 stuff : unsigned char[] lvalue
               convert lvalue : int
-                decl #105 i : int lvalue
-decl #107 how_far : const int object external static declared
-decl #108 reads_the_distance : unsigned char(void) function external defined
+                decl #109 i : int lvalue
+decl #111 how_far : const int object external static declared
+decl #112 reads_the_distance : unsigned char(void) function external defined
   body
     block
       return
@@ -685,31 +731,31 @@ decl #108 reads_the_distance : unsigned char(void) function external defined
             binary + : const unsigned char *
               cast : const unsigned char *
                 unary & : const int *
-                  decl #107 how_far : const int lvalue
+                  decl #111 how_far : const int lvalue
               convert lvalue : int
-                decl #107 how_far : const int lvalue
-decl #109 ran : int object internal static tentative
-decl #110 opens : void(void) function internal defined constructor
+                decl #111 how_far : const int lvalue
+decl #113 ran : int object internal static tentative
+decl #114 opens : void(void) function internal defined constructor
   body
     block
       expr
         assign = : int
-          decl #109 ran : int lvalue
+          decl #113 ran : int lvalue
           const 1 : int
-decl #111 closes : void(void) function internal defined destructor(101)
+decl #115 closes : void(void) function internal defined destructor(101)
   body
     block
       expr
         assign = : int
-          decl #109 ran : int lvalue
+          decl #113 ran : int lvalue
           const 0 : int
-decl #112 both_ways : void(void) function internal defined constructor(101) destructor
+decl #116 both_ways : void(void) function internal defined constructor(101) destructor
   body
     block
       expr
         assign = : int
-          decl #109 ran : int lvalue
+          decl #113 ran : int lvalue
           binary + : int
             convert lvalue : int
-              decl #109 ran : int lvalue
+              decl #113 ran : int lvalue
             const 1 : int

@@ -342,8 +342,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 let bytes = self.string()?;
                 Ok(Datum::Bytes(module.push_bytes(&bytes)))
             }
-            word @ ("addr" | "away") => {
-                let away = word == "away";
+            word @ ("addr" | "away" | "apart") => {
                 self.expect(word)?;
                 self.expect(".")?;
                 let size = self.u32()?;
@@ -359,8 +358,18 @@ impl<'a, 'n> Parser<'a, 'n> {
                 } else {
                     0
                 };
+                let from = if word == "apart" {
+                    self.expect("from")?;
+                    Some(self.symbol()?)
+                } else {
+                    None
+                };
                 let reloc = module.add_reloc(Reloc { symbol, addend, size });
-                Ok(if away { Datum::Away(reloc) } else { Datum::Addr(reloc) })
+                Ok(match (word, from) {
+                    ("away", _) => Datum::Away(reloc),
+                    (_, Some(from)) => Datum::Apart { to: reloc, from },
+                    _ => Datum::Addr(reloc),
+                })
             }
             _ => {
                 let ty = self.ty()?;
@@ -2026,6 +2035,19 @@ labels:
     block1 = @.Llbl.0
     block2 = @.Llbl.1
 }}
+"
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn a_distance_between_two_labels_comes_back_byte_for_byte() {
+        // `&&to - &&from` in a static initializer, which is one relocation for where it goes and
+        // a second name for where it comes from. Losing the second would be a table of addresses
+        // where the program wrote a table of distances.
+        let text = format!(
+            "{HEADER}
+global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 from @.Llbl.1 }}, align 4, linkage(internal)
 "
         );
         assert_eq!(round_trip(&text), text);

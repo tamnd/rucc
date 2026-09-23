@@ -41,7 +41,7 @@
 use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
 use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module, SymbolRef};
-use rucc_object::{Alias, Binding, Data, Object, Place, Reference, Reloc, Visibility};
+use rucc_object::{Alias, Apart, Binding, Data, Object, Place, Reference, Reloc, Visibility};
 use rucc_target::ObjectFormat;
 
 use crate::Error;
@@ -121,6 +121,18 @@ pub enum Piece {
         /// symbol the place being measured to sits.
         addend: i64,
     },
+    /// How far one label is from another, which is a number the writer works out once the code is
+    /// laid out and not a hole for the linker. `.long .L1-.L0` for GNU C's `&&l1 - &&l0`.
+    Apart {
+        /// The label measured to, as the module named it.
+        to: String,
+        /// The label measured from.
+        from: String,
+        /// What to add to the distance.
+        addend: i64,
+        /// How many bytes it occupies.
+        bytes: u8,
+    },
 }
 
 impl Piece {
@@ -130,7 +142,7 @@ impl Piece {
         match self {
             Piece::Zero(bytes) => *bytes,
             Piece::Bytes(bytes) | Piece::Scalar(bytes) => bytes.len() as u64,
-            Piece::Addr { bytes, .. } => u64::from(*bytes),
+            Piece::Addr { bytes, .. } | Piece::Apart { bytes, .. } => u64::from(*bytes),
             Piece::Away { .. } => 4,
         }
     }
@@ -190,6 +202,17 @@ impl Globals {
                             after: 0,
                         });
                         object.bytes.resize(object.bytes.len() + 4, 0);
+                    }
+                    Piece::Apart { to, from, addend, bytes } => {
+                        data.apart.push(Apart {
+                            object: data.objects.len(),
+                            at: object.bytes.len(),
+                            to: to.clone(),
+                            from: from.clone(),
+                            addend: *addend,
+                            bytes: *bytes,
+                        });
+                        object.bytes.resize(object.bytes.len() + usize::from(*bytes), 0);
                     }
                 }
             }
@@ -318,6 +341,21 @@ fn variable(
                 }
                 let symbol = names.resolve(reloc.symbol).to_owned();
                 Piece::Away { symbol, addend: reloc.addend }
+            }
+            // Both ends are labels of a function in this file, so neither goes in `addrs`: the
+            // distance is the same number wherever the file is loaded.
+            Datum::Apart { to, from } => {
+                let reloc = module[to];
+                let bytes = match reloc.size {
+                    1 | 2 | 4 | 8 => reloc.size as u8,
+                    size => {
+                        let why = format!("a distance {size} bytes wide");
+                        return Err(Error::Image { name, why });
+                    }
+                };
+                let to = names.resolve(reloc.symbol).to_owned();
+                let from = names.resolve(from).to_owned();
+                Piece::Apart { to, from, addend: reloc.addend, bytes }
             }
             Datum::Addr(idx) => {
                 let reloc = module[idx];

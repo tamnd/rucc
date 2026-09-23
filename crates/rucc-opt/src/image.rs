@@ -234,7 +234,9 @@ impl Object {
                 Datum::Scalar { ty, value } => Piece::Scalar { ty, value: module[value] },
                 // Kept rather than dropped, so that what follows it is still at the offset it is
                 // at. What it holds is an address the linker has not written yet.
-                Datum::Addr(_) | Datum::Away(_) => Piece::Opaque(datum.size(module)),
+                Datum::Addr(_) | Datum::Away(_) | Datum::Apart { .. } => {
+                    Piece::Opaque(datum.size(module))
+                }
             })
             .collect();
         Self { size: global.size, pieces }

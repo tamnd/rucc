@@ -215,7 +215,8 @@ impl<'a> Eval<'a> {
                 // `0 && f()` below, which is 6.6p3 saying the operands of an unevaluated
                 // subexpression do not have to be constants and is what both compilers do.
                 let cond = self.eval(cond)?;
-                let taken = if truth(cond) { then } else { otherwise };
+                let taken =
+                    if truth(cond).ok_or_else(|| self.stop(expr))? { then } else { otherwise };
                 self.eval(taken)
             }
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
@@ -378,7 +379,10 @@ impl<'a> Eval<'a> {
         let value = self.eval(operand)?;
         match (op, value) {
             (UnaryOp::Plus, value) => Ok(value),
-            (UnaryOp::Not, value) => Ok(Const::Int(i128::from(!truth(value)))),
+            (UnaryOp::Not, value) => match truth(value) {
+                Some(value) => Ok(Const::Int(i128::from(!value))),
+                None => Err(self.stop(expr)),
+            },
             // The two halves of a complex constant, which are what these name, and the halves of
             // a real one, where `__real__` is the operand and `__imag__` is a zero of the same
             // type.
@@ -445,11 +449,12 @@ impl<'a> Eval<'a> {
             BinaryOp::LogAnd | BinaryOp::LogOr => {
                 let wanted = matches!(op, BinaryOp::LogOr);
                 let left = self.eval(lhs)?;
-                if truth(left) == wanted {
+                if truth(left).ok_or_else(|| self.stop(expr))? == wanted {
                     return Ok(Const::Int(i128::from(wanted)));
                 }
                 let right = self.eval(rhs)?;
-                Ok(Const::Int(i128::from(truth(right))))
+                let right = truth(right).ok_or_else(|| self.stop(expr))?;
+                Ok(Const::Int(i128::from(right)))
             }
             BinaryOp::Shl | BinaryOp::Shr => self.shift(expr, op, lhs, rhs),
             _ => {
@@ -919,6 +924,17 @@ impl<'a> Eval<'a> {
                         left.offset - right.offset
                     }
                     (Const::Int(left), Const::Int(right)) => left - right,
+                    // Two labels, which are two places in one function's code, and the distance
+                    // between them is a number once the code is laid out even though neither
+                    // address is. Only the bare labels: an offset from one is not a place a jump
+                    // may go and has no meaning to measure from.
+                    (Const::Address(left), Const::Address(right)) => match (left, right) {
+                        (
+                            Address { base: Base::Label(to), offset: 0 },
+                            Address { base: Base::Label(from), offset: 0 },
+                        ) if step == 1 => return Ok(Const::Apart { to, from }),
+                        _ => return Err(self.stop(expr)),
+                    },
                     _ => return Err(self.stop(expr)),
                 };
                 Ok(Const::Int(distance / i128::from(step)))
@@ -944,9 +960,10 @@ impl<'a> Eval<'a> {
                 offset: address.offset.wrapping_add(distance),
             })),
             Const::Int(value) => Ok(Const::Int(value.wrapping_add(distance))),
-            Const::Float(_) | Const::Complex { .. } | Const::ComplexInt { .. } => {
-                Err(self.stop(expr))
-            }
+            Const::Float(_)
+            | Const::Complex { .. }
+            | Const::ComplexInt { .. }
+            | Const::Apart { .. } => Err(self.stop(expr)),
         }
     }
 
@@ -1020,7 +1037,7 @@ impl<'a> Eval<'a> {
         match bare(self.types, to) {
             // Not a truncation to one bit. `(bool)2` is one and `(bool)0.5` is one, which is
             // why this is a comparison against zero and not the integer case below.
-            TypeKind::Bool => Some(Const::Int(i128::from(truth(value)))),
+            TypeKind::Bool => Some(Const::Int(i128::from(truth(value)?))),
             TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_) => {
                 let info = self.int_shape(to)?;
                 match value {
@@ -1053,6 +1070,10 @@ impl<'a> Eval<'a> {
                     // `int n = (int)&a;`, and it is measured in bits and not in names.
                     Const::Address(address) => (u64::from(info.width) == self.size_of(from) * 8)
                         .then_some(Const::Address(address)),
+                    // A distance between two labels survives in any width a directive can write
+                    // it in, since it is a number the assembler works out and not a relocation
+                    // that has to hold a whole address. gcc writes `.long` for an `int`.
+                    Const::Apart { .. } => matches!(info.width, 8 | 16 | 32 | 64).then_some(value),
                 }
             }
             TypeKind::Float(kind) => {
@@ -1090,7 +1111,7 @@ impl<'a> Eval<'a> {
                         Const::Float(value) => (value.to_integer(info.width, info.signed).0, 0),
                         // No cast makes a complex value out of an address, so a tree with one
                         // here did not check.
-                        Const::Address(_) => return None,
+                        Const::Address(_) | Const::Apart { .. } => return None,
                     };
                     Some(Const::ComplexInt { real, imag })
                 }
@@ -1099,7 +1120,10 @@ impl<'a> Eval<'a> {
             // an address stays the same address and a number stays the same number.
             TypeKind::Pointer(_) => match value {
                 Const::Int(_) | Const::Address(_) => Some(value),
-                Const::Float(_) | Const::Complex { .. } | Const::ComplexInt { .. } => None,
+                Const::Float(_)
+                | Const::Complex { .. }
+                | Const::ComplexInt { .. }
+                | Const::Apart { .. } => None,
             },
             // `void` and a record. Neither has a constant to be.
             _ => None,
@@ -1126,8 +1150,8 @@ impl<'a> Eval<'a> {
                 _ => Float::from_signed(value, format),
             },
             // No cast turns an address into a floating value, so a tree with one here did not
-            // check.
-            Const::Address(_) => return None,
+            // check. A distance between labels is a number, but not one known here.
+            Const::Address(_) | Const::Apart { .. } => return None,
         };
         Some(value)
     }
@@ -1198,8 +1222,8 @@ pub(crate) fn int_shape(types: &Types, ty: TypeId, target: &TargetInfo) -> Optio
 ///
 /// A nan is true, because it is not equal to zero, and so is a negative zero's negation of
 /// itself: the test is `!= 0` and `-0.0 == 0.0`.
-fn truth(value: Const) -> bool {
-    match value {
+fn truth(value: Const) -> Option<bool> {
+    Some(match value {
         Const::Int(value) => value != 0,
         Const::Float(value) => !value.is_zero(),
         // A complex value is true when either half is, 6.3.1.2, which is the same question asked
@@ -1208,7 +1232,10 @@ fn truth(value: Const) -> bool {
         Const::ComplexInt { real, imag } => real != 0 || imag != 0,
         // An object has an address and no object is at zero, so an address is always true.
         Const::Address(_) => true,
-    }
+        // Two labels with nothing between them are at the same place, and whether there is
+        // anything between them is not known until the function is laid out.
+        Const::Apart { .. } => return None,
+    })
 }
 
 /// A folded integer negated, for the `p - n` that is written as an offset of minus `n`.
@@ -1349,7 +1376,7 @@ pub(crate) fn narrowed(value: Const, info: IntegerInfo) -> i128 {
         Const::ComplexInt { real, .. } => info.wrap(real),
         // Nothing narrows an address, since the caller asked for a number and got one of these
         // instead. Zero is a value it will not use.
-        Const::Address(_) => 0,
+        Const::Address(_) | Const::Apart { .. } => 0,
     }
 }
 
@@ -1380,6 +1407,7 @@ pub(crate) fn spell_const(value: Const, info: Option<IntegerInfo>) -> String {
             };
             format!("&#{base} + {}", address.offset)
         }
+        Const::Apart { to, from } => format!("&&#{} - &&#{}", to.index(), from.index()),
     }
 }
 
@@ -1411,8 +1439,9 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
                 && !IntegerInfo::new(false, info.width).holds(real)
         }
         // An address is as wide as a pointer or it would not have got this far, so nothing about
-        // it is lost.
-        Const::Address(_) => false,
+        // it is lost. A distance between two labels in one function is far smaller than any
+        // width it is written in.
+        Const::Address(_) | Const::Apart { .. } => false,
     }
 }
 

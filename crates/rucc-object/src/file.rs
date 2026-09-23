@@ -30,7 +30,7 @@
 //! model and the back end writes none of them, so a module carrying one is refused before it
 //! reaches here rather than written as an ordinary variable in the wrong section.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use object::write::{
     Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
@@ -43,8 +43,8 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Array, Binding, Data, Info, Object, Output, Place, Property, Reference, Reloc, Sections,
-    Text, Visibility,
+    Alias, Apart, Array, Binding, Data, Info, Object, Output, Place, Property, Reference, Reloc,
+    Sections, Text, Visibility,
 };
 use crate::{coff, elf};
 
@@ -290,7 +290,7 @@ pub fn write(
     // Every function defined here, then every variable, then every name either of them wanted that
     // is not. A name is looked up rather than added twice, because two symbols with one name is
     // not a file a linker accepts.
-    let mut symbols = std::collections::BTreeMap::new();
+    let mut symbols = BTreeMap::new();
     // Where each function ended up, in the order they were written, so that a relocation inside
     // one goes into the section that one is in and one that points at the start of one can be
     // written against that section. The same list as `text.funcs` and in the same order, so the
@@ -438,6 +438,19 @@ pub fn write(
         flavour.see(&mut obj, id, object.binding, object.visibility);
         symbols.insert(object.name.clone(), id);
         placed.push((section.id(), offset));
+    }
+
+    // The distances between two labels, written into the images just placed. Both labels were
+    // added above with the section they are in and where in it, so the distance is the one value
+    // less the other, and it is a number only when the section is the same one.
+    for apart in &data.apart {
+        let (Some(section), offset) = placed[apart.object] else { continue };
+        let value = distance(&obj, &symbols, apart)?;
+        let bytes = usize::from(apart.bytes);
+        let at = usize::try_from(offset).map_err(|why| Error::Refused { why: why.to_string() })?;
+        let at = at + apart.at;
+        let image = obj.section_mut(section).data_mut();
+        image[at..at + bytes].copy_from_slice(&value.to_le_bytes()[..bytes]);
     }
 
     // A second name for something already added, which is where the alias's own binding is the
@@ -693,6 +706,35 @@ pub fn write(
     Ok(bytes)
 }
 
+/// How far one label is from another, from the symbols [`write()`] added for them.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for a label that is not here, for two that are in different sections, and
+/// for a distance too far for the width it is written in.
+fn distance(
+    obj: &Writer<'_>,
+    symbols: &BTreeMap<String, SymbolId>,
+    apart: &Apart,
+) -> Result<i64, Error> {
+    let find = |name: &str| match symbols.get(name) {
+        Some(&id) => Ok(obj.symbol(id)),
+        None => Err(Error::Refused { why: format!("'{name}' is measured from and is not here") }),
+    };
+    let (to, from) = (find(&apart.to)?, find(&apart.from)?);
+    if to.section != from.section {
+        let why = format!("'{}' and '{}' are in different sections", apart.to, apart.from);
+        return Err(Error::Refused { why });
+    }
+    let value = (to.value as i64).wrapping_sub(from.value as i64).wrapping_add(apart.addend);
+    let bits = u32::from(apart.bytes) * 8;
+    if bits < 64 && (value >> (bits - 1)) != 0 && (value >> (bits - 1)) != -1 {
+        let why = format!("'{}' is too far from '{}' for {} bytes", apart.to, apart.from, bits / 8);
+        return Err(Error::Refused { why });
+    }
+    Ok(value)
+}
+
 /// Everything in this module the target's format has no way to write, refused by name.
 ///
 /// Each of these is something ELF has and COFF does not, and each would otherwise be written as the
@@ -909,7 +951,7 @@ fn add(
     section: object::write::SectionId,
     at: u64,
     reloc: &Reloc,
-    symbols: &std::collections::BTreeMap<String, SymbolId>,
+    symbols: &BTreeMap<String, SymbolId>,
     flavour: Flavour,
 ) -> Result<(), Error> {
     let flags = flavour
@@ -951,7 +993,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, Triple};
 
     use crate::elf::PATCHABLE;
-    use crate::section::{Extent, Patch, Reloc};
+    use crate::section::{Extent, Marker, Patch, Reloc};
 
     /// A linux x86-64 target, which is the only one this writes.
     fn target() -> TargetInfo {
@@ -1544,9 +1586,55 @@ mod tests {
         }
     }
 
+    /// Two labels in `f` and an image holding the distance between them each way round.
+    fn measured() -> (Text, Data) {
+        let mut text = calling("puts");
+        text.labels.push(Marker { name: ".L0".to_owned(), at: 1 });
+        text.labels.push(Marker { name: ".L1".to_owned(), at: 5 });
+        let mut table = variable("table", Place::ReadOnly);
+        table.bytes = vec![0; 8];
+        table.size = 8;
+        let apart = |at, to: &str, from: &str| Apart {
+            object: 0,
+            at,
+            to: to.to_owned(),
+            from: from.to_owned(),
+            addend: 0,
+            bytes: 4,
+        };
+        let apart = vec![apart(0, ".L1", ".L0"), apart(4, ".L0", ".L1")];
+        (text, Data { apart, weak: Vec::new(), objects: vec![table] })
+    }
+
+    #[test]
+    fn a_distance_between_two_labels_is_a_number_and_not_a_relocation() {
+        let (text, data) = measured();
+        let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
+            .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".rodata").expect("a read only section");
+        assert_eq!(section.relocations().count(), 0);
+        let image = section.data().expect("the image");
+        assert_eq!(image[..8], [4, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn a_distance_between_labels_in_two_sections_is_refused() {
+        // `.L1` moves to a second function, which `-ffunction-sections` puts in a section of its
+        // own, and then no number is the distance.
+        let (mut text, data) = measured();
+        text.bytes.resize(22, 0x90);
+        text.funcs.push(extent("g".to_owned(), 16, 6, Binding::Global));
+        text.labels[1].at = 17;
+        let output =
+            Output { sections: Sections { functions: true, data: false }, ..Output::default() };
+        let refused = write(&text, &data, &[], &target(), output, &Info::default());
+        assert!(matches!(refused, Err(Error::Refused { .. })), "{refused:?}");
+    }
+
     /// A file of that one variable and nothing else.
     fn holding(object: Object) -> Vec<u8> {
-        let data = Data { weak: Vec::new(), objects: vec![object] };
+        let data = Data { apart: Vec::new(), weak: Vec::new(), objects: vec![object] };
         write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
             .expect("an object")
     }
@@ -1628,7 +1716,7 @@ mod tests {
             variable("x", Place::Named(".init_array".to_owned())),
             variable("y", Place::Named(".init_array".to_owned())),
         ];
-        let data = Data { weak: Vec::new(), objects };
+        let data = Data { apart: Vec::new(), weak: Vec::new(), objects };
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
                 .expect("an object");
@@ -1655,7 +1743,11 @@ mod tests {
             (Place::Thread { zero: false }, ".tdata.x"),
             (Place::Thread { zero: true }, ".tbss.x"),
         ] {
-            let data = Data { weak: Vec::new(), objects: vec![variable("x", place.clone())] };
+            let data = Data {
+                apart: Vec::new(),
+                weak: Vec::new(),
+                objects: vec![variable("x", place.clone())],
+            };
             let bytes = write(&Text::default(), &data, &[], &target(), sections, &Info::default())
                 .expect("object");
             let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1680,7 +1772,7 @@ mod tests {
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes = write(
             &Text::default(),
-            &Data { weak: Vec::new(), objects },
+            &Data { apart: Vec::new(), weak: Vec::new(), objects },
             &[],
             &target(),
             sections,
@@ -1717,7 +1809,7 @@ mod tests {
         let objects = vec![variable("first", Place::Written), pointer];
         let bytes = write(
             &Text::default(),
-            &Data { weak: Vec::new(), objects },
+            &Data { apart: Vec::new(), weak: Vec::new(), objects },
             &[],
             &target(),
             sections,
@@ -1744,6 +1836,7 @@ mod tests {
     fn every_variable_that_wants_the_local_relocated_section_shares_one() {
         let place = Place::RelocReadOnly { local: true };
         let data = Data {
+            apart: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("first", place.clone()), variable("second", place)],
         };
@@ -1757,7 +1850,11 @@ mod tests {
 
     #[test]
     fn a_variable_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
-        let mut data = Data { weak: Vec::new(), objects: vec![variable("first", Place::Written)] };
+        let mut data = Data {
+            apart: Vec::new(),
+            weak: Vec::new(),
+            objects: vec![variable("first", Place::Written)],
+        };
         data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
@@ -1845,8 +1942,11 @@ mod tests {
             addend: -4,
             after: 0,
         });
-        let data =
-            Data { weak: vec!["hook".to_owned(), "never_called".to_owned()], objects: vec![] };
+        let data = Data {
+            apart: Vec::new(),
+            weak: vec!["hook".to_owned(), "never_called".to_owned()],
+            objects: vec![],
+        };
         let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1897,7 +1997,7 @@ mod tests {
             addend: -4,
             after: 0,
         });
-        let data = Data { weak: Vec::new(), objects: vec![] };
+        let data = Data { apart: Vec::new(), weak: Vec::new(), objects: vec![] };
         let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1914,7 +2014,11 @@ mod tests {
     /// Not a rewording of the case above: what is checked is the arithmetic between the two.
     #[test]
     fn a_relocation_counts_from_the_start_of_the_section_and_not_of_the_image_it_is_in() {
-        let mut data = Data { weak: Vec::new(), objects: vec![variable("first", Place::Written)] };
+        let mut data = Data {
+            apart: Vec::new(),
+            weak: Vec::new(),
+            objects: vec![variable("first", Place::Written)],
+        };
         data.objects.push(Object {
             bytes: vec![0; 16],
             size: 16,
@@ -1942,6 +2046,7 @@ mod tests {
     #[test]
     fn a_second_name_is_a_second_symbol_at_the_first_one_s_address_and_no_second_image() {
         let data = Data {
+            apart: Vec::new(),
             weak: Vec::new(),
             objects: vec![Object { binding: Binding::Local, ..variable("a", Place::Written) }],
         };
@@ -2055,6 +2160,7 @@ mod tests {
         text.funcs.push(extent("shared".to_owned(), 32, 1, Binding::Weak));
         text.bytes.resize(33, 0x90);
         let data = Data {
+            apart: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("seen", Place::Written), {
                 let mut quiet = variable("quiet", Place::Zero);
@@ -2182,7 +2288,7 @@ mod tests {
             }],
             ..variable("p", Place::Written)
         };
-        let data = Data { weak: Vec::new(), objects: vec![object] };
+        let data = Data { apart: Vec::new(), weak: Vec::new(), objects: vec![object] };
         let bytes =
             write(&Text::default(), &data, &[], &windows(), Output::default(), &Info::default())
                 .expect("an object");
@@ -2199,6 +2305,7 @@ mod tests {
     fn a_variable_the_loader_writes_into_is_read_only_data_here() {
         for local in [false, true] {
             let data = Data {
+                apart: Vec::new(),
                 weak: Vec::new(),
                 objects: vec![variable("p", Place::RelocReadOnly { local })],
             };
@@ -2282,7 +2389,11 @@ mod tests {
     #[test]
     fn the_names_a_linker_can_find_are_the_same_list_on_either_format() {
         let text = calling("puts");
-        let data = Data { weak: Vec::new(), objects: vec![variable("shared", Place::Written)] };
+        let data = Data {
+            apart: Vec::new(),
+            weak: Vec::new(),
+            objects: vec![variable("shared", Place::Written)],
+        };
         let theirs = defines(&text, &data, &[], &windows()).expect("a list");
         assert_eq!(theirs, defines(&text, &data, &[], &target()).expect("a list"));
     }

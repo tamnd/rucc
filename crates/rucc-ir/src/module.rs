@@ -286,6 +286,16 @@ pub enum Datum {
     /// where an address takes eight, and it is the same number wherever the image is loaded,
     /// so nothing has to be written into it at startup.
     Away(Idx<Reloc>),
+    /// How far the symbol in the relocation is from another, `.long to - from`. GNU C's
+    /// `&&to - &&from` in an initializer, where both are labels of one function and the distance
+    /// is a number once the function is laid out, so the assembler writes it and the linker is
+    /// never asked. The relocation says where it is measured to and how wide it is written.
+    Apart {
+        /// The place the distance is measured to, with what to add and the width.
+        to: Idx<Reloc>,
+        /// The place it is measured from.
+        from: Symbol,
+    },
 }
 
 impl Datum {
@@ -300,7 +310,9 @@ impl Datum {
             Self::Bytes(range) => range.len() as u64,
             // Rounded up, so that an `i1` in an image is a byte and a `_BitInt(24)` is three.
             Self::Scalar { ty, .. } => u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes()),
-            Self::Addr(reloc) | Self::Away(reloc) => u64::from(module[reloc].size),
+            Self::Addr(reloc) | Self::Away(reloc) | Self::Apart { to: reloc, .. } => {
+                u64::from(module[reloc].size)
+            }
         }
     }
 }

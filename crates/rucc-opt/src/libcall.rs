@@ -2049,7 +2049,9 @@ impl Site<'_> {
                 // A number written in the target's byte order, or an address the linker has not
                 // filled in. Neither is a byte this can read, and what follows one is at an offset
                 // that is right only if this one's width is, so the walk stops.
-                Datum::Scalar { .. } | Datum::Addr(_) | Datum::Away(_) => return None,
+                Datum::Scalar { .. } | Datum::Addr(_) | Datum::Away(_) | Datum::Apart { .. } => {
+                    return None;
+                }
             }
         }
         // An object whose image stops short of its size is zero from there on, which is what an

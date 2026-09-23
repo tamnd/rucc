@@ -308,6 +308,18 @@ impl Writer<'_> {
                     }
                 }
             }
+            // Spelled the way a jump table's cells are, which is what gas reads as a number it
+            // works out itself when both labels are in one section.
+            Piece::Apart { to, from, addend, bytes } => {
+                let directive = width(usize::from(*bytes)).unwrap_or(".long");
+                let prefix = self.directives.symbol();
+                let _ = write!(self.out, "\t{directive}\t{prefix}{to}-{prefix}{from}");
+                let _ = match addend.signum() {
+                    1 => writeln!(self.out, "+{addend}"),
+                    -1 => writeln!(self.out, "-{}", addend.unsigned_abs()),
+                    _ => writeln!(self.out),
+                };
+            }
         }
     }
 
@@ -1293,6 +1305,21 @@ mod tests {
         let away = Piece::Away { symbol: "y".to_owned(), addend: -3 };
         let text = data(vec![var("d", Place::ReadOnly, vec![away])], Os::Linux);
         assert!(text.contains("\nd:\n\t.long\ty-3 - .\n"), "{text}");
+    }
+
+    #[test]
+    fn a_distance_between_two_labels_is_written_as_one_less_the_other() {
+        let piece = |addend, bytes| Piece::Apart {
+            to: ".Llbl.1".to_owned(),
+            from: ".Llbl.0".to_owned(),
+            addend,
+            bytes,
+        };
+        let text = data(vec![var("b", Place::ReadOnly, vec![piece(0, 4)])], Os::Linux);
+        assert!(text.contains("\nb:\n\t.long\t.Llbl.1-.Llbl.0\n"), "{text}");
+
+        let text = data(vec![var("b", Place::ReadOnly, vec![piece(-2, 2)])], Os::Linux);
+        assert!(text.contains("\nb:\n\t.short\t.Llbl.1-.Llbl.0-2\n"), "{text}");
     }
 
     #[test]

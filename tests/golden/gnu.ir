@@ -11,6 +11,7 @@ global @stuff : bytes 2 = { i8 42, i8 1 }, align 1, linkage(internal)
 global @measured : bytes 2 = { i8 42, i8 43 }, align 1, linkage(internal)
 global @how_far : bytes 4 = { away.4 @measured + 1 }, align 1, linkage(external), section ".data.away"
 global @table.0 : bytes 16 = { addr.8 @.Llbl.0, addr.8 @.Llbl.1 }, align 8, linkage(internal), constant
+global @table.1 : bytes 8 = { i32 0, apart.4 @.Llbl.2 from @.Llbl.3 }, align 4, linkage(internal), constant
 global @.Lstr.0 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.1 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
 global @.Lstr.2 : bytes 12 = { bytes "three_names\00" }, align 1, linkage(internal), constant
@@ -246,6 +247,35 @@ block2(%17: i32):
 labels:
     block1 = @.Llbl.0
     block2 = @.Llbl.1
+}
+
+func @apart(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = block_addr block1
+    %3 = global_addr @table.1
+    %4 = iconst.i32 1
+    %5 = and %0, %4
+    %6 = sext.i64 %5
+    %7 = iconst.i64 4
+    %8 = mul.nsw %6, %7
+    %9 = ptr_add %3, %8
+    %10 = load.i32 %9, align 4, tbaa !1
+    %11 = sext.i64 %10
+    %12 = ptr_add %2, %11
+    indirect_br %12, block1, block2(%1)
+
+block1:
+    jump block2(%0)
+
+block2(%13: i32):
+    %14 = iconst.i32 3
+    %15 = add.nsw %13, %14
+    return %15
+
+labels:
+    block1 = @.Llbl.3
+    block2 = @.Llbl.2
 }
 
 func @barrier(), linkage(external) {
