@@ -1787,9 +1787,26 @@ impl<'u> Body<'_, 'u> {
     /// the machine, because which of those it is is the target's answer and this is not where
     /// the target's answers are kept. The list arrives as a pointer, which is what every
     /// target's `va_list` has decayed to by the time anything reads it.
+    ///
+    /// An integer two registers wide is read as the object form and then loaded, because where it
+    /// is has the rules of a pair of words rather than of a scalar: both halves in registers or
+    /// both in the argument area, and there on a boundary of its own size. The object form is the
+    /// walk that already knows both, and [`abi::va_slots`] is what tells it this is a pair.
     fn va_arg(&mut self, list: ExprId, ty: TypeId, span: Span) -> Option<Value> {
-        let list = self.value(list);
         let result = repr::value_type(self.types(), self.target(), ty)?;
+        if result.is_int() && result.bits() == 2 * self.target().pointer_width {
+            let at = self.va_object(list, ty, span);
+            let info = MemInfo {
+                size: u64::from(result.bits() / 8),
+                align: repr::align_of(self.types(), self.target(), ty),
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            return Some(self.build(span).load(result, at, info, Flags::NONE));
+        }
+        let list = self.value(list);
         let mut build = self.build(span);
         let args = build.func().push_values(&[list]);
         Some(build.value(InstData { args, ..InstData::new(Opcode::VaArg) }, result))

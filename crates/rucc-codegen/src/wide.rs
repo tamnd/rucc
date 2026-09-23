@@ -42,8 +42,18 @@
 //! wherever the convention leaves a register or a word empty. Both ends of a call are built from the
 //! same layout, a function's own parameters and every call it makes, so nothing below this has to
 //! know a parameter was ever in any other order, and the IR needs no form of parameter it did not
-//! have. A variadic signature is still refused, because its named parameters have to stay in front
-//! of the rest, and that is tamnd/rucc#351 along with the `va_arg` of one in tamnd/rucc#340.
+//! have.
+//!
+//! A call to a variadic function is laid out the same way over everything it passes, the arguments
+//! past the `...` included, because System V puts each of those where it would have gone had it
+//! been named. What the ABI asks of each of them moves onto the parameter it becomes, so the call
+//! names all its arguments afterwards and still says the callee is variadic, which is what sets the
+//! count of vector registers the callee is told about. A variadic function's own signature with a
+//! wide named parameter that goes in memory is still refused, because its named parameters are what
+//! `va_start` counts from, and so is any of this on a convention that counts the two register files
+//! as one run, where a float past the `...` travels in both. The `va_arg` of one is read in
+//! `rucc-lower` as a pair of words, which is the walk [`crate::varargs`] already has for a small
+//! structure.
 //!
 //! # Dividing and converting are calls into the runtime
 //!
@@ -129,7 +139,7 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
         walk(func).into_iter().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     let order: HashMap<Inst, usize> =
         insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
-    if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, &order, at, inst)) {
+    if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, conv, &order, at, inst)) {
         return false;
     }
     let Some(arriving) = plan(func.signature(), conv) else { return false };
@@ -252,7 +262,13 @@ fn understood(opcode: Opcode) -> bool {
 ///
 /// Asked of every instruction, and answered yes at once for the ones that never see a value this
 /// wide, which in a function that has one at all is still most of them.
-fn can_split(func: &Func, order: &HashMap<Inst, usize>, at: usize, inst: Inst) -> bool {
+fn can_split(
+    func: &Func,
+    conv: &CallRegs,
+    order: &HashMap<Inst, usize>,
+    at: usize,
+    inst: Inst,
+) -> bool {
     let data = func[inst];
     let reads = operands(func, inst);
     let wide = |&value: &Value| is_wide(func[value].ty);
@@ -284,11 +300,14 @@ fn can_split(func: &Func, order: &HashMap<Inst, usize>, at: usize, inst: Inst) -
         return false;
     }
     // Splitting an argument makes two of them, and which parameter an argument stands for is how a
-    // variadic call knows what the ABI asks of the ones its signature does not name. Two values
-    // where that list has one entry is a call laid out against the wrong list.
+    // variadic call knows what the ABI asks of the ones its signature does not name. So a variadic
+    // call is laid out as a whole, with the arguments past the `...` named as parameters, and that
+    // is only right where naming them changes nothing. On a convention that counts the two files as
+    // one run it does, because a float past the `...` goes in both files and one before it does
+    // not.
     if matches!(data.opcode, Opcode::Call | Opcode::CallIndirect) {
-        let Extra::Call(info) = data.extra else { return false };
-        if func[func[info].signature].variadic {
+        let Some((site, variadic)) = site(func, inst) else { return false };
+        if variadic && (conv.shared_positions || plan(&site, conv).is_none()) {
             return false;
         }
     }
@@ -1254,13 +1273,10 @@ fn call(
     let data = func[inst];
     let Extra::Call(info) = data.extra else { return };
     let info = func[info];
-    let whole = func[info.signature].clone();
+    let Some((whole, variadic)) = site(func, inst) else { return };
     let old = func[data.args].to_vec();
     // An indirect call's first operand is the address it calls, and the arguments come after it.
     let skip = usize::from(data.opcode == Opcode::CallIndirect);
-    if old.len() < skip + whole.params.len() {
-        return;
-    }
     let Some(slots) = plan(&whole, conv) else { return };
     let mut args = spread(&old[..skip], halves);
     for slot in slots.iter().copied() {
@@ -1276,16 +1292,16 @@ fn call(
         };
         args.push(value);
     }
-    // Whatever a variadic call passes beyond the parameters its signature names, which a plan
-    // leaves where they were because a signature that moves anything is never variadic.
-    args.extend(spread(&old[skip + whole.params.len()..], halves));
     let results: Vec<Type> = data
         .results()
         .map(|value| func[value].ty)
         .flat_map(|ty| if is_wide(ty) { vec![half(), half()] } else { vec![ty] })
         .collect();
-    let signature = func.add_signature(planned(&whole, &slots));
-    let extra = Extra::Call(func.add_call(CallInfo { signature, ..info }));
+    let signature = func.add_signature(planned(&Signature { variadic, ..whole }, &slots));
+    // What the ABI asks of each argument past the `...` is on the parameter it became now, so the
+    // call names none of them any more and the list it kept that in is empty.
+    let varargs = if variadic { func.push_abis(&[]) } else { info.varargs };
+    let extra = Extra::Call(func.add_call(CallInfo { signature, varargs, ..info }));
     let args = func.push_values(&args);
     let span = func.span(inst);
     let made = func.create_inst(InstData { args, extra, ..data }, &results, span);
@@ -1300,6 +1316,37 @@ fn call(
         }
     }
     func.remove_inst(inst);
+}
+
+/// Everything one call passes as the one list of parameters it is laid out as, and whether the
+/// callee is variadic.
+///
+/// A variadic callee's signature names the parameters in front of the `...` and nothing else, and
+/// what the ABI asks of each argument behind it is on the call. Here those become parameters too,
+/// each with what the call said about it, which is the list the convention lays out anyway: on
+/// System V an argument past the `...` goes where it would have gone had it been named, and the
+/// one thing the callee is told is how many vector registers were used, which is a count over all
+/// of them. The list comes back not variadic so [`plan`] lays it out as a whole, and the flag is
+/// handed back beside it for the signature the call is made against.
+fn site(func: &Func, inst: Inst) -> Option<(Signature, bool)> {
+    let data = func[inst];
+    let Extra::Call(info) = data.extra else { return None };
+    let info = func[info];
+    let mut whole = func[info.signature].clone();
+    let skip = usize::from(data.opcode == Opcode::CallIndirect);
+    let args = &func[data.args];
+    let named = skip + whole.params.len();
+    if args.len() < named {
+        return None;
+    }
+    let beyond = &func[info.varargs];
+    for (index, &value) in args[named..].iter().enumerate() {
+        let abi = beyond.get(index).copied().unwrap_or_default();
+        whole.params.push(Param { ty: func[value].ty, abi });
+    }
+    let variadic = whole.variadic;
+    whole.variadic = false;
+    Some((whole, variadic))
 }
 
 /// A `return`, whose operands are the values the signature says and so are halves now.
@@ -1464,7 +1511,7 @@ fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Float, Func, MemOrder, Module, Restrict, Signature, Type, Value,
+        Abi, Block, Builder, Flags, Float, Func, MemOrder, Module, Restrict, Signature, Type, Value,
     };
     use rucc_target::x86_64::{MINGW64, SYSV};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
@@ -2067,6 +2114,54 @@ mod tests {
 
         assert!(!halves(&mut func, &mut names, &SYSV), "the named parameters cannot move");
         assert_eq!(printed(&func, &mut names), before, "so nothing moved");
+    }
+
+    /// A wide argument past the `...` is laid out as if it had been named, which is what System V
+    /// does with it, and the call names every argument afterwards so the list of what the ABI asks
+    /// of the unnamed ones is empty.
+    #[test]
+    fn a_wide_argument_past_the_dots_goes_where_a_named_one_would() {
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let (mut func, entry, _) = shell(&mut names, &[], &[]);
+        let callee = names.intern("g");
+        let params = [word, word, word, word, word];
+        let signature = Signature { variadic: true, ..Signature::new().with_params(&params) };
+        let signature = func.add_signature(signature);
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(word, 1);
+        let big = build.iconst(wide(), 4);
+        build.call_varargs(callee, signature, &[one, one, one, one, one, big], &[Abi::Plain]);
+        build.ret(&[]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let call = func.insts(entry).find(|&inst| func[inst].opcode == Opcode::Call);
+        let call = call.expect("the call is still there");
+        let Extra::Call(info) = func[call].extra else { unreachable!("a call has call info") };
+        let made = &func[func[info].signature];
+        assert!(made.variadic, "the callee is still variadic");
+        assert_eq!(types(made), vec![word; 8], "five words, a filler and the two halves");
+        assert!(func[func[info].varargs].is_empty(), "every argument is named now");
+        assert_eq!(func[func[call].args].len(), 8, "one argument for each parameter");
+    }
+
+    /// The same call on a convention that counts both files as one run is left alone, because
+    /// naming a float past the `...` there changes which registers it goes in.
+    #[test]
+    fn a_wide_argument_past_the_dots_on_windows_leaves_the_function_alone() {
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let (mut func, entry, _) = shell(&mut names, &[], &[]);
+        let callee = names.intern("g");
+        let signature = Signature { variadic: true, ..Signature::new().with_params(&[word]) };
+        let signature = func.add_signature(signature);
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(word, 1);
+        let big = build.iconst(wide(), 4);
+        build.call_varargs(callee, signature, &[one, big], &[Abi::Plain]);
+        build.ret(&[]);
+
+        assert!(!halves(&mut func, &mut names, &MINGW64), "the call is left for a refusal");
     }
 
     /// The order the function holds its blocks in is not the order they run in.

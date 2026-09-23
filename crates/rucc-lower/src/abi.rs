@@ -298,10 +298,30 @@ pub(crate) fn width(slot: Slot) -> u64 {
 /// Which registers those were is not a thing the callee can work out from the type: the caller
 /// may have passed anything at all ahead of it, and the offsets in the list are what say where
 /// the object ended up. So this is the shape of the answer and the list holds the rest of it.
+///
+/// An `__int128` is asked about as the two words it is. Asked as a scalar, the classification
+/// says it travels as itself, which is true and says nothing about where either half is, and the
+/// psABI's answer is the one it gives a sixteen byte aligned pair of `long`s: two general purpose
+/// registers when both are left and the argument area on a sixteen byte boundary when they are
+/// not.
 pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Slot> {
     let Some(shaped) = shape(types, target, ty) else { return Vec::new() };
     let Some(mut call) = target.call() else { return Vec::new() };
-    let arg = shaped.arg();
+    let word = u64::from(target.pointer_width / 8);
+    let halves;
+    let arg = match shaped {
+        Shaped::Scalar(scalar) if scalar.kind == Kind::Integer && scalar.size == 2 * word => {
+            let half = Scalar { kind: Kind::Integer, size: word, align: word };
+            halves = [Piece { offset: 0, scalar: half }, Piece { offset: word, scalar: half }];
+            Arg::Aggregate(Shape {
+                size: scalar.size,
+                align: scalar.align,
+                pieces: &halves,
+                complex: false,
+            })
+        }
+        _ => shaped.arg(),
+    };
     match call.argument(&arg) {
         Pass::Pieces(slots) => slots,
         _ => Vec::new(),
@@ -671,5 +691,18 @@ mod tests {
         assert_eq!(sysv.args[0].types, vec![Type::int(64), Type::int(64)]);
         assert_eq!(win64.args[0].pass, Pass::Reference);
         assert_eq!(win64.args[0].types, vec![Type::PTR]);
+    }
+
+    /// `va_arg(ap, __int128)` reads two general purpose registers on System V, which is what makes
+    /// the walk over the list want room for both at once, and on Windows the argument is the
+    /// address of a copy, which the walk there works out from the size and needs no slots for.
+    #[test]
+    fn an_int128_read_off_a_list_is_two_words_on_sysv_and_none_on_windows() {
+        let types = Types::new();
+        let wide = types.int(IntKind::Int128);
+        let half = Slot::Integer { offset: 0, size: 8 };
+        let sysv = va_slots(&types, &target("x86_64-unknown-linux-gnu"), wide);
+        assert_eq!(sysv, vec![half, Slot::Integer { offset: 8, size: 8 }]);
+        assert!(va_slots(&types, &target("x86_64-pc-windows-gnu"), wide).is_empty());
     }
 }
