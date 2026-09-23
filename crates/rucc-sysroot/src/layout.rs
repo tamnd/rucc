@@ -343,7 +343,16 @@ impl Kernel {
             return None;
         }
         let arch = kernel_arch(target.arch())?;
-        Some(Kernel { arch, root: cache.join("kernel-headers") })
+        Some(Kernel { arch, root: Kernel::in_cache(cache) })
+    }
+
+    /// Where the tree is under a cache directory, whichever target is asking.
+    ///
+    /// Separate from [`Kernel::for_target`] because an install puts the whole tree there and has no
+    /// target to ask with, and one place that spells the name is one place it can be wrong.
+    #[must_use]
+    pub fn in_cache(cache: &Path) -> PathBuf {
+        cache.join("kernel-headers")
     }
 
     /// The directory both of these are under.

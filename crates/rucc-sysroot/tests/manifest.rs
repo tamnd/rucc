@@ -3,7 +3,7 @@
 //! Design: `spec/cross-compile/08-sysroots.md` section 8.6 and `spec/cross-compile/02-the-goal.md`
 //! claim 5.
 
-use rucc_sysroot::{Input, Licence, Manifest, ManifestError, Provenance};
+use rucc_sysroot::{Input, KernelManifest, Licence, Manifest, ManifestError, Provenance};
 use rucc_tuple::{TargetTuple, Version};
 
 /// The target with this spelling.
@@ -322,4 +322,63 @@ fn a_truncated_hash_is_refused_rather_than_kept() {
         "bundled",
     );
     assert!(matches!(Manifest::parse(&uppercase), Err(ManifestError::BadHash { line: 3, .. })));
+}
+
+/// The kernel tree's record is written by `bin/kernel-headers` in `tamnd/rucc-cross`, and this is
+/// the start of one it wrote, so what is tested is that the producer's text reads back as itself.
+#[test]
+fn the_kernel_trees_record_reads_back_as_the_text_the_producer_wrote() {
+    let text = "rucc kernel headers manifest 1\n\
+                linux\t6.19\n\
+                arm/asm/auxvec.h\tlinux-6.19\t\
+                4ca852e0b982f283f06b49a7bc96a647ee4d40d491cd4b50fb3c5e39eac94569\t\
+                gpl-2.0-with-linux-syscall-note\n\
+                generic/linux/types.h\tlinux-6.19\t\
+                07cfe8e5f1188e41649907f107c4ed411a61102c2a53ca50a5b954b5644befb6\t\
+                gpl-2.0-with-linux-syscall-note\n";
+    let read = KernelManifest::parse(text).expect("a record the producer writes");
+    assert_eq!(read.linux(), Version::new(6, 19));
+    assert_eq!(read.files().len(), 2);
+    assert_eq!(read.files()[0].licence, Licence::LinuxUapi);
+    assert_eq!(read.render(), text);
+    // Which makes the digest the number `sha256sum` prints for the file.
+    assert_eq!(read.digest(), rucc_sysroot::sha256::hex(text.as_bytes()));
+}
+
+#[test]
+fn a_kernel_record_that_does_not_parse_says_which_line_and_why() {
+    // A sysroot's manifest is not a kernel tree's record and the other way round, which is how an
+    // install handed the wrong archive finds out.
+    assert_eq!(
+        KernelManifest::parse("rucc sysroot manifest 3\ntarget\tx86_64-linux-musl\n"),
+        Err(ManifestError::NotAManifest)
+    );
+    assert_eq!(
+        Manifest::parse("rucc kernel headers manifest 1\nlinux\t6.19\n"),
+        Err(ManifestError::NotAManifest)
+    );
+    assert_eq!(
+        KernelManifest::parse("rucc kernel headers manifest 2\n"),
+        Err(ManifestError::UnknownVersion("2".into()))
+    );
+    assert_eq!(
+        KernelManifest::parse("rucc kernel headers manifest 1\nlinux\tsix\n"),
+        Err(ManifestError::BadKernel("six".into()))
+    );
+    let wide = format!(
+        "rucc kernel headers manifest 1\nlinux\t6.19\nx86/asm/a.h\tlinux-6.19\turl\t{}\tmit\n",
+        "a".repeat(64)
+    );
+    assert_eq!(
+        KernelManifest::parse(&wide),
+        Err(ManifestError::BadKernelFile { line: 3, fields: 5 })
+    );
+    let hollow = format!(
+        "rucc kernel headers manifest 1\nlinux\t6.19\n\tlinux-6.19\t{}\tmit\n",
+        "a".repeat(64)
+    );
+    assert_eq!(
+        KernelManifest::parse(&hollow),
+        Err(ManifestError::EmptyField { line: 3, field: "path" })
+    );
 }

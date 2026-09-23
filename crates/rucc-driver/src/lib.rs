@@ -2151,44 +2151,79 @@ fn unpinned(tuple: &str) -> String {
 /// and the check is ours, so a person reading this wants to know which downloader ran, that the
 /// bytes matched, how many files the record named and where the tree ended up. A fetch of something
 /// that is already there says that instead and moves nothing.
-fn fetch_sysroot(what: &rucc_sysroot::Pinned, target: TargetTuple, cache: &std::path::Path) -> i32 {
+///
+/// A Linux target is two artifacts, its own sysroot and the kernel header tree every Linux target
+/// shares, and `kernel` is the second one when the target reads it. It is fetched after the sysroot
+/// and by the same two steps, so a machine that has fetched one Linux target already has it and a
+/// second target's fetch says so and moves nothing.
+fn fetch_sysroot(
+    what: &rucc_sysroot::Pinned,
+    kernel: Option<&rucc_sysroot::Pinned>,
+    target: TargetTuple,
+    cache: &std::path::Path,
+) -> i32 {
     let tuple = target.to_canonical_string();
-    let archive = what.archive_in(cache);
     let say = |line: &str| println!("rucc: {tuple}: {line}");
-    match fetch::fetch(what.url, what.sha256, &archive) {
-        Ok(fetch::Fetched::AlreadyThere) => {
-            say(&format!("{} is already here and matches the hash", archive.display()));
-        }
-        Ok(fetch::Fetched::Downloaded(by)) => {
-            say(&format!("downloaded {} with {}", what.url, by.program()));
-        }
+    if let Err(why) = bring(what, cache, &say) {
+        return complain(why);
+    }
+    let archive = what.archive_in(cache);
+    match install::install(&archive, what.sha256, target, cache) {
+        Ok(done) => report(&done, "sysroot", &say),
         Err(why) => return complain(why),
     }
-    match install::install(&archive, what.sha256, target, cache) {
+    let Some(kernel) = kernel else { return 0 };
+    if let Err(why) = bring(kernel, cache, &say) {
+        return complain(why);
+    }
+    match install::install_kernel(&kernel.archive_in(cache), kernel.sha256, cache) {
         Ok(done) => {
-            match &done.before {
-                install::Before::Nothing => {
-                    say(&format!("{} files installed at {}", done.files, done.root.display()));
-                }
-                install::Before::TheSame => {
-                    say(&format!(
-                        "the same sysroot is already at {}, so nothing moved",
-                        done.root.display()
-                    ));
-                }
-                install::Before::Different(was) => {
-                    say(&format!(
-                        "{} files installed at {}, over a tree whose record digested to {was}",
-                        done.files,
-                        done.root.display()
-                    ));
-                }
-            }
-            say(&format!("the record digests to {}", done.digest));
+            report(&done, "kernel header tree", &say);
             0
         }
         Err(why) => complain(why),
     }
+}
+
+/// The download half of a fetch, for one artifact.
+fn bring(
+    what: &rucc_sysroot::Pinned,
+    cache: &std::path::Path,
+    say: &impl Fn(&str),
+) -> Result<(), CliError> {
+    let archive = what.archive_in(cache);
+    match fetch::fetch(what.url, what.sha256, &archive)? {
+        fetch::Fetched::AlreadyThere => {
+            say(&format!("{} is already here and matches the hash", archive.display()));
+        }
+        fetch::Fetched::Downloaded(by) => {
+            say(&format!("downloaded {} with {}", what.url, by.program()));
+        }
+    }
+    Ok(())
+}
+
+/// What an install did, in the words a person reading a fetch wants.
+fn report(done: &install::Installed, what: &str, say: &impl Fn(&str)) {
+    match &done.before {
+        install::Before::Nothing => {
+            say(&format!("{} files installed at {}", done.files, done.root.display()));
+        }
+        install::Before::TheSame => {
+            say(&format!(
+                "the same {what} is already at {}, so nothing moved",
+                done.root.display()
+            ));
+        }
+        install::Before::Different(was) => {
+            say(&format!(
+                "{} files installed at {}, over a tree whose record digested to {was}",
+                done.files,
+                done.root.display()
+            ));
+        }
+    }
+    say(&format!("the {what}'s record digests to {}", done.digest));
 }
 
 /// What one of the `-dump` and `-print` flags prints.
@@ -3163,7 +3198,11 @@ pub fn run(args: &[String]) -> i32 {
             }
             0
         }
-        Ok(Action::Fetch { what, target, cache }) => fetch_sysroot(what, target, &cache),
+        Ok(Action::Fetch { what, target, cache }) => {
+            let kernel = rucc_sysroot::Kernel::for_target(&cache, target)
+                .map(|_| &rucc_sysroot::KERNEL_HEADERS);
+            fetch_sysroot(what, kernel, target, &cache)
+        }
         Ok(Action::FetchMsvcSdk { target, accepted, cache }) => {
             msvc::fetch_msvc_sdk(target, accepted, &cache)
         }
@@ -3429,17 +3468,17 @@ mod tests {
         assert!(e.message.contains("assembler-with-cpp"), "{}", e.message);
     }
 
-    /// What `--fetch` says for a target this release pins nothing for, which is every target except
-    /// the three windows-gnu ones today.
+    /// What `--fetch` says for a target this release pins nothing for, which today is every target
+    /// but the three windows-gnu ones and the four musl ones.
     #[test]
     fn a_fetch_of_a_target_nothing_is_pinned_for_says_so_rather_than_reaching_the_network() {
-        let e = parse_args(&args(&["--fetch", "x86_64-linux-musl"])).unwrap_err();
-        assert!(e.message.contains("pins no sysroot for x86_64-linux-musl"), "{}", e.message);
+        let e = parse_args(&args(&["--fetch", "x86_64-linux-gnu"])).unwrap_err();
+        assert!(e.message.contains("pins no sysroot for x86_64-linux-gnu"), "{}", e.message);
         // And what it does pin, because a release with some rows in the table and a release with
         // none are two situations and the second sentence is what tells them apart.
         assert!(e.message.contains("x86_64-windows-gnu"), "{}", e.message);
         // The joined spelling is the same flag.
-        let joined = parse_args(&args(&["--fetch=x86_64-linux-musl"])).unwrap_err();
+        let joined = parse_args(&args(&["--fetch=x86_64-linux-gnu"])).unwrap_err();
         assert_eq!(joined, e);
     }
 

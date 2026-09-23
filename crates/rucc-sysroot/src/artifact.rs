@@ -32,13 +32,20 @@
 //!
 //! # What is in it
 //!
-//! Three rows, which are the three windows-gnu targets. `bin/mingw-headers` in `tamnd/rucc-cross`
-//! installs mingw-w64 14.0.0's headers, `bin/mingw-runtime` builds the runtime and the import
-//! libraries into the `lib` directory beside them, `bin/artifact` packs the tree, and the release
-//! `sysroots-2026-09-21` is where the files are. The archives are 15.2 MiB for x86_64, 14.8 MiB for
-//! i686 and 12.5 MiB for aarch64, installing to 134 MB, 128 MB and 113 MB. The header half is the
-//! same 1702 files in all three, because mingw-w64 has no per architecture split and
-//! [`crate::Sysroot::splits_by_arch`] says so, and the `lib` half is what differs.
+//! Seven rows, which are the three windows-gnu targets and four musl ones. For windows-gnu,
+//! `bin/mingw-headers` in `tamnd/rucc-cross` installs mingw-w64 14.0.0's headers, `bin/mingw-runtime`
+//! builds the runtime and the import libraries into the `lib` directory beside them, `bin/artifact`
+//! packs the tree, and the release `sysroots-2026-09-21` is where the files are. The archives are
+//! 15.2 MiB for x86_64, 14.8 MiB for i686 and 12.5 MiB for aarch64, installing to 134 MB, 128 MB and
+//! 113 MB. The header half is the same 1702 files in all three, because mingw-w64 has no per
+//! architecture split and [`crate::Sysroot::splits_by_arch`] says so, and the `lib` half is what
+//! differs.
+//!
+//! For musl, `bin/sysroot` builds musl 1.2.5 for x86_64, aarch64, riscv64 and armv7 hard float, and
+//! the release `sysroots-2026-09-23` has the four archives, each about 2 MiB and installing to between
+//! 7 and 13 MB. They hold musl's headers and its static libraries and start files, and not the Linux
+//! uapi headers, which are [`KERNEL_HEADERS`] and fetched once for every Linux target. Both runs that
+//! produced them, on two machines, packed the same bytes.
 //!
 //! Every other target is still unpublished, which is a statement about producers rather than about
 //! this table: `--fetch` of one says so by name, and the day a tree for it is published is the day a
@@ -48,9 +55,13 @@
 use std::path::{Path, PathBuf};
 
 /// One artifact: the sysroot for one target, as this release pins it.
+///
+/// Or the kernel header tree, which is [`KERNEL_HEADERS`] and the one artifact that is not any
+/// target's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pinned {
-    /// The target it is the sysroot for, in the spelling that names its directory under the cache.
+    /// The target it is the sysroot for, in the spelling that names its directory under the cache,
+    /// or `kernel-headers` for the tree every Linux target shares, which is that tree's directory.
     pub tuple: &'static str,
     /// Where to get it. Handed to a downloader as it stands, and nothing here builds it out of
     /// parts.
@@ -98,9 +109,19 @@ impl Pinned {
 /// and two releases of this file diff as what changed between them.
 pub const PINNED: &[Pinned] = &[
     Pinned {
+        tuple: "aarch64-linux-musl",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-aarch64-linux-musl.tar.gz",
+        sha256: "098c24c0c27d264dceaee76141f0933845dcc8a7c3a4b473954987f731fecde5",
+    },
+    Pinned {
         tuple: "aarch64-windows-gnu",
         url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-aarch64-windows-gnu.tar.gz",
         sha256: "cc6be4263b09a475895d9054bb4b096d837010b7e5ed25ebc8934accccd5258e",
+    },
+    Pinned {
+        tuple: "armv7-linux-musleabihf",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-armv7-linux-musleabihf.tar.gz",
+        sha256: "645ceef60e0302b260ad804569243c3470f7545f1b135a143f9b7ec8408b6f78",
     },
     Pinned {
         tuple: "i686-windows-gnu",
@@ -108,11 +129,34 @@ pub const PINNED: &[Pinned] = &[
         sha256: "296de7554f57d308c00b405c145eb314886e1e28ff8507aa6e7b34e7e4def7f1",
     },
     Pinned {
+        tuple: "riscv64-linux-musl",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-riscv64-linux-musl.tar.gz",
+        sha256: "00fc00f996d0a9a3de1cabd95840d423de1562ed5345dd5c47f1bf89b30f0b99",
+    },
+    Pinned {
+        tuple: "x86_64-linux-musl",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-x86_64-linux-musl.tar.gz",
+        sha256: "93b42df66c0a7547c3e96cd5512267790df1ca0227a0000ba4f1808eb214c376",
+    },
+    Pinned {
         tuple: "x86_64-windows-gnu",
         url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-x86_64-windows-gnu.tar.gz",
         sha256: "2f1e34ea0ad3e1ae8be08c054c61030e0a916053e194916f4045e08dcfd69545",
     },
 ];
+
+/// The Linux uapi header tree, which every Linux target reads beside its own sysroot.
+///
+/// One archive rather than a part of each Linux sysroot, for the reason [`crate::Kernel`] gives
+/// about the directory: the tree is the same for every Linux row except a small `asm/` per
+/// architecture, so a copy in every sysroot would be the same eleven megabytes once per target.
+/// `bin/kernel-headers` in `tamnd/rucc-cross` produces it and `bin/artifact kernel-headers` packs it,
+/// and `--fetch` of a Linux target installs it after the sysroot when it is not there already.
+pub const KERNEL_HEADERS: Pinned = Pinned {
+    tuple: "kernel-headers",
+    url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-kernel-headers.tar.gz",
+    sha256: "e96934f553df19d6bdbb6804f1b52d079adc4bea10a819d51eda5bc4ec584f2d",
+};
 
 /// The artifact this release pins for `tuple`, if it pins one.
 ///
@@ -227,5 +271,22 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted, pinned_targets(), "the rows are in tuple order and each target once");
+    }
+
+    /// The kernel tree's row is held to the same rules as a target's, except that its name is the
+    /// directory it is installed at rather than a tuple.
+    #[test]
+    fn the_kernel_tree_is_a_url_and_a_hash_and_no_target_is_called_that() {
+        let what = KERNEL_HEADERS;
+        assert!(what.url.starts_with("https://"), "{}", what.url);
+        assert!(!what.url.contains('?') && !what.url.contains('#'), "{}", what.url);
+        assert_eq!(what.file_name(), "rucc-kernel-headers.tar.gz");
+        assert_eq!(what.sha256.len(), 64, "{}", what.sha256);
+        assert!(
+            what.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{} is not lowercase hex",
+            what.sha256
+        );
+        assert_eq!(pinned_for(what.tuple), None);
     }
 }

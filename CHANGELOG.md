@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `rucc --fetch` now installs the four musl targets, `x86_64-linux-musl`, `aarch64-linux-musl`, `riscv64-linux-musl` and `armv7-linux-musleabihf`. Each is musl 1.2.5 with its static libraries and start files, packed by `tamnd/rucc-cross` and published in its release `sysroots-2026-09-23`, about 2 MiB each. The Linux uapi headers are a fifth archive shared by every Linux target, so a fetch of the first Linux target also installs them at `kernel-headers` in the cache, and later ones find them there. Both archives are checked against a hash compiled into the release, and the kernel tree is checked against its own record the same way a sysroot is.
+
+- `PROVENANCE` has a `tree` line for the kernel header archive beside the `target` lines, so `bin/artifact --against` in `tamnd/rucc-cross` can check a fresh build of it every night.
+
+### Changed
+
+- The Linux header trees are no longer counted in the base install. Spec 13.1 now counts only what every target needs, which comes to 36.2 MB, and moves the glibc header tree, the musl sysroot and the Linux uapi headers to the rows fetched per target. `cargo xtask size` reports them the same way. With that, the minimal configuration the spec used to plan separately is simply the base.
+
 ## 0.10.80
 
 ### Added
