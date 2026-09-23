@@ -7514,6 +7514,11 @@ impl<'u> Body<'_, 'u> {
         let direct = self.direct(callee, &plan, &actual, span);
         let inst = match direct {
             Some((mut symbol, mut settled)) => {
+                // `(enter(s), f)(x)` still calls `enter`, after the arguments as the pointer
+                // would have been, and then `f` by name.
+                for effect in self.named_callee(callee).0 {
+                    self.discard(effect);
+                }
                 // The one call this rewrites rather than builds. A checking function handed an
                 // object size that says nothing is known is the function it guards with an
                 // argument nobody reads, so the argument goes and the plain name takes its place.
@@ -7619,6 +7624,7 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Option<(Symbol, Plan)> {
         let tast = self.tast();
+        let callee = self.named_callee(callee).1;
         let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
         else {
             return None;
@@ -7643,6 +7649,22 @@ impl<'u> Body<'_, 'u> {
             return None;
         }
         Some((self.unit.symbol_of(decl), settled))
+    }
+
+    /// The callee with the commas in front of it taken off, and the left sides they had.
+    ///
+    /// tcc writes `(tcc_enter_state(s1), _tcc_warning)(fmt, ...)`, and gcc calls `_tcc_warning`
+    /// by name there rather than loading its address, even at O0. Loading it is not wrong, but
+    /// in a shared library the address comes out of the GOT, and tcc's own linker fills that slot
+    /// wrongly for a function the library defines, so tcc's dlltest crashed.
+    fn named_callee(&self, mut callee: ExprId) -> (Vec<ExprId>, ExprId) {
+        let tast = self.tast();
+        let mut effects = Vec::new();
+        while let ExprKind::Comma { lhs, rhs } = tast[callee].kind {
+            effects.push(lhs);
+            callee = rhs;
+        }
+        (effects, callee)
     }
 
     /// The library function a `_chk` call means when the object size it carries says nothing is
@@ -7673,6 +7695,7 @@ impl<'u> Body<'_, 'u> {
         settled: &Plan,
     ) -> Option<Symbol> {
         let tast = self.tast();
+        let callee = self.named_callee(callee).1;
         let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
         else {
             return None;

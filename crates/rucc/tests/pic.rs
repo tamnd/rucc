@@ -180,3 +180,24 @@ int for_a_library(void) { return 1; }
     let library = asm("macro-lib", &["-fPIC"], source);
     assert!(library.contains("for_a_library:"), "{library}");
 }
+
+/// A function named behind a comma is called by name, and its address never comes out of the
+/// table.
+///
+/// tcc writes `(tcc_enter_state(s1), _tcc_warning)(fmt, ...)` and gcc calls `_tcc_warning`
+/// there, even at O0. Loading the address through the GOT is not wrong, but tcc's own linker
+/// fills that slot wrongly for a function the shared library defines, and its dlltest crashed.
+#[test]
+fn a_function_named_behind_a_comma_is_called_by_name() {
+    let source = "\
+void enter(void);
+void warn(const char *fmt, ...);
+void tell(const char *what) { (enter(), warn)(\"%s\", what); }
+";
+    for level in ["-O0", "-O2"] {
+        let text = asm("comma", &["-fPIC", level], source);
+        assert!(text.contains("call\tenter"), "{level}: {text}");
+        assert!(text.contains("\tcall\twarn"), "{level}: {text}");
+        assert!(!text.contains("warn@GOTPCREL"), "{level}: {text}");
+    }
+}

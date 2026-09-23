@@ -474,6 +474,11 @@ impl Assembler<'_> {
                 // instruction it is in is bytes like any others.
                 let after = u8::try_from(end - at - 4).expect("an instruction this long");
                 self.text.relocs.push(Reloc { at, symbol, kind, addend, after });
+                // The addend is the whole of it, so the four bytes are left as nothing, which is
+                // what gas leaves. tcc's linker adds to what is there rather than writing over it,
+                // and a `mov cstr_buf+8(%rip)` with the eight in both places read eight bytes
+                // past the member it wanted.
+                self.text.bytes[at..at + 4].fill(0);
             } else if let Some((to, disp)) = labelled {
                 // The address of a label, which is the four bytes an address counted from the
                 // instruction pointer leaves and is patched where a jump is patched rather than
@@ -494,10 +499,8 @@ impl Assembler<'_> {
     ///
     /// A symbol with no base and no index is reached from the instruction pointer, which is how a
     /// global is reached in position independent code and the only way this compiler reaches one.
-    /// The displacement is written into the instruction and counted again in the relocation's
-    /// addend, because a linker writes the whole four bytes from the addend and never reads what
-    /// was there. What is in the bytes is what the instruction meant before anything was linked,
-    /// which is what a person disassembling the object file would want to see.
+    /// The displacement is carried to the relocation's addend, and the four bytes it would have
+    /// gone in are left as nothing once the relocation is written.
     fn addr(
         &self,
         operands: &[Operand],
@@ -755,7 +758,9 @@ mod tests {
 
         let text =
             assemble(&[func], &names, &target(), true, false).expect("a load of a global").text;
-        assert_eq!(hex(&text.bytes), "48 8b 05 08 00 00 00");
+        // The four bytes are nothing, as gas leaves them, because tcc's linker adds to what is
+        // there and would count the eight twice.
+        assert_eq!(hex(&text.bytes), "48 8b 05 00 00 00 00");
         // Four bytes back to where the instruction ends, and then the eight the address already
         // meant. A relocation counts from where its own bytes start and an instruction counts
         // from where it ends, and the addend is what makes up the difference.
