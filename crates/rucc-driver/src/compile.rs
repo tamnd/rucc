@@ -966,6 +966,39 @@ fn generate(
                 );
                 *assembly = Some(listing.map_err(refused)?);
             }
+            // A template kept as text has no bytes until an assembler reads it, and it may jump to
+            // a label another statement's text defines or switch section halfway through. So a
+            // unit with one in it is assembled the way gcc assembles every unit: written out as a
+            // listing and read back. The listing carries no line table yet, so a build that asked
+            // for one is refused rather than handed an object without it.
+            if rucc_asm::kept(&funcs, names) {
+                if opts.debug_info {
+                    return Err(vec![unsupported(
+                        "debug information for a unit with an `asm` template kept as text",
+                    )]);
+                }
+                let listing = rucc_asm::print(
+                    &funcs,
+                    &globals,
+                    &aliases,
+                    names,
+                    target,
+                    unwind,
+                    output(opts, target),
+                )
+                .map_err(refused)?;
+                let read = rucc_asm::read(&listing).map_err(|trouble| {
+                    vec![unsupported(&format!(
+                        "an `asm` template kept as text, whose listing the assembler stopped at on \
+                         line {}: {}",
+                        trouble.line, trouble.why
+                    ))]
+                })?;
+                let defines = rucc_object::assembled_defines(&read);
+                let bytes =
+                    rucc_object::assembled(&read, &TargetInfo::new(opts.target)).map_err(wrote)?;
+                return Ok(Artifact::Object { bytes, defines });
+            }
             let assembled = rucc_asm::assemble(&funcs, names, target, unwind, opts.debug_info)
                 .map_err(refused)?;
             let text = assembled.text;

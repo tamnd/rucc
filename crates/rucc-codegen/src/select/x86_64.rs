@@ -325,7 +325,10 @@ mod tests {
     /// one step further still: it is not an instruction, and what it holds is a byte the program
     /// wrote out itself because its assembler was older than the instruction it wanted. There is
     /// nothing for a rule to have said about a number a program handed the processor directly.
-    const TEMPLATE: &[&str] = &["cpuid", "pause", "align", "byte"];
+    ///
+    /// A template kept as text is the fifth, and is further again: it is not even one instruction,
+    /// it is whatever the program wrote that could not be read as instructions.
+    const TEMPLATE: &[&str] = &["cpuid", "pause", "align", "byte", "template"];
 
     /// The rotates and the test against a constant, which a template writes and nothing else does.
     ///

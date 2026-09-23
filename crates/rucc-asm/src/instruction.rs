@@ -114,6 +114,8 @@ enum Operand {
     High(PhysReg),
     /// A vector register.
     Xmm(PhysReg),
+    /// A place on the x87 stack, by its depth.
+    Stack(u8),
     /// An address, and the name in its displacement when it has one.
     Mem(Addr, Option<Named>),
     /// A number the instruction carries.
@@ -154,6 +156,18 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         }
         Err(why) => return Err(why),
     };
+    let named: Vec<u8> = operands
+        .iter()
+        .filter_map(|op| match op {
+            Operand::Stack(depth) => Some(*depth),
+            _ => None,
+        })
+        .collect();
+    if !named.is_empty() && named != depths(&mnemonic) {
+        return Err(format!(
+            "'{word}' at those depths of the x87 stack is not one this compiler has"
+        ));
+    }
 
     let mut bytes = Vec::with_capacity(16);
     let holes = encode(&mnemonic, &values, &mut bytes).map_err(|why| why.to_string())?;
@@ -402,6 +416,7 @@ fn value(operand: &Operand, standing: i64) -> Value {
         Operand::Reg(reg, width) => Value::Reg(*reg, *width),
         Operand::High(reg) => Value::High(*reg),
         Operand::Xmm(reg) => Value::Xmm(*reg),
+        Operand::Stack(_) => Value::Stack,
         Operand::Mem(addr, _) => Value::Mem(*addr),
         Operand::Imm(number) => Value::Imm(*number),
         Operand::Expr(_) => Value::Imm(standing),
@@ -428,6 +443,9 @@ fn operand(text: &str) -> Result<Operand, String> {
         return Ok(number(rest.trim())
             .map_or_else(|_| Operand::Expr(rest.trim().to_owned()), Operand::Imm));
     }
+    if let Some(depth) = stack(text) {
+        return Ok(Operand::Stack(depth));
+    }
     if text.starts_with('%') && !text.contains('(') && !text.contains(':') {
         return register(&text[1..]);
     }
@@ -445,6 +463,30 @@ fn operand(text: &str) -> Result<Operand, String> {
         return Ok(Operand::Dest(Named { name, addend }));
     }
     Err(format!("'{text}' is not an operand this compiler reads"))
+}
+
+/// The depth of a place on the x87 stack, for `%st` and `%st(N)`.
+fn stack(text: &str) -> Option<u8> {
+    let rest = text.strip_prefix("%st")?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let depth = rest.strip_prefix('(')?.strip_suffix(')')?.trim().parse::<u8>().ok()?;
+    (depth < 8).then_some(depth)
+}
+
+/// The depths an x87 instruction of that mnemonic is encoded with.
+///
+/// The encoder has no depth in its arguments: each row is the one pair of places the compiler
+/// writes that instruction with, and the depth is part of its opcode. So a line naming any other
+/// depth is refused here rather than written as the one the row has.
+fn depths(mnemonic: &str) -> &'static [u8] {
+    match mnemonic {
+        "faddp" | "fsubp" | "fsubrp" | "fmulp" | "fdivp" | "fdivrp" => &[0, 1],
+        "fucomip" => &[1, 0],
+        "fstp" => &[0],
+        _ => &[],
+    }
 }
 
 /// A register, without its sigil.
@@ -684,6 +726,16 @@ mod tests {
     fn a_conditional_jump_counted_from_itself_is_short_when_it_fits() {
         assert_eq!(bytes("jne .+2"), [0x75, 0x00]);
         assert_eq!(bytes("jmp .+1000"), [0xe9, 0xe3, 0x03, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn the_x87_stack_at_the_depths_the_compiler_writes_it() {
+        assert_eq!(bytes("fucomip %st(1), %st(0)"), [0xdf, 0xe9]);
+        assert_eq!(bytes("fstp %st(0)"), [0xdd, 0xd8]);
+        assert_eq!(bytes("fstp %st"), [0xdd, 0xd8]);
+        assert_eq!(bytes("faddp %st(0), %st(1)"), [0xde, 0xc1]);
+        // Another depth is another opcode, which no row here has.
+        assert!(refused("fstp %st(1)").contains("depths"));
     }
 
     #[test]

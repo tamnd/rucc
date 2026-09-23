@@ -46,8 +46,8 @@ use Form::{
     Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
     Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
     ShiftCl, ShiftRi, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
-    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Test, TestCmov,
-    TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
+    TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -626,6 +626,19 @@ pub enum Form {
     /// a number and nothing in them is a register anybody can read. So the letters say both, and the
     /// lowering builds the operand list from them rather than from this table.
     Literal,
+    /// A template the reader could not take apart, kept as the text the program wrote.
+    ///
+    /// Some templates are not a run of instructions this compiler knows. tcc's tests write ones that
+    /// switch section, define symbols with `=`, and jump from one statement into a label another
+    /// statement defines. None of that is an instruction anything here could select, and all of it
+    /// is something the assembler does with text. So the text stays text: it is carried in the
+    /// instruction's symbol, the operands the program handed it are the instruction's operands, and
+    /// each writer puts the text down with those operands spelled into it. The listing writes it as
+    /// it is, and a unit with one of these in it is assembled from its listing.
+    ///
+    /// The description is empty for the reason [`Form::Literal`]'s is. What the template reads and
+    /// writes is what its constraints said, and the lowering builds the operand list from those.
+    Template,
     /// What the processor is asked about itself, which reads two registers and writes four.
     ///
     /// The one form here whose every operand is fixed by the instruction and named by nothing
@@ -1210,7 +1223,7 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Landing | Nop | Spin | Trap | Align | Literal => &LEAVE,
+            Ret | Barrier | Landing | Nop | Spin | Trap | Align | Literal | Template => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -1333,6 +1346,7 @@ impl Form {
                 | StrScanRep
                 | StrCompare
                 | StrCompareRep
+                | Template
         )
     }
 }
@@ -1351,6 +1365,44 @@ pub const ALIGN: &str = "align";
 /// Spelled as the directive a template wrote it as, and carrying its bytes as its immediate. See
 /// [`Form::Literal`].
 pub const LITERAL: &str = "byte";
+
+/// The opcode that is a template kept as text, named the way [`ALIGN`] is. See [`Form::Template`].
+pub const TEMPLATE: &str = "template";
+
+/// Where the address a kept template names goes in its text.
+///
+/// The address is the instruction's memory operand, and where it is depends on registers nothing
+/// has chosen yet when the text is written down, so the text holds this in its place and the writer
+/// puts the address there. The two bytes around it are ones no template can hold, since a string a
+/// program wrote into an `asm` statement is text an assembler reads.
+pub const TEMPLATE_MEM: &str = "\u{1}m\u{2}";
+
+/// A name a kept template names, held the same way so the writer can spell it the way the object
+/// format wants names spelled. See [`TEMPLATE_MEM`].
+#[must_use]
+pub fn template_name(name: &str) -> String {
+    format!("\u{1}n{name}\u{2}")
+}
+
+/// A kept template's text with its holes filled: the address by `mem`, and each name by `name`.
+#[must_use]
+pub fn template_filled(text: &str, mem: &str, name: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('\u{1}') {
+        out.push_str(&rest[..at]);
+        let hole = &rest[at + 1..];
+        let end = hole.find('\u{2}').unwrap_or(hole.len());
+        match hole[..end].split_at_checked(1) {
+            Some(("m", _)) => out.push_str(mem),
+            Some(("n", named)) => out.push_str(&name(named)),
+            _ => {}
+        }
+        rest = hole.get(end + 1..).unwrap_or("");
+    }
+    out.push_str(rest);
+    out
+}
 
 /// The most bytes one `.byte` directive may carry, which is how many fit beside the opcode.
 ///
@@ -2197,6 +2249,7 @@ pub static INSTS: &[(&str, Form)] = &[
     // listing and a run of padding in the bytes rather than anything the processor does.
     ("align", Align),
     ("byte", Literal),
+    ("template", Template),
     // Compare and exchange, at each width the machine has one for. It is the instruction the
     // whole atomic family is built on: everything the machine has no single instruction for is a
     // loop around one of these, and `spec/10-backend.md` section 10.2 is where that is written
@@ -2435,6 +2488,14 @@ pub fn address(name: &str) -> Option<Address> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_kept_template_has_its_holes_filled_and_nothing_else_touched() {
+        let text = format!("mov %eax,{}; .long {}+1", TEMPLATE_MEM, template_name("s"));
+        let filled = template_filled(&text, "8(%rsp)", |name| format!("_{name}"));
+        assert_eq!(filled, "mov %eax,8(%rsp); .long _s+1");
+        assert_eq!(template_filled("1: jmp 1b", "", |name| name.to_owned()), "1: jmp 1b");
+    }
+
     use super::*;
     use crate::operand::Role;
     use crate::x86_64::{FRAME, SYSV, WIN64};
@@ -2524,6 +2585,7 @@ mod tests {
                             | Trap
                             | Align
                             | Literal
+                            | Template
                     ),
                 "{name} writes nothing and does nothing"
             );
@@ -2703,6 +2765,7 @@ mod tests {
                             | Trap
                             | Align
                             | Literal
+                            | Template
                     )
                     || matches!(shape, PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87),
                 "{name} has an empty operand list and is not one of the ones that should"

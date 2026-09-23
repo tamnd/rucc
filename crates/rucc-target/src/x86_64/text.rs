@@ -1115,6 +1115,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // back out and the object writer puts the byte down. The byte is on the instruction, since
     // every one of them is a different byte.
     ("byte", &[]),
+    // A template kept as text, which each writer puts down itself for the same reason.
+    ("template", &[]),
     // Compare and exchange. Three spellings for one opcode: the prefix that makes it indivisible,
     // the instruction, and the byte that reads the answer out of the flags. The prefix is a
     // spelling of its own because that is what it is in the encoding as well, one byte in front of
@@ -1834,6 +1836,7 @@ mod tests {
                         | Form::BrCond
                         | Form::Align
                         | Form::Literal
+                        | Form::Template
                 ),
                 "{name} and whether it is an instruction disagree"
             );

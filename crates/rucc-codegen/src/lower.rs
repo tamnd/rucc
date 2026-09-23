@@ -3217,8 +3217,10 @@ impl<'a> Lowering<'a> {
         let steps = if template.trim().is_empty() {
             Vec::new()
         } else {
-            x86_64::read_in(&template, &widths, &memory)
-                .ok_or(Unsupported::Assembly { inst, refused: Written::Template })?
+            match x86_64::read_in(&template, &widths, &memory) {
+                Some(steps) => steps,
+                None => return self.kept(inst, &template, &list),
+            }
         };
 
         // Which operands the template writes, counted before anything is placed, because the answer
@@ -3393,6 +3395,200 @@ impl<'a> Lowering<'a> {
             self.instruction(inst, line, &places, &list, &clobbered)?;
         }
         Ok(())
+    }
+
+    /// A template the reader could not take apart, kept as its text. See [`x86_64::Form::Template`].
+    ///
+    /// What the text names is spelled into it here, the way gcc prints it into its listing: a
+    /// constant as `$5`, or as `5` under the `c` modifier, and the address of a name as the name.
+    /// An object in memory is the one thing that cannot be spelled yet, since where it is depends on
+    /// registers nothing has chosen, so it is left as a hole the writer fills and its address is the
+    /// instruction's memory operand. One is all an instruction has room for, and every template this
+    /// has met names one at most. An operand in a register is refused for now, as is a template
+    /// that names one by name rather than by number.
+    ///
+    /// A statement written with no colons is basic assembly, where `%` is a character like any
+    /// other and a register is written `%eax`. The front end keeps no mark of which kind a statement
+    /// was, so one with no operands and no clobbers is read as basic, which is what gcc would do for
+    /// every such template but one written with empty colons around it.
+    ///
+    /// The registers a call may write are taken as written, see below for why.
+    fn kept(
+        &mut self,
+        inst: Inst,
+        template: &str,
+        list: &[AsmOperand<'_>],
+    ) -> Result<(), Unsupported> {
+        // Refused as the template it is, since keeping it is what was tried after reading it
+        // failed, and what could not be kept is what it names rather than any one operand.
+        let refused = || Unsupported::Assembly { inst, refused: Written::Template };
+        let data = &self.source[inst];
+        let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
+        let clobbers = self.names.resolve(self.source[asm].clobbers).to_string();
+        let basic = list.is_empty() && clobbers.trim().is_empty();
+
+        let mut text = String::with_capacity(template.len());
+        let mut memory: Option<usize> = None;
+        if basic {
+            text.push_str(template);
+        } else {
+            let mut chars = template.chars().peekable();
+            // Inside `{att|intel}`, and past the `|` in it, which is the half nobody reads.
+            let mut dialect = false;
+            let mut skipped = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '{' => {
+                        dialect = true;
+                        continue;
+                    }
+                    '|' if dialect => {
+                        skipped = true;
+                        continue;
+                    }
+                    '}' if dialect => {
+                        dialect = false;
+                        skipped = false;
+                        continue;
+                    }
+                    _ if skipped => continue,
+                    '%' => {}
+                    _ => {
+                        text.push(c);
+                        continue;
+                    }
+                }
+                match chars.peek().copied() {
+                    Some(c @ ('%' | '{' | '|' | '}')) => {
+                        chars.next();
+                        text.push(c);
+                        continue;
+                    }
+                    Some('=') => {
+                        chars.next();
+                        text.push_str(&inst.index().to_string());
+                        continue;
+                    }
+                    _ => {}
+                }
+                let modifier = match chars.peek().copied() {
+                    Some(c) if c.is_ascii_alphabetic() => {
+                        chars.next();
+                        Some(c)
+                    }
+                    _ => None,
+                };
+                let mut digits = String::new();
+                while let Some(c) = chars.peek().copied().filter(char::is_ascii_digit) {
+                    digits.push(c);
+                    chars.next();
+                }
+                let index: usize = digits.parse().map_err(|_| refused())?;
+                let operand = list.get(index).ok_or_else(refused)?;
+                if operand.memory {
+                    if modifier.is_some() || memory.is_some_and(|had| had != index) {
+                        return Err(refused());
+                    }
+                    memory = Some(index);
+                    text.push_str(x86_64::TEMPLATE_MEM);
+                    continue;
+                }
+                if operand.result.is_some() {
+                    return Err(refused());
+                }
+                let value = operand.value.ok_or_else(refused)?;
+                let bare = match modifier {
+                    None => false,
+                    Some('c' | 'P' | 'p') => true,
+                    Some(_) => return Err(refused()),
+                };
+                if !bare {
+                    text.push('$');
+                }
+                if let Some(number) = self.number(value) {
+                    text.push_str(&number.to_string());
+                } else if let Some(symbol) = self.named_address(value) {
+                    text.push_str(&x86_64::template_name(self.names.resolve(symbol)));
+                } else {
+                    return Err(refused());
+                }
+            }
+        }
+
+        // Every register a call may leave anything in, as well as the ones the list names. The
+        // text can write any register it likes without saying so, and tcc's tests do: gcc gets
+        // away with that at `-O0` because nothing lives in a register between two statements
+        // there, and taking these away from the allocator across the template is what gives the
+        // same answer here. Nothing is written to them by this, so a register one template leaves
+        // a value in is still holding it when the next template reads it.
+        let mut clobbered: Vec<(PhysReg, RegClass)> =
+            self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect();
+        for reg in Self::clobbered(inst, &clobbers)? {
+            if !clobbered.iter().any(|&(had, _)| had == reg) {
+                clobbered.push((reg, self.gpr));
+            }
+        }
+        // An object in this function's frame is named by where it is in the frame, the way gcc
+        // names it, rather than by a register its address was put in first. The text may write
+        // registers it does not declare, and tcc's tests do: one that writes `%ecx` behind the
+        // compiler's back would otherwise take the address with it.
+        let mut local = None;
+        let at = match memory {
+            Some(index) => {
+                let value = list[index].value.ok_or_else(refused)?;
+                local = self.local_of(value);
+                let base = match local {
+                    Some(_) => mir::Reg::physical(self.conv.stack_pointer),
+                    None => self.reg_of(value)?,
+                };
+                Some(mir::Mem::at(mir::Operand::read(base, self.gpr)))
+            }
+            None => None,
+        };
+        let symbol = self.names.intern(&text);
+        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::TEMPLATE)));
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let mut build = self.out.build(block, opcode).at(span).symbol(symbol);
+        for (reg, class) in clobbered {
+            build = build.operand(mir::Operand::write(mir::Reg::physical(reg), class));
+        }
+        if let Some(mem) = at {
+            build = build.mem(mem);
+        }
+        let made = build.finish();
+        if let Some(local) = local {
+            self.stack.addresses.push((made, local));
+        }
+        Ok(())
+    }
+
+    /// The object in this function's frame a value is the address of, for one an `alloca` of a
+    /// size known here made. See [`Self::reserve`], which is where the `lea` it is found by came
+    /// from.
+    fn local_of(&self, value: Value) -> Option<usize> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        if self.source[inst].opcode != Opcode::Alloca
+            || !self.source[self.source[inst].args].is_empty()
+        {
+            return None;
+        }
+        let reg = self.regs[value.index()]?;
+        self.stack.addresses.iter().find_map(|&(made, local)| {
+            let data = &self.out[made];
+            let defined = self.out[data.operands].first()?;
+            (defined.reg == reg).then_some(local)
+        })
+    }
+
+    /// The name a value is the address of, for one a `global_addr` defined.
+    fn named_address(&self, value: Value) -> Option<Symbol> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        if self.source[inst].opcode != Opcode::GlobalAddr {
+            return None;
+        }
+        let Extra::Symbol(symbol) = self.source[inst].extra else { return None };
+        Some(symbol)
     }
 
     /// A register holding a zero, for an operand of a template that is read before anything filled
@@ -6584,14 +6780,31 @@ mod tests {
         );
     }
 
+    /// A template this cannot read is kept as its text, which is what gcc does with every template.
+    /// Whether the text is an instruction is the assembler's question, asked when the unit is
+    /// assembled from its listing.
     #[test]
-    fn a_template_naming_an_instruction_this_machine_has_not_got_is_refused() {
+    fn a_template_naming_an_instruction_this_machine_has_not_got_is_kept_as_text() {
         let (mut names, mut source, block, _) = blank(&[]);
         assembly(&mut source, block, &mut names, "hcf", "", &[], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
+        let printed = lower(&mut names, &source);
+        assert!(printed.contains("x64.template"), "{printed}");
+        assert!(printed.contains("@hcf"), "{printed}");
+    }
+
+    /// A template kept as text with an operand in a register is refused, since nothing here spells
+    /// a register into the text yet, and the refusal is about the template.
+    #[test]
+    fn a_template_kept_as_text_with_an_operand_in_a_register_is_refused() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        assembly(&mut source, block, &mut names, "hcf %0", "r", &[args[0]], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+
         let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
-            .expect_err("there is no such instruction");
+            .expect_err("a register is not spelled into kept text");
         assert_eq!(
             failed.to_string(),
             "this `asm` has instructions in its template, which nothing here assembles"

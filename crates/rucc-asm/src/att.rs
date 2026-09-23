@@ -364,6 +364,28 @@ impl Writer<'_> {
             let _ = writeln!(self.out, "\t.byte\t{}", written.join(", "));
             return Ok(());
         }
+        // A template kept as text, written back as the text with what it names filled in. Each of
+        // its lines goes down as a line of the listing, which is where gcc puts one too.
+        if opcode == x86_64::TEMPLATE {
+            let Some(text) = data.symbol else {
+                return Err(Error::Opcode {
+                    func: func_name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            };
+            let mem = match data.mem {
+                Some(mem) => self.amode(&func[data.operands], &func[mem], func_name, spelled)?,
+                None => String::new(),
+            };
+            let prefix = self.directives.symbol();
+            let filled = x86_64::template_filled(self.names.resolve(text), &mem, |name| {
+                format!("{prefix}{name}")
+            });
+            for line in filled.lines() {
+                let _ = writeln!(self.out, "\t{}", line.trim_start());
+            }
+            return Ok(());
+        }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: func_name.to_owned(), opcode: spelled.to_owned() });
         };
