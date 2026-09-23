@@ -51,7 +51,7 @@
 //! asked for it and got a file twice the size it expected has a real complaint. Nothing reads it
 //! yet, and on a line table alone the saving is smaller than it will be.
 
-#![doc(html_root_url = "https://docs.rs/rucc-debug/0.10.77")]
+#![doc(html_root_url = "https://docs.rs/rucc-debug/0.10.78")]
 
 mod line;
 mod shape;

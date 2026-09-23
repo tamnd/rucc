@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.10.78
+
 ### Added
 
 - `--fetch-msvc-sdk --accept-licence` now lays what it downloaded out as a sysroot, which is the last step between Microsoft's manifest and a compile. The tree is the one `--sysroot` already reads and the one xwin produces: `crt/include` and `crt/lib/<arch>` out of the two Visual C++ packages, `sdk/include/{ucrt,um,shared}` and `sdk/lib/{ucrt,um}/<arch>` out of the seven Windows SDK installers and the cabinets they name. The installers hold no bytes of their own, so that half is two steps: the tables say which cabinet each file is in and what it is called there, and only the cabinets holding something this target wants are fetched, which is a handful of the 149 the kit publishes. A cabinet folder is one compressed stream with the files laid end to end inside it, so it is decompressed once and sliced rather than once per file. Part of tamnd/rucc#979.
