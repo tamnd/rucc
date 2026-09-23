@@ -65,15 +65,20 @@
 //! extension is never negative and the two readings agree on it. This is `unsigned char a, b; a /
 //! b`, which C divides at `int` because the promotions say so.
 //!
+//! A division of sign extensions, when the ranges say it is not the one that raises. `char a =
+//! -128, b = -1; char c = a / b;` is well defined in C: the division happens at `int`, gives 128,
+//! and the conversion back to `char` is what makes it minus 128 again. The same division at one
+//! byte is the overflow case that raises on this machine. Every other pair of sign extensions
+//! divides to a quotient and a remainder that fit, so the signed division at the narrow width is
+//! the same answer once the pair is ruled out. The range analysis is asked before anything is
+//! rewritten, and it rules the pair out when the dividend cannot be the most negative narrow value
+//! or the divisor cannot be minus one where the division is.
+//!
 //! # What it does not narrow
 //!
-//! Not a divide or a remainder of sign extensions. `char a = -128, b = -1; char c = a / b;` is well
-//! defined in C: the division happens at `int`, gives 128, and the conversion back to `char` is
-//! what makes it minus 128 again. The same division at one byte is the overflow case that raises
-//! on this machine, so narrowing it turns a program that works into a program that dies. It needs a
-//! range that says the operands miss that one pair, and ranges are the analysis this pass does not
-//! have. A division by a constant is not narrowed either, because the back end turns one into a
-//! multiply at the width it is written at, and that is worth more than the narrow divide.
+//! Not a division of sign extensions the ranges cannot clear, for the reason just given. Not a
+//! division by a constant, because the back end turns one into a multiply at the width it is
+//! written at, and that is worth more than the narrow divide.
 //!
 //! Not a shift by a value. `char c; c <<= n;` shifts at `int`, so a count of twenty is a defined
 //! shift whose low eight bits are zero, and the same count at one byte is poison. A shift by a
@@ -88,13 +93,13 @@
 //! The width here is the one the truncation names. A real demanded bits analysis would let it
 //! shrink further, so that `(x & 0xff) + 1` narrows on the strength of the mask rather than on the
 //! strength of a truncation that is not written, and so that a value read at three widths is
-//! narrowed to the widest of them rather than to none. That is the first box of issue 375 and it
-//! wants the analysis manager, which wants the dominator tree, which is the next thing to build.
+//! narrowed to the widest of them rather than to none. That is the first box of issue 375.
 
 use rucc_ir::{
     Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value, ValueList,
 };
 
+use crate::range::query::Ranges;
 use crate::uses::count;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -133,12 +138,15 @@ impl Pass for Narrow {
         Preserved::ALL.without(Analysis::Liveness)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
         let mut uses = count(func);
+        let cleared = cleared(func, an);
+        let seen = Seen { uses: &[], cleared: &cleared };
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
-                let Some(redo) = truncated_arithmetic(func, inst, &uses)
+                let seen = Seen { uses: &uses, ..seen };
+                let Some(redo) = truncated_arithmetic(func, inst, seen)
                     .or_else(|| extended_comparison(func, inst))
                     .or_else(|| widened_bits(func, inst, &uses))
                 else {
@@ -157,6 +165,60 @@ impl Pass for Narrow {
         }
         stats
     }
+}
+
+/// What the walk from a truncation reads besides the function.
+#[derive(Clone, Copy)]
+struct Seen<'a> {
+    /// How many readers each value has.
+    uses: &'a [u32],
+    /// The signed divisions of sign extensions the ranges say are not the pair that raises.
+    cleared: &'a [Inst],
+}
+
+/// The signed divisions and remainders of sign extensions that cannot be the one that raises.
+///
+/// Asked of the whole function before anything is rewritten, because the ranges borrow the
+/// function and the rewrite changes it. A division whose operands are not two sign extensions
+/// from one width is not asked about, so a function with none of them costs a walk and no
+/// queries. The rewrite only turns wide operations into narrow ones and never touches an
+/// extension, so the answers are still about the same values when the rewrite reads them.
+fn cleared(func: &Func, an: &Analyses) -> Vec<Inst> {
+    let asked: Vec<(Inst, Value, Value, Type)> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter_map(|inst| signed_division(func, inst))
+        .collect();
+    if asked.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Ranges::new(func, an.cfg(func), an.dominators(func));
+    let mut cleared = Vec::new();
+    for (inst, left, right, ty) in asked {
+        // The most negative narrow value and minus one, as bit patterns. A range keeps its
+        // values at its own width and masks what it is asked about to it, so the patterns can
+        // be written at the widest width there is.
+        let least = (1u128 << (ty.bits() - 1)).wrapping_neg();
+        if !ranges.at_inst(left, inst).contains(least) || !ranges.at_inst(right, inst).contains(!0)
+        {
+            cleared.push(inst);
+        }
+    }
+    cleared
+}
+
+/// A signed division or remainder of two sign extensions from one width it could be done at, as
+/// the instruction, the two wide operands and that width.
+fn signed_division(func: &Func, inst: Inst) -> Option<(Inst, Value, Value, Type)> {
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::SDiv | Opcode::SRem) {
+        return None;
+    }
+    let args = &func[data.args];
+    let (&left, &right) = (args.first()?, args.get(1)?);
+    let (Opcode::SExt, ty, _) = widening(func, left)? else { return None };
+    let (Opcode::SExt, from, _) = widening(func, right)? else { return None };
+    (from == ty && narrowable(ty)).then_some((inst, left, right, ty))
 }
 
 /// An instruction rewritten at the narrow width, with its operands narrowed too.
@@ -188,7 +250,7 @@ enum Plan {
 /// The truncation is the root because it is the only place the narrow width is written down. Its
 /// operand has to be read by nothing else, since a second reader would keep the wide operation
 /// alive and the rewrite would be a second instruction rather than a replacement.
-fn truncated_arithmetic(func: &Func, inst: Inst, uses: &[u32]) -> Option<Redo> {
+fn truncated_arithmetic(func: &Func, inst: Inst, seen: Seen<'_>) -> Option<Redo> {
     let data = &func[inst];
     if data.opcode != Opcode::Trunc {
         return None;
@@ -197,7 +259,7 @@ fn truncated_arithmetic(func: &Func, inst: Inst, uses: &[u32]) -> Option<Redo> {
     if !narrowable(ty) {
         return None;
     }
-    redo(func, *func[data.args].first()?, ty, uses, DEPTH)
+    redo(func, *func[data.args].first()?, ty, seen, DEPTH)
 }
 
 /// Whether a width is one this pass will redo an operation at.
@@ -217,8 +279,8 @@ const fn narrowable(ty: Type) -> bool {
 }
 
 /// Whether this value is arithmetic that can be redone at that width, and what it becomes.
-fn redo(func: &Func, value: Value, ty: Type, uses: &[u32], depth: u32) -> Option<Redo> {
-    if depth == 0 || uses[value.index()] != 1 {
+fn redo(func: &Func, value: Value, ty: Type, seen: Seen<'_>, depth: u32) -> Option<Redo> {
+    if depth == 0 || seen.uses[value.index()] != 1 {
         return None;
     }
     let Def::Result { inst, .. } = func[value].def else { return None };
@@ -226,32 +288,41 @@ fn redo(func: &Func, value: Value, ty: Type, uses: &[u32], depth: u32) -> Option
     let args = &func[data.args];
     let (&left, &right) = (args.first()?, args.get(1)?);
     if let Some(opcode) = unsigned_division(data.opcode) {
-        let lhs = Plan::Already(zero_extended(func, left, ty)?);
-        let rhs = Plan::Already(zero_extended(func, right, ty)?);
-        return Some(Redo { opcode, extra: Extra::None, ty, lhs, rhs: Some(rhs) });
+        // Two zero extensions are the unsigned division whatever the opcode was, and two sign
+        // extensions are the division as it was written when the ranges have cleared it. The
+        // second has to be asked when the first is not what this is, so neither returns early.
+        let unsigned = zero_extended(func, left, ty).zip(zero_extended(func, right, ty));
+        let signed = seen.cleared.contains(&inst).then(|| sign_extended(func, left, right, ty));
+        let (opcode, (lhs, rhs)) = match (unsigned, signed.flatten()) {
+            (Some(pair), _) => (opcode, pair),
+            (None, Some(pair)) => (data.opcode, pair),
+            (None, None) => return None,
+        };
+        let (lhs, rhs) = (Plan::Already(lhs), Some(Plan::Already(rhs)));
+        return Some(Redo { opcode, extra: Extra::None, ty, lhs, rhs });
     }
     if !low_bits_only(data.opcode) {
         return None;
     }
-    let lhs = plan(func, left, ty, uses, depth)?;
+    let lhs = plan(func, left, ty, seen, depth)?;
     // A shift is the one operation whose right operand is not a number of the same kind as its
     // left one, and it is the one that is unsafe to narrow when that operand is not a constant.
     let rhs = match data.opcode {
         Opcode::Shl => Plan::Constant(count_below(func, right, ty)?),
-        _ => plan(func, right, ty, uses, depth)?,
+        _ => plan(func, right, ty, seen, depth)?,
     };
     Some(Redo { opcode: data.opcode, extra: Extra::None, ty, lhs, rhs: Some(rhs) })
 }
 
 /// What an operand becomes at that width, or `None` when it would cost something to get there.
-fn plan(func: &Func, value: Value, ty: Type, uses: &[u32], depth: u32) -> Option<Plan> {
+fn plan(func: &Func, value: Value, ty: Type, seen: Seen<'_>, depth: u32) -> Option<Plan> {
     if let Some(narrow) = extended(func, value, ty) {
         return Some(Plan::Already(narrow));
     }
     if let Some((imm, wide)) = constant(func, value) {
         return Some(Plan::Constant(imm.signed(wide)));
     }
-    redo(func, value, ty, uses, depth - 1).map(|redo| Plan::Nested(Box::new(redo)))
+    redo(func, value, ty, seen, depth - 1).map(|redo| Plan::Nested(Box::new(redo)))
 }
 
 /// Whether an operation's low bits depend only on the low bits of what went into it.
@@ -297,6 +368,13 @@ fn zero_extended(func: &Func, value: Value, ty: Type) -> Option<Value> {
         (Opcode::ZExt, from, narrow) if from == ty => Some(narrow),
         _ => None,
     }
+}
+
+/// What two values were before they were sign extended from exactly that width.
+fn sign_extended(func: &Func, left: Value, right: Value, ty: Type) -> Option<(Value, Value)> {
+    let (Opcode::SExt, from, left) = widening(func, left)? else { return None };
+    let (Opcode::SExt, other, right) = widening(func, right)? else { return None };
+    (from == ty && other == ty).then_some((left, right))
 }
 
 /// Whether this is a comparison of two things extended from the same narrower width.
@@ -823,6 +901,67 @@ mod tests {
         assert_eq!(shape(&func, narrow), (Opcode::Add, vec![Type::int(8), Type::int(8)]));
         let inner = under(&func, narrow);
         assert_eq!(shape(&func, inner), (Opcode::UDiv, vec![Type::int(8), Type::int(8)]));
+    }
+
+    /// A signed division of sign extensions where the ranges rule out the pair that raises, once
+    /// for a dividend that cannot be the most negative value and once for a divisor that cannot
+    /// be minus one, at both opcodes.
+    #[test]
+    fn a_signed_division_the_ranges_clear_is_the_signed_division_at_the_narrow_width() {
+        for (opcode, masked_left) in [
+            (Opcode::SDiv, true),
+            (Opcode::SDiv, false),
+            (Opcode::SRem, true),
+            (Opcode::SRem, false),
+        ] {
+            let (mut func, block) = blank();
+            let a = func.append_param(block, Type::int(8));
+            let b = func.append_param(block, Type::int(8));
+            let mut build = Builder::new(&mut func, block);
+            // Clearing the top bit leaves a value that is neither minus one nor minus 128.
+            let mask = build.iconst(Type::int(8), 0x7f);
+            let (a, b) = if masked_left {
+                (build.binary(Opcode::And, a, mask, Flags::NONE), b)
+            } else {
+                (a, build.binary(Opcode::And, b, mask, Flags::NONE))
+            };
+            let wide_a = build.unary(Opcode::SExt, a, Type::int(32));
+            let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
+            let divided = build.binary(opcode, wide_a, wide_b, Flags::NONE);
+            let narrow = build.unary(Opcode::Trunc, divided, Type::int(8));
+            build.ret(&[narrow]);
+            assert!(
+                Narrow
+                    .run(
+                        &mut func,
+                        &mut crate::machine::fixtures::analyses(),
+                        &mut Fuel::unlimited()
+                    )
+                    .changed()
+            );
+            assert_eq!(shape(&func, narrow), (opcode, vec![Type::int(8), Type::int(8)]));
+        }
+    }
+
+    #[test]
+    fn a_signed_division_whose_divisor_can_only_be_minus_one_when_the_dividend_is_not_the_least() {
+        // Neither range excludes its value on its own, so the pair is not ruled out even though
+        // a program could never produce it. The ranges are asked one operand at a time.
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(8));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::SExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
+        let divided = build.binary(Opcode::SRem, wide_a, wide_b, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, divided, Type::int(8));
+        build.ret(&[narrow]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
     }
 
     #[test]

@@ -773,16 +773,6 @@ mod tests {
         "xor_ri_16",
         "imul_ri_8",
         "imul_ri_16",
-        // The signed divides, which are two instructions per width because the quotient and the
-        // remainder come out of one division in two different registers. `narrow` writes the
-        // unsigned ones for a division of zero extensions and refuses these on purpose: the most
-        // negative byte over minus one is a defined hundred and twenty eight at four bytes and is
-        // the overflow that raises at one, so narrowing a signed division wants a range that rules
-        // the pair out and there is no range analysis yet.
-        "idiv_quo_8",
-        "idiv_quo_16",
-        "idiv_rem_8",
-        "idiv_rem_16",
         // The shifts by a value, whose count is in `cl` whatever the width being shifted is. The
         // same refusal for the same kind of reason: a count of twenty is a defined shift to zero
         // at four bytes and is poison at one, so only a count that is a constant below the narrow
