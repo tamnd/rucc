@@ -312,7 +312,7 @@ static NUMBERS: Threads = Threads::new();
 /// allocated, nothing has to outlive anything, and reading the clock is the one call that module
 /// says it is.
 #[cfg(unix)]
-static CLOCK: crate::tls::Slot = crate::tls::Slot::new();
+static CLOCK: crate::tls::Slot = crate::tls::Slot::new(crate::tls::CLOCK);
 
 /// The stamp travels in a slot the size of a pointer, which is what makes keeping it free.
 ///
