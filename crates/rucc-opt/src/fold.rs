@@ -79,7 +79,7 @@
 //! comparison did.
 
 use rucc_base::float::{Float, Status};
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
 
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -192,36 +192,77 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
         return None;
     }
     match data.opcode {
-        Opcode::Trunc | Opcode::SExt | Opcode::ZExt => {
-            let (value, from) = constant(func, *args.first()?)?;
-            Some(convert(data.opcode, value, from, ty))
-        }
-        Opcode::Shl | Opcode::LShr | Opcode::AShr => {
-            let (value, from) = constant(func, *args.first()?)?;
-            let (count, count_ty) = constant(func, *args.get(1)?)?;
-            shift(data.opcode, value, from, count, count_ty, ty, data.flags)
-        }
-        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::And | Opcode::Or | Opcode::Xor => {
-            let (lhs, lhs_ty) = constant(func, *args.first()?)?;
-            let (rhs, _) = constant(func, *args.get(1)?)?;
-            binary(data.opcode, lhs, rhs, lhs_ty, ty, data.flags)
-        }
-        Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop | Opcode::Bswap | Opcode::Bitreverse => {
-            let (value, from) = constant(func, *args.first()?)?;
-            count(data.opcode, value, from, ty)
-        }
         Opcode::FPToSI | Opcode::FPToUI => {
             let value = floating(func, *args.first()?)?;
             to_integer(value, ty, data.opcode == Opcode::FPToSI)
         }
+        _ => arithmetic(data, args, ty, &|value| constant(func, value)),
+    }
+}
+
+/// What an instruction of integer arithmetic works out to, given a way to read each operand as a
+/// constant.
+///
+/// The way to read an operand is the caller's, because this pass wants an operand that is already
+/// a constant and nothing more, while [`evaluated`] wants to go on looking underneath one that is
+/// not. Both of them want the arithmetic itself to be this one, so that the two cannot disagree
+/// about what an instruction answers.
+fn arithmetic(
+    data: &InstData,
+    args: &[Value],
+    ty: Type,
+    operand: &dyn Fn(Value) -> Option<(Imm, Type)>,
+) -> Option<Imm> {
+    match data.opcode {
+        Opcode::Trunc | Opcode::SExt | Opcode::ZExt => {
+            let (value, from) = operand(*args.first()?)?;
+            Some(convert(data.opcode, value, from, ty))
+        }
+        Opcode::Shl | Opcode::LShr | Opcode::AShr => {
+            let (value, from) = operand(*args.first()?)?;
+            let (count, count_ty) = operand(*args.get(1)?)?;
+            shift(data.opcode, value, from, count, count_ty, ty, data.flags)
+        }
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::And | Opcode::Or | Opcode::Xor => {
+            let (lhs, lhs_ty) = operand(*args.first()?)?;
+            let (rhs, _) = operand(*args.get(1)?)?;
+            binary(data.opcode, lhs, rhs, lhs_ty, ty, data.flags)
+        }
+        Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop | Opcode::Bswap | Opcode::Bitreverse => {
+            let (value, from) = operand(*args.first()?)?;
+            count(data.opcode, value, from, ty)
+        }
         Opcode::ICmp => {
             let Extra::IntPred(pred) = data.extra else { return None };
-            let (lhs, from) = constant(func, *args.first()?)?;
-            let (rhs, _) = constant(func, *args.get(1)?)?;
+            let (lhs, from) = operand(*args.first()?)?;
+            let (rhs, _) = operand(*args.get(1)?)?;
             Some(Imm::int(i128::from(compare(pred, lhs, rhs, from)), ty))
         }
         _ => None,
     }
+}
+
+/// The constant this value works out to, looking through as many as `depth` instructions of
+/// integer arithmetic over constants.
+///
+/// For a pass that runs before this one has had the chance to write the answer down as a constant,
+/// which is [`crate::libcall`]: it runs over the module before any function pass has started, so
+/// an index the source wrote as `x & 3` with `x` known is still an `and` of two constants when it
+/// looks. Nothing here changes the function, and the arithmetic is [`arithmetic`], so the answer
+/// is the one this pass would have written later.
+pub(crate) fn evaluated(func: &Func, value: Value, depth: u32) -> Option<(Imm, Type)> {
+    if let Some(found) = constant(func, value) {
+        return Some(found);
+    }
+    let next = depth.checked_sub(1)?;
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    let ty = func[value].ty;
+    if data.results != 1 || !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let found = arithmetic(data, &func[data.args], ty, &|arg| evaluated(func, arg, next))?;
+    Some((found, ty))
 }
 
 /// The bits a value holds, if it is a constant of either kind.

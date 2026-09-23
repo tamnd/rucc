@@ -106,8 +106,8 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, Linkage, MemInfo,
-    MemOrder, Module, Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
+    CallInfo, Datum, Def, Extra, Func, FuncId, Global, Imm, Inst, InstData, IntPred, Linkage,
+    MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -182,6 +182,14 @@ enum Answer {
     /// declared `strlen` as something returning an `int` gets an `int`, and a constant of the
     /// width the call already had is the only one that can take its place.
     Number(i128),
+    /// The smaller of a count the call was given and a length the compiler knows, compared as
+    /// unsigned numbers, which is what `strnlen` answers over a string the module holds.
+    Least {
+        /// The count, which nothing is known about.
+        count: Value,
+        /// The length of the string, up to its terminator.
+        len: u64,
+    },
     /// One byte of a string the call was given against a byte the compiler knows.
     ///
     /// This is the one answer that is an instruction rather than a constant or an address, because
@@ -512,7 +520,7 @@ impl Site<'_> {
     /// The character a search was told to look for, which the call carries as an `int` and the
     /// library reads as a `char`.
     fn character(&self, value: Value) -> Option<u8> {
-        let (imm, ty) = crate::fold::constant(self.func, value)?;
+        let (imm, ty) = crate::fold::evaluated(self.func, value, DEPTH)?;
         u8::try_from(imm.signed(ty).rem_euclid(256)).ok()
     }
 
@@ -523,7 +531,7 @@ impl Site<'_> {
     /// argument would miss every count anyone actually writes.
     fn count(&self, value: Value) -> Option<usize> {
         let narrow = self.widened(value);
-        let (imm, ty) = crate::fold::constant(self.func, narrow)?;
+        let (imm, ty) = crate::fold::evaluated(self.func, narrow, DEPTH)?;
         // A count the source wrote as a negative number is not a count, whatever the conversion
         // makes of it, and folding on one would be reading an object that is not there.
         (narrow == value || imm.signed(ty) >= 0).then_some(())?;
@@ -613,7 +621,26 @@ impl Site<'_> {
         if args.len() != 2 || self.func[args[0]].ty != Type::PTR {
             return None;
         }
-        self.answers(data)?;
+        let ty = self.answers(data)?;
+        // A string with its terminator inside the object is read no further than the terminator
+        // whatever the count is, so the answer is the smaller of the two, and any count at all is
+        // one the call could have been given. That includes a count the source wrote as a negative
+        // number, which is a very large one once it is a `size_t`.
+        if let Some(text) = self.literal(args[0]) {
+            let len = u64::try_from(text.len()).ok()?;
+            if let Some((imm, _)) = crate::fold::evaluated(self.func, args[1], DEPTH) {
+                let least = imm.unsigned().min(u128::from(len));
+                return Some(Plan::Answer(Answer::Number(i128::try_from(least).ok()?)));
+            }
+            // An empty string is nothing to count, so the count does not matter.
+            if len == 0 {
+                return Some(Plan::Answer(Answer::Number(0)));
+            }
+            // Otherwise the smaller of the two has to be worked out when the program runs, and the
+            // count and the answer have to be the same type for that to be one comparison.
+            (self.func[args[1]].ty == ty).then_some(())?;
+            return Some(Plan::Answer(Answer::Least { count: args[1], len }));
+        }
         let count = self.count(args[1])?;
         let bytes = self.raw(args[0])?;
         let window = bytes.get(..count.min(bytes.len()))?;
@@ -1057,33 +1084,18 @@ impl Site<'_> {
         None
     }
 
-    /// The constant this value is, looking through a widening of one.
+    /// The distance in bytes this value is, where it works out to a constant.
     ///
     /// An index into an array is an `int` where the source wrote one, and a pointer is sixty four
     /// bits, so what the frontend leaves in front of a `ptr_add` is a `sext` of a constant rather
-    /// than a constant. This runs before anything has folded that, since everything that would is
-    /// one function at a time and the function pipeline has not started, so the walk above would
-    /// stop at the first index written in the source without this.
-    fn step(&self, mut value: Value) -> Option<i128> {
-        for _ in 0..DEPTH {
-            if let Some((imm, ty)) = crate::fold::constant(self.func, value) {
-                return Some(imm.signed(ty));
-            }
-            let Def::Result { inst, .. } = self.func[value].def else { return None };
-            match self.func[inst].opcode {
-                // The narrow value read the way the widening reads it, which for the signed one is
-                // the same number and for the unsigned one is the same number only where it was
-                // not negative.
-                Opcode::SExt => value = *self.func[self.func[inst].args].first()?,
-                Opcode::ZExt => {
-                    let arg = *self.func[self.func[inst].args].first()?;
-                    let (imm, _) = crate::fold::constant(self.func, arg)?;
-                    return i128::try_from(imm.unsigned()).ok();
-                }
-                _ => return None,
-            }
-        }
-        None
+    /// than a constant, and an index the source worked out, as in `s + (x & 3)` with `x` known, is
+    /// still the arithmetic rather than its answer. This runs before anything has folded either,
+    /// since everything that would is one function at a time and the function pipeline has not
+    /// started, so the walk above looks underneath both with [`crate::fold::evaluated`], which is
+    /// the same arithmetic that pass would do later.
+    fn step(&self, value: Value) -> Option<i128> {
+        let (imm, ty) = crate::fold::evaluated(self.func, value, DEPTH)?;
+        Some(imm.signed(ty))
     }
 }
 
@@ -1187,6 +1199,24 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) {
                 .map(|result| func[result].ty)
                 .expect("a call whose answer is a number has one");
             constant(func, inst, ty, number)
+        }
+        Answer::Least { count, len } => {
+            let ty = func[count].ty;
+            let len = constant(func, inst, ty, i128::from(len));
+            let args = func.push_values(&[count, len]);
+            let data = InstData {
+                args,
+                extra: Extra::IntPred(IntPred::Ult),
+                ..InstData::new(Opcode::ICmp)
+            };
+            let made = func.create_inst(data, &[Type::I1], span);
+            func.insert_before(made, inst);
+            let shorter = func[made].results().next().expect("a comparison is one value");
+            let args = func.push_values(&[shorter, count, len]);
+            let data = InstData { args, ..InstData::new(Opcode::Select) };
+            let made = func.create_inst(data, &[ty], span);
+            func.insert_before(made, inst);
+            func[made].results().next().expect("a choice is one value")
         }
         Answer::Byte { of, against, leading } => {
             let ty = func[inst]
@@ -1998,6 +2028,40 @@ block0:
         assert!(out.contains("iconst.i64 11"), "the terminator came first, {out}");
     }
 
+    /// A string the module holds is read no further than its terminator, so a count nothing is
+    /// known about makes the answer the smaller of the two, and a count written as a negative number
+    /// is a very large one.
+    #[test]
+    fn strnlen_of_a_string_this_module_holds_takes_any_count() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 4 = { bytes "123\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 1 = { bytes "\00" }, align 1, linkage(internal), constant
+
+func @strnlen(ptr, i64) -> i64, linkage(external);
+func @use(i64, i64, i64), linkage(external);
+
+func @g(i64), linkage(external) {
+block0(%0: i64):
+    %1 = global_addr @.Lstr.0
+    %2 = call @strnlen(%1, %0) : (ptr, i64) -> i64
+    %3 = iconst.i32 -2
+    %4 = sext.i64 %3
+    %5 = call @strnlen(%1, %4) : (ptr, i64) -> i64
+    %6 = global_addr @.Lstr.1
+    %7 = call @strnlen(%6, %0) : (ptr, i64) -> i64
+    call @use(%2, %5, %7) : (i64, i64, i64)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strnlen("), "{out}");
+        assert!(out.contains("icmp ult %0"), "the count against the length, {out}");
+        assert!(out.contains("select"), "and the smaller of the two, {out}");
+        assert!(out.contains("iconst.i64 3"), "a negative count is past the terminator, {out}");
+        assert!(out.contains("iconst.i64 0"), "an empty string is nothing to count, {out}");
+    }
+
     /// A count the source wrote as an `int` reaches the call widened, and the constant is under the
     /// widening rather than in the argument.
     #[test]
@@ -2199,6 +2263,39 @@ block0(%0: ptr, %1: ptr):
         assert!(out.contains("iconst.i32 0"), "no bytes to read is no difference, {out}");
         assert!(out.contains("load.i8 %0"), "one byte of the other string, {out}");
         assert!(out.contains("iconst.i32 111"), "against the first byte of this one, {out}");
+    }
+
+    /// An index and a count the source worked out from constants are still the arithmetic when this
+    /// pass looks, because nothing has folded them yet, and they are read as the answer they have.
+    #[test]
+    fn an_index_and_a_count_worked_out_from_constants_are_constants() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "hello world\00" }, align 1, linkage(internal), constant
+
+func @strncmp(ptr, ptr, i64) -> i32, linkage(external);
+func @use(i32), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = iconst.i64 1
+    %2 = ptr_add %0, %1
+    %3 = iconst.i32 1
+    %4 = iconst.i32 3
+    %5 = and %3, %4
+    %6 = sext.i64 %5
+    %7 = ptr_add %0, %6
+    %8 = iconst.i32 2
+    %9 = add.nsw %8, %3
+    %10 = sext.i64 %9
+    %11 = call @strncmp(%2, %7, %10) : (ptr, ptr, i64) -> i32
+    call @use(%11) : (i32)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strncmp("), "{out}");
     }
 
     /// A comparison declared to answer something no wider than the byte it would read is left
