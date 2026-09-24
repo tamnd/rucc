@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A tuple can carry a glibc version after the fused float suffix, the way zig writes it, so `--target=armv7-linux-gnueabihf.2.31` is read as the same target as `armv7-linux-gnu.2.31eabihf`, which stays the canonical spelling and the cache key. It used to be refused as an unknown environment.
+
 ### Fixed
 
 - A union with a bit-field in it on `windows-gnu` now takes the bit-field's alignment, as MinGW's gcc does, so `union { unsigned m:3; char c; }` is four bytes aligned to four there rather than aligned to one. The rule that gives the bit-field no say in the alignment is MSVC's and now applies only to `windows-msvc`. clang aligns the union to one on both, and section 6.9 of the cross specification says gcc wins where it is the incumbent, so the layout corpus declares that record on `windows-gnu` without asserting it. The corpus also drops `flexible_only`, a struct whose only member is a flexible array, which ISO C forbids and gcc refuses, so the nightly run against gcc has been failing on every row since it was added.
