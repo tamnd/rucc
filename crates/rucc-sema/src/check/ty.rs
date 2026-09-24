@@ -168,6 +168,26 @@ impl Checker<'_> {
         self.build_type(specs, declarator, Place::default())
     }
 
+    /// The typedef name a declaration's type is, when the name is the whole of it.
+    ///
+    /// `size_type n;` is one and `const size_type n;`, `size_type *p;` and `constexpr size_type
+    /// n = 1;` are not, since each builds a type on top of the name and the name is no longer what
+    /// the declaration has. The answer is what was written and nothing more: an attribute that
+    /// changes the type, or an initializer that gives an array its length, still leaves the name
+    /// here, and whoever reads it checks the type it stands for against the declaration's.
+    pub(in crate::check) fn spelled_with(
+        &self,
+        specs: ast::DeclSpecsId,
+        declarator: ast::DeclaratorId,
+    ) -> Option<Symbol> {
+        let written = &self.ast[specs];
+        let TypeSpec::Typedef(name) = written.ty else { return None };
+        let bare = written.quals == ast::Quals::NONE
+            && !written.constexpr
+            && self.ast[self.ast[declarator].derived].is_empty();
+        bare.then_some(name)
+    }
+
     /// The type a declaration with no declarator names, which is what declares a tag.
     ///
     /// `struct S { int x; };` builds and lays out the record even though there is nothing for it
@@ -1077,6 +1097,13 @@ impl Checker<'_> {
             // the type it was written as is kept against the parameter for the walk to evaluate.
             if let TypeKind::Array { len: ArrayLen::Variable(_), .. } = self.types.kind(written) {
                 self.tast.record_adjustment(decl, written);
+            }
+            // The typedef name the parameter was written with, which the type does not keep and
+            // which a debugger printing the parameter says in place of what the name stands for.
+            if let Some(name) =
+                param.specs.and_then(|specs| self.spelled_with(specs, param.declarator))
+            {
+                self.tast.record_spelling(decl, name);
             }
             declared.push(decl);
         }
