@@ -93,6 +93,10 @@ pub struct AsmOperand<'a> {
     /// that place, since an input in a register the assembly writes early is gone before the
     /// assembly reads it.
     pub early: bool,
+    /// Whether a constant may be handed to the assembly as itself rather than in a register, which
+    /// is what `i`, `n`, `g` and the immediate ranges say and what `r` does not. A template that
+    /// writes the operand into its text spells a constant as a number only when this allows it.
+    pub immediate: bool,
 }
 
 /// The operands of one assembly statement, in the order the template counts them.
@@ -136,6 +140,7 @@ impl<'a> AsmOperands<'a> {
                 fixed: entry.fixed,
                 named: entry.named,
                 early: entry.early,
+                immediate: entry.immediate,
             });
         }
 
@@ -197,6 +202,7 @@ struct Entry<'a> {
     fixed: Option<char>,
     named: Option<&'a str>,
     early: bool,
+    immediate: bool,
 }
 
 impl<'a> Entry<'a> {
@@ -215,6 +221,7 @@ impl<'a> Entry<'a> {
         let mut named = None;
         let mut several = false;
         let mut early = false;
+        let mut immediate = false;
 
         let mut rest = text.char_indices().peekable();
         while let Some((at, letter)) = rest.next() {
@@ -251,11 +258,15 @@ impl<'a> Entry<'a> {
                 // `p` is an address, which is a value like any other until something reads what
                 // it points at, and it is kept in a register the same way.
                 'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'A' | 'q' | 'Q' | 'f' | 't' | 'u' | 'x'
-                | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => register = true,
+                | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => {
+                    register = true;
+                    immediate |= matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'e' | 'z');
+                }
                 // The immediate ranges, which are `I` through `P` on x86 and are a constant
                 // wherever they are read.
                 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' => {
                     register = true;
+                    immediate = true;
                 }
                 // A matching constraint, which is the number of the output this shares a place
                 // with. More than one digit is a statement with more than ten operands, and the
@@ -298,7 +309,16 @@ impl<'a> Entry<'a> {
             return None;
         }
         let fixed = if several { None } else { fixed };
-        Some(Entry { role, memory: memory && !register, updates, tied, fixed, named, early })
+        Some(Entry {
+            role,
+            memory: memory && !register,
+            updates,
+            tied,
+            fixed,
+            named,
+            early,
+            immediate,
+        })
     }
 }
 
@@ -317,6 +337,14 @@ mod tests {
         let read =
             AsmOperands::read("", &[], &[]).expect("an empty list describes an empty statement");
         assert!(read.is_empty());
+    }
+
+    #[test]
+    fn a_constant_is_handed_over_as_itself_only_where_the_constraint_allows_one() {
+        let values = values(4);
+        let read = AsmOperands::read("r,ri,a,n", &[], &values).expect("four inputs");
+        let allowed: Vec<bool> = read.iter().map(|operand| operand.immediate).collect();
+        assert_eq!(allowed, [false, true, false, true]);
     }
 
     #[test]

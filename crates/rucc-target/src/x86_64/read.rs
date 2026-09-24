@@ -316,6 +316,34 @@ pub enum Step {
     Line(Line),
 }
 
+/// Whether one line of a template is an instruction this knows, with arguments of the shapes it
+/// was written with, whether or not it can then be read.
+///
+/// A template [`read_in`] could not take apart is kept as text, and this is what tells a line it
+/// could not read because nothing here knows the instruction from one it knows and refused for a
+/// reason of its own. `addq %1, %k0` is the second kind: an add of two registers is known, and a
+/// quadword add into half a register is not an instruction.
+#[must_use]
+pub fn known(line: &str, widths: &[Option<Width>], memory: &[bool]) -> bool {
+    let mut text = uncommented(line).trim();
+    while let Some((_, rest)) = labelled(text) {
+        text = rest.trim_start();
+    }
+    let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    if mnemonic.is_empty() || !mnemonic.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let Some(given) =
+        arguments(rest).iter().map(|text| given(text, memory)).collect::<Option<Vec<Given>>>()
+    else {
+        return false;
+    };
+    let shapes: Vec<Shape> = given.iter().map(Given::shape).collect();
+    machine(mnemonic, &shapes).is_some()
+        || suffixed(mnemonic, &given, widths)
+            .is_some_and(|named| machine(&named, &shapes).is_some())
+}
+
 /// Every step of that template, or nothing when any of them is not one this can place.
 ///
 /// Nothing rather than a partial answer, because half a template is not a smaller program, it is a

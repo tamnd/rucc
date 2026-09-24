@@ -411,10 +411,35 @@ impl Writer<'_> {
                 Some(mem) => self.amode(&func[data.operands], &func[mem], func_name, spelled)?,
                 None => String::new(),
             };
+            // A register it names is the operand's, spelled at the width the hole says. Every one
+            // of them has a register by now, and one that has not is the same mistake it is in any
+            // other instruction.
+            let operands = &func[data.operands];
+            if operands.iter().any(|operand| operand.reg.phys().is_none()) {
+                return Err(Error::Virtual {
+                    func: func_name.to_owned(),
+                    opcode: spelled.to_owned(),
+                });
+            }
             let prefix = self.directives.symbol();
-            let filled = x86_64::template_filled(self.names.resolve(text), &mem, |name| {
-                format!("{prefix}{name}")
-            });
+            let reg = |at: usize, width: char| {
+                let Some(operand) = operands.get(at) else { return String::from("?") };
+                let phys = operand.reg.phys().expect("every operand was checked above");
+                let named = match width {
+                    'b' => name_of(operand.class, phys, Width::Byte),
+                    'w' => name_of(operand.class, phys, Width::Word),
+                    'k' => name_of(operand.class, phys, Width::Long),
+                    'h' => x86_64::gpr_high(phys).unwrap_or("?"),
+                    _ => name_of(operand.class, phys, Width::Quad),
+                };
+                format!("%{named}")
+            };
+            let filled = x86_64::template_filled(
+                self.names.resolve(text),
+                &mem,
+                |name| format!("{prefix}{name}"),
+                reg,
+            );
             for line in filled.lines() {
                 let _ = writeln!(self.out, "\t{}", line.trim_start());
             }

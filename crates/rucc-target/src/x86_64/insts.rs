@@ -1385,9 +1385,24 @@ pub fn template_name(name: &str) -> String {
     format!("\u{1}n{name}\u{2}")
 }
 
-/// A kept template's text with its holes filled: the address by `mem`, and each name by `name`.
+/// A register a kept template names, held the same way. What it says is the instruction's operand
+/// at `at` and the width to spell it at, as the letter gcc's modifier for that width is: `b`, `w`,
+/// `k`, `q`, or `h` for the second byte. The register is only known once the allocator has run,
+/// which is after the text is written down. See [`TEMPLATE_MEM`].
 #[must_use]
-pub fn template_filled(text: &str, mem: &str, name: impl Fn(&str) -> String) -> String {
+pub fn template_reg(at: usize, width: char) -> String {
+    format!("\u{1}r{at}{width}\u{2}")
+}
+
+/// A kept template's text with its holes filled: the address by `mem`, each name by `name`, and
+/// each register by `reg`, which is handed the operand and the width letter [`template_reg`] kept.
+#[must_use]
+pub fn template_filled(
+    text: &str,
+    mem: &str,
+    name: impl Fn(&str) -> String,
+    reg: impl Fn(usize, char) -> String,
+) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('\u{1}') {
@@ -1397,6 +1412,12 @@ pub fn template_filled(text: &str, mem: &str, name: impl Fn(&str) -> String) -> 
         match hole[..end].split_at_checked(1) {
             Some(("m", _)) => out.push_str(mem),
             Some(("n", named)) => out.push_str(&name(named)),
+            Some(("r", held)) => {
+                let (at, width) = held.split_at(held.len().saturating_sub(1));
+                if let (Ok(at), Some(width)) = (at.parse(), width.chars().next()) {
+                    out.push_str(&reg(at, width));
+                }
+            }
             _ => {}
         }
         rest = hole.get(end + 1..).unwrap_or("");
@@ -2466,9 +2487,13 @@ mod tests {
     #[test]
     fn a_kept_template_has_its_holes_filled_and_nothing_else_touched() {
         let text = format!("mov %eax,{}; .long {}+1", TEMPLATE_MEM, template_name("s"));
-        let filled = template_filled(&text, "8(%rsp)", |name| format!("_{name}"));
+        let spelled = |at: usize, width: char| format!("%{width}{at}");
+        let filled = template_filled(&text, "8(%rsp)", |name| format!("_{name}"), spelled);
         assert_eq!(filled, "mov %eax,8(%rsp); .long _s+1");
-        assert_eq!(template_filled("1: jmp 1b", "", |name| name.to_owned()), "1: jmp 1b");
+        let text = format!("add {},{}", template_reg(12, 'k'), template_reg(0, 'q'));
+        assert_eq!(template_filled(&text, "", |name| name.to_owned(), spelled), "add %k12,%q0");
+        let kept = template_filled("1: jmp 1b", "", |name| name.to_owned(), spelled);
+        assert_eq!(kept, "1: jmp 1b");
     }
 
     use super::*;
