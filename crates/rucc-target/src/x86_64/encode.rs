@@ -494,6 +494,8 @@ static IV: [Kind; 2] = [Kind::Imm, Kind::Vec];
 static IMV: [Kind; 3] = [Kind::Imm, Kind::Mem, Kind::Vec];
 static IRV: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Vec];
 static IVR: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Reg];
+// A shuffle, whose immediate says which lane of the source goes where in the destination.
+static IVV: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Vec];
 // The x87 stack positions, which are one argument or two and are never anything else. There is no
 // row here mixing one with a register or with an address, because no instruction on this machine
 // names a stack position and a register in the same breath.
@@ -1784,6 +1786,135 @@ static ENCODINGS: &[Encoding] = &[
     // bytes rather than in bits because that is the only thing moving a register sideways can mean.
     bytes("pslldq", &IV, Word, &[0x0F, 0x73], ext(1, 7), ImmSize::Ib),
     bytes("psrldq", &IV, Word, &[0x0F, 0x73], ext(1, 3), ImmSize::Ib),
+    // What a file gcc wrote reads from SSE and this compiler does not write itself. Most of it is
+    // a form above with the source in memory, which gcc uses wherever a constant or a spilled value
+    // is read once, and the rest is instructions gcc reaches for and this compiler does without.
+    bytes("addss", &MV, Single, &[0x0F, 0x58], pair(0, 1), NO_IMM),
+    bytes("addsd", &MV, Double, &[0x0F, 0x58], pair(0, 1), NO_IMM),
+    bytes("mulss", &MV, Single, &[0x0F, 0x59], pair(0, 1), NO_IMM),
+    bytes("mulsd", &MV, Double, &[0x0F, 0x59], pair(0, 1), NO_IMM),
+    bytes("subss", &MV, Single, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
+    bytes("subsd", &MV, Double, &[0x0F, 0x5C], pair(0, 1), NO_IMM),
+    bytes("divss", &MV, Single, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
+    bytes("divsd", &MV, Double, &[0x0F, 0x5E], pair(0, 1), NO_IMM),
+    // The square root, the smaller and the larger, which gcc writes for `sqrt`, `fmin` and `fmax`
+    // and for a comparison and a pick it can see is one of the two.
+    bytes("sqrtss", &VV, Single, &[0x0F, 0x51], pair(0, 1), NO_IMM),
+    bytes("sqrtsd", &VV, Double, &[0x0F, 0x51], pair(0, 1), NO_IMM),
+    bytes("sqrtss", &MV, Single, &[0x0F, 0x51], pair(0, 1), NO_IMM),
+    bytes("sqrtsd", &MV, Double, &[0x0F, 0x51], pair(0, 1), NO_IMM),
+    bytes("minss", &VV, Single, &[0x0F, 0x5D], pair(0, 1), NO_IMM),
+    bytes("minsd", &VV, Double, &[0x0F, 0x5D], pair(0, 1), NO_IMM),
+    bytes("minss", &MV, Single, &[0x0F, 0x5D], pair(0, 1), NO_IMM),
+    bytes("minsd", &MV, Double, &[0x0F, 0x5D], pair(0, 1), NO_IMM),
+    bytes("maxss", &VV, Single, &[0x0F, 0x5F], pair(0, 1), NO_IMM),
+    bytes("maxsd", &VV, Double, &[0x0F, 0x5F], pair(0, 1), NO_IMM),
+    bytes("maxss", &MV, Single, &[0x0F, 0x5F], pair(0, 1), NO_IMM),
+    bytes("maxsd", &MV, Double, &[0x0F, 0x5F], pair(0, 1), NO_IMM),
+    // The conversions again with the source in memory.
+    bytes("cvtss2sd", &MV, Single, &[0x0F, 0x5A], pair(0, 1), NO_IMM),
+    bytes("cvtsd2ss", &MV, Double, &[0x0F, 0x5A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2ssl", &MV, Single, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2ssq", &MV, SingleQuad, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2sdl", &MV, Double, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvtsi2sdq", &MV, DoubleQuad, &[0x0F, 0x2A], pair(0, 1), NO_IMM),
+    bytes("cvttss2sil", &MR, Single, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvttss2siq", &MR, SingleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvttsd2sil", &MR, Double, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvttsd2siq", &MR, DoubleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    // The comparisons with memory on the left, and the ones that also raise the invalid exception
+    // on a quiet NaN, which is what an ordered comparison in C is and what gcc writes for `<`.
+    bytes("ucomiss", &MV, Long, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
+    bytes("ucomisd", &MV, Word, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
+    bytes("comiss", &VV, Long, &[0x0F, 0x2F], pair(0, 1), NO_IMM),
+    bytes("comisd", &VV, Word, &[0x0F, 0x2F], pair(0, 1), NO_IMM),
+    bytes("comiss", &MV, Long, &[0x0F, 0x2F], pair(0, 1), NO_IMM),
+    bytes("comisd", &MV, Word, &[0x0F, 0x2F], pair(0, 1), NO_IMM),
+    // The moves of a whole register that do not ask for sixteen byte alignment, and the `double`
+    // spelling of the aligned one. gcc copies a small struct with `movups` more than with anything.
+    bytes("movups", &VV, Long, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movups", &MV, Long, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movups", &VM, Long, &[0x0F, 0x11], pair(1, 0), NO_IMM),
+    bytes("movupd", &VV, Word, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movupd", &MV, Word, &[0x0F, 0x10], pair(0, 1), NO_IMM),
+    bytes("movupd", &VM, Word, &[0x0F, 0x11], pair(1, 0), NO_IMM),
+    bytes("movapd", &VV, Word, &[0x0F, 0x28], pair(0, 1), NO_IMM),
+    bytes("movapd", &MV, Word, &[0x0F, 0x28], pair(0, 1), NO_IMM),
+    bytes("movapd", &VM, Word, &[0x0F, 0x29], pair(1, 0), NO_IMM),
+    // The bitwise operations on the float formats, which is how gcc takes an absolute value or
+    // flips a sign: a mask from memory and one of these.
+    bytes("andps", &VV, Long, &[0x0F, 0x54], pair(0, 1), NO_IMM),
+    bytes("andpd", &VV, Word, &[0x0F, 0x54], pair(0, 1), NO_IMM),
+    bytes("andps", &MV, Long, &[0x0F, 0x54], pair(0, 1), NO_IMM),
+    bytes("andpd", &MV, Word, &[0x0F, 0x54], pair(0, 1), NO_IMM),
+    bytes("andnps", &VV, Long, &[0x0F, 0x55], pair(0, 1), NO_IMM),
+    bytes("andnpd", &VV, Word, &[0x0F, 0x55], pair(0, 1), NO_IMM),
+    bytes("andnps", &MV, Long, &[0x0F, 0x55], pair(0, 1), NO_IMM),
+    bytes("andnpd", &MV, Word, &[0x0F, 0x55], pair(0, 1), NO_IMM),
+    bytes("orps", &VV, Long, &[0x0F, 0x56], pair(0, 1), NO_IMM),
+    bytes("orpd", &VV, Word, &[0x0F, 0x56], pair(0, 1), NO_IMM),
+    bytes("orps", &MV, Long, &[0x0F, 0x56], pair(0, 1), NO_IMM),
+    bytes("orpd", &MV, Word, &[0x0F, 0x56], pair(0, 1), NO_IMM),
+    bytes("xorps", &VV, Long, &[0x0F, 0x57], pair(0, 1), NO_IMM),
+    bytes("xorpd", &VV, Word, &[0x0F, 0x57], pair(0, 1), NO_IMM),
+    bytes("xorps", &MV, Long, &[0x0F, 0x57], pair(0, 1), NO_IMM),
+    bytes("xorpd", &MV, Word, &[0x0F, 0x57], pair(0, 1), NO_IMM),
+    // Half a register to or from memory, and the high half of one register into the other.
+    bytes("movlps", &MV, Long, &[0x0F, 0x12], pair(0, 1), NO_IMM),
+    bytes("movlps", &VM, Long, &[0x0F, 0x13], pair(1, 0), NO_IMM),
+    bytes("movhps", &MV, Long, &[0x0F, 0x16], pair(0, 1), NO_IMM),
+    bytes("movhps", &VM, Long, &[0x0F, 0x17], pair(1, 0), NO_IMM),
+    bytes("movlpd", &MV, Word, &[0x0F, 0x12], pair(0, 1), NO_IMM),
+    bytes("movlpd", &VM, Word, &[0x0F, 0x13], pair(1, 0), NO_IMM),
+    bytes("movhpd", &MV, Word, &[0x0F, 0x16], pair(0, 1), NO_IMM),
+    bytes("movhpd", &VM, Word, &[0x0F, 0x17], pair(1, 0), NO_IMM),
+    bytes("movhlps", &VV, Long, &[0x0F, 0x12], pair(0, 1), NO_IMM),
+    bytes("movlhps", &VV, Long, &[0x0F, 0x16], pair(0, 1), NO_IMM),
+    // Thirty two bits of a vector register to or from memory.
+    bytes("movd", &MV, Word, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
+    bytes("movd", &VM, Word, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
+    // The shuffles, each an immediate, a source and a destination.
+    bytes("shufps", &IVV, Long, &[0x0F, 0xC6], pair(1, 2), ImmSize::Ib),
+    bytes("shufps", &IMV, Long, &[0x0F, 0xC6], pair(1, 2), ImmSize::Ib),
+    bytes("shufpd", &IVV, Word, &[0x0F, 0xC6], pair(1, 2), ImmSize::Ib),
+    bytes("shufpd", &IMV, Word, &[0x0F, 0xC6], pair(1, 2), ImmSize::Ib),
+    bytes("pshufd", &IVV, Word, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("pshufd", &IMV, Word, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("pshuflw", &IVV, Double, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("pshuflw", &IMV, Double, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("pshufhw", &IVV, Single, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("pshufhw", &IMV, Single, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    // The interleaves below the quadword one above, the greater than comparisons, and the
+    // unsigned multiply of the even lanes, which is how gcc multiplies two vectors of `long`.
+    bytes("punpcklbw", &VV, Word, &[0x0F, 0x60], pair(0, 1), NO_IMM),
+    bytes("punpcklbw", &MV, Word, &[0x0F, 0x60], pair(0, 1), NO_IMM),
+    bytes("punpcklwd", &VV, Word, &[0x0F, 0x61], pair(0, 1), NO_IMM),
+    bytes("punpcklwd", &MV, Word, &[0x0F, 0x61], pair(0, 1), NO_IMM),
+    bytes("punpckldq", &VV, Word, &[0x0F, 0x62], pair(0, 1), NO_IMM),
+    bytes("punpckldq", &MV, Word, &[0x0F, 0x62], pair(0, 1), NO_IMM),
+    bytes("punpckhbw", &VV, Word, &[0x0F, 0x68], pair(0, 1), NO_IMM),
+    bytes("punpckhbw", &MV, Word, &[0x0F, 0x68], pair(0, 1), NO_IMM),
+    bytes("punpckhwd", &VV, Word, &[0x0F, 0x69], pair(0, 1), NO_IMM),
+    bytes("punpckhwd", &MV, Word, &[0x0F, 0x69], pair(0, 1), NO_IMM),
+    bytes("punpckhdq", &VV, Word, &[0x0F, 0x6A], pair(0, 1), NO_IMM),
+    bytes("punpckhdq", &MV, Word, &[0x0F, 0x6A], pair(0, 1), NO_IMM),
+    bytes("pcmpgtb", &VV, Word, &[0x0F, 0x64], pair(0, 1), NO_IMM),
+    bytes("pcmpgtb", &MV, Word, &[0x0F, 0x64], pair(0, 1), NO_IMM),
+    bytes("pcmpgtw", &VV, Word, &[0x0F, 0x65], pair(0, 1), NO_IMM),
+    bytes("pcmpgtw", &MV, Word, &[0x0F, 0x65], pair(0, 1), NO_IMM),
+    bytes("pcmpgtd", &VV, Word, &[0x0F, 0x66], pair(0, 1), NO_IMM),
+    bytes("pcmpgtd", &MV, Word, &[0x0F, 0x66], pair(0, 1), NO_IMM),
+    bytes("pmuludq", &VV, Word, &[0x0F, 0xF4], pair(0, 1), NO_IMM),
+    bytes("pmuludq", &MV, Word, &[0x0F, 0xF4], pair(0, 1), NO_IMM),
+    // The integer additions and subtractions with memory on the left.
+    bytes("paddb", &MV, Word, &[0x0F, 0xFC], pair(0, 1), NO_IMM),
+    bytes("paddw", &MV, Word, &[0x0F, 0xFD], pair(0, 1), NO_IMM),
+    bytes("paddd", &MV, Word, &[0x0F, 0xFE], pair(0, 1), NO_IMM),
+    bytes("paddq", &MV, Word, &[0x0F, 0xD4], pair(0, 1), NO_IMM),
+    bytes("psubb", &MV, Word, &[0x0F, 0xF8], pair(0, 1), NO_IMM),
+    bytes("psubw", &MV, Word, &[0x0F, 0xF9], pair(0, 1), NO_IMM),
+    bytes("psubd", &MV, Word, &[0x0F, 0xFA], pair(0, 1), NO_IMM),
+    bytes("psubq", &MV, Word, &[0x0F, 0xFB], pair(0, 1), NO_IMM),
     // The two x87 instructions, which are the same opcode with a different extension in the
     // addressing byte: `0xDB` with five is the load and with seven is the store. One argument
     // each, because the other end of the move is the top of the x87 stack and there is nothing in
@@ -3277,6 +3408,27 @@ mod tests {
         // And adding each piece without carrying between them.
         assert_eq!(hex("paddq", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f d4 c1");
         assert_eq!(hex("psubb", &[Value::Xmm(xmm(1)), Value::Xmm(xmm(0))]), "66 0f f8 c1");
+    }
+
+    /// The SSE forms a file gcc wrote needs and this compiler does not write, checked against the
+    /// bytes gas writes for the same lines.
+    #[test]
+    fn the_vector_forms_gcc_writes_read_as_gas_reads_them() {
+        let from = Addr { base: Some(RSI), ..Addr::default() };
+        let to = Addr { base: Some(RDI), disp: 16, ..Addr::default() };
+        let x = |n| Value::Xmm(xmm(n));
+        assert_eq!(hex("movups", &[x(0), Value::Mem(to)]), "0f 11 47 10");
+        assert_eq!(hex("mulsd", &[Value::Mem(from), x(0)]), "f2 0f 59 06");
+        let at = Addr { base: Some(RDI), ..Addr::default() };
+        assert_eq!(hex("cvtsi2sdq", &[Value::Mem(at), x(0)]), "f2 48 0f 2a 07");
+        assert_eq!(hex("comisd", &[x(1), x(0)]), "66 0f 2f c1");
+        assert_eq!(hex("pshufd", &[Value::Imm(78), x(0), x(10)]), "66 44 0f 70 d0 4e");
+        assert_eq!(hex("punpckldq", &[x(1), x(0)]), "66 0f 62 c1");
+        assert_eq!(hex("xorpd", &[x(1), x(1)]), "66 0f 57 c9");
+        assert_eq!(hex("movhps", &[Value::Mem(from), x(1)]), "0f 16 0e");
+        assert_eq!(hex("movd", &[Value::Mem(from), x(0)]), "66 0f 6e 06");
+        assert_eq!(hex("sqrtsd", &[x(1), x(0)]), "f2 0f 51 c1");
+        assert_eq!(hex("cvttsd2siq", &[Value::Mem(from), quad(RAX)]), "f2 48 0f 2c 06");
     }
 
     #[test]
