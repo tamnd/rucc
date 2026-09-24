@@ -80,6 +80,12 @@ pub struct MachineInsts {
     /// scales and not an interval, and a pass folding an address into a memory operand has to ask
     /// whether the number it worked out is one of them.
     pub scales: &'static [u8],
+    /// Whether an addressing mode with an index may have a displacement beside it.
+    ///
+    /// x86-64 adds all three in one mode. AArch64 adds a base to a constant or to a register and
+    /// not to both, so a pass that would fold an `add` of two registers into a load that already
+    /// has an offset is proposing an address that machine has no way to write.
+    pub index_and_disp: bool,
 }
 
 impl MachineInsts {

@@ -257,6 +257,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     touches_mem: machine_touches_mem,
     calls: machine_calls,
     scales: &[1, 2, 4, 8],
+    index_and_disp: true,
 };
 
 /// The operands an instruction of that name has, or `None` if this machine has no such name.
@@ -1243,6 +1244,7 @@ pub static SYSV: CallRegs = CallRegs {
     push: 8,
     link: None,
     sret: None,
+    list: crate::VaList::SysV,
     dwarf: &X86_64_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,
     // Forty bytes into the block a thread has to itself, which is where glibc, musl and every
@@ -1322,6 +1324,7 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         push: 8,
         link: None,
         sret: None,
+        list: crate::VaList::CharPointer,
         dwarf: &X86_64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
         // None, and not because the platform has no protector. Windows has one and it is a

@@ -226,6 +226,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     touches_mem: machine_touches_mem,
     calls: machine_calls,
     scales: &[1],
+    index_and_disp: false,
 };
 
 /// The operands an instruction of that name has, or `None` if this machine has no such name.
@@ -665,7 +666,7 @@ static FP_ORDER: [PhysReg; 32] = [
 
 /// Where an AAPCS64 call puts things on Linux and every other platform that uses it unchanged, per
 /// `spec/12-abi-and-runtime.md` section 12.3.
-pub static AAPCS64: CallRegs = aapcs64(&rucc_abi::abis::AAPCS64, 0);
+pub static AAPCS64: CallRegs = aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaList::Aapcs);
 
 /// Where a call puts things on Apple's platforms.
 ///
@@ -673,9 +674,14 @@ pub static AAPCS64: CallRegs = aapcs64(&rucc_abi::abis::AAPCS64, 0);
 /// argument travel, which is in the description rather than here, and one thing that is here: a
 /// leaf function may use the hundred and twenty eight bytes below the stack pointer, which Apple's
 /// ABI document promises and the Linux one does not.
-pub static DARWIN: CallRegs = aapcs64(&rucc_abi::abis::DARWIN_ARM64, 128);
+pub static DARWIN: CallRegs =
+    aapcs64(&rucc_abi::abis::DARWIN_ARM64, 128, crate::VaList::CharPointer);
 
-const fn aapcs64(abi: &'static rucc_abi::AbiDescription, red_zone: u32) -> CallRegs {
+const fn aapcs64(
+    abi: &'static rucc_abi::AbiDescription,
+    red_zone: u32,
+    list: crate::VaList,
+) -> CallRegs {
     CallRegs {
         abi,
         int_class: GPR,
@@ -710,6 +716,7 @@ const fn aapcs64(abi: &'static rucc_abi::AbiDescription, red_zone: u32) -> CallR
         push: 16,
         link: Some(LR),
         sret: Some(X8),
+        list,
         dwarf: &AARCH64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
         // None for now, and it is a different mechanism rather than a missing number. glibc and
