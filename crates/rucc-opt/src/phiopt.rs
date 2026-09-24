@@ -308,10 +308,10 @@
 //! it belongs in the change that adds the passes it exists to clean up after.
 //!
 //! Section 22.2 also wants a peephole run after this one, so that the rule set can answer what the
-//! `select` becomes: `select(c, a, a)` is `a`, `select(c, 1, 0)` is `zext(c)`, and the min, max and
-//! abs recognitions are all rules rather than code here. Those rules are tier six of
-//! `spec/optimizer/13-rewrite-rules.md` and none of them are written, so the run that would fire
-//! them is not in the pipeline yet either. It goes in with them.
+//! `select` becomes. Those rules are tier six of `spec/optimizer/13-rewrite-rules.md`, in
+//! `rules/select.rules`, and the run that fires them is the `simplify` every level already has
+//! after this pass. `select(c, 1, 0)` is `zext(c)` there, and a select between a value and one
+//! step from it is the value moved by the condition.
 
 use rucc_cost::heuristics;
 use rucc_ir::{

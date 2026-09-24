@@ -178,6 +178,16 @@ the pair is ordered and folds to true.
 *Tier 6, select and control, roughly 20.* `select(c, x, x)`, `select(true, ...)`, `select(c, 1, 0)`
 to a zero-extended condition, min and max recognition, absolute value recognition.
 
+What was built is 32 rules in `crates/rucc-opt/rules/select.rules`, chosen by counting the selects
+`phiopt` leaves in the corpus and in SQLite. `select(c, 1, 0)` is `zext(c)` and `select(c, 0, 1)`
+is the opposite comparison widened. `select(c, -1, 0)` and `select(c, 0, -1)` are the widened
+condition negated or less one. `select(c, x + 1, x)` is `x + zext(c)` and `select(c, x - 1, x)` is
+`x - zext(c)`, and both hold with the arms the other way round. `select(c, x, x)` and a select on a
+constant are not rules, because `phiopt` and `fold` leave none of either. Min and max are not rules,
+because the back end already writes a compare and a conditional move for them, which is what GCC
+writes. Absolute value is not a rule, because its branch free form reads one shifted copy of the
+value twice and a replacement here is a tree.
+
 That is 250. Note what is not there: nothing about memory, nothing floating point beyond the
 identities that hold without fast-math (which is almost none: `x + 0.0` is not `x` because of
 negative zero, and `x * 1.0` is not `x` because of signalling NaN in some modes), nothing target

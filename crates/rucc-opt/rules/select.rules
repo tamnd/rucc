@@ -1,0 +1,176 @@
+;; The select rules.
+;;
+;; Tier six of `spec/optimizer/13-rewrite-rules.md` section 13.4, select and control. The document
+;; names five things for it: `select(c, x, x)`, `select(true, ...)`, `select(c, 1, 0)` to a widened
+;; condition, and the recognition of min, max and absolute value. What is here is chosen by what
+;; the corpus has, per the same section's rule that a rule earns its place by firing, and that
+;; leaves some of the five out and adds shapes the list did not name.
+;;
+;; Every rule here takes a select whose two arms differ by something a condition can be added to,
+;; and writes that sum instead. A truth value is a zero or a one, so widening it gives the number
+;; the select was choosing between, and a select between one and zero is the condition itself.
+;; What that buys at the machine is the whole point. A select is a compare, two moves of the arms
+;; into registers and a conditional move, and what these write is a compare, a set and a widening
+;; move, with no register holding the arm that was not taken.
+;;
+;; Counted over the 2608 programs of rucc-corpus and the SQLite amalgamation after `phiopt`, which
+;; is where selects come from. `c ? x + 1 : x` is the most common select there is that is not
+;; between two constants, 73 of them, and `c ? x - 1 : x` is 17 more. `c ? 1 : 0` is 101, and its
+;; mirror and the two with minus one are 15 between them. A rule is written for each of those at
+;; the four widths a select comes in, and for the mirror of the two with an add or a sub, which the
+;; count found a few of.
+;;
+;; What the list named and the file does not have is not missing by accident. `select(c, x, x)` and
+;; a select on a constant do not reach this tier: `phiopt` does not make the first and `fold`
+;; answers the second, and neither shape is in the count at all. Min and max are a compare and a
+;; conditional move already, which is what GCC writes for them too, so a rule recognising them
+;; would have nothing to become. Absolute value is 14 in the count and is a three instruction
+;; answer, a shift and an exclusive or and a subtraction all reading one shifted copy, which is
+;; not a term this rewriter can write without writing the shift twice.
+;;
+;; A replacement here is two instructions deep, a widening under an add or a sub and in the mirrors
+;; an exclusive or under the widening, which no tier above this one needed. The pass builds the
+;; ones underneath in front of the instruction it rewrites, the same way it already builds a
+;; constant there. The exclusive or with one on a comparison is then the opposite comparison,
+;; which the pass does on the spot, so `a < b ? 0 : 1` is `a >= b` widened and nothing is negated
+;; at run time.
+;;
+;; The claims are proved against `select.model`, which includes the model of the IR and adds
+;; nothing. A select in that model is `(ite (not (= c 0)) t f)` with `c` one bit wide, and each
+;; claim below says the same thing about the pattern in those terms.
+
+;; One and zero, which is the condition widened, and the other way round, which is the opposite.
+
+(rule (simplify (select.i8 (value.i1 c) (iconst.i8 1) (iconst.i8 0)))
+      (zext.i1.i8 (value.i1 c))
+      (spec (= (ite (not (= c 0)) 1 0) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (iconst.i16 1) (iconst.i16 0)))
+      (zext.i1.i16 (value.i1 c))
+      (spec (= (ite (not (= c 0)) 1 0) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (iconst.i32 1) (iconst.i32 0)))
+      (zext.i1.i32 (value.i1 c))
+      (spec (= (ite (not (= c 0)) 1 0) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (iconst.i64 1) (iconst.i64 0)))
+      (zext.i1.i64 (value.i1 c))
+      (spec (= (ite (not (= c 0)) 1 0) (result))))
+
+(rule (simplify (select.i8 (value.i1 c) (iconst.i8 0) (iconst.i8 1)))
+      (zext.i1.i8 (xor.i1 (value.i1 c) (iconst.i1 1)))
+      (spec (= (ite (not (= c 0)) 0 1) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (iconst.i16 0) (iconst.i16 1)))
+      (zext.i1.i16 (xor.i1 (value.i1 c) (iconst.i1 1)))
+      (spec (= (ite (not (= c 0)) 0 1) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (iconst.i32 0) (iconst.i32 1)))
+      (zext.i1.i32 (xor.i1 (value.i1 c) (iconst.i1 1)))
+      (spec (= (ite (not (= c 0)) 0 1) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (iconst.i64 0) (iconst.i64 1)))
+      (zext.i1.i64 (xor.i1 (value.i1 c) (iconst.i1 1)))
+      (spec (= (ite (not (= c 0)) 0 1) (result))))
+
+;; Minus one and zero, which is the condition widened and negated, or less one.
+
+(rule (simplify (select.i8 (value.i1 c) (iconst.i8 -1) (iconst.i8 0)))
+      (sub.i8 (iconst.i8 0) (zext.i1.i8 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) -1 0) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (iconst.i16 -1) (iconst.i16 0)))
+      (sub.i16 (iconst.i16 0) (zext.i1.i16 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) -1 0) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (iconst.i32 -1) (iconst.i32 0)))
+      (sub.i32 (iconst.i32 0) (zext.i1.i32 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) -1 0) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (iconst.i64 -1) (iconst.i64 0)))
+      (sub.i64 (iconst.i64 0) (zext.i1.i64 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) -1 0) (result))))
+
+(rule (simplify (select.i8 (value.i1 c) (iconst.i8 0) (iconst.i8 -1)))
+      (add.i8 (zext.i1.i8 (value.i1 c)) (iconst.i8 -1))
+      (spec (= (ite (not (= c 0)) 0 -1) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (iconst.i16 0) (iconst.i16 -1)))
+      (add.i16 (zext.i1.i16 (value.i1 c)) (iconst.i16 -1))
+      (spec (= (ite (not (= c 0)) 0 -1) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (iconst.i32 0) (iconst.i32 -1)))
+      (add.i32 (zext.i1.i32 (value.i1 c)) (iconst.i32 -1))
+      (spec (= (ite (not (= c 0)) 0 -1) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (iconst.i64 0) (iconst.i64 -1)))
+      (add.i64 (zext.i1.i64 (value.i1 c)) (iconst.i64 -1))
+      (spec (= (ite (not (= c 0)) 0 -1) (result))))
+
+;; One more than a value or the value, which is the value plus the condition.
+
+(rule (simplify (select.i8 (value.i1 c) (add.i8 (value.i8 x) (iconst.i8 1)) (value.i8 x)))
+      (add.i8 (value.i8 x) (zext.i1.i8 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvadd x 1) x) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (add.i16 (value.i16 x) (iconst.i16 1)) (value.i16 x)))
+      (add.i16 (value.i16 x) (zext.i1.i16 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvadd x 1) x) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (add.i32 (value.i32 x) (iconst.i32 1)) (value.i32 x)))
+      (add.i32 (value.i32 x) (zext.i1.i32 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvadd x 1) x) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (add.i64 (value.i64 x) (iconst.i64 1)) (value.i64 x)))
+      (add.i64 (value.i64 x) (zext.i1.i64 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvadd x 1) x) (result))))
+
+(rule (simplify (select.i8 (value.i1 c) (value.i8 x) (add.i8 (value.i8 x) (iconst.i8 1))))
+      (add.i8 (value.i8 x) (zext.i1.i8 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvadd x 1)) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (value.i16 x) (add.i16 (value.i16 x) (iconst.i16 1))))
+      (add.i16 (value.i16 x) (zext.i1.i16 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvadd x 1)) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (value.i32 x) (add.i32 (value.i32 x) (iconst.i32 1))))
+      (add.i32 (value.i32 x) (zext.i1.i32 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvadd x 1)) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (value.i64 x) (add.i64 (value.i64 x) (iconst.i64 1))))
+      (add.i64 (value.i64 x) (zext.i1.i64 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvadd x 1)) (result))))
+
+;; One less than a value or the value, which is the value less the condition.
+
+(rule (simplify (select.i8 (value.i1 c) (sub.i8 (value.i8 x) (iconst.i8 1)) (value.i8 x)))
+      (sub.i8 (value.i8 x) (zext.i1.i8 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvsub x 1) x) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (sub.i16 (value.i16 x) (iconst.i16 1)) (value.i16 x)))
+      (sub.i16 (value.i16 x) (zext.i1.i16 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvsub x 1) x) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (sub.i32 (value.i32 x) (iconst.i32 1)) (value.i32 x)))
+      (sub.i32 (value.i32 x) (zext.i1.i32 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvsub x 1) x) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (sub.i64 (value.i64 x) (iconst.i64 1)) (value.i64 x)))
+      (sub.i64 (value.i64 x) (zext.i1.i64 (value.i1 c)))
+      (spec (= (ite (not (= c 0)) (bvsub x 1) x) (result))))
+
+(rule (simplify (select.i8 (value.i1 c) (value.i8 x) (sub.i8 (value.i8 x) (iconst.i8 1))))
+      (sub.i8 (value.i8 x) (zext.i1.i8 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvsub x 1)) (result))))
+
+(rule (simplify (select.i16 (value.i1 c) (value.i16 x) (sub.i16 (value.i16 x) (iconst.i16 1))))
+      (sub.i16 (value.i16 x) (zext.i1.i16 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvsub x 1)) (result))))
+
+(rule (simplify (select.i32 (value.i1 c) (value.i32 x) (sub.i32 (value.i32 x) (iconst.i32 1))))
+      (sub.i32 (value.i32 x) (zext.i1.i32 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvsub x 1)) (result))))
+
+(rule (simplify (select.i64 (value.i1 c) (value.i64 x) (sub.i64 (value.i64 x) (iconst.i64 1))))
+      (sub.i64 (value.i64 x) (zext.i1.i64 (xor.i1 (value.i1 c) (iconst.i1 1))))
+      (spec (= (ite (not (= c 0)) x (bvsub x 1)) (result))))
