@@ -1655,10 +1655,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
                     })?;
             }
-            // The head of every loop, which is padded to a sixteen byte boundary the way gcc pads it
-            // when this is asked for. Both directions of the plain form are answered. A number is
-            // taken and says nothing, because the boundary here is gcc's default one and a build
-            // that names another is asking for speed rather than for a different program.
+            // The head of every hot loop, which is padded when this is asked for so that a loop that
+            // fits in a 64 byte line does not cross one. Both directions of the plain form are
+            // answered. A number is taken and says nothing, because the boundary here is the
+            // line's and a build that names another is asking for speed rather than for a
+            // different program.
             "-falign-loops" => opts.align_loops = Some(true),
             "-fno-align-loops" => opts.align_loops = Some(false),
             // The other two of the family, which are about padding in front of any label and in

@@ -86,20 +86,41 @@ pub fn kept(funcs: &[Func], names: &Interner, target: &TargetInfo) -> bool {
     })
 }
 
-/// What the listing writes in front of the head of a loop, which is gcc's own padding at `-O2`.
+/// The line a hot loop is kept inside, which is the cache line and the fetch block on the x86-64
+/// machines this was measured on.
 ///
-/// Sixteen bytes when that is at most ten bytes of padding away, and eight otherwise. The two
-/// numbers are the ones gcc uses for x86-64 and the directives are the ones it writes, so a loop
-/// lands where gcc's would given the same bytes in front of it. The object writer does the same
-/// arithmetic in [`loop_padding`], and the two are beside each other so that they are changed
-/// together.
-const LOOP_DIRECTIVES: &str = "\t.p2align\t4,,10\n\t.p2align\t3\n";
+/// Where a small loop starts matters on those machines only as far as whether it crosses one of
+/// these. The same thirty eight bytes of loop ran in 527M to 553M cycles wherever it fitted inside
+/// one line and in 578M to 753M wherever it crossed, while gcc's rule of sixteen bytes when that is
+/// near and eight otherwise kept it inside a line only half the time. That is `tamnd/rucc#1838`.
+const LINE: usize = 64;
 
-/// How many bytes of padding go in front of the head of a loop that would otherwise start `at`
-/// bytes into the section. See [`LOOP_DIRECTIVES`].
-fn loop_padding(at: usize) -> usize {
-    let wide = at.next_multiple_of(16) - at;
-    if wide <= 10 { wide } else { at.next_multiple_of(8) - at }
+/// The most padding one loop is given, whatever it would take to keep it inside a line.
+///
+/// Half a line. With no limit the padding cost SQLite 1.01% of its text, with this one 0.48%, and
+/// with a quarter of a line 0.16%, which is too little to reach the loop the rule was written for:
+/// its head was twenty bytes short of the next line.
+const MOST_PADDING: usize = 31;
+
+/// The most padding worth putting in front of a loop that is `size` bytes from its head to the end
+/// of the jump back to it, or nothing when no padding would keep it inside a line.
+///
+/// A loop longer than a line crosses one wherever it starts. A loop of one line or less crosses one
+/// exactly when the padding to the next line is less than its size, so asking for the next line
+/// with that much padding at most pads the loops that cross and leaves the ones that do not alone.
+/// That is gas's `.p2align 6,,N`, which is what the listing writes, and [`loop_padding`] is the
+/// same arithmetic for the object writer. The two are beside each other so that they are changed
+/// together.
+fn loop_room(size: usize) -> Option<usize> {
+    (size > 1 && size <= LINE).then(|| (size - 1).min(MOST_PADDING))
+}
+
+/// How many bytes of padding go in front of the head of a loop of that size that would otherwise
+/// start `at` bytes into the section. See [`loop_room`].
+fn loop_padding(at: usize, size: usize) -> usize {
+    let Some(most) = loop_room(size) else { return 0 };
+    let wanted = at.next_multiple_of(LINE) - at;
+    if wanted <= most { wanted } else { 0 }
 }
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
@@ -247,13 +268,30 @@ mod tests {
         assert!(super::MILESTONE.starts_with('M'));
     }
 
-    /// Up to ten bytes to reach sixteen, and past that whatever reaches eight.
+    /// A loop that would cross a line is moved to the start of the next one, and a loop that
+    /// would not, that is too long for any line to hold or that is too far from the next line, is
+    /// left where it is.
     #[test]
-    fn a_loop_is_padded_to_sixteen_when_that_is_near_and_to_eight_when_it_is_not() {
-        let cases = [(0, 0), (6, 10), (5, 3), (1, 7), (8, 8), (9, 7), (15, 1), (16, 0), (18, 6)];
-        for (at, padding) in cases {
-            assert_eq!(super::loop_padding(at), padding, "at {at}");
-            assert!((at + padding) % 8 == 0, "at {at} lands on eight at least");
+    fn a_loop_is_padded_only_when_that_keeps_it_inside_a_line() {
+        let cases = [
+            (0, 38, 0),
+            (26, 38, 0),
+            (27, 38, 0),
+            (40, 38, 24),
+            (56, 38, 8),
+            (63, 38, 1),
+            (64 + 40, 38, 24),
+            (33, 64, 31),
+            (32, 64, 0),
+            (1, 65, 0),
+            (10, 1, 0),
+        ];
+        for (at, size, padding) in cases {
+            assert_eq!(super::loop_padding(at, size), padding, "{size} bytes at {at}");
+            let start = at + padding;
+            if padding > 0 {
+                assert!(start % 64 + size <= 64, "{size} bytes at {at} still cross a line");
+            }
         }
     }
 }

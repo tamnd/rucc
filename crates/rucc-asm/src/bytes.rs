@@ -175,6 +175,7 @@ pub fn assemble(
             wants: lines,
             start,
             room: None,
+            loops: Vec::new(),
         };
         assembler.func()?;
         let room = assembler.room;
@@ -313,11 +314,68 @@ struct Assembler<'a> {
     /// label, which is the same answer to two different questions and is why the caller decides
     /// which of them it asked. See `assemble`.
     room: Option<usize>,
+    /// How long the loop each block is the head of is, indexed by the block's own number, and zero
+    /// for a block that heads none. See [`loop_sizes`].
+    loops: Vec<usize>,
+}
+
+/// How long each loop in the function is, from its head to the end of the last jump back to it,
+/// indexed by the head's own number and zero for a block that is not a head.
+///
+/// Worked out by laying the function out once with no padding and throwing the bytes away. That is
+/// exact because every jump here is four bytes of distance whatever the distance is, so no
+/// instruction's length depends on where it lands and padding in front of the head moves the whole
+/// loop without changing its size. The cost is encoding a function twice, and only a function
+/// something asked to pad a loop in pays it.
+pub(crate) fn loop_sizes(
+    names: &Interner,
+    directives: Directives,
+    func: &Func,
+) -> Result<Vec<usize>, Error> {
+    let mut sizes = vec![0; func.block_count()];
+    if func.heads.is_empty() {
+        return Ok(sizes);
+    }
+    let mut text = Text::default();
+    let mut scratch = Assembler {
+        names,
+        directives,
+        func,
+        name: "",
+        text: &mut text,
+        blocks: Vec::new(),
+        jumps: Vec::new(),
+        rows: Vec::new(),
+        lines: Vec::new(),
+        wants: false,
+        start: 0,
+        room: None,
+        loops: Vec::new(),
+    };
+    scratch.lay()?;
+    for jump in &scratch.jumps {
+        let To::Block(head) = jump.to else { continue };
+        let start = scratch.blocks[head.index()];
+        // A jump that ends in front of the head is the way into the loop and not the way round it.
+        if start == usize::MAX || jump.end <= start || !func.heads.contains(&head) {
+            continue;
+        }
+        sizes[head.index()] = sizes[head.index()].max(jump.end - start);
+    }
+    Ok(sizes)
 }
 
 impl Assembler<'_> {
     /// The blocks, and then the jumps between them once every block has a place.
     fn func(&mut self) -> Result<(), Error> {
+        self.loops = loop_sizes(self.names, self.directives, self.func)?;
+        self.lay()?;
+        let tables = self.tables()?;
+        self.patch(&tables)
+    }
+
+    /// The blocks, one after another, with the jumps between them left for [`Self::patch`].
+    fn lay(&mut self) -> Result<(), Error> {
         self.blocks = vec![usize::MAX; self.func.block_count()];
         // The prologue, first, because nothing in it has a span of its own. The pushes, the frame
         // and the moves that put the arguments where the body expects them came from no expression
@@ -328,18 +386,17 @@ impl Assembler<'_> {
             self.lines.push(Row { at: 0, span: self.func.declared, inst: None });
         }
         let end = self.func.cfi_end();
-        let mut heads = vec![false; self.func.block_count()];
-        for &head in &self.func.heads {
-            heads[head.index()] = true;
-        }
         for block in self.func.blocks() {
-            // The head of a loop is padded to the boundary the listing asks the assembler for, with
+            // The head of a loop is padded the way the listing asks the assembler to pad it, with
             // instructions rather than single bytes, since the block in front of it may fall in.
-            // The section is told for the reason an alignment instruction tells it below.
-            if heads[block.index()] {
-                let count = crate::loop_padding(self.text.bytes.len());
+            // The section is told for the reason an alignment instruction tells it below, since a
+            // place inside a line of the section is one inside a line of memory only if the
+            // section starts on one.
+            let size = self.loops.get(block.index()).copied().unwrap_or(0);
+            if crate::loop_room(size).is_some() {
+                let count = crate::loop_padding(self.text.bytes.len(), size);
                 x86_64::nops(count, &mut self.text.bytes);
-                self.text.align = self.text.align.max(16);
+                self.text.align = self.text.align.max(crate::LINE as u32);
             }
             self.blocks[block.index()] = self.text.bytes.len();
             // And the name an image knows the block by, as a symbol at the same byte. The number
@@ -377,7 +434,11 @@ impl Assembler<'_> {
                 self.rows.extend(self.func.cfi_after(inst).map(|op| (at, op)));
             }
         }
-        let tables = self.tables()?;
+        Ok(())
+    }
+
+    /// Where the jumps go, now that every block and every table has a place.
+    fn patch(&mut self, tables: &[usize]) -> Result<(), Error> {
         for jump in std::mem::take(&mut self.jumps) {
             let to = match jump.to {
                 To::Block(block) => self.blocks[block.index()],
@@ -1172,33 +1233,39 @@ mod tests {
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }
 
-    /// The head of a loop starts on sixteen when that is ten bytes away or less and on eight when
-    /// it is further, and what fills the gap is one instruction that does nothing.
+    /// A loop that would cross a line starts on the next one, the gap is instructions that do
+    /// nothing, and a loop that fits where it falls is left there.
     #[test]
-    fn the_head_of_a_loop_is_padded_with_one_instruction_that_does_nothing() {
-        let adds = |count: usize| {
+    fn the_head_of_a_loop_that_would_cross_a_line_starts_on_the_next_one() {
+        let laid = |ahead: usize| {
             write(|func, names| {
                 let first = func.create_block();
                 let head = func.create_block();
                 let add = Opcode::new(names.intern("x64.add_rr_32"));
-                for block in std::iter::repeat_n(first, count).chain([head]) {
+                for block in std::iter::repeat_n(first, ahead).chain(std::iter::repeat_n(head, 15))
+                {
                     func.build(block, add)
                         .operand(Operand::write(Reg::physical(RAX), GPR))
                         .operand(Operand::read(Reg::physical(RAX), GPR))
                         .operand(Operand::read(Reg::physical(RCX), GPR))
                         .finish();
                 }
+                func.build(head, Opcode::new(names.intern("x64.jmp"))).finish();
+                func.succs_mut(head).push(BlockCall::to(head));
                 func.heads = vec![head];
             })
         };
-        // Six bytes in, which is ten from sixteen: one ten byte nop.
-        let text = adds(3);
-        assert_eq!(&text.bytes[6..16], [0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0]);
-        assert_eq!(hex(&text.bytes[16..]), "01 c8");
-        // Two bytes in, which is fourteen from sixteen and too far, so six to reach eight.
-        let text = adds(1);
-        assert_eq!(hex(&text.bytes[2..8]), "66 0f 1f 44 00 00");
-        assert_eq!(hex(&text.bytes[8..]), "01 c8");
-        assert!(text.align >= 16, "{}", text.align);
+        // Fifteen adds and the five byte jump back are a loop of thirty five bytes. Twenty adds in
+        // front put it at forty, which crosses at sixty four, so it moves there.
+        let text = laid(20);
+        assert_eq!(text.bytes.len(), 64 + 35);
+        assert_eq!(hex(&text.bytes[64..66]), "01 c8");
+        assert!(text.bytes[40..64].iter().all(|&byte| byte != 0x01), "only padding in the gap");
+        assert_eq!(text.bytes[40], 0x66, "a long nop rather than single bytes");
+        assert!(text.align >= 64, "{}", text.align);
+        // Ten adds in front put it at twenty, and it ends at fifty five without crossing.
+        let text = laid(10);
+        assert_eq!(text.bytes.len(), 20 + 35);
+        assert_eq!(hex(&text.bytes[20..22]), "01 c8");
     }
 }
