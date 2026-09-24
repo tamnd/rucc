@@ -27,6 +27,7 @@ pub static SELECTOR: super::Selector = super::Selector {
     gpr: rucc_target::x86_64::GPR,
     fence: "mfence",
     trap: "ud2",
+    abi: &crate::abi::X86_64,
 };
 
 #[cfg(test)]

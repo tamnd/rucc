@@ -34,6 +34,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The instruction selector no longer names x86-64. `lower::func` is handed a `select::Selector` holding the rule table, the operand shapes, the address constructors and the few instructions it writes itself, and `pipeline::Machine` carries one for each machine. The address constructor enum is now `rucc_target::Address`, shared by both rule files, and inline `asm` is refused on a machine other than x86-64 instead of being read as x86. What the pipeline still assumes about x86-64 is listed in `docs/LEAKS.md`.
 
+- The argument, return and call instructions in `abi.rs` come from the machine being compiled for rather than being x86-64 names, so a function of integer arithmetic now lowers to AArch64 machine IR from end to end of selection. Nothing past selection runs for AArch64 yet.
+
 ### Fixed
 
 - A function with a comparison against memory that keeps a byte, such as `cmpl (%rbx), %eax; setg %dl`, now gets `xorl` for its zeros like any other. The size pass asked whether any block read a condition a predecessor left, and it took that comparison for such a read, since it compares against memory and so is not in the table of comparisons, and then kept `movl $0` for every zero in the function. See tamnd/rucc#1822.

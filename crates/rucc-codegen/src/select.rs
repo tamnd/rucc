@@ -50,6 +50,8 @@ pub struct Selector {
     pub fence: &'static str,
     /// The instruction a program that must stop here stops with, without the prefix.
     pub trap: &'static str,
+    /// The instructions the calling convention is written with.
+    pub abi: &'static crate::abi::Insts,
 }
 
 impl Selector {
