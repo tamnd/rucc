@@ -795,7 +795,27 @@ mod tests {
         let out =
             compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
                 .expect("every instruction has a rule");
-        let text = mir::print_func(&out, &names, &rucc_target::aarch64::REGS);
+        let text = mir::print_func(&out, &names, &aarch64::REGS);
+        println!("{text}");
+    }
+
+    #[test]
+    fn probe_call_for_aarch64() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
+        let got = source[call].first_result.expect("an integer comes back");
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, got, args[0], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::aarch64(&aarch64::AAPCS64);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &aarch64::REGS);
         panic!("{text}");
     }
 
