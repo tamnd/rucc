@@ -16,6 +16,55 @@ pub mod aarch64;
 pub mod x86_64;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};
+use rucc_target::{Address, BranchInsts, FrameInsts, MachineInsts, OperandDesc, RegClass};
+
+/// What `crate::lower` has to know about the machine it selects instructions for.
+///
+/// The lowering is one walk over the IR whichever machine it is for, and everything in it that
+/// differs between two machines is a question this answers: which table the rules compiled into,
+/// what each opcode's operands are, what an address constructor's arguments mean, and the handful
+/// of instructions the walk writes itself rather than getting from a rule. A walk that reaches
+/// for a machine's module by name is a walk for that machine only, which is what this is here to
+/// stop.
+///
+/// The frame and branch instructions are the same tables `crate::pipeline::Machine` hands the
+/// passes after this one. They are in here as well so that the lowering is handed one thing,
+/// rather than a machine and the convention and the rules separately.
+#[derive(Debug)]
+pub struct Selector {
+    /// The rules, compiled.
+    pub table: &'static Table,
+    /// The shape of each opcode, and the prefix a rule file puts in front of one.
+    pub shapes: &'static MachineInsts,
+    /// What an address constructor in a replacement stands for, or `None` for a name that is not
+    /// one of this machine's.
+    pub address: fn(&str) -> Option<Address>,
+    /// The instructions that take a frame and give it back, of which the walk writes the address
+    /// of a local and the move between two registers itself.
+    pub frame: &'static FrameInsts,
+    /// The instructions a branch becomes, of which the walk writes the indirect jump itself.
+    pub branch: &'static BranchInsts,
+    /// The class an address is in.
+    pub gpr: RegClass,
+    /// The instruction a full fence is, without the prefix.
+    pub fence: &'static str,
+    /// The instruction a program that must stop here stops with, without the prefix.
+    pub trap: &'static str,
+}
+
+impl Selector {
+    /// What a rule file and the machine IR put in front of this machine's opcodes.
+    #[must_use]
+    pub fn prefix(&self) -> &'static str {
+        self.shapes.prefix
+    }
+
+    /// The operands the opcode of that name has, the name written without the prefix.
+    #[must_use]
+    pub fn operands(&self, name: &str) -> Option<&'static [OperandDesc]> {
+        (self.shapes.operands)(name)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -286,5 +335,48 @@ mod tests {
         let y = terms.value(64, "v1");
         let odd = terms.app("no.such.opcode", &[x, y]);
         assert_eq!(selects(&terms, odd), None);
+    }
+
+    /// Every instruction a selector names outside its rules is one its machine describes, since
+    /// the lowering writes those without asking a rule and nothing else would catch a name that is
+    /// not there.
+    #[test]
+    fn a_selector_names_only_instructions_its_machine_has() {
+        for selector in [&super::x86_64::SELECTOR, &super::aarch64::SELECTOR] {
+            let named = [
+                selector.fence,
+                selector.trap,
+                selector.frame.lea,
+                selector.frame.grow,
+                selector.frame.imm,
+                selector.branch.indirect,
+            ];
+            for name in named {
+                assert!(
+                    selector.operands(name).is_some(),
+                    "{}{name} is not an instruction of its machine",
+                    selector.prefix()
+                );
+            }
+            // And the rules it is handed are the ones written for the same machine.
+            for rule in selector.table.rules {
+                let Some(Piece::App { head, .. }) = rule.replacement.first() else { continue };
+                assert!(head.starts_with(selector.prefix()), "{head} in {}", selector.table.source);
+            }
+        }
+    }
+
+    /// An address constructor is read the same way on both machines, and the one the AArch64 rules
+    /// cannot write is not one it answers for.
+    #[test]
+    fn both_machines_read_an_address_the_same_way() {
+        let (x86, a64) = (&super::x86_64::SELECTOR, &super::aarch64::SELECTOR);
+        for name in ["amode_base", "amode_base_offset"] {
+            assert_eq!((x86.address)(name), (a64.address)(name));
+            assert!((a64.address)(name).is_some());
+        }
+        assert!((x86.address)("amode_base_index_scale").is_some());
+        assert_eq!((a64.address)("amode_base_index_scale"), None);
+        assert_eq!((a64.address)("add_rr_64"), None);
     }
 }

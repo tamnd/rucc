@@ -89,7 +89,14 @@ mod tests {
 
     /// Lowers a function and carries its weights down, and gives back the machine function.
     fn lowered(source: &mut Func, names: &mut Interner) -> mir::Func {
-        let out = lower::func(source, names, &SYSV, &Elsewhere::default()).expect("it lowers");
+        let out = lower::func(
+            source,
+            names,
+            &crate::select::x86_64::SELECTOR,
+            &SYSV,
+            &Elsewhere::default(),
+        )
+        .expect("it lowers");
         let lower::Lowered { mut func, blocks, .. } = out;
         carry(source, &blocks, &mut func);
         func

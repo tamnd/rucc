@@ -116,3 +116,37 @@ impl MachineInsts {
         self.scales.contains(&scale)
     }
 }
+
+/// What an address constructor's arguments are.
+///
+/// An addressing mode is an argument to an instruction rather than an instruction, and a rule
+/// file writes one as a term so that a rule can say which registers go where. The selector has
+/// to turn that term into a machine IR memory operand, and what each constructor's arguments
+/// mean is the same kind of target fact as an instruction's operands, so it is written here
+/// rather than in the selector.
+///
+/// The names are shared. A rule file writes an address with whichever of these its machine has,
+/// and a target with only some of them lists which, so a selector reads a constructor the same
+/// way whichever machine it is selecting for.
+///
+/// The scale and the displacement are arguments rather than part of the name because each is a
+/// number the rule matched and the machine encodes it as a number. There is none with a symbol
+/// yet, because the rules that would need one are the ones about a global and those are not
+/// written.
+///
+/// What the arguments mean is the whole of what tells these apart, and there is deliberately no
+/// predicate here that answers half the question: the same register is a base in one of these
+/// and an index in another, and the same constant is a scale in one and a displacement in
+/// another, so anything building an address out of one has to look at which it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Address {
+    /// A base register, an index register and a scale, in that order.
+    BaseIndexScale,
+    /// An index register and a scale, which is an address with nothing to add it to.
+    IndexScale,
+    /// A base register on its own, which is what a pointer already in a register is.
+    Base,
+    /// A base register and a constant added to it, which is every field of a structure and
+    /// every local reached through a frame pointer.
+    BaseOffset,
+}

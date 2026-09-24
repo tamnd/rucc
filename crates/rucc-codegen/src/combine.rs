@@ -154,23 +154,6 @@
 //! the condition is the one the comparison already had. What is left holding a register is the byte
 //! the comparison sets, and the block layout usually takes that too.
 //!
-//! # Widenings
-//!
-//! A narrow integer read out of memory and then widened is the same pair with a widening where the
-//! arithmetic was, and this machine has a load that widens on the way in at every width it has a
-//! widening for. So `p[i]` on a `signed char` that the program returns as an `int` is one
-//! instruction rather than two:
-//!
-//! ```text
-//!   movb (%rdi,%rsi), %al
-//!   movsbl %al, %eax       ->    movsbl (%rdi,%rsi), %eax
-//! ```
-//!
-//! The rows are in [`FOLDS`] with the rest. A widening has one source and so one arrangement, and
-//! the load in its row is as wide as what it reads rather than what it writes. The one widening
-//! with no row is the zero extension from four bytes to eight, since that is a plain four byte
-//! load already and the move that follows it is the allocator's to take away.
-//!
 //! # What a `volatile` access gets
 //!
 //! Nothing. Both walks stop at one, so `volatile int *p; *p += x;` comes out as the load, the
@@ -365,10 +348,6 @@ pub struct Fold {
 /// And then the same forty against a constant, which name one instruction each. The constant is on
 /// the instruction and cannot be anywhere else, so the register the load filled is the left hand
 /// side and there is no other arrangement to offer.
-///
-/// And last the widenings, which read one register and so have one arrangement as well. The load in
-/// these is as wide as the source rather than the answer, since what the instruction reads out of
-/// memory is the narrow value it widens.
 pub static FOLDS: &[Fold] = &[
     Fold { from: "add_rr_8", into: "add_rm_8", load: "mov_rm_8", swapped: Some("add_rm_8") },
     Fold { from: "add_rr_16", into: "add_rm_16", load: "mov_rm_16", swapped: Some("add_rm_16") },
@@ -673,17 +652,6 @@ pub static FOLDS: &[Fold] = &[
     Fold { from: "cmp_set_ae_ri_16", into: "cmp_set_ae_mi_16", load: "mov_rm_16", swapped: None },
     Fold { from: "cmp_set_ae_ri_32", into: "cmp_set_ae_mi_32", load: "mov_rm_32", swapped: None },
     Fold { from: "cmp_set_ae_ri_64", into: "cmp_set_ae_mi_64", load: "mov_rm_64", swapped: None },
-    Fold { from: "movzx_8_16", into: "movzx_rm_8_16", load: "mov_rm_8", swapped: None },
-    Fold { from: "movzx_8_32", into: "movzx_rm_8_32", load: "mov_rm_8", swapped: None },
-    Fold { from: "movzx_8_64", into: "movzx_rm_8_64", load: "mov_rm_8", swapped: None },
-    Fold { from: "movzx_16_32", into: "movzx_rm_16_32", load: "mov_rm_16", swapped: None },
-    Fold { from: "movzx_16_64", into: "movzx_rm_16_64", load: "mov_rm_16", swapped: None },
-    Fold { from: "movsx_8_16", into: "movsx_rm_8_16", load: "mov_rm_8", swapped: None },
-    Fold { from: "movsx_8_32", into: "movsx_rm_8_32", load: "mov_rm_8", swapped: None },
-    Fold { from: "movsx_8_64", into: "movsx_rm_8_64", load: "mov_rm_8", swapped: None },
-    Fold { from: "movsx_16_32", into: "movsx_rm_16_32", load: "mov_rm_16", swapped: None },
-    Fold { from: "movsx_16_64", into: "movsx_rm_16_64", load: "mov_rm_16", swapped: None },
-    Fold { from: "movsxd_32_64", into: "movsxd_rm_32_64", load: "mov_rm_32", swapped: None },
 ];
 
 /// One arithmetic instruction that could work on memory rather than on a register, and the load
@@ -2198,55 +2166,6 @@ mod tests {
         assert_eq!(func[func[inst].operands][2].reg, base, "the address it took on");
     }
 
-    /// A byte read and then widened with its sign, which is `p[i]` on a `signed char` returned as an
-    /// `int`. The one instruction reads the byte and widens it, and the register the byte was in is
-    /// not written at all.
-    #[test]
-    fn a_narrow_load_read_once_by_a_widening_becomes_one_widening_load() {
-        let (mut names, mut func, block) = empty();
-        let base = func.new_vreg(GPR);
-        let byte = func.new_vreg(GPR);
-        let mov = op(&mut names, "mov_rm_8");
-        func.build(block, mov)
-            .def(byte, GPR)
-            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
-            .finish();
-        let wide = func.new_vreg(GPR);
-        let movsx = op(&mut names, "movsx_8_32");
-        func.build(block, movsx).def(wide, GPR).uses(byte, GPR).finish();
-
-        assert_eq!(combine(&mut func, &mut names), 1);
-        assert_eq!(shape(&func, &names, block), ["x64.movsx_rm_8_32"]);
-        let inst = func.insts(block).next().expect("the widening");
-        let mem = func[inst].mem.expect("the widening reads memory now");
-        assert_eq!(func[mem].disp, 16, "the load's displacement came with it");
-        assert_eq!(func[mem].base, Some(1), "and names the operand behind the answer");
-        assert_eq!(func[func[inst].operands][0].reg, wide, "the answer is where it was");
-        assert_eq!(func[func[inst].operands][1].reg, base, "the address it took on");
-    }
-
-    /// The same byte with something else reading it too. The load has to stay for the other
-    /// reader, so the widening stays a widening of a register.
-    #[test]
-    fn a_narrow_load_something_else_reads_stays_a_load() {
-        let (mut names, mut func, block) = empty();
-        let base = func.new_vreg(GPR);
-        let other = func.new_vreg(GPR);
-        let byte = func.new_vreg(GPR);
-        let mov = op(&mut names, "mov_rm_8");
-        func.build(block, mov)
-            .def(byte, GPR)
-            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
-            .finish();
-        let wide = func.new_vreg(GPR);
-        let movzx = op(&mut names, "movzx_8_64");
-        func.build(block, movzx).def(wide, GPR).uses(byte, GPR).finish();
-        alu(&mut func, &mut names, block, "add_rr_8", other, byte);
-
-        assert_eq!(combine(&mut func, &mut names), 0);
-        assert_eq!(shape(&func, &names, block), ["x64.mov_rm_8", "x64.movzx_8_64", "x64.add_rr_8"]);
-    }
-
     /// The same load feeding the source the answer is tied to. The two sources are swapped, which
     /// an addition does not mind and is what lets this fold at all.
     #[test]
@@ -2599,12 +2518,7 @@ mod tests {
             assert!(MACHINE.has(fold.load), "{} is not an instruction", fold.load);
             let width = |name: &str| name.rsplit_once('_').map(|(_, width)| width.to_owned());
             assert_eq!(width(fold.from), width(fold.into), "{} changes width", fold.from);
-            // A widening reads the narrower of its two widths, which is the one in front.
-            let read = match fold.from.strip_prefix("movsx").or(fold.from.strip_prefix("movzx")) {
-                Some(rest) => rest.trim_start_matches('d').split('_').nth(1).map(str::to_owned),
-                None => width(fold.from),
-            };
-            assert_eq!(read, width(fold.load), "{} loads another width", fold.from);
+            assert_eq!(width(fold.from), width(fold.load), "{} loads another width", fold.from);
             assert!((MACHINE.takes_mem)(fold.into), "{} reads no memory", fold.into);
             assert!(!(MACHINE.takes_mem)(fold.from), "{} already reads memory", fold.from);
             let Some(swapped) = fold.swapped else { continue };
@@ -2624,9 +2538,7 @@ mod tests {
             compares, 80,
             "ten conditions at four widths, against a register and a constant"
         );
-        let widens = FOLDS.iter().filter(|fold| fold.from.starts_with("mov")).count();
-        assert_eq!(widens, 11, "five widenings with a sign, five without and the four byte one");
-        let arithmetic = FOLDS.len() - compares - widens;
+        let arithmetic = FOLDS.len() - compares;
         assert_eq!(arithmetic, 23, "six operations at four widths, less the eight bit multiply");
         let swapped = FOLDS.iter().filter(|fold| fold.swapped.is_some()).count();
         assert_eq!(swapped, 59, "everything but the four subtractions and the constant compares");

@@ -332,7 +332,7 @@ pub fn entry(
         arrived.spare = spare(out, block, conv, names, area, arrived.took);
     }
 
-    let lea = format!("{}{}", crate::lower::PREFIX, x86_64::FRAME.lea);
+    let lea = format!("{}{}", x86_64::MACHINE.prefix, x86_64::FRAME.lea);
     // The stack pointer is written down as the register to read through because it is the one that
     // reaches the caller's stack in almost every function, and a realigned frame is the exception
     // that [`crate::finish`] rewrites. Putting something here rather than nothing keeps the

@@ -35,6 +35,7 @@
 //! and the allocator never sees one. That is a deliberate constraint on the rule set rather
 //! than a simplification of the machine.
 
+pub use crate::machine::Address;
 use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
@@ -1993,19 +1994,6 @@ pub static INSTS: &[(&str, Form)] = &[
     // whole address and so is widened with its sign on the way in. Only the lowering of a dense
     // `switch` writes it.
     ("movsxd_rm_32_64", Load),
-    // Reading a narrow integer and widening it in the one instruction, which is what a load read
-    // only by a widening becomes once `rucc_codegen::combine` puts the two together. The jump table
-    // cell above is the same thing at four bytes and is used for that as well.
-    ("movzx_rm_8_16", Load),
-    ("movzx_rm_8_32", Load),
-    ("movzx_rm_8_64", Load),
-    ("movzx_rm_16_32", Load),
-    ("movzx_rm_16_64", Load),
-    ("movsx_rm_8_16", Load),
-    ("movsx_rm_8_32", Load),
-    ("movsx_rm_8_64", Load),
-    ("movsx_rm_16_32", Load),
-    ("movsx_rm_16_64", Load),
     // Putting the value a function gives back where the caller looks for it, which is as much of
     // a return as a lowering rule decides.
     ("ret_val_8", RetVal),
@@ -2456,36 +2444,6 @@ pub fn form(name: &str) -> Option<Form> {
     INSTS.iter().find(|(known, _)| *known == name).map(|&(_, form)| form)
 }
 
-/// What an address constructor's arguments are.
-///
-/// An addressing mode is an argument to an instruction rather than an instruction, and a rule
-/// file writes one as a term so that a rule can say which registers go where. The selector has
-/// to turn that term into a machine IR memory operand, and what each constructor's arguments
-/// mean is the same kind of target fact as [`Form`], so it is written here rather than in the
-/// selector.
-///
-/// The scale and the displacement are arguments rather than part of the name because each is a
-/// number the rule matched and the machine encodes it as a number. There is none with a symbol
-/// yet, because the rules that would need one are the ones about a global and those are not
-/// written.
-///
-/// What the arguments mean is the whole of what tells these apart, and there is deliberately no
-/// predicate here that answers half the question: the same register is a base in one of these
-/// and an index in another, and the same constant is a scale in one and a displacement in
-/// another, so anything building an address out of one has to look at which it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Address {
-    /// A base register, an index register and a scale, in that order.
-    BaseIndexScale,
-    /// An index register and a scale, which is an address with nothing to add it to.
-    IndexScale,
-    /// A base register on its own, which is what a pointer already in a register is.
-    Base,
-    /// A base register and a constant added to it, which is every field of a structure and
-    /// every local reached through a frame pointer.
-    BaseOffset,
-}
-
 /// Every address constructor the x86-64 rule set can write, and what its arguments are.
 pub static ADDRESSES: &[(&str, Address)] = &[
     ("amode_base_index_scale", Address::BaseIndexScale),
@@ -2527,7 +2485,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 740);
+        assert_eq!(described, 730);
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Encoded, Error, Extend, Fixup, Mode, Offset, Operator, Scalar, Shift,
     Value, Width, encode,
 };
-pub use crate::aarch64::insts::{Form, INSTS, form};
+pub use crate::aarch64::insts::{ADDRESSES, Form, INSTS, address, form};
 pub use crate::aarch64::read::{Error as ReadError, Line, read};
 pub use crate::aarch64::text::{Arg, Missing, Operands, Written, fill, operand_width, written};
 pub use crate::aarch64::timing::{LOAD, MODEL, TIMING};

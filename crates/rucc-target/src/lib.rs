@@ -63,7 +63,7 @@ pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 pub use crate::frame::{ClassMoves, FrameInsts, Probe};
-pub use crate::machine::MachineInsts;
+pub use crate::machine::{Address, MachineInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
