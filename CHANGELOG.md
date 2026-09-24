@@ -20,6 +20,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `rucc_target::aarch64::encode` writes AArch64 instructions as their words, covering the integer, bitfield, conditional, load and store, pair, exclusive, branch, system and scalar floating point instructions and the aliases GNU as takes for them, such as `mov`, `cmp`, `lsl` with a number and `cset`, and `rucc_target::aarch64::read` reads them in GNU syntax. A symbol or a label is left as zeros with the ELF relocation that fills it in. Every word is checked against the word GNU as 2.42 writes for the same line, 477 lines in all.
 
+- `rucc_target::aarch64::INSTS` is the AArch64 instruction table: 286 machine IR opcodes, each with the operands the allocator reads and, in `rucc_target::aarch64::written`, the instructions it is written as. `fill` turns those into the values `encode` takes, and `rucc_target::aarch64::write` prints the same values in GNU syntax, so `-S` and the object file will be written from one description. Every opcode's instructions encode, and all 328 of them give the same word GNU as 2.42 gives for the printed line. Every line in the encoder's golden file reads back unchanged once written. Nothing selects these opcodes yet.
+
 ### Fixed
 
 - A local copied from another at the top of a loop body, as in `int j = i;` in `while (i < n) { int j = i; i = i + 1; ... }`, now shows the old value of `i` under `-g` at `-O1` and `-O2`, where gdb printed the new one. Header copying gives the body its own copy of the counter and now moves the names and start points in the body onto it, instead of leaving them on the header's value, which the loop hands the next value when it comes round. See tamnd/rucc#1810.

@@ -1,0 +1,331 @@
+# Every instruction every opcode in text.rs is written as, filled in with x1 to x4, the constant 1
+# and [x9, #16], then assembled by GNU as 2.42 (aarch64-linux-gnu-as) and read back with objdump -d.
+# Columns: the word GNU as wrote, the line it was given, the opcode.
+52800021	mov w1, #1	mov_ri_32
+d2800021	mov x1, #1	mov_ri_64
+72a00021	movk w1, #1, lsl #16	movk_ri_16_32
+f2a00021	movk x1, #1, lsl #16	movk_ri_16_64
+f2c00021	movk x1, #1, lsl #32	movk_ri_32_64
+f2e00021	movk x1, #1, lsl #48	movk_ri_48_64
+2a0203e1	mov w1, w2	mov_rr_32
+aa0203e1	mov x1, x2	mov_rr_64
+0b030041	add w1, w2, w3	add_rr_32
+8b030041	add x1, x2, x3	add_rr_64
+4b030041	sub w1, w2, w3	sub_rr_32
+cb030041	sub x1, x2, x3	sub_rr_64
+0a030041	and w1, w2, w3	and_rr_32
+8a030041	and x1, x2, x3	and_rr_64
+2a030041	orr w1, w2, w3	orr_rr_32
+aa030041	orr x1, x2, x3	orr_rr_64
+4a030041	eor w1, w2, w3	eor_rr_32
+ca030041	eor x1, x2, x3	eor_rr_64
+0a230041	bic w1, w2, w3	bic_rr_32
+8a230041	bic x1, x2, x3	bic_rr_64
+2a230041	orn w1, w2, w3	orn_rr_32
+aa230041	orn x1, x2, x3	orn_rr_64
+1b037c41	mul w1, w2, w3	mul_rr_32
+9b037c41	mul x1, x2, x3	mul_rr_64
+1ac30c41	sdiv w1, w2, w3	sdiv_rr_32
+9ac30c41	sdiv x1, x2, x3	sdiv_rr_64
+1ac30841	udiv w1, w2, w3	udiv_rr_32
+9ac30841	udiv x1, x2, x3	udiv_rr_64
+1ac32041	lslv w1, w2, w3	lsl_rr_32
+9ac32041	lslv x1, x2, x3	lsl_rr_64
+1ac32441	lsrv w1, w2, w3	lsr_rr_32
+9ac32441	lsrv x1, x2, x3	lsr_rr_64
+1ac32841	asrv w1, w2, w3	asr_rr_32
+9ac32841	asrv x1, x2, x3	asr_rr_64
+1ac32c41	rorv w1, w2, w3	ror_rr_32
+9ac32c41	rorv x1, x2, x3	ror_rr_64
+9b437c41	smulh x1, x2, x3	smulh_rr_64
+9bc37c41	umulh x1, x2, x3	umulh_rr_64
+11000441	add w1, w2, #1	add_ri_32
+91000441	add x1, x2, #1	add_ri_64
+51000441	sub w1, w2, #1	sub_ri_32
+d1000441	sub x1, x2, #1	sub_ri_64
+12000041	and w1, w2, #1	and_ri_32
+92400041	and x1, x2, #1	and_ri_64
+32000041	orr w1, w2, #1	orr_ri_32
+b2400041	orr x1, x2, #1	orr_ri_64
+52000041	eor w1, w2, #1	eor_ri_32
+d2400041	eor x1, x2, #1	eor_ri_64
+531f7841	lsl w1, w2, #1	lsl_ri_32
+d37ff841	lsl x1, x2, #1	lsl_ri_64
+53017c41	lsr w1, w2, #1	lsr_ri_32
+d341fc41	lsr x1, x2, #1	lsr_ri_64
+13017c41	asr w1, w2, #1	asr_ri_32
+9341fc41	asr x1, x2, #1	asr_ri_64
+13820441	ror w1, w2, #1	ror_ri_32
+93c20441	ror x1, x2, #1	ror_ri_64
+1b031041	madd w1, w2, w3, w4	madd_rrr_32
+9b031041	madd x1, x2, x3, x4	madd_rrr_64
+1b039041	msub w1, w2, w3, w4	msub_rrr_32
+9b039041	msub x1, x2, x3, x4	msub_rrr_64
+4b0203e1	neg w1, w2	neg_r_32
+cb0203e1	neg x1, x2	neg_r_64
+2a2203e1	mvn w1, w2	mvn_r_32
+aa2203e1	mvn x1, x2	mvn_r_64
+5ac01041	clz w1, w2	clz_r_32
+dac01041	clz x1, x2	clz_r_64
+5ac00041	rbit w1, w2	rbit_r_32
+dac00041	rbit x1, x2	rbit_r_64
+5ac00841	rev w1, w2	rev_r_32
+dac00c41	rev x1, x2	rev_r_64
+5ac00441	rev16 w1, w2	rev16_r_32
+13001c41	sxtb w1, w2	sxtb_32
+93401c41	sxtb x1, w2	sxtb_64
+13003c41	sxth w1, w2	sxth_32
+93403c41	sxth x1, w2	sxth_64
+53001c41	uxtb w1, w2	uxtb_32
+53003c41	uxth w1, w2	uxth_32
+93407c41	sxtw x1, w2	sxtw_64
+2a0203e1	mov w1, w2	uxtw_64
+6b02003f	cmp w1, w2	cmp_rr_32
+7100043f	cmp w1, #1	cmp_ri_32
+7100003f	cmp w1, #0	test_32
+eb02003f	cmp x1, x2	cmp_rr_64
+f100043f	cmp x1, #1	cmp_ri_64
+f100003f	cmp x1, #0	test_64
+6b03005f	cmp w2, w3	cmp_set_eq_32
+1a9f17e1	cset w1, eq	cmp_set_eq_32
+eb03005f	cmp x2, x3	cmp_set_eq_64
+1a9f17e1	cset w1, eq	cmp_set_eq_64
+6b03005f	cmp w2, w3	cmp_set_ne_32
+1a9f07e1	cset w1, ne	cmp_set_ne_32
+eb03005f	cmp x2, x3	cmp_set_ne_64
+1a9f07e1	cset w1, ne	cmp_set_ne_64
+6b03005f	cmp w2, w3	cmp_set_lt_32
+1a9fa7e1	cset w1, lt	cmp_set_lt_32
+eb03005f	cmp x2, x3	cmp_set_lt_64
+1a9fa7e1	cset w1, lt	cmp_set_lt_64
+6b03005f	cmp w2, w3	cmp_set_le_32
+1a9fc7e1	cset w1, le	cmp_set_le_32
+eb03005f	cmp x2, x3	cmp_set_le_64
+1a9fc7e1	cset w1, le	cmp_set_le_64
+6b03005f	cmp w2, w3	cmp_set_gt_32
+1a9fd7e1	cset w1, gt	cmp_set_gt_32
+eb03005f	cmp x2, x3	cmp_set_gt_64
+1a9fd7e1	cset w1, gt	cmp_set_gt_64
+6b03005f	cmp w2, w3	cmp_set_ge_32
+1a9fb7e1	cset w1, ge	cmp_set_ge_32
+eb03005f	cmp x2, x3	cmp_set_ge_64
+1a9fb7e1	cset w1, ge	cmp_set_ge_64
+6b03005f	cmp w2, w3	cmp_set_lo_32
+1a9f27e1	cset w1, lo	cmp_set_lo_32
+eb03005f	cmp x2, x3	cmp_set_lo_64
+1a9f27e1	cset w1, lo	cmp_set_lo_64
+6b03005f	cmp w2, w3	cmp_set_ls_32
+1a9f87e1	cset w1, ls	cmp_set_ls_32
+eb03005f	cmp x2, x3	cmp_set_ls_64
+1a9f87e1	cset w1, ls	cmp_set_ls_64
+6b03005f	cmp w2, w3	cmp_set_hi_32
+1a9f97e1	cset w1, hi	cmp_set_hi_32
+eb03005f	cmp x2, x3	cmp_set_hi_64
+1a9f97e1	cset w1, hi	cmp_set_hi_64
+6b03005f	cmp w2, w3	cmp_set_hs_32
+1a9f37e1	cset w1, hs	cmp_set_hs_32
+eb03005f	cmp x2, x3	cmp_set_hs_64
+1a9f37e1	cset w1, hs	cmp_set_hs_64
+7100045f	cmp w2, #1	cmp_set_eq_ri_32
+1a9f17e1	cset w1, eq	cmp_set_eq_ri_32
+f100045f	cmp x2, #1	cmp_set_eq_ri_64
+1a9f17e1	cset w1, eq	cmp_set_eq_ri_64
+7100045f	cmp w2, #1	cmp_set_ne_ri_32
+1a9f07e1	cset w1, ne	cmp_set_ne_ri_32
+f100045f	cmp x2, #1	cmp_set_ne_ri_64
+1a9f07e1	cset w1, ne	cmp_set_ne_ri_64
+7100045f	cmp w2, #1	cmp_set_lt_ri_32
+1a9fa7e1	cset w1, lt	cmp_set_lt_ri_32
+f100045f	cmp x2, #1	cmp_set_lt_ri_64
+1a9fa7e1	cset w1, lt	cmp_set_lt_ri_64
+7100045f	cmp w2, #1	cmp_set_le_ri_32
+1a9fc7e1	cset w1, le	cmp_set_le_ri_32
+f100045f	cmp x2, #1	cmp_set_le_ri_64
+1a9fc7e1	cset w1, le	cmp_set_le_ri_64
+7100045f	cmp w2, #1	cmp_set_gt_ri_32
+1a9fd7e1	cset w1, gt	cmp_set_gt_ri_32
+f100045f	cmp x2, #1	cmp_set_gt_ri_64
+1a9fd7e1	cset w1, gt	cmp_set_gt_ri_64
+7100045f	cmp w2, #1	cmp_set_ge_ri_32
+1a9fb7e1	cset w1, ge	cmp_set_ge_ri_32
+f100045f	cmp x2, #1	cmp_set_ge_ri_64
+1a9fb7e1	cset w1, ge	cmp_set_ge_ri_64
+7100045f	cmp w2, #1	cmp_set_lo_ri_32
+1a9f27e1	cset w1, lo	cmp_set_lo_ri_32
+f100045f	cmp x2, #1	cmp_set_lo_ri_64
+1a9f27e1	cset w1, lo	cmp_set_lo_ri_64
+7100045f	cmp w2, #1	cmp_set_ls_ri_32
+1a9f87e1	cset w1, ls	cmp_set_ls_ri_32
+f100045f	cmp x2, #1	cmp_set_ls_ri_64
+1a9f87e1	cset w1, ls	cmp_set_ls_ri_64
+7100045f	cmp w2, #1	cmp_set_hi_ri_32
+1a9f97e1	cset w1, hi	cmp_set_hi_ri_32
+f100045f	cmp x2, #1	cmp_set_hi_ri_64
+1a9f97e1	cset w1, hi	cmp_set_hi_ri_64
+7100045f	cmp w2, #1	cmp_set_hs_ri_32
+1a9f37e1	cset w1, hs	cmp_set_hs_ri_32
+f100045f	cmp x2, #1	cmp_set_hs_ri_64
+1a9f37e1	cset w1, hs	cmp_set_hs_ri_64
+7100009f	cmp w4, #0	sel_32
+1a821061	csel w1, w3, w2, ne	sel_32
+7100009f	cmp w4, #0	sel_64
+9a821061	csel x1, x3, x2, ne	sel_64
+1a820061	csel w1, w3, w2, eq	csel_eq_32
+9a820061	csel x1, x3, x2, eq	csel_eq_64
+1a821061	csel w1, w3, w2, ne	csel_ne_32
+9a821061	csel x1, x3, x2, ne	csel_ne_64
+1a82b061	csel w1, w3, w2, lt	csel_lt_32
+9a82b061	csel x1, x3, x2, lt	csel_lt_64
+1a82d061	csel w1, w3, w2, le	csel_le_32
+9a82d061	csel x1, x3, x2, le	csel_le_64
+1a82c061	csel w1, w3, w2, gt	csel_gt_32
+9a82c061	csel x1, x3, x2, gt	csel_gt_64
+1a82a061	csel w1, w3, w2, ge	csel_ge_32
+9a82a061	csel x1, x3, x2, ge	csel_ge_64
+1a823061	csel w1, w3, w2, lo	csel_lo_32
+9a823061	csel x1, x3, x2, lo	csel_lo_64
+1a829061	csel w1, w3, w2, ls	csel_ls_32
+9a829061	csel x1, x3, x2, ls	csel_ls_64
+1a828061	csel w1, w3, w2, hi	csel_hi_32
+9a828061	csel x1, x3, x2, hi	csel_hi_64
+1a822061	csel w1, w3, w2, hs	csel_hs_32
+9a822061	csel x1, x3, x2, hs	csel_hs_64
+91004121	add x1, x9, #16	lea_64
+90000001	adrp x1, s	addr_64
+91000021	add x1, x1, :lo12:s	addr_64
+90000001	adrp x1, :got:s	got_64
+f9400021	ldr x1, [x1, :got_lo12:s]	got_64
+d53bd041	mrs x1, tpidr_el0	tls_64
+91400021	add x1, x1, :tprel_hi12:s, lsl #12	tls_64
+91000021	add x1, x1, :tprel_lo12_nc:s	tls_64
+39404121	ldrb w1, [x9, #16]	ldr_8
+79402121	ldrh w1, [x9, #16]	ldr_16
+b9401121	ldr w1, [x9, #16]	ldr_32
+f9400921	ldr x1, [x9, #16]	ldr_64
+39c04121	ldrsb w1, [x9, #16]	ldrs_8_32
+39804121	ldrsb x1, [x9, #16]	ldrs_8_64
+79c02121	ldrsh w1, [x9, #16]	ldrs_16_32
+79802121	ldrsh x1, [x9, #16]	ldrs_16_64
+b9801121	ldrsw x1, [x9, #16]	ldrs_32_64
+39004121	strb w1, [x9, #16]	str_8
+79002121	strh w1, [x9, #16]	str_16
+b9001121	str w1, [x9, #16]	str_32
+f9000921	str x1, [x9, #16]	str_64
+bd401121	ldr s1, [x9, #16]	ldr_f32
+fd400921	ldr d1, [x9, #16]	ldr_f64
+3dc00521	ldr q1, [x9, #16]	ldr_f128
+bd001121	str s1, [x9, #16]	str_f32
+fd000921	str d1, [x9, #16]	str_f64
+3d800521	str q1, [x9, #16]	str_f128
+1e232841	fadd s1, s2, s3	fadd_f32
+1e632841	fadd d1, d2, d3	fadd_f64
+1e233841	fsub s1, s2, s3	fsub_f32
+1e633841	fsub d1, d2, d3	fsub_f64
+1e230841	fmul s1, s2, s3	fmul_f32
+1e630841	fmul d1, d2, d3	fmul_f64
+1e231841	fdiv s1, s2, s3	fdiv_f32
+1e631841	fdiv d1, d2, d3	fdiv_f64
+1e235841	fmin s1, s2, s3	fmin_f32
+1e635841	fmin d1, d2, d3	fmin_f64
+1e234841	fmax s1, s2, s3	fmax_f32
+1e634841	fmax d1, d2, d3	fmax_f64
+1e237841	fminnm s1, s2, s3	fminnm_f32
+1e637841	fminnm d1, d2, d3	fminnm_f64
+1e236841	fmaxnm s1, s2, s3	fmaxnm_f32
+1e636841	fmaxnm d1, d2, d3	fmaxnm_f64
+1e214041	fneg s1, s2	fneg_f32
+1e614041	fneg d1, d2	fneg_f64
+1e20c041	fabs s1, s2	fabs_f32
+1e60c041	fabs d1, d2	fabs_f64
+1e21c041	fsqrt s1, s2	fsqrt_f32
+1e61c041	fsqrt d1, d2	fsqrt_f64
+1e25c041	frintz s1, s2	frintz_f32
+1e65c041	frintz d1, d2	frintz_f64
+1e254041	frintm s1, s2	frintm_f32
+1e654041	frintm d1, d2	frintm_f64
+1e24c041	frintp s1, s2	frintp_f32
+1e64c041	frintp d1, d2	frintp_f64
+1e264041	frinta s1, s2	frinta_f32
+1e664041	frinta d1, d2	frinta_f64
+1e244041	frintn s1, s2	frintn_f32
+1e644041	frintn d1, d2	frintn_f64
+1e274041	frintx s1, s2	frintx_f32
+1e674041	frintx d1, d2	frintx_f64
+1e27c041	frinti s1, s2	frinti_f32
+1e67c041	frinti d1, d2	frinti_f64
+1e204041	fmov s1, s2	fmov_rr_f32
+1e604041	fmov d1, d2	fmov_rr_f64
+4ea21c41	mov v1.16b, v2.16b	mov_rr_f128
+1e624041	fcvt s1, d2	fcvt_f64_f32
+1e22c041	fcvt d1, s2	fcvt_f32_f64
+1e220041	scvtf s1, w2	scvtf_32_f32
+1e620041	scvtf d1, w2	scvtf_32_f64
+9e220041	scvtf s1, x2	scvtf_64_f32
+9e620041	scvtf d1, x2	scvtf_64_f64
+1e230041	ucvtf s1, w2	ucvtf_32_f32
+1e630041	ucvtf d1, w2	ucvtf_32_f64
+9e230041	ucvtf s1, x2	ucvtf_64_f32
+9e630041	ucvtf d1, x2	ucvtf_64_f64
+1e380041	fcvtzs w1, s2	fcvtzs_f32_32
+9e380041	fcvtzs x1, s2	fcvtzs_f32_64
+1e780041	fcvtzs w1, d2	fcvtzs_f64_32
+9e780041	fcvtzs x1, d2	fcvtzs_f64_64
+1e390041	fcvtzu w1, s2	fcvtzu_f32_32
+9e390041	fcvtzu x1, s2	fcvtzu_f32_64
+1e790041	fcvtzu w1, d2	fcvtzu_f64_32
+9e790041	fcvtzu x1, d2	fcvtzu_f64_64
+1e270041	fmov s1, w2	fmov_to_f32
+9e670041	fmov d1, x2	fmov_to_f64
+1e260041	fmov w1, s2	fmov_from_f32
+9e660041	fmov x1, d2	fmov_from_f64
+1e222020	fcmp s1, s2	fcmp_f32
+1e622020	fcmp d1, d2	fcmp_f64
+1e232040	fcmp s2, s3	fcmp_set_eq_f32
+1a9f17e1	cset w1, eq	fcmp_set_eq_f32
+1e632040	fcmp d2, d3	fcmp_set_eq_f64
+1a9f17e1	cset w1, eq	fcmp_set_eq_f64
+1e232040	fcmp s2, s3	fcmp_set_ne_f32
+1a9f07e1	cset w1, ne	fcmp_set_ne_f32
+1e632040	fcmp d2, d3	fcmp_set_ne_f64
+1a9f07e1	cset w1, ne	fcmp_set_ne_f64
+1e232040	fcmp s2, s3	fcmp_set_lt_f32
+1a9f57e1	cset w1, mi	fcmp_set_lt_f32
+1e632040	fcmp d2, d3	fcmp_set_lt_f64
+1a9f57e1	cset w1, mi	fcmp_set_lt_f64
+1e232040	fcmp s2, s3	fcmp_set_le_f32
+1a9f87e1	cset w1, ls	fcmp_set_le_f32
+1e632040	fcmp d2, d3	fcmp_set_le_f64
+1a9f87e1	cset w1, ls	fcmp_set_le_f64
+1e232040	fcmp s2, s3	fcmp_set_gt_f32
+1a9fd7e1	cset w1, gt	fcmp_set_gt_f32
+1e632040	fcmp d2, d3	fcmp_set_gt_f64
+1a9fd7e1	cset w1, gt	fcmp_set_gt_f64
+1e232040	fcmp s2, s3	fcmp_set_ge_f32
+1a9fb7e1	cset w1, ge	fcmp_set_ge_f32
+1e632040	fcmp d2, d3	fcmp_set_ge_f64
+1a9fb7e1	cset w1, ge	fcmp_set_ge_f64
+14000000	b s	b
+54000000	b.eq s	b_eq
+54000001	b.ne s	b_ne
+5400000b	b.lt s	b_lt
+5400000d	b.le s	b_le
+5400000c	b.gt s	b_gt
+5400000a	b.ge s	b_ge
+54000003	b.lo s	b_lo
+54000009	b.ls s	b_ls
+54000008	b.hi s	b_hi
+54000002	b.hs s	b_hs
+54000004	b.mi s	b_mi
+54000005	b.pl s	b_pl
+54000006	b.vs s	b_vs
+54000007	b.vc s	b_vc
+14000000	b s	b_away
+d61f0020	br x1	br
+94000000	bl s	bl
+d63f0020	blr x1	blr
+d65f03c0	ret	ret
+f81f0fe1	str x1, [sp, #-16]!	push_64
+f84107e1	ldr x1, [sp], #16	pop_64
+d503201f	nop	nop
+d4200020	brk #1	trap
+d5033bbf	dmb ish	fence
