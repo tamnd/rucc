@@ -35,6 +35,7 @@ use rucc_target::{
 use rucc_tuple::Arch;
 
 use crate::bits;
+use crate::choice;
 use crate::combine;
 use crate::compare;
 use crate::copies;
@@ -500,6 +501,8 @@ pub fn compile_recording(
     // written once and a physical one is not, so after allocation that question no longer has an
     // answer.
     let fusable = layout::fusable(&func, machine.branch, names);
+    // The same question about the selects on a comparison's byte, asked here for the same reason.
+    let choosable = choice::fusable(&func, machine.branch, names);
 
     // In front of the splitting below, because what it does is take the values off the edges out of
     // a computed `goto` and the splitting has no answer for one of those: the block they leave ends
@@ -662,6 +665,12 @@ pub fn compile_recording(
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
     layout::blocks(&mut func, machine.branch, names, &fusable, flags.reorder);
+
+    // After the layout for the reason the branches wait for it: a select that reads what a
+    // comparison left is a pair with nothing allowed between, and nothing past here puts anything
+    // there. Before the compare pass, since the comparison this keeps is one that pass may find
+    // was already made.
+    choice::moves(&mut func, machine.branch, machine.flags, machine.shapes, names, &choosable);
 
     // After the layout rather than before it, which is the whole of what makes it safe. What a
     // comparison leaves for the instruction behind it to read is not a register and nothing may

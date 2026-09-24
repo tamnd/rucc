@@ -53,7 +53,7 @@ pub use crate::x86_64::text::{
 pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 
 use crate::bits::BitInsts;
-use crate::branch::{BranchInsts, Fusion};
+use crate::branch::{BranchInsts, Fusion, Move};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
@@ -319,6 +319,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     indirect: "jmp_reg",
     conditional: &CONDITIONAL,
     fused: &FUSED,
+    moves: &MOVES,
 };
 
 /// Every jump on the condition state this machine has, which is sixteen conditions.
@@ -505,6 +506,55 @@ static FUSED: [Fusion; 160] = [
     Fusion { set: "cmp_set_ae_mi_16", cmp: "cmp_mi_16", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_mi_32", cmp: "cmp_mi_32", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_mi_64", cmp: "cmp_mi_64", if_true: "jcc_ae", if_false: "jcc_b" },
+];
+
+/// What a select on a comparison's answer becomes, which is the move on the condition the
+/// comparison was asked about.
+///
+/// The ten conditions at the four widths a select has. There is no conditional move narrower than
+/// sixteen bits, so the eight bit select moves thirty two bits here for the reason its own rule
+/// does.
+static MOVES: [Move; 40] = [
+    Move { select: "test_cmov_ne_8", when: "jcc_e", cmov: "cmov_e_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_ne", cmov: "cmov_ne_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_l", cmov: "cmov_l_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_le", cmov: "cmov_le_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_g", cmov: "cmov_g_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_ge", cmov: "cmov_ge_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_b", cmov: "cmov_b_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_be", cmov: "cmov_be_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_a", cmov: "cmov_a_32" },
+    Move { select: "test_cmov_ne_8", when: "jcc_ae", cmov: "cmov_ae_32" },
+    Move { select: "test_cmov_ne_16", when: "jcc_e", cmov: "cmov_e_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_ne", cmov: "cmov_ne_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_l", cmov: "cmov_l_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_le", cmov: "cmov_le_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_g", cmov: "cmov_g_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_ge", cmov: "cmov_ge_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_b", cmov: "cmov_b_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_be", cmov: "cmov_be_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_a", cmov: "cmov_a_16" },
+    Move { select: "test_cmov_ne_16", when: "jcc_ae", cmov: "cmov_ae_16" },
+    Move { select: "test_cmov_ne_32", when: "jcc_e", cmov: "cmov_e_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_ne", cmov: "cmov_ne_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_l", cmov: "cmov_l_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_le", cmov: "cmov_le_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_g", cmov: "cmov_g_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_ge", cmov: "cmov_ge_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_b", cmov: "cmov_b_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_be", cmov: "cmov_be_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_a", cmov: "cmov_a_32" },
+    Move { select: "test_cmov_ne_32", when: "jcc_ae", cmov: "cmov_ae_32" },
+    Move { select: "test_cmov_ne_64", when: "jcc_e", cmov: "cmov_e_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_ne", cmov: "cmov_ne_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_l", cmov: "cmov_l_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_le", cmov: "cmov_le_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_g", cmov: "cmov_g_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_ge", cmov: "cmov_ge_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_b", cmov: "cmov_b_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_be", cmov: "cmov_be_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_a", cmov: "cmov_a_64" },
+    Move { select: "test_cmov_ne_64", when: "jcc_ae", cmov: "cmov_ae_64" },
 ];
 
 /// What each x86-64 instruction leaves in the condition state.
@@ -1495,6 +1545,44 @@ mod tests {
         // folded branches and another for the rest.
         let jumps: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.if_true).collect();
         assert!(jumps.contains(&BRANCH.if_true) && jumps.contains(&BRANCH.if_false));
+    }
+
+    /// Every select has a move for every condition a comparison can be asked, and each move is
+    /// the select with the byte taken off the end.
+    ///
+    /// A condition with no entry would be a select that keeps its test, which is a missed saving,
+    /// and an entry naming the wrong condition would be a select that picks the wrong value, so
+    /// the condition on the end of the move's name has to be the one on the end of the jump's.
+    #[test]
+    fn every_select_on_a_comparison_has_the_move_that_reads_its_condition() {
+        let selects: Vec<&str> = INSTS
+            .iter()
+            .filter(|&&(_, shape)| shape == Form::TestCmov)
+            .map(|&(opcode, _)| opcode)
+            .collect();
+        let mut conditions: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.if_true).collect();
+        conditions.sort_unstable();
+        conditions.dedup();
+        for select in &selects {
+            for when in &conditions {
+                let found = BRANCH
+                    .moves
+                    .iter()
+                    .filter(|entry| entry.select == *select && entry.when == *when)
+                    .count();
+                assert_eq!(found, 1, "{select} on {when}");
+            }
+        }
+        assert_eq!(BRANCH.moves.len(), selects.len() * conditions.len());
+        for entry in BRANCH.moves {
+            assert_eq!(form(entry.cmov), Some(Form::Cmov), "{} is not a move", entry.cmov);
+            let before = form(entry.select).expect("a described select").operands();
+            let after = form(entry.cmov).expect("a described move").operands();
+            assert_eq!(after, &before[..before.len() - 1], "{} and {}", entry.select, entry.cmov);
+            let asked = entry.when.strip_prefix("jcc_").expect("a jump on a condition");
+            let read = entry.cmov.strip_prefix("cmov_").and_then(|rest| rest.rsplit_once('_'));
+            assert_eq!(read.map(|(condition, _)| condition), Some(asked), "{}", entry.cmov);
+        }
     }
 
     /// The condition on the end of an opcode's name, which is the part the tables are indexed by.
