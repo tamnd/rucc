@@ -179,7 +179,11 @@ not a no-op if the page is read-only. The C++ memory model forbids introducing s
 that were not otherwise written, and C's rules are the same in practice. The predicate must require
 that the location is unconditionally written on some path through the same region, not merely read.
 
+rucc takes the one armed store only where this can be shown another way, which is GCC's condition in `cselim`: the location is a local whose address never leaves the function, so no other thread can be writing it and the page is writable, and the block ending in the branch already read or wrote the same address at the same width with no call after that access. Everything else keeps its branch.
+
 **A load is speculated and faults.** The `&&` case in 22.5 and the arm-hoisting case. Same predicate.
+
+rucc hoists a load out of an arm only when the block ending in the branch already made a plain access to an address built the same way from the same values, at the same width, with no call after it.
 
 **A division is speculated and traps.** `cond ? a/b : 0` where `b` may be zero. Speculating the
 division executes it unconditionally. Arithmetic that can trap is not safe to speculate and integer

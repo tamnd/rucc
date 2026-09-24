@@ -3357,6 +3357,29 @@ decl #0 x : int object external static defined
         assert!(!text.contains("$-1"), "{text}");
     }
 
+    /// A store one path makes to a local the loop has just read, which GCC also turns into a
+    /// conditional move and an unconditional store. The branch was on data, so it was the one the
+    /// machine gets wrong half the time.
+    #[test]
+    fn a_store_to_a_local_the_loop_just_read_is_a_conditional_move() {
+        let text = optimized(
+            "int f(const int *v, int n, int k) { int best[8] = {0}; \
+             for (int i = 0; i < n; i++) if (v[i] > best[i & 7]) best[i & 7] = v[i]; \
+             return best[k & 7]; }\n",
+        );
+        assert!(text.contains("\tcmovnel"), "{text}");
+    }
+
+    /// The same loop on a global keeps its branch, because another thread may own the slot.
+    #[test]
+    fn a_store_to_a_global_the_loop_just_read_keeps_its_branch() {
+        let text = optimized(
+            "int best[8]; void f(const int *v, int n) { \
+             for (int i = 0; i < n; i++) if (v[i] > best[i & 7]) best[i & 7] = v[i]; }\n",
+        );
+        assert!(!text.contains("\tcmov"), "{text}");
+    }
+
     /// A conversion whose operand the optimizer turned into a constant, which is the whole of what
     /// `rucc_opt::fold` does with floating point.
     ///
