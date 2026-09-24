@@ -6,6 +6,10 @@
 //! `__GNUC__` is nine or more and `typedef __SVFloat32_t __sv_f32_t;` when it is ten or more. A
 //! compiler without them cannot include `<math.h>` for that target at all.
 //!
+//! x86 and PowerPC have one more, `__float128`, which is gcc's older name for `_Float128` and the
+//! one code written before C23 reaches for. gcc has it on those two and nowhere else, and
+//! `__SIZEOF_FLOAT128__` is defined exactly where it is.
+//!
 //! They are names and not keywords, as they are in gcc, so a program may declare something of
 //! the same name and hide one, and on every other target they are ordinary identifiers.
 
@@ -47,6 +51,8 @@ pub enum TypeName {
     /// type, and gcc allows one in a declaration and nearly nowhere else, so it is an incomplete
     /// type here: a prototype can name it, and an object of it is refused.
     Sizeless,
+    /// `_Float128`, under the name gcc had for it before the ISO one.
+    Float128,
 }
 
 /// The Advanced SIMD vectors under the names gcc gives them in `aarch64-simd-builtin-types.def`,
@@ -95,11 +101,15 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__SVBool_t", TypeName::Sizeless),
 ];
 
+/// The name x86 and PowerPC have for quad precision.
+const FLOAT128: &[(&str, TypeName)] = &[("__float128", TypeName::Float128)];
+
 /// The names `arch` has before anything is read, and what each one is.
 #[must_use]
 pub(crate) fn type_names(arch: Arch) -> &'static [(&'static str, TypeName)] {
     match arch {
         Arch::Aarch64 => AARCH64,
+        Arch::X86_64 | Arch::X86 | Arch::PowerPc64 => FLOAT128,
         _ => &[],
     }
 }
@@ -127,8 +137,13 @@ mod tests {
     }
 
     #[test]
-    fn only_aarch64_has_any() {
-        assert!(!type_names(Arch::Aarch64).is_empty());
-        assert!(type_names(Arch::X86_64).is_empty());
+    fn quad_precision_has_its_old_name_where_gcc_has_it() {
+        let has = |arch| type_names(arch).iter().any(|&(name, _)| name == "__float128");
+        assert!(has(Arch::X86_64));
+        assert!(has(Arch::X86));
+        assert!(has(Arch::PowerPc64));
+        assert!(!has(Arch::Aarch64));
+        assert!(!has(Arch::Riscv64));
+        assert!(type_names(Arch::Arm).is_empty());
     }
 }

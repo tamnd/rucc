@@ -1513,203 +1513,203 @@ int hv_registers_already_spent(long long a0, long long a1, long long a2, long lo
 	return 4379208;
 }
 
-unsigned long v00(long a0, int a1, ...)
+unsigned long va00(long a0, int a1, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 4387127L)
-		abi_fail("v00", "a0");
+		abi_fail("va00", "a0");
 	if (a1 != 4395046)
-		abi_fail("v00", "a1");
+		abi_fail("va00", "a1");
 
 	ABI_VA_START(ap, a1);
 	{
 		long double v0 = ABI_VA_ARG(ap, long double);
 		if (v0 != 557.25L)
-			abi_fail("v00", "v0");
+			abi_fail("va00", "v0");
 	}
 	{
 		struct long_double_one v1 = ABI_VA_ARG(ap, struct long_double_one);
 		if (v1.a != 558.25L)
-			abi_fail("v00", "v1.a");
+			abi_fail("va00", "v1.a");
 	}
 	{
 		int v2 = ABI_VA_ARG(ap, int);
 		if (v2 != (signed char)(59))
-			abi_fail("v00", "v2");
+			abi_fail("va00", "v2");
 	}
 	{
 		void *v3 = ABI_VA_ARG(ap, void *);
 		if (v3 != (void *)&anchor[47])
-			abi_fail("v00", "v3");
+			abi_fail("va00", "v3");
 	}
 	ABI_VA_END(ap);
 
 	return 4434641UL;
 }
 
-int v01(struct four_float a0, ...)
+int va01(struct four_float a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 562.25f)
-		abi_fail("v01", "a0.a");
+		abi_fail("va01", "a0.a");
 	if (a0.b != 563.25f)
-		abi_fail("v01", "a0.b");
+		abi_fail("va01", "a0.b");
 	if (a0.c != 564.25f)
-		abi_fail("v01", "a0.c");
+		abi_fail("va01", "a0.c");
 	if (a0.d != 565.25f)
-		abi_fail("v01", "a0.d");
+		abi_fail("va01", "a0.d");
 
 	ABI_VA_START(ap, a0);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != (signed char)(66))
-			abi_fail("v01", "v0");
+			abi_fail("va01", "v0");
 	}
 	{
 		void *v1 = ABI_VA_ARG(ap, void *);
 		if (v1 != (void *)&anchor[54])
-			abi_fail("v01", "v1");
+			abi_fail("va01", "v1");
 	}
 	ABI_VA_END(ap);
 
 	return 4490074;
 }
 
-char v02(int a0, ...)
+char va02(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 4497993)
-		abi_fail("v02", "a0");
+		abi_fail("va02", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct int_float v0 = ABI_VA_ARG(ap, struct int_float);
 		if (v0.a != 4505912)
-			abi_fail("v02", "v0.a");
+			abi_fail("va02", "v0.a");
 		if (v0.b != 571.25f)
-			abi_fail("v02", "v0.b");
+			abi_fail("va02", "v0.b");
 	}
 	{
 		struct nested v1 = ABI_VA_ARG(ap, struct nested);
 		if (v1.a.a != 4521750)
-			abi_fail("v02", "v1.a.a");
+			abi_fail("va02", "v1.a.a");
 		if (v1.a.b != 4529669)
-			abi_fail("v02", "v1.a.b");
+			abi_fail("va02", "v1.a.b");
 		if (v1.b != 574.25f)
-			abi_fail("v02", "v1.b");
+			abi_fail("va02", "v1.b");
 	}
 	ABI_VA_END(ap);
 
 	return (char)(75);
 }
 
-signed char v03(signed char a0, double a1, ...)
+signed char va03(signed char a0, double a1, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != (signed char)(76))
-		abi_fail("v03", "a0");
+		abi_fail("va03", "a0");
 	if (a1 != 577.25)
-		abi_fail("v03", "a1");
+		abi_fail("va03", "a1");
 
 	ABI_VA_START(ap, a1);
 	{
 		struct three_char v0 = ABI_VA_ARG(ap, struct three_char);
 		if (v0.a != (char)(78))
-			abi_fail("v03", "v0.a");
+			abi_fail("va03", "v0.a");
 		if (v0.b != (char)(79))
-			abi_fail("v03", "v0.b");
+			abi_fail("va03", "v0.b");
 		if (v0.c != (char)(80))
-			abi_fail("v03", "v0.c");
+			abi_fail("va03", "v0.c");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != (char)(81))
-			abi_fail("v03", "v1");
+			abi_fail("va03", "v1");
 	}
 	ABI_VA_END(ap);
 
 	return (signed char)(82);
 }
 
-void v04(union int_or_float a0, ...)
+void va04(union int_or_float a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 4608859)
-		abi_fail("v04", "a0.a");
+		abi_fail("va04", "a0.a");
 
 	ABI_VA_START(ap, a0);
 	{
 		union int_or_float v0 = ABI_VA_ARG(ap, union int_or_float);
 		if (v0.a != 4616778)
-			abi_fail("v04", "v0.a");
+			abi_fail("va04", "v0.a");
 	}
 	ABI_VA_END(ap);
 
 }
 
-int v05(unsigned long long a0, int a1, struct long_double_one a2, ...)
+int va05(unsigned long long a0, int a1, struct long_double_one a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 12124072409076481ULL)
-		abi_fail("v05", "a0");
+		abi_fail("va05", "a0");
 	if (a1 != 4632616)
-		abi_fail("v05", "a1");
+		abi_fail("va05", "a1");
 	if (a2.a != 587.25L)
-		abi_fail("v05", "a2.a");
+		abi_fail("va05", "a2.a");
 
 	ABI_VA_START(ap, a2);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != (unsigned char)(108))
-			abi_fail("v05", "v0");
+			abi_fail("va05", "v0");
 	}
 	{
 		struct one_char v1 = ABI_VA_ARG(ap, struct one_char);
 		if (v1.a != (char)(89))
-			abi_fail("v05", "v1.a");
+			abi_fail("va05", "v1.a");
 	}
 	{
 		unsigned int v2 = ABI_VA_ARG(ap, unsigned int);
 		if (v2 != 4664292u)
-			abi_fail("v05", "v2");
+			abi_fail("va05", "v2");
 	}
 	{
 		unsigned long v3 = ABI_VA_ARG(ap, unsigned long);
 		if (v3 != 4672211UL)
-			abi_fail("v05", "v3");
+			abi_fail("va05", "v3");
 	}
 	ABI_VA_END(ap);
 
 	return 4680130;
 }
 
-struct three_char v06(struct int_float a0, int a1, ...)
+struct three_char va06(struct int_float a0, int a1, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 4688049)
-		abi_fail("v06", "a0.a");
+		abi_fail("va06", "a0.a");
 	if (a0.b != 594.25f)
-		abi_fail("v06", "a0.b");
+		abi_fail("va06", "a0.b");
 	if (a1 != 4703887)
-		abi_fail("v06", "a1");
+		abi_fail("va06", "a1");
 
 	ABI_VA_START(ap, a1);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != (unsigned short)(596))
-			abi_fail("v06", "v0");
+			abi_fail("va06", "v0");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != 4719725)
-			abi_fail("v06", "v1");
+			abi_fail("va06", "v1");
 	}
 	ABI_VA_END(ap);
 
@@ -1717,159 +1717,159 @@ struct three_char v06(struct int_float a0, int a1, ...)
 	return r;
 }
 
-long double v07(unsigned char a0, union int_or_float a1, struct two_int a2, ...)
+long double va07(unsigned char a0, union int_or_float a1, struct two_int a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != (unsigned char)(121))
-		abi_fail("v07", "a0");
+		abi_fail("va07", "a0");
 	if (a1.a != 4759320)
-		abi_fail("v07", "a1.a");
+		abi_fail("va07", "a1.a");
 	if (a2.a != 4767239)
-		abi_fail("v07", "a2.a");
+		abi_fail("va07", "a2.a");
 	if (a2.b != 4775158)
-		abi_fail("v07", "a2.b");
+		abi_fail("va07", "a2.b");
 
 	ABI_VA_START(ap, a2);
 	{
 		unsigned long v0 = ABI_VA_ARG(ap, unsigned long);
 		if (v0 != 4783077UL)
-			abi_fail("v07", "v0");
+			abi_fail("va07", "v0");
 	}
 	{
 		struct two_int v1 = ABI_VA_ARG(ap, struct two_int);
 		if (v1.a != 4790996)
-			abi_fail("v07", "v1.a");
+			abi_fail("va07", "v1.a");
 		if (v1.b != 4798915)
-			abi_fail("v07", "v1.b");
+			abi_fail("va07", "v1.b");
 	}
 	ABI_VA_END(ap);
 
 	return 608.25L;
 }
 
-double v08(long double a0, struct two_int a1, struct four_float a2, ...)
+double va08(long double a0, struct two_int a1, struct four_float a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 609.25L)
-		abi_fail("v08", "a0");
+		abi_fail("va08", "a0");
 	if (a1.a != 4822672)
-		abi_fail("v08", "a1.a");
+		abi_fail("va08", "a1.a");
 	if (a1.b != 4830591)
-		abi_fail("v08", "a1.b");
+		abi_fail("va08", "a1.b");
 	if (a2.a != 612.25f)
-		abi_fail("v08", "a2.a");
+		abi_fail("va08", "a2.a");
 	if (a2.b != 613.25f)
-		abi_fail("v08", "a2.b");
+		abi_fail("va08", "a2.b");
 	if (a2.c != 614.25f)
-		abi_fail("v08", "a2.c");
+		abi_fail("va08", "a2.c");
 	if (a2.d != 615.25f)
-		abi_fail("v08", "a2.d");
+		abi_fail("va08", "a2.d");
 
 	ABI_VA_START(ap, a2);
 	{
 		long v0 = ABI_VA_ARG(ap, long);
 		if (v0 != 4870186L)
-			abi_fail("v08", "v0");
+			abi_fail("va08", "v0");
 	}
 	ABI_VA_END(ap);
 
 	return 617.25;
 }
 
-unsigned long v09(struct one_char a0, ...)
+unsigned long va09(struct one_char a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != (char)(18))
-		abi_fail("v09", "a0.a");
+		abi_fail("va09", "a0.a");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct two_int v0 = ABI_VA_ARG(ap, struct two_int);
 		if (v0.a != 4893943)
-			abi_fail("v09", "v0.a");
+			abi_fail("va09", "v0.a");
 		if (v0.b != 4901862)
-			abi_fail("v09", "v0.b");
+			abi_fail("va09", "v0.b");
 	}
 	{
 		struct one_char v1 = ABI_VA_ARG(ap, struct one_char);
 		if (v1.a != (char)(21))
-			abi_fail("v09", "v1.a");
+			abi_fail("va09", "v1.a");
 	}
 	{
 		int v2 = ABI_VA_ARG(ap, int);
 		if (v2 != (short)(622))
-			abi_fail("v09", "v2");
+			abi_fail("va09", "v2");
 	}
 	{
 		long double v3 = ABI_VA_ARG(ap, long double);
 		if (v3 != 623.25L)
-			abi_fail("v09", "v3");
+			abi_fail("va09", "v3");
 	}
 	{
 		double v4 = ABI_VA_ARG(ap, double);
 		if (v4 != 624.25f)
-			abi_fail("v09", "v4");
+			abi_fail("va09", "v4");
 	}
 	{
 		long v5 = ABI_VA_ARG(ap, long);
 		if (v5 != 4941457L)
-			abi_fail("v09", "v5");
+			abi_fail("va09", "v5");
 	}
 	ABI_VA_END(ap);
 
 	return 4949376UL;
 }
 
-struct four_float v10(unsigned char a0, void *a1, struct four_float a2, ...)
+struct four_float va10(unsigned char a0, void *a1, struct four_float a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != (unsigned char)(147))
-		abi_fail("v10", "a0");
+		abi_fail("va10", "a0");
 	if (a1 != (void *)&anchor[51])
-		abi_fail("v10", "a1");
+		abi_fail("va10", "a1");
 	if (a2.a != 629.25f)
-		abi_fail("v10", "a2.a");
+		abi_fail("va10", "a2.a");
 	if (a2.b != 630.25f)
-		abi_fail("v10", "a2.b");
+		abi_fail("va10", "a2.b");
 	if (a2.c != 631.25f)
-		abi_fail("v10", "a2.c");
+		abi_fail("va10", "a2.c");
 	if (a2.d != 632.25f)
-		abi_fail("v10", "a2.d");
+		abi_fail("va10", "a2.d");
 
 	ABI_VA_START(ap, a2);
 	{
 		unsigned long long v0 = ABI_VA_ARG(ap, unsigned long long);
 		if (v0 != 8435640004343041ULL)
-			abi_fail("v10", "v0");
+			abi_fail("va10", "v0");
 	}
 	{
 		long double v1 = ABI_VA_ARG(ap, long double);
 		if (v1 != 634.25L)
-			abi_fail("v10", "v1");
+			abi_fail("va10", "v1");
 	}
 	{
 		struct one_char v2 = ABI_VA_ARG(ap, struct one_char);
 		if (v2.a != (char)(35))
-			abi_fail("v10", "v2.a");
+			abi_fail("va10", "v2.a");
 	}
 	{
 		long v3 = ABI_VA_ARG(ap, long);
 		if (v3 != 5028566L)
-			abi_fail("v10", "v3");
+			abi_fail("va10", "v3");
 	}
 	{
 		long long v4 = ABI_VA_ARG(ap, long long);
 		if (v4 != 628270637281921LL)
-			abi_fail("v10", "v4");
+			abi_fail("va10", "v4");
 	}
 	{
 		int v5 = ABI_VA_ARG(ap, int);
 		if (v5 != (signed char)(38))
-			abi_fail("v10", "v5");
+			abi_fail("va10", "v5");
 	}
 	ABI_VA_END(ap);
 
@@ -1877,94 +1877,94 @@ struct four_float v10(unsigned char a0, void *a1, struct four_float a2, ...)
 	return r;
 }
 
-int v11(struct int_float a0, unsigned short a1, int a2, ...)
+int va11(struct int_float a0, unsigned short a1, int a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 5083999)
-		abi_fail("v11", "a0.a");
+		abi_fail("va11", "a0.a");
 	if (a0.b != 644.25f)
-		abi_fail("v11", "a0.b");
+		abi_fail("va11", "a0.b");
 	if (a1 != (unsigned short)(645))
-		abi_fail("v11", "a1");
+		abi_fail("va11", "a1");
 	if (a2 != 5107756)
-		abi_fail("v11", "a2");
+		abi_fail("va11", "a2");
 
 	ABI_VA_START(ap, a2);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != 5115675)
-			abi_fail("v11", "v0");
+			abi_fail("va11", "v0");
 	}
 	{
 		unsigned long long v1 = ABI_VA_ARG(ap, unsigned long long);
 		if (v1 != 12908004877863841ULL)
-			abi_fail("v11", "v1");
+			abi_fail("va11", "v1");
 	}
 	ABI_VA_END(ap);
 
 	return 5131513;
 }
 
-long double v12(void *a0, long a1, ...)
+long double va12(void *a0, long a1, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != (void *)&anchor[9])
-		abi_fail("v12", "a0");
+		abi_fail("va12", "a0");
 	if (a1 != 5147351L)
-		abi_fail("v12", "a1");
+		abi_fail("va12", "a1");
 
 	ABI_VA_START(ap, a1);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != (signed char)(52))
-			abi_fail("v12", "v0");
+			abi_fail("va12", "v0");
 	}
 	{
 		struct int_pointer v1 = ABI_VA_ARG(ap, struct int_pointer);
 		if (v1.a != 5163189)
-			abi_fail("v12", "v1.a");
+			abi_fail("va12", "v1.a");
 		if (v1.b != (void *)&anchor[13])
-			abi_fail("v12", "v1.b");
+			abi_fail("va12", "v1.b");
 	}
 	{
 		double v2 = ABI_VA_ARG(ap, double);
 		if (v2 != 655.25f)
-			abi_fail("v12", "v2");
+			abi_fail("va12", "v2");
 	}
 	ABI_VA_END(ap);
 
 	return 656.25L;
 }
 
-struct four_float v13(int a0, ...)
+struct four_float va13(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 5194865)
-		abi_fail("v13", "a0");
+		abi_fail("va13", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != 5202784)
-			abi_fail("v13", "v0");
+			abi_fail("va13", "v0");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != (char)(59))
-			abi_fail("v13", "v1");
+			abi_fail("va13", "v1");
 	}
 	{
 		unsigned long long v2 = ABI_VA_ARG(ap, unsigned long long);
 		if (v2 != 16485896776680481ULL)
-			abi_fail("v13", "v2");
+			abi_fail("va13", "v2");
 	}
 	{
 		int v3 = ABI_VA_ARG(ap, int);
 		if (v3 != (unsigned char)(181))
-			abi_fail("v13", "v3");
+			abi_fail("va13", "v3");
 	}
 	ABI_VA_END(ap);
 
@@ -1972,191 +1972,191 @@ struct four_float v13(int a0, ...)
 	return r;
 }
 
-void v14(struct three_char a0, unsigned int a1, ...)
+void va14(struct three_char a0, unsigned int a1, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != (char)(66))
-		abi_fail("v14", "a0.a");
+		abi_fail("va14", "a0.a");
 	if (a0.b != (char)(67))
-		abi_fail("v14", "a0.b");
+		abi_fail("va14", "a0.b");
 	if (a0.c != (char)(68))
-		abi_fail("v14", "a0.c");
+		abi_fail("va14", "a0.c");
 	if (a1 != 5289893u)
-		abi_fail("v14", "a1");
+		abi_fail("va14", "a1");
 
 	ABI_VA_START(ap, a1);
 	{
 		struct three_char v0 = ABI_VA_ARG(ap, struct three_char);
 		if (v0.a != (char)(70))
-			abi_fail("v14", "v0.a");
+			abi_fail("va14", "v0.a");
 		if (v0.b != (char)(71))
-			abi_fail("v14", "v0.b");
+			abi_fail("va14", "v0.b");
 		if (v0.c != (char)(72))
-			abi_fail("v14", "v0.c");
+			abi_fail("va14", "v0.c");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != 5321569)
-			abi_fail("v14", "v1");
+			abi_fail("va14", "v1");
 	}
 	{
 		int v2 = ABI_VA_ARG(ap, int);
 		if (v2 != (char)(74))
-			abi_fail("v14", "v2");
+			abi_fail("va14", "v2");
 	}
 	{
 		struct int_float v3 = ABI_VA_ARG(ap, struct int_float);
 		if (v3.a != 5337407)
-			abi_fail("v14", "v3.a");
+			abi_fail("va14", "v3.a");
 		if (v3.b != 676.25f)
-			abi_fail("v14", "v3.b");
+			abi_fail("va14", "v3.b");
 	}
 	{
 		int v4 = ABI_VA_ARG(ap, int);
 		if (v4 != (unsigned short)(677))
-			abi_fail("v14", "v4");
+			abi_fail("va14", "v4");
 	}
 	{
 		struct three_char v5 = ABI_VA_ARG(ap, struct three_char);
 		if (v5.a != (char)(78))
-			abi_fail("v14", "v5.a");
+			abi_fail("va14", "v5.a");
 		if (v5.b != (char)(79))
-			abi_fail("v14", "v5.b");
+			abi_fail("va14", "v5.b");
 		if (v5.c != (char)(80))
-			abi_fail("v14", "v5.c");
+			abi_fail("va14", "v5.c");
 	}
 	ABI_VA_END(ap);
 
 }
 
-char v15(long a0, struct long_double_one a1, void *a2, ...)
+char va15(long a0, struct long_double_one a1, void *a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 5384921L)
-		abi_fail("v15", "a0");
+		abi_fail("va15", "a0");
 	if (a1.a != 682.25L)
-		abi_fail("v15", "a1.a");
+		abi_fail("va15", "a1.a");
 	if (a2 != (void *)&anchor[42])
-		abi_fail("v15", "a2");
+		abi_fail("va15", "a2");
 
 	ABI_VA_START(ap, a2);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != (unsigned short)(684))
-			abi_fail("v15", "v0");
+			abi_fail("va15", "v0");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != 5416597)
-			abi_fail("v15", "v1");
+			abi_fail("va15", "v1");
 	}
 	{
 		double v2 = ABI_VA_ARG(ap, double);
 		if (v2 != 686.25)
-			abi_fail("v15", "v2");
+			abi_fail("va15", "v2");
 	}
 	{
 		int v3 = ABI_VA_ARG(ap, int);
 		if (v3 != (unsigned short)(687))
-			abi_fail("v15", "v3");
+			abi_fail("va15", "v3");
 	}
 	{
 		long v4 = ABI_VA_ARG(ap, long);
 		if (v4 != 5440354L)
-			abi_fail("v15", "v4");
+			abi_fail("va15", "v4");
 	}
 	{
 		struct four_float v5 = ABI_VA_ARG(ap, struct four_float);
 		if (v5.a != 689.25f)
-			abi_fail("v15", "v5.a");
+			abi_fail("va15", "v5.a");
 		if (v5.b != 690.25f)
-			abi_fail("v15", "v5.b");
+			abi_fail("va15", "v5.b");
 		if (v5.c != 691.25f)
-			abi_fail("v15", "v5.c");
+			abi_fail("va15", "v5.c");
 		if (v5.d != 692.25f)
-			abi_fail("v15", "v5.d");
+			abi_fail("va15", "v5.d");
 	}
 	ABI_VA_END(ap);
 
 	return (char)(93);
 }
 
-signed char v16(int a0, ...)
+signed char va16(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 5487868)
-		abi_fail("v16", "a0");
+		abi_fail("va16", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct long_double_one v0 = ABI_VA_ARG(ap, struct long_double_one);
 		if (v0.a != 695.25L)
-			abi_fail("v16", "v0.a");
+			abi_fail("va16", "v0.a");
 	}
 	{
 		struct four_float v1 = ABI_VA_ARG(ap, struct four_float);
 		if (v1.a != 696.25f)
-			abi_fail("v16", "v1.a");
+			abi_fail("va16", "v1.a");
 		if (v1.b != 697.25f)
-			abi_fail("v16", "v1.b");
+			abi_fail("va16", "v1.b");
 		if (v1.c != 698.25f)
-			abi_fail("v16", "v1.c");
+			abi_fail("va16", "v1.c");
 		if (v1.d != 699.25f)
-			abi_fail("v16", "v1.d");
+			abi_fail("va16", "v1.d");
 	}
 	{
 		struct two_double v2 = ABI_VA_ARG(ap, struct two_double);
 		if (v2.a != 700.25)
-			abi_fail("v16", "v2.a");
+			abi_fail("va16", "v2.a");
 		if (v2.b != 701.25)
-			abi_fail("v16", "v2.b");
+			abi_fail("va16", "v2.b");
 	}
 	{
 		struct long_double_one v3 = ABI_VA_ARG(ap, struct long_double_one);
 		if (v3.a != 702.25L)
-			abi_fail("v16", "v3.a");
+			abi_fail("va16", "v3.a");
 	}
 	{
 		union int_or_float v4 = ABI_VA_ARG(ap, union int_or_float);
 		if (v4.a != 5559139)
-			abi_fail("v16", "v4.a");
+			abi_fail("va16", "v4.a");
 	}
 	{
 		unsigned int v5 = ABI_VA_ARG(ap, unsigned int);
 		if (v5 != 5567058u)
-			abi_fail("v16", "v5");
+			abi_fail("va16", "v5");
 	}
 	ABI_VA_END(ap);
 
 	return (signed char)(5);
 }
 
-struct one_char v17(union int_or_float a0, unsigned char a1, unsigned int a2, ...)
+struct one_char va17(union int_or_float a0, unsigned char a1, unsigned int a2, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 5582896)
-		abi_fail("v17", "a0.a");
+		abi_fail("va17", "a0.a");
 	if (a1 != (unsigned char)(227))
-		abi_fail("v17", "a1");
+		abi_fail("va17", "a1");
 	if (a2 != 5598734u)
-		abi_fail("v17", "a2");
+		abi_fail("va17", "a2");
 
 	ABI_VA_START(ap, a2);
 	{
 		double v0 = ABI_VA_ARG(ap, double);
 		if (v0 != 709.25)
-			abi_fail("v17", "v0");
+			abi_fail("va17", "v0");
 	}
 	{
 		struct int_pointer v1 = ABI_VA_ARG(ap, struct int_pointer);
 		if (v1.a != 5614572)
-			abi_fail("v17", "v1.a");
+			abi_fail("va17", "v1.a");
 		if (v1.b != (void *)&anchor[6])
-			abi_fail("v17", "v1.b");
+			abi_fail("va17", "v1.b");
 	}
 	ABI_VA_END(ap);
 
@@ -2164,127 +2164,127 @@ struct one_char v17(union int_or_float a0, unsigned char a1, unsigned int a2, ..
 	return r;
 }
 
-long long v18(long a0, ...)
+long long va18(long a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 5638329L)
-		abi_fail("v18", "a0");
+		abi_fail("va18", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		unsigned long long v0 = ABI_VA_ARG(ap, unsigned long long);
 		if (v0 != 14586410321355361ULL)
-			abi_fail("v18", "v0");
+			abi_fail("va18", "v0");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != (unsigned short)(715))
-			abi_fail("v18", "v1");
+			abi_fail("va18", "v1");
 	}
 	{
 		struct long_double_one v2 = ABI_VA_ARG(ap, struct long_double_one);
 		if (v2.a != 716.25L)
-			abi_fail("v18", "v2.a");
+			abi_fail("va18", "v2.a");
 	}
 	{
 		unsigned int v3 = ABI_VA_ARG(ap, unsigned int);
 		if (v3 != 5670005u)
-			abi_fail("v18", "v3");
+			abi_fail("va18", "v3");
 	}
 	{
 		int v4 = ABI_VA_ARG(ap, int);
 		if (v4 != (unsigned char)(238))
-			abi_fail("v18", "v4");
+			abi_fail("va18", "v4");
 	}
 	ABI_VA_END(ap);
 
 	return 7077198612528961LL;
 }
 
-unsigned int v19(unsigned int a0, ...)
+unsigned int va19(unsigned int a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0 != 5693762u)
-		abi_fail("v19", "a0");
+		abi_fail("va19", "a0");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct six_int v0 = ABI_VA_ARG(ap, struct six_int);
 		if (v0.a != 5701681)
-			abi_fail("v19", "v0.a");
+			abi_fail("va19", "v0.a");
 		if (v0.b != 5709600)
-			abi_fail("v19", "v0.b");
+			abi_fail("va19", "v0.b");
 		if (v0.c != 5717519)
-			abi_fail("v19", "v0.c");
+			abi_fail("va19", "v0.c");
 		if (v0.d != 5725438)
-			abi_fail("v19", "v0.d");
+			abi_fail("va19", "v0.d");
 		if (v0.e != 5733357)
-			abi_fail("v19", "v0.e");
+			abi_fail("va19", "v0.e");
 		if (v0.f != 5741276)
-			abi_fail("v19", "v0.f");
+			abi_fail("va19", "v0.f");
 	}
 	{
 		double v1 = ABI_VA_ARG(ap, double);
 		if (v1 != 727.25f)
-			abi_fail("v19", "v1");
+			abi_fail("va19", "v1");
 	}
 	{
 		int v2 = ABI_VA_ARG(ap, int);
 		if (v2 != (signed char)(28))
-			abi_fail("v19", "v2");
+			abi_fail("va19", "v2");
 	}
 	ABI_VA_END(ap);
 
 	return 5765033u;
 }
 
-void v20(struct int_float a0, ...)
+void va20(struct int_float a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 5772952)
-		abi_fail("v20", "a0.a");
+		abi_fail("va20", "a0.a");
 	if (a0.b != 731.25f)
-		abi_fail("v20", "a0.b");
+		abi_fail("va20", "a0.b");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct int_float v0 = ABI_VA_ARG(ap, struct int_float);
 		if (v0.a != 5788790)
-			abi_fail("v20", "v0.a");
+			abi_fail("va20", "v0.a");
 		if (v0.b != 733.25f)
-			abi_fail("v20", "v0.b");
+			abi_fail("va20", "v0.b");
 	}
 	{
 		int v1 = ABI_VA_ARG(ap, int);
 		if (v1 != (signed char)(34))
-			abi_fail("v20", "v1");
+			abi_fail("va20", "v1");
 	}
 	{
 		struct one_char v2 = ABI_VA_ARG(ap, struct one_char);
 		if (v2.a != (char)(35))
-			abi_fail("v20", "v2.a");
+			abi_fail("va20", "v2.a");
 	}
 	ABI_VA_END(ap);
 
 }
 
-struct int_pointer v21(struct int_pointer a0, ...)
+struct int_pointer va21(struct int_pointer a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 5820466)
-		abi_fail("v21", "a0.a");
+		abi_fail("va21", "a0.a");
 	if (a0.b != (void *)&anchor[32])
-		abi_fail("v21", "a0.b");
+		abi_fail("va21", "a0.b");
 
 	ABI_VA_START(ap, a0);
 	{
 		int v0 = ABI_VA_ARG(ap, int);
 		if (v0 != (signed char)(38))
-			abi_fail("v21", "v0");
+			abi_fail("va21", "v0");
 	}
 	ABI_VA_END(ap);
 
@@ -2292,174 +2292,174 @@ struct int_pointer v21(struct int_pointer a0, ...)
 	return r;
 }
 
-unsigned char v22(struct two_float a0, ...)
+unsigned char va22(struct two_float a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a != 741.25f)
-		abi_fail("v22", "a0.a");
+		abi_fail("va22", "a0.a");
 	if (a0.b != 742.25f)
-		abi_fail("v22", "a0.b");
+		abi_fail("va22", "a0.b");
 
 	ABI_VA_START(ap, a0);
 	{
 		double v0 = ABI_VA_ARG(ap, double);
 		if (v0 != 743.25)
-			abi_fail("v22", "v0");
+			abi_fail("va22", "v0");
 	}
 	{
 		double v1 = ABI_VA_ARG(ap, double);
 		if (v1 != 744.25)
-			abi_fail("v22", "v1");
+			abi_fail("va22", "v1");
 	}
 	{
 		struct four_float v2 = ABI_VA_ARG(ap, struct four_float);
 		if (v2.a != 745.25f)
-			abi_fail("v22", "v2.a");
+			abi_fail("va22", "v2.a");
 		if (v2.b != 746.25f)
-			abi_fail("v22", "v2.b");
+			abi_fail("va22", "v2.b");
 		if (v2.c != 747.25f)
-			abi_fail("v22", "v2.c");
+			abi_fail("va22", "v2.c");
 		if (v2.d != 748.25f)
-			abi_fail("v22", "v2.d");
+			abi_fail("va22", "v2.d");
 	}
 	{
 		struct six_int v3 = ABI_VA_ARG(ap, struct six_int);
 		if (v3.a != 5923413)
-			abi_fail("v22", "v3.a");
+			abi_fail("va22", "v3.a");
 		if (v3.b != 5931332)
-			abi_fail("v22", "v3.b");
+			abi_fail("va22", "v3.b");
 		if (v3.c != 5939251)
-			abi_fail("v22", "v3.c");
+			abi_fail("va22", "v3.c");
 		if (v3.d != 5947170)
-			abi_fail("v22", "v3.d");
+			abi_fail("va22", "v3.d");
 		if (v3.e != 5955089)
-			abi_fail("v22", "v3.e");
+			abi_fail("va22", "v3.e");
 		if (v3.f != 5963008)
-			abi_fail("v22", "v3.f");
+			abi_fail("va22", "v3.f");
 	}
 	ABI_VA_END(ap);
 
 	return (unsigned char)(35);
 }
 
-short v23(struct nested a0, ...)
+short va23(struct nested a0, ...)
 {
 	ABI_VA_LIST ap;
 
 	if (a0.a.a != 5978846)
-		abi_fail("v23", "a0.a.a");
+		abi_fail("va23", "a0.a.a");
 	if (a0.a.b != 5986765)
-		abi_fail("v23", "a0.a.b");
+		abi_fail("va23", "a0.a.b");
 	if (a0.b != 758.25f)
-		abi_fail("v23", "a0.b");
+		abi_fail("va23", "a0.b");
 
 	ABI_VA_START(ap, a0);
 	{
 		struct six_int v0 = ABI_VA_ARG(ap, struct six_int);
 		if (v0.a != 6002603)
-			abi_fail("v23", "v0.a");
+			abi_fail("va23", "v0.a");
 		if (v0.b != 6010522)
-			abi_fail("v23", "v0.b");
+			abi_fail("va23", "v0.b");
 		if (v0.c != 6018441)
-			abi_fail("v23", "v0.c");
+			abi_fail("va23", "v0.c");
 		if (v0.d != 6026360)
-			abi_fail("v23", "v0.d");
+			abi_fail("va23", "v0.d");
 		if (v0.e != 6034279)
-			abi_fail("v23", "v0.e");
+			abi_fail("va23", "v0.e");
 		if (v0.f != 6042198)
-			abi_fail("v23", "v0.f");
+			abi_fail("va23", "v0.f");
 	}
 	{
 		struct two_double v1 = ABI_VA_ARG(ap, struct two_double);
 		if (v1.a != 765.25)
-			abi_fail("v23", "v1.a");
+			abi_fail("va23", "v1.a");
 		if (v1.b != 766.25)
-			abi_fail("v23", "v1.b");
+			abi_fail("va23", "v1.b");
 	}
 	ABI_VA_END(ap);
 
 	return (short)(767);
 }
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-_Float128 q_quad_between_ints(int a0, _Float128 a1, int a2)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+__float128 q_quad_between_ints(int a0, __float128 a1, int a2)
 {
 	if (a0 != 6073874)
 		abi_fail("q_quad_between_ints", "a0");
-	if (a1 != 769.25f128)
+	if (a1 != 769.25q)
 		abi_fail("q_quad_between_ints", "a1");
 	if (a2 != 6089712)
 		abi_fail("q_quad_between_ints", "a2");
-	return 771.25f128;
+	return 771.25q;
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-_Float128 q_quads_past_the_registers(_Float128 a0, _Float128 a1, _Float128 a2, _Float128 a3, _Float128 a4, _Float128 a5, _Float128 a6, _Float128 a7, _Float128 a8, _Float128 a9)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+__float128 q_quads_past_the_registers(__float128 a0, __float128 a1, __float128 a2, __float128 a3, __float128 a4, __float128 a5, __float128 a6, __float128 a7, __float128 a8, __float128 a9)
 {
-	if (a0 != 772.25f128)
+	if (a0 != 772.25q)
 		abi_fail("q_quads_past_the_registers", "a0");
-	if (a1 != 773.25f128)
+	if (a1 != 773.25q)
 		abi_fail("q_quads_past_the_registers", "a1");
-	if (a2 != 774.25f128)
+	if (a2 != 774.25q)
 		abi_fail("q_quads_past_the_registers", "a2");
-	if (a3 != 775.25f128)
+	if (a3 != 775.25q)
 		abi_fail("q_quads_past_the_registers", "a3");
-	if (a4 != 776.25f128)
+	if (a4 != 776.25q)
 		abi_fail("q_quads_past_the_registers", "a4");
-	if (a5 != 777.25f128)
+	if (a5 != 777.25q)
 		abi_fail("q_quads_past_the_registers", "a5");
-	if (a6 != 778.25f128)
+	if (a6 != 778.25q)
 		abi_fail("q_quads_past_the_registers", "a6");
-	if (a7 != 779.25f128)
+	if (a7 != 779.25q)
 		abi_fail("q_quads_past_the_registers", "a7");
-	if (a8 != 780.25f128)
+	if (a8 != 780.25q)
 		abi_fail("q_quads_past_the_registers", "a8");
-	if (a9 != 781.25f128)
+	if (a9 != 781.25q)
 		abi_fail("q_quads_past_the_registers", "a9");
-	return 782.25f128;
+	return 782.25q;
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_one q_struct_then_double(struct quad_one a0, double a1, int a2)
 {
-	if (a0.x != 783.25f128)
+	if (a0.x != 783.25q)
 		abi_fail("q_struct_then_double", "a0.x");
 	if (a1 != 784.25)
 		abi_fail("q_struct_then_double", "a1");
 	if (a2 != 6208497)
 		abi_fail("q_struct_then_double", "a2");
-	struct quad_one r = { 786.25f128 };
+	struct quad_one r = { 786.25q };
 	return r;
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_two q_memory_aggregate(int a0, struct quad_two a1, int a2)
 {
 	if (a0 != 6224335)
 		abi_fail("q_memory_aggregate", "a0");
-	if (a1.x != 788.25f128)
+	if (a1.x != 788.25q)
 		abi_fail("q_memory_aggregate", "a1.x");
-	if (a1.y != 789.25f128)
+	if (a1.y != 789.25q)
 		abi_fail("q_memory_aggregate", "a1.y");
 	if (a2 != 6248092)
 		abi_fail("q_memory_aggregate", "a2");
-	struct quad_two r = { 791.25f128, 792.25f128 };
+	struct quad_two r = { 791.25q, 792.25q };
 	return r;
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+union quad_or_long q_union_and_quad(union quad_or_long a0, __float128 a1)
 {
-	if (a0.q != 793.25f128)
+	if (a0.q != 793.25q)
 		abi_fail("q_union_and_quad", "a0.q");
-	if (a1 != 794.25f128)
+	if (a1 != 794.25q)
 		abi_fail("q_union_and_quad", "a1");
-	union quad_or_long r = { 795.25f128 };
+	union quad_or_long r = { 795.25q };
 	return r;
 }
 #endif
@@ -2531,8 +2531,8 @@ __int128 w_int128s_past_the_registers(__int128 a0, __int128 a1, __int128 a2, dou
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-_Float128 qv_quads_past_the_registers(int a0, ...)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+__float128 qv_quads_past_the_registers(int a0, ...)
 {
 	ABI_VA_LIST ap;
 
@@ -2541,62 +2541,62 @@ _Float128 qv_quads_past_the_registers(int a0, ...)
 
 	ABI_VA_START(ap, a0);
 	{
-		_Float128 v0 = ABI_VA_ARG(ap, _Float128);
-		if (v0 != 823.25f128)
+		__float128 v0 = ABI_VA_ARG(ap, __float128);
+		if (v0 != 823.25q)
 			abi_fail("qv_quads_past_the_registers", "v0");
 	}
 	{
-		_Float128 v1 = ABI_VA_ARG(ap, _Float128);
-		if (v1 != 824.25f128)
+		__float128 v1 = ABI_VA_ARG(ap, __float128);
+		if (v1 != 824.25q)
 			abi_fail("qv_quads_past_the_registers", "v1");
 	}
 	{
-		_Float128 v2 = ABI_VA_ARG(ap, _Float128);
-		if (v2 != 825.25f128)
+		__float128 v2 = ABI_VA_ARG(ap, __float128);
+		if (v2 != 825.25q)
 			abi_fail("qv_quads_past_the_registers", "v2");
 	}
 	{
-		_Float128 v3 = ABI_VA_ARG(ap, _Float128);
-		if (v3 != 826.25f128)
+		__float128 v3 = ABI_VA_ARG(ap, __float128);
+		if (v3 != 826.25q)
 			abi_fail("qv_quads_past_the_registers", "v3");
 	}
 	{
-		_Float128 v4 = ABI_VA_ARG(ap, _Float128);
-		if (v4 != 827.25f128)
+		__float128 v4 = ABI_VA_ARG(ap, __float128);
+		if (v4 != 827.25q)
 			abi_fail("qv_quads_past_the_registers", "v4");
 	}
 	{
-		_Float128 v5 = ABI_VA_ARG(ap, _Float128);
-		if (v5 != 828.25f128)
+		__float128 v5 = ABI_VA_ARG(ap, __float128);
+		if (v5 != 828.25q)
 			abi_fail("qv_quads_past_the_registers", "v5");
 	}
 	{
-		_Float128 v6 = ABI_VA_ARG(ap, _Float128);
-		if (v6 != 829.25f128)
+		__float128 v6 = ABI_VA_ARG(ap, __float128);
+		if (v6 != 829.25q)
 			abi_fail("qv_quads_past_the_registers", "v6");
 	}
 	{
-		_Float128 v7 = ABI_VA_ARG(ap, _Float128);
-		if (v7 != 830.25f128)
+		__float128 v7 = ABI_VA_ARG(ap, __float128);
+		if (v7 != 830.25q)
 			abi_fail("qv_quads_past_the_registers", "v7");
 	}
 	{
-		_Float128 v8 = ABI_VA_ARG(ap, _Float128);
-		if (v8 != 831.25f128)
+		__float128 v8 = ABI_VA_ARG(ap, __float128);
+		if (v8 != 831.25q)
 			abi_fail("qv_quads_past_the_registers", "v8");
 	}
 	{
-		_Float128 v9 = ABI_VA_ARG(ap, _Float128);
-		if (v9 != 832.25f128)
+		__float128 v9 = ABI_VA_ARG(ap, __float128);
+		if (v9 != 832.25q)
 			abi_fail("qv_quads_past_the_registers", "v9");
 	}
 	ABI_VA_END(ap);
 
-	return 833.25f128;
+	return 833.25q;
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 double qv_quad_between_doubles(int a0, ...)
 {
 	ABI_VA_LIST ap;
@@ -2611,8 +2611,8 @@ double qv_quad_between_doubles(int a0, ...)
 			abi_fail("qv_quad_between_doubles", "v0");
 	}
 	{
-		_Float128 v1 = ABI_VA_ARG(ap, _Float128);
-		if (v1 != 836.25f128)
+		__float128 v1 = ABI_VA_ARG(ap, __float128);
+		if (v1 != 836.25q)
 			abi_fail("qv_quad_between_doubles", "v1");
 	}
 	{
@@ -2621,8 +2621,8 @@ double qv_quad_between_doubles(int a0, ...)
 			abi_fail("qv_quad_between_doubles", "v2");
 	}
 	{
-		_Float128 v3 = ABI_VA_ARG(ap, _Float128);
-		if (v3 != 838.25f128)
+		__float128 v3 = ABI_VA_ARG(ap, __float128);
+		if (v3 != 838.25q)
 			abi_fail("qv_quad_between_doubles", "v3");
 	}
 	{
@@ -2636,7 +2636,7 @@ double qv_quad_between_doubles(int a0, ...)
 }
 #endif
 
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_one qv_struct_holding_a_quad(int a0, ...)
 {
 	ABI_VA_LIST ap;
@@ -2647,7 +2647,7 @@ struct quad_one qv_struct_holding_a_quad(int a0, ...)
 	ABI_VA_START(ap, a0);
 	{
 		struct quad_one v0 = ABI_VA_ARG(ap, struct quad_one);
-		if (v0.x != 842.25f128)
+		if (v0.x != 842.25q)
 			abi_fail("qv_struct_holding_a_quad", "v0.x");
 	}
 	{
@@ -2657,7 +2657,7 @@ struct quad_one qv_struct_holding_a_quad(int a0, ...)
 	}
 	ABI_VA_END(ap);
 
-	struct quad_one r = { 844.25f128 };
+	struct quad_one r = { 844.25q };
 	return r;
 }
 #endif

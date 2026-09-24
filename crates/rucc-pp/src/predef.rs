@@ -701,6 +701,15 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     d.set("__SIZEOF_FLOAT__", "4");
     d.set("__SIZEOF_DOUBLE__", "8");
     d.set("__SIZEOF_LONG_DOUBLE__", &long_double.to_string());
+    // Where the type has its old name and nowhere else, which is gcc's rule and the reason the
+    // macro is the one portable code tests before it writes `__float128`. PowerPC also says
+    // `__FLOAT128__`, which gcc defines there and not on x86.
+    if target.type_names().iter().any(|&(name, _)| name == "__float128") {
+        d.set("__SIZEOF_FLOAT128__", "16");
+        if target.tuple.arch() == tuple::Arch::PowerPc64 {
+            d.set("__FLOAT128__", "1");
+        }
+    }
     d.set("__SIZEOF_POINTER__", &pointer.to_string());
     d.set("__SIZEOF_SIZE_T__", &pointer.to_string());
     d.set("__SIZEOF_PTRDIFF_T__", &pointer.to_string());
@@ -1549,6 +1558,18 @@ mod tests {
         assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 64"));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 113"));
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __LDBL_MANT_DIG__ 53"));
+    }
+
+    #[test]
+    fn the_size_of_float128_is_defined_where_gcc_has_the_name() {
+        let line = "#define __SIZEOF_FLOAT128__ 16";
+        assert!(has(&set_for("x86_64-unknown-linux-gnu"), line));
+        assert!(has(&set_for_tuple("i686-linux-gnu"), line));
+        let power = set_for_tuple("powerpc64le-linux-gnu");
+        assert!(has(&power, line));
+        assert!(has(&power, "#define __FLOAT128__ 1"));
+        assert!(!set_for("x86_64-unknown-linux-gnu").contains("__FLOAT128__"));
+        assert!(!set_for("aarch64-unknown-linux-gnu").contains("__SIZEOF_FLOAT128__"));
     }
 
     #[test]

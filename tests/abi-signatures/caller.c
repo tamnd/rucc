@@ -495,123 +495,123 @@ int main(void)
 	}
 	{
 		struct long_double_one v1 = { 558.25L };
-		unsigned long r = v00(4387127L, 4395046, 557.25L, v1, (signed char)(59), (void *)&anchor[47]);
+		unsigned long r = va00(4387127L, 4395046, 557.25L, v1, (signed char)(59), (void *)&anchor[47]);
 		if (r != 4434641UL)
-			abi_fail("v00", "return");
+			abi_fail("va00", "return");
 	}
 	{
 		struct four_float a0 = { 562.25f, 563.25f, 564.25f, 565.25f };
-		int r = v01(a0, (signed char)(66), (void *)&anchor[54]);
+		int r = va01(a0, (signed char)(66), (void *)&anchor[54]);
 		if (r != 4490074)
-			abi_fail("v01", "return");
+			abi_fail("va01", "return");
 	}
 	{
 		struct int_float v0 = { 4505912, 571.25f };
 		struct nested v1 = { { 4521750, 4529669 }, 574.25f };
-		char r = v02(4497993, v0, v1);
+		char r = va02(4497993, v0, v1);
 		if (r != (char)(75))
-			abi_fail("v02", "return");
+			abi_fail("va02", "return");
 	}
 	{
 		struct three_char v0 = { (char)(78), (char)(79), (char)(80) };
-		signed char r = v03((signed char)(76), 577.25, v0, (char)(81));
+		signed char r = va03((signed char)(76), 577.25, v0, (char)(81));
 		if (r != (signed char)(82))
-			abi_fail("v03", "return");
+			abi_fail("va03", "return");
 	}
 	{
 		union int_or_float a0 = { 4608859 };
 		union int_or_float v0 = { 4616778 };
-		v04(a0, v0);
+		va04(a0, v0);
 	}
 	{
 		struct long_double_one a2 = { 587.25L };
 		struct one_char v1 = { (char)(89) };
-		int r = v05(12124072409076481ULL, 4632616, a2, (unsigned char)(108), v1, 4664292u, 4672211UL);
+		int r = va05(12124072409076481ULL, 4632616, a2, (unsigned char)(108), v1, 4664292u, 4672211UL);
 		if (r != 4680130)
-			abi_fail("v05", "return");
+			abi_fail("va05", "return");
 	}
 	{
 		struct int_float a0 = { 4688049, 594.25f };
-		struct three_char r = v06(a0, 4703887, (unsigned short)(596), 4719725);
+		struct three_char r = va06(a0, 4703887, (unsigned short)(596), 4719725);
 		if (r.a != (char)(98))
-			abi_fail("v06", "return.a");
+			abi_fail("va06", "return.a");
 		if (r.b != (char)(99))
-			abi_fail("v06", "return.b");
+			abi_fail("va06", "return.b");
 		if (r.c != (char)(100))
-			abi_fail("v06", "return.c");
+			abi_fail("va06", "return.c");
 	}
 	{
 		union int_or_float a1 = { 4759320 };
 		struct two_int a2 = { 4767239, 4775158 };
 		struct two_int v1 = { 4790996, 4798915 };
-		long double r = v07((unsigned char)(121), a1, a2, 4783077UL, v1);
+		long double r = va07((unsigned char)(121), a1, a2, 4783077UL, v1);
 		if (r != 608.25L)
-			abi_fail("v07", "return");
+			abi_fail("va07", "return");
 	}
 	{
 		struct two_int a1 = { 4822672, 4830591 };
 		struct four_float a2 = { 612.25f, 613.25f, 614.25f, 615.25f };
-		double r = v08(609.25L, a1, a2, 4870186L);
+		double r = va08(609.25L, a1, a2, 4870186L);
 		if (r != 617.25)
-			abi_fail("v08", "return");
+			abi_fail("va08", "return");
 	}
 	{
 		struct one_char a0 = { (char)(18) };
 		struct two_int v0 = { 4893943, 4901862 };
 		struct one_char v1 = { (char)(21) };
-		unsigned long r = v09(a0, v0, v1, (short)(622), 623.25L, 624.25f, 4941457L);
+		unsigned long r = va09(a0, v0, v1, (short)(622), 623.25L, 624.25f, 4941457L);
 		if (r != 4949376UL)
-			abi_fail("v09", "return");
+			abi_fail("va09", "return");
 	}
 	{
 		struct four_float a2 = { 629.25f, 630.25f, 631.25f, 632.25f };
 		struct one_char v2 = { (char)(35) };
-		struct four_float r = v10((unsigned char)(147), (void *)&anchor[51], a2, 8435640004343041ULL, 634.25L, v2, 5028566L, 628270637281921LL, (signed char)(38));
+		struct four_float r = va10((unsigned char)(147), (void *)&anchor[51], a2, 8435640004343041ULL, 634.25L, v2, 5028566L, 628270637281921LL, (signed char)(38));
 		if (r.a != 639.25f)
-			abi_fail("v10", "return.a");
+			abi_fail("va10", "return.a");
 		if (r.b != 640.25f)
-			abi_fail("v10", "return.b");
+			abi_fail("va10", "return.b");
 		if (r.c != 641.25f)
-			abi_fail("v10", "return.c");
+			abi_fail("va10", "return.c");
 		if (r.d != 642.25f)
-			abi_fail("v10", "return.d");
+			abi_fail("va10", "return.d");
 	}
 	{
 		struct int_float a0 = { 5083999, 644.25f };
-		int r = v11(a0, (unsigned short)(645), 5107756, 5115675, 12908004877863841ULL);
+		int r = va11(a0, (unsigned short)(645), 5107756, 5115675, 12908004877863841ULL);
 		if (r != 5131513)
-			abi_fail("v11", "return");
+			abi_fail("va11", "return");
 	}
 	{
 		struct int_pointer v1 = { 5163189, (void *)&anchor[13] };
-		long double r = v12((void *)&anchor[9], 5147351L, (signed char)(52), v1, 655.25f);
+		long double r = va12((void *)&anchor[9], 5147351L, (signed char)(52), v1, 655.25f);
 		if (r != 656.25L)
-			abi_fail("v12", "return");
+			abi_fail("va12", "return");
 	}
 	{
-		struct four_float r = v13(5194865, 5202784, (char)(59), 16485896776680481ULL, (unsigned char)(181));
+		struct four_float r = va13(5194865, 5202784, (char)(59), 16485896776680481ULL, (unsigned char)(181));
 		if (r.a != 662.25f)
-			abi_fail("v13", "return.a");
+			abi_fail("va13", "return.a");
 		if (r.b != 663.25f)
-			abi_fail("v13", "return.b");
+			abi_fail("va13", "return.b");
 		if (r.c != 664.25f)
-			abi_fail("v13", "return.c");
+			abi_fail("va13", "return.c");
 		if (r.d != 665.25f)
-			abi_fail("v13", "return.d");
+			abi_fail("va13", "return.d");
 	}
 	{
 		struct three_char a0 = { (char)(66), (char)(67), (char)(68) };
 		struct three_char v0 = { (char)(70), (char)(71), (char)(72) };
 		struct int_float v3 = { 5337407, 676.25f };
 		struct three_char v5 = { (char)(78), (char)(79), (char)(80) };
-		v14(a0, 5289893u, v0, 5321569, (char)(74), v3, (unsigned short)(677), v5);
+		va14(a0, 5289893u, v0, 5321569, (char)(74), v3, (unsigned short)(677), v5);
 	}
 	{
 		struct long_double_one a1 = { 682.25L };
 		struct four_float v5 = { 689.25f, 690.25f, 691.25f, 692.25f };
-		char r = v15(5384921L, a1, (void *)&anchor[42], (unsigned short)(684), 5416597, 686.25, (unsigned short)(687), 5440354L, v5);
+		char r = va15(5384921L, a1, (void *)&anchor[42], (unsigned short)(684), 5416597, 686.25, (unsigned short)(687), 5440354L, v5);
 		if (r != (char)(93))
-			abi_fail("v15", "return");
+			abi_fail("va15", "return");
 	}
 	{
 		struct long_double_one v0 = { 695.25L };
@@ -619,96 +619,96 @@ int main(void)
 		struct two_double v2 = { 700.25, 701.25 };
 		struct long_double_one v3 = { 702.25L };
 		union int_or_float v4 = { 5559139 };
-		signed char r = v16(5487868, v0, v1, v2, v3, v4, 5567058u);
+		signed char r = va16(5487868, v0, v1, v2, v3, v4, 5567058u);
 		if (r != (signed char)(5))
-			abi_fail("v16", "return");
+			abi_fail("va16", "return");
 	}
 	{
 		union int_or_float a0 = { 5582896 };
 		struct int_pointer v1 = { 5614572, (void *)&anchor[6] };
-		struct one_char r = v17(a0, (unsigned char)(227), 5598734u, 709.25, v1);
+		struct one_char r = va17(a0, (unsigned char)(227), 5598734u, 709.25, v1);
 		if (r.a != (char)(12))
-			abi_fail("v17", "return.a");
+			abi_fail("va17", "return.a");
 	}
 	{
 		struct long_double_one v2 = { 716.25L };
-		long long r = v18(5638329L, 14586410321355361ULL, (unsigned short)(715), v2, 5670005u, (unsigned char)(238));
+		long long r = va18(5638329L, 14586410321355361ULL, (unsigned short)(715), v2, 5670005u, (unsigned char)(238));
 		if (r != 7077198612528961LL)
-			abi_fail("v18", "return");
+			abi_fail("va18", "return");
 	}
 	{
 		struct six_int v0 = { 5701681, 5709600, 5717519, 5725438, 5733357, 5741276 };
-		unsigned int r = v19(5693762u, v0, 727.25f, (signed char)(28));
+		unsigned int r = va19(5693762u, v0, 727.25f, (signed char)(28));
 		if (r != 5765033u)
-			abi_fail("v19", "return");
+			abi_fail("va19", "return");
 	}
 	{
 		struct int_float a0 = { 5772952, 731.25f };
 		struct int_float v0 = { 5788790, 733.25f };
 		struct one_char v2 = { (char)(35) };
-		v20(a0, v0, (signed char)(34), v2);
+		va20(a0, v0, (signed char)(34), v2);
 	}
 	{
 		struct int_pointer a0 = { 5820466, (void *)&anchor[32] };
-		struct int_pointer r = v21(a0, (signed char)(38));
+		struct int_pointer r = va21(a0, (signed char)(38));
 		if (r.a != 5844223)
-			abi_fail("v21", "return.a");
+			abi_fail("va21", "return.a");
 		if (r.b != (void *)&anchor[35])
-			abi_fail("v21", "return.b");
+			abi_fail("va21", "return.b");
 	}
 	{
 		struct two_float a0 = { 741.25f, 742.25f };
 		struct four_float v2 = { 745.25f, 746.25f, 747.25f, 748.25f };
 		struct six_int v3 = { 5923413, 5931332, 5939251, 5947170, 5955089, 5963008 };
-		unsigned char r = v22(a0, 743.25, 744.25, v2, v3);
+		unsigned char r = va22(a0, 743.25, 744.25, v2, v3);
 		if (r != (unsigned char)(35))
-			abi_fail("v22", "return");
+			abi_fail("va22", "return");
 	}
 	{
 		struct nested a0 = { { 5978846, 5986765 }, 758.25f };
 		struct six_int v0 = { 6002603, 6010522, 6018441, 6026360, 6034279, 6042198 };
 		struct two_double v1 = { 765.25, 766.25 };
-		short r = v23(a0, v0, v1);
+		short r = va23(a0, v0, v1);
 		if (r != (short)(767))
-			abi_fail("v23", "return");
+			abi_fail("va23", "return");
 	}
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		_Float128 r = q_quad_between_ints(6073874, 769.25f128, 6089712);
-		if (r != 771.25f128)
+		__float128 r = q_quad_between_ints(6073874, 769.25q, 6089712);
+		if (r != 771.25q)
 			abi_fail("q_quad_between_ints", "return");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		_Float128 r = q_quads_past_the_registers(772.25f128, 773.25f128, 774.25f128, 775.25f128, 776.25f128, 777.25f128, 778.25f128, 779.25f128, 780.25f128, 781.25f128);
-		if (r != 782.25f128)
+		__float128 r = q_quads_past_the_registers(772.25q, 773.25q, 774.25q, 775.25q, 776.25q, 777.25q, 778.25q, 779.25q, 780.25q, 781.25q);
+		if (r != 782.25q)
 			abi_fail("q_quads_past_the_registers", "return");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		struct quad_one a0 = { 783.25f128 };
+		struct quad_one a0 = { 783.25q };
 		struct quad_one r = q_struct_then_double(a0, 784.25, 6208497);
-		if (r.x != 786.25f128)
+		if (r.x != 786.25q)
 			abi_fail("q_struct_then_double", "return.x");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		struct quad_two a1 = { 788.25f128, 789.25f128 };
+		struct quad_two a1 = { 788.25q, 789.25q };
 		struct quad_two r = q_memory_aggregate(6224335, a1, 6248092);
-		if (r.x != 791.25f128)
+		if (r.x != 791.25q)
 			abi_fail("q_memory_aggregate", "return.x");
-		if (r.y != 792.25f128)
+		if (r.y != 792.25q)
 			abi_fail("q_memory_aggregate", "return.y");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		union quad_or_long a0 = { 793.25f128 };
-		union quad_or_long r = q_union_and_quad(a0, 794.25f128);
-		if (r.q != 795.25f128)
+		union quad_or_long a0 = { 793.25q };
+		union quad_or_long r = q_union_and_quad(a0, 794.25q);
+		if (r.q != 795.25q)
 			abi_fail("q_union_and_quad", "return.q");
 	}
 #endif
@@ -733,25 +733,25 @@ int main(void)
 			abi_fail("w_int128s_past_the_registers", "return");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		_Float128 r = qv_quads_past_the_registers(6501500, 823.25f128, 824.25f128, 825.25f128, 826.25f128, 827.25f128, 828.25f128, 829.25f128, 830.25f128, 831.25f128, 832.25f128);
-		if (r != 833.25f128)
+		__float128 r = qv_quads_past_the_registers(6501500, 823.25q, 824.25q, 825.25q, 826.25q, 827.25q, 828.25q, 829.25q, 830.25q, 831.25q, 832.25q);
+		if (r != 833.25q)
 			abi_fail("qv_quads_past_the_registers", "return");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		double r = qv_quad_between_doubles(6596528, 835.25, 836.25f128, 837.25, 838.25f128, 839.25);
+		double r = qv_quad_between_doubles(6596528, 835.25, 836.25q, 837.25, 838.25q, 839.25);
 		if (r != 840.25)
 			abi_fail("qv_quad_between_doubles", "return");
 	}
 #endif
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 	{
-		struct quad_one v0 = { 842.25f128 };
+		struct quad_one v0 = { 842.25q };
 		struct quad_one r = qv_struct_holding_a_quad(6651961, v0, 6667799);
-		if (r.x != 844.25f128)
+		if (r.x != 844.25q)
 			abi_fail("qv_struct_holding_a_quad", "return.x");
 	}
 #endif

@@ -329,6 +329,7 @@ impl<'a> Checker<'a> {
                     let id = self.types.declare_record(RecordKind::Struct, Some(name));
                     self.types.record(id)
                 }
+                TypeName::Float128 => self.types.float(FloatKind::Float128),
             };
             self.scopes.declare(name, Binding::Typedef(ty));
         }
