@@ -4,6 +4,9 @@
 //! binary path share one instruction description so they cannot disagree about what an
 //! instruction is. This is the text path, and the description is `rucc_target::x86_64`.
 //!
+//! An AArch64 file is written by the same walk, since sections, labels, unwind rows and variables
+//! are spelled the same way for both machines. Only the instruction is handed to [`crate::a64`].
+//!
 //! So there is almost nothing about x86-64 in this file. What an opcode is called, how many
 //! instructions it really is, which operand each of them is given and how wide each of those is
 //! written are all read out of the target. What is here is the syntax: a register carries a `%`,
@@ -50,6 +53,7 @@ use rucc_target::{PhysReg, RegClass, Segment, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::Error;
+use crate::a64;
 use crate::data::{Globals, Piece, Variable};
 use crate::format::{Directives, binding, visibility};
 
@@ -88,11 +92,13 @@ pub fn print(
     output: Output,
 ) -> Result<String, Error> {
     let Output { sections, property } = output;
-    if target.tuple.arch() != Arch::X86_64 {
+    let arch = target.tuple.arch();
+    if !matches!(arch, Arch::X86_64 | Arch::Aarch64) {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let directives = Directives::of(target.object_format);
     let mut writer = Writer {
+        arch,
         names,
         directives,
         // Nothing outside ELF reads one of these, and the directives for the other two formats are
@@ -124,6 +130,9 @@ pub fn print(
 
 /// A file being written out.
 struct Writer<'a> {
+    /// The machine the instructions are for, which is the one thing about a file that decides how
+    /// an instruction is spelled. See [`crate::a64`].
+    arch: Arch,
     names: &'a Interner,
     directives: Directives,
     /// Whether each function is wrapped in an unwind record.
@@ -163,7 +172,8 @@ impl Writer<'_> {
                 self.pad(&mut ahead, patch.pad, patch.before);
             }
         }
-        self.directives.open(&mut self.out, &name, align, binding, seen, &ahead);
+        let fill = self.fill();
+        self.directives.open(&mut self.out, &name, align, fill, binding, seen, &ahead);
         let unwind = self.unwind;
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
@@ -216,7 +226,7 @@ impl Writer<'_> {
     /// which is what makes writing the mnemonic and nothing else the whole of it.
     fn pad(&self, out: &mut String, pad: Opcode, count: u32) {
         let spelled = self.names.resolve(pad.name());
-        let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
+        let opcode = spelled.strip_prefix(self.prefix()).unwrap_or(spelled);
         for _ in 0..count {
             let _ = writeln!(out, "\t{opcode}");
         }
@@ -343,6 +353,14 @@ impl Writer<'_> {
         inst: Inst,
         func_name: &str,
     ) -> Result<(), Error> {
+        if self.arch == Arch::Aarch64 {
+            let at =
+                a64::Context { names: self.names, symbol: self.directives.symbol(), func_name };
+            let mut line = String::new();
+            a64::inst(&mut line, &at, func, block, inst, |to| self.label(func_name, to))?;
+            self.out.push_str(&line);
+            return Ok(());
+        }
         let data = func[inst];
         let spelled = self.names.resolve(data.opcode.name());
         let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
@@ -579,7 +597,10 @@ impl Writer<'_> {
         if func.tables.is_empty() {
             return;
         }
-        let _ = writeln!(self.out, "\t.p2align\t2, 0x90");
+        let _ = match self.fill() {
+            Some(byte) => writeln!(self.out, "\t.p2align\t2, {byte:#x}"),
+            None => writeln!(self.out, "\t.p2align\t2"),
+        };
         for (index, table) in func.tables.iter().enumerate() {
             let label = self.table(func_name, index);
             let _ = writeln!(self.out, "{label}:");
@@ -596,6 +617,17 @@ impl Writer<'_> {
     /// block's label, which is a number after the same underscore.
     fn table(&self, func_name: &str, index: usize) -> String {
         format!("{}{func_name}_j{index}", self.directives.local())
+    }
+
+    /// What the machine IR puts in front of an opcode of this machine.
+    fn prefix(&self) -> &'static str {
+        if self.arch == Arch::Aarch64 { a64::PREFIX } else { PREFIX }
+    }
+
+    /// The byte padding inside code is made of, which is the one byte `nop` on x86-64. AArch64 has
+    /// no one byte instruction, so the assembler is left to pad with its own `nop`.
+    fn fill(&self) -> Option<u8> {
+        if self.arch == Arch::Aarch64 { None } else { Some(0x90) }
     }
 
     /// The label one block of one function carries.
@@ -1328,10 +1360,73 @@ mod tests {
     #[test]
     fn a_machine_with_no_writer_here_is_said_so_rather_than_written_as_x86_64() {
         let names = Interner::new();
-        let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
-        let error = print(&[], &Globals::default(), &[], &names, &aarch64, true, Output::default())
+        let riscv = TargetInfo::new(Triple::new(Arch::Riscv64, Os::Linux, Env::Gnu));
+        let error = print(&[], &Globals::default(), &[], &names, &riscv, true, Output::default())
             .expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
+    }
+
+    /// One AArch64 function of one block, with those instructions in it, written out.
+    fn write_a64(build: impl FnOnce(&mut Func, &mut Interner)) -> Result<String, Error> {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        build(&mut func, &mut names);
+        let target = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
+        print(&[func], &Globals::default(), &[], &names, &target, true, Output::default())
+    }
+
+    #[test]
+    fn an_aarch64_instruction_is_written_the_way_its_own_table_says() {
+        use rucc_target::aarch64::{self, x};
+        let text = write_a64(|func, names| {
+            let block = func.create_block();
+            let add = Opcode::new(names.intern("a64.add_rr_32"));
+            func.build(block, add)
+                .operand(Operand::write(Reg::physical(x(0)), aarch64::GPR))
+                .operand(Operand::read(Reg::physical(x(1)), aarch64::GPR))
+                .operand(Operand::read(Reg::physical(x(2)), aarch64::GPR))
+                .finish();
+            let load = Opcode::new(names.intern("a64.ldr_64"));
+            let base = Operand::read(Reg::physical(aarch64::SP), aarch64::GPR);
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(x(3)), aarch64::GPR))
+                .mem(Mem::at(base).plus(16))
+                .finish();
+        })
+        .expect("an allocated function");
+        // Destination first, which is the order the operands are in already, and the stack
+        // pointer as `sp` because 31 in a base is never the zero register.
+        assert_eq!(body(&text), ["add w0, w1, w2", "ldr x3, [sp, #16]"]);
+        // Padded by the assembler's own `nop`, since `0x90` is not an instruction here.
+        assert!(text.contains("\t.p2align\t4\n"), "{text}");
+        assert!(!text.contains("0x90"), "{text}");
+    }
+
+    #[test]
+    fn an_aarch64_register_left_virtual_is_refused() {
+        let error = write_a64(|func, names| {
+            let block = func.create_block();
+            let mov = Opcode::new(names.intern("a64.mov_rr_64"));
+            let class = rucc_target::aarch64::GPR;
+            let v0 = func.new_vreg(class);
+            let v1 = func.new_vreg(class);
+            func.build(block, mov)
+                .operand(Operand::write(v0, class))
+                .operand(Operand::read(v1, class))
+                .finish();
+        })
+        .expect_err("a register was never allocated");
+        assert!(matches!(error, Error::Virtual { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn an_opcode_aarch64_does_not_have_is_refused_rather_than_written_as_x86() {
+        let error = write_a64(|func, names| {
+            let block = func.create_block();
+            func.build(block, Opcode::new(names.intern("x64.ret"))).finish();
+        })
+        .expect_err("not an AArch64 opcode");
+        assert!(matches!(error, Error::Opcode { .. }), "{error:?}");
     }
 
     #[test]

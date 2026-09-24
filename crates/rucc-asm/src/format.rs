@@ -113,19 +113,30 @@ impl Directives {
     /// which is what `static` is. Windows says the same thing as a storage class, where three is
     /// the local one and two the rest.
     ///
-    /// `align` is in bytes and is a power of two, and the padding is `0x90` because the space in
-    /// front of a function is reached by falling off the end of the one before it.
+    /// `align` is in bytes and is a power of two. `fill` is the byte the padding is made of, which
+    /// on x86-64 is `0x90` because the space in front of a function is reached by falling off the
+    /// end of the one before it and that byte is a `nop`. A machine with no one byte `nop` gives
+    /// `None` and the assembler pads with whatever `nop` the machine has.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is a separate thing a function is opened with"
+    )]
     pub fn open(
         self,
         out: &mut String,
         name: &str,
         align: u32,
+        fill: Option<u8>,
         binding: Binding,
         visibility: Visibility,
         ahead: &str,
     ) {
         let symbol = self.symbol();
-        let _ = writeln!(out, "\t.p2align\t{}, 0x90", align.max(1).trailing_zeros());
+        let power = align.max(1).trailing_zeros();
+        let _ = match fill {
+            Some(byte) => writeln!(out, "\t.p2align\t{power}, {byte:#x}"),
+            None => writeln!(out, "\t.p2align\t{power}"),
+        };
         match binding {
             Binding::Global => {
                 let _ = writeln!(out, "\t.globl\t{symbol}{name}");
@@ -507,7 +518,15 @@ mod tests {
     #[test]
     fn a_mach_o_symbol_is_the_c_name_with_an_underscore_in_front_of_it() {
         let mut out = String::new();
-        Directives::MachO.open(&mut out, "main", 16, Binding::Global, Visibility::Default, "");
+        Directives::MachO.open(
+            &mut out,
+            "main",
+            16,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Default,
+            "",
+        );
         assert!(out.contains("\t.globl\t_main\n"), "{out}");
         assert!(out.contains("\n_main:\n"), "{out}");
         // No type and no size, neither of which Mach-O has.
@@ -520,7 +539,15 @@ mod tests {
     #[test]
     fn an_elf_function_says_what_it_is_and_how_long_it_is() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "main", 16, Binding::Global, Visibility::Default, "");
+        Directives::Elf.open(
+            &mut out,
+            "main",
+            16,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Default,
+            "",
+        );
         Directives::Elf.close(&mut out, "main");
         assert!(out.contains("\t.type\tmain, @function\n"), "{out}");
         assert!(out.contains("\t.size\tmain, .-main\n"), "{out}");
@@ -529,12 +556,28 @@ mod tests {
     #[test]
     fn a_function_that_asked_to_be_more_aligned_is_written_at_that_alignment() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "f", 256, Binding::Global, Visibility::Default, "");
+        Directives::Elf.open(
+            &mut out,
+            "f",
+            256,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Default,
+            "",
+        );
         // The directive counts in powers of two and the attribute counts in bytes, and two
         // hundred and fifty six bytes is eight of them.
         assert!(out.contains("\t.p2align\t8, 0x90\n"), "{out}");
         let mut plain = String::new();
-        Directives::Elf.open(&mut plain, "f", FUNC_ALIGN, Binding::Global, Visibility::Default, "");
+        Directives::Elf.open(
+            &mut plain,
+            "f",
+            FUNC_ALIGN,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Default,
+            "",
+        );
         assert!(plain.contains("\t.p2align\t4, 0x90\n"), "{plain}");
     }
 
@@ -548,16 +591,40 @@ mod tests {
     #[test]
     fn a_name_that_does_not_leave_the_library_says_so_in_the_listing() {
         let mut out = String::new();
-        Directives::Elf.open(&mut out, "f", 16, Binding::Global, Visibility::Hidden, "");
+        Directives::Elf.open(
+            &mut out,
+            "f",
+            16,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Hidden,
+            "",
+        );
         assert!(out.contains("\t.globl\tf\n"), "still global to the static linker: {out}");
         assert!(out.contains("\t.hidden\tf\n"), "{out}");
         let mut protected = String::new();
-        Directives::Elf.open(&mut protected, "f", 16, Binding::Global, Visibility::Protected, "");
+        Directives::Elf.open(
+            &mut protected,
+            "f",
+            16,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Protected,
+            "",
+        );
         assert!(protected.contains("\t.protected\tf\n"), "{protected}");
         // Mach-O's one spelling of the one of these it has, and it carries the underscore every
         // other Apple symbol does.
         let mut apple = String::new();
-        Directives::MachO.open(&mut apple, "f", 16, Binding::Global, Visibility::Hidden, "");
+        Directives::MachO.open(
+            &mut apple,
+            "f",
+            16,
+            Some(0x90),
+            Binding::Global,
+            Visibility::Hidden,
+            "",
+        );
         assert!(apple.contains("\t.private_extern\t_f\n"), "{apple}");
     }
 
@@ -570,7 +637,7 @@ mod tests {
     fn a_static_name_is_told_nothing_about_a_dynamic_linker_it_will_never_meet() {
         for seen in [Visibility::Default, Visibility::Hidden, Visibility::Protected] {
             let mut out = String::new();
-            Directives::Elf.open(&mut out, "f", 16, Binding::Local, seen, "");
+            Directives::Elf.open(&mut out, "f", 16, Some(0x90), Binding::Local, seen, "");
             assert!(!out.contains(".hidden"), "{seen:?}: {out}");
             assert!(!out.contains(".protected"), "{seen:?}: {out}");
         }
@@ -714,7 +781,15 @@ mod tests {
             let directives = Directives::of(format);
             assert!(directives.text().starts_with('\t'));
             let mut out = String::new();
-            directives.open(&mut out, "f", 16, Binding::Global, Visibility::Default, "");
+            directives.open(
+                &mut out,
+                "f",
+                16,
+                Some(0x90),
+                Binding::Global,
+                Visibility::Default,
+                "",
+            );
             directives.close(&mut out, "f");
             directives.end(&mut out, Property::default());
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");

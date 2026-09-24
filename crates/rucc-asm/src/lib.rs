@@ -43,6 +43,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-asm/0.11.3")]
 
+mod a64;
 mod att;
 mod bytes;
 mod data;
