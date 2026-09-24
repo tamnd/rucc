@@ -2285,6 +2285,21 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_across_lines_inside_a_definition_does_not_end_it() {
+        let src = "#define F(x) \\\n  ((x) + \\\n/* runs\nonto two lines */ \\\n  1)\nF(2)\n";
+        assert_eq!(clean(src), "((2) + 1)");
+        assert_eq!(clean("#define G 1 /* a\nb */ + 2\nG\n"), "1 + 2");
+        // The `#` of a directive may be separated from its name by one too.
+        assert_eq!(clean("#/* a\n*/define H 4\nH\n"), "4");
+    }
+
+    #[test]
+    fn a_hash_after_a_comment_across_lines_is_a_directive_only_if_the_comment_began_the_line() {
+        assert_eq!(clean("/* a\nb */ #define X 3\nX\n"), "3");
+        assert!(clean("int x; /* a\nb */ #define Y 3\nY\n").ends_with(" 3 Y"));
+    }
+
+    #[test]
     fn undef_removes_a_definition() {
         assert_eq!(clean("#define F 1\n#undef F\n#ifdef F\nyes\n#else\nno\n#endif\n"), "no");
         // Undefining something that was never defined is not an error, and configure scripts

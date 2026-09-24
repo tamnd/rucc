@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A block comment that runs across lines inside a `#define` no longer ends the definition. The newline inside the comment was taken as the end of the line, so the rest of the body became stray text and the file failed to compile. A `#` after such a comment is now a directive only when the comment began its line, which is what GCC does (#1749).
+
 ## 0.11.5
 
 ### Added

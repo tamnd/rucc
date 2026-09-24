@@ -258,13 +258,16 @@ mod tests {
     }
 
     #[test]
-    fn a_token_after_a_comment_that_crossed_a_line_still_starts_a_line() {
-        // `# define` after a multi-line comment is a directive. GCC agrees, and real headers
-        // are written this way, so getting it wrong means silently dropping a definition.
+    fn a_comment_that_crossed_a_line_starts_one_only_if_it_began_one() {
+        // `# define` after a multi-line comment that began its line is a directive, and real
+        // headers are written this way. After a comment that followed code it is not, since
+        // the comment is one space in the middle of that line. GCC agrees on both.
         let mut interner = Interner::new();
+        let (tokens, _) = tokenize(b"/*\n*/ #define F 1", 0, Options::new(), &mut interner);
+        assert!(tokens[0].flags.has(TokenFlags::START_OF_LINE));
+        assert_eq!(tokens[0].punct(), Some(Punct::Hash));
         let (tokens, _) = tokenize(b"x /*\n*/ #define F 1", 0, Options::new(), &mut interner);
-        assert!(!tokens[0].flags.has(TokenFlags::START_OF_LINE) || tokens[0].span.lo == 0);
-        assert!(tokens[1].flags.has(TokenFlags::START_OF_LINE));
+        assert!(!tokens[1].flags.has(TokenFlags::START_OF_LINE));
         assert_eq!(tokens[1].punct(), Some(Punct::Hash));
     }
 
@@ -421,6 +424,18 @@ mod tests {
         // before it must stop at the backslash rather than carry on, or the `/` and the `*`
         // come out as two punctuators and the comment body becomes program text.
         assert_eq!(spellings("a        /\\\n* body *\\\n/ b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_newline_inside_a_comment_does_not_start_a_line() {
+        let mut interner = Interner::new();
+        let (tokens, _) = tokenize(b"a /* x\ny */ b", 0, Options::new(), &mut interner);
+        assert!(tokens[1].flags.has(TokenFlags::LEADING_SPACE));
+        assert!(!tokens[1].flags.has(TokenFlags::START_OF_LINE));
+        // A comment that began its line leaves the line start where it was, so the `#` after
+        // it is still the first thing on the line.
+        let (tokens, _) = tokenize(b"a\n/* x\ny */ # b", 0, Options::new(), &mut interner);
+        assert!(tokens[1].flags.has(TokenFlags::START_OF_LINE));
     }
 
     #[test]
