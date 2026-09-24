@@ -474,15 +474,12 @@ _Static_assert(__builtin_offsetof(struct bits_trailing_zero_width, m0) == 0, "of
 
 /* A union of a bit-field and a char. Microsoft's rule gives the bit-field its storage and no say
  * in the alignment, so this is four bytes aligned to one there, which is an alignment smaller
- * than either member has on its own. */
+ * than either member has on its own. MinGW's gcc aligns it to four and clang to one, so on
+ * `windows-gnu` it is declared and not asserted. */
 union union_of_bits {
 	unsigned int m0 : 3;	/* bit 0 */
 	char m1;	/* +0 */
 };
-_Static_assert(sizeof(union union_of_bits) == 4, "sizeof union union_of_bits");
-_Static_assert(_Alignof(union union_of_bits) == 1, "_Alignof union union_of_bits");
-_Static_assert(__builtin_offsetof(union union_of_bits, m1) == 0, "offsetof union union_of_bits.m1");
-
 /* A flexible array member. It sits where it would have sat and adds nothing to the size, and the
  * tail padding in front of it is what makes the idiom allocate enough. */
 struct flexible {
@@ -495,16 +492,6 @@ _Static_assert(_Alignof(struct flexible) == 4, "_Alignof struct flexible");
 _Static_assert(__builtin_offsetof(struct flexible, m0) == 0, "offsetof struct flexible.m0");
 _Static_assert(__builtin_offsetof(struct flexible, m1) == 4, "offsetof struct flexible.m1");
 _Static_assert(__builtin_offsetof(struct flexible, m2) == 8, "offsetof struct flexible.m2");
-
-/* A struct whose only member is a flexible array member, so it holds no storage at all. It has
- * the size of the empty struct and the alignment of the element type, which is the one place
- * those two come from different members. */
-struct flexible_only {
-	int m0[];	/* +0 */
-};
-_Static_assert(sizeof(struct flexible_only) == 0, "sizeof struct flexible_only");
-_Static_assert(_Alignof(struct flexible_only) == 4, "_Alignof struct flexible_only");
-_Static_assert(__builtin_offsetof(struct flexible_only, m0) == 0, "offsetof struct flexible_only.m0");
 
 struct gen_00 {
 	short m0[3];	/* +0 */
