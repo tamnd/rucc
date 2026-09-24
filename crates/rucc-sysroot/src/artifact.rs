@@ -54,6 +54,8 @@
 
 use std::path::{Path, PathBuf};
 
+use rucc_tuple::{Env, Os, TargetTuple};
+
 /// One artifact: the sysroot for one target, as this release pins it.
 ///
 /// Or the kernel header tree, which is [`KERNEL_HEADERS`] and the one artifact that is not any
@@ -167,6 +169,42 @@ pub fn pinned_for(tuple: &str) -> Option<&'static Pinned> {
     look(PINNED, tuple)
 }
 
+/// The artifact this release pins for a target, which for a glibc tuple that names a release is the
+/// one for the same tuple without it.
+///
+/// One glibc sysroot serves every release, because the headers in it pick the release with
+/// `__GLIBC_MINOR__` and the libraries a link reads are the stubs the driver writes for the release
+/// asked for. So `x86_64-linux-gnu.2.28` and `x86_64-linux-gnu` fetch the same archive, and it is
+/// installed under the pinned spelling because that is the directory the compiler reads.
+#[must_use]
+pub fn pinned_for_target(target: TargetTuple) -> Option<&'static Pinned> {
+    pinned_for(&target.to_canonical_string())
+        .or_else(|| pinned_for(&glibc_base(target)?.to_canonical_string()))
+}
+
+/// The same glibc target with its release left off, or [`None`] for a target that is not glibc or
+/// names no release.
+///
+/// What [`pinned_for_target`] looks a pinned release up under, and what the install accepts as the
+/// target of an archive fetched for one.
+#[must_use]
+pub fn glibc_base(target: TargetTuple) -> Option<TargetTuple> {
+    if target.os() != Os::Linux || target.env() != Env::Gnu {
+        return None;
+    }
+    target.env_version()?;
+    let mut base = TargetTuple::builder(target.arch(), target.os())
+        .sub_arch(target.sub_arch())
+        .endian(target.endian())
+        .data_model(target.data_model())
+        .env(target.env())
+        .abi(target.abi());
+    if let Some(version) = target.os_version() {
+        base = base.os_version(version);
+    }
+    base.build().ok()
+}
+
 /// Every target this release pins an artifact for, for a message that has to say what there is.
 #[must_use]
 pub fn pinned_targets() -> Vec<&'static str> {
@@ -183,9 +221,24 @@ fn look<'a>(table: &'a [Pinned], tuple: &str) -> Option<&'a Pinned> {
 mod tests {
     use std::path::PathBuf;
 
-    use rucc_tuple::TargetTuple;
-
     use super::*;
+
+    #[test]
+    fn a_pinned_glibc_release_shares_the_artifact_of_its_tuple() {
+        let tuple = |spelling: &str| spelling.parse::<TargetTuple>().expect("a tuple");
+        let base = glibc_base(tuple("x86_64-linux-gnu.2.28")).expect("glibc with a release");
+        assert_eq!(base.to_canonical_string(), "x86_64-linux-gnu");
+        let arm = glibc_base(tuple("armv7-linux-gnu.2.31eabihf")).expect("glibc with a release");
+        assert_eq!(arm.to_canonical_string(), "armv7-linux-gnueabihf");
+        // No release, or not glibc, is nothing to fall back to.
+        assert_eq!(glibc_base(tuple("x86_64-linux-gnu")), None);
+        assert_eq!(glibc_base(tuple("x86_64-linux-musl")), None);
+        // And a musl row is still found under its own name.
+        assert_eq!(
+            pinned_for_target(tuple("x86_64-linux-musl")).map(|what| what.tuple),
+            Some("x86_64-linux-musl")
+        );
+    }
 
     /// A table with rows in it, which is what [`PINNED`] will look like.
     const TABLE: &[Pinned] = &[

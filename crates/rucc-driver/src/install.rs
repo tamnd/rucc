@@ -177,7 +177,10 @@ fn install_staged(
     let manifest =
         Manifest::parse(&text).map_err(|why| err(format!("{}: {why}", archive.display())))?;
 
-    if manifest.target() != target {
+    // A pinned glibc release installs the archive of its tuple without the release, which is the
+    // one archive every release of that target shares.
+    let shared = rucc_sysroot::glibc_base(target) == Some(manifest.target());
+    if manifest.target() != target && !shared {
         return Err(err(format!(
             "{} is a sysroot for {}, which is not {}",
             archive.display(),
@@ -656,6 +659,35 @@ mod tests {
         assert!(why.message.contains("aarch64-linux-musl"), "{}", why.message);
         assert!(why.message.contains("x86_64-linux-musl"), "{}", why.message);
         assert!(!cache.join("sysroots").exists(), "nothing should have been installed");
+    }
+
+    /// A pinned glibc release is served by the archive of its tuple without the release, and it is
+    /// installed under the pinned tuple, which is the directory the compiler will look in.
+    #[test]
+    fn a_pinned_glibc_release_installs_the_archive_of_its_tuple() {
+        let tree = Tree::new("pinned");
+        let mut manifest = Manifest::new("x86_64-linux-gnu".parse().expect("a tuple"));
+        for (path, text) in FILES {
+            manifest.push(Input {
+                path: (*path).to_owned(),
+                source: "glibc-merged".to_owned(),
+                url: "https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz".to_owned(),
+                sha256: sha256::hex(text.as_bytes()),
+                licence: Licence::Lgpl,
+                provenance: Provenance::Generated,
+            });
+        }
+        let (archive, hash) = artifact(&tree, FILES, &manifest);
+        let cache = tree.0.join("cache");
+
+        let pinned = "x86_64-linux-gnu.2.28".parse().expect("a tuple");
+        let done = install(&archive, &hash, pinned, &cache).expect("the shared archive");
+        assert_eq!(done.root, cache.join("sysroots").join("x86_64-linux-gnu.2.28"));
+
+        // A release of some other tuple is still some other tuple.
+        let other = "aarch64-linux-gnu.2.28".parse().expect("a tuple");
+        let why = install(&archive, &hash, other, &cache).expect_err("the wrong target");
+        assert!(why.message.contains("aarch64-linux-gnu.2.28"), "{}", why.message);
     }
 
     #[test]

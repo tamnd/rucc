@@ -2077,7 +2077,7 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
     if let Some(wall) = rucc_sysroot::Wall::of(target) {
         return Err(err(format!("--fetch {tuple}: {}", wall.no_fetch(&tuple))));
     }
-    let Some(what) = rucc_sysroot::pinned_for(&tuple) else {
+    let Some(what) = rucc_sysroot::pinned_for_target(target) else {
         return Err(err(unpinned(&tuple)));
     };
     Ok(Action::Fetch { what, target, cache: cache::dir() })
