@@ -30,7 +30,7 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
     BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, MachineInsts, PhysReg, RegFile,
-    ShortInsts, TargetInfo, TimingInsts, x86_64,
+    ShortInsts, TargetInfo, TimingInsts, aarch64, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -110,8 +110,22 @@ pub struct Machine {
 /// it and nothing anywhere else.
 pub(crate) const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 
+/// The scratch registers held back from the allocator on AArch64. See [`Machine::aarch64`].
+const AARCH64_SCRATCH: [PhysReg; 2] = [aarch64::X16, aarch64::X17];
+
 /// How many of each class are held back.
 const SCRATCH_COUNT: usize = SCRATCH.len();
+
+/// The second register file's allocation order and the scratch registers taken out of it, which
+/// are the last two in the order that the convention does not preserve.
+fn held_back(conv: &CallRegs) -> (Vec<PhysReg>, Vec<PhysReg>) {
+    let free: Vec<PhysReg> =
+        conv.sse_order.iter().copied().filter(|&reg| !conv.preserves_sse(reg)).collect();
+    let at = free.len().saturating_sub(SCRATCH_COUNT);
+    let scratch: Vec<PhysReg> = free[at..].to_vec();
+    let order = conv.sse_order.iter().copied().filter(|reg| !scratch.contains(reg)).collect();
+    (order, scratch)
+}
 
 impl Machine {
     /// The x86-64 machine under that convention.
@@ -130,12 +144,7 @@ impl Machine {
         // would be one nothing saved. That rules out the upper ten on Windows and nothing at all
         // on SysV, and taking the last two that are left lands on `xmm14` and `xmm15` there and on
         // `xmm4` and `xmm5` on Windows, neither of which any argument travels in.
-        let free: Vec<PhysReg> =
-            conv.sse_order.iter().copied().filter(|&reg| !conv.preserves_sse(reg)).collect();
-        let at = free.len().saturating_sub(SCRATCH_COUNT);
-        let sse_scratch: Vec<PhysReg> = free[at..].to_vec();
-        let sse_order: Vec<PhysReg> =
-            conv.sse_order.iter().copied().filter(|reg| !sse_scratch.contains(reg)).collect();
+        let (sse_order, sse_scratch) = held_back(conv);
         Self {
             conv,
             file: x86_64::REGS,
@@ -150,6 +159,38 @@ impl Machine {
                 x86_64::XMM,
                 &sse_order,
                 &sse_scratch,
+            ),
+        }
+    }
+
+    /// The AArch64 machine under that convention.
+    ///
+    /// The scratch registers are `x16` and `x17`, which the convention already keeps out of the
+    /// allocation order because a linker's veneer may write them between a call and the function
+    /// it reaches. That is the property a scratch register wants: nothing lives in one across
+    /// anything the compiler did not write, so a move the rewriter puts in can have it. The vector
+    /// file's two are picked the way the x86 ones are, which lands on `v30` and `v31`.
+    ///
+    /// Nothing selects AArch64 instructions yet, so [`Machine::for_target`] does not return this.
+    #[must_use]
+    pub fn aarch64(conv: &'static CallRegs) -> Self {
+        let order: Vec<PhysReg> =
+            conv.int_order.iter().copied().filter(|reg| !AARCH64_SCRATCH.contains(reg)).collect();
+        let (fp_order, fp_scratch) = held_back(conv);
+        Self {
+            conv,
+            file: aarch64::REGS,
+            insts: &aarch64::FRAME,
+            branch: &aarch64::BRANCH,
+            bits: &aarch64::BITS,
+            flags: &aarch64::FLAGS,
+            shapes: &aarch64::MACHINE,
+            timing: &aarch64::TIMING,
+            short: &aarch64::SHORT,
+            env: Env::new().with(aarch64::GPR, &order, &AARCH64_SCRATCH).with(
+                aarch64::FPR,
+                &fp_order,
+                &fp_scratch,
             ),
         }
     }
@@ -710,6 +751,20 @@ mod tests {
         let block = func.create_block();
         let values = params.iter().map(|&ty| func.append_param(block, ty)).collect();
         (names, func, block, values)
+    }
+
+    /// The AArch64 machine holds back the two registers a veneer may write and two vector
+    /// registers nothing is passed in, and hands out everything else the convention orders.
+    #[test]
+    fn the_aarch64_machine_holds_back_what_a_veneer_writes() {
+        use rucc_target::aarch64::{self, AAPCS64, FPR, GPR, v};
+        let machine = Machine::aarch64(&AAPCS64);
+        assert_eq!(machine.env.scratch(GPR), [aarch64::X16, aarch64::X17]);
+        assert_eq!(machine.env.scratch(FPR), [v(30), v(31)]);
+        assert_eq!(machine.env.order(GPR), AAPCS64.int_order);
+        assert_eq!(machine.env.order(FPR).len(), 30);
+        assert_eq!(machine.insts.prefix, "a64.");
+        assert_eq!(machine.timing.prefix, machine.shapes.prefix);
     }
 
     #[test]
