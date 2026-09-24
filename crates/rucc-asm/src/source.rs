@@ -183,6 +183,10 @@ struct Reader {
     /// relocation has something to point at. That is a numbered local label or a set name reached
     /// from another section, and is rare.
     relocated: std::collections::HashSet<usize>,
+    /// The names `.local` was said of, which a `.comm` after it makes room for here rather than
+    /// asking the linker, the way `.lcomm` does. Every name is local until something says
+    /// otherwise, so the binding alone cannot tell these apart.
+    said_local: std::collections::HashSet<usize>,
     /// The function whose frame rules are being read, between `.cfi_startproc` and `.cfi_endproc`.
     frame: Option<Frame>,
     /// Every function that has had its frame rules read, in the order the file wrote them.
@@ -694,7 +698,13 @@ impl Reader {
 
             "globl" | "global" => self.bind(&args, Binding::Global)?,
             "weak" => self.bind(&args, Binding::Weak)?,
-            "local" => self.bind(&args, Binding::Local)?,
+            "local" => {
+                self.bind(&args, Binding::Local)?;
+                for arg in &args {
+                    let sym = self.sym(arg.trim());
+                    self.said_local.insert(sym);
+                }
+            }
             "hidden" => self.sight(&args, Visibility::Hidden)?,
             "protected" => self.sight(&args, Visibility::Protected)?,
             // Hidden and not in any dynamic table at all. Nothing this writes can say the second
@@ -775,6 +785,7 @@ impl Reader {
         // No flags means the name decides, which is what makes `.section .text` the same section as
         // `.text` rather than an unallocated one that happens to share its name.
         let mut shape = Shape::of(&name);
+        let (mut merge, mut strings) = (false, false);
         if let Some(flags) = args.get(1) {
             let letters = unquoted(flags.trim());
             shape = Shape { bits: true, ..Shape::default() };
@@ -784,10 +795,12 @@ impl Reader {
                     'w' => shape.write = true,
                     'x' => shape.exec = true,
                     'T' => shape.thread = true,
-                    // Mergeable, with or without strings in it, and part of a group. All three are
-                    // about what a linker may do with two copies of the section, and taking them as
-                    // an ordinary section of the same bytes is correct and merely larger.
-                    'M' | 'S' | 'G' | 'o' | 'e' | 'R' | 'd' => {}
+                    'M' => merge = true,
+                    'S' => strings = true,
+                    // Part of a group, and the rest. They are about what a linker may do with two
+                    // copies of the section, and taking them as an ordinary section of the same
+                    // bytes is correct and merely larger.
+                    'G' | 'o' | 'e' | 'R' | 'd' => {}
                     _ => {
                         let what = format!("'{letter}' is not a section flag this compiler knows");
                         return Err(self.bad(&what));
@@ -810,6 +823,12 @@ impl Reader {
                     return Err(self.bad(&what));
                 }
             }
+        }
+        // How long an entry is follows the type, and a section with `M` and no length, or one this
+        // cannot read, is taken as an ordinary one, which is correct and merely larger.
+        if merge {
+            shape.merge = args.get(3).and_then(|entry| entry.trim().parse().ok()).unwrap_or(0);
+            shape.strings = strings;
         }
         self.section(&name, shape);
         Ok(())
@@ -1022,6 +1041,10 @@ impl Reader {
             return Err(self.bad(&what));
         }
         let sym = self.sym(&name);
+        // `.local` and then `.comm` is how gcc writes a `static` variable it leaves in common, and
+        // gas takes it as `.lcomm`. Taken as common it would be a global the linker merges with
+        // every other file's variable of the same name.
+        let local = local || self.said_local.contains(&sym);
         // Both spellings ask for storage, so both name data, and gas records that whether or not
         // the file also wrote a `.type` for it. A `.type` afterwards still overrides this, since
         // this is only what the directive itself says.
@@ -2616,6 +2639,13 @@ mod tests {
     }
 
     #[test]
+    fn comm_of_a_name_said_to_be_local_is_room_here_as_lcomm_is() {
+        let out = assembled("\t.local mine\n\t.comm mine, 8, 8\n");
+        assert_eq!(name(&out, "mine").binding, Binding::Local);
+        assert!(matches!(name(&out, "mine").at, Held::In { .. }));
+    }
+
+    #[test]
     fn what_a_file_says_about_who_can_see_a_name_is_kept() {
         let out = assembled(
             "\t.text\n\t.globl seen\n\t.weak maybe\n\t.hidden inside\n\t.globl \
@@ -2732,6 +2762,17 @@ mod tests {
         let out = assembled("\tjmp elsewhere\n\tjz maybe\n\t.weak maybe\nmaybe:\n\tret\n");
         assert_eq!(bytes(&out, ".text")[..1], [0xe9]);
         assert_eq!(bytes(&out, ".text")[5..7], [0x0f, 0x84]);
+    }
+
+    #[test]
+    fn a_section_of_constants_says_how_long_each_one_is() {
+        let out = assembled(
+            "\t.section .rodata.str1.1,\"aMS\",@progbits,1\n\t.string \"hi\"\n\t\
+             .section .rodata.cst8,\"aM\",@progbits,8\n\t.quad 1\n\t.section .rodata.x,\"aM\"\n\t.byte 1\n",
+        );
+        let shapes: Vec<_> =
+            out.parts.iter().map(|part| (part.shape.merge, part.shape.strings)).collect();
+        assert_eq!(shapes, [(1, true), (8, false), (0, false)]);
     }
 
     #[test]
