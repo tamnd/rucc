@@ -820,3 +820,20 @@ decl #122 sends_measured : int(int) function external defined
             decl #121 z : int lvalue
           convert lvalue : struct <anonymous>
             decl #123 x : struct <anonymous> lvalue
+decl #125 after_measured : unsigned int(int) function external defined
+  params
+    decl #124 n : int object automatic defined
+  body
+    block
+      decls
+        decl #126 s : struct <anonymous> object automatic defined
+      expr
+        assign = : unsigned int
+          member #2 c : unsigned int bit-field
+            decl #126 s : struct <anonymous> lvalue
+          convert arithmetic : unsigned int
+            const 5 : int
+      return
+        convert lvalue : unsigned int
+          member #2 c : unsigned int bit-field
+            decl #126 s : struct <anonymous> lvalue
