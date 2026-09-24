@@ -42,6 +42,13 @@
 (semantics (a64.udiv_rr_32 l r) (bvudiv l r))
 (semantics (a64.udiv_rr_64 l r) (bvudiv l r))
 
+;; A multiply with an add or a subtract on the end, in the order the instruction takes its operands:
+;; the two to multiply, then the one the product is added to or taken from.
+(semantics (a64.madd_rrr_32 n m a) (bvadd a (bvmul n m)))
+(semantics (a64.madd_rrr_64 n m a) (bvadd a (bvmul n m)))
+(semantics (a64.msub_rrr_32 n m a) (bvsub a (bvmul n m)))
+(semantics (a64.msub_rrr_64 n m a) (bvsub a (bvmul n m)))
+
 ;; Shifts. By a constant the count is whatever the rule's guard let through, and by a register the
 ;; machine takes it modulo the size of the register.
 (semantics (a64.lsl_ri_32 l r) (bvshl l r))

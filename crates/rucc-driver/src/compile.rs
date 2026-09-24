@@ -3040,6 +3040,23 @@ decl #0 x : int object external static defined
         assert!(text.contains("bl make"), "{text}");
     }
 
+    /// A remainder is two instructions on AArch64, the division and then a multiply subtract that
+    /// reads the quotient the division wrote.
+    #[test]
+    fn an_aarch64_remainder_is_a_division_and_a_multiply_subtract() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "int s(int a, int b) { return a % b; }\n\
+                      unsigned long u(unsigned long a, unsigned long b) { return a % b; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        let at = |what: &str| text.find(what).unwrap_or_else(|| panic!("{what} is not in\n{text}"));
+        assert!(at("sdiv w") < at("msub w"), "{text}");
+        assert!(at("udiv x") < at("msub x"), "{text}");
+    }
+
     /// What only the x86-64 lowering writes yet is refused on AArch64 with a reason, rather than
     /// written with x86 instructions.
     #[test]
