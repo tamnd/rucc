@@ -1139,6 +1139,12 @@ pub(crate) fn length(func: &Func, block: Block) -> u32 {
 ///
 /// An arm longer than this bothers to look through is counted whole, since it is refused as too
 /// long either way and the question is a walk over the head for each of its instructions.
+///
+/// An integer constant is not counted. On the machine it is an immediate in the instruction that
+/// reads it, or at worst a move nothing waits on, so it is not work the other path would be paying
+/// for. Counting it made the arm of `acc = c ? acc + 1 : acc` two instructions when `acc` is an
+/// `int` and three when it is anything else, since the front end writes the `1` as an `int` and
+/// converts it, and that one extra constant was the difference between a select and a branch.
 fn work(func: &Func, head: Block, arm: Block) -> u32 {
     let whole = length(func, arm);
     if whole > heuristics::PHIOPT_ARM_SCAN_INSTRUCTIONS {
@@ -1157,8 +1163,11 @@ fn work(func: &Func, head: Block, arm: Block) -> u32 {
         let Some(value) = data.first_result else { return false };
         done.iter().any(|&there| same(func, there, value, 0))
     };
-    let count =
-        func.insts(arm).filter(|&inst| !func.is_terminator(inst) && !repeated(inst)).count();
+    let free = |inst: Inst| func[inst].opcode == Opcode::IConst;
+    let count = func
+        .insts(arm)
+        .filter(|&inst| !func.is_terminator(inst) && !repeated(inst) && !free(inst))
+        .count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
@@ -2091,6 +2100,76 @@ mod tests {
         let mut build = Builder::new(&mut func, arms[1]);
         let it = build.iconst(Type::int(32), 0);
         build.jump(join, &[it]);
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::ARMS_TOO_LONG), 1);
+    }
+
+    /// An arm whose work is one addition and two constants, one of them left over.
+    ///
+    /// This is `acc = v < k ? acc + 1 : acc` with `acc` an `unsigned long long`, as the front end
+    /// hands it over: the `1` written as an `int`, the same `1` as the add reads it, and the add.
+    /// Only the add is work, so the arm fits and the branch goes.
+    #[test]
+    fn constants_in_an_arm_are_not_counted_as_work() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32), Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let outside = func.append_param(head, Type::int(32));
+        let acc = func.append_param(head, Type::int(64));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(64));
+
+        let mut build = Builder::new(&mut func, head);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Slt, outside, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        let mut build = Builder::new(&mut func, arms[0]);
+        build.iconst(Type::int(32), 1);
+        let one = build.iconst(Type::int(64), 1);
+        let it = build.binary(Opcode::Add, acc, one, Flags::NONE);
+        build.jump(join, &[it]);
+        let mut build = Builder::new(&mut func, arms[1]);
+        build.jump(join, &[acc]);
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::ARMS_TOO_LONG), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+    }
+
+    /// The same arm with a third operation in it is still too long, constants or not.
+    #[test]
+    fn an_arm_of_three_operations_is_too_long_with_its_constants_free() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32), Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let outside = func.append_param(head, Type::int(32));
+        let acc = func.append_param(head, Type::int(64));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(64));
+
+        let mut build = Builder::new(&mut func, head);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Slt, outside, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        let mut build = Builder::new(&mut func, arms[0]);
+        let mut it = acc;
+        for step in 1..=3 {
+            let by = build.iconst(Type::int(64), step);
+            it = build.binary(Opcode::Mul, it, by, Flags::NONE);
+        }
+        build.jump(join, &[it]);
+        let mut build = Builder::new(&mut func, arms[1]);
+        build.jump(join, &[acc]);
         let mut build = Builder::new(&mut func, join);
         build.ret(&[param]);
 

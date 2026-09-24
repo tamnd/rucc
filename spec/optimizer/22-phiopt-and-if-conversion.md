@@ -93,6 +93,8 @@ the branch. GCC's analogous numbers at the RTL level are `max-rtl-if-conversion-
 `Init(40)` (`gcc/params.opt:741` onwards), and the fact that GCC uses a cost limit twice as large
 for unpredictable branches is the same idea expressed in the other direction.
 
+An integer constant in an arm is not one of the two. It becomes an immediate in the instruction that reads it, or a move nothing waits on, so the other path does not pay for it. The front end writes the `1` in `acc = c ? acc + 1 : acc` as an `int` and converts it when `acc` is wider or narrower, and counting both constants kept that branch at every type but `int`. tamnd/rucc-corpus#101 is where that was found.
+
 ## 22.3 The other two if-conversions
 
 **RTL if-conversion**, `gcc/ifcvt.cc`. The `noce_try_*` family at `gcc/ifcvt.cc:779` onwards is a
