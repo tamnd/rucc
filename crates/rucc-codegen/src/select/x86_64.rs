@@ -28,6 +28,7 @@ pub static SELECTOR: super::Selector = super::Selector {
     fence: "mfence",
     trap: "ud2",
     abi: &crate::abi::X86_64,
+    scratch: &crate::pipeline::SCRATCH,
 };
 
 #[cfg(test)]

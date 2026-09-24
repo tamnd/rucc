@@ -8,6 +8,8 @@ The instruction selector in `lower.rs` is handed a `select::Selector` instead of
 
 The calling convention in `abi.rs` writes its pseudos, loads, stores and calls through an `abi::Insts` the selector carries, with one for each machine. The AArch64 one uses the 32 bit pseudo for anything narrower than 32 bits, since that is the register such a value lives in. The one x86 name left there is the `movq` that copies an unprototyped float into a general purpose register, which only the Windows x64 convention asks for.
 
+The registers `__builtin_longjmp` may hold things in come from the selector's scratch list, which is `r10` and `r11` on x86-64 and `x16` and `x17` on AArch64, rather than from the x86-64 pair in `pipeline.rs`.
+
 The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::Address`, because the rule files for both machines use the same names for the same shapes. AArch64 lists the two it has.
 
 ## Still there
@@ -19,8 +21,6 @@ These are in code that runs, not in tests. A test that builds x86-64 instruction
 - `lower.rs` lowers every `long double` operation through x87 instructions. AArch64 Linux has a 128-bit IEEE `long double` that goes through soft float calls, and Darwin makes it a `double`. The x87 arm has to become a question for the target rather than the only answer.
 
 - `lower.rs` lowers inline `asm` with the x86 template reader. A function with an `asm` statement is now refused on any other machine instead of being read as the wrong language.
-
-- `lower.rs` uses `pipeline::SCRATCH`, which is the x86-64 pair, to decide which registers `__builtin_longjmp` may use. It should ask the machine's `Env`.
 
 - `lower.rs` reads the global offset table with `mov_rm_64`, jumps away with `jmp_away`, and reads a global register variable with `x86_64::gpr_named`. The first two are PIC details that AArch64 does with `adrp` and `ldr`, and the third needs a register name table per machine.
 

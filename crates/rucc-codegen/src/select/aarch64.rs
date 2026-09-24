@@ -22,6 +22,7 @@ pub static SELECTOR: super::Selector = super::Selector {
     fence: "fence",
     trap: "trap",
     abi: &crate::abi::aarch64::INSTS,
+    scratch: &crate::pipeline::AARCH64_SCRATCH,
 };
 
 #[cfg(test)]

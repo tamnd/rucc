@@ -2836,7 +2836,7 @@ impl<'a> Lowering<'a> {
             .filter(|&reg| {
                 reg != self.conv.stack_pointer
                     && reg != self.conv.frame_pointer
-                    && !crate::pipeline::SCRATCH.contains(&reg)
+                    && !self.selector.scratch.contains(&reg)
             })
             .collect()
     }

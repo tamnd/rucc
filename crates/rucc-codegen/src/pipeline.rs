@@ -115,7 +115,7 @@ pub struct Machine {
 pub(crate) const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 
 /// The scratch registers held back from the allocator on AArch64. See [`Machine::aarch64`].
-const AARCH64_SCRATCH: [PhysReg; 2] = [aarch64::X16, aarch64::X17];
+pub(crate) const AARCH64_SCRATCH: [PhysReg; 2] = [aarch64::X16, aarch64::X17];
 
 /// How many of each class are held back.
 const SCRATCH_COUNT: usize = SCRATCH.len();
