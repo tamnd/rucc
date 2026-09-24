@@ -457,6 +457,21 @@ fn darwin_puts_every_variadic_argument_in_the_argument_area() {
 }
 
 #[test]
+fn darwin_aligns_a_homogeneous_aggregate_in_memory_to_its_members_and_anything_else_to_words() {
+    let floats = pieces(&[float(Format::Single, 4); 3]);
+    let bytes = pieces(&[int(1), int(1), int(1)]);
+    let mixed = pieces(&[int(4), float(Format::Single, 4), int(4)]);
+    // Three floats stay on a four byte boundary on Darwin, and a record of three chars or one of
+    // mixed members goes on a word boundary there.
+    assert_eq!(DARWIN_ARM64.call().in_memory(&record(&floats)), 4);
+    assert_eq!(DARWIN_ARM64.call().in_memory(&record(&bytes)), 8);
+    assert_eq!(DARWIN_ARM64.call().in_memory(&record(&mixed)), 8);
+    // Everywhere else the alignment is the record's own, and the backend rounds it.
+    assert_eq!(AAPCS64.call().in_memory(&record(&floats)), 4);
+    assert_eq!(AAPCS64.call().in_memory(&record(&bytes)), 1);
+}
+
+#[test]
 fn win64_reads_a_size_a_register_holds_as_an_integer_whatever_is_in_it() {
     for scalars in [vec![int(1)], vec![int(2)], vec![int(4)], vec![int(4), int(4)]] {
         let members = pieces(&scalars);
