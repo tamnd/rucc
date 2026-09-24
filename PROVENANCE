@@ -3,18 +3,18 @@ release	0.11.3
 producer	https://github.com/tamnd/rucc-cross
 payload	rucc	apache-2.0
 targets	42
-target	x86_64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-x86_64-linux-gnu.tar.gz	1e22d1247ae697a6b4b014731f8f66729095c742a8154f8880c33036e7da0404
+target	x86_64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-x86_64-linux-gnu.tar.gz	a951b219c641ee0b17e228adc8e43f36eaa70ee255d3c6f7717ec39c41e8b5b8
 target	x86_64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-x86_64-linux-musl.tar.gz	93b42df66c0a7547c3e96cd5512267790df1ca0227a0000ba4f1808eb214c376
-target	aarch64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-aarch64-linux-gnu.tar.gz	6f3f443a65c66d6810288a52c6993328736cf22499cf6b5600083753f93069f2
+target	aarch64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-aarch64-linux-gnu.tar.gz	7a3e54260de1a07d00c7b6a1d8c4a3868367885d4aa96351b804a3a4c14e1a3c
 target	aarch64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-aarch64-linux-musl.tar.gz	098c24c0c27d264dceaee76141f0933845dcc8a7c3a4b473954987f731fecde5
-target	riscv64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-riscv64-linux-gnu.tar.gz	7e04cef3741577fdec11169d87ff0ebf3545beef952a3fb68a6d066439c90a8a
+target	riscv64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-riscv64-linux-gnu.tar.gz	6157fb51fb66fac4fedfe5233d0a2857bcce346cd8f376c595db558e0470c42f
 target	riscv64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-riscv64-linux-musl.tar.gz	00fc00f996d0a9a3de1cabd95840d423de1562ed5345dd5c47f1bf89b30f0b99
-target	i686-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-i686-linux-gnu.tar.gz	6d8e96b37e0395b67e5a178f2e5fd62588c6b30ae62fb3f4533a8905565ade09
-target	armv7-linux-gnueabihf	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-armv7-linux-gnueabihf.tar.gz	7b500c8905a91c010ec92ee70b73b0a9255d49eb1c46ca8a1c001cd80a819a95
+target	i686-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-i686-linux-gnu.tar.gz	6860bcb60e2079d7ba40f29d8ce6344da202affe0a0f9462d12652bff773d513
+target	armv7-linux-gnueabihf	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-armv7-linux-gnueabihf.tar.gz	f96e369bdbe1013a2d8d162fce9fb83444835098c606f5e200f181db63ab011f
 target	armv7-linux-musleabihf	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-armv7-linux-musleabihf.tar.gz	645ceef60e0302b260ad804569243c3470f7545f1b135a143f9b7ec8408b6f78
-target	loongarch64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-loongarch64-linux-gnu.tar.gz	67e0565d9acc6a768dd2ad6318fab716c34bcbfaeb005398e38d4ca8d7f5c3c2
-target	powerpc64le-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-powerpc64le-linux-gnu.tar.gz	7a942076c80962f80314bae54f91d2bbdcd915e6a7f2232c936414617db0a88e
-target	s390x-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24/rucc-sysroot-s390x-linux-gnu.tar.gz	933531721ef7428cc3a4c1af70c3dbe94daa007957b9c39a91e5cd1d86bc2249
+target	loongarch64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-loongarch64-linux-gnu.tar.gz	67e0565d9acc6a768dd2ad6318fab716c34bcbfaeb005398e38d4ca8d7f5c3c2
+target	powerpc64le-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-powerpc64le-linux-gnu.tar.gz	c5262070d3de6f6a91d6df9ee0acf32088d7d03720ce2bb650cae1f865d2ba05
+target	s390x-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-s390x-linux-gnu.tar.gz	ac73fa903ef8816f2eebb35d106bcf6aabdc3e5c22e94646af196df8d5615b56
 target	aarch64-linux-android	unpublished
 target	x86_64-linux-android	unpublished
 target	riscv64-linux-android	unpublished
