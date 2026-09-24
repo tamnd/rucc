@@ -3150,16 +3150,35 @@ decl #0 x : int object external static defined
         assert!(result.messages[0].contains("thread-local"), "{:?}", result.messages);
     }
 
-    /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, which is
-    /// not written yet, so a variadic definition there is refused rather than given the Linux list.
+    /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, so a
+    /// variadic definition saves no registers and its `va_start` stores one address.
     #[test]
-    fn a_variadic_definition_is_refused_on_darwin_until_its_list_is_written() {
+    fn a_darwin_variadic_definition_saves_nothing_and_walks_the_stack() {
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
-        let result = run(&opts, "int f(int n, ...) { return n; }\n");
-        assert!(result.failed());
-        assert!(result.messages[0].contains("does not name"), "{:?}", result.messages);
+        let source = "int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n\
+                      int r = __builtin_va_arg(ap, int); __builtin_va_end(ap); return r; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(!text.contains("str q"), "{text}");
+        assert!(!text.contains("x7"), "{text}");
+    }
+
+    /// A call on Darwin puts every argument past the named ones in memory, even with registers
+    /// left over, so the `double` here is stored rather than put in `d0`.
+    #[test]
+    fn a_darwin_call_puts_its_variadic_arguments_in_memory() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
+        let source = "int printf(const char *, ...);\n\
+                      int g(double x) { return printf(\"%d %f\", 7, x); }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("str d0, [sp, #8]"), "{text}");
     }
 
     /// A construct the rule set does not reach yet is named, along with the function it is in.

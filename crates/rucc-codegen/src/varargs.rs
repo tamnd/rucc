@@ -102,7 +102,7 @@ use rucc_ir::{
     Block, Builder, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
     Opcode, Restrict, Type, Value,
 };
-use rucc_target::{CallRegs, Slot, VaList};
+use rucc_target::{CallRegs, Slot, VaList, Variadic};
 
 /// Where the count of general purpose register bytes already walked is.
 pub const GP_OFFSET: i64 = 0;
@@ -212,7 +212,9 @@ impl Area {
 ///
 /// A convention whose list is a plain pointer gets the walk the module doc's last section
 /// describes instead, which is the same three rewrites over a list of one field, and AAPCS64 gets
-/// the walk [`aapcs`] describes.
+/// the walk [`aapcs`] describes. Apple's AArch64 has the plain pointer, and its scalars take the
+/// same walk, but an object there is as many words as it needs rather than one, which is the
+/// memory half of the AAPCS64 walk and is `aapcs::stacked`.
 pub fn lists(func: &mut Func, conv: &CallRegs) {
     let area = Area::of(conv);
     let word = u64::from(conv.word);
@@ -225,6 +227,11 @@ pub fn lists(func: &mut Func, conv: &CallRegs) {
             (Opcode::VaArg, VaList::CharPointer | VaList::VoidPointer) => value(func, inst, word),
             (Opcode::VaObject, VaList::SysV) => object(func, inst, area),
             (Opcode::VaObject, VaList::Aapcs) => aapcs::object(func, inst),
+            (Opcode::VaObject, VaList::CharPointer)
+                if conv.abi.variadic == Variadic::AlwaysMemory =>
+            {
+                aapcs::stacked(func, inst);
+            }
             (Opcode::VaObject, VaList::CharPointer | VaList::VoidPointer) => {
                 held(func, inst, word);
             }

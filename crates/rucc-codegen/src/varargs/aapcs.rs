@@ -41,6 +41,12 @@
 //!
 //! In the caller's memory, every argument takes a whole number of eight byte words and one aligned
 //! to sixteen starts on a boundary of sixteen.
+//!
+//! # Apple's platforms
+//!
+//! Apple's AArch64 puts every argument the signature does not name in the caller's memory, so its
+//! list is only the `__stack` pointer, at the same offset of zero, and its walk is the memory half
+//! of this one with no question to ask first.
 
 use rucc_ir::{
     Block, Builder, Extra, Flags, Float, Func, Inst, IntPred, MemInfo, Opcode, Type, Value,
@@ -185,6 +191,50 @@ pub(super) fn object(func: &mut Func, inst: Inst) {
     }
 }
 
+/// One `va_arg` of an aggregate on Apple's platforms, as the address it can be read from.
+///
+/// An object of sixteen bytes or less, or a structure of up to four floats of one kind, is in the
+/// caller's memory as itself, and anything larger is the address of a copy the caller made. That
+/// is the same split [`object`] makes, and the memory it reads is the same memory its last step
+/// reads.
+pub(super) fn stacked(func: &mut Func, inst: Inst) {
+    let Extra::VaObject(at) = func[inst].extra else { return };
+    let object = func[at];
+    let MemInfo { size, align, .. } = func[object.mem];
+    let by_reference = func[object.slots].is_empty() && size > IN_REGISTERS;
+    let Some(&list) = func[func[inst].args].first() else { return };
+    let Some(block) = func.block_of(inst) else { return };
+    if func[inst].first_result.is_none() {
+        return;
+    }
+    let wants = if by_reference {
+        Wants { float: false, slots: 1, even: false, size: u64::from(WORD), wide: false }
+    } else {
+        Wants { float: false, slots: 1, even: false, size, wide: align >= 16 }
+    };
+
+    let rest = cut(func, block, inst);
+    let span = func.span(inst);
+    let mut build = Builder::new(func, block).at(span);
+    let mut address = in_memory(&mut build, list, wants);
+    if by_reference {
+        let slot = build.unary(Opcode::IntToPtr, address, Type::PTR);
+        let held = build.load(Type::PTR, slot, info(8, 8), Flags::default());
+        address = build.unary(Opcode::PtrToInt, held, Type::int(64));
+    }
+
+    let args = func.push_values(&[address]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::IntToPtr;
+    data.args = args;
+    data.extra = Extra::None;
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::IntToPtr));
+    func.append_inst(block, inst);
+    for at in rest {
+        func.append_inst(block, at);
+    }
+}
+
 /// Takes the instruction and everything below it out of its block, and gives back what was below
 /// it, because a builder appends to a block and this one has to end at the first branch.
 fn cut(func: &mut Func, block: Block, inst: Inst) -> Vec<Inst> {
@@ -255,10 +305,19 @@ fn walk(
     let here = found(&mut build, here);
     build.jump(join, &[here]);
 
-    // In the caller's memory, where the pointer is rounded up for an argument that wants sixteen
-    // and then stepped on past it by whole words.
     let mut build = Builder::new(func, stack).at(span);
-    let pointer = offset(&mut build, list, STACK);
+    let there = in_memory(&mut build, list, wants);
+    build.jump(join, &[there]);
+
+    (join, address)
+}
+
+/// Where the argument is in the caller's memory, as an integer, with `__stack` stepped on past it.
+///
+/// The pointer is rounded up for an argument that wants sixteen and then stepped on by whole words.
+fn in_memory(build: &mut Builder<'_>, list: Value, wants: Wants) -> Value {
+    let wide = Type::int(64);
+    let pointer = offset(build, list, STACK);
     let there = build.load(Type::PTR, pointer, info(8, 8), Flags::default());
     let mut there = build.unary(Opcode::PtrToInt, there, wide);
     if wants.wide {
@@ -271,9 +330,7 @@ fn walk(
     let onward = build.binary(Opcode::Add, there, by, Flags::default());
     let onward = build.unary(Opcode::IntToPtr, onward, Type::PTR);
     build.store(onward, pointer, info(8, 8), Flags::default());
-    build.jump(join, &[there]);
-
-    (join, address)
+    there
 }
 
 /// The members of a structure of floats copied out of the vector half into a buffer, as the

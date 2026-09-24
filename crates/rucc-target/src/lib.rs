@@ -58,7 +58,7 @@ mod short;
 mod timing;
 pub mod x86_64;
 
-pub use crate::abi::{AbiDescription, Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
+pub use crate::abi::{AbiDescription, Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot, Variadic};
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};

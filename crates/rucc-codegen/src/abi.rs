@@ -100,7 +100,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{Abi, Param, Type};
 use rucc_mir as mir;
-use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
+use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Variadic, Where};
 
 use crate::capability;
 use crate::varargs::Area;
@@ -641,7 +641,18 @@ pub fn call(
             passed.push((reg, sret, class_of(ty, conv)));
             continue;
         }
-        let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
+        // Apple's AArch64 puts every argument past the named ones in memory, a word or more each,
+        // whatever registers are left.
+        let unnamed = variadic && index >= named && conv.abi.variadic == Variadic::AlwaysMemory;
+        let at = if unnamed {
+            let bytes =
+                if ty.is_ptr() { conv.word } else { (ty.bits() * ty.lanes()).div_ceil(8).max(1) };
+            places.on_stack(bytes, bytes)
+        } else if ty.is_float() {
+            places.float(float_bytes(ty))
+        } else {
+            places.integer()
+        };
         if let Some(missing) = refuses(ty, insts) {
             return Err(refused(missing));
         }
