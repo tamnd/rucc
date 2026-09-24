@@ -94,8 +94,9 @@ pub(crate) struct Node {
     pub(crate) same: Vec<(usize, usize)>,
     /// The branch that takes anything, and the name it binds it under.
     pub(crate) wildcard: Option<(String, usize)>,
-    /// The rule that ends here, if one does.
-    pub(crate) accept: Option<usize>,
+    /// The rules that end here, in the order they were written. Every one but the last has a
+    /// guard, and the first whose guard holds is the one that fires.
+    pub(crate) accept: Vec<usize>,
 }
 
 impl Node {
@@ -167,9 +168,10 @@ impl Matcher {
     ///
     /// # Errors
     ///
-    /// A rule whose pattern is one an earlier rule already has can never fire, and that is
-    /// reported rather than silently dropped. It is always a mistake: either the second rule was
-    /// meant to say something else, or one of the two should not be there.
+    /// A rule whose pattern is one an earlier rule without a guard already has can never fire,
+    /// and that is reported rather than silently dropped. It is always a mistake: either the
+    /// second rule was meant to say something else, or one of the two should not be there. After
+    /// a rule with a guard it is the next thing tried when the guard does not hold.
     pub fn build(path: &str, rules: &[Rule]) -> Result<Matcher, Vec<Error>> {
         let mut matcher = Matcher { nodes: vec![Node::default()] };
         let mut errors = Vec::new();
@@ -179,8 +181,9 @@ impl Matcher {
             for step in flatten(&rule.pattern) {
                 at = matcher.follow(at, step);
             }
-            match matcher.nodes[at].accept {
-                Some(first) => errors.push(Error {
+            let accept = &mut matcher.nodes[at].accept;
+            match accept.iter().find(|&&first| rules[first].guard.is_none()) {
+                Some(&first) => errors.push(Error {
                     path: path.to_owned(),
                     line: rule.line,
                     column: rule.column,
@@ -189,7 +192,7 @@ impl Matcher {
                         rules[first].line
                     ),
                 }),
-                None => matcher.nodes[at].accept = Some(index),
+                None => accept.push(index),
             }
         }
 
@@ -271,6 +274,8 @@ impl Matcher {
 
     /// Match one term against the whole rule set, returning the rule that fires.
     ///
+    /// Guards are not evaluated here, so of rules that share a pattern it is the first.
+    ///
     /// The term is matched as a whole. Finding the subterms of a function worth matching is the
     /// selector's job and not this one's.
     #[must_use]
@@ -291,7 +296,7 @@ impl Matcher {
         bindings: &mut Vec<(String, &'t Term)>,
     ) -> Option<usize> {
         let Some(subject) = left.pop() else {
-            return self.nodes[at].accept;
+            return self.nodes[at].accept.first().copied();
         };
         let node = &self.nodes[at];
 
@@ -432,7 +437,7 @@ impl Matcher {
     fn show(&self, f: &mut fmt::Formatter<'_>, at: usize, depth: usize) -> fmt::Result {
         let pad = "  ".repeat(depth);
         let node = &self.nodes[at];
-        if let Some(rule) = node.accept {
+        for rule in &node.accept {
             writeln!(f, "{pad}=> rule {rule}")?;
         }
         for (branch, next) in node.branches() {

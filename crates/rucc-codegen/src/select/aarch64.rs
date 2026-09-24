@@ -155,16 +155,27 @@ mod tests {
         assert_eq!(selects(&terms, add), Some("a64.add_rr_64"));
     }
 
-    /// A constant is one `mov` when it or its complement fits in sixteen bits, and anything wider
-    /// has no rule yet rather than a rule the assembler would refuse.
+    /// A constant is one `mov` when it or its complement fits in sixteen bits. Anything wider is
+    /// built a piece at a time, and the outermost instruction says how many pieces: one `movk`
+    /// under two to the thirty two and three above it or below zero.
     #[test]
     fn a_constant_is_one_mov_only_when_one_mov_can_build_it() {
         let mut terms = Terms::default();
-        for (value, want) in [(0, true), (65535, true), (-65536, true), (65536, false)] {
+        let wanted = [
+            (0, "a64.mov_ri_64"),
+            (65535, "a64.mov_ri_64"),
+            (-65536, "a64.mov_ri_64"),
+            (65536, "a64.movk_ri_16_64"),
+            (0xffff_ffff, "a64.movk_ri_16_64"),
+            (0x1_0000_0000, "a64.movk_ri_48_64"),
+            (-65537, "a64.movk_ri_48_64"),
+        ];
+        for (value, want) in wanted {
             let k = terms.constant("iconst.i64", value);
-            let got = selects(&terms, k);
-            assert_eq!(got, want.then_some("a64.mov_ri_64"), "{value}");
+            assert_eq!(selects(&terms, k), Some(want), "{value}");
         }
+        let k = terms.constant("iconst.i32", 0x1234_5678);
+        assert_eq!(selects(&terms, k), Some("a64.movk_ri_16_32"));
     }
 
     #[test]

@@ -13,11 +13,14 @@
 ;;
 ;; A machine term inside another one is an instruction of its own, built first into a register of its
 ;; own, which is how a remainder is written: the division, then a multiply subtract that takes the
-;; quotient times the divisor away from the dividend. A constant too wide for one `mov` needs more
-;; than one rule for the same pattern and waits for that.
+;; quotient times the divisor away from the dividend. A constant too wide for one `mov` is built the
+;; same way, as a `mov` of its low sixteen bits with a `movk` for each piece above them.
 
 ;; Constants. One `mov` builds anything sixteen bits wide and anything whose complement is, and
-;; that covers every constant of eight and sixteen bits as the IR holds them, sign extended.
+;; that covers every constant of eight and sixteen bits as the IR holds them, sign extended. A wider
+;; one is built a piece at a time. The rules for one width share a pattern and the first whose guard
+;; holds is the one that fires, so a constant takes as few instructions as these rules know how to
+;; give it.
 
 (rule (lower (iconst.i1 k))
       (a64.mov_ri_32 k)
@@ -36,9 +39,29 @@
       (a64.mov_ri_32 k)
       (spec (= k (result))))
 
+(rule (lower (iconst.i32 k))
+      (a64.movk_ri_16_32 (a64.mov_ri_32 (zero_extend 16 32 (extract 15 0 k)))
+                         (zero_extend 16 32 (extract 31 16 k)))
+      (spec (= k (result))))
+
 (rule (lower (iconst.i64 k))
       (if (and (>= k -65536) (< k 65536)))
       (a64.mov_ri_64 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i64 k))
+      (if (and (>= k 0) (< k 4294967296)))
+      (a64.movk_ri_16_64 (a64.mov_ri_64 (zero_extend 16 64 (extract 15 0 k)))
+                         (zero_extend 16 64 (extract 31 16 k)))
+      (spec (= k (result))))
+
+(rule (lower (iconst.i64 k))
+      (a64.movk_ri_48_64
+        (a64.movk_ri_32_64
+          (a64.movk_ri_16_64 (a64.mov_ri_64 (zero_extend 16 64 (extract 15 0 k)))
+                             (zero_extend 16 64 (extract 31 16 k)))
+          (zero_extend 16 64 (extract 47 32 k)))
+        (zero_extend 16 64 (extract 63 48 k)))
       (spec (= k (result))))
 
 
