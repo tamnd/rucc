@@ -1242,6 +1242,7 @@ pub static SYSV: CallRegs = CallRegs {
     word: 8,
     push: 8,
     link: None,
+    sret: None,
     dwarf: &X86_64_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,
     // Forty bytes into the block a thread has to itself, which is where glibc, musl and every
@@ -1320,6 +1321,7 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         word: 8,
         push: 8,
         link: None,
+        sret: None,
         dwarf: &X86_64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
         // None, and not because the platform has no protector. Windows has one and it is a

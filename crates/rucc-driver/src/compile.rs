@@ -3023,6 +3023,23 @@ decl #0 x : int object external static defined
         assert!(!text.contains('%'), "{text}");
     }
 
+    /// A structure too big for registers comes back through the address in x8, which AAPCS64 keeps
+    /// apart from the arguments, so the argument after it is still in x0.
+    #[test]
+    fn an_aarch64_result_in_memory_is_reached_through_x8() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "struct big { long a, b, c; };\nstruct big make(long v);\n\
+                      long f(long v) { return make(v).c; }\n\
+                      struct big g(long v) { struct big b = { v, v, v }; return b; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("x8"), "{text}");
+        assert!(text.contains("bl make"), "{text}");
+    }
+
     /// What only the x86-64 lowering writes yet is refused on AArch64 with a reason, rather than
     /// written with x86 instructions.
     #[test]

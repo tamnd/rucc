@@ -709,6 +709,7 @@ const fn aapcs64(abi: &'static rucc_abi::AbiDescription, red_zone: u32) -> CallR
         word: 8,
         push: 16,
         link: Some(LR),
+        sret: Some(X8),
         dwarf: &AARCH64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
         // None for now, and it is a different mechanism rather than a missing number. glibc and
