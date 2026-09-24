@@ -215,6 +215,7 @@ impl Checker<'_> {
     ) -> Option<DeclId> {
         let node = self.ast[declarator];
         let span = node.name_span;
+        let spelled = self.spelled_with(specs);
         let (params, kind) = match self.ast[node.derived].first() {
             Some(&ast::Derived::Function { params, kind, .. }) => (params, kind),
             // A definition whose declarator does not end in a parameter list is a parse that did
@@ -338,6 +339,10 @@ impl Checker<'_> {
             span,
         };
         let id = self.merge(declared);
+        // The return type's name, kept for the debug information the way an object's is below.
+        if let Some((name, of)) = spelled {
+            self.tast.record_spelling(id, name, of);
+        }
         if nested {
             return Some(id);
         }
@@ -582,7 +587,7 @@ impl Checker<'_> {
         // A deduced type is not known until its initializer is checked, and until then the
         // declaration is made with `int` so that everything else about it is still checked.
         let deduces = self.ast[specs].deduces();
-        let spelled = self.spelled_with(specs, item.declarator);
+        let spelled = self.spelled_with(specs);
         let deducible = deduces.is_some_and(|which| self.deducible(which, item));
         let ty =
             if deduces.is_some() { self.int() } else { self.declared_type(specs, item.declarator) };
@@ -684,8 +689,8 @@ impl Checker<'_> {
         };
         let id = self.merge(declared);
         // Kept for the debug information, which names the typedef where the program did.
-        if let Some(name) = spelled {
-            self.tast.record_spelling(id, name);
+        if let Some((name, of)) = spelled {
+            self.tast.record_spelling(id, name, of);
         }
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
@@ -3090,7 +3095,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_whose_whole_type_is_a_typedef_name_keeps_the_name_and_no_other_does() {
+    fn a_declaration_written_with_a_typedef_name_keeps_the_name_and_what_it_stood_for() {
         let mut f = Fixture::new();
         let mut specs = f.int_specs();
         specs.storage = Some(StorageClass::Typedef);
@@ -3108,7 +3113,7 @@ mod tests {
         let takes = f.takes(&[n, p]);
         let returns = f.int_specs();
         let function = f.var(returns, "g", &[takes], None);
-        let (a, n) = (f.name("a"), f.name("n"));
+        let names = ["a", "b", "c", "n", "p"].map(|name| Some(f.name(name)));
 
         let mut c = f.checker();
         for decl in [named, plain, qualified, pointed, function] {
@@ -3116,9 +3121,15 @@ mod tests {
         }
 
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
-        let kept: Vec<_> =
-            c.tast.spellings().iter().map(|&(decl, name)| (c.tast[decl].name, name)).collect();
-        assert_eq!(kept, [(Some(a), t), (Some(n), t)], "only `T a` and `T n` are the name alone");
+        let int = c.int();
+        let kept: Vec<_> = c
+            .tast
+            .spellings()
+            .iter()
+            .map(|&(decl, name, of)| (c.tast[decl].name, name, of))
+            .collect();
+        let want = names.map(|name| (name, t, int));
+        assert_eq!(kept, want, "every one written with `T`, and not `g`, which was written `int`");
     }
 
     #[test]

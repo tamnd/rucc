@@ -45,13 +45,14 @@
 //!
 //! A declaration points at the name it was written with. `types.kind` for a parameter declared
 //! `size_type` answers `unsigned long`, since the name is not in the type, so which name a
-//! declaration used is a fact about the declaration and the checker keeps it beside the tree. A
-//! parameter, a local or a file-scope object whose whole type was a file-scope typedef name gets
-//! that name's `DW_TAG_typedef` as its `DW_AT_type`, and a debugger printing it says `size_type`,
-//! the way it does for gcc. One written `const size_type` or `size_type *` still points at the
-//! type it has, because the name is only part of it and the entry for the qualified or pointer
-//! type is made from the type table, which does not have the name either. That half is open on
-//! tamnd/rucc#1817.
+//! declaration used is a fact about the declaration and the checker keeps it beside the tree,
+//! with the type the name stood for. A parameter, a local, a file-scope object or a function's
+//! return type written with a file-scope typedef name then has its type built over that name's
+//! `DW_TAG_typedef`: `size_type n` points at it, `const size_type m` at a const over it and
+//! `size_type *p` at a pointer to it, the way gcc writes them, and a debugger printing any of
+//! them says `size_type`. A record member written with one still points at the type it has,
+//! because the members are in the type table and the table does not keep the name. That is open
+//! on tamnd/rucc#1817.
 
 use std::collections::{HashMap, HashSet};
 
@@ -204,10 +205,16 @@ pub(crate) fn collect(
         out: Vec::new(),
         memo: HashMap::new(),
         tags: HashMap::new(),
-        spellings: tast.spellings().iter().copied().collect(),
+        spellings: HashMap::new(),
         written: types.aliases().iter().map(|alias| (alias.name, alias.of)).collect(),
         aliases: HashMap::new(),
+        through: HashMap::new(),
     };
+    // The first time a declaration was written is the one that counts, which is the order the
+    // checker saw them in.
+    for &(decl, name, of) in tast.spellings() {
+        walk.spellings.entry(decl).or_insert((name, of));
+    }
     let mut funcs = HashMap::new();
     let mut objects = HashMap::new();
     for &id in tast.top_level() {
@@ -422,13 +429,19 @@ struct Walk<'a> {
     /// is a different type and the same record, and writing the members twice is what keying on
     /// the type alone would do.
     tags: HashMap<RecordId, usize>,
-    /// The typedef name each declaration named its type with, for the ones that did.
-    spellings: HashMap<DeclId, Symbol>,
+    /// The typedef name each declaration named its type with, for the ones that did, and the type
+    /// the name stood for.
+    spellings: HashMap<DeclId, (Symbol, TypeId)>,
     /// Every typedef name written at file scope and the type it stands for, which are the only
     /// names a declaration can point at, since those are the only ones that get an entry.
     written: HashSet<(Symbol, TypeId)>,
     /// Which entry each typedef name went in, once it has one.
     aliases: HashMap<(Symbol, TypeId), Option<usize>>,
+    /// What each type built over a typedef name came out as, which is [`Walk::memo`] for the
+    /// types a declaration reached through a name. The two cannot share a table, since one type
+    /// is two entries: `size_type *` and `unsigned long *` are the same type and a debugger prints
+    /// them differently.
+    through: HashMap<(Type, Symbol, TypeId), Option<usize>>,
 }
 
 impl Walk<'_> {
@@ -443,7 +456,10 @@ impl Walk<'_> {
             return None;
         };
         let signature = self.types.signature(which).clone();
-        let returns = self.told_or_void(signature.ret)?;
+        let returns = match self.spellings.get(&id) {
+            Some(&(name, of)) => self.over_or_void(signature.ret, name, of),
+            None => self.told_or_void(signature.ret),
+        }?;
         // The names off the definition's own parameter list and the types off the function type,
         // which is a pairing the checker already guarantees: a definition has one declaration per
         // parameter whether or not it was written with a prototype. A name is missing only where
@@ -452,9 +468,12 @@ impl Walk<'_> {
         let mut params = Vec::with_capacity(signature.params.len());
         let mut declared = Vec::with_capacity(signature.params.len());
         for (index, &ty) in signature.params.iter().enumerate() {
+            // The parameter's own type where there is a declaration for it, which is the type the
+            // function type has with the qualifiers put back: `void f(const int x)` takes an `int`
+            // and has a `const int` in it, and the entry is for the object in the frame.
             let ty = match written.get(index) {
-                Some(&param) if tast[param].ty == ty => self.declared(param, ty)?,
-                _ => self.told(ty)?,
+                Some(&param) => self.declared(param, tast[param].ty)?,
+                None => self.told(ty)?,
             };
             let name = written.get(index).and_then(|&param| tast[param].name);
             params.push(Param { name: name.map(|name| self.spelled(name)), ty, spot: None });
@@ -466,17 +485,94 @@ impl Walk<'_> {
     }
 
     /// Which entry a declaration's type is, going through the typedef name it was written with.
-    ///
-    /// The name is used only when the type it stands for is still the declaration's type. The
-    /// checker records the name before anything after it has had its say, and `name a[] = {...}`
-    /// with `name` an array of unknown length, or an attribute that changes the type, leaves a
-    /// declaration whose type the name no longer stands for. Pointing at the name there would
-    /// describe an object of the wrong size, so it falls back to the type itself.
     fn declared(&mut self, id: DeclId, ty: TypeId) -> Option<usize> {
         match self.spellings.get(&id) {
-            Some(&name) if self.written.contains(&(name, ty)) => self.alias(name, ty),
-            _ => self.told(ty),
+            Some(&(name, of)) => self.over(ty, name, of),
+            None => self.told(ty),
         }
+    }
+
+    /// Which entry a type is, with the typedef name's entry wherever the name's type is inside it.
+    ///
+    /// The type is walked the way a declarator builds it, through the qualifiers, the pointers
+    /// and the arrays, so `const size_type` is a const over the `size_type` entry and
+    /// `size_type *` a pointer to it, which is what gcc writes. A function type is not walked
+    /// into, because its parameters were not written with the name, and a record is not either.
+    /// Where the name's type is nowhere to be found the answer is the type itself, which is what
+    /// happens when the checker had its say after the name was read: `name a[] = {1, 2}` with
+    /// `name` an array of unknown length is an array of two, and the name does not stand for it.
+    fn over(&mut self, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
+        if !self.written.contains(&(name, of)) {
+            return self.told(id);
+        }
+        self.walked(self.types.get(id), id, name, of)
+    }
+
+    /// The same, where `void` is an answer rather than a failure. See [`Walk::told_or_void`].
+    ///
+    /// Only the `void` the name did not stand for, since `typedef void none;` has an entry and
+    /// `none *` points at it.
+    fn over_or_void(&mut self, id: TypeId, name: Symbol, of: TypeId) -> Option<Option<usize>> {
+        let ty = self.types.get(id);
+        if matches!(ty.kind, TypeKind::Void) && ty.quals.is_none() && ty != self.types.get(of) {
+            return Some(None);
+        }
+        self.over(id, name, of).map(Some)
+    }
+
+    /// The same, for a type that may have no identifier of its own. See [`Walk::shaped`].
+    fn walked(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
+        if let Some(&known) = self.through.get(&(ty, name, of)) {
+            return known;
+        }
+        let answer = self.layered_over(ty, id, name, of);
+        self.through.insert((ty, name, of), answer);
+        answer
+    }
+
+    /// One level of [`Walk::walked`].
+    fn layered_over(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
+        let base = self.types.get(of);
+        if ty == base {
+            return self.alias(name, of);
+        }
+        // The qualifiers the name had are part of its entry and the rest were written beside it.
+        // A type of the same kind with fewer than the name had is not built on the name at all.
+        let had = if ty.kind == base.kind { base.quals } else { Qualifiers::NONE };
+        if !ty.quals.has(had) {
+            return self.shaped(ty, id);
+        }
+        for (mask, which) in [
+            (Qualifiers::CONST, Qualifier::Const),
+            (Qualifiers::VOLATILE, Qualifier::Volatile),
+            (Qualifiers::RESTRICT, Qualifier::Restrict),
+        ] {
+            if !ty.quals.has(mask) || had.has(mask) {
+                continue;
+            }
+            let inner = Type { kind: ty.kind, quals: ty.quals.without(mask) };
+            let under = self.walked(inner, id, name, of)?;
+            let at = self.out.len();
+            self.out.push(Shape::Qualified { which, of: Some(under) });
+            return Some(at);
+        }
+        let shape = match ty.kind {
+            TypeKind::Pointer(to) => {
+                let size = self.size(id)?;
+                Shape::Pointer { to: self.over_or_void(to, name, of)?, size }
+            }
+            TypeKind::Array { elem, len } => {
+                let count = match len {
+                    ArrayLen::Fixed(count) => Some(count),
+                    ArrayLen::Unknown | ArrayLen::Star | ArrayLen::Variable(_) => None,
+                };
+                Shape::Array { of: self.over(elem, name, of)?, count }
+            }
+            _ => return self.shaped(ty, id),
+        };
+        let at = self.out.len();
+        self.out.push(shape);
+        Some(at)
     }
 
     /// Which entry a typedef name is, adding it the first time it is asked for.
