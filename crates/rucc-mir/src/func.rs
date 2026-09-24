@@ -369,7 +369,7 @@ pub struct Func {
     /// Written by the back end once the layout is final, since a head is the block a jump runs
     /// backwards to and there is no backwards before there is an order, and read by the listing
     /// and by the object writer, which are the two that know where an instruction lands. Empty
-    /// in a build that did not ask for it, which is `-O0`, `-O1` and the two size levels.
+    /// in a build that did not ask for it with `-falign-loops`.
     pub heads: Vec<Block>,
 
     insts: Vec<InstData>,

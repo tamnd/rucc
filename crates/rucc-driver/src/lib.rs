@@ -1652,8 +1652,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
                     })?;
             }
-            // The head of every loop, which is padded to a sixteen byte boundary at `-O2` and `-O3`
-            // the way gcc pads it. Both directions of the plain form are answered. A number is
+            // The head of every loop, which is padded to a sixteen byte boundary the way gcc pads it
+            // when this is asked for. Both directions of the plain form are answered. A number is
             // taken and says nothing, because the boundary here is gcc's default one and a build
             // that names another is asking for speed rather than for a different program.
             "-falign-loops" => opts.align_loops = Some(true),

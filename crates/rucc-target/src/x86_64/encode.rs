@@ -2388,7 +2388,8 @@ const NOPS: [&[u8]; 10] = [
 /// That many bytes of instructions that do nothing, as few instructions as they can be.
 ///
 /// Padding the processor may run through, which is the space in front of a loop that the block
-/// before it falls into. See [`NOPS`] for which instructions they are.
+/// before it falls into. The longest is ten bytes, `cs nopw 0(%rax,%rax,1)`, and a longer run is
+/// more than one of them.
 pub fn nops(count: usize, out: &mut Vec<u8>) {
     let mut left = count;
     while left > 0 {

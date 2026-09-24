@@ -296,8 +296,7 @@ pub struct Flags {
     /// [`crate::schedule`].
     pub schedule: bool,
     /// Whether the head of every loop starts on a boundary of its own, which `-falign-loops` asks
-    /// for and every level from `-O2` turns on apart from the two that asked for small code. See
-    /// [`crate::layout::heads`].
+    /// for and no level turns on by itself yet. See [`crate::layout::heads`].
     pub align_loops: bool,
     /// Whether the target's timing model is believed about the machine's units as well as about
     /// its latencies, which `-Zcycle-accurate-model=` says and the model itself answers otherwise.

@@ -89,16 +89,6 @@ impl OptLevel {
     pub const fn schedules(self) -> bool {
         !matches!(self, OptLevel::O0 | OptLevel::O1)
     }
-
-    /// Whether the head of every loop starts on a boundary of its own.
-    ///
-    /// `-O2` and `-O3`, which is where gcc turns `-falign-loops` on. Not at the size levels,
-    /// because the padding is bytes that buy speed and nothing else, and not at `-O1` for the
-    /// reason gcc gives for leaving it off there: the level is meant to cost little, and padding
-    /// every loop is a larger file whatever else it is.
-    pub const fn aligns_loops(self) -> bool {
-        matches!(self, OptLevel::O2 | OptLevel::O3)
-    }
 }
 
 impl fmt::Display for OptLevel {
@@ -1808,9 +1798,11 @@ pub struct Options {
     /// Whether the head of every loop starts on a sixteen byte boundary when that costs at most ten
     /// bytes of padding, from `-falign-loops` and `-fno-align-loops`.
     ///
-    /// `None` is a command line that said neither, and then the level decides: see
-    /// [`OptLevel::aligns_loops`]. Three way rather than a `bool` for the reason `reorder_blocks`
-    /// above is.
+    /// `None` is a command line that said neither, and then it is off at every level. gcc turns it
+    /// on at `-O2` and `-O3`, and rucc does not yet, because it was measured and bought nothing:
+    /// tamnd/rucc#1823 has the numbers. Three way rather than a `bool` for the reason
+    /// `reorder_blocks` above is, so that the day a level turns it on, `-fno-align-loops` still
+    /// means something.
     pub align_loops: Option<bool>,
     /// Whether the target's timing model is believed about the machine's units as well as about
     /// its latencies, from `-Zcycle-accurate-model=`.

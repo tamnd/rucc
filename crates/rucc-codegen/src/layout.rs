@@ -151,7 +151,7 @@ pub fn blocks(
 ///
 /// A jump that runs backwards is not always a loop. The trace can lay a cold arm out after the
 /// block it rejoins, and the jump back from it runs once. What makes it a loop is that the block
-/// it lands on can get back to the jump, which is both ends being in one piece of [`cycles`].
+/// it lands on can get back to the jump, which is both ends being on one cycle of the graph.
 ///
 /// Never the first block. The front of a function is already on the boundary a function is given,
 /// and anything put between the function's name and its first instruction would be in the room a
