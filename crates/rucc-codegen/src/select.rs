@@ -6,11 +6,13 @@
 //!
 //! The walk over that automaton is [`rucc_base::rules`], because `rucc-opt` matches IR against a
 //! table of rewrite rules with the same walk and neither crate can see the other. What is here
-//! is which targets there are and the tests that the x86-64 table lowers what it should.
+//! is which targets there are and the tests that the x86-64 table lowers what it should. The
+//! AArch64 table has its own tests beside it.
 //!
 //! The names are re-exported rather than reached for through `rucc_base`, because the generated
 //! file refers to them through `super` and that is the whole of the contract between the two.
 
+pub mod aarch64;
 pub mod x86_64;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};

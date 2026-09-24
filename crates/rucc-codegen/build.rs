@@ -17,7 +17,7 @@ use std::{env, fs, process};
 ///
 /// A target is added here when its rule file is written. The list is short on purpose: a rule
 /// file nobody compiles is a rule file nobody notices has stopped compiling.
-const TARGETS: &[&str] = &["x86-64"];
+const TARGETS: &[&str] = &["x86-64", "aarch64"];
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
