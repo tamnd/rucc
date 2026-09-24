@@ -39,8 +39,8 @@ use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
-    FunctionType, IntKind, Qualifiers, TypeId, TypeKind, is_integer, is_pointer, is_real, is_void,
-    pointee,
+    ArrayLen, FunctionType, IntKind, Qualifiers, TypeId, TypeKind, is_integer, is_pointer, is_real,
+    is_void, pointee,
 };
 
 use crate::check::Checker;
@@ -349,8 +349,40 @@ impl Checker<'_> {
             ExprKind::Cond { cond, then, otherwise } => {
                 self.quietly(cond) && self.quietly(then) && self.quietly(otherwise)
             }
+            ExprKind::Subscript { base, index } => self.in_literal(base, index),
             _ => false,
         }
+    }
+
+    /// Whether `base[index]` reads a character of a string literal at a constant index inside it,
+    /// which is `"hi"[0]`.
+    ///
+    /// The one pointer followed that cannot fault, since the literal is there for the whole run
+    /// of the program and the index is known to be inside it. It is not an integer constant
+    /// expression, so the front end cannot answer it, but the load folds to the character once
+    /// the optimizer runs, and gcc 16 answers one for it at `-O1` and zero at `-O0`, which is
+    /// what leaving it to the IR gives.
+    fn in_literal(&self, base: ExprId, index: ExprId) -> bool {
+        let ExprKind::Convert { kind: Conversion::ArrayDecay, operand } = self.tast[base].kind
+        else {
+            return false;
+        };
+        if !matches!(self.tast[operand].kind, ExprKind::Str(_)) {
+            return false;
+        }
+        let TypeKind::Array { len: ArrayLen::Fixed(len), .. } =
+            bare(&self.types, self.tast[operand].ty)
+        else {
+            return false;
+        };
+        let mut index = index;
+        while let ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } =
+            self.tast[index].kind
+        {
+            index = inner;
+        }
+        let ExprKind::Const(value) = self.tast[index].kind else { return false };
+        matches!(self.tast[value], Const::Int(at) if at >= 0 && at < i128::from(len))
     }
 
     /// Whether an expression folds to something gcc counts as a constant.

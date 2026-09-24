@@ -89,8 +89,8 @@ struct Declared {
     noreturn: bool,
     /// Whether this declaration said the function is written without a prologue or an epilogue.
     naked: bool,
-    /// What this declaration said about inlining it, as [`DeclFlags::ALWAYS_INLINE`] and
-    /// [`DeclFlags::NOINLINE`] and nothing else.
+    /// What this declaration said about inlining it, as [`DeclFlags::ALWAYS_INLINE`],
+    /// [`DeclFlags::NOINLINE`] and [`DeclFlags::DECLARED_INLINE`] and nothing else.
     inlining: DeclFlags,
     /// What this declaration promised a call to it does, from `const` and `pure`.
     effects: Effects,
@@ -319,7 +319,9 @@ impl Checker<'_> {
             naked: self.is_naked(specs.attrs),
             // The specifiers only, for the reason `noreturn` above reads them only. glibc writes
             // `__fortify_function` in front of the definition, which is here.
-            inlining: self.inlining(specs.attrs),
+            inlining: self
+                .inlining(specs.attrs)
+                .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
             // The specifiers only, for the reason `noreturn` above reads them only, and read
             // on a definition at all because a promise made over a body is still a promise.
             // The analysis that reads the body keeps its own answer somewhere else, so the two
@@ -666,7 +668,8 @@ impl Checker<'_> {
             // declares an interrupt handler and defines it elsewhere writes it here.
             naked: self.is_naked(specs.attrs) || self.is_naked(item.attrs),
             // Both places, for the reason `noreturn` above reads both.
-            inlining: self.inlining(specs.attrs) | self.inlining(item.attrs),
+            inlining: (self.inlining(specs.attrs) | self.inlining(item.attrs))
+                .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
             // Both places, for the reason `noreturn` above reads both. A header writing
             // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
             // one writing `int look(const int *) __attribute__((pure));` puts it after the

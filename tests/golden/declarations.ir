@@ -34,22 +34,22 @@ block0(%0: i32):
     return %10
 }
 
-func @always_inline_me(i32) -> i32, linkage(linkonce) {
+func @always_inline_me(i32) -> i32, linkage(linkonce), attrs(inline_hint) {
 block0(%0: i32):
     return %0
 }
 
-func @inline_but_also_declared(i32) -> i32, linkage(external) {
+func @inline_but_also_declared(i32) -> i32, linkage(external), attrs(inline_hint) {
 block0(%0: i32):
     return %0
 }
 
-func @inline_and_extern(i32) -> i32, linkage(external) {
+func @inline_and_extern(i32) -> i32, linkage(external), attrs(inline_hint) {
 block0(%0: i32):
     return %0
 }
 
-func @inline_and_static(i32) -> i32, linkage(internal) {
+func @inline_and_static(i32) -> i32, linkage(internal), attrs(inline_hint) {
 block0(%0: i32):
     return %0
 }

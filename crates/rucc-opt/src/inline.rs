@@ -1,4 +1,5 @@
-//! The inliner, for the calls gcc inlines at every level: those to an `always_inline` function.
+//! The inliner, for the calls gcc inlines at every level, those to an `always_inline` function,
+//! and from `-O1` up for the calls to a small function declared `inline`.
 //!
 //! Design: `spec/optimizer/33-inlining.md`, and tamnd/rucc#392.
 //!
@@ -43,6 +44,21 @@
 //! function nothing can emit. It becomes a declaration, which is gcc's answer too: gcc emits nothing
 //! for an inline definition, so a call the inliner left goes to whatever the rest of the program
 //! defines under the name, which for a glibc wrapper is the library function.
+//!
+//! From `-O1` up the same splice takes a call to a function declared `inline` whose body, once its
+//! own calls are settled, is no larger than `max-inline-insns-single`, the limit gcc gives such a
+//! callee. It is the declared half of gcc's early inliner and not the rest of it: a function
+//! nobody declared `inline` is left alone however small it is, and nothing here weighs the call
+//! against the growth the way section 33.4 wants the later inliner to. What it is for is the code
+//! after it. A `__builtin_constant_p` in the body of such a function asks about a parameter, and
+//! only once the body is where the call was can the answer be the constant the caller passed,
+//! which is what gcc answers and what `bcp-1.c` checks. `-fno-inline` turns this half off and
+//! leaves `always_inline` alone, which is what the flag does in gcc.
+//!
+//! A body that takes the address of one of its own labels is copied with the label, so each copy
+//! has an address of its own, which is what gcc does and what `990208-1.c` checks. A body that
+//! jumps to such an address, or whose labels a static table holds, is refused, since the copy
+//! would still be reaching into the original.
 
 use std::collections::{HashMap, HashSet};
 
@@ -56,10 +72,22 @@ use rucc_tuple::{Arch, Os};
 
 use crate::Stats;
 
-/// What the step calls itself in a remark.
-pub const NAME: &str = "always-inline";
+/// What the step calls itself in a remark, and the name `-fno-inline` turns the declared half off
+/// by.
+pub const NAME: &str = "inline";
 
 const INLINED: &str = "always_inline call inlined";
+
+const HINT_INLINED: &str = "inline call inlined";
+
+/// Which of the two reasons a function is inlined for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `always_inline`, which is a promise.
+    Always,
+    /// `inline`, which is a hint taken when the body is small enough.
+    Hinted,
+}
 
 /// Why a call to an `always_inline` function was not inlined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,14 +100,20 @@ pub enum InlineFailure {
     ByValue,
     /// The body starts a variable argument list of its own, which only a frame of its own has.
     VaStart,
-    /// The body takes the address of a label, which is an address in its own copy.
-    LabelAddress,
+    /// The body jumps to a label by its address, or a static table holds one of its labels,
+    /// either of which would still name the original body from the copy.
+    ComputedGoto,
     /// The body calls `setjmp`, whose frame would become the caller's.
     Setjmp,
     /// The IR has memory SSA in it, which this step runs before.
     MemorySsa,
     /// A `va_arg_pack` whose arguments cannot be forwarded to where it is.
     Pack,
+    /// The body grows the stack by an amount only known when it runs, which in a loop in the
+    /// caller would grow it once for every time round. Only a hint is refused for this.
+    Alloca,
+    /// The body is larger than a callee declared `inline` is allowed to be.
+    TooLarge,
 }
 
 impl InlineFailure {
@@ -91,36 +125,79 @@ impl InlineFailure {
             Self::Mismatch => "always_inline call not inlined: arguments do not match",
             Self::ByValue => "always_inline call not inlined: structure passed by value",
             Self::VaStart => "always_inline call not inlined: callee uses va_start",
-            Self::LabelAddress => "always_inline call not inlined: callee takes a label address",
+            Self::ComputedGoto => "always_inline call not inlined: callee has a computed goto",
             Self::Setjmp => "always_inline call not inlined: callee calls setjmp",
             Self::MemorySsa => "always_inline call not inlined: memory SSA present",
             Self::Pack => "always_inline call not inlined: va_arg_pack cannot be forwarded",
+            Self::Alloca => "always_inline call not inlined: callee calls alloca",
+            Self::TooLarge => "always_inline call not inlined: callee too large",
+        }
+    }
+
+    /// What `-fopt-info` says about it for a call to a function that was only declared `inline`.
+    #[must_use]
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::Recursive => "inline call not inlined: recursive",
+            Self::Mismatch => "inline call not inlined: arguments do not match",
+            Self::ByValue => "inline call not inlined: structure passed by value",
+            Self::VaStart => "inline call not inlined: callee uses va_start",
+            Self::ComputedGoto => "inline call not inlined: callee has a computed goto",
+            Self::Setjmp => "inline call not inlined: callee calls setjmp",
+            Self::MemorySsa => "inline call not inlined: memory SSA present",
+            Self::Pack => "inline call not inlined: va_arg_pack cannot be forwarded",
+            Self::Alloca => "inline call not inlined: callee calls alloca",
+            Self::TooLarge => "inline call not inlined: callee too large",
         }
     }
 }
 
-/// Inlines every call to an `always_inline` function that can be, and says what it did where.
+/// Inlines every call to an `always_inline` function that can be, and with a `limit` every call to
+/// a function declared `inline` whose body is no larger than that, and says what it did where.
 ///
 /// Then turns every function still holding a `va_arg_pack` into a declaration. See the module
 /// documentation for why that is the right thing to do with one.
-pub fn run(module: &mut Module) -> Vec<(FuncId, Stats)> {
-    let wanted: HashMap<Symbol, FuncId> = module
+pub fn run(module: &mut Module, limit: Option<u32>) -> Vec<(FuncId, Stats)> {
+    let wanted: HashMap<Symbol, (FuncId, Kind)> = module
         .funcs()
-        .filter(|&id| {
-            module[id].attrs.set.contains(AttrSet::ALWAYS_INLINE) && !module[id].is_declaration()
+        .filter(|&id| !module[id].is_declaration())
+        .filter_map(|id| {
+            let set = module[id].attrs.set;
+            let kind = if set.contains(AttrSet::ALWAYS_INLINE) {
+                Kind::Always
+            } else if limit.is_some()
+                && set.contains(AttrSet::INLINE_HINT)
+                && set.without(AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED) == set
+            {
+                Kind::Hinted
+            } else {
+                return None;
+            };
+            Some((module[id].name, (id, kind)))
         })
-        .map(|id| (module[id].name, id))
         .collect();
     let mut done = Vec::new();
     if !wanted.is_empty() {
         let convention = Convention::of(module);
         let mut state = HashMap::new();
+        let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
+        let how = How { wanted: &wanted, convention, limit };
         for id in module.funcs().collect::<Vec<FuncId>>() {
-            settle(module, id, &wanted, convention, &mut state, &mut done);
+            settle(module, id, &how, &mut state, &mut done);
         }
     }
     withdraw(module);
     done
+}
+
+/// What stays the same for every function [`settle`] visits.
+struct How<'a> {
+    /// The functions whose calls are inlined, by name, and why.
+    wanted: &'a HashMap<Symbol, (FuncId, Kind)>,
+    /// The calling convention the pack is forwarded under.
+    convention: Convention,
+    /// How many instructions a callee declared `inline` may have.
+    limit: usize,
 }
 
 /// Where a function is in being settled.
@@ -136,8 +213,7 @@ enum State {
 fn settle(
     module: &mut Module,
     id: FuncId,
-    wanted: &HashMap<Symbol, FuncId>,
-    convention: Convention,
+    how: &How<'_>,
     state: &mut HashMap<FuncId, State>,
     done: &mut Vec<(FuncId, Stats)>,
 ) {
@@ -146,8 +222,10 @@ fn settle(
     }
     state.insert(id, State::Settling);
     // The calls as the function was written. A call that arrives inside a body being inlined is
-    // one the callee's own settling already had its chance at.
-    let calls: Vec<(Inst, FuncId)> = {
+    // one the callee's own settling already had its chance at. A function that asked not to be
+    // optimized is left with its calls, except for the ones that are a promise.
+    let optnone = module[id].attrs.set.contains(AttrSet::OPTNONE);
+    let calls: Vec<(Inst, FuncId, Kind)> = {
         let func = &module[id];
         func.blocks()
             .flat_map(|block| func.insts(block))
@@ -157,26 +235,43 @@ fn settle(
                     return None;
                 }
                 let callee = func[info].callee?;
-                wanted.get(&callee).map(|&callee| (inst, callee))
+                let &(callee, kind) = how.wanted.get(&callee)?;
+                (kind == Kind::Always || !optnone).then_some((inst, callee, kind))
             })
             .collect()
     };
     let mut stats = Stats::new();
-    for (call, callee) in calls {
+    for (call, callee, kind) in calls {
+        let why = |failure: InlineFailure| match kind {
+            Kind::Always => failure.why(),
+            Kind::Hinted => failure.hint(),
+        };
         if callee == id || state.get(&callee) == Some(&State::Settling) {
-            stats.missed(InlineFailure::Recursive.why());
+            stats.missed(why(InlineFailure::Recursive));
             continue;
         }
-        settle(module, callee, wanted, convention, state, done);
-        match splice(module, id, call, callee, convention) {
-            Ok(()) => stats.optimized(INLINED),
-            Err(failure) => stats.missed(failure.why()),
+        settle(module, callee, how, state, done);
+        // Measured once the callee is settled, since what is copied is the body with its own
+        // calls already inlined.
+        if kind == Kind::Hinted && size(&module[callee]) > how.limit {
+            stats.missed(why(InlineFailure::TooLarge));
+            continue;
+        }
+        match splice(module, id, call, callee, how.convention, kind) {
+            Ok(()) if kind == Kind::Always => stats.optimized(INLINED),
+            Ok(()) => stats.optimized(HINT_INLINED),
+            Err(failure) => stats.missed(why(failure)),
         }
     }
     state.insert(id, State::Settled);
     if !stats.is_empty() {
         done.push((id, stats));
     }
+}
+
+/// How many instructions a body has, which is what the limit on a callee declared `inline` counts.
+fn size(func: &Func) -> usize {
+    func.blocks().map(|block| func.insts(block).count()).sum()
 }
 
 /// Inlines one call, or says why not and leaves the caller as it was.
@@ -186,13 +281,14 @@ fn splice(
     call: Inst,
     callee: FuncId,
     convention: Convention,
+    kind: Kind,
 ) -> Result<(), InlineFailure> {
     // Out of the module for the length of the splice, so that the callee can be read while the
     // caller is written. The two are different functions, since a call to itself is refused
     // before this.
     let stand_in = Func::new(module[caller].name, Signature::new());
     let mut func = std::mem::replace(&mut module[caller], stand_in);
-    let result = check(&func, call, &module[callee], convention)
+    let result = check(&func, call, &module[callee], convention, kind)
         .map(|plan| copy(&mut func, call, &module[callee], &plan));
     module[caller] = func;
     result
@@ -219,6 +315,7 @@ fn check(
     call: Inst,
     callee: &Func,
     convention: Convention,
+    kind: Kind,
 ) -> Result<Plan, InlineFailure> {
     let entry = callee.entry().ok_or(InlineFailure::Mismatch)?;
     let params = &callee[entry].params;
@@ -251,13 +348,19 @@ fn check(
         .map(|(at, &arg)| (func[arg].ty, signature.params.get(at).map_or(Abi::Plain, |p| p.abi)))
         .collect();
 
+    if callee.named_blocks().next().is_some() {
+        return Err(InlineFailure::ComputedGoto);
+    }
     let mut packs = HashSet::new();
     let mut counted = false;
     for block in callee.blocks() {
         for inst in callee.insts(block) {
             match callee[inst].opcode {
                 Opcode::VaStart => return Err(InlineFailure::VaStart),
-                Opcode::BlockAddr | Opcode::IndirectBr => return Err(InlineFailure::LabelAddress),
+                Opcode::IndirectBr => return Err(InlineFailure::ComputedGoto),
+                Opcode::Alloca if kind == Kind::Hinted && !callee[inst].args.is_empty() => {
+                    return Err(InlineFailure::Alloca);
+                }
                 Opcode::SetjmpMarker => return Err(InlineFailure::Setjmp),
                 Opcode::MemEntry => return Err(InlineFailure::MemorySsa),
                 Opcode::VaArgPack => packs.extend(callee[inst].results()),
@@ -543,12 +646,24 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
 
     // The callee's blocks and their parameters, and then its instructions with their results, so
     // that every value exists before any operand is written.
+    //
+    // The entry block's parameters are the call's arguments themselves rather than parameters of
+    // the copy, since nothing branches to an entry block and so nothing else arrives there. That
+    // way a constant argument is a constant in the body straight away, and the folding that runs
+    // next sees `1 + 1` rather than a block parameter that only `simplify-cfg` would later find
+    // is always `1`.
+    let start = callee.entry().expect("checked to have a body");
+    let passed = func[func[call].args][..plan.fixed].to_vec();
     let mut blocks = HashMap::new();
     let mut values = HashMap::new();
     for from in callee.blocks() {
         let to = func.create_block();
-        for &param in &callee[from].params {
-            values.insert(param, func.append_param(to, callee[param].ty));
+        if from == start {
+            values.extend(callee[from].params.iter().copied().zip(passed.iter().copied()));
+        } else {
+            for &param in &callee[from].params {
+                values.insert(param, func.append_param(to, callee[param].ty));
+            }
         }
         blocks.insert(from, to);
     }
@@ -665,10 +780,8 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
     }
 
     // And the call itself, which becomes a jump to the copy of the entry block.
-    let passed = func[func[call].args][..plan.fixed].to_vec();
-    let to = func.push_values(&passed);
-    let start = blocks[&callee.entry().expect("checked to have a body")];
-    let targets = func.push_block_calls(&[BlockCall::new(start, to)]);
+    let to = ValueList::EMPTY;
+    let targets = func.push_block_calls(&[BlockCall::new(blocks[&start], to)]);
     let span = func.span(call);
     let jump = func.create_inst(
         InstData { extra: Extra::Targets(targets), ..InstData::new(Opcode::Jump) },
@@ -831,10 +944,14 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 "#;
 
     fn inlined(body: &str) -> String {
+        inlined_under(body, None)
+    }
+
+    fn inlined_under(body: &str, limit: Option<u32>) -> String {
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        run(&mut module);
+        run(&mut module, limit);
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
@@ -920,6 +1037,94 @@ block0(%0: i64, %1: f64):
         let g = &out[out.find("func @g").expect("g is there")..];
         assert!(g.contains("iconst.i32 2"), "{out}");
         assert!(!g.contains("call @wrap"), "{out}");
+    }
+
+    /// A function declared `inline`, which is a call left alone at `-O0` and inlined above it.
+    const HINTED: &str = r#"
+func @bump(i32) -> i32, linkage(external), attrs(inline_hint) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = add.i32 %0, %1
+    return %2
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @bump(%0) : (i32) -> i32
+    return %1
+}
+"#;
+
+    /// A small function declared `inline` goes in when there is a limit and stays a call when
+    /// there is none, which is `-O0`.
+    #[test]
+    fn a_small_function_declared_inline_is_inlined_above_o0() {
+        let out = inlined_under(HINTED, Some(70));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @bump"), "{out}");
+        let out = inlined_under(HINTED, None);
+        assert!(out.contains("call @bump"), "{out}");
+    }
+
+    /// One that is larger than the limit stays a call.
+    #[test]
+    fn a_function_declared_inline_over_the_limit_is_left_alone() {
+        let out = inlined_under(HINTED, Some(2));
+        assert!(out.contains("call @bump"), "{out}");
+    }
+
+    /// Each copy of a body that takes the address of its own label gets a label of its own, which
+    /// is `990208-1.c`.
+    #[test]
+    fn each_copy_of_a_label_address_is_a_label_of_its_own() {
+        let out = inlined_under(
+            r#"
+func @here() -> ptr, linkage(internal), attrs(inline_hint) {
+block0:
+    jump block1
+block1:
+    %0 = block_addr block1
+    return %0
+}
+
+func @g() -> i1, linkage(external) {
+block0:
+    %0 = call @here() : () -> ptr
+    %1 = call @here() : () -> ptr
+    %2 = icmp eq %0, %1
+    return %2
+}
+"#,
+            Some(70),
+        );
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @here"), "{out}");
+        assert_eq!(g.matches("block_addr").count(), 2, "{out}");
+    }
+
+    /// A body that jumps through a label address is refused, since a table of them may be what
+    /// it jumps through and the table names the original body.
+    #[test]
+    fn a_computed_goto_is_not_inlined() {
+        let out = inlined_under(
+            r#"
+func @jump(ptr) -> i32, linkage(internal), attrs(inline_hint) {
+block0(%0: ptr):
+    indirect_br %0, block1
+block1:
+    %1 = iconst.i32 1
+    return %1
+}
+
+func @g(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = call @jump(%0) : (ptr) -> i32
+    return %1
+}
+"#,
+            Some(70),
+        );
+        assert!(out.contains("call @jump"), "{out}");
     }
 
     /// A function that reaches itself is left as a call rather than unrolled for ever.
