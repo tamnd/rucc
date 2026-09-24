@@ -3011,11 +3011,14 @@ impl<'u> Body<'_, 'u> {
             Some(Local::Slot(slot)) => Place::new(Where::Addr(slot), ty),
             None => return,
         };
-        // A register holds a word, so a number or an address is what can come out of one. A
-        // structure or a floating type asks for something else and is refused rather than quietly
-        // started with nothing, since a program that writes one of these is counting on the value.
-        let value = repr::value_type(self.types(), self.target(), ty)
-            .filter(|value| value.is_ptr() || (value.is_int() && value.is_scalar()));
+        // A register holds a number, an address or a float, so one of those is what can come out
+        // of one. A structure asks for something else and is refused rather than quietly started
+        // with nothing, since a program that writes one is counting on the value. Whether the
+        // register is in the file the type is in is the back end's question, since which file a
+        // name is in is the machine's business.
+        let value = repr::value_type(self.types(), self.target(), ty).filter(|value| {
+            value.is_ptr() || (value.is_scalar() && (value.is_int() || value.is_float()))
+        });
         let Some(value) = value else {
             self.unsupported("an object of this type kept in a named register", span);
             return;

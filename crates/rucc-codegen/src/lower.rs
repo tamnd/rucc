@@ -316,9 +316,10 @@ fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
 ///
 /// [`AsmOperands::read`] gives the x86 meaning to every letter it knows, and most of the letters
 /// mean something else on AArch64: `Q` is an address in one register there rather than one of four
-/// registers, `w` is a vector register, and `a` to `d` name nothing. So an AArch64 statement is
-/// taken only with the letters the two agree on, which are a register, a constant, memory, the
-/// immediate ranges and a matching number, and anything else is refused rather than read as x86. A
+/// registers, and `a` to `d` name nothing. So an AArch64 statement is taken only with the letters
+/// the two agree on, which are a register, a constant, memory, the immediate ranges and a matching
+/// number, and anything else is refused rather than read as x86. `w` is the one exception: it is a
+/// register on both, and which file it is in is decided by the caller with [`vector_letter`]. A
 /// register the front end named in braces is read against AArch64's own names, so what is inside
 /// them is not a letter.
 fn shared_letters(constraint: &str) -> bool {
@@ -335,9 +336,23 @@ fn shared_letters(constraint: &str) -> bool {
         _ if inside => true,
         _ => matches!(
             c,
-            '=' | '+' | '&' | '%' | 'r' | 'm' | 'o' | 'V' | 'g' | 'X' | 'i' | 'n' | 'p' | 'I'..='N'
-                | '0'..='9'
+            '=' | '+' | '&' | '%' | 'r' | 'w' | 'm' | 'o' | 'V' | 'g' | 'X' | 'i' | 'n' | 'p'
+                | 'I'..='N' | '0'..='9'
         ),
+    })
+}
+
+/// Whether an AArch64 constraint asks for a floating point or vector register, which is what `w`
+/// means there. A register named in braces is not a letter, so a `w` inside one is not read.
+fn vector_letter(constraint: &str) -> bool {
+    let mut inside = false;
+    constraint.chars().any(|c| {
+        match c {
+            '{' => inside = true,
+            '}' => inside = false,
+            _ => {}
+        }
+        !inside && c == 'w'
     })
 }
 
@@ -3191,7 +3206,9 @@ impl<'a> Lowering<'a> {
     ///
     /// The whole sixty four bits are moved whatever the type is, because the register is that
     /// wide and a narrower type reads the low end of the copy, which is the same low end. A type
-    /// wider than the register is refused, since there is no register holding it to read.
+    /// wider than the register is refused, since there is no register holding it to read. On
+    /// AArch64 a float may be kept in a vector register, `register double x asm ("d8");`, and it is
+    /// moved out of that file the same way.
     ///
     /// A name the machine has not got is refused too, and is the only thing that can be wrong
     /// with the string: which register a name means is this machine's question and this is where
@@ -3210,26 +3227,32 @@ impl<'a> Lowering<'a> {
         let spelled = self.names.resolve(symbol).to_owned();
         let bare = spelled.strip_prefix('%').unwrap_or(&spelled);
         let named = if self.on_aarch64() {
-            aarch64::named(bare).and_then(|(reg, class)| (class == aarch64::GPR).then_some(reg))
+            aarch64::named(bare)
+        } else if self.class_of(ty) != self.gpr {
+            return Err(self.unsupported(inst));
         } else {
-            x86_64::gpr_named(bare).map(|(reg, _)| reg)
+            x86_64::gpr_named(bare).map(|(reg, _)| (reg, self.gpr))
         };
-        let Some(held) = named else {
+        let Some((held, file)) = named else {
             return Err(Unsupported::Register { inst, name: spelled });
         };
+        // A float in a general purpose register, or a number in a vector one, is a register the
+        // machine has holding a type that is not kept there, and would need a move between the
+        // files that nothing here makes yet.
+        if on_x87(ty) || self.class_of(ty) != file {
+            return Err(self.unsupported(inst));
+        }
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let mov =
-            self.selector.frame.moves(self.gpr).expect("a class the target says how to move").mov;
+        let mov = self.selector.frame.moves(file).expect("a class the target says how to move").mov;
         let mov = self.named(mov);
         let into = self.new_reg(result);
         self.out
             .build(block, mov)
             .at(span)
-            .operand(mir::Operand::write(into, self.gpr))
+            .operand(mir::Operand::write(into, file))
             .operand(
-                mir::Operand::read(mir::Reg::physical(held), self.gpr)
-                    .with(Constraint::Fixed(held)),
+                mir::Operand::read(mir::Reg::physical(held), file).with(Constraint::Fixed(held)),
             )
             .finish();
         Ok(())
@@ -3879,6 +3902,31 @@ impl<'a> Lowering<'a> {
             }
         }
 
+        // The file each operand is in. On AArch64 `w` is a floating point or vector register and an
+        // input tied to an output is in that output's file. A value whose type puts it in the other
+        // file would need a move into this one first, which gcc makes and this does not yet, so
+        // that is refused below.
+        let mut files = vec![self.gpr; list.len()];
+        if a64 {
+            let constraints = self.names.resolve(self.source[asm].constraints);
+            for (file, entry) in files.iter_mut().zip(constraints.split(',')) {
+                if vector_letter(entry) {
+                    *file = self.conv.sse_class;
+                }
+            }
+            for index in 0..list.len() {
+                if let Some(&file) = list[index].tied.and_then(|output| files.get(output)) {
+                    files[index] = file;
+                }
+            }
+        }
+        let pins: Vec<_> = list.iter().map(|operand| self.pinned_here(operand)).collect();
+        let pin = |index: usize, file: RegClass| match pins[index] {
+            Some((at, class)) if class == file => Ok(Some(Constraint::Fixed(at))),
+            Some(_) => Err(refused()),
+            None => Ok(None),
+        };
+
         // The operands in a register, as the instruction's own. An input the text is handed as a
         // constant or as the address of a name is spelled into the text instead, when its
         // constraint allows a constant at all and no output is tied to it. `"a" (0x1234)` is a
@@ -3890,19 +3938,19 @@ impl<'a> Lowering<'a> {
         if !basic {
             for (index, operand) in list.iter().enumerate() {
                 let Some(result) = operand.result else { continue };
-                let ty = self.source[result].ty;
-                if on_x87(ty) || self.class_of(ty) != self.gpr {
+                let (ty, file) = (self.source[result].ty, files[index]);
+                if on_x87(ty) || self.class_of(ty) != file {
                     return Err(refused());
                 }
                 let reg = self.new_reg(result);
                 let written = if operand.early {
-                    mir::Operand::write_early(reg, self.gpr)
+                    mir::Operand::write_early(reg, file)
                 } else {
-                    mir::Operand::write(reg, self.gpr)
+                    mir::Operand::write(reg, file)
                 };
                 def_of[index] = Some(defs.len());
-                defs.push(match self.pinned_here(operand) {
-                    Some(at) => written.with(Constraint::Fixed(at)),
+                defs.push(match pin(index, file)? {
+                    Some(fixed) => written.with(fixed),
                     None => written,
                 });
             }
@@ -3917,14 +3965,14 @@ impl<'a> Lowering<'a> {
                 if (operand.memory && !a64) || spelled {
                     continue;
                 }
-                let ty = self.source[value].ty;
-                if on_x87(ty) || self.class_of(ty) != self.gpr {
+                let (ty, file) = (self.source[value].ty, files[index]);
+                if on_x87(ty) || self.class_of(ty) != file {
                     return Err(refused());
                 }
-                let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
+                let read = mir::Operand::read(self.reg_of(value)?, file);
                 use_of[index] = Some(uses.len());
-                uses.push(match self.pinned_here(operand) {
-                    Some(at) => read.with(Constraint::Fixed(at)),
+                uses.push(match pin(index, file)? {
+                    Some(fixed) => read.with(fixed),
                     None => read,
                 });
             }
@@ -3936,7 +3984,7 @@ impl<'a> Lowering<'a> {
         let mut written: Vec<mir::Operand> = Vec::new();
         for (reg, class) in clobbered {
             let fixed = |operand: &mir::Operand| {
-                class == self.gpr && operand.constraint == Constraint::Fixed(reg)
+                operand.class == class && operand.constraint == Constraint::Fixed(reg)
             };
             if defs.iter().any(fixed) {
                 continue;
@@ -4066,8 +4114,16 @@ impl<'a> Lowering<'a> {
                     let value = operand.result.or(operand.value).ok_or_else(refused)?;
                     let bits = held_bits(self.source[value].ty);
                     // `w` and `x` are the two names every general purpose register has, and one
-                    // with no modifier is named at the width of its type, as gcc names it.
-                    let width = if a64 {
+                    // with no modifier is named at the width of its type, as gcc names it. A
+                    // vector register with no modifier is `v`, which is what gcc writes for one
+                    // whatever is in it, and the modifiers name the scalar views of it.
+                    let width = if a64 && files[index] != self.gpr {
+                        match modifier {
+                            None => 'v',
+                            Some(view @ ('b' | 'h' | 's' | 'd' | 'q')) => view,
+                            Some(_) => return Err(refused()),
+                        }
+                    } else if a64 {
                         match (modifier, bits) {
                             (None, 8 | 16 | 32) | (Some('w'), _) => 'w',
                             (None, 64) | (Some('x'), _) => 'x',
@@ -4460,21 +4516,19 @@ impl<'a> Lowering<'a> {
     /// Every register a call may leave anything in, with its file and the output pinned to it if
     /// one is.
     ///
-    /// Only a general purpose register is ever pinned to an output, since those are the only ones a
-    /// constraint letter or a register variable names here. The vector registers are numbered from
-    /// nought as well, so asking about one of them would find the output pinned to the register of
-    /// the same number in the other file.
+    /// A register is asked about with its file, since the two files are numbered from nought alike
+    /// and a question about `v8` alone would find an output pinned to `x8`.
     fn lost(&self, list: &[AsmOperand<'_>]) -> Vec<(PhysReg, RegClass, Option<usize>)> {
         let conv = self.conv;
         let ints = conv.int_order.iter().filter(|&&reg| !conv.preserves_int(reg));
         let sses = conv.sse_order.iter().filter(|&&reg| !conv.preserves_sse(reg));
-        let written = |reg| {
+        let written = |reg, class| {
             list.iter().position(|operand| {
-                operand.result.is_some() && self.pinned_here(operand) == Some(reg)
+                operand.result.is_some() && self.pinned_here(operand) == Some((reg, class))
             })
         };
-        ints.map(|&reg| (reg, conv.int_class, written(reg)))
-            .chain(sses.map(|&reg| (reg, conv.sse_class, None)))
+        ints.map(|&reg| (reg, conv.int_class, written(reg, conv.int_class)))
+            .chain(sses.map(|&reg| (reg, conv.sse_class, written(reg, conv.sse_class))))
             .collect()
     }
 
@@ -4570,18 +4624,16 @@ impl<'a> Lowering<'a> {
 
     /// The register an operand is pinned to on the machine being lowered for.
     ///
-    /// [`pinned`] on x86. AArch64 has no constraint letter for one register, so there only a local
-    /// register variable pins anything, and its name is read against [`aarch64::named`]. A vector
-    /// register pins nothing, since an operand in that file is refused before it is placed.
-    fn pinned_here(&self, operand: &AsmOperand<'_>) -> Option<PhysReg> {
+    /// [`pinned`] on x86, where it is always a general purpose register. AArch64 has no constraint
+    /// letter for one register, so there only a local register variable pins anything, and its name
+    /// is read against [`aarch64::named`], which may put it in either file. The file comes back with
+    /// the register because the two are numbered from nought alike, and `x8` is not `v8`.
+    fn pinned_here(&self, operand: &AsmOperand<'_>) -> Option<(PhysReg, RegClass)> {
         if !self.on_aarch64() {
-            return pinned(operand);
+            return pinned(operand).map(|reg| (reg, self.gpr));
         }
         let name = operand.named?;
-        match aarch64::named(name.strip_prefix('%').unwrap_or(name))? {
-            (reg, aarch64::GPR) => Some(reg),
-            _ => None,
-        }
+        aarch64::named(name.strip_prefix('%').unwrap_or(name))
     }
 
     /// An `asm` statement on AArch64, which is kept as text whatever is in it.
@@ -5823,12 +5875,12 @@ mod tests {
     }
 
     /// A letter that means one thing on x86 and another on AArch64 is refused there rather than
-    /// read as x86. `w` is a vector register on AArch64 and `Q` an address in one register, and
-    /// the reader of the constraint list knows them as neither.
+    /// read as x86. `Q` is an address in one register on AArch64, and the reader of the constraint
+    /// list does not know it as that.
     #[test]
     fn a_constraint_letter_the_two_machines_disagree_about_is_refused_on_aarch64() {
         let i64 = Type::int(64);
-        for constraints in ["=w,r", "=r,Q", "=a,r", "=r,S"] {
+        for constraints in ["=r,Q", "=a,r", "=r,S"] {
             let (mut names, mut source, block, args) = blank(&[i64]);
             let out = clobbering(
                 &mut source,
@@ -5845,6 +5897,39 @@ mod tests {
             let refused = lower_a64(&mut names, &source).expect_err(constraints);
             assert!(refused.contains("has an operand this cannot place"), "{refused}");
         }
+    }
+
+    /// `w` on AArch64 is a vector register, named `v` with no modifier the way gcc names it and by
+    /// its scalar view with one. An integer asked for in one is refused, since it would need a move
+    /// into that file first.
+    #[test]
+    fn a_vector_operand_on_aarch64_is_in_the_vector_file() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64, f64]);
+        let out = clobbering(
+            &mut source,
+            block,
+            &mut names,
+            "fadd %d0, %d1, %d2\n\tmov %0.16b, %0.16b",
+            "=w,w,w",
+            "",
+            &[args[0], args[1]],
+            &[f64],
+        );
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+        let text = lower_a64(&mut names, &source).expect("kept as text");
+        assert!(text.contains("%2:fpr, early $x0,"), "{text}");
+        assert!(text.contains("@fadd \u{1}r0d\u{2}, \u{1}r"), "{text}");
+        assert!(text.contains("\n\tmov \u{1}r0v\u{2}.16b, \u{1}r0v\u{2}.16b\n"), "{text}");
+
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, args) = blank(&[i64]);
+        let out =
+            clobbering(&mut source, block, &mut names, "fmov %d0, %d1", "=w,w", "", &args, &[i64]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+        assert!(lower_a64(&mut names, &source).is_err());
     }
 
     #[test]
