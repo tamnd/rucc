@@ -313,9 +313,8 @@ impl Reader {
         let mut written = crate::instruction::one(word, &args).map_err(|why| self.bad(&why))?;
         // `jmp .+10` has been given its short form already, where the distance is known.
         let mut branch = None;
-        if let Some(short) = crate::instruction::short(&written)
-            && written.holes[0].name != "."
-        {
+        let short = crate::instruction::short(&written).filter(|_| written.holes[0].name != ".");
+        if let Some(short) = short {
             if !self.long.contains(&self.branches) {
                 branch = Some(self.branches);
                 written = short;
