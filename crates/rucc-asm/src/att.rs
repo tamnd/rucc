@@ -128,6 +128,32 @@ pub fn print(
     Ok(writer.out)
 }
 
+/// One template kept as text, filled in the way [`print()`] writes it into a listing.
+///
+/// For the byte writer, which reads a template on its own when the text allows it rather than
+/// sending the whole unit to the assembler. See `crate::bytes::template`. What goes into the holes
+/// is the same text either way, so a template cannot come out as one instruction in the listing and
+/// another in the object.
+pub(crate) fn template(
+    func: &Func,
+    block: Block,
+    inst: Inst,
+    names: &Interner,
+    directives: Directives,
+) -> Result<String, Error> {
+    let mut writer = Writer {
+        arch: Arch::X86_64,
+        names,
+        directives,
+        unwind: false,
+        out: String::new(),
+        labels: Vec::new(),
+        sections: Sections::default(),
+    };
+    writer.inst(func, block, inst, names.resolve(func.name))?;
+    Ok(writer.out)
+}
+
 /// A file being written out.
 struct Writer<'a> {
     /// The machine the instructions are for, which is the one thing about a file that decides how

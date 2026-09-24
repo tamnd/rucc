@@ -62,17 +62,26 @@ use std::fmt;
 
 use rucc_base::Interner;
 use rucc_mir::Func;
-use rucc_target::x86_64;
+use rucc_target::{TargetInfo, x86_64};
 
-/// Whether any of these functions holds a template kept as text, which is what decides that the
-/// unit is assembled from its listing rather than written out as bytes directly. See
-/// [`x86_64::Form::Template`].
+/// Whether any of these functions holds a template kept as text that the assembler cannot read on
+/// its own, which is what decides that the unit is assembled from its listing rather than written
+/// out as bytes directly. See [`x86_64::Form::Template`].
+///
+/// One that jumps to a label another template defines, switches section or aligns what follows is
+/// only right in the listing, where every template is read as part of one file. Every other one is
+/// read by itself where it is and laid down as bytes, which keeps the line table and the rest of
+/// what `-g` writes, since those come out of [`assemble`] and not out of a listing.
 #[must_use]
-pub fn kept(funcs: &[Func], names: &Interner) -> bool {
+pub fn kept(funcs: &[Func], names: &Interner, target: &TargetInfo) -> bool {
     let wanted = format!("x64.{}", x86_64::TEMPLATE);
+    let directives = Directives::of(target.object_format);
     funcs.iter().any(|func| {
         func.blocks().any(|block| {
-            func.insts(block).any(|inst| names.resolve(func[inst].opcode.name()) == wanted)
+            func.insts(block).any(|inst| {
+                names.resolve(func[inst].opcode.name()) == wanted
+                    && bytes::template(func, block, inst, names, directives).is_err()
+            })
         })
     })
 }
