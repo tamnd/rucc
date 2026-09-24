@@ -28,6 +28,8 @@ The comparison is of what the two say and not of the bytes they say it in. Both 
 
 Relaxation, choosing the short form of a jump when the displacement fits, and growing it when it does not, is an iterate-to-fixpoint pass over the fragment list. It must terminate, and it must be deterministic; both are tested.
 
+The reader of `.s` files does it by reading the file more than once. Every `jmp` and conditional jump to a name starts out two bytes long, and at the end of the file each one whose distance is not a number that fits in a signed byte is marked. The file is then read again with the marked ones written long, and that repeats until a pass marks nothing. A jump that is long stays long, so each pass has more long jumps than the one before and the count of jumps bounds the number of passes, which is the argument for termination. Starting short and only ever growing is also what gas does, so the two come out the same size. A jump out of the section, or to a weak name, is a relocation and is always long.
+
 ## 11.2 Inline assembly
 
 GCC's inline assembly is one of the least-specified and most-depended-upon parts of the C ecosystem, and it is a hard requirement for the kernel.

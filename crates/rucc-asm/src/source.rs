@@ -67,9 +67,19 @@ impl std::error::Error for Trouble {}
 /// it cannot read, an expression that does not reduce to something a relocation can say, or a file
 /// that is malformed. Every one of them carries the line it was on.
 pub fn read(text: &str) -> Result<Assembled, Trouble> {
-    let mut reader = Reader::default();
-    reader.run(text)?;
-    reader.finish()
+    // Every branch starts out in its two byte form and the file is read again with the ones that
+    // did not reach written long, until none is left over. A branch made long never goes back, so
+    // each pass has more long ones than the last and there are only so many branches, which is how
+    // gas does it and why the two come out the same size.
+    let mut long = std::collections::HashSet::new();
+    loop {
+        let mut reader = Reader { long: long.clone(), ..Reader::default() };
+        reader.run(text)?;
+        match reader.finish()? {
+            Ok(done) => return Ok(done),
+            Err(grow) => long.extend(grow),
+        }
+    }
 }
 
 /// One name, while the file is still being read.
@@ -101,6 +111,9 @@ struct Fixup {
     /// load of a datum is not, and a name reached through a table is a relocation however near it
     /// turns out to be. A directive writes [`Reach::Near`], which is the plain one.
     reach: Reach,
+    /// Which branch of the file this is, counting every one that has a two byte form, when it was
+    /// written in that form and so may turn out not to reach.
+    branch: Option<usize>,
     line: usize,
 }
 
@@ -165,6 +178,10 @@ struct Reader {
     /// refers to, and a file whose own name is also the name of something in it would otherwise be
     /// one symbol where it should be two.
     files: Vec<String>,
+    /// The branches an earlier pass found out of reach of two bytes, which this one writes long.
+    long: std::collections::HashSet<usize>,
+    /// How many branches with a two byte form have been read so far.
+    branches: usize,
     line: usize,
 }
 
@@ -293,7 +310,18 @@ impl Reader {
     /// object defines is allowed to go through a stub and a load of a datum is not.
     fn instruction(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
-        let written = crate::instruction::one(word, &args).map_err(|why| self.bad(&why))?;
+        let mut written = crate::instruction::one(word, &args).map_err(|why| self.bad(&why))?;
+        // `jmp .+10` has been given its short form already, where the distance is known.
+        let mut branch = None;
+        if let Some(short) = crate::instruction::short(&written)
+            && written.holes[0].name != "."
+        {
+            if !self.long.contains(&self.branches) {
+                branch = Some(self.branches);
+                written = short;
+            }
+            self.branches += 1;
+        }
         let part = self.here;
         let at = self.at();
         self.put(&written.bytes)?;
@@ -329,6 +357,7 @@ impl Reader {
                 width: hole.width,
                 sum,
                 reach: hole.sort,
+                branch,
                 line: self.line,
             });
         }
@@ -821,7 +850,15 @@ impl Reader {
                 return Err(self.bad(&what));
             }
             self.put(&vec![0u8; width as usize])?;
-            self.fixups.push(Fixup { part, at, width, sum, reach: Reach::Near, line: self.line });
+            self.fixups.push(Fixup {
+                part,
+                at,
+                width,
+                sum,
+                reach: Reach::Near,
+                branch: None,
+                line: self.line,
+            });
         }
         Ok(())
     }
@@ -1111,13 +1148,20 @@ impl Reader {
     }
 
     /// Work out everything that was waiting for the end of the file.
-    fn finish(mut self) -> Result<Assembled, Trouble> {
+    ///
+    /// Or the branches written short that do not reach, when there are any, for the file to be read
+    /// again with those long.
+    fn finish(mut self) -> Result<Result<Assembled, Vec<usize>>, Trouble> {
         if self.frame.is_some() {
             return Err(self.bad("a '.cfi_startproc' that is never ended"));
         }
         self.unwind_table();
         self.resolve_sets()?;
         self.resolve_sizes()?;
+        let grow = self.too_far()?;
+        if !grow.is_empty() {
+            return Ok(Err(grow));
+        }
         self.resolve_fixups()?;
         // A section the file only ever mentioned is dropped, so that a `.section` in a macro that
         // turned out to be unused does not put an empty header in the object. `.text` at the top is
@@ -1176,7 +1220,7 @@ impl Reader {
                 visibility: sym.visibility,
             });
         }
-        Ok(Assembled { parts, names })
+        Ok(Ok(Assembled { parts, names }))
     }
 
     /// The unwind table the frame rules describe, as a section of its own.
@@ -1286,6 +1330,30 @@ impl Reader {
     }
 
     /// The places whose bytes name something.
+    /// The branches written in two bytes that two bytes do not reach.
+    ///
+    /// That is one whose distance is not a number in this section, or is a number past a signed
+    /// byte, or goes to a weak name, which another object may replace and so is a relocation
+    /// wherever it is defined.
+    fn too_far(&self) -> Result<Vec<usize>, Trouble> {
+        let mut grow = Vec::new();
+        for fixup in &self.fixups {
+            let Some(nth) = fixup.branch else { continue };
+            let residue =
+                self.reduce(&fixup.sum).map_err(|why| Trouble { line: fixup.line, why })?;
+            let weak = fixup.sum.terms.iter().any(|term| match &term.what {
+                What::Symbol(name) => {
+                    self.known.get(name).is_some_and(|&sym| self.syms[sym].binding == Binding::Weak)
+                }
+                _ => false,
+            });
+            if weak || !residue.left.is_empty() || i8::try_from(residue.constant).is_err() {
+                grow.push(nth);
+            }
+        }
+        Ok(grow)
+    }
+
     fn resolve_fixups(&mut self) -> Result<(), Trouble> {
         for fixup in std::mem::take(&mut self.fixups) {
             let line = fixup.line;
@@ -2163,10 +2231,7 @@ mod tests {
         let text = bytes(&out, ".text");
         // `nop`, then a jump back over both of them, then `nop`, then a jump forward over the
         // `nop` behind it, then that `nop`, then `ret`.
-        assert_eq!(
-            text,
-            vec![0x90, 0xe9, 0xfa, 0xff, 0xff, 0xff, 0x90, 0xe9, 0x01, 0, 0, 0, 0x90, 0xc3]
-        );
+        assert_eq!(text, vec![0x90, 0xeb, 0xfd, 0x90, 0xeb, 0x01, 0x90, 0xc3]);
         assert!(out.parts[0].relocs.is_empty(), "{:?}", out.parts[0].relocs);
         // One name, and it is the one the file wrote as a name.
         let written: Vec<&str> = out.names.iter().map(|name| name.name.as_str()).collect();
@@ -2477,16 +2542,49 @@ mod tests {
     fn a_jump_to_a_label_in_this_section_is_a_number_and_not_a_relocation() {
         // Because both ends are here, so there is nothing for a linker to work out. The distance
         // is counted from the end of the jump, which is why jumping over nothing is zero and not
-        // minus five.
+        // minus two.
         let out = assembled("\t.text\n\tjmp over\nover:\n\tret\n");
-        assert_eq!(bytes(&out, ".text"), vec![0xe9, 0, 0, 0, 0, 0xc3]);
+        assert_eq!(bytes(&out, ".text"), vec![0xeb, 0, 0xc3]);
         assert!(out.parts[0].relocs.is_empty(), "{:?}", out.parts[0].relocs);
     }
 
     #[test]
     fn a_jump_backwards_is_the_negative_distance_to_it() {
         let out = assembled("\t.text\nagain:\n\tjmp again\n");
-        assert_eq!(bytes(&out, ".text"), vec![0xe9, 0xfb, 0xff, 0xff, 0xff]);
+        assert_eq!(bytes(&out, ".text"), vec![0xeb, 0xfe]);
+    }
+
+    #[test]
+    fn a_branch_is_as_short_as_the_distance_lets_it_be() {
+        // A hundred and twenty seven bytes forward still fits in one, and one more does not, which
+        // is where gas moves to the long form too. The conditional one keeps its condition.
+        let out = assembled("\tjne far\n\t.zero 127\nfar:\n\tret\n");
+        assert_eq!(bytes(&out, ".text")[..2], [0x75, 127]);
+        let out = assembled("\tjne far\n\t.zero 128\nfar:\n\tret\n");
+        assert_eq!(bytes(&out, ".text")[..6], [0x0f, 0x85, 128, 0, 0, 0]);
+        let out = assembled("back:\n\t.zero 126\n\tjmp back\n");
+        assert_eq!(bytes(&out, ".text")[126..], [0xeb, 0x80]);
+        let out = assembled("back:\n\t.zero 127\n\tjmp back\n");
+        assert_eq!(bytes(&out, ".text")[127..], [0xe9, 0x7c, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn a_branch_made_long_can_push_another_one_out_of_reach() {
+        // The first jump fits only while the second is short, and the second does not fit at all.
+        // Once the second is long the first is three bytes further from its label and has to be
+        // long as well, which is the pass after the one that found the second.
+        let out = assembled("\tjmp a\n\t.zero 125\n\tjmp b\na:\n\t.zero 128\nb:\n\tret\n");
+        let text = bytes(&out, ".text");
+        assert_eq!(text[..5], [0xe9, 130, 0, 0, 0]);
+        assert_eq!(text[130..135], [0xe9, 128, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_branch_that_leaves_the_section_or_goes_to_a_weak_name_is_long() {
+        // Both are relocations, and a relocation is four bytes whatever the distance comes to.
+        let out = assembled("\tjmp elsewhere\n\tjz maybe\n\t.weak maybe\nmaybe:\n\tret\n");
+        assert_eq!(bytes(&out, ".text")[..1], [0xe9]);
+        assert_eq!(bytes(&out, ".text")[5..7], [0x0f, 0x84]);
     }
 
     #[test]

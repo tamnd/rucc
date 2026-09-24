@@ -25,12 +25,9 @@
 //!
 //! # What is not read yet
 //!
-//! A branch is four bytes of distance whether it needs them or not. Choosing the two byte form
-//! where it fits is relaxation, which is a pass over the whole section rather than a decision one
-//! instruction makes, and until it is written the bytes are correct and longer than gas would have
-//! written. A symbol as an immediate is not read, nor a symbol as the displacement of an address
-//! that names a register, because both want a relocation this does not write yet and a wrong guess
-//! about either is silent.
+//! A symbol as an immediate is not read, nor a symbol as the displacement of an address that names
+//! a register, because both want a relocation this does not write yet and a wrong guess about
+//! either is silent.
 
 use rucc_target::x86_64::{Addr, Encoding, ImmSize, Value, Width, encode, encoding, gpr_named};
 use rucc_target::{PhysReg, Segment};
@@ -234,6 +231,27 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort: Sort::Value });
     }
     Ok(Written { bytes, holes: wanted })
+}
+
+/// The two byte form of a jump written with four bytes of distance to a name, or nothing for any
+/// other instruction.
+///
+/// Only `jmp` and the sixteen conditional jumps have one, and a call has none, which is why this
+/// looks at the opcode rather than at the hole: `e9` becomes `eb` and `0f 8x` becomes `7x`, each
+/// followed by one byte of distance. Whether the byte reaches is not known here, since the name
+/// is somewhere in a file that has not been laid out yet, and [`crate::source`] is the one that
+/// finds out and asks for the long form back when it does not.
+pub(crate) fn short(long: &Written) -> Option<Written> {
+    let [hole] = long.holes.as_slice() else { return None };
+    if hole.sort != Sort::Branch || hole.width != 4 || hole.at + 4 != long.bytes.len() {
+        return None;
+    }
+    let code = match long.bytes.as_slice() {
+        [0xE9, ..] if hole.at == 1 => 0xEB,
+        [0x0F, code @ 0x80..=0x8F, ..] if hole.at == 2 => code - 0x10,
+        _ => return None,
+    };
+    Some(Written { bytes: vec![code, 0], holes: vec![Hole { at: 1, width: 1, ..hole.clone() }] })
 }
 
 /// A branch whose distance is counted from its own first byte, written with that distance in it.
