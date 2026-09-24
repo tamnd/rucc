@@ -84,6 +84,14 @@
 //! reader rather than the first is what makes this the set's question too, since a write after the
 //! first reader and before the second is a write the one at a time version would never have seen.
 //!
+//! # A constant added to the index
+//!
+//! `p[i + 3]` is an index of `i + 3`, and what selection gives the address is the register an
+//! `add $3` wrote. [`offsets`] runs first and has the address read `i` with the three times the
+//! scale in its displacement, which is `12(%rdi,%rsi,4)` for an `int` and what gcc writes, and the
+//! add goes when the address was the only thing reading it. A `lea` that took the constant hands it
+//! on to its readers the same way it would hand on any displacement.
+//!
 //! # The addresses into the frame
 //!
 //! A local's place in the frame and an argument's place in the caller's area is a distance from the
@@ -322,6 +330,100 @@ pub fn addresses(
         }
     }
     folded
+}
+
+/// Moves a constant added to an address's index into the address's displacement, and gives back
+/// how many.
+///
+/// `p[i + 3]` on an `int` is an index of `i + 3` scaled by four, and the optimizer leaves it that
+/// way because in the IR it is one value multiplied by one number. Selection then writes the add
+/// on its own and the address takes what it wrote as the index, so the read comes out as an
+/// `addq $3` and a load, where the address could have been `12(%rdi,%rsi,4)` and the add need not
+/// be there at all. This is the rewrite from one to the other: the address reads what the add
+/// read, and its displacement grows by the constant times the scale.
+///
+/// Only when the address is the one read of what the add wrote, since otherwise the add stays for
+/// its other readers and nothing is saved, and only in the block the add is in, for the reason
+/// [`addresses`] has for staying in one. An address with no index is left to the selector, which
+/// already writes `p + 3` as a base and a displacement, and one with nowhere to put a displacement,
+/// a jump table or a place in this function, is left as it is. A displacement that would not fit
+/// in its field leaves the pair alone too.
+///
+/// Run before [`addresses`], so a `lea` that has taken the constant in is what gets handed on to
+/// its readers.
+pub fn offsets(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+) -> usize {
+    let add = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.add)));
+    let sub = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sub)));
+    let mut reads = Reads::of(func);
+    let mut moved = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        // Each register an addition of a constant has written so far in this block, with the
+        // instruction that wrote it, the operand it added to and the constant it added.
+        let mut added: HashMap<mir::Reg, (mir::Inst, mir::Reg, i64)> = HashMap::new();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let opcode = func[inst].opcode;
+            if opcode == add || opcode == sub {
+                if let Some((reg, from, value)) = constant_added(func, inst, opcode == sub) {
+                    added.insert(reg, (inst, from, value));
+                }
+                continue;
+            }
+            let Some(mem) = func[inst].mem else { continue };
+            let amode = func[mem];
+            let Some(at) = amode.index else { continue };
+            if amode.table.is_some() || amode.block.is_some() {
+                continue;
+            }
+            let Some(index) = func[func[inst].operands].get(usize::from(at)).map(|op| op.reg)
+            else {
+                continue;
+            };
+            let Some(&(sum, from, value)) = added.get(&index) else { continue };
+            if reads.count(index) != 1 {
+                continue;
+            }
+            let disp = value
+                .checked_mul(i64::from(amode.scale))
+                .and_then(|scaled| scaled.checked_add(i64::from(amode.disp)))
+                .and_then(|disp| i32::try_from(disp).ok());
+            let Some(disp) = disp else { continue };
+            let mut plan = Plan::of(func, inst);
+            plan.operands[usize::from(at)].reg = from;
+            plan.amode = Some(mir::Amode { disp, ..amode });
+            let mut set = Changes::new();
+            set.rewrite(inst, plan);
+            set.remove(sum);
+            if set.commit(func, &mut reads, names, machine).is_ok() {
+                added.remove(&index);
+                moved += 1;
+            }
+        }
+    }
+    moved
+}
+
+/// The register an addition of a constant writes, the one it adds to and the constant, with the
+/// constant negated for a subtraction.
+///
+/// `None` unless both registers are virtual, since a virtual register is written once and that is
+/// what makes the one it adds to still hold the same value wherever the address is.
+fn constant_added(
+    func: &mir::Func,
+    inst: mir::Inst,
+    negate: bool,
+) -> Option<(mir::Reg, mir::Reg, i64)> {
+    let [written, from] = &func[func[inst].operands] else { return None };
+    if !written.reg.is_virtual() || !from.reg.is_virtual() || func[inst].mem.is_some() {
+        return None;
+    }
+    let value = func[func[inst].imm?].0;
+    let value = if negate { value.checked_neg()? } else { value };
+    Some((written.reg, from.reg, value))
 }
 
 /// An address computation whose readers are still being counted.
@@ -1500,5 +1602,84 @@ mod tests {
 
         assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// The pass that moves a constant into the displacement, run on its own.
+    fn offsets_moved(func: &mut mir::Func, names: &mut Interner) -> usize {
+        offsets(func, &FRAME, &MACHINE, names)
+    }
+
+    /// `p[i + 3]` on an `int` as selection leaves it: an `add $3` and a load that scales what it
+    /// wrote by four.
+    fn indexed_past(
+        names: &mut Interner,
+        add: &str,
+        by: i64,
+    ) -> (mir::Func, mir::Block, [mir::Reg; 3]) {
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        let array = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let past = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(names, add)).def(past, GPR).uses(index, GPR).imm(by).finish();
+        func.build(block, op(names, "mov_rm_32"))
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(array, GPR))
+                    .indexed(mir::Operand::read(past, GPR), 4),
+            )
+            .finish();
+        (func, block, [array, index, past])
+    }
+
+    #[test]
+    fn a_constant_added_to_the_index_goes_into_the_displacement() {
+        let mut names = Interner::new();
+        let (mut func, block, [array, index, _]) = indexed_past(&mut names, FRAME.add, 3);
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the add is still there: {left:?}");
+        assert_eq!(left[0].1.disp, 12, "three elements of four bytes");
+        assert_eq!(left[0].1.scale, 4);
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![array, index]);
+    }
+
+    #[test]
+    fn a_constant_taken_off_the_index_is_a_negative_displacement() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = indexed_past(&mut names, FRAME.sub, 1);
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].1.disp, -4);
+    }
+
+    /// Something else reads the sum as well, so the add has to stay and moving the constant would
+    /// save nothing.
+    #[test]
+    fn an_index_something_else_reads_keeps_its_add() {
+        let mut names = Interner::new();
+        let (mut func, block, [_, _, past]) = indexed_past(&mut names, FRAME.add, 3);
+        let copy = func.new_vreg(GPR);
+        func.build(block, op(&mut names, "mov_rr_64")).def(copy, GPR).uses(past, GPR).finish();
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A constant whose scaled value does not fit in the field a displacement goes in.
+    #[test]
+    fn a_displacement_that_would_not_fit_leaves_the_add() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = indexed_past(&mut names, FRAME.add, 1 << 30);
+
+        assert_eq!(offsets_moved(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
     }
 }

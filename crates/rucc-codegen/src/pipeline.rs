@@ -475,6 +475,9 @@ pub fn compile_recording(
     // the frame and into the caller's argument area go through it like anything else, and the two
     // lists `finish` reads are rewritten as they do, so an address that ends up inside its reader
     // is still an address the frame layout knows to write an offset into.
+    // A constant added to an index goes into the displacement first, so an address that took one
+    // is handed on to its readers with it already inside.
+    fold::offsets(&mut func, machine.insts, machine.shapes, names);
     let mut pending = fold::Pending {
         addresses: &mut stack.addresses,
         arguments: &mut stack.arguments,
