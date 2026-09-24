@@ -516,9 +516,9 @@ pub(crate) const PROJECTS: &[Project] = &[
         // takes on a machine with no threads. What is left is the codec, which is what this row is
         // for.
         defines: &[],
-        // Seven, and two stories. The first two are the init plane over a lane libwebp leaves alone
-        // on purpose and then loads anyway, and the other five are the type plane over a run of
-        // pixels the lossless decoder fills eight bytes at a time and reads back four at a time.
+        // Thirteen, and two stories. The first eight are the init plane over a lane libwebp leaves
+        // alone on purpose and then loads anyway, and the other five are the type plane over a run
+        // of pixels the lossless decoder fills eight bytes at a time and reads back four at a time.
         known: &[
             Known {
                 judgement: 1,
@@ -533,14 +533,52 @@ pub(crate) const PROJECTS: &[Project] = &[
                       says. libwebp knows about it: the loop has a WEBP_MSAN arm that zeroes the \
                       lane for this reason and names https://crbug.com/webp/573 beside it. Same \
                       class as zlib's slide_hash above, and the second project to produce it. This \
-                      is the low half of the sixteen bytes.",
+                      is the low half of the first of the four sixteen byte loads \
+                      RGBA32PackedToPlanar_16b_SSE2 makes, the one at rgbx + 0.",
             },
             Known {
                 judgement: 1,
                 bytes: 8,
-                why: "The high half of the same load. Two reports rather than eight because the \
-                      four loads that helper makes all go through one out of line _mm_loadu_si128, \
-                      so every load of every row of the image arrives at the same two check sites.",
+                why: "The high half of the load at rgbx + 0. There was a time when all four loads \
+                      went through one out of line _mm_loadu_si128 and so arrived at the same two \
+                      check sites, and since tamnd/rucc#1842 inlines always_inline at every level \
+                      each LOAD_16 is a site of its own with a low and a high half.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The low half of the load at rgbx + 8 in RGBA32PackedToPlanar_16b_SSE2, \
+                      which reads the same unwritten alpha lane of the averaged row.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The high half of the load at rgbx + 8 in RGBA32PackedToPlanar_16b_SSE2, \
+                      which reads the same unwritten alpha lane of the averaged row.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The low half of the load at rgbx + 16 in RGBA32PackedToPlanar_16b_SSE2, \
+                      which reads the same unwritten alpha lane of the averaged row.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The high half of the load at rgbx + 16 in RGBA32PackedToPlanar_16b_SSE2, \
+                      which reads the same unwritten alpha lane of the averaged row.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The low half of the load at rgbx + 24 in RGBA32PackedToPlanar_16b_SSE2, \
+                      which reads the same unwritten alpha lane of the averaged row.",
+            },
+            Known {
+                judgement: 1,
+                bytes: 8,
+                why: "The high half of the load at rgbx + 24 in RGBA32PackedToPlanar_16b_SSE2, \
+                      which reads the same unwritten alpha lane of the averaged row.",
             },
             Known {
                 judgement: 1,
