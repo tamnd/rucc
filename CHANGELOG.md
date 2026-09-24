@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A `_Complex long double` can be returned from a function and taken back from a call on x86-64 SysV. It comes back on the x87 stack with the real half in `st(0)` and the imaginary half in `st(1)`, which the back end used to refuse because only a lone `long double` was handled there.
 - AArch64 compares two floats. Each of the IR's fourteen predicates is an `fcmp` and a `cset` on the condition that means it, and ordered but not equal and unordered or equal add a `csinc`, as gcc writes them. Every float comparison in C used to fail to build for AArch64.
 - AArch64 has gcc's vector type names before any header is read, `__Float32x4_t` and the rest of the Advanced SIMD ones as GNU vectors and SVE's `__SVFloat32_t`, `__SVBool_t` and the rest as incomplete types a prototype can name. glibc's `<math.h>` typedefs them, so including it for aarch64-linux-gnu used to fail. They are names rather than keywords, so a declaration can hide one, and on other targets they mean nothing.
 - The assembler reads `cltq`, `cwtl`, `leave`, and `notrack` in front of an indirect `jmp` or `call`. In gcc's output for zlib, lua and the other projects we compare against gas, these were the words most often refused, and `notrack jmp` is how every `switch` table jump comes out of gcc with `-fcf-protection`, which Ubuntu turns on by default. The `0x3E` byte goes in front of any REX byte, so `notrack jmp *%r8` still jumps through `r8` (#1863).
