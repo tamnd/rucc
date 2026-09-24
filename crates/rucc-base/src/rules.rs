@@ -69,6 +69,10 @@
 //! that did not match, and the walk carries on looking rather than giving up. What that costs is
 //! the search from where the guard failed, which is the price of a guard being allowed to be
 //! about the values rather than only about the shape.
+//!
+//! Two rules can end at the same node when the earlier one has a guard, which is how one pattern
+//! gets a different answer for different constants. They are tried in the order the rule file
+//! writes them and the first whose guard holds fires.
 
 /// The bits of a term the automaton asks about.
 ///
@@ -121,8 +125,10 @@ pub struct Node {
     pub same: &'static [(usize, u32)],
     /// The branch that takes anything, and the name the first rule to reach it gave that hole.
     pub wildcard: Option<(&'static str, u32)>,
-    /// The rule that ends here, if one does.
-    pub accept: Option<u32>,
+    /// The rules that end here, in the order the rule file writes them. The first whose guard
+    /// holds is the one that fires, so every one of them but the last has a guard, which the rule
+    /// compiler checks.
+    pub accept: &'static [u32],
 }
 
 impl Node {
@@ -344,19 +350,21 @@ impl Table {
         None
     }
 
-    /// The rule that ends at this node, if one does and if its guard holds.
+    /// The first rule that ends at this node whose guard holds, if there is one.
     fn accept<S: Subject>(&self, subject: &S, at: usize, bindings: &[S::Node]) -> Option<usize> {
-        let rule = self.nodes[at].accept? as usize;
-        if let Some(guard) = self.rules[rule].guard {
-            // The values are collected here rather than as the bindings are made, because most
-            // rules have no guard and would pay for it every time.
-            let values: Vec<Option<i128>> =
-                bindings.iter().map(|&node| subject.int(node)).collect();
-            if !guard(&values) {
-                return None;
+        // The values are collected once and only when a guard asks, because most rules have no
+        // guard and would pay for it every time.
+        let mut values: Option<Vec<Option<i128>>> = None;
+        for &rule in self.nodes[at].accept {
+            let rule = rule as usize;
+            let Some(guard) = self.rules[rule].guard else { return Some(rule) };
+            let values = values
+                .get_or_insert_with(|| bindings.iter().map(|&node| subject.int(node)).collect());
+            if guard(values) {
+                return Some(rule);
             }
         }
-        Some(rule)
+        None
     }
 }
 
@@ -423,13 +431,14 @@ mod tests {
 
     /// A table written by hand, in the shape `rucc-rules` emits.
     ///
-    /// Two rules over `(add x k)`: the first wants the constant to be zero and the second takes
-    /// any constant that is not negative. That is enough to exercise everything the walk does,
-    /// which is a concrete test before a wildcard, a guard that can refuse, and the search
-    /// carrying on after it does. A third rule, `(and x x)`, is the one that writes a name
-    /// twice.
+    /// Three rules over `(add x k)`: the first wants the constant to be zero, the second takes
+    /// any constant that is not negative, and the third, on the same node as the second, takes
+    /// one below minus ten. That is enough to exercise everything the walk does, which is a
+    /// concrete test before a wildcard, a guard that can refuse, the next rule on the node being
+    /// asked when it does, and the search carrying on after all of them have. A fourth rule,
+    /// `(and x x)`, is the one that writes a name twice.
     /// A node with nothing on it, so that the ones below say only what they are about.
-    const NOTHING: Node = Node { heads: &[], ints: &[], same: &[], wildcard: None, accept: None };
+    const NOTHING: Node = Node { heads: &[], ints: &[], same: &[], wildcard: None, accept: &[] };
 
     static NODES: &[Node] = &[
         // 0, the root.
@@ -439,20 +448,25 @@ mod tests {
         // 2, the second operand.
         Node { ints: &[(0, 3)], wildcard: Some(("k", 4)), ..NOTHING },
         // 3, an addition of zero.
-        Node { accept: Some(0), ..NOTHING },
-        // 4, an addition of anything, if the guard holds.
-        Node { accept: Some(1), ..NOTHING },
+        Node { accept: &[0], ..NOTHING },
+        // 4, an addition of anything, if one of the two guards holds.
+        Node { accept: &[1, 3], ..NOTHING },
         // 5, the first operand of the conjunction, which is the one that binds.
         Node { wildcard: Some(("x", 6)), ..NOTHING },
         // 6, the second operand, which has to be what the first one bound.
         Node { same: &[(0, 7)], ..NOTHING },
         // 7, a conjunction of one thing with itself.
-        Node { accept: Some(2), ..NOTHING },
+        Node { accept: &[2], ..NOTHING },
     ];
 
     fn not_negative(bound: &[Option<i128>]) -> bool {
         let Some(Some(k)) = bound.get(1).copied() else { return false };
         k >= 0
+    }
+
+    fn far_below(bound: &[Option<i128>]) -> bool {
+        let Some(Some(k)) = bound.get(1).copied() else { return false };
+        k < -10
     }
 
     static RULES: &[Rule] = &[
@@ -477,6 +491,16 @@ mod tests {
             replacement: &[Piece::Var { name: "x", index: 0 }],
             guard: None,
             line: 3,
+        },
+        Rule {
+            pattern: "(add x k)",
+            replacement: &[
+                Piece::App { head: "add_far", arity: 2 },
+                Piece::Var { name: "x", index: 0 },
+                Piece::Var { name: "k", index: 1 },
+            ],
+            guard: Some(far_below),
+            line: 4,
         },
     ];
 
@@ -523,6 +547,20 @@ mod tests {
         let negative = terms.constant(-1);
         let term = add(&mut terms, negative);
         assert_eq!(TABLE.find(&terms, term), None);
+    }
+
+    /// Two rules with one pattern, and the second is asked when the first one's guard refuses.
+    #[test]
+    fn a_rule_that_shares_its_pattern_fires_when_the_one_before_it_refuses() {
+        let mut terms = Terms::default();
+        let far = terms.constant(-20);
+        let term = add(&mut terms, far);
+        let found = TABLE.find(&terms, term).expect("a rule fires");
+        assert_eq!(TABLE.rule(&found).head(), Some("add_far"));
+        let near = terms.constant(20);
+        let term = add(&mut terms, near);
+        let found = TABLE.find(&terms, term).expect("a rule fires");
+        assert_eq!(TABLE.rule(&found).head(), Some("add_immediate"));
     }
 
     /// The same guard against an operand that is not a constant at all. A guard is a claim about
@@ -654,10 +692,10 @@ mod tests {
                 Node { heads: &[("f", 2, 1)], ..NOTHING },
                 Node { wildcard: Some(("x", 2)), ..NOTHING },
                 *second,
-                Node { accept: Some(0), ..NOTHING },
-                Node { accept: Some(1), ..NOTHING },
-                Node { accept: Some(2), ..NOTHING },
-                Node { accept: Some(3), ..NOTHING },
+                Node { accept: &[0], ..NOTHING },
+                Node { accept: &[1], ..NOTHING },
+                Node { accept: &[2], ..NOTHING },
+                Node { accept: &[3], ..NOTHING },
             ]));
             Table { source: "rules/test.rules", nodes, rules: FOUR }
         }
@@ -668,7 +706,7 @@ mod tests {
             ints: &[(7, 4)],
             same: &[(0, 5)],
             wildcard: Some(("y", 6)),
-            accept: None,
+            accept: &[],
         };
         assert_eq!(table(&MIXED).find(&Both, 0).map(|found| found.rule), Some(0));
 

@@ -177,12 +177,8 @@ fn nodes(out: &mut String, matcher: &Matcher) {
             }
             None => out.push_str("        wildcard: None,\n"),
         }
-        match node.accept {
-            Some(rule) => {
-                let _ = writeln!(out, "        accept: Some({rule}),");
-            }
-            None => out.push_str("        accept: None,\n"),
-        }
+        let accept: Vec<String> = node.accept.iter().map(ToString::to_string).collect();
+        let _ = writeln!(out, "        accept: &[{}],", accept.join(", "));
         out.push_str("    },\n");
     }
     out.push_str("];\n");
@@ -673,7 +669,7 @@ mod tests {
         assert!(out.contains("pub const SOURCE: &str = \"rules/test.rules\";"), "{out}");
         assert!(out.contains("(\"add.i64\", 2, 1),"), "{out}");
         assert!(out.contains("wildcard: Some((\"x\", 3)),"), "{out}");
-        assert!(out.contains("accept: Some(0),"), "{out}");
+        assert!(out.contains("accept: &[0],"), "{out}");
         assert!(out.contains("Piece::App { head: \"x64.add_rr_64\", arity: 2 }"), "{out}");
         assert!(out.contains("Piece::Var { name: \"x\", index: 0 }"), "{out}");
         assert!(out.contains("Piece::Var { name: \"y\", index: 1 }"), "{out}");

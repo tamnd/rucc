@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Two rules can now share a pattern when the earlier one has a guard, and the first whose guard holds fires. AArch64 uses it to build a constant too wide for one `mov` as a `mov` of its low sixteen bits and a `movk` for each piece above, so `0x12345678` is two instructions, a 64-bit constant under `2^32` is two, and any other is four. A rule after an unguarded one with the same pattern is still refused as one that can never fire.
+
 ### Changed
 
 - An `asm` template kept as text now takes operands in registers. `%0` of an `"=r"` output or an `"r"` input is spelled after allocation as the register the operand was given, at the width of its type or the one `%b0`, `%w0`, `%k0`, `%q0` or `%h0` asks for, so `mov %1,%0; jmp 1f; 1:` builds where it was refused. Tied operands, `&` and pinned letters work the way they do for gcc, and a constant under a constraint that only allows a register is loaded into one. The same programs give gcc's answers at every level (#1781).

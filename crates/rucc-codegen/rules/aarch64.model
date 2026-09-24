@@ -12,6 +12,14 @@
 (semantics (a64.mov_ri_32 c) c)
 (semantics (a64.mov_ri_64 c) c)
 
+;; Writing sixteen bits of a constant into a register and leaving the rest of it alone, which is how
+;; a constant too wide for one `mov` is built a piece at a time. The number is the piece, and the
+;; head says which sixteen bits it goes in.
+(semantics (a64.movk_ri_16_32 d c) (concat (extract 15 0 c) (extract 15 0 d)))
+(semantics (a64.movk_ri_16_64 d c) (concat (extract 63 32 d) (concat (extract 15 0 c) (extract 15 0 d))))
+(semantics (a64.movk_ri_32_64 d c) (concat (extract 63 48 d) (concat (extract 15 0 c) (extract 31 0 d))))
+(semantics (a64.movk_ri_48_64 d c) (concat (extract 15 0 c) (extract 47 0 d)))
+
 ;; Arithmetic. The same operation at the two sizes the machine has, and with a constant in place of
 ;; the second register where the instruction takes one.
 (semantics (a64.add_rr_32 l r) (bvadd l r))

@@ -222,6 +222,21 @@ fn a_rule_that_can_never_fire_is_refused_rather_than_dropped() {
 }
 
 #[test]
+fn a_rule_after_a_guarded_one_with_the_same_pattern_is_kept() {
+    let text = "\
+(rule (lower (iconst.i64 k)) (if (< k 65536)) (x64.small k) (spec (= k (result))))
+(rule (lower (iconst.i64 k)) (x64.large k) (spec (= k (result))))";
+    let matcher = Matcher::build("t.rules", &rules(text)).expect("the first rule has a guard");
+    // Guards are not evaluated here, so what this says is that both rules end at one node.
+    let seven = term("(iconst.i64 7)");
+    let found = matcher.find(&seven).expect("a rule");
+    assert_eq!(found.rule, 0);
+    let shown = matcher.to_string();
+    let lines: Vec<&str> = shown.lines().map(str::trim).collect();
+    assert!(lines.windows(2).any(|pair| pair == ["=> rule 0", "=> rule 1"]), "{shown}");
+}
+
+#[test]
 fn an_empty_rule_set_matches_nothing_and_says_so() {
     let matcher = Matcher::build("t.rules", &[]).expect("nothing to refuse");
     assert!(matcher.is_empty());
