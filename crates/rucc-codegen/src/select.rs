@@ -16,7 +16,7 @@ pub mod aarch64;
 pub mod x86_64;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};
-use rucc_target::{Address, BranchInsts, FrameInsts, MachineInsts, OperandDesc, RegClass};
+use rucc_target::{Address, BranchInsts, FrameInsts, MachineInsts, OperandDesc, PhysReg, RegClass};
 
 /// What `crate::lower` has to know about the machine it selects instructions for.
 ///
@@ -52,6 +52,9 @@ pub struct Selector {
     pub trap: &'static str,
     /// The instructions the calling convention is written with.
     pub abi: &'static crate::abi::Insts,
+    /// The address registers held back from the allocator for the rewriter's reloads, which are
+    /// the ones the walk must not keep anything in across more than one instruction.
+    pub scratch: &'static [PhysReg],
 }
 
 impl Selector {

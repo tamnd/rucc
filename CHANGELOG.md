@@ -38,6 +38,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The argument, return and call instructions in `abi.rs` come from the machine being compiled for rather than being x86-64 names, so a function of integer arithmetic now lowers to AArch64 machine IR from end to end of selection. Nothing past selection runs for AArch64 yet.
 - `rucc-asm` writes AArch64 machine functions as assembly text. Each instruction is spelled from the same table and the same operand values the AArch64 encoder takes, and everything around the instructions is the same walk x86-64 uses, except that code is padded with the assembler's own `nop` rather than `0x90`. Nothing hands it an AArch64 function yet, since the pipeline still stops at selection for that machine.
+- The registers `__builtin_longjmp` keeps its values in while it restores a frame are chosen against the scratch registers of the machine being compiled for, where they were always checked against x86-64's `r10` and `r11`.
 
 ### Fixed
 
