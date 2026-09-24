@@ -98,14 +98,35 @@
 //! same at `-Os` and not at `-O2`, where the widening is an instruction on the path and the bytes
 //! it saves are data rather than code. Three `int` answers under ten are twelve bytes at `-O2` and
 //! three at `-Os`, in gcc and here.
+//!
+//! # A table of where the answers are
+//!
+//! An arm may give an address rather than a number, which is `case 0: return "zero";`. gcc 16
+//! makes those a `CSWTCH` array of pointers only under `-fno-pic`. In a position independent
+//! executable it keeps the compares, because every cell would be an address the loader has to
+//! write at startup, and the array would have to be in `.data.rel.ro` to be written at all. rucc
+//! only builds position independent code, so it does what clang does instead: a cell is four
+//! bytes holding how far the answer is from the table, which the linker works out once and the
+//! loader never touches. The answer is the table's address plus the cell, so the array stays in
+//! `.rodata` and what replaces the chain is one load and one addition.
+//!
+//! The distance has to be a number once the program is linked, so every answer has to be read
+//! only data this file defines and no other object can replace, which is what
+//! `crate::image::Images` holds, or a constant number of bytes into it, which is `&table[2]` and
+//! is the same distance with the bytes added. And it needs a four byte relocation measured from where it is
+//! written, which x86-64 ELF has and `crate::ReadOnly` says so. Anywhere else the `switch` stays
+//! a `switch`.
+//!
+//! The sum is made as an integer and turned back into a pointer, rather than added to the table's
+//! address, because the answer is not in the table and `crate::alias::origin` would say it was.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
 use rucc_ir::{
-    Block, BlockCall, Builder, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode,
-    Restrict, Type, Value,
+    Block, BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
+    Opcode, Restrict, Type, Value,
 };
 
 use rucc_cost::Goal;
@@ -119,6 +140,10 @@ const CONVERTED: &str = "switch replaced by a range check and the arithmetic its
 
 /// What is reported when a `switch` becomes a load from a table of what its arms gave.
 const TABLED: &str = "switch replaced by a range check and a load from a table of its answers";
+
+/// What is reported when a `switch` becomes a load from a table of how far its answers are.
+const PLACED: &str =
+    "switch replaced by a range check and a load from a table of how far away its answers are";
 
 /// What is reported when the pass ran out of fuel with a `switch` it was about to convert.
 const NO_FUEL: &str = "switch left alone, the pass ran out of fuel";
@@ -154,6 +179,10 @@ const LABEL_TOO_WIDE: &str = "switch left alone, its label is wider than a word"
 /// What is reported for a `switch` whose answers are not something a table cell holds.
 const CELL_IS_ODD: &str =
     "switch left alone, its answers are not a whole number of bytes of integer";
+
+/// What is reported for a `switch` whose answers are addresses a table cannot say where are.
+const PLACE_IS_ODD: &str =
+    "switch left alone, its answers are not all addresses of read only data this file defines";
 
 /// The fewest labels worth converting, per the module documentation.
 const LABELS: usize = 3;
@@ -215,10 +244,11 @@ fn convert(
         .collect();
 
     let index_bits = data.as_ref().map(|data| data.pointer_bits());
+    let near = near(func, an, data.as_deref());
     let small = an.machine().goal() == Goal::Size;
     let mut plans = Vec::new();
     for inst in found {
-        match plan(func, cfg, inst, index_bits, small) {
+        match plan(func, cfg, inst, index_bits, small, &near) {
             Ok(plan) => plans.push(plan),
             Err(why) => stats.missed(why),
         }
@@ -234,9 +264,14 @@ fn convert(
             (How::Table { cell, cells, .. }, Some(data)) => {
                 Some(data.table(cell.ty, cells.clone()))
             }
+            (How::Distances { to, .. }, Some(data)) => Some(data.distances(to)),
             _ => None,
         };
-        stats.optimized(if table.is_some() { TABLED } else { CONVERTED });
+        stats.optimized(match (&plan.how, table) {
+            (_, None) => CONVERTED,
+            (How::Distances { .. }, Some(_)) => PLACED,
+            (_, Some(_)) => TABLED,
+        });
         apply(func, &plan, table);
         changed = true;
     }
@@ -244,6 +279,26 @@ fn convert(
         an.clear();
     }
     stats
+}
+
+/// The names an answer may be the address of, when a table may hold how far away they are.
+///
+/// Empty when it may not, which is on a target with no four byte distance or for a caller with
+/// nowhere to put a table. Only the names this function takes the address of are asked about,
+/// since no other name can be an answer.
+fn near(func: &Func, an: &Analyses, data: Option<&ReadOnly<'_>>) -> HashSet<Symbol> {
+    if !data.is_some_and(ReadOnly::measures) {
+        return HashSet::new();
+    }
+    let images = an.images();
+    func.blocks()
+        .flat_map(|block| func.insts(block))
+        .filter_map(|inst| match func[inst] {
+            InstData { opcode: Opcode::GlobalAddr, extra: Extra::Symbol(name), .. } => Some(name),
+            _ => None,
+        })
+        .filter(|&name| images.holds(name))
+        .collect()
 }
 
 /// How the arms of one `switch` hand their answer on.
@@ -303,6 +358,16 @@ enum How {
         /// The width of an index into the table, which is a word on the target.
         index_bits: u32,
     },
+    /// As the table's address plus cell `label - low`, which is how far the answer is from it.
+    Distances {
+        /// The lowest label, which is cell zero.
+        low: i128,
+        /// What each cell is the distance to, as a name and how many bytes into it, with `None` in
+        /// a hole nothing reads.
+        to: Vec<Option<(Symbol, i128)>>,
+        /// The width of an index into the table, which is a word on the target.
+        index_bits: u32,
+    },
 }
 
 /// How a cell of a table is held, and how it is made an answer again.
@@ -317,13 +382,15 @@ struct Cell {
 /// What one `switch` becomes, or why it stays as it is.
 ///
 /// `index_bits` is the width of an address when a table may be made and `None` when it may not,
-/// and `small` is whether the goal is size, which is what narrows a cell.
+/// `small` is whether the goal is size, which is what narrows a cell, and `near` is the names a
+/// table may hold the distance to.
 fn plan(
     func: &Func,
     cfg: &Cfg,
     inst: Inst,
     index_bits: Option<u32>,
     small: bool,
+    near: &HashSet<Symbol>,
 ) -> Result<Plan, &'static str> {
     let Extra::Switch(info) = func[inst].extra else { return Err(ARMS_DIFFER) };
     let info = func[info];
@@ -395,28 +462,39 @@ fn plan(
     }
     let (Some(hands), Some(args)) = (hands, shared) else { return Err(ARMS_DIFFER) };
     let answer = answer.ok_or(NOT_AFFINE)?;
+    let kind = func[args[answer]].ty;
     // Read once the position is known and not while it was being found. Until the second arm
     // disagrees with the first nobody knows which position the answer is in, and reading the first
     // arm's answer from a guess of the first position would take whatever was there, which is a
     // constant every arm passed if the arms pass one, and a line fitted through that is wrong at
     // the first label.
-    let mut answers = Vec::with_capacity(handed.len());
-    for args in &handed {
-        let Some(number) = constant(func, args[answer]) else { return Err(NOT_AFFINE) };
-        answers.push(number);
-    }
-    let kind = func[args[answer]].ty;
-
-    let line = if consecutive && kind == ty { line(&labels, &answers, ty) } else { None };
-    let (how, holes) = match (line, index_bits) {
-        (Some((scale, offset)), _) => (How::Line { scale, offset }, Vec::new()),
-        (None, Some(index_bits)) => {
-            let fill = fallback(func, default, hands, &args, answer);
-            let shape = Shape { ty, kind, index_bits, small };
-            table(&labels, &answers, shape, fill)?
+    let (how, holes) = if kind.is_ptr() {
+        let index_bits = index_bits.ok_or(PLACE_IS_ODD)?;
+        let mut places = Vec::with_capacity(handed.len());
+        for args in &handed {
+            places.push(place(func, args[answer], near).ok_or(PLACE_IS_ODD)?);
         }
-        (None, None) if kind != ty => return Err(WIDTHS_DIFFER),
-        (None, None) => return Err(NOT_AFFINE),
+        let fill = fallback(func, default, hands, &args, answer)
+            .and_then(|given| place(func, given, near));
+        distances(&labels, &places, ty, index_bits, fill)?
+    } else {
+        let mut answers = Vec::with_capacity(handed.len());
+        for args in &handed {
+            let Some(number) = constant(func, args[answer]) else { return Err(NOT_AFFINE) };
+            answers.push(number);
+        }
+        let line = if consecutive && kind == ty { line(&labels, &answers, ty) } else { None };
+        match (line, index_bits) {
+            (Some((scale, offset)), _) => (How::Line { scale, offset }, Vec::new()),
+            (None, Some(index_bits)) => {
+                let fill = fallback(func, default, hands, &args, answer)
+                    .and_then(|given| constant(func, given));
+                let shape = Shape { ty, kind, index_bits, small };
+                table(&labels, &answers, shape, fill)?
+            }
+            (None, None) if kind != ty => return Err(WIDTHS_DIFFER),
+            (None, None) => return Err(NOT_AFFINE),
+        }
     };
     Ok(Plan {
         inst,
@@ -439,13 +517,16 @@ fn plan(
 /// `default: y = 0; break;` once the empty block is gone. Either way every position but the answer
 /// has to be what the arms pass, since a hole given a case is about to pass that instead. The
 /// default block is only read here and never taken away, so it may be shared.
+///
+/// What comes back is the value in the answer's place, and whether it is a number or an address a
+/// table can hold is for the caller to ask.
 fn fallback(
     func: &Func,
     default: BlockCall,
     hands: Hands,
     args: &[Value],
     answer: usize,
-) -> Option<i128> {
+) -> Option<Value> {
     let theirs = if default.args.is_empty() {
         let (way, theirs) = tail(func, default.block).ok()?;
         if way != hands {
@@ -465,7 +546,7 @@ fn fallback(
     if !agrees {
         return None;
     }
-    constant(func, theirs[answer])
+    Some(theirs[answer])
 }
 
 /// What a table is made for: the label's width, the answer's, an index's, and whether the goal is
@@ -502,6 +583,41 @@ fn table(
     if !kind.is_int() || !matches!(kind.bits(), 8 | 16 | 32 | 64) {
         return Err(CELL_IS_ODD);
     }
+    let (low, cells) = spread(labels, answers)?;
+    let holes = if fill.is_some() { holes(low, &cells) } else { Vec::new() };
+    let cells: Vec<i128> = cells.into_iter().map(|cell| cell.or(fill).unwrap_or(0)).collect();
+    let cell = if small { narrowest(&cells, kind) } else { Cell { ty: kind, signed: false } };
+    Ok((How::Table { low, ty: kind, cell, cells, index_bits }, holes))
+}
+
+/// The table of distances the answers make when one is worth making, and the holes that get a case
+/// of their own.
+///
+/// The same as [`table`] but for what a cell is, which is four bytes whatever the label is. It is
+/// how far the answer is from the table, and nothing in one program is four gigabytes from
+/// anything else in it. A hole with nothing to fill it is `None`, a cell nothing reads.
+fn distances(
+    labels: &[i128],
+    places: &[(Symbol, i128)],
+    ty: Type,
+    index_bits: u32,
+    fill: Option<(Symbol, i128)>,
+) -> Result<(How, Vec<i128>), &'static str> {
+    if ty.bits() > 64 {
+        return Err(LABEL_TOO_WIDE);
+    }
+    let (low, to) = spread(labels, places)?;
+    let holes = if fill.is_some() { holes(low, &to) } else { Vec::new() };
+    let to = to.into_iter().map(|cell| cell.or(fill)).collect();
+    Ok((How::Distances { low, to, index_bits }, holes))
+}
+
+/// The answers laid out by label from the lowest one, with `None` in the holes, and the lowest
+/// label.
+///
+/// Refused when the labels are too far apart for the table to be worth its size, which is the
+/// growth limit in the module documentation.
+fn spread<T: Copy>(labels: &[i128], answers: &[T]) -> Result<(i128, Vec<Option<T>>), &'static str> {
     let (Some(&low), Some(&high)) = (labels.iter().min(), labels.iter().max()) else {
         return Err(TOO_FEW);
     };
@@ -514,13 +630,12 @@ fn table(
         let at = usize::try_from(label - low).map_err(|_| TOO_SPARSE)?;
         cells[at] = Some(answer);
     }
-    let holes: Vec<i128> = match fill {
-        Some(_) => (low..=high).filter(|&label| cells[(label - low) as usize].is_none()).collect(),
-        None => Vec::new(),
-    };
-    let cells: Vec<i128> = cells.into_iter().map(|cell| cell.or(fill).unwrap_or(0)).collect();
-    let cell = if small { narrowest(&cells, kind) } else { Cell { ty: kind, signed: false } };
-    Ok((How::Table { low, ty: kind, cell, cells, index_bits }, holes))
+    Ok((low, cells))
+}
+
+/// The labels between the lowest and the highest that are not cases, from a spread of the answers.
+fn holes<T>(low: i128, cells: &[Option<T>]) -> Vec<i128> {
+    (low..).zip(cells).filter(|(_, cell)| cell.is_none()).map(|(label, _)| label).collect()
 }
 
 /// The narrowest cell every answer fits in, read back to the answer's width.
@@ -547,13 +662,16 @@ fn narrowest(answers: &[i128], kind: Type) -> Cell {
 
 /// What a block hands on, when handing something on is the whole of what it does.
 ///
-/// Every instruction in it but the last has to be a constant, because the last one is about to be
-/// written somewhere else and anything the block worked out for it would be left behind. A constant
-/// is the exception because a constant is rewritten rather than moved.
+/// Every instruction in it but the last has to be a constant or an address, because the last one
+/// is about to be written somewhere else and anything the block worked out for it would be left
+/// behind. A constant is the exception because a constant is rewritten rather than moved, and an
+/// address is too, since what a table holds is how far away it is. Which addresses a table can
+/// hold is for [`place`] to say, and an arm that hands on one it cannot is refused there.
 fn tail(func: &Func, block: Block) -> Result<(Hands, Vec<Value>), &'static str> {
     let Some(last) = func.terminator(block) else { return Err(ARM_DOES_WORK) };
     for inst in func.insts(block) {
-        if inst != last && func[inst].opcode != Opcode::IConst {
+        let opcode = func[inst].opcode;
+        if inst != last && !matches!(opcode, Opcode::IConst | Opcode::GlobalAddr | Opcode::PtrAdd) {
             return Err(ARM_DOES_WORK);
         }
     }
@@ -587,7 +705,7 @@ fn arithmetic(builder: &mut Builder<'_>, plan: &Plan, scale: i128, offset: i128)
     }
 }
 
-/// The answer as cell `label - low` of the table called `name`.
+/// The address of the table called `name`, and cell `label - low` of it.
 ///
 /// The subtraction is at the label's width and wraps, and then the difference is made a word. Only
 /// a label that is a case gets here, so the difference is below the table's length and the
@@ -599,7 +717,7 @@ fn look_up(
     low: i128,
     ty: Type,
     index_bits: u32,
-) -> Value {
+) -> (Value, Value) {
     let from = if low == 0 {
         plan.value
     } else {
@@ -632,7 +750,41 @@ fn look_up(
         owns: 0,
         restrict: Restrict::NONE,
     };
-    builder.load(ty, cell, info, Flags::NONE)
+    (base, builder.load(ty, cell, info, Flags::NONE))
+}
+
+/// The answer as the address of the table called `name` plus cell `label - low` of it.
+///
+/// The cell is four bytes with a sign, since an answer can be on either side of the table. The sum
+/// is worked out on integers and made a pointer at the end, so that where the answer came from is
+/// somewhere nobody can follow back, which is true, and not the table, which is not.
+fn far(builder: &mut Builder<'_>, plan: &Plan, name: Symbol, low: i128, index_bits: u32) -> Value {
+    let (base, read) = look_up(builder, plan, name, low, Type::int(32), index_bits);
+    let word = Type::int(index_bits);
+    let away = if index_bits > 32 { builder.unary(Opcode::SExt, read, word) } else { read };
+    let start = builder.unary(Opcode::PtrToInt, base, word);
+    let at = builder.binary(Opcode::Add, start, away, Flags::NONE);
+    builder.unary(Opcode::IntToPtr, at, Type::PTR)
+}
+
+/// The name an answer is the address of and how many bytes into it, when it is one a table may
+/// hold the distance to.
+///
+/// The bytes are held to what four bytes can say, since they are added to the distance in the
+/// cell and a cell is four bytes.
+fn place(func: &Func, value: Value, near: &HashSet<Symbol>) -> Option<(Symbol, i128)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = func[inst];
+    match (data.opcode, data.extra) {
+        (Opcode::GlobalAddr, Extra::Symbol(name)) if near.contains(&name) => Some((name, 0)),
+        (Opcode::PtrAdd, _) => {
+            let args = &func[data.args];
+            let (name, bytes) = place(func, args[0], near)?;
+            let bytes = bytes.checked_add(constant(func, args[1])?)?;
+            i32::try_from(bytes).is_ok().then_some((name, bytes))
+        }
+        _ => None,
+    }
 }
 
 /// The value of an integer constant, read with its own sign.
@@ -679,14 +831,19 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
     let answer = match (&plan.how, table) {
         (&How::Line { scale, offset }, _) => arithmetic(&mut builder, plan, scale, offset),
         (&How::Table { low, ty, cell, index_bits, .. }, Some(name)) => {
-            let read = look_up(&mut builder, plan, name, low, cell.ty, index_bits);
+            let (_, read) = look_up(&mut builder, plan, name, low, cell.ty, index_bits);
             match (cell.ty == ty, cell.signed) {
                 (true, _) => read,
                 (false, true) => builder.unary(Opcode::SExt, read, ty),
                 (false, false) => builder.unary(Opcode::ZExt, read, ty),
             }
         }
-        (How::Table { .. }, None) => unreachable!("a table was planned with nowhere to put it"),
+        (&How::Distances { low, index_bits, .. }, Some(name)) => {
+            far(&mut builder, plan, name, low, index_bits)
+        }
+        (How::Table { .. } | How::Distances { .. }, None) => {
+            unreachable!("a table was planned with nowhere to put it")
+        }
     };
     let mut args = plan.args.clone();
     args[plan.answer] = answer;
@@ -729,11 +886,18 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use rucc_base::Interner;
-    use rucc_cost::Goal;
-    use rucc_ir::{Block, Builder, Func, Opcode, Signature, Type, Value};
+    use std::sync::Arc;
 
-    use super::SwitchConv;
+    use rucc_base::{Interner, Symbol};
+    use rucc_cost::Goal;
+    use rucc_ir::{
+        Block, Builder, Datum, Extra, Flags, Func, Global, InstData, Linkage, Module, Opcode, Pic,
+        Signature, Type, Value,
+    };
+    use rucc_target::{TargetInfo, Triple};
+
+    use super::{PLACE_IS_ODD, SwitchConv};
+    use crate::image::Images;
     use crate::stats::Kind;
     use crate::{Fuel, Pass, ReadOnly, Stats, Table};
 
@@ -851,16 +1015,19 @@ mod tests {
                     let from = func[func[data.args][0]].ty;
                     super::wrap(args[0], from).rem_euclid(1 << from.bits())
                 }
-                Opcode::SExt => args[0],
+                Opcode::SExt | Opcode::PtrToInt | Opcode::IntToPtr => args[0],
                 Opcode::GlobalAddr => 0,
                 Opcode::PtrAdd => args[0] + args[1],
+                // A cell that is how far a name is from the table is where the name is, since the
+                // table is at zero.
                 Opcode::Load => {
                     assert_eq!(tables.len(), 1, "a load with no single table to read");
                     let table = &tables[0];
                     let bytes = i128::from(table.ty.bits() / 8);
                     assert_eq!(args[0] % bytes, 0, "a load between two cells");
                     let at = usize::try_from(args[0] / bytes).expect("a load before the table");
-                    *table.cells.get(at).expect("a load after the table")
+                    let cell = *table.cells.get(at).expect("a load after the table");
+                    cell + table.to.get(at).copied().flatten().map_or(0, spot)
                 }
                 other => panic!("this pass does not write {other:?}"),
             };
@@ -869,6 +1036,11 @@ mod tests {
             values.insert(result, if ty.is_int() { super::wrap(it, ty) } else { it });
         }
         panic!("a block with no terminator");
+    }
+
+    /// Where the tests say a name is, which is somewhere a distance from a table at zero shows.
+    fn spot(name: Symbol) -> i128 {
+        1000 * (i128::from(name.raw()) + 1)
     }
 
     /// Whether the pass says it changed the function.
@@ -1080,7 +1252,7 @@ mod tests {
             let mut build = Builder::new(&mut func, arm);
             let it = build.iconst(i32(), index as i128 + 1);
             // An addition the arm did, which is work the answer would have been left without.
-            let sum = build.binary(Opcode::Add, it, value, rucc_ir::Flags::NONE);
+            let sum = build.binary(Opcode::Add, it, value, Flags::NONE);
             build.ret(&[sum]);
         }
         let cases: Vec<(i128, Block)> = (0..3).zip(arms.iter().copied()).collect();
@@ -1325,5 +1497,147 @@ mod tests {
         let mut func = returning(i32(), &[0, 1, 2, 3], &[5, -9, 2, 7]);
         let (_, tables) = tabled_for(&mut func, Goal::Speed);
         assert_eq!(tables[0].ty, i32());
+    }
+
+    /// A function whose arms return addresses, the module that defines what they are the
+    /// addresses of, and the names of those, the default's last.
+    struct Pointing {
+        names: Interner,
+        module: Module,
+        func: Func,
+        places: Vec<Symbol>,
+    }
+
+    /// A function that switches on its parameter and returns the address of a name per label,
+    /// with the module that defines the names.
+    ///
+    /// The names are `s0` and on, one per label, and the default returns the address of one more.
+    /// Each is read only and `static` unless `written` names it, and a name that is written to
+    /// is not somewhere a table may hold the distance to. The arm for the `k`th label returns an
+    /// address `k * into` bytes into its name, which is `&s[k]` for an array of `into` bytes.
+    fn pointing(labels: &[i128], written: Option<usize>, into: i128) -> Pointing {
+        let mut names = Interner::new();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        let places: Vec<Symbol> =
+            (0..=labels.len()).map(|k| names.intern(&format!("s{k}"))).collect();
+        for (k, &name) in places.iter().enumerate() {
+            let mut global = Global::new(name, 4, 1);
+            global.linkage = Linkage::Internal;
+            global.constant = written != Some(k);
+            global.init = Some(module.push_data(&[Datum::Zero(4)]));
+            module.add_global(global);
+        }
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let head = func.create_block();
+        let value = func.append_param(head, i32());
+        let blocks: Vec<Block> = places.iter().map(|_| func.create_block()).collect();
+        for ((k, &block), &name) in blocks.iter().enumerate().zip(&places) {
+            let mut build = Builder::new(&mut func, block);
+            let data = InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) };
+            let mut it = build.value(data, Type::PTR);
+            if into != 0 && k < labels.len() {
+                let bytes = build.iconst(Type::int(64), into * k as i128);
+                it = build.binary(Opcode::PtrAdd, it, bytes, Flags::NONE);
+            }
+            build.ret(&[it]);
+        }
+        let (&default, arms) = blocks.split_last().expect("a default");
+        let cases: Vec<(i128, Block)> = labels.iter().copied().zip(arms.iter().copied()).collect();
+        Builder::new(&mut func, head).switch(value, default, &cases);
+        Pointing { names, module, func, places }
+    }
+
+    /// Runs the pass the way the pipeline does on x86-64 ELF when `measures` is true, and on a
+    /// target with no four byte distance when it is not.
+    fn placed(pointing: &mut Pointing, measures: bool) -> (Stats, Vec<Table>) {
+        let taken = HashSet::new();
+        let mut data = ReadOnly::new(&mut pointing.names, &taken, 64, 0).measuring(measures);
+        let images = Arc::new(Images::of(&pointing.module, Pic::Executable));
+        let mut an = crate::Analyses::new(crate::Machine::with(None, Goal::Speed)).reading(images);
+        let stats =
+            SwitchConv.run_emitting(&mut pointing.func, &mut an, &mut Fuel::unlimited(), &mut data);
+        (stats, data.into_tables())
+    }
+
+    #[test]
+    fn answers_that_are_addresses_are_a_table_of_how_far_they_are_from_it() {
+        let mut pointing = pointing(&[0, 1, 2, 3], None, 0);
+        let (stats, tables) = placed(&mut pointing, true);
+        assert!(fired(&stats));
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].ty, i32());
+        assert_eq!(tables[0].cells, [0, 0, 0, 0]);
+        let want: Vec<Option<Symbol>> = pointing.places[..4].iter().copied().map(Some).collect();
+        assert_eq!(tables[0].to, want);
+        assert_eq!(tables[0].cells, [0, 0, 0, 0]);
+        let func = &pointing.func;
+        let arm = arm(func);
+        let mut want = LOOKUP.to_vec();
+        want.extend([
+            Opcode::SExt,
+            Opcode::PtrToInt,
+            Opcode::Add,
+            Opcode::IntToPtr,
+            Opcode::Return,
+        ]);
+        assert_eq!(opcodes(func, arm), want);
+        for label in 0..4 {
+            let place = pointing.places[label as usize];
+            assert_eq!(looked_up(func, arm, label, &tables), spot(place));
+        }
+    }
+
+    /// `&s[k]` for each label `k`, where the cell is the distance to the name with the bytes into
+    /// it added.
+    #[test]
+    fn an_address_part_way_into_a_name_is_the_distance_to_it_and_the_bytes_in() {
+        let mut pointing = pointing(&[0, 1, 2, 3], None, 4);
+        let (stats, tables) = placed(&mut pointing, true);
+        assert!(fired(&stats));
+        assert_eq!(tables[0].cells, [0, 4, 8, 12]);
+        let arm = arm(&pointing.func);
+        for label in 0..4 {
+            let place = pointing.places[label as usize];
+            let got = looked_up(&pointing.func, arm, label, &tables);
+            assert_eq!(got, spot(place) + 4 * label, "{label}");
+        }
+    }
+
+    /// The default returns the address of `s4`, which is somewhere a table can say it is, so the
+    /// hole reads that and gets what it got before.
+    #[test]
+    fn a_hole_in_a_table_of_addresses_is_where_the_default_points() {
+        let mut pointing = pointing(&[1, 2, 4, 5], None, 0);
+        let (stats, tables) = placed(&mut pointing, true);
+        assert!(fired(&stats));
+        let places = &pointing.places;
+        let want = [places[0], places[1], places[4], places[2], places[3]].map(Some);
+        assert_eq!(tables[0].to, want);
+        assert_eq!(cases(&pointing.func).len(), 5, "the hole was not given a case");
+        let arm = arm(&pointing.func);
+        for (label, place) in [(1, 0), (2, 1), (3, 4), (4, 2), (5, 3)] {
+            let got = looked_up(&pointing.func, arm, label, &tables);
+            assert_eq!(got, spot(places[place]), "{label}");
+        }
+    }
+
+    /// A name the program writes to is still a name this file defines, but it is not in the images,
+    /// and the images are what says a name is somewhere nothing else can move.
+    #[test]
+    fn an_answer_that_is_not_read_only_data_keeps_its_switch() {
+        let mut pointing = pointing(&[0, 1, 2, 3], Some(2), 0);
+        let (stats, tables) = placed(&mut pointing, true);
+        assert!(!fired(&stats));
+        assert!(tables.is_empty());
+        assert_eq!(stats.count(Kind::Missed, PLACE_IS_ODD), 1, "{stats:?}");
+    }
+
+    #[test]
+    fn a_target_with_no_four_byte_distance_keeps_its_switch() {
+        let mut pointing = pointing(&[0, 1, 2, 3], None, 0);
+        let (stats, tables) = placed(&mut pointing, false);
+        assert!(!fired(&stats));
+        assert!(tables.is_empty());
     }
 }

@@ -3604,6 +3604,28 @@ decl #0 x : int object external static defined
         assert!(table.contains("\t.long\t100\n"), "{text}");
     }
 
+    /// A `switch` whose arms give string literals is a table of how far each string is from it.
+    ///
+    /// gcc 16 keeps the compares here, because its table would hold addresses the loader has to
+    /// write when the program starts, and that table would have to be in `.data.rel.ro`. This one
+    /// holds four byte distances the linker writes once, so it stays in `.rodata` with the strings.
+    #[test]
+    fn a_switch_whose_arms_give_strings_is_a_table_of_how_far_away_they_are() {
+        let text = optimized(
+            "const char *f(int k) { switch (k) { case 0: return \"zero\"; \
+             case 1: return \"one\"; case 2: return \"two\"; case 3: return \"three\"; } \
+             return \"many\"; }\n",
+        );
+        assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
+        assert!(text.contains("leaq\tCSWTCH.0(%rip)"), "{text}");
+        assert!(!text.contains(".data.rel.ro"), "{text}");
+        let at = text.find("CSWTCH.0:").expect("the table is in the output");
+        assert!(text[..at].rfind("\t.section\t.rodata").is_some(), "{text}");
+        let table = &text[at..];
+        assert_eq!(table.matches(" - .\n").count(), 4, "{text}");
+        assert!(table.contains("\t.long\t.Lstr.1+4 - .\n"), "{text}");
+    }
+
     /// The same table at `-Os`, where a cell is a byte because every answer fits in one.
     ///
     /// gcc 16 narrows the cells at `-Os` and not at `-O2`, and so does rucc: sixteen answers under a

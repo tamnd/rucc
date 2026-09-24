@@ -28,6 +28,10 @@ pub struct Table {
     pub ty: Type,
     /// The cells in order, each read with its own sign and held at the type's width when written.
     pub cells: Vec<i128>,
+    /// What each cell also holds the distance to, in the same order, or nothing at all when every
+    /// cell is only a number. A cell with a name here is that name's address less the address of
+    /// the cell's own table, plus its number, which the linker works out.
+    pub to: Vec<Option<Symbol>>,
 }
 
 /// Where a pass puts the tables it asks for, until the pipeline takes them.
@@ -36,6 +40,7 @@ pub struct ReadOnly<'a> {
     names: &'a mut Interner,
     taken: &'a HashSet<Symbol>,
     pointer_bits: u32,
+    measures: bool,
     next: u32,
     tables: Vec<Table>,
 }
@@ -53,7 +58,24 @@ impl<'a> ReadOnly<'a> {
         pointer_bits: u32,
         next: u32,
     ) -> Self {
-        Self { names, taken, pointer_bits, next, tables: Vec::new() }
+        Self { names, taken, pointer_bits, measures: false, next, tables: Vec::new() }
+    }
+
+    /// The same place, able to hold a table of distances when `measures` is true.
+    #[must_use]
+    pub const fn measuring(mut self, measures: bool) -> Self {
+        self.measures = measures;
+        self
+    }
+
+    /// Whether a cell may be how far a name is from its table, which [`ReadOnly::distances`]
+    /// makes.
+    ///
+    /// That needs a four byte relocation measured from where it is written. x86-64 ELF has one,
+    /// and it is the only target the pipeline says yes for.
+    #[must_use]
+    pub const fn measures(&self) -> bool {
+        self.measures
     }
 
     /// The width of an address on the target, which is how wide an index into a table is made.
@@ -69,15 +91,34 @@ impl<'a> ReadOnly<'a> {
     /// already has is stepped over rather than trusted not to be there, since an `asm` label can
     /// spell anything.
     pub fn table(&mut self, ty: Type, cells: Vec<i128>) -> Symbol {
-        let name = loop {
+        let name = self.name();
+        self.tables.push(Table { name, ty, cells, to: Vec::new() });
+        name
+    }
+
+    /// Asks for a table of how far names are from it and gets back the name to load from it by.
+    ///
+    /// Cell `k` is four bytes holding the address of the name in `to[k]` plus the bytes beside it,
+    /// less the address of the table, and zero where `to[k]` is `None`, which is a hole nothing
+    /// reads. Only asked for where [`ReadOnly::measures`] says it may be, and named the way
+    /// [`ReadOnly::table`] names one.
+    pub fn distances(&mut self, to: &[Option<(Symbol, i128)>]) -> Symbol {
+        let name = self.name();
+        let cells = to.iter().map(|cell| cell.map_or(0, |(_, bytes)| bytes)).collect();
+        let to = to.iter().map(|cell| cell.map(|(name, _)| name)).collect();
+        self.tables.push(Table { name, ty: Type::int(32), cells, to });
+        name
+    }
+
+    /// A name for the next table, which is one the module does not have.
+    fn name(&mut self) -> Symbol {
+        loop {
             let name = self.names.intern(&format!("CSWTCH.{}", self.next));
             self.next += 1;
             if !self.taken.contains(&name) {
-                break name;
+                return name;
             }
-        };
-        self.tables.push(Table { name, ty, cells });
-        name
+        }
     }
 
     /// The number the next name will be made from.
@@ -114,5 +155,20 @@ mod tests {
         assert_eq!(tables.len(), 2);
         assert_eq!(names.resolve(first), "CSWTCH.0");
         assert_eq!(names.resolve(second), "CSWTCH.2");
+    }
+
+    #[test]
+    fn a_table_of_distances_is_four_byte_cells_named_like_any_other() {
+        let mut names = Interner::new();
+        let taken = HashSet::new();
+        let to = [names.intern("a"), names.intern("b")].map(Some);
+        let mut data = ReadOnly::new(&mut names, &taken, 64, 0).measuring(true);
+        assert!(data.measures());
+        let name = data.distances(&[to[0].map(|it| (it, 0)), None, to[1].map(|it| (it, 8))]);
+        let tables = data.into_tables();
+        assert_eq!(names.resolve(name), "CSWTCH.0");
+        assert_eq!(tables[0].ty, Type::int(32));
+        assert_eq!(tables[0].cells, [0, 0, 8]);
+        assert_eq!(tables[0].to, [to[0], None, to[1]]);
     }
 }

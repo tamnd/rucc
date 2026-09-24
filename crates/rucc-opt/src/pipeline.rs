@@ -36,8 +36,9 @@ use std::sync::Arc;
 
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
-use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic};
+use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
 use rucc_session::OptLevel;
+use rucc_tuple::{Arch, ObjectFormat};
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
@@ -1033,6 +1034,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         // What the level and the `-f` flags decided, which is what a gate overrides for the
         // functions it names and leaves alone for the ones it does not.
         let default = chosen.contains(&name);
+        // Whether a table may hold how far a name is from it, which wants a four byte relocation
+        // measured from where it is written. See `crate::switch_conv`.
+        let measures = module.tuple.arch() == Arch::X86_64
+            && module.tuple.object_format() == ObjectFormat::Elf;
         for id in module.funcs() {
             if module[id].is_declaration() {
                 continue;
@@ -1051,7 +1056,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
                     .touching(Arc::clone(&modref))
             });
             let pointer_bits = module.datalayout.pointer_bits;
-            let mut data = readonly::ReadOnly::new(names, &taken, pointer_bits, tables);
+            let mut data =
+                readonly::ReadOnly::new(names, &taken, pointer_bits, tables).measuring(measures);
             let stats = pass.run_emitting(&mut module[id], an, &mut fuel, &mut data);
             tables = data.next();
             for table in data.into_tables() {
@@ -1124,9 +1130,15 @@ fn add_table(module: &mut Module, table: readonly::Table) {
     let cells: Vec<Datum> = table
         .cells
         .iter()
-        .map(|&cell| Datum::Scalar {
-            ty: table.ty,
-            value: module.add_imm(Imm::int(cell, table.ty)),
+        .enumerate()
+        .map(|(at, &cell)| match table.to.get(at).copied().flatten() {
+            // Measured from the cell, which is `at` cells into the table, so that much is added
+            // back to make it the distance from the table.
+            Some(symbol) => {
+                let addend = cell as i64 + at as i64 * i64::from(bytes);
+                Datum::Away(module.add_reloc(Reloc { symbol, addend, size: bytes }))
+            }
+            None => Datum::Scalar { ty: table.ty, value: module.add_imm(Imm::int(cell, table.ty)) },
         })
         .collect();
     let init = module.push_data(&cells);
