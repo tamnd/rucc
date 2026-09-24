@@ -1795,12 +1795,13 @@ pub struct Options {
     /// `spec/optimizer/38-scheduling-and-layout.md` section 38.6 decides on one scheduler and puts
     /// it after allocation, and section 38.8 owes the measurement that would justify a second.
     pub schedule_insns: Option<bool>,
-    /// Whether the head of every loop starts on a sixteen byte boundary when that costs at most ten
-    /// bytes of padding, from `-falign-loops` and `-fno-align-loops`.
+    /// Whether a hot loop that fits in a 64 byte line is padded so that it does not cross one,
+    /// when that costs at most 31 bytes, from `-falign-loops` and `-fno-align-loops`.
     ///
-    /// `None` is a command line that said neither, and then it is off at every level. gcc turns it
-    /// on at `-O2` and `-O3`, and rucc does not yet, because it was measured and bought nothing:
-    /// tamnd/rucc#1823 has the numbers. Three way rather than a `bool` for the reason
+    /// `None` is a command line that said neither, and then it is off at every level. gcc turns its
+    /// own rule on at `-O2` and `-O3`, and rucc does not, because what it buys is a machine's and
+    /// not every machine's: tamnd/rucc#1838 measured 18% on a loop on AMD EPYC and nothing on the
+    /// same loop on an Intel Core, for about half a percent of text. Three way rather than a `bool` for the reason
     /// `reorder_blocks` above is, so that the day a level turns it on, `-fno-align-loops` still
     /// means something.
     pub align_loops: Option<bool>,

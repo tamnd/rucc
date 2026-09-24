@@ -205,9 +205,14 @@ impl Writer<'_> {
             let _ = writeln!(self.out, "\t.cfi_startproc");
         }
         let end = func.cfi_end();
+        // How long each loop is, which the listing cannot say without the lengths of the
+        // instructions in it. The object writer's encoder is asked, and a function it cannot
+        // encode, which is one for another machine, has its loops left where they fall.
+        let loops = crate::bytes::loop_sizes(self.names, self.directives, func).unwrap_or_default();
         for (index, block) in func.blocks().enumerate() {
-            if func.heads.contains(&block) {
-                self.out.push_str(crate::LOOP_DIRECTIVES);
+            let size = loops.get(block.index()).copied().unwrap_or(0);
+            if let Some(most) = crate::loop_room(size) {
+                let _ = writeln!(self.out, "\t.p2align\t6,,{most}");
             }
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             // And the name an image knows the block by, as a second label on the same address. The
@@ -1521,7 +1526,7 @@ mod tests {
     }
 
     #[test]
-    fn the_head_of_a_loop_is_padded_the_way_gcc_pads_one() {
+    fn the_head_of_a_loop_is_asked_to_stay_inside_one_line() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         func.create_block();
@@ -1540,7 +1545,9 @@ mod tests {
             Output::default(),
         )
         .expect("a function with a loop in it");
-        let wanted = "\n.Lf_0:\n\t.p2align\t4,,10\n\t.p2align\t3\n.Lf_1:\n";
+        // The loop is the jump back to itself, five bytes, so it crosses a line only when it
+        // starts in the last four bytes of one.
+        let wanted = "\n.Lf_0:\n\t.p2align\t6,,4\n.Lf_1:\n";
         assert!(text.contains(wanted), "{text}");
     }
 }
