@@ -3080,13 +3080,35 @@ decl #0 x : int object external static defined
         assert!(text.contains(".long"), "{text}");
     }
 
-    /// What only the x86-64 lowering writes yet is refused on AArch64 with a reason, rather than
-    /// written with x86 instructions.
+    /// An AArch64 Linux `va_start` fills in the five fields AAPCS64 gives a list. The two offsets
+    /// count up to nothing from minus the size of what is left of each half of the save area, so
+    /// with one integer named they start at minus fifty six and minus one hundred and twenty eight.
     #[test]
-    fn a_variadic_definition_is_refused_on_aarch64_until_its_list_is_written() {
+    fn an_aarch64_va_start_writes_the_five_fields_of_its_list() {
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "typedef __builtin_va_list va_list;\n\
+                      int f(int n, ...) { va_list ap; __builtin_va_start(ap, n); \
+                      int x = __builtin_va_arg(ap, int); double d = __builtin_va_arg(ap, double); \
+                      __builtin_va_end(ap); return x + (int)d; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("#-56"), "{text}");
+        assert!(text.contains("#-128"), "{text}");
+        assert!(text.contains("#24]"), "{text}");
+        assert!(text.contains("#28]"), "{text}");
+        assert!(text.contains("str q"), "{text}");
+    }
+
+    /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, which is
+    /// not written yet, so a variadic definition there is refused rather than given the Linux list.
+    #[test]
+    fn a_variadic_definition_is_refused_on_darwin_until_its_list_is_written() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
         let result = run(&opts, "int f(int n, ...) { return n; }\n");
         assert!(result.failed());
         assert!(result.messages[0].contains("does not name"), "{:?}", result.messages);

@@ -424,6 +424,13 @@ pub struct CallRegs {
     /// start at `x0`. SysV and Windows x64 pass it where the first argument would have gone and
     /// move the rest along by one.
     pub sret: Option<PhysReg>,
+    /// What a `va_list` is on this convention, which is what a variadic callee builds and walks.
+    ///
+    /// The same answer [`crate::TargetInfo::va_list`] gives the front end, kept here as well since
+    /// the walk is written after the front end is gone. It is not the same question as
+    /// [`CallRegs::shared_positions`]: Apple's AArch64 counts the files apart and still has a list
+    /// that is a pointer, because every argument a signature does not name goes on the stack.
+    pub list: crate::VaList,
     /// What DWARF calls each register, one list per class in the order the file numbers the
     /// classes, and inside a list in the order the class numbers its registers.
     ///
@@ -744,6 +751,7 @@ mod tests {
             push: 8,
             link: None,
             sret: None,
+            list: if shared { crate::VaList::CharPointer } else { crate::VaList::SysV },
             // Empty, which is all a convention made up for a test of argument placement needs to
             // say about a question it never asks.
             dwarf: &[],

@@ -86,7 +86,9 @@ use rucc_ir::{
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, Segment};
+use rucc_target::{
+    Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, Segment, VaList,
+};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -889,6 +891,23 @@ enum Varargs {
         integers: u32,
         /// What `fp_offset` starts at, which is past the vector ones.
         floats: u32,
+    },
+    /// The AAPCS64 list, whose two offsets count up to zero from the top of each half of the save
+    /// area. The two tops are addresses in the frame and so is the first field, like the SysV list.
+    Aapcs {
+        /// Which of the function's stack objects is the register save area.
+        save: usize,
+        /// How far up the caller's argument area the first argument the signature does not name is.
+        incoming: u32,
+        /// Where the general purpose half of the save area ends.
+        integers_end: u32,
+        /// Where the vector half ends, which is the end of the area.
+        floats_end: u32,
+        /// What `__gr_offs` starts at, which is minus the general purpose half the named arguments
+        /// did not take.
+        integers: i32,
+        /// What `__vr_offs` starts at.
+        floats: i32,
     },
     /// The list that is a pointer, which is the one address and nothing else.
     Pointer {
@@ -2338,23 +2357,53 @@ impl<'a> Lowering<'a> {
         let (save, incoming) = match started {
             Varargs::Pointer { incoming } => (None, incoming),
             Varargs::Fields { save, incoming, integers, floats } => {
-                for (at, count) in [(varargs::GP_OFFSET, integers), (varargs::FP_OFFSET, floats)] {
-                    let held = self.out.new_vreg(self.gpr);
-                    let load = self.named("mov_ri_32");
-                    let build = self.out.build(block, load).at(span);
-                    build.def(held, self.gpr).imm(i64::from(count)).finish();
-
-                    let store = self.named("mov_mr_32");
-                    let mem = self.field(list, at);
-                    self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
+                let counts = [(varargs::GP_OFFSET, integers), (varargs::FP_OFFSET, floats)];
+                for (at, count) in counts {
+                    self.store_small(list, at, i64::from(count), span);
                 }
                 (Some(save), incoming)
             }
+            Varargs::Aapcs { save, incoming, integers_end, floats_end, integers, floats } => {
+                let counts =
+                    [(varargs::aapcs::GR_OFFS, integers), (varargs::aapcs::VR_OFFS, floats)];
+                for (at, count) in counts {
+                    self.store_small(list, at, i64::from(count), span);
+                }
+                let overflow = self.overflow(block, incoming, span);
+                let integers_top = self.frame_address_plus(block, save, integers_end);
+                let floats_top = self.frame_address_plus(block, save, floats_end);
+                let fields = [
+                    (varargs::aapcs::STACK, overflow),
+                    (varargs::aapcs::GR_TOP, integers_top),
+                    (varargs::aapcs::VR_TOP, floats_top),
+                ];
+                for (at, held) in fields {
+                    self.store_word(list, at, held, span);
+                }
+                return Ok(());
+            }
         };
 
-        // The first argument the signature did not name, which is as far up the caller's argument
-        // area as the ones it did name reached. Nothing here knows where that area is, so the
-        // distance is recorded the way a parameter read out of it is and finished with it.
+        // At the front of the list when that address is the whole of it, and at the field the
+        // layout gives it when there are four, with the save area behind it.
+        let overflow = self.overflow(block, incoming, span);
+        let fields = match save {
+            None => vec![(0, overflow)],
+            Some(save) => {
+                let save = self.frame_address(block, save);
+                vec![(varargs::OVERFLOW, overflow), (varargs::SAVE_AREA, save)]
+            }
+        };
+        for (at, held) in fields {
+            self.store_word(list, at, held, span);
+        }
+        Ok(())
+    }
+
+    /// The first argument the signature did not name, which is as far up the caller's argument
+    /// area as the ones it did name reached. Nothing here knows where that area is, so the distance
+    /// is recorded the way a parameter read out of it is and finished with it.
+    fn overflow(&mut self, block: mir::Block, incoming: u32, span: Span) -> mir::Reg {
         let overflow = self.out.new_vreg(self.gpr);
         let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
@@ -2366,22 +2415,29 @@ impl<'a> Lowering<'a> {
             .mem(mir::Mem::at(sp))
             .finish();
         self.stack.arguments.push((made, incoming));
+        overflow
+    }
 
-        // At the front of the list when that address is the whole of it, and at the field the
-        // layout gives it when there are four, with the save area behind it.
-        let fields = match save {
-            None => vec![(0, overflow)],
-            Some(save) => {
-                let save = self.frame_address(block, save);
-                vec![(varargs::OVERFLOW, overflow), (varargs::SAVE_AREA, save)]
-            }
-        };
-        for (at, held) in fields {
-            let store = self.named("mov_mr_64");
-            let mem = self.field(list, at);
-            self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
-        }
-        Ok(())
+    /// Writes a small constant into a 32 bit field of a list.
+    fn store_small(&mut self, list: mir::Reg, at: i64, value: i64, span: Span) {
+        let block = self.at.expect("a block is being filled");
+        let held = self.out.new_vreg(self.gpr);
+        let load = mir::Opcode::new(self.names.intern(self.selector.abi.small));
+        self.out.build(block, load).at(span).def(held, self.gpr).imm(value).finish();
+
+        let head = (self.selector.abi.store)(Type::int(32)).expect("a store of a word");
+        let store = mir::Opcode::new(self.names.intern(head));
+        let mem = self.field(list, at);
+        self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
+    }
+
+    /// Writes an address into a pointer field of a list.
+    fn store_word(&mut self, list: mir::Reg, at: i64, held: mir::Reg, span: Span) {
+        let block = self.at.expect("a block is being filled");
+        let head = (self.selector.abi.store)(Type::int(64)).expect("a store of an address");
+        let store = mir::Opcode::new(self.names.intern(head));
+        let mem = self.field(list, at);
+        self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
     }
 
     /// One field of a list, as the addressing mode that reaches it.
@@ -4800,9 +4856,13 @@ impl<'a> Lowering<'a> {
         // block of this function's frame on one convention and the shadow space the caller already
         // reserved on the other. Which of the two it is is [`varargs::Area::of`]'s answer and
         // [`Self::save_area`] is where the difference is spent.
+        //
+        // Apple's AArch64 passes every argument a signature does not name on the stack, which is
+        // a list that is a pointer on a convention that counts the files apart, and the walk for
+        // that is not written.
         let variadic = self.source.signature().variadic;
-        if variadic {
-            self.only_x86(None, Unported::Variadic)?;
+        if variadic && self.conv.list == VaList::CharPointer && !self.conv.shared_positions {
+            return Err(Unsupported::Unported { inst: None, what: Unported::Variadic });
         }
         let area = variadic.then(|| varargs::Area::of(self.conv));
         let arrived =
@@ -4864,17 +4924,36 @@ impl<'a> Lowering<'a> {
 
         let save = self.stack.locals.len();
         self.stack.locals.push(Local { size: area.size, align: varargs::VECTOR_SLOT });
-        self.varargs = Some(Varargs::Fields {
-            save,
-            incoming: arrived.beyond,
-            integers: u32::try_from(arrived.took.0).unwrap_or(0) * area.stride(false),
-            floats: area.starts_at(true)
-                + u32::try_from(arrived.took.1).unwrap_or(0) * area.stride(true),
+        let took = |count: usize, float: bool| {
+            let count = u32::try_from(count).unwrap_or(0).min(area.holds(float));
+            area.starts_at(float) + count * area.stride(float)
+        };
+        let integers = took(arrived.took.0, false);
+        let floats = took(arrived.took.1, true);
+        self.varargs = Some(if self.conv.list == VaList::Aapcs {
+            // Minus what is left of each half, since the two offsets count up to its top.
+            let left = |at: u32, float: bool| {
+                i32::try_from(at).unwrap_or(0) - i32::try_from(area.ends_at(float)).unwrap_or(0)
+            };
+            Varargs::Aapcs {
+                save,
+                incoming: arrived.beyond,
+                integers_end: area.ends_at(false),
+                floats_end: area.ends_at(true),
+                integers: left(integers, false),
+                floats: left(floats, true),
+            }
+        } else {
+            Varargs::Fields { save, incoming: arrived.beyond, integers, floats }
         });
 
+        // A vector register is saved all sixteen bytes wide, as a quad is, whatever it held.
         let base = self.frame_address(out, save);
         for &(reg, class, at) in &arrived.spare {
-            let store = self.named(if class == self.gpr { "mov_mr_64" } else { "movaps_mr" });
+            let ty =
+                if class == self.gpr { Type::int(64) } else { Type::float(rucc_ir::Float::F128) };
+            let head = (self.selector.abi.store)(ty).expect("a store of a whole register");
+            let store = mir::Opcode::new(self.names.intern(head));
             let up = i32::try_from(at).expect("a register save area under two gigabytes");
             let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
             self.out.build(out, store).uses(reg, class).mem(mem).finish();
@@ -4886,10 +4965,18 @@ impl<'a> Lowering<'a> {
     /// Written with nothing in its displacement, because where an object is in a frame is not known
     /// until after allocation, and given to [`crate::finish`] to fill in the way an `alloca` is.
     fn frame_address(&mut self, out: mir::Block, local: usize) -> mir::Reg {
+        self.frame_address_plus(out, local, 0)
+    }
+
+    /// The address some way into a local, which the frame finishes the same way, adding where the
+    /// local is to what is already there.
+    fn frame_address_plus(&mut self, out: mir::Block, local: usize, plus: u32) -> mir::Reg {
         let reg = self.out.new_vreg(self.gpr);
         let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
-        let made = self.out.build(out, lea).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
+        let plus = i32::try_from(plus).expect("an offset into a local under two gigabytes");
+        let mem = mir::Mem::at(sp).plus(plus);
+        let made = self.out.build(out, lea).def(reg, self.gpr).mem(mem).finish();
         self.stack.addresses.push((made, local));
         reg
     }

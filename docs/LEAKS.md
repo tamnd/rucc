@@ -14,13 +14,15 @@ A symbol's address is reached through the selector's `Symbols`, which says wheth
 
 A jump table and the address of a label are built from the selector's `Jumps`, which names the instruction that takes the address of a place in this function, the load of a cell and the add. On x86-64 those are `lea`, `movslq` and a two address `add`, and on AArch64 they are `adr`, `ldrsw` and a three address `add`.
 
+`va_start` writes the list the convention's `VaList` names. SysV x86-64 gets its four fields, AAPCS64 gets its five with the two offsets counted up from minus what is left of each half, and Windows x64 gets a pointer. The spare registers go into the save area through the selector's own stores, so a vector register is saved sixteen bytes wide on both machines.
+
 The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::Address`, because the rule files for both machines use the same names for the same shapes. AArch64 lists the two it has.
 
 ## Still there
 
 These are in code that runs, not in tests. A test that builds x86-64 instructions by hand to exercise a pass is not a leak, since the pass under test only sees names.
 
-- `lower.rs` writes `va_start` as the SysV x86-64 `va_list` with its four fields and the register save area. AAPCS64 has a five field `va_list` with two save areas, and Darwin uses a plain pointer. The `Varargs::Pointer` case already covers the Darwin shape. A variadic definition is refused on AArch64 until its list is written.
+- `lower.rs` refuses a variadic definition on Darwin, whose list is one pointer and whose variadic arguments are all on the stack. The `Varargs::Pointer` case already covers the shape, and what is missing is the entry that puts nothing in the save area.
 
 - `lower.rs` reaches a thread-local variable only the x86-64 way. It is refused on any other machine through `Unsupported::Unported`.
 

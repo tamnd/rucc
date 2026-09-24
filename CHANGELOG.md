@@ -10,12 +10,17 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - AArch64 has a rule for every widening and narrowing between integer types, including to and from one bit values, which are widened and narrowed with an `and` so nothing above the bit is taken on trust.
 - AArch64 builds a dense `switch` as a jump table, reached with `adr` and read with `ldrsw`, and takes the address of a label with `adr`, so computed `goto` works there too. Both used to be refused.
 - `-finstrument-functions` is taken rather than refused. Every function calls `__cyg_profile_func_enter` in front of its body and `__cyg_profile_func_exit` in front of every return, with its own address and the address it returns to, and `__attribute__((no_instrument_function))` takes a function back out. The calls go in while the body is lowered, before inlining, as gcc does. `execute/eeprof-1.c` passes at every level.
+- AArch64 Linux writes `va_start` and `va_arg` the AAPCS64 way, with the five field `va_list`, a save area of eight general purpose and eight vector registers, and the walk that falls back to the stack once either half runs out. Structs over sixteen bytes are read by reference and floating point aggregates of up to four members from the vector half, so `vprintf` and friends get a list they can read. Darwin still refuses a variadic definition.
 
 ### Changed
 
 - An `asm` template kept as text now takes operands in registers. `%0` of an `"=r"` output or an `"r"` input is spelled after allocation as the register the operand was given, at the width of its type or the one `%b0`, `%w0`, `%k0`, `%q0` or `%h0` asks for, so `mov %1,%0; jmp 1f; 1:` builds where it was refused. Tied operands, `&` and pinned letters work the way they do for gcc, and a constant under a constraint that only allows a register is loaded into one. The same programs give gcc's answers at every level (#1781).
 - A unit with an `asm` template kept as text now builds with `-g` when the template reaches nothing outside itself. The template is filled in and read by the assembler on its own, and its bytes go into the object with the rest, so the line table and frame rules are written as for any other function. A template that defines a label, switches section or aligns what follows still sends the unit through its listing, which still refuses `-g` (#1781).
 - A global register variable such as `register long gr asm ("r12");` at file scope is now refused as what it is, where the message used to say no register was named (#1673).
+
+### Fixed
+
+- The pass that folds an address into the load or store reading it asks the target whether an index and a displacement can share one address. AArch64 has no such mode, and a load of a register plus a register plus a constant used to reach the assembler and be refused there.
 
 ## 0.11.4
 

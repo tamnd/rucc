@@ -149,6 +149,9 @@ pub enum Refusal {
     Mem(mir::Inst),
     /// An index multiplied by something this machine cannot write.
     Scale(mir::Inst),
+    /// An index and a displacement in one address, on a machine whose addresses hold one or the
+    /// other.
+    Crowded(mir::Inst),
     /// Taking that instruction out would leave something reading a register it wrote.
     Read(mir::Inst),
     /// A rename would put a register of one class where the instruction reads another.
@@ -529,6 +532,9 @@ fn shaped(
     if !machine.scales(scaled) || (amode.index.is_none() && amode.scale != 1) {
         return Some(Refusal::Scale(inst));
     }
+    if amode.index.is_some() && amode.disp != 0 && !machine.index_and_disp {
+        return Some(Refusal::Crowded(inst));
+    }
     None
 }
 
@@ -823,6 +829,41 @@ mod tests {
         let mut set = Changes::new();
         set.rewrite(mov, scaled(4));
         assert_eq!(refused(&func, &names, &set), None);
+    }
+
+    /// A load from a register plus a register plus a constant, which x86-64 writes in one mode and
+    /// AArch64 has no mode for. The same load with nothing added is one AArch64 has.
+    #[test]
+    fn an_index_beside_a_displacement_is_refused_where_the_machine_has_no_such_mode() {
+        use rucc_target::aarch64;
+
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(aarch64::GPR);
+        let base = func.new_vreg(aarch64::GPR);
+        let index = func.new_vreg(aarch64::GPR);
+        let load = mir::Opcode::new(names.intern("a64.ldr_64"));
+        let mov = func.build(block, load).def(into, aarch64::GPR).uses(base, aarch64::GPR).finish();
+        let plan = |disp| Plan {
+            opcode: load,
+            operands: vec![
+                mir::Operand::write(into, aarch64::GPR),
+                mir::Operand::read(base, aarch64::GPR),
+                mir::Operand::read(index, aarch64::GPR),
+            ],
+            imm: None,
+            amode: Some(mir::Amode { base: Some(1), index: Some(2), disp, ..mir::Amode::NOTHING }),
+            symbol: None,
+        };
+        let asked = |set: &Changes, func: &mir::Func| {
+            set.refused(func, &Reads::of(func), &names, &aarch64::MACHINE)
+        };
+        let mut set = Changes::new();
+        set.rewrite(mov, plan(16));
+        assert_eq!(asked(&set, &func), Some(Refusal::Crowded(mov)));
+
+        let mut set = Changes::new();
+        set.rewrite(mov, plan(0));
+        assert_eq!(asked(&set, &func), None);
     }
 
     /// An address whose base points at an operand the description already claimed. The registers an

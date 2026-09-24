@@ -95,12 +95,14 @@
 //! are is a question about the size and nothing else, so the classification the front end put on a
 //! `va_object` is not read here at all.
 
+pub mod aapcs;
+
 use rucc_base::float::Format;
 use rucc_ir::{
     Block, Builder, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
     Opcode, Restrict, Type, Value,
 };
-use rucc_target::{CallRegs, Slot};
+use rucc_target::{CallRegs, Slot, VaList};
 
 /// Where the count of general purpose register bytes already walked is.
 pub const GP_OFFSET: i64 = 0;
@@ -209,19 +211,26 @@ impl Area {
 /// `va_start` is the one that does need the frame, and [`crate::lower`] has it.
 ///
 /// A convention whose list is a plain pointer gets the walk the module doc's last section
-/// describes instead, which is the same three rewrites over a list of one field.
+/// describes instead, which is the same three rewrites over a list of one field, and AAPCS64 gets
+/// the walk [`aapcs`] describes.
 pub fn lists(func: &mut Func, conv: &CallRegs) {
     let area = Area::of(conv);
     let word = u64::from(conv.word);
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for inst in found {
-        match (func[inst].opcode, conv.shared_positions) {
-            (Opcode::VaArg, false) => next(func, inst, area),
-            (Opcode::VaArg, true) => value(func, inst, word),
-            (Opcode::VaObject, false) => object(func, inst, area),
-            (Opcode::VaObject, true) => held(func, inst, word),
-            (Opcode::VaCopy, shared) => copy(func, inst, if shared { word } else { SIZE }),
+        match (func[inst].opcode, conv.list) {
+            (Opcode::VaArg, VaList::SysV) => next(func, inst, area),
+            (Opcode::VaArg, VaList::Aapcs) => aapcs::next(func, inst),
+            (Opcode::VaArg, VaList::CharPointer | VaList::VoidPointer) => value(func, inst, word),
+            (Opcode::VaObject, VaList::SysV) => object(func, inst, area),
+            (Opcode::VaObject, VaList::Aapcs) => aapcs::object(func, inst),
+            (Opcode::VaObject, VaList::CharPointer | VaList::VoidPointer) => {
+                held(func, inst, word);
+            }
+            (Opcode::VaCopy, VaList::SysV) => copy(func, inst, SIZE),
+            (Opcode::VaCopy, VaList::Aapcs) => copy(func, inst, aapcs::SIZE),
+            (Opcode::VaCopy, VaList::CharPointer | VaList::VoidPointer) => copy(func, inst, word),
             // Nothing at all, which is what the psABI says it is. The instruction was still worth
             // emitting, because it says the list stops being read here, and here is where that
             // stops being worth saying.
