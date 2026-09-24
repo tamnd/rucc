@@ -1108,6 +1108,26 @@ mod tests {
         assert_eq!(shape(&func, &names, first), ["xor_rr_32"]);
     }
 
+    /// The same with the comparison's operand in memory, which is the shape a loop reading an array
+    /// and counting with tier six's `setcc` and `movzbl` comes out as. The comparison table leaves
+    /// these out, and before the description named them apart this turned the function down.
+    #[test]
+    fn a_block_opening_with_a_comparison_against_memory_is_not_a_carried_state() {
+        let (mut names, mut func, first) = empty();
+        let second = func.create_block();
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        let base = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_32");
+        let fused = op(&mut names, "cmp_set_g_rm_32");
+        func.build(first, zero).def(into, GPR).imm(0).finish();
+        func.build(second, fused).def(byte, GPR).uses(value, GPR).uses(base, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, first), ["xor_rr_32"]);
+    }
+
     /// The same sentence inside a block. What the comparison reads is what it wrote, so what it was
     /// handed is written over before anything looks at it, and the move in front of it may spend a
     /// state nothing wants.
