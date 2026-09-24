@@ -2303,15 +2303,25 @@ pub(crate) fn split(text: &str, on: char) -> Vec<String> {
 /// front of a scan or a comparison and `rep` in front of anything else, and `repne` and `repnz` are
 /// the other. A prefix in front of anything that is not a string instruction is left alone here,
 /// so it reaches the encoder as the word it was and is refused there as a mnemonic nobody knows.
+///
+/// `notrack` is read the same way, joined to the `jmp` or `call` behind it, since the encoder has
+/// rows for the pair and none for the prefix alone.
 fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
+    let (next, after) = match rest.find(char::is_whitespace) {
+        Some(cut) => (&rest[..cut], rest[cut..].trim()),
+        None => (rest, ""),
+    };
+    if word == "notrack" {
+        return match next {
+            "jmp" | "jmpq" => Some(("notrack jmp".to_owned(), after)),
+            "call" | "callq" => Some(("notrack call".to_owned(), after)),
+            _ => None,
+        };
+    }
     let unequal = match word {
         "rep" | "repe" | "repz" => false,
         "repne" | "repnz" => true,
         _ => return None,
-    };
-    let (next, after) = match rest.find(char::is_whitespace) {
-        Some(cut) => (&rest[..cut], rest[cut..].trim()),
-        None => (rest, ""),
     };
     let string = next.len() == 5 && next.ends_with(['b', 'w', 'l', 'q']);
     let which = if string { &next[..4] } else { "" };
@@ -2370,6 +2380,12 @@ mod tests {
             bytes(&assembled, ".text"),
             [0xF3, 0xA5, 0xF2, 0xAE, 0xF3, 0xA6, 0xF3, 0x48, 0xAB]
         );
+    }
+
+    #[test]
+    fn notrack_is_read_with_the_jump_behind_it() {
+        let assembled = assembled("\t.text\n\tnotrack jmp\t*%rax\n\tnotrack jmp *%r8\n\tleave\n");
+        assert_eq!(bytes(&assembled, ".text"), [0x3E, 0xFF, 0xE0, 0x3E, 0x41, 0xFF, 0xE0, 0xC9]);
     }
 
     /// A numbered local label, which is a place a file may write as often as it likes.

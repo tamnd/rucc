@@ -46,7 +46,7 @@ use crate::regs::{PhysReg, Segment};
 use crate::x86_64::text::{Arg, Width};
 
 use Fits::{Signed8, Signed32};
-use Size::{Byte, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Word, WordQuad};
+use Size::{Byte, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Untracked, Word, WordQuad};
 
 /// What kind of thing one argument of an instruction is.
 ///
@@ -135,6 +135,14 @@ pub enum Size {
     SingleQuad,
     /// The `0xF2` prefix with `REX.W` set, which is the `double` ones.
     DoubleQuad,
+    /// The `0x3E` prefix, which is `notrack` in front of an indirect jump or call.
+    ///
+    /// Not a size either. With indirect branch tracking on, a jump through a register has to land
+    /// on an `endbr64`, and this byte says the place it lands is one that need not, which is what
+    /// a switch lowered to a table of offsets wants. It goes where the other prefixes go, in front
+    /// of the REX byte, since behind it the REX byte would no longer be the last thing before the
+    /// opcode and `jmp *%r8` would read as a jump through `rax`.
+    Untracked,
 }
 
 impl Size {
@@ -147,6 +155,7 @@ impl Size {
             Word | WordQuad => Some(0x66),
             Single | SingleQuad => Some(0xF3),
             Double | DoubleQuad => Some(0xF2),
+            Untracked => Some(0x3E),
             Byte | Long | Quad => None,
         }
     }
@@ -820,6 +829,11 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cwtd", &NO_ARGS, Word, &[0x99], NO_MODRM, NO_IMM),
     bytes("cltd", &NO_ARGS, Long, &[0x99], NO_MODRM, NO_IMM),
     bytes("cqto", &NO_ARGS, Quad, &[0x99], NO_MODRM, NO_IMM),
+    // The same two opcodes at the other size each can have, which widen the low half of `rax` into
+    // the whole of it instead of into `rdx`. `cltq` is what a compiler writes to make an `int`
+    // index into a pointer's width, which is why it is one of the commonest words in its output.
+    bytes("cwtl", &NO_ARGS, Long, &[0x98], NO_MODRM, NO_IMM),
+    bytes("cltq", &NO_ARGS, Quad, &[0x98], NO_MODRM, NO_IMM),
     // The divisions themselves, which are the last two of the eight.
     bytes("idivb", &R, Byte, &[0xF6], ext(0, 7), NO_IMM),
     bytes("idivw", &R, Word, &[0xF7], ext(0, 7), NO_IMM),
@@ -1436,6 +1450,12 @@ static ENCODINGS: &[Encoding] = &[
     // as the register form, since what tells the two apart is the addressing byte rather than
     // anything in front of it.
     bytes("jmp", &M, Long, &[0xFF], ext(0, 4), NO_IMM),
+    // The two through a register or an address again with `notrack` in front, which is what gcc
+    // writes for the jump a switch table ends in when the file is built with `-fcf-protection`.
+    bytes("notrack jmp", &R, Untracked, &[0xFF], ext(0, 4), NO_IMM),
+    bytes("notrack jmp", &M, Untracked, &[0xFF], ext(0, 4), NO_IMM),
+    bytes("notrack call", &R, Untracked, &[0xFF], ext(0, 2), NO_IMM),
+    bytes("notrack call", &M, Untracked, &[0xFF], ext(0, 2), NO_IMM),
     // What a prologue and an epilogue are made of. A push and a pop move eight bytes without
     // being told to, so neither carries the prefix that would say so.
     bytes("pushq", &R, Long, &[0x50], plus(0), NO_IMM),
@@ -1453,6 +1473,9 @@ static ENCODINGS: &[Encoding] = &[
     bytes("pushfq", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
     bytes("popfq", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
+    // The frame taken down in one byte, which is `movq %rbp, %rsp` and `popq %rbp` together and
+    // is sixty four bits without a prefix for the reason a pop is.
+    bytes("leave", &NO_ARGS, Long, &[0xC9], NO_MODRM, NO_IMM),
     // The barrier. Three bytes with no operands, so the last of them is written as part of the
     // opcode rather than built: `0xF0` is the addressing byte that names no memory and no
     // register, and there is nothing here that could choose a different one.
@@ -2841,6 +2864,18 @@ mod tests {
         assert_eq!(hex("cqto", &[]), "48 99");
         assert_eq!(hex("cwtd", &[]), "66 99");
         assert_eq!(hex("cbtw", &[]), "66 98");
+        assert_eq!(hex("cwtl", &[]), "98");
+        assert_eq!(hex("cltq", &[]), "48 98");
+        assert_eq!(hex("leave", &[]), "c9");
+    }
+
+    /// `notrack` is a prefix like the operand size one and goes where that one does, in front of
+    /// the REX byte a register past the first eight needs, so the REX byte stays next to the opcode.
+    #[test]
+    fn notrack_goes_in_front_of_the_rex_byte() {
+        assert_eq!(hex("notrack jmp", &[quad(RAX)]), "3e ff e0");
+        assert_eq!(hex("notrack jmp", &[quad(R8)]), "3e 41 ff e0");
+        assert_eq!(hex("notrack call", &[quad(RDX)]), "3e ff d2");
     }
 
     #[test]
