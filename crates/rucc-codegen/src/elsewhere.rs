@@ -35,7 +35,7 @@
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
-use rucc_ir::{Linkage, Module, Pic};
+use rucc_ir::{Linkage, Module, Pic, Visibility};
 use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
@@ -108,11 +108,19 @@ impl Elsewhere {
         // cover, since there may be no definition anywhere to copy and then its address is null. The
         // distance from here to null is not a number the linker has, so lld refuses the
         // `R_X86_64_PC32` and gcc reads the address out of a slot, which the linker fills with zero.
+        //
+        // Mach-O does no copying at all. `dyld` has no copy relocation, so a variable a library
+        // defines stays in the library and the only way to it is the slot. That is every variable
+        // this file only declares, unless it is hidden and so promised to be in the same image,
+        // and it is what clang writes: `_ext@GOTPAGE` on arm64 and `_ext@GOTPCREL` on x86-64.
+        let uncopied = format == ObjectFormat::MachO;
         let globals = module
             .globals()
             .filter(|&id| {
                 let global = &module[id];
-                (global.is_declaration() && global.linkage == Linkage::Weak)
+                (global.is_declaration()
+                    && (global.linkage == Linkage::Weak
+                        || (uncopied && global.visibility == Visibility::Default)))
                     || pic.replaceable(global.linkage, global.visibility)
             })
             .map(|id| module[id].name);
@@ -274,6 +282,23 @@ mod tests {
         module.add_global(maybe);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
         assert!(elsewhere.holds(names.intern("maybe")));
+    }
+
+    /// Mach-O never copies a variable into the executable, so the one this file only declares is
+    /// read through the table even in a program, and the ones it defines are still reached
+    /// directly.
+    #[test]
+    fn a_mach_o_executable_pays_for_the_variables_it_does_not_define_as_well() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut near = Global::new(names.intern("near"), 4, 4);
+        near.visibility = Visibility::Hidden;
+        module.add_global(near);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::MachO);
+        assert!(elsewhere.holds(names.intern("away")));
+        for name in ["kept", "quiet", "shy", "near"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
+        }
     }
 
     /// A library pays for every name it exports, defined here or not, because the definition the

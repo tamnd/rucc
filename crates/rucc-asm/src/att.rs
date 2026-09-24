@@ -49,7 +49,7 @@ use rucc_base::Interner;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
-use rucc_target::{PhysReg, RegClass, Segment, TargetInfo};
+use rucc_target::{PhysReg, RegClass, Segment, TargetInfo, aarch64};
 use rucc_tuple::Arch;
 
 use crate::Error;
@@ -385,8 +385,16 @@ impl Writer<'_> {
         func_name: &str,
     ) -> Result<(), Error> {
         if self.arch == Arch::Aarch64 {
-            let at =
-                a64::Context { names: self.names, symbol: self.directives.symbol(), func_name };
+            let spelling = match self.directives {
+                Directives::MachO => aarch64::Spelling::Apple,
+                Directives::Elf | Directives::Coff => aarch64::Spelling::Gnu,
+            };
+            let at = a64::Context {
+                names: self.names,
+                symbol: self.directives.symbol(),
+                spelling,
+                func_name,
+            };
             let mut line = String::new();
             let label = |to| self.label(func_name, to);
             let table = |at: u32| self.table(func_name, at as usize);
@@ -1367,7 +1375,9 @@ mod tests {
         let text = data(vec![var("x", Place::Zero, vec![Piece::Zero(4)])], Os::Darwin);
         // Mach-O has no way to put bytes in its zero filled section, so a variable that goes
         // there is asked for by size the way a tentative definition is on every format.
-        assert!(text.contains("\t.zerofill\t__DATA,__bss,_x,4,2\n"), "{text}");
+        // The directive is also the definition, so the binding goes above it or the variable is
+        // one no other file can find.
+        assert!(text.contains("\t.globl\t_x\n\t.zerofill\t__DATA,__bss,_x,4,2\n"), "{text}");
         let read_only = data(vec![var("x", Place::ReadOnly, vec![Piece::Zero(4)])], Os::Darwin);
         assert!(read_only.contains("\t.section\t__TEXT,__const\n"), "{read_only}");
         assert!(read_only.contains("\n_x:\n"), "the underscore, without which nothing links");
@@ -1465,7 +1475,7 @@ mod tests {
         let error = write_a64(|func, names| {
             let block = func.create_block();
             let mov = Opcode::new(names.intern("a64.mov_rr_64"));
-            let class = rucc_target::aarch64::GPR;
+            let class = aarch64::GPR;
             let v0 = func.new_vreg(class);
             let v1 = func.new_vreg(class);
             func.build(block, mov)

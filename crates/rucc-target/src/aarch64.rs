@@ -52,7 +52,7 @@ pub use crate::aarch64::insts::{ADDRESSES, Form, INSTS, address, form};
 pub use crate::aarch64::read::{Error as ReadError, Line, read};
 pub use crate::aarch64::text::{Arg, Missing, Operands, Written, fill, operand_width, written};
 pub use crate::aarch64::timing::{LOAD, MODEL, TIMING};
-pub use crate::aarch64::write::{cond_name, write};
+pub use crate::aarch64::write::{Spelling, cond_name, write};
 
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};

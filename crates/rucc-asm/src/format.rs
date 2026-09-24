@@ -351,8 +351,12 @@ impl Directives {
                 let _ = writeln!(out, "\t{comm}\t{symbol}{name},{},{}", var.size, var.align);
                 return false;
             }
+            // The directive defines the symbol and says nothing about who may see it, so the
+            // binding is written first, the same as it is above a label.
             (Directives::MachO, Place::Zero) => {
                 let name = &var.name;
+                self.bind(out, name, var.binding);
+                self.seen(out, name, var.binding, var.visibility);
                 let _ =
                     writeln!(out, "\t.zerofill\t__DATA,__bss,{symbol}{name},{},{align}", var.size);
                 return false;
@@ -360,17 +364,7 @@ impl Directives {
             _ => {}
         }
         self.section(out, &var.place, &var.name, sections);
-        match var.binding {
-            Binding::Global => {
-                let _ = writeln!(out, "\t.globl\t{symbol}{}", var.name);
-            }
-            Binding::Weak => {
-                let _ = writeln!(out, "\t.weak\t{symbol}{}", var.name);
-            }
-            // Nothing, which is what makes it invisible outside the file. A name no directive
-            // mentions is still in the symbol table as a local one, which is what `static` is.
-            Binding::Local => {}
-        }
+        self.bind(out, &var.name, var.binding);
         self.seen(out, &var.name, var.binding, var.visibility);
         let _ = writeln!(out, "\t.p2align\t{align}");
         if self == Directives::Elf {
@@ -386,6 +380,22 @@ impl Directives {
         }
         let _ = writeln!(out, "{symbol}{}:", var.name);
         true
+    }
+
+    /// The directive that makes a variable visible outside the file, if it is.
+    fn bind(self, out: &mut String, name: &str, binding: Binding) {
+        let symbol = self.symbol();
+        match binding {
+            Binding::Global => {
+                let _ = writeln!(out, "\t.globl\t{symbol}{name}");
+            }
+            Binding::Weak => {
+                let _ = writeln!(out, "\t.weak\t{symbol}{name}");
+            }
+            // Nothing, which is what makes it invisible outside the file. A name no directive
+            // mentions is still in the symbol table as a local one, which is what `static` is.
+            Binding::Local => {}
+        }
     }
 
     /// What is said about a function after its last instruction.
