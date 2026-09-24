@@ -136,6 +136,8 @@ them are removable. `crates/rucc-opt/src/fold.rs` already gestures at this in it
 where `long y; y + 7` producing a 32-bit constant plus a `sext` is described as costing two
 instructions and a register on every wide-integer operation.
 
+One of those is written by hand, because it turns on a flag and a pattern cannot see one. A sign extension of a sum with a constant that carries `nsw` is the extension of the other operand with the constant added at the wide width, and the wide sum keeps `nsw`. That is `p[i + 1]` with an `int` index, and written the wide way the constant reaches the address as a displacement and the one extension of `i` is shared by every subscript near it. A difference comes along as the sum with the constant negated. tamnd/rucc#1839.
+
 *Tier 5, the comparison rules, roughly 30.* Folding comparisons against constants using ranges
 from document 10, `(x & c) != 0` patterns, comparison chains, `x < 0` on an unsigned type.
 

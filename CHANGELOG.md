@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A sign extension of a sum with a constant that does not wrap is now the extension with the constant added afterwards, so `p[i + 1]` with an `int` index is `movslq %esi, %rax` and `movl 4(%rdi,%rax,4), %eax` as it is for gcc, and `p[i + 1] + p[i + 2]` shares one extension. Over SQLite at `-O2` it takes out 210 instructions, 170 of them `movslq`. See tamnd/rucc#1839.
 - A constant added to an array index now goes into the address as a displacement, so `p[i + 3]` on an `int` with a `long` index is `movl 12(%rdi,%rsi,4), %eax` as it is for gcc, where it was an `addq $3, %rsi` and then the load. The add goes when the address was the only thing reading it.
 - An index doubled by adding it to itself, which is what `i * 2` and `i << 1` both become before selection, now goes into the address as a scale of two, so `return p[i];` on a `short` is `movswq (%rdi,%rsi,2), %rax` as it is for gcc, where it was an `addq %rsi, %rsi` and then a load. Over SQLite at `-O2` that takes out 182 instructions.
 - A narrow load read only by a widening is now one widening load, so `return p[i];` on a `signed char` is `movsbl (%rdi,%rsi,1), %eax` rather than a byte move and a `movsbl`, the same as gcc. It covers every width the machine has a widening load for, with and without the sign. Over the SQLite amalgamation at `-O2` it applies 2515 times (#1776).
