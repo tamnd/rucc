@@ -221,6 +221,16 @@ impl Interner {
         sym
     }
 
+    /// The symbol `s` was interned as, and [`None`] when nothing has interned it.
+    ///
+    /// For a name the compiler knows and a program may or may not write: one it did not write
+    /// was never interned, and asking this is how a table of such names is matched against the
+    /// source without adding any of them to it.
+    #[must_use]
+    pub fn find(&self, s: &str) -> Option<Symbol> {
+        self.map.get(s).copied()
+    }
+
     /// The text behind a symbol.
     ///
     /// # Panics

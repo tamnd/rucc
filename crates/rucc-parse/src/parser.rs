@@ -14,7 +14,7 @@ use rucc_lex::{Keyword, Punct, Token, TokenKind, Tokens};
 use rucc_session::Std;
 
 use crate::cursor::Cursor;
-use crate::scope::Scopes;
+use crate::scope::{IdentKind, Scopes};
 
 /// How deeply brackets may nest before the parser gives up.
 ///
@@ -39,13 +39,24 @@ pub struct Context<'a> {
     pub pedantic: bool,
     /// How many errors to report before stopping, with zero meaning no limit.
     pub error_limit: usize,
+    /// The names the target declares as types before the file starts, which are the ones
+    /// `rucc_target::TargetInfo::type_names` lists and the file wrote. Declared in the file scope
+    /// rather than made keywords, so a declaration can hide one the way it can in gcc.
+    pub type_names: &'a [Symbol],
 }
 
 impl<'a> Context<'a> {
     /// A context with the defaults, for a caller that only has an interner to hand.
     #[must_use]
     pub fn new(interner: &'a Interner, std: Std) -> Context<'a> {
-        Context { interner, std, gnu: true, pedantic: false, error_limit: DEFAULT_ERROR_LIMIT }
+        Context {
+            interner,
+            std,
+            gnu: true,
+            pedantic: false,
+            error_limit: DEFAULT_ERROR_LIMIT,
+            type_names: &[],
+        }
     }
 }
 
@@ -88,10 +99,14 @@ impl<'a> Parser<'a> {
     /// A parser over `tokens`.
     #[must_use]
     pub fn new(tokens: &'a Tokens, cx: Context<'a>) -> Parser<'a> {
+        let mut scopes = Scopes::new();
+        for &name in cx.type_names {
+            scopes.declare(name, IdentKind::Typedef);
+        }
         Parser {
             cursor: Cursor::new(&tokens.tokens),
             tokens,
-            scopes: Scopes::new(),
+            scopes,
             errors: Errors::new(cx.error_limit),
             ast: Ast::new(),
             cx,
