@@ -51,8 +51,8 @@ use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
     ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
-    RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, TypeId, TypeKind, integer_info,
-    is_complete, is_function, is_void, layout, layout_record,
+    RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, Spelled, TypeId, TypeKind,
+    integer_info, is_complete, is_function, is_void, layout, layout_record,
 };
 
 use super::{MEMBER, Subject};
@@ -168,6 +168,7 @@ impl Checker<'_> {
                     continue;
                 }
             };
+            let spelled = self.spelled_with(field.specs);
             let Some((decl, at)) = self.member_decl(field) else { continue };
             if let Some(name) = decl.name {
                 if !named.insert(name) {
@@ -178,6 +179,10 @@ impl Checker<'_> {
                     );
                     continue;
                 }
+            }
+            // Kept for the debug information, which names the typedef where the program did.
+            if let (Some(member), Some((name, of))) = (decl.name, spelled) {
+                self.types.record_member_spelling(Spelled { record: id, member, name, of });
             }
             fields.push((decl, at));
         }
@@ -924,6 +929,35 @@ mod tests {
         assert!(is_complete(&checker.types, ty));
         // The `char` at zero and the `int` at its own alignment, which is four bytes in.
         assert_eq!(placed(&checker, ty), (8, 4, vec![0, 32]));
+        assert!(messages(&checker).is_empty());
+    }
+
+    #[test]
+    fn a_member_written_with_a_typedef_name_keeps_the_name_and_one_written_without_does_not() {
+        let mut fixture = Fixture::new();
+        let word = fixture.name("word");
+        let named = fixture.specs(TypeSpec::Typedef(word), Quals::CONST);
+        let pointer = Derived::Pointer { quals: Quals::NONE, attrs: ast::AttrList::EMPTY };
+        let n = fixture.declarator(Some("n"), &[pointer]);
+        let int = fixture.int_specs();
+        let x = fixture.declarator(Some("x"), &[]);
+        let specs = structure(&mut fixture, Some("S"), &[member(named, n), member(int, x)]);
+        let hole = defined(&mut fixture, specs);
+        let n = fixture.name("n");
+
+        let mut checker = fixture.checker();
+        let long = checker.types.int(IntKind::Long);
+        checker.declare_typedef(word, long);
+        let ty = checker.declared_type(specs, hole);
+        let TypeKind::Record(record) = checker.types.kind(ty) else { panic!("a record type") };
+
+        let kept: Vec<_> = checker
+            .types
+            .member_spellings()
+            .iter()
+            .map(|one| (one.record, one.member, one.name, one.of))
+            .collect();
+        assert_eq!(kept, [(record, n, word, long)], "`const word *n` and not `int x`");
         assert!(messages(&checker).is_empty());
     }
 

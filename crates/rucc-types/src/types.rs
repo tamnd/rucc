@@ -143,6 +143,19 @@ pub struct Alias {
     pub of: TypeId,
 }
 
+/// A record member written with a typedef name, and the name it was written with.
+#[derive(Debug, Clone, Copy)]
+pub struct Spelled {
+    /// The record the member is in.
+    pub record: RecordId,
+    /// The member.
+    pub member: Symbol,
+    /// The typedef name its specifiers named.
+    pub name: Symbol,
+    /// The type the name stood for, which the member's type is built on top of.
+    pub of: TypeId,
+}
+
 /// Every type in one translation unit.
 #[derive(Debug)]
 pub struct Types {
@@ -153,6 +166,7 @@ pub struct Types {
     records: Vec<RecordInfo>,
     enums: Vec<EnumInfo>,
     aliases: Vec<Alias>,
+    spelled: Vec<Spelled>,
     void: TypeId,
     boolean: TypeId,
     ints: [TypeId; 13],
@@ -181,6 +195,7 @@ impl Types {
             records: Vec::new(),
             enums: Vec::new(),
             aliases: Vec::new(),
+            spelled: Vec::new(),
             // Fixed up immediately below. There is no id to put here before the table exists,
             // and an `Option` on each of them would be paid for on every read for the sake of
             // four lines of construction.
@@ -546,6 +561,22 @@ impl Types {
     #[must_use]
     pub fn aliases(&self) -> &[Alias] {
         &self.aliases
+    }
+
+    /// Records that a member of a record was written with a typedef name.
+    ///
+    /// Here rather than on the member, for the reason the aliases above are beside the table
+    /// rather than in it: which name a member was written with says nothing about the record's
+    /// layout or about which records are compatible, and the member is compared for both. The
+    /// debug information is the one reader, and it wants `size_type n` where the program wrote it.
+    pub fn record_member_spelling(&mut self, spelled: Spelled) {
+        self.spelled.push(spelled);
+    }
+
+    /// Every record member written with a typedef name, in the order they were written.
+    #[must_use]
+    pub fn member_spellings(&self) -> &[Spelled] {
+        &self.spelled
     }
 
     /// A typedef name standing for `underlying`.
