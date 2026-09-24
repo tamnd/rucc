@@ -1995,6 +1995,12 @@ pub struct Options {
     /// because the attribute is a statement about that function and this is a preference about
     /// the unit.
     pub align_functions: Option<u32>,
+    /// Whether every function calls `__cyg_profile_func_enter` on the way in and
+    /// `__cyg_profile_func_exit` on the way out, from `-finstrument-functions`.
+    ///
+    /// Off unless asked for. A function declared `no_instrument_function` is left alone whatever
+    /// this says, which is how the two hooks avoid calling themselves.
+    pub instrument_functions: bool,
     /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`.
     pub pic: Pic,
     /// Whether a definition in this unit may be replaced at load time by one in another object,
@@ -2235,6 +2241,7 @@ impl Options {
             gnu89_inline: false,
             visibility: Visibility::default(),
             align_functions: None,
+            instrument_functions: false,
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,

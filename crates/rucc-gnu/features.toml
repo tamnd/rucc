@@ -471,9 +471,10 @@ notes = "`setjmp` is declared with it, and ignoring it means the register alloca
 name = "no_instrument_function"
 kind = "attribute"
 gcc_version = "2.95"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-sema::no_instrument_function_written_as_the_attribute_is_kept", "rucc-driver::instrumenting_functions_calls_the_hooks_around_every_body_but_the_hooks"]
+notes = "Takes a function back out of `-finstrument-functions`, which is what the two hooks need or they call themselves. One declaration saying it is enough, so a prototype that says it covers the definition below."
 
 [[feature]]
 name = "no_stack_protector"

@@ -377,6 +377,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Contract::Fast => FpContract::Fast,
                             },
                             align: opts.align_functions,
+                            instrument: opts.instrument_functions,
                             read: &mut read,
                         },
                     );
@@ -4376,6 +4377,50 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
         let text = result.text().to_owned();
         assert!(!text.contains("tbaa"), "not even the root: {text}");
+    }
+
+    /// `-finstrument-functions` puts one call to the entry hook in front of the body and one call
+    /// to the exit hook in front of every return, each given the function's own address and the
+    /// address it returns to. A function declared `no_instrument_function` gets neither, and the
+    /// hooks are declared that way here as they are in `execute/eeprof-1.c`, since a hook that
+    /// called itself would never get as far as its body.
+    #[test]
+    fn instrumenting_functions_calls_the_hooks_around_every_body_but_the_hooks() {
+        let source = concat!(
+            "#define NOCHK __attribute__((no_instrument_function))\n",
+            "void __cyg_profile_func_enter(void *, void *) NOCHK;\n",
+            "void __cyg_profile_func_exit(void *, void *) NOCHK;\n",
+            "int calls;\n",
+            "int pick(int x) { if (x) return 1; return 2; }\n",
+            "void quiet(void) NOCHK;\n",
+            "void quiet(void) { calls++; }\n",
+            "void __cyg_profile_func_enter(void *fn, void *site) { calls++; }\n",
+            "void __cyg_profile_func_exit(void *fn, void *site) { calls--; }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.instrument_functions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+        let text = result.text().to_owned();
+        let body = |name: &str| -> String {
+            let open = format!("func @{name}(");
+            let start = text.find(&open).unwrap_or_else(|| panic!("no {name}: {text}"));
+            let rest = &text[start..];
+            rest[..rest.find("\n}").unwrap_or(rest.len())].to_owned()
+        };
+        let pick = body("pick");
+        assert_eq!(pick.matches("call @__cyg_profile_func_enter(").count(), 1, "{pick}");
+        assert_eq!(pick.matches("call @__cyg_profile_func_exit(").count(), 2, "{pick}");
+        assert!(pick.contains("return_address"), "{pick}");
+        assert!(pick.contains("global_addr @pick"), "{pick}");
+        for quiet in ["quiet", "__cyg_profile_func_enter", "__cyg_profile_func_exit"] {
+            assert!(!body(quiet).contains("call "), "{quiet} is left alone: {text}");
+        }
+
+        opts.instrument_functions = false;
+        let result = run(&opts, source);
+        assert!(!result.text().contains("call @__cyg_profile"), "off unless asked for");
     }
 
     /// `return;` from a function that promised a value, which only C89 lets through and which

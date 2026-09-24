@@ -1711,16 +1711,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 ));
             }
             "-fno-non-call-exceptions" => {}
-            "-finstrument-functions" => {
-                return Err(err(
-                    "-finstrument-functions calls __cyg_profile_func_enter on entry to every \
-                     function and __cyg_profile_func_exit on the way out, and nothing here emits \
-                     either call. A program that asks for them usually counts them, so taking the \
-                     flag and dropping it would turn a program that fails loudly into one that \
-                     fails quietly",
-                ));
-            }
-            "-fno-instrument-functions" => {}
+            "-finstrument-functions" => opts.instrument_functions = true,
+            "-fno-instrument-functions" => opts.instrument_functions = false,
             // The unstable options, spelled the way rustc spells them and carrying the same
             // promise, which is none: one of these may change or go away in any release. They are
             // measurements and debugging aids rather than things a build asks for, which is why
@@ -3949,12 +3941,10 @@ mod tests {
     /// how fast it does it, so each is refused with the reason, and the negative of each is what
     /// happens anyway and is taken.
     #[test]
-    fn the_three_that_change_the_answer_are_refused_and_their_negatives_are_taken() {
-        for (flag, word) in [
-            ("-ffast-math", "__FAST_MATH__"),
-            ("-fnon-call-exceptions", "landing pad"),
-            ("-finstrument-functions", "__cyg_profile_func_enter"),
-        ] {
+    fn the_two_that_change_the_answer_are_refused_and_their_negatives_are_taken() {
+        for (flag, word) in
+            [("-ffast-math", "__FAST_MATH__"), ("-fnon-call-exceptions", "landing pad")]
+        {
             let e = parse_args(&args(&["-c", flag, "a.c"])).unwrap_err();
             assert!(e.message.contains(word), "{flag}: {}", e.message);
             assert!(!e.message.contains("unknown option"), "{flag} deserves a reason");
@@ -3963,6 +3953,17 @@ mod tests {
             let (opts, _) = compile(&["-c", &off, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{off}");
         }
+    }
+
+    /// `-finstrument-functions` used to be the third of those, and it is taken now that the hooks
+    /// are called. The last of it and its negative is the one that counts, as with any pair.
+    #[test]
+    fn instrument_functions_is_taken_and_the_last_of_the_pair_wins() {
+        let (opts, _) = compile(&["-c", "-finstrument-functions", "a.c"]);
+        assert!(opts.instrument_functions);
+        let (opts, _) =
+            compile(&["-c", "-finstrument-functions", "-fno-instrument-functions", "a.c"]);
+        assert!(!opts.instrument_functions);
     }
 
     #[test]

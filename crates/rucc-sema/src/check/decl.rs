@@ -89,8 +89,9 @@ struct Declared {
     noreturn: bool,
     /// Whether this declaration said the function is written without a prologue or an epilogue.
     naked: bool,
-    /// What this declaration said about inlining it, as [`DeclFlags::ALWAYS_INLINE`],
-    /// [`DeclFlags::NOINLINE`] and [`DeclFlags::DECLARED_INLINE`] and nothing else.
+    /// What this declaration said about inlining it and about what is written around its body, as
+    /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
+    /// [`DeclFlags::NO_STRICT_ALIASING`] and [`DeclFlags::NO_INSTRUMENT`] and nothing else.
     inlining: DeclFlags,
     /// What this declaration promised a call to it does, from `const` and `pure`.
     effects: Effects,
@@ -2634,6 +2635,24 @@ mod tests {
         let id = only(&c, list);
 
         assert_eq!(dump(&c, id), "decl #0 nlr_push : int(void) function external declared naked\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn no_instrument_function_written_as_the_attribute_is_kept() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.attrs = f.attribute("__no_instrument_function__");
+        let decl = f.var(specs, "hook", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 hook : int(void) function external declared no_instrument_function\n"
+        );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 

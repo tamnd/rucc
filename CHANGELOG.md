@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Two rules can now share a pattern when the earlier one has a guard, and the first whose guard holds fires. AArch64 uses it to build a constant too wide for one `mov` as a `mov` of its low sixteen bits and a `movk` for each piece above, so `0x12345678` is two instructions, a 64-bit constant under `2^32` is two, and any other is four. A rule after an unguarded one with the same pattern is still refused as one that can never fire.
 - AArch64 has a rule for every widening and narrowing between integer types, including to and from one bit values, which are widened and narrowed with an `and` so nothing above the bit is taken on trust.
 - AArch64 builds a dense `switch` as a jump table, reached with `adr` and read with `ldrsw`, and takes the address of a label with `adr`, so computed `goto` works there too. Both used to be refused.
+- `-finstrument-functions` is taken rather than refused. Every function calls `__cyg_profile_func_enter` in front of its body and `__cyg_profile_func_exit` in front of every return, with its own address and the address it returns to, and `__attribute__((no_instrument_function))` takes a function back out. The calls go in while the body is lowered, before inlining, as gcc does. `execute/eeprof-1.c` passes at every level.
 
 ### Changed
 
