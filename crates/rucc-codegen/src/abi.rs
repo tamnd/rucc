@@ -294,7 +294,13 @@ pub fn entry(
             ));
             continue;
         }
-        let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
+        let at = match (abi, conv.sret) {
+            // The address a result goes back through, on a convention with a register of its own
+            // for it, which takes no position from the arguments after it.
+            (Abi::Sret { .. }, Some(sret)) => Where::Reg(sret),
+            _ if ty.is_float() => places.float(float_bytes(ty)),
+            _ => places.integer(),
+        };
         if let Some(missing) = refuses(ty, insts) {
             return Err((index, missing));
         }
@@ -627,6 +633,12 @@ pub fn call(
             let plan = crate::expand::plan(u64::from(size), align, conv.word);
             let count = i32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
             as_bytes.push((reg, up, count, plan));
+            continue;
+        }
+        // The address a result comes back through goes in its own register where the convention
+        // has one, and is not an argument position, the same as on the other side in [`entry`].
+        if let (Abi::Sret { .. }, Some(sret)) = (abi, conv.sret) {
+            passed.push((reg, sret, class_of(ty, conv)));
             continue;
         }
         let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };

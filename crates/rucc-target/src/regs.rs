@@ -417,6 +417,13 @@ pub struct CallRegs {
     /// record, and so a function that calls keeps a frame pointer on such a machine whatever the
     /// flags say. gcc does the same there.
     pub link: Option<PhysReg>,
+    /// The register the address of a result returned through memory is passed in, or `None` on a
+    /// convention that passes it as the first integer argument.
+    ///
+    /// AAPCS64 gives it `x8`, which is not an argument register, so the arguments after it still
+    /// start at `x0`. SysV and Windows x64 pass it where the first argument would have gone and
+    /// move the rest along by one.
+    pub sret: Option<PhysReg>,
     /// What DWARF calls each register, one list per class in the order the file numbers the
     /// classes, and inside a list in the order the class numbers its registers.
     ///
@@ -736,6 +743,7 @@ mod tests {
             word: 8,
             push: 8,
             link: None,
+            sret: None,
             // Empty, which is all a convention made up for a test of argument placement needs to
             // say about a question it never asks.
             dwarf: &[],
