@@ -295,6 +295,9 @@ pub struct Flags {
     /// which `-fschedule-insns2` asks for and every level from `-O2` turns on. See
     /// [`crate::schedule`].
     pub schedule: bool,
+    /// Whether the head of every loop starts on a boundary of its own, which `-falign-loops` asks
+    /// for and no level turns on by itself yet. See [`crate::layout::heads`].
+    pub align_loops: bool,
     /// Whether the target's timing model is believed about the machine's units as well as about
     /// its latencies, which `-Zcycle-accurate-model=` says and the model itself answers otherwise.
     ///
@@ -322,9 +325,9 @@ pub struct Flags {
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
     /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
-    /// nothing in the frame sharing with anything, no scheduling and code that is meant to be fast
-    /// rather than small, which is what a convention that has a red zone says at `-O0` when nobody
-    /// on the command line has said otherwise.
+    /// nothing in the frame sharing with anything, no scheduling, no loop padded to a boundary and
+    /// code that is meant to be fast rather than small, which is what a convention that has a red
+    /// zone says at `-O0` when nobody on the command line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -336,6 +339,7 @@ impl Default for Flags {
             reorder: false,
             reuse: false,
             schedule: false,
+            align_loops: false,
             accurate: None,
             verify: false,
             goal: Goal::Speed,
@@ -731,6 +735,12 @@ pub fn compile_recording(
     // are allowed. Nothing here moves an instruction or changes a block, so being behind the
     // layout's freeze costs it nothing.
     shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names, flags.goal);
+
+    // Once the blocks will not move again, since a head is a block a jump runs backwards to and
+    // which way a jump runs is the layout's answer. Nothing below adds or takes out a block.
+    if flags.align_loops {
+        func.heads = layout::heads(&func);
+    }
 
     // Last of all, because a stretch is named by the instructions at either end of it and every
     // pass above is free to take an instruction out or move one. The frame is wanted here as well

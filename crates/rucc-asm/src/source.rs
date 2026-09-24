@@ -35,7 +35,7 @@ use rucc_object::{
     Array, Assembled, Binding, Extent, Held, Name, Part, Reference, Reloc, Shape, Sort, Visibility,
 };
 use rucc_target::ObjectFormat;
-use rucc_target::x86_64::{SYSV, gpr_named};
+use rucc_target::x86_64::{SYSV, gpr_named, nops};
 
 /// What an instruction says about the place in it that names something, under a name that does not
 /// collide with the [`Sort`] an ELF symbol has.
@@ -864,10 +864,10 @@ impl Reader {
         // The default filling is a no-op instruction in a section that holds instructions, because
         // what is being aligned there is the next instruction and the processor may walk into the
         // padding from the one before it.
-        let default = if self.parts[self.here].shape.exec { 0x90 } else { 0 };
+        let exec = self.parts[self.here].shape.exec;
         let fill = match args.get(1) {
-            Some(arg) if !arg.trim().is_empty() => self.byte(arg)?,
-            _ => default,
+            Some(arg) if !arg.trim().is_empty() => Some(self.byte(arg)?),
+            _ => None,
         };
         let at = self.at();
         let over = at % boundary;
@@ -882,7 +882,17 @@ impl Reader {
         }
         let part = &mut self.parts[self.here];
         part.align = part.align.max(boundary);
-        self.pad(need, fill)
+        match fill {
+            Some(fill) => self.pad(need, fill),
+            // Not one byte at a time, which is what gas does as well: the padding in front of a
+            // loop is fallen into, and a few long nops are fewer instructions than many short ones.
+            None if exec => {
+                let mut bytes = Vec::new();
+                nops(usize::try_from(need).unwrap_or(usize::MAX), &mut bytes);
+                self.put(&bytes)
+            }
+            None => self.pad(need, 0),
+        }
     }
 
     /// `.globl` and the two others that say who can see a name.

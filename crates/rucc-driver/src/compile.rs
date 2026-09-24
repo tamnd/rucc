@@ -843,6 +843,10 @@ fn generate(
         // because a schedule is a whole dependence graph per block and `-O1` is the level whose
         // budget is roughly `-O0`'s. Not at `-O0` for the reason nothing else is.
         schedule: opts.schedule_insns.unwrap_or_else(|| opts.opt_level.schedules()),
+        // Off unless asked for. gcc pads loops at `-O2` and `-O3`, and the same padding here cost a
+        // third of a percent of the corpus's text and more than a percent of SQLite's for no speed
+        // anybody could measure, so no level asks for it yet. See tamnd/rucc#1823.
+        align_loops: opts.align_loops.unwrap_or(false),
         // Whatever the command line said, and the model's own answer when it said nothing.
         accurate: opts.cycle_accurate_model,
         // The same flag that turns the IR verifier on in a release build, since what it says is

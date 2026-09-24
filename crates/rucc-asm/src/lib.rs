@@ -76,6 +76,22 @@ pub fn kept(funcs: &[Func], names: &Interner) -> bool {
     })
 }
 
+/// What the listing writes in front of the head of a loop, which is gcc's own padding at `-O2`.
+///
+/// Sixteen bytes when that is at most ten bytes of padding away, and eight otherwise. The two
+/// numbers are the ones gcc uses for x86-64 and the directives are the ones it writes, so a loop
+/// lands where gcc's would given the same bytes in front of it. The object writer does the same
+/// arithmetic in [`loop_padding`], and the two are beside each other so that they are changed
+/// together.
+const LOOP_DIRECTIVES: &str = "\t.p2align\t4,,10\n\t.p2align\t3\n";
+
+/// How many bytes of padding go in front of the head of a loop that would otherwise start `at`
+/// bytes into the section. See [`LOOP_DIRECTIVES`].
+fn loop_padding(at: usize) -> usize {
+    let wide = at.next_multiple_of(16) - at;
+    if wide <= 10 { wide } else { at.next_multiple_of(8) - at }
+}
+
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
 
@@ -219,5 +235,15 @@ mod tests {
     #[test]
     fn milestone_is_recorded() {
         assert!(super::MILESTONE.starts_with('M'));
+    }
+
+    /// Up to ten bytes to reach sixteen, and past that whatever reaches eight.
+    #[test]
+    fn a_loop_is_padded_to_sixteen_when_that_is_near_and_to_eight_when_it_is_not() {
+        let cases = [(0, 0), (6, 10), (5, 3), (1, 7), (8, 8), (9, 7), (15, 1), (16, 0), (18, 6)];
+        for (at, padding) in cases {
+            assert_eq!(super::loop_padding(at), padding, "at {at}");
+            assert!((at + padding) % 8 == 0, "at {at} lands on eight at least");
+        }
     }
 }

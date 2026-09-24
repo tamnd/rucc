@@ -141,6 +141,107 @@ pub fn blocks(
     func.set_block_order(&order);
 }
 
+/// The heads of the loops, which are the blocks a jump inside a loop runs backwards to, in the order
+/// they are laid out.
+///
+/// Read off the layout rather than off a loop tree, because what the padding is for is where the
+/// jump lands and the layout is what says that. A loop the layout rotated has its test at the
+/// bottom and its body at the top, and the top of the body is the head here, since it is where the
+/// back edge goes every time round. A block that jumps to itself is its own head.
+///
+/// A jump that runs backwards is not always a loop. The trace can lay a cold arm out after the
+/// block it rejoins, and the jump back from it runs once. What makes it a loop is that the block
+/// it lands on can get back to the jump, which is both ends being on one cycle of the graph.
+///
+/// Never the first block. The front of a function is already on the boundary a function is given,
+/// and anything put between the function's name and its first instruction would be in the room a
+/// patcher was promised or ahead of the landing pad an indirect call has to find first.
+///
+/// Nor a loop that hardly runs. `spec/optimizer/38-scheduling-and-layout.md` section 38.5 takes
+/// gcc's `align-threshold`: padding is size, so it goes in front of a head that runs at least a
+/// hundredth as often as the hottest block of the function and nowhere else. A function with no
+/// weights has every block at the same one, and then every loop is hot enough.
+///
+/// Run after [`blocks`], and after anything else that adds or takes out a block.
+#[must_use]
+pub fn heads(func: &mir::Func) -> Vec<mir::Block> {
+    let mut at = vec![usize::MAX; func.block_count()];
+    for (place, block) in func.blocks().enumerate() {
+        at[block.index()] = place;
+    }
+    let piece = cycles(func);
+    let mut back = vec![false; func.block_count()];
+    for block in func.blocks() {
+        for succ in &func[block].succs {
+            let to = succ.block.index();
+            if at[to] <= at[block.index()] && piece[to] == piece[block.index()] {
+                back[to] = true;
+            }
+        }
+    }
+    let hottest = func.blocks().map(|block| func[block].weight.raw()).max().unwrap_or(0);
+    let floor = hottest / ALIGN_THRESHOLD;
+    func.blocks()
+        .skip(1)
+        .filter(|block| back[block.index()] && func[*block].weight.raw() >= floor)
+        .collect()
+}
+
+/// How many times less often than the hottest block a loop may run and still be padded, which is
+/// gcc's `align-threshold` (`gcc/params.opt:29`). See [`heads`].
+const ALIGN_THRESHOLD: u64 = 100;
+
+/// Which piece of the graph each block is in, indexed by the block's own number, where two blocks
+/// are in the same piece when each can reach the other.
+///
+/// Kosaraju's two walks, both with a stack of their own rather than recursion, for the reason
+/// [`order`] gives: the first down the edges to find the order the blocks finish in, and the second
+/// up them from the last to finish, where everything one walk reaches is one piece.
+fn cycles(func: &mir::Func) -> Vec<usize> {
+    let count = func.block_count();
+    let mut preds = vec![Vec::new(); count];
+    for block in func.blocks() {
+        for succ in &func[block].succs {
+            preds[succ.block.index()].push(block.index());
+        }
+    }
+    let mut finished = Vec::with_capacity(count);
+    let mut seen = vec![false; count];
+    for block in func.blocks() {
+        if std::mem::replace(&mut seen[block.index()], true) {
+            continue;
+        }
+        let mut stack = vec![(block, 0usize)];
+        while let Some((block, next)) = stack.pop() {
+            let Some(succ) = func[block].succs.get(next) else {
+                finished.push(block.index());
+                continue;
+            };
+            stack.push((block, next + 1));
+            if !std::mem::replace(&mut seen[succ.block.index()], true) {
+                stack.push((succ.block, 0));
+            }
+        }
+    }
+    let mut piece = vec![usize::MAX; count];
+    for (number, &root) in finished.iter().rev().enumerate() {
+        if piece[root] != usize::MAX {
+            continue;
+        }
+        piece[root] = number;
+        let mut stack = vec![root];
+        while let Some(block) = stack.pop() {
+            for &pred in &preds[block] {
+                if piece[pred] == usize::MAX {
+                    piece[pred] = number;
+                    stack.push(pred);
+                }
+            }
+        }
+    }
+    piece
+}
+
 /// The order the blocks are laid out in, which is every block the function has exactly once.
 fn order(func: &mir::Func) -> Vec<mir::Block> {
     let mut order = Vec::with_capacity(func.block_count());
@@ -1288,5 +1389,74 @@ mod tests {
         traced(&mut func, &mut names);
 
         assert_eq!(order_of(&func), [0, 2, 4, 1, 3]);
+    }
+
+    /// The head of a loop is the block its back edge runs to, and a function with no loop has none.
+    #[test]
+    fn the_head_of_a_loop_is_where_its_back_edge_lands() {
+        let (mut names, mut func, made) = blank(4);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        branch(&mut func, &mut names, made[1], &[made[2], made[3]]);
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[1])];
+        runs(&mut func, made[0], 10_000, &[10_000]);
+        runs(&mut func, made[1], 100_000, &[90_000, 10_000]);
+        runs(&mut func, made[2], 90_000, &[90_000]);
+        runs(&mut func, made[3], 10_000, &[]);
+        traced(&mut func, &mut names);
+        assert_eq!(heads(&func), [made[1]]);
+
+        let (mut names, mut func, made) = blank(4);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[3])];
+        traced(&mut func, &mut names);
+        assert_eq!(heads(&func), [], "nothing runs backwards");
+    }
+
+    /// A loop that runs less than a hundredth as often as the hottest block is left unpadded.
+    #[test]
+    fn a_loop_that_hardly_runs_is_not_padded() {
+        let (mut names, mut func, made) = blank(5);
+        branch(&mut func, &mut names, made[0], &[made[1], made[3]]);
+        branch(&mut func, &mut names, made[1], &[made[1], made[2]]);
+        branch(&mut func, &mut names, made[3], &[made[3], made[4]]);
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[4])];
+        runs(&mut func, made[0], 10_000, &[10, 9_990]);
+        runs(&mut func, made[1], 900, &[890, 10]);
+        runs(&mut func, made[2], 10, &[10]);
+        runs(&mut func, made[3], 100_000, &[90_010, 9_990]);
+        runs(&mut func, made[4], 10_000, &[]);
+        traced(&mut func, &mut names);
+        assert_eq!(heads(&func), [made[3]], "the cold loop runs 900 times to the hot one's 100000");
+    }
+
+    /// A jump back to a block that cannot get back to the jump is the end of a cold arm rather
+    /// than a loop, however the layout ordered the two.
+    #[test]
+    fn a_jump_backwards_out_of_a_cold_arm_is_not_a_loop() {
+        let (mut names, mut func, made) = blank(4);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[3])];
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[3])];
+        runs(&mut func, made[0], 10_000, &[9_990, 10]);
+        runs(&mut func, made[1], 9_990, &[9_990]);
+        runs(&mut func, made[2], 10, &[10]);
+        runs(&mut func, made[3], 10_000, &[]);
+        traced(&mut func, &mut names);
+        let at = |block| func.blocks().position(|laid| laid == block);
+        assert!(at(made[2]) > at(made[3]), "the cold arm is laid out behind where it rejoins");
+        assert_eq!(heads(&func), []);
+    }
+
+    /// A block that jumps to itself is a loop, and the first block is never padded even when a
+    /// jump runs back to it.
+    #[test]
+    fn a_block_that_goes_round_itself_is_a_head_and_the_first_block_is_not() {
+        let (mut names, mut func, made) = blank(3);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        branch(&mut func, &mut names, made[1], &[made[1], made[2]]);
+        branch(&mut func, &mut names, made[2], &[made[0], made[2]]);
+        laid_out(&mut func, &mut names);
+        assert_eq!(heads(&func), [made[1], made[2]]);
     }
 }

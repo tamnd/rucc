@@ -277,7 +277,19 @@ impl Assembler<'_> {
             self.lines.push(Row { at: 0, span: self.func.declared, inst: None });
         }
         let end = self.func.cfi_end();
+        let mut heads = vec![false; self.func.block_count()];
+        for &head in &self.func.heads {
+            heads[head.index()] = true;
+        }
         for block in self.func.blocks() {
+            // The head of a loop is padded to the boundary the listing asks the assembler for, with
+            // instructions rather than single bytes, since the block in front of it may fall in.
+            // The section is told for the reason an alignment instruction tells it below.
+            if heads[block.index()] {
+                let count = crate::loop_padding(self.text.bytes.len());
+                x86_64::nops(count, &mut self.text.bytes);
+                self.text.align = self.text.align.max(16);
+            }
             self.blocks[block.index()] = self.text.bytes.len();
             // And the name an image knows the block by, as a symbol at the same byte. The number
             // the jumps above use is worked out here and stays here, because both ends of a jump
@@ -1098,5 +1110,35 @@ mod tests {
         let aarch64 = TargetInfo::new(Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu));
         let error = assemble(&[], &names, &aarch64, true, false).expect_err("no encoder");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
+    }
+
+    /// The head of a loop starts on sixteen when that is ten bytes away or less and on eight when
+    /// it is further, and what fills the gap is one instruction that does nothing.
+    #[test]
+    fn the_head_of_a_loop_is_padded_with_one_instruction_that_does_nothing() {
+        let adds = |count: usize| {
+            write(|func, names| {
+                let first = func.create_block();
+                let head = func.create_block();
+                let add = Opcode::new(names.intern("x64.add_rr_32"));
+                for block in std::iter::repeat_n(first, count).chain([head]) {
+                    func.build(block, add)
+                        .operand(Operand::write(Reg::physical(RAX), GPR))
+                        .operand(Operand::read(Reg::physical(RAX), GPR))
+                        .operand(Operand::read(Reg::physical(RCX), GPR))
+                        .finish();
+                }
+                func.heads = vec![head];
+            })
+        };
+        // Six bytes in, which is ten from sixteen: one ten byte nop.
+        let text = adds(3);
+        assert_eq!(&text.bytes[6..16], [0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0]);
+        assert_eq!(hex(&text.bytes[16..]), "01 c8");
+        // Two bytes in, which is fourteen from sixteen and too far, so six to reach eight.
+        let text = adds(1);
+        assert_eq!(hex(&text.bytes[2..8]), "66 0f 1f 44 00 00");
+        assert_eq!(hex(&text.bytes[8..]), "01 c8");
+        assert!(text.align >= 16, "{}", text.align);
     }
 }

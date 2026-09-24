@@ -1795,6 +1795,15 @@ pub struct Options {
     /// `spec/optimizer/38-scheduling-and-layout.md` section 38.6 decides on one scheduler and puts
     /// it after allocation, and section 38.8 owes the measurement that would justify a second.
     pub schedule_insns: Option<bool>,
+    /// Whether the head of every loop starts on a sixteen byte boundary when that costs at most ten
+    /// bytes of padding, from `-falign-loops` and `-fno-align-loops`.
+    ///
+    /// `None` is a command line that said neither, and then it is off at every level. gcc turns it
+    /// on at `-O2` and `-O3`, and rucc does not yet, because it was measured and bought nothing:
+    /// tamnd/rucc#1823 has the numbers. Three way rather than a `bool` for the reason
+    /// `reorder_blocks` above is, so that the day a level turns it on, `-fno-align-loops` still
+    /// means something.
+    pub align_loops: Option<bool>,
     /// Whether the target's timing model is believed about the machine's units as well as about
     /// its latencies, from `-Zcycle-accurate-model=`.
     ///
@@ -2198,6 +2207,7 @@ impl Options {
             red_zone: true,
             reorder_blocks: None,
             schedule_insns: None,
+            align_loops: None,
             cycle_accurate_model: None,
             stack_reuse: None,
             protector: Protector::default(),
