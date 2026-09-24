@@ -48,12 +48,13 @@
 //! since a `va_arg` of a quad is a walk over a save area whose slot for this one type is a whole
 //! vector register rather than the low half of one.
 //!
-//! The guard names two things and needs both. `__FLT128_MANT_DIG__` is the macro gcc defines
-//! wherever the type exists, so it is the question "is there a `_Float128` here" asked the way
-//! both compilers answer it, and `__x86_64__` is the row the harness runs. The second half is
-//! there because the two sides of a differential are two different compilers: a guard one of them
-//! takes and the other does not is a caller calling a function nobody defined, which is a link
-//! error rather than a finding.
+//! The guard names two things and needs both. `__SIZEOF_FLOAT128__` is the macro gcc, clang and
+//! rucc all define where the type has its `__float128` name, which is the name written here for
+//! that reason, and `__x86_64__` is the row the harness runs. `__FLT128_MANT_DIG__` was the macro
+//! before, and clang does not define it, so a caller built by rucc called quad cases a callee
+//! built by zig had left out. The second half is there because the two sides of a differential
+//! are two different compilers: a guard one of them takes and the other does not is a caller
+//! calling a function nobody defined, which is a link error rather than a finding.
 //!
 //! `__int128` is in on the same terms with a guard of its own, `__SIZEOF_INT128__` in the place of
 //! the quad's macro. It is the other type here that takes two eightbytes, and it takes them as two
@@ -101,7 +102,7 @@ const ANCHOR: u64 = 64;
 /// The module comment argues for both halves of it. The short version is that the first half asks
 /// whether the type is here and the second asks whether this is the row the harness runs, and a
 /// differential needs the answer to be the same on both sides of the call.
-const QUAD: &str = "defined(__FLT128_MANT_DIG__) && defined(__x86_64__)";
+const QUAD: &str = "defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)";
 
 /// The condition the `__int128` cases are written under, which is the quad's with the other type.
 const INT128: &str = "defined(__SIZEOF_INT128__) && defined(__x86_64__)";
@@ -160,7 +161,7 @@ impl Scalar {
             Scalar::Float => "float",
             Scalar::Double => "double",
             Scalar::LongDouble => "long double",
-            Scalar::Float128 => "_Float128",
+            Scalar::Float128 => "__float128",
             Scalar::Int128 => "__int128",
             Scalar::Pointer => "void *",
         }
@@ -563,7 +564,7 @@ impl Values {
             // Lowercase, the way the `f` on a float here is, and it is the suffix rather than a
             // cast because a quad written as a double and widened would be exact anyway and would
             // stop saying which type the value was meant to be.
-            Scalar::Float128 => format!("{}.25f128", 1 + n % 100_000),
+            Scalar::Float128 => format!("{}.25q", 1 + n % 100_000),
             // Both halves carry the number, so a half that arrived in the other's place is wrong
             // and a high half that was never passed at all is not the zero it would be by luck.
             // Built out of unsigned words, since shifting a negative value is undefined.
@@ -893,7 +894,9 @@ fn signatures() -> Vec<Signature> {
         let count = 1 + rng.below(6) as usize;
         let varargs: Vec<Ty> = (0..count).map(|_| draw(&mut rng)).collect();
         let ret = if rng.below(8) == 0 { None } else { Some(draw(&mut rng)) };
-        out.push(build_variadic(&mut values, format!("v{index:02}"), "", ret, params, varargs));
+        // `va` rather than `v`, because `v10` is a vector register to the LLVM assembler, which
+        // then refuses `bl v10` in the caller, and clang's own output with it.
+        out.push(build_variadic(&mut values, format!("va{index:02}"), "", ret, params, varargs));
     }
 
     // The quad cases go last, after everything drawn from the seed, so that every other signature

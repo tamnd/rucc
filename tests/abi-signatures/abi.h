@@ -109,9 +109,9 @@ union int_or_float {
  * puts in a single vector register. It is the only shape here that spends two eightbytes on one
  * register, so a compiler that places arguments by counting eightbytes gets everything behind it
  * wrong and gets nothing else wrong. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_one {
-	_Float128 x;
+	__float128 x;
 };
 #endif
 
@@ -119,10 +119,10 @@ struct quad_one {
  * thing goes to memory although every member of it is a float. AAPCS64 reads the same
  * declaration as a homogeneous aggregate and gives it two vector registers, which is the sort of
  * disagreement the corpus exists to find. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_two {
-	_Float128 x;
-	_Float128 y;
+	__float128 x;
+	__float128 y;
 };
 #endif
 
@@ -130,9 +130,9 @@ struct quad_two {
  * object: the first eightbyte is a float and an integer at once and comes out INTEGER, the
  * second is an SSEUP with no SSE in front of it any more and is turned back into SSE, so sixteen
  * bytes arrive split between the two register files. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 union quad_or_long {
-	_Float128 q;
+	__float128 q;
 	long a;
 };
 #endif
@@ -298,63 +298,63 @@ void hv_long_double_and_friends(int a0, ...);
  * case above it, and the one where an off by one in the save area offset does not show up. */
 int hv_registers_already_spent(long long a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6, long long a7, ...);
 
-unsigned long v00(long a0, int a1, ...);
-int v01(struct four_float a0, ...);
-char v02(int a0, ...);
-signed char v03(signed char a0, double a1, ...);
-void v04(union int_or_float a0, ...);
-int v05(unsigned long long a0, int a1, struct long_double_one a2, ...);
-struct three_char v06(struct int_float a0, int a1, ...);
-long double v07(unsigned char a0, union int_or_float a1, struct two_int a2, ...);
-double v08(long double a0, struct two_int a1, struct four_float a2, ...);
-unsigned long v09(struct one_char a0, ...);
-struct four_float v10(unsigned char a0, void *a1, struct four_float a2, ...);
-int v11(struct int_float a0, unsigned short a1, int a2, ...);
-long double v12(void *a0, long a1, ...);
-struct four_float v13(int a0, ...);
-void v14(struct three_char a0, unsigned int a1, ...);
-char v15(long a0, struct long_double_one a1, void *a2, ...);
-signed char v16(int a0, ...);
-struct one_char v17(union int_or_float a0, unsigned char a1, unsigned int a2, ...);
-long long v18(long a0, ...);
-unsigned int v19(unsigned int a0, ...);
-void v20(struct int_float a0, ...);
-struct int_pointer v21(struct int_pointer a0, ...);
-unsigned char v22(struct two_float a0, ...);
-short v23(struct nested a0, ...);
+unsigned long va00(long a0, int a1, ...);
+int va01(struct four_float a0, ...);
+char va02(int a0, ...);
+signed char va03(signed char a0, double a1, ...);
+void va04(union int_or_float a0, ...);
+int va05(unsigned long long a0, int a1, struct long_double_one a2, ...);
+struct three_char va06(struct int_float a0, int a1, ...);
+long double va07(unsigned char a0, union int_or_float a1, struct two_int a2, ...);
+double va08(long double a0, struct two_int a1, struct four_float a2, ...);
+unsigned long va09(struct one_char a0, ...);
+struct four_float va10(unsigned char a0, void *a1, struct four_float a2, ...);
+int va11(struct int_float a0, unsigned short a1, int a2, ...);
+long double va12(void *a0, long a1, ...);
+struct four_float va13(int a0, ...);
+void va14(struct three_char a0, unsigned int a1, ...);
+char va15(long a0, struct long_double_one a1, void *a2, ...);
+signed char va16(int a0, ...);
+struct one_char va17(union int_or_float a0, unsigned char a1, unsigned int a2, ...);
+long long va18(long a0, ...);
+unsigned int va19(unsigned int a0, ...);
+void va20(struct int_float a0, ...);
+struct int_pointer va21(struct int_pointer a0, ...);
+unsigned char va22(struct two_float a0, ...);
+short va23(struct nested a0, ...);
 /* A _Float128 between two integers and returned as one. The type is sixteen bytes with sixteen
  * byte alignment and travels in a vector register on the row this runs on, so the integers
  * either side of it are how a shift in either register file shows up. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-_Float128 q_quad_between_ints(int a0, _Float128 a1, int a2);
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+__float128 q_quad_between_ints(int a0, __float128 a1, int a2);
 #endif
 
 /* Ten of them, which is more than SysV has vector registers, so the last two are on the stack
  * and are the only arguments in this corpus whose stack slot has to be aligned to sixteen rather
  * than to eight. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-_Float128 q_quads_past_the_registers(_Float128 a0, _Float128 a1, _Float128 a2, _Float128 a3, _Float128 a4, _Float128 a5, _Float128 a6, _Float128 a7, _Float128 a8, _Float128 a9);
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+__float128 q_quads_past_the_registers(__float128 a0, __float128 a1, __float128 a2, __float128 a3, __float128 a4, __float128 a5, __float128 a6, __float128 a7, __float128 a8, __float128 a9);
 #endif
 
 /* The struct holding one quad with a double behind it, which is the case tamnd/rucc#1191 was
  * about. The struct is two eightbytes and one register, so a compiler that counts the eightbytes
  * hands the double a register the struct is already sitting in. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_one q_struct_then_double(struct quad_one a0, double a1, int a2);
 #endif
 
 /* The thirty two byte one with an integer either side, which is the aggregate of floats that
  * goes to memory anyway, so a caller that left the copy in the wrong place moves the argument
  * after it as well. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_two q_memory_aggregate(int a0, struct quad_two a1, int a2);
 #endif
 
 /* The union, returned and passed, with a bare quad behind it. The union spends one register of
  * each file and the quad behind it spends a second vector register, so this is the one case here
  * where the two counters have to move by different amounts for the same argument. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-union quad_or_long q_union_and_quad(union quad_or_long a0, _Float128 a1);
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+union quad_or_long q_union_and_quad(union quad_or_long a0, __float128 a1);
 #endif
 
 /* Five integers and then a __int128, which gets no pair of registers, so the whole of it goes in
@@ -381,22 +381,22 @@ __int128 w_int128s_past_the_registers(__int128 a0, __int128 a1, __int128 a2, dou
  * save area is the whole of a vector register rather than the low half of one. Eight of them are
  * in the area and the last two are where the caller left them, so this asks about both ends of
  * the walk and about the sixteen byte alignment the argument area owes the type. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
-_Float128 qv_quads_past_the_registers(int a0, ...);
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
+__float128 qv_quads_past_the_registers(int a0, ...);
 #endif
 
 /* A quad with a double either side of it past the dots, which is where the offset into the
  * vector half has to move by sixteen for one of them and by eight for the others. A walk that
  * stepped the counter by the same amount for all three reads the second double out of the top of
  * the quad. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 double qv_quad_between_doubles(int a0, ...);
 #endif
 
 /* The struct holding one read off the list, which is the other half of the walk: an aggregate
  * that arrived in registers is copied out of the save area into a buffer, and this is the only
  * object in the corpus whose one slot is sixteen bytes wide. */
-#if defined(__FLT128_MANT_DIG__) && defined(__x86_64__)
+#if defined(__SIZEOF_FLOAT128__) && defined(__x86_64__)
 struct quad_one qv_struct_holding_a_quad(int a0, ...);
 #endif
 
