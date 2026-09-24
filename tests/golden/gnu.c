@@ -407,3 +407,25 @@ __attribute__((destructor(101))) static void closes(void) { ran = 0; }
 __attribute__((constructor(101))) __attribute__((destructor)) static void both_ways(void) {
   ran = ran + 1;
 }
+
+// A structure whose size the program works out, passed through a `...` and read back. It goes by
+// reference the way gcc sends it: the caller makes a copy as big as the program says and passes
+// where it is, and `va_arg` reads that address off the list and copies the object out of it.
+int measured(int size, ...) {
+  struct {
+    char x[size];
+  } d;
+  __builtin_va_list ap;
+  __builtin_va_start(ap, size);
+  d = __builtin_va_arg(ap, typeof(d));
+  __builtin_va_end(ap);
+  return d.x[size - 1];
+}
+
+int sends_measured(int z) {
+  struct {
+    char a[z];
+  } x;
+  x.a[z - 1] = 7;
+  return measured(z, x);
+}
