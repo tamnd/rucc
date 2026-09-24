@@ -843,6 +843,9 @@ fn generate(
         // because a schedule is a whole dependence graph per block and `-O1` is the level whose
         // budget is roughly `-O0`'s. Not at `-O0` for the reason nothing else is.
         schedule: opts.schedule_insns.unwrap_or_else(|| opts.opt_level.schedules()),
+        // On at `-O2` and `-O3`, which is where gcc turns `-falign-loops` on, and off at the size
+        // levels, where sixteen bytes of padding in front of a loop is what `-Os` exists to save.
+        align_loops: opts.align_loops.unwrap_or_else(|| opts.opt_level.aligns_loops()),
         // Whatever the command line said, and the model's own answer when it said nothing.
         accurate: opts.cycle_accurate_model,
         // The same flag that turns the IR verifier on in a release build, since what it says is

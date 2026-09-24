@@ -1652,17 +1652,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
                     })?;
             }
-            // The other three of the family, which are about padding in front of a label inside a
-            // body. This compiler writes none, and what they ask for is speed: a loop that starts
-            // on a cache line boundary computes what a loop that does not computes. So they are
-            // taken and dropped for the reason `-march=` is, and they are kept out of the arm
-            // above because the question they ask is a different one and the day one of them is
-            // answered it will be answered separately.
+            // The head of every loop, which is padded to a sixteen byte boundary at `-O2` and `-O3`
+            // the way gcc pads it. Both directions of the plain form are answered. A number is
+            // taken and says nothing, because the boundary here is gcc's default one and a build
+            // that names another is asking for speed rather than for a different program.
+            "-falign-loops" => opts.align_loops = Some(true),
+            "-fno-align-loops" => opts.align_loops = Some(false),
+            // The other two of the family, which are about padding in front of any label and in
+            // front of a label only a jump reaches. This compiler writes neither, and what they
+            // ask for is speed: a label on a boundary computes what a label off one computes. So
+            // they are taken and dropped for the reason `-march=` is, and the numbered form of
+            // the loop flag with them.
             _ if arg.starts_with("-falign-labels")
-                || arg.starts_with("-falign-loops")
+                || arg.starts_with("-falign-loops=")
                 || arg.starts_with("-falign-jumps")
                 || arg.starts_with("-fno-align-labels")
-                || arg.starts_with("-fno-align-loops")
                 || arg.starts_with("-fno-align-jumps") => {}
             // The charset flags are not in that pile, because an encoding is a statement about
             // what the bytes of the source mean rather than about how fast the output is. The
@@ -3888,9 +3892,9 @@ mod tests {
         assert!(e.message.contains("number of bytes"), "{}", e.message);
     }
 
-    /// The other three of the family are about padding inside a body, which nothing here writes,
-    /// so they are taken and say nothing. Every spelling of each, since a build writes whichever
-    /// one its author typed.
+    /// The other three of the family are about padding inside a body, so none of them is about
+    /// where a function starts. Every spelling of each, since a build writes whichever one its
+    /// author typed.
     #[test]
     fn the_alignment_flags_about_the_inside_of_a_body_are_taken_and_say_nothing() {
         for flag in [
@@ -3907,6 +3911,16 @@ mod tests {
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
             assert_eq!(opts.align_functions, None, "{flag} is not about where a function starts");
         }
+    }
+
+    /// The loop flag in either direction is an answer, and a command line that wrote neither
+    /// leaves the level to decide.
+    #[test]
+    fn the_loop_alignment_flag_is_answered_both_ways() {
+        assert_eq!(compile(&["-c", "-O2", "a.c"]).0.align_loops, None);
+        assert_eq!(compile(&["-c", "-O0", "-falign-loops", "a.c"]).0.align_loops, Some(true));
+        assert_eq!(compile(&["-c", "-O2", "-fno-align-loops", "a.c"]).0.align_loops, Some(false));
+        assert_eq!(compile(&["-c", "-falign-loops=32", "a.c"]).0.align_loops, None, "a number");
     }
 
     /// The encoding of the source is not a question about speed, so the one name that describes

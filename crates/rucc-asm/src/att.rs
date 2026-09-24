@@ -170,6 +170,9 @@ impl Writer<'_> {
         }
         let end = func.cfi_end();
         for (index, block) in func.blocks().enumerate() {
+            if func.heads.contains(&block) {
+                self.out.push_str(crate::LOOP_DIRECTIVES);
+            }
             let _ = writeln!(self.out, "{}{name}_{index}:", self.directives.local());
             // And the name an image knows the block by, as a second label on the same address. The
             // block's own label is written by this file and is a number, which is no good to a
@@ -1329,5 +1332,29 @@ mod tests {
         let error = print(&[], &Globals::default(), &[], &names, &aarch64, true, Output::default())
             .expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn the_head_of_a_loop_is_padded_the_way_gcc_pads_one() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        func.create_block();
+        let head = func.create_block();
+        let jmp = Opcode::new(names.intern("x64.jmp"));
+        func.build(head, jmp).finish();
+        func.succs_mut(head).push(rucc_mir::BlockCall::to(head));
+        func.heads = vec![head];
+        let text = print(
+            &[func],
+            &Globals::default(),
+            &[],
+            &names,
+            &target(Os::Linux),
+            true,
+            Output::default(),
+        )
+        .expect("a function with a loop in it");
+        let wanted = "\n.Lf_0:\n\t.p2align\t4,,10\n\t.p2align\t3\n.Lf_1:\n";
+        assert!(text.contains(wanted), "{text}");
     }
 }

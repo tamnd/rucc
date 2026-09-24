@@ -363,6 +363,14 @@ pub struct Func {
     /// The jump tables, each one written after the function's last instruction and read by the
     /// address [`Mem::table`] names. See [`Table`].
     pub tables: Vec<Table>,
+    /// The blocks that start on a boundary of their own, which are the heads of loops, in the
+    /// order the blocks are laid out.
+    ///
+    /// Written by the back end once the layout is final, since a head is the block a jump runs
+    /// backwards to and there is no backwards before there is an order, and read by the listing
+    /// and by the object writer, which are the two that know where an instruction lands. Empty
+    /// in a build that did not ask for it, which is `-O0`, `-O1` and the two size levels.
+    pub heads: Vec<Block>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -400,6 +408,7 @@ impl Func {
             entries: Vec::new(),
             kept: Vec::new(),
             tables: Vec::new(),
+            heads: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
