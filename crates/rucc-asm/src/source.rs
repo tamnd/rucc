@@ -114,6 +114,9 @@ struct Fixup {
     /// Which branch of the file this is, counting every one that has a two byte form, when it was
     /// written in that form and so may turn out not to reach.
     branch: Option<usize>,
+    /// Whether this is a jump at all, short or long, which gas works out to a global name where it
+    /// leaves a call to one for the linker.
+    jump: bool,
     line: usize,
 }
 
@@ -329,6 +332,7 @@ impl Reader {
         // `jmp .+10` has been given its short form already, where the distance is known.
         let mut branch = None;
         let short = crate::instruction::short(&written).filter(|_| written.holes[0].name != ".");
+        let jump = short.is_some();
         if let Some(short) = short {
             if !self.long.contains(&self.branches) {
                 branch = Some(self.branches);
@@ -372,6 +376,7 @@ impl Reader {
                 sum,
                 reach: hole.sort,
                 branch,
+                jump,
                 line: self.line,
             });
         }
@@ -871,6 +876,7 @@ impl Reader {
                 sum,
                 reach: Reach::Near,
                 branch: None,
+                jump: false,
                 line: self.line,
             });
         }
@@ -1372,15 +1378,10 @@ impl Reader {
         let mut jumps: Vec<(usize, i64, i64, usize)> = Vec::new();
         for fixup in &self.fixups {
             let Some(nth) = fixup.branch else { continue };
-            let residue =
-                self.reduce(&fixup.sum).map_err(|why| Trouble { line: fixup.line, why })?;
-            let weak = fixup.sum.terms.iter().any(|term| match &term.what {
-                What::Symbol(name) => {
-                    self.known.get(name).is_some_and(|&sym| self.syms[sym].binding == Binding::Weak)
-                }
-                _ => false,
-            });
-            if weak || !residue.left.is_empty() {
+            let residue = self
+                .reduce_kept(&fixup.sum, true)
+                .map_err(|why| Trouble { line: fixup.line, why })?;
+            if !residue.left.is_empty() {
                 away.push(nth);
             } else {
                 jumps.push((fixup.part, fixup.at as i64 + 1, residue.constant, nth));
@@ -1470,7 +1471,8 @@ impl Reader {
                 });
                 continue;
             }
-            let residue = self.reduce(&fixup.sum).map_err(|why| Trouble { line, why })?;
+            let residue =
+                self.reduce_kept(&fixup.sum, fixup.jump).map_err(|why| Trouble { line, why })?;
             if fixup.reach == Reach::Value && !residue.left.is_empty() {
                 return Err(bad(
                     "a number in an instruction that names something outside this section, \
@@ -1544,7 +1546,13 @@ impl Reader {
                     // way round, and it is minus four for a call, whose four bytes are counted
                     // from the end of the instruction they are the last of.
                     let addend = residue.constant + fixup.at as i64 - offset;
-                    let kind = if fixup.reach == Reach::Branch {
+                    // A static name defined here needs no stub whichever section it is in, and
+                    // gas says so by asking for the plain distance to it rather than a call.
+                    let near = self.known.get(name).is_some_and(|&sym| {
+                        self.syms[sym].binding == Binding::Local
+                            && matches!(self.syms[sym].at, Held::In { .. })
+                    });
+                    let kind = if fixup.reach == Reach::Branch && !near {
                         Reference::Call
                     } else {
                         Reference::Data
@@ -1598,6 +1606,39 @@ impl Reader {
             });
         }
         Ok(())
+    }
+
+    /// The same as `reduce`, except that a weak name defined here is left for the linker, and so
+    /// is a global one unless this is a jump.
+    ///
+    /// Another object can put its own definition in front of one of those, a weak one by being
+    /// strong and a global one by being in the executable when this is a shared library, so a
+    /// place that reaches it is a relocation even though the distance is known here. That is what
+    /// gas does for a call and a `lea`. A jump to a global name gas judges the way it judges one to
+    /// a label and works out, and only a weak name makes it long and a relocation. It only holds
+    /// when the name is the one thing counted from, since `f - g` is a distance whichever `f` the
+    /// linker picks and gas works that out too.
+    fn reduce_kept(&self, sum: &Sum, jump: bool) -> Result<Residue, String> {
+        let mut named =
+            sum.terms.iter().enumerate().filter(|(_, term)| matches!(term.what, What::Symbol(_)));
+        let (Some((nth, Term { coeff: 1, what: What::Symbol(name) })), None) =
+            (named.next(), named.next())
+        else {
+            return self.reduce(sum);
+        };
+        let kept = self.known.get(name).is_some_and(|&sym| {
+            (self.syms[sym].binding == Binding::Weak
+                || !jump && self.syms[sym].binding == Binding::Global)
+                && matches!(self.syms[sym].at, Held::In { .. })
+        });
+        if !kept {
+            return self.reduce(sum);
+        }
+        let mut rest = sum.clone();
+        rest.terms.remove(nth);
+        let mut residue = self.reduce(&rest)?;
+        residue.left.push(Left { coeff: 1, what: What::Symbol(name.clone()), at: None });
+        Ok(residue)
     }
 
     /// Take an expression down to a constant and whatever names would not cancel.
@@ -2691,6 +2732,32 @@ mod tests {
         let out = assembled("\tjmp elsewhere\n\tjz maybe\n\t.weak maybe\nmaybe:\n\tret\n");
         assert_eq!(bytes(&out, ".text")[..1], [0xe9]);
         assert_eq!(bytes(&out, ".text")[5..7], [0x0f, 0x84]);
+    }
+
+    #[test]
+    fn a_global_name_defined_here_is_still_left_to_the_linker() {
+        // Another object may define it first, so the call and the address are relocations with
+        // zeros in the bytes, the same as gas writes. A jump to it is worked out the way gas works
+        // it out, and so is a call to a static name and a distance from one global to another.
+        let out = assembled(
+            "\t.globl f\nf:\n\tcall f\n\tjmp f\n\tleaq f(%rip), %rax\n\tcall g\n\t\
+             .long f - g\ng:\n\tret\n",
+        );
+        let relocs = &out.parts[0].relocs;
+        let kinds: Vec<_> = relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind)).collect();
+        assert_eq!(kinds, [(1, "f", Reference::Call), (10, "f", Reference::Data)]);
+        assert!(relocs.iter().all(|r| r.addend == -4));
+        let text = bytes(&out, ".text");
+        assert_eq!(text[..7], [0xe8, 0, 0, 0, 0, 0xeb, 0xf9]);
+        assert_eq!(text[14..19], [0xe8, 4, 0, 0, 0]);
+        assert_eq!(text[19..23], (-23i32).to_le_bytes());
+    }
+
+    #[test]
+    fn a_call_to_a_static_name_in_another_section_needs_no_stub() {
+        let out = assembled("\t.text\n\tcall cold\n\t.section .text.unlikely\ncold:\n\tret\n");
+        let reloc = &out.parts[0].relocs[0];
+        assert_eq!((reloc.symbol.as_str(), reloc.kind), ("cold", Reference::Data));
     }
 
     #[test]
