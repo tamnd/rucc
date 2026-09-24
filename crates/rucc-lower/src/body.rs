@@ -3551,7 +3551,69 @@ impl<'u> Body<'_, 'u> {
                     self.write(Place::new(Where::Addr(at), from), value, span);
                 }
             }
+            ExprKind::Shuffle { lhs, rhs, mask } => self.shuffle(at, lhs, rhs, mask, ty, span),
             _ => self.unsupported("this vector expression", span),
+        }
+    }
+
+    /// `__builtin_shuffle(a, m)` and `__builtin_shuffle(a, b, m)` written into the object at `at`.
+    ///
+    /// The sources are copied end to end into one temporary first, so that every lane of the
+    /// answer is a load from one array at an index the mask gives, whichever source it is in. The
+    /// copy is also what makes `*v = __builtin_shuffle(*v, m)` right: the lanes are read out of
+    /// the copy, so writing the answer cannot change what a later lane reads.
+    ///
+    /// gcc takes each index modulo the number of lanes there are to pick from, which is a power of
+    /// two because every vector length is, so the index is masked with one less than it. That is
+    /// what `pr85331.c` checks, with a lane of `10000000001` that picks lane one of two. The mask
+    /// lane is widened to a word first where it is narrower, for the same reason a comparison's
+    /// lanes are above: the rule sets are written at the widths C computes in.
+    fn shuffle(
+        &mut self,
+        at: Value,
+        lhs: ExprId,
+        rhs: Option<ExprId>,
+        mask: ExprId,
+        ty: TypeId,
+        span: Span,
+    ) {
+        let lane = rucc_types::element(self.types(), ty).expect("a vector");
+        let lanes = self.lanes(ty);
+        let stride = repr::size_of(self.types(), self.target(), lane);
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let sources: Vec<ExprId> = iter::once(lhs).chain(rhs).collect();
+        let pool = self.scratch(size * sources.len() as u64, align, span);
+        for (index, &source) in sources.iter().enumerate() {
+            let from = self.vector_addr(source, span);
+            let into = self.offset(pool, size * index as u64, span);
+            self.memcpy(into, from, size, align, span);
+        }
+        let total = lanes * sources.len() as u64;
+        let indices = self.tast()[mask].ty;
+        let from = rucc_types::element(self.types(), indices).expect("a vector");
+        let width = repr::size_of(self.types(), self.target(), from);
+        let picks = self.vector_addr(mask, span);
+        for index in 0..lanes {
+            let pick = self.lane(picks, index, width, from, span);
+            let read = self.func[pick].ty;
+            let wide = if read.bits() < 32 { Type::int(32) } else { read };
+            let pick = self.widen(pick, false, wide, span);
+            let pick = {
+                let mut build = self.build(span);
+                let low = build.iconst(wide, i128::from(total - 1));
+                build.binary(Opcode::And, pick, low, Flags::NONE)
+            };
+            let source = self.step(pool, pick, false, Stride::Bytes(stride), false, span);
+            let value = match self.read(Place::new(Where::Addr(source), lane), span) {
+                Some(value) => value,
+                None => {
+                    let ty = self.value_type(lane, span);
+                    self.poison(ty, span)
+                }
+            };
+            let into = self.lane_place(at, index, stride, lane, span);
+            self.write(into, value, span);
         }
     }
 
@@ -4969,6 +5031,12 @@ impl<'u> Body<'_, 'u> {
             ExprKind::FpClassify { value, answers } => self.fpclassify(value, answers, ty, span),
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
+            // A vector, which has no value form, so it is built where one would live. What a read
+            // of that gives is what a read of any other vector object gives.
+            ExprKind::Shuffle { .. } => {
+                let place = self.place(expr);
+                self.read(place, span)
+            }
             ExprKind::ByteSwap { operand } => Some(self.byte_swap(operand, span)),
             ExprKind::Expect { value, hint, parts } => Some(self.expect(value, hint, parts, span)),
             // Counted at the operand's width, which is the question, and answered in `int`, which
@@ -8281,6 +8349,13 @@ impl Scan<'_> {
                 if let Some(rhs) = rhs {
                     self.expr(rhs);
                 }
+            }
+            ExprKind::Shuffle { lhs, rhs, mask } => {
+                self.expr(lhs);
+                if let Some(rhs) = rhs {
+                    self.expr(rhs);
+                }
+                self.expr(mask);
             }
             ExprKind::Abs { operand }
             | ExprKind::ByteSwap { operand }

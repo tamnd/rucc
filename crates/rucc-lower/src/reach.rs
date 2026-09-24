@@ -295,6 +295,13 @@ impl Reach<'_> {
                     self.expr(rhs);
                 }
             }
+            ExprKind::Shuffle { lhs, rhs, mask } => {
+                self.expr(lhs);
+                if let Some(rhs) = rhs {
+                    self.expr(rhs);
+                }
+                self.expr(mask);
+            }
             ExprKind::FpClassify { value, answers } => {
                 self.expr(value);
                 for index in 0..self.tast[answers].len() {

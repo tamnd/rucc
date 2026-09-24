@@ -268,6 +268,11 @@ impl Checker<'_> {
         if let Some(answer) = self.sign_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // A vector made of the lanes of others, which has no function behind it to call. In
+        // `check/builtin/shuffle.rs`.
+        if let Some(answer) = self.shuffle_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         let spelled = self.text(name);
         let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
         if generic.name == CONSTANT_P {
@@ -733,6 +738,7 @@ mod tests {
             let known = GENERIC.iter().any(|generic| generic.name == feature.name)
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
+                || crate::check::builtin::shuffle::is_family(feature.name)
                 || syntax.contains(&feature.name);
             assert!(known, "{} has neither a signature nor a rule", feature.name);
         }

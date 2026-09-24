@@ -288,6 +288,20 @@ pub enum ExprKind {
         /// a sign from anywhere other than nowhere.
         rhs: Option<ExprId>,
     },
+    /// `__builtin_shuffle`, a vector whose lanes are picked out of one or two others by a mask.
+    ///
+    /// A node rather than a call because there is no function to call: the answer is a vector,
+    /// which no call returns in a register here, and gcc expands it everywhere. Each lane of the
+    /// mask is an index into the lanes of the sources laid end to end, and only as many of its low
+    /// bits as it takes to name one of them count. See `check/builtin/shuffle.rs`.
+    Shuffle {
+        /// The vector the lanes come from, and the first half of them when there are two.
+        lhs: ExprId,
+        /// The second half, for the three operand form. It has the same type as the first.
+        rhs: Option<ExprId>,
+        /// The integer vector of indices, one per lane of the answer.
+        mask: ExprId,
+    },
     /// `abs`, `labs` and `llabs`, which are the magnitude of an integer.
     ///
     /// A node rather than a call because the names are the C library's and the compiler is allowed
