@@ -3474,16 +3474,16 @@ mod tests {
     }
 
     /// What `--fetch` says for a target this release pins nothing for, which today is every target
-    /// but the three windows-gnu ones and the four musl ones.
+    /// but the three windows-gnu ones, the four musl ones and the eight glibc ones.
     #[test]
     fn a_fetch_of_a_target_nothing_is_pinned_for_says_so_rather_than_reaching_the_network() {
-        let e = parse_args(&args(&["--fetch", "x86_64-linux-gnu"])).unwrap_err();
-        assert!(e.message.contains("pins no sysroot for x86_64-linux-gnu"), "{}", e.message);
+        let e = parse_args(&args(&["--fetch", "x86_64-linux-gnux32"])).unwrap_err();
+        assert!(e.message.contains("pins no sysroot for x86_64-linux-gnux32"), "{}", e.message);
         // And what it does pin, because a release with some rows in the table and a release with
         // none are two situations and the second sentence is what tells them apart.
         assert!(e.message.contains("x86_64-windows-gnu"), "{}", e.message);
         // The joined spelling is the same flag.
-        let joined = parse_args(&args(&["--fetch=x86_64-linux-gnu"])).unwrap_err();
+        let joined = parse_args(&args(&["--fetch=x86_64-linux-gnux32"])).unwrap_err();
         assert_eq!(joined, e);
     }
 
