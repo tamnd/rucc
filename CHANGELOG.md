@@ -35,6 +35,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The instruction selector no longer names x86-64. `lower::func` is handed a `select::Selector` holding the rule table, the operand shapes, the address constructors and the few instructions it writes itself, and `pipeline::Machine` carries one for each machine. The address constructor enum is now `rucc_target::Address`, shared by both rule files, and inline `asm` is refused on a machine other than x86-64 instead of being read as x86. What the pipeline still assumes about x86-64 is listed in `docs/LEAKS.md`.
 
 - The argument, return and call instructions in `abi.rs` come from the machine being compiled for rather than being x86-64 names, so a function of integer arithmetic now lowers to AArch64 machine IR from end to end of selection. Nothing past selection runs for AArch64 yet.
+- `rucc-asm` writes AArch64 machine functions as assembly text. Each instruction is spelled from the same table and the same operand values the AArch64 encoder takes, and everything around the instructions is the same walk x86-64 uses, except that code is padded with the assembler's own `nop` rather than `0x90`. Nothing hands it an AArch64 function yet, since the pipeline still stops at selection for that machine.
 
 ### Fixed
 
