@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- AArch64 compares two floats. Each of the IR's fourteen predicates is an `fcmp` and a `cset` on the condition that means it, and ordered but not equal and unordered or equal add a `csinc`, as gcc writes them. Every float comparison in C used to fail to build for AArch64.
+
 ### Fixed
 
 - A block comment that runs across lines inside a `#define` no longer ends the definition. The newline inside the comment was taken as the end of the line, so the rest of the body became stray text and the file failed to compile. A `#` after such a comment is now a directive only when the comment began its line, which is what GCC does (#1749).

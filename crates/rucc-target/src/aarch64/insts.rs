@@ -571,6 +571,25 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fcmp_set_gt_f64", FCmpSet),
     ("fcmp_set_ge_f32", FCmpSet),
     ("fcmp_set_ge_f64", FCmpSet),
+    // The unordered predicates and the two that need a second condition. Each ordered one above is
+    // false on a NaN, and each of these is true on one except `ord` and `one`, which is why they
+    // are named after the IR's predicates rather than after C's operators.
+    ("fcmp_set_ult_f32", FCmpSet),
+    ("fcmp_set_ult_f64", FCmpSet),
+    ("fcmp_set_ule_f32", FCmpSet),
+    ("fcmp_set_ule_f64", FCmpSet),
+    ("fcmp_set_ugt_f32", FCmpSet),
+    ("fcmp_set_ugt_f64", FCmpSet),
+    ("fcmp_set_uge_f32", FCmpSet),
+    ("fcmp_set_uge_f64", FCmpSet),
+    ("fcmp_set_uno_f32", FCmpSet),
+    ("fcmp_set_uno_f64", FCmpSet),
+    ("fcmp_set_ord_f32", FCmpSet),
+    ("fcmp_set_ord_f64", FCmpSet),
+    ("fcmp_set_one_f32", FCmpSet),
+    ("fcmp_set_one_f64", FCmpSet),
+    ("fcmp_set_ueq_f32", FCmpSet),
+    ("fcmp_set_ueq_f64", FCmpSet),
     // Values arriving and leaving in the registers the convention names. None is an instruction,
     // and each is here so the allocator knows which register the value has to be in.
     ("ret_val_32", RetVal),

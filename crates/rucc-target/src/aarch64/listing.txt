@@ -332,6 +332,42 @@ fd000921	str d1, [x9, #16]	str_f64
 1a9fb7e1	cset w1, ge	fcmp_set_ge_f32
 1e632040	fcmp d2, d3	fcmp_set_ge_f64
 1a9fb7e1	cset w1, ge	fcmp_set_ge_f64
+1e232040	fcmp s2, s3	fcmp_set_ult_f32
+1a9fa7e1	cset w1, lt	fcmp_set_ult_f32
+1e632040	fcmp d2, d3	fcmp_set_ult_f64
+1a9fa7e1	cset w1, lt	fcmp_set_ult_f64
+1e232040	fcmp s2, s3	fcmp_set_ule_f32
+1a9fc7e1	cset w1, le	fcmp_set_ule_f32
+1e632040	fcmp d2, d3	fcmp_set_ule_f64
+1a9fc7e1	cset w1, le	fcmp_set_ule_f64
+1e232040	fcmp s2, s3	fcmp_set_ugt_f32
+1a9f97e1	cset w1, hi	fcmp_set_ugt_f32
+1e632040	fcmp d2, d3	fcmp_set_ugt_f64
+1a9f97e1	cset w1, hi	fcmp_set_ugt_f64
+1e232040	fcmp s2, s3	fcmp_set_uge_f32
+1a9f47e1	cset w1, pl	fcmp_set_uge_f32
+1e632040	fcmp d2, d3	fcmp_set_uge_f64
+1a9f47e1	cset w1, pl	fcmp_set_uge_f64
+1e232040	fcmp s2, s3	fcmp_set_uno_f32
+1a9f77e1	cset w1, vs	fcmp_set_uno_f32
+1e632040	fcmp d2, d3	fcmp_set_uno_f64
+1a9f77e1	cset w1, vs	fcmp_set_uno_f64
+1e232040	fcmp s2, s3	fcmp_set_ord_f32
+1a9f67e1	cset w1, vc	fcmp_set_ord_f32
+1e632040	fcmp d2, d3	fcmp_set_ord_f64
+1a9f67e1	cset w1, vc	fcmp_set_ord_f64
+1e232040	fcmp s2, s3	fcmp_set_one_f32
+1a9f57e1	cset w1, mi	fcmp_set_one_f32
+1a9fd421	csinc w1, w1, wzr, le	fcmp_set_one_f32
+1e632040	fcmp d2, d3	fcmp_set_one_f64
+1a9f57e1	cset w1, mi	fcmp_set_one_f64
+1a9fd421	csinc w1, w1, wzr, le	fcmp_set_one_f64
+1e232040	fcmp s2, s3	fcmp_set_ueq_f32
+1a9f17e1	cset w1, eq	fcmp_set_ueq_f32
+1a9f7421	csinc w1, w1, wzr, vc	fcmp_set_ueq_f32
+1e632040	fcmp d2, d3	fcmp_set_ueq_f64
+1a9f17e1	cset w1, eq	fcmp_set_ueq_f64
+1a9f7421	csinc w1, w1, wzr, vc	fcmp_set_ueq_f64
 14000000	b s	b
 54000000	b.eq s	b_eq
 54000001	b.ne s	b_ne
