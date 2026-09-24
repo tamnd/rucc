@@ -50,7 +50,8 @@ impl Width {
     }
 
     /// How many bits that is.
-    fn bits(self) -> u32 {
+    #[must_use]
+    pub const fn bits(self) -> u32 {
         match self {
             Width::W => 32,
             Width::X => 64,

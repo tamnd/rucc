@@ -37,8 +37,8 @@ use crate::operand::{Constraint, OperandDesc};
 use Form::{
     Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet, CmpSetI,
     Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FpToInt, Insert, IntToFp, Jcc,
-    Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, Push, Ret, RetVal,
-    RetVal2, RetVal2Fp, RetValFp, Select, Store, StoreFp, Test, Trap, Unary,
+    Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, Probe, Push, Ret,
+    RetVal, RetVal2, RetVal2Fp, RetValFp, Select, Set, Store, StoreFp, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -77,6 +77,9 @@ pub enum Form {
     Select,
     /// A destination and two sources, picked between on a condition some comparison left.
     Csel,
+    /// A destination that is one when a condition some comparison left holds, which is what is
+    /// left of a [`Form::CmpSet`] once the comparison in front of it has been found to be made.
+    Set,
     /// A destination and an addressing mode whose address it computes and does not read.
     Lea,
     /// A destination and a symbol whose address it computes.
@@ -135,6 +138,9 @@ pub enum Form {
     Push,
     /// A register loaded from the stack pointer, moving the pointer up.
     Pop,
+    /// A page of the stack written without anything being put there, which is an address and a
+    /// constant the machine has no use for and the prologue hands over anyway.
+    Probe,
     /// Nothing.
     Nop,
     /// A stop the program cannot step past.
@@ -182,7 +188,7 @@ impl Form {
     #[must_use]
     pub fn operands(self) -> &'static [OperandDesc] {
         match self {
-            LoadImm | Lea | Address | Load | ArgVal => &ONE_WRITTEN,
+            LoadImm | Lea | Address | Load | ArgVal | Set => &ONE_WRITTEN,
             Insert => &INSERT,
             AluI | Unary | Convert | Move | CmpSetI => &ONE_TO_ONE,
             Alu | CmpSet | Csel => &TWO_TO_ONE,
@@ -202,20 +208,20 @@ impl Form {
             RetVal2 => &RET_VAL_2,
             RetValFp => &RET_VAL_FP,
             RetVal2Fp => &RET_VAL_2_FP,
-            Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier => &NONE,
+            Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe => &NONE,
         }
     }
 
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | Insert | AluI | CmpI | CmpSetI)
+        matches!(self, LoadImm | Insert | AluI | CmpI | CmpSetI | Probe)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store | LoadFp | StoreFp)
+        matches!(self, Lea | Load | Store | LoadFp | StoreFp | Probe)
     }
 
     /// Whether an instruction of this form reads or writes memory.
@@ -226,7 +232,7 @@ impl Form {
     /// while the program runs, so nothing moved past the read can change what it reads.
     #[must_use]
     pub fn touches_mem(self) -> bool {
-        matches!(self, Load | Store | LoadFp | StoreFp | Push | Pop | Call | Ret | Barrier)
+        matches!(self, Load | Store | LoadFp | StoreFp | Push | Pop | Probe | Call | Ret | Barrier)
     }
 }
 
@@ -394,6 +400,20 @@ pub static INSTS: &[(&str, Form)] = &[
     ("csel_hi_64", Csel),
     ("csel_hs_32", Csel),
     ("csel_hs_64", Csel),
+    // A condition kept on its own, which is what a comparison that keeps its answer becomes when
+    // the comparison has already been made. Always thirty two bits, since the answer is a one or
+    // a zero and writing a `w` register clears the rest.
+    ("cset_eq", Set),
+    ("cset_ne", Set),
+    ("cset_lt", Set),
+    ("cset_le", Set),
+    ("cset_gt", Set),
+    ("cset_ge", Set),
+    ("cset_lo", Set),
+    ("cset_ls", Set),
+    ("cset_hi", Set),
+    ("cset_hs", Set),
+    ("cset_mi", Set),
     // Addresses. A base and a constant is one `add`, and a symbol is the page it is on and then the
     // offset into that page.
     ("lea_64", Lea),
@@ -550,6 +570,11 @@ pub static INSTS: &[(&str, Form)] = &[
     // multiple of sixteen whenever it is used to reach memory.
     ("push_64", Push),
     ("pop_64", Pop),
+    // The two a prologue writes that no rule selects. A frame aligned harder than sixteen goes
+    // through `x16`, since the one instruction that can write the stack pointer with a mask cannot
+    // read it, and a page is touched by storing the zero register to it.
+    ("align_sp_64", AluI),
+    ("probe_64", Probe),
     // Everything else.
     ("nop", Nop),
     ("trap", Trap),
@@ -581,8 +606,10 @@ mod tests {
 
     #[test]
     fn a_form_that_carries_a_constant_or_an_address_has_a_register_to_go_with_it() {
+        // Save the probe, which writes the page its address names and is handed a constant it has
+        // no use for, because the prologue writes every target's probe the same way.
         for &(name, form) in INSTS {
-            if form.takes_imm() || form.takes_mem() {
+            if (form.takes_imm() || form.takes_mem()) && form != Probe {
                 assert!(!form.operands().is_empty(), "{name} has nothing to put its answer in");
             }
         }

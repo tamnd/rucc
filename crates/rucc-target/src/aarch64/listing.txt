@@ -190,6 +190,17 @@ f100045f	cmp x2, #1	cmp_set_hs_ri_64
 9a828061	csel x1, x3, x2, hi	csel_hi_64
 1a822061	csel w1, w3, w2, hs	csel_hs_32
 9a822061	csel x1, x3, x2, hs	csel_hs_64
+1a9f17e1	cset w1, eq	cset_eq
+1a9f07e1	cset w1, ne	cset_ne
+1a9fa7e1	cset w1, lt	cset_lt
+1a9fc7e1	cset w1, le	cset_le
+1a9fd7e1	cset w1, gt	cset_gt
+1a9fb7e1	cset w1, ge	cset_ge
+1a9f27e1	cset w1, lo	cset_lo
+1a9f87e1	cset w1, ls	cset_ls
+1a9f97e1	cset w1, hi	cset_hi
+1a9f37e1	cset w1, hs	cset_hs
+1a9f57e1	cset w1, mi	cset_mi
 91004121	add x1, x9, #16	lea_64
 90000001	adrp x1, s	addr_64
 91000021	add x1, x1, :lo12:s	addr_64
@@ -326,6 +337,9 @@ d63f0020	blr x1	blr
 d65f03c0	ret	ret
 f81f0fe1	str x1, [sp, #-16]!	push_64
 f84107e1	ldr x1, [sp], #16	pop_64
+aa0203f0	mov x16, x2	align_sp_64
+92400201	and x1, x16, #1	align_sp_64
+f900093f	str xzr, [x9, #16]	probe_64
 d503201f	nop	nop
 d4200020	brk #1	trap
 d5033bbf	dmb ish	fence

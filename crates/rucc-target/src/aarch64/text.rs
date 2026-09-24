@@ -30,8 +30,8 @@ use crate::aarch64::encode::{
 use crate::aarch64::read::system_field;
 
 use Arg::{
-    Barrier, Base, Disp, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Page, Pop, Push, Reg,
-    Symbol, Thread, Through, TprelHi, TprelLo, Vector,
+    Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Page, Pop, Push,
+    Reg, Symbol, Thread, Through, TprelHi, TprelLo, Vector,
 };
 use Scalar::{D, Q, S};
 use Width::{W, X};
@@ -55,6 +55,9 @@ pub enum Arg {
     Cond(Cond),
     /// A barrier option that is part of the opcode.
     Barrier(u8),
+    /// A general register that is part of the opcode rather than one the allocator chose, where
+    /// thirty one is the zero register.
+    Fixed(u8, Width),
     /// The instruction's addressing mode.
     Mem,
     /// The base register of the instruction's addressing mode, as a register on its own.
@@ -397,6 +400,17 @@ static TEXT: &[(&str, &[Written])] = &[
     ("csel_hi_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Hi)])]),
     ("csel_hs_32", &[spell("csel", &[Reg(0, W), Reg(2, W), Reg(1, W), Arg::Cond(Cond::Hs)])]),
     ("csel_hs_64", &[spell("csel", &[Reg(0, X), Reg(2, X), Reg(1, X), Arg::Cond(Cond::Hs)])]),
+    ("cset_eq", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])]),
+    ("cset_ne", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])]),
+    ("cset_lt", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])]),
+    ("cset_le", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])]),
+    ("cset_gt", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Gt)])]),
+    ("cset_ge", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])]),
+    ("cset_lo", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lo)])]),
+    ("cset_ls", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ls)])]),
+    ("cset_hi", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])]),
+    ("cset_hs", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])]),
+    ("cset_mi", &[spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)])]),
     // Addresses. A base and a constant is one `add`, and a symbol is the page it is on and then the
     // offset into that page.
     ("lea_64", &[spell("add", &[Reg(0, X), Base, Disp])]),
@@ -596,6 +610,11 @@ static TEXT: &[(&str, &[Written])] = &[
     // multiple of sixteen whenever it is used to reach memory.
     ("push_64", &[spell("str", &[Reg(0, X), Push])]),
     ("pop_64", &[spell("ldr", &[Reg(0, X), Pop])]),
+    (
+        "align_sp_64",
+        &[spell("mov", &[Fixed(16, X), Reg(1, X)]), spell("and", &[Reg(0, X), Fixed(16, X), Imm])],
+    ),
+    ("probe_64", &[spell("str", &[Fixed(31, X), Mem])]),
     // Everything else.
     ("nop", &[spell("nop", &[])]),
     ("trap", &[spell("brk", &[Lit(1)])]),
@@ -609,6 +628,33 @@ static TEXT: &[(&str, &[Written])] = &[
 #[must_use]
 pub fn written(name: &str) -> Option<&'static [Written]> {
     TEXT.iter().find(|(known, _)| *known == name).map(|&(_, insts)| insts)
+}
+
+/// How many bits of the operand at that index the opcode of that name names, or `None` for all
+/// of it.
+///
+/// `None` for an operand no instruction of the opcode names as a general register, which is one
+/// in the other file, one inside an addressing mode, one of an opcode that is written as nothing,
+/// and every operand of a name this target does not have. The widest where one operand is named
+/// more than once, since that is how much of it something reads.
+///
+/// This is [`crate::BitInsts::width`] for this target, taken from the table the encoder and the
+/// listing both read, as the x86 one is.
+#[must_use]
+pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
+    let mut found: Option<u32> = None;
+    for inst in written(name)? {
+        for arg in inst.args {
+            let bits = match *arg {
+                Reg(at, width) if at == operand => width.bits(),
+                GotSlot(at) if at == operand => 64,
+                Fp(at, _) | Vector(at) if at == operand => return None,
+                _ => continue,
+            };
+            found = Some(found.map_or(bits, |had: u32| had.max(bits)));
+        }
+    }
+    found
 }
 
 /// What an allocated instruction has that its arguments are filled in from.
@@ -660,6 +706,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Arg::Shift(shift, amount) => Value::Shift(shift, amount),
         Arg::Cond(cond) => Value::Cond(cond),
         Barrier(option) => Value::Barrier(option),
+        Fixed(number, width) => Value::Gpr(width, number),
         Mem => Value::Mem(with.mem.ok_or(Missing::Mem)?),
         Base => gpr(X, with.mem.ok_or(Missing::Mem)?.base),
         Disp => match with.mem.ok_or(Missing::Mem)?.offset {
@@ -816,6 +863,12 @@ mod tests {
         assert_eq!(listing("blr", &with), ["blr x1"]);
         assert_eq!(listing("push_64", &with), ["str x0, [sp, #-16]!"]);
         assert_eq!(listing("pop_64", &with), ["ldr x0, [sp], #16"]);
+        assert_eq!(listing("cset_hs", &with), ["cset w0, hs"]);
+        let sp = Addr { base: 31, offset: Offset::Imm(0), mode: Mode::Offset };
+        let touched = Operands { regs: &[], reads: 0, imm: 0, mem: Some(sp) };
+        assert_eq!(listing("probe_64", &touched), ["str xzr, [sp]"]);
+        let aligned = Operands { regs: &[31, 31], reads: 1, imm: -64, mem: None };
+        assert_eq!(listing("align_sp_64", &aligned), ["mov x16, sp", "and sp, x16, #-64"]);
         assert!(listing("arg_val_64", &with).is_empty());
     }
 
