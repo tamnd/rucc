@@ -433,6 +433,25 @@ pub struct CallInfo {
     pub varargs: AbiList,
 }
 
+/// The argument registers an object in the argument area leaves behind it with nothing in them.
+///
+/// AAPCS64 is the ABI that asks for it. A homogeneous floating point aggregate that finds too few
+/// vector registers left goes in memory, and so does every floating point argument after it, even
+/// one that would fit in the register the aggregate did not take. A record of sixteen bytes or
+/// less that finds too few general purpose registers does the same to those. The classification
+/// knows which of the two happened and the backend placing the arguments does not, so the object
+/// carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Drains {
+    /// Every register left is still there for the arguments after the object.
+    #[default]
+    Nothing,
+    /// No general purpose register is.
+    Integers,
+    /// No vector register is.
+    Floats,
+}
+
 /// A signature, in the function's table.
 pub type Sig = Idx<Signature>;
 
@@ -653,6 +672,8 @@ pub enum Abi {
         /// What the copy is aligned to, which is the C alignment of the type and not the
         /// pointer's.
         align: u32,
+        /// The argument registers of one kind that nothing after this object may have.
+        drains: Drains,
     },
     /// Somewhere for the return value to go, whose address the caller passes as the first
     /// argument because the value does not fit in the registers a return comes back in.
@@ -675,7 +696,7 @@ impl Abi {
     #[must_use]
     pub const fn object(self) -> Option<(u64, u32)> {
         match self {
-            Self::ByVal { size, align } | Self::Sret { size, align } => Some((size, align)),
+            Self::ByVal { size, align, .. } | Self::Sret { size, align } => Some((size, align)),
             _ => None,
         }
     }
@@ -881,7 +902,7 @@ mod tests {
 
     #[test]
     fn a_parameter_says_how_it_travels_and_not_only_what_it_is() {
-        let object = Abi::ByVal { size: 24, align: 8 };
+        let object = Abi::ByVal { size: 24, align: 8, drains: Drains::Nothing };
         let sig = Signature::new()
             .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 32, align: 16 }))
             .and_param(Param::with_abi(Type::PTR, object))

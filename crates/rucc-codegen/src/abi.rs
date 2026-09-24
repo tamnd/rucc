@@ -98,7 +98,7 @@
 
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
-use rucc_ir::{Abi, Param, Type};
+use rucc_ir::{Abi, Drains, Param, Type};
 use rucc_mir as mir;
 use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Variadic, Where};
 
@@ -165,6 +165,15 @@ fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
 /// it and being placed on top of half of it.
 pub(crate) fn float_bytes(ty: Type) -> u32 {
     ty.bits().div_ceil(8).saturating_mul(ty.lanes())
+}
+
+/// Spends the registers an object in the argument area said nothing after it may have.
+pub(crate) fn drain(places: &mut Places<'_>, drains: Drains) {
+    match drains {
+        Drains::Nothing => {}
+        Drains::Integers => places.drain_integers(),
+        Drains::Floats => places.drain_floats(),
+    }
 }
 
 /// How many bytes of the argument area a value in the general purpose file takes.
@@ -284,9 +293,10 @@ pub fn entry(
         // A structure the classification put in the argument area arrived as bytes, and the
         // parameter the IR sees is a pointer to them. So there is nothing to bring in: the bytes
         // are already in this function's frame, and what the pointer holds is where they are.
-        if let Abi::ByVal { size, align } = abi {
+        if let Abi::ByVal { size, align, drains } = abi {
             let size = u32::try_from(size).map_err(|_| (index, Missing::TooBig))?;
             where_from.push((ty, places.object(size, align), abi));
+            drain(&mut places, drains);
             continue;
         }
         // And an eighty bit float, which arrives the same way for the same reason and is told
@@ -299,7 +309,7 @@ pub fn entry(
             where_from.push((
                 ty,
                 places.on_stack(size, align),
-                Abi::ByVal { size: size.into(), align },
+                Abi::ByVal { size: size.into(), align, drains: Drains::Nothing },
             ));
             continue;
         }
@@ -627,11 +637,11 @@ pub fn call(
         let abi = match abi {
             _ if on_the_stack(ty) => {
                 let (size, align) = X87_AREA;
-                Abi::ByVal { size: size.into(), align }
+                Abi::ByVal { size: size.into(), align, drains: Drains::Nothing }
             }
             abi => abi,
         };
-        if let Abi::ByVal { size, align } = abi {
+        if let Abi::ByVal { size, align, drains } = abi {
             let size = u32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
             // One past the `...` is never packed, so it is words wherever it is.
             let at = if variadic && index >= named {
@@ -639,6 +649,7 @@ pub fn call(
             } else {
                 places.object(size, align)
             };
+            drain(&mut places, drains);
             let Where::Stack(up) = at else {
                 unreachable!("an object in the argument area is in the argument area")
             };
@@ -1204,7 +1215,8 @@ mod tests {
 
     #[test]
     fn a_structure_that_arrived_as_bytes_is_an_address_and_not_a_load() {
-        let byval = Param::with_abi(Type::PTR, Abi::ByVal { size: 32, align: 8 });
+        let byval =
+            Param::with_abi(Type::PTR, Abi::ByVal { size: 32, align: 8, drains: Drains::Nothing });
         let (text, up) =
             arrive_with(&[Param::new(Type::int(32)), byval, Param::new(Type::int(32))], &SYSV);
 
@@ -1221,7 +1233,8 @@ mod tests {
 
     #[test]
     fn the_argument_behind_a_structure_that_travelled_as_bytes_is_above_all_of_them() {
-        let byval = Param::with_abi(Type::PTR, Abi::ByVal { size: 24, align: 16 });
+        let byval =
+            Param::with_abi(Type::PTR, Abi::ByVal { size: 24, align: 16, drains: Drains::Nothing });
         let params: Vec<Param> = (0..7).map(|_| Param::new(Type::int(64))).collect();
         let (_, up) = arrive_with(&[&params[..], &[byval], &params[..1]].concat(), &SYSV);
 
@@ -1602,7 +1615,7 @@ mod tests {
         args.push(Passing {
             ty: Type::PTR,
             reg: out.append_param(block, conv.int_class),
-            abi: Abi::ByVal { size, align },
+            abi: Abi::ByVal { size, align, drains: Drains::Nothing },
         });
         args.push(Passing {
             ty: Type::int(32),

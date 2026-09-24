@@ -41,8 +41,8 @@ use rucc_tuple::TargetTuple;
 use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
-    Abi, AsmInfo, Block, BlockCall, CallInfo, Hint, Imm, Inst, InstData, MemInfo, Meta, MetaNode,
-    Param, PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
+    Abi, AsmInfo, Block, BlockCall, CallInfo, Drains, Hint, Imm, Inst, InstData, MemInfo, Meta,
+    MetaNode, Param, PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -544,8 +544,21 @@ impl<'a, 'n> Parser<'a, 'n> {
                 self.expect(",")?;
                 self.expect("align")?;
                 let align = self.u32()?;
+                let mut drains = Drains::Nothing;
+                if indirect && self.eat(",") {
+                    self.expect("drains")?;
+                    drains = match self.word() {
+                        "integers" => Drains::Integers,
+                        "floats" => Drains::Floats,
+                        other => return self.fail(format!("`{other}` is not a register kind")),
+                    };
+                }
                 self.expect(")")?;
-                if indirect { Abi::ByVal { size, align } } else { Abi::Sret { size, align } }
+                if indirect {
+                    Abi::ByVal { size, align, drains }
+                } else {
+                    Abi::Sret { size, align }
+                }
             }
             _ => Abi::Plain,
         };
@@ -2182,6 +2195,8 @@ block0(%0: ptr, %1: ptr, %2: i8):
 }}
 
 func @g(i8 sext) -> i8 sext, linkage(external);
+
+func @h(ptr byval(12, align 4, drains floats), ptr byval(16, align 8, drains integers)), linkage(external);
 "
         );
         assert_eq!(round_trip(&text), text);

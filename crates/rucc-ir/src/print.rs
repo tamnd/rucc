@@ -32,7 +32,7 @@ use rucc_target::Slot;
 
 use crate::func::Func;
 use crate::inst::{
-    Abi, Block, BlockCall, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param, PlaneNode,
+    Abi, Block, BlockCall, Drains, Imm, Inst, InstData, MemInfo, Meta, MetaNode, Param, PlaneNode,
     Signature, Value,
 };
 use crate::module::{Alias, Datum, Global, Module, Reloc};
@@ -457,7 +457,14 @@ impl<'a> Printer<'a> {
             Abi::Plain => Ok(()),
             Abi::Sext => write!(self.out, " sext"),
             Abi::Zext => write!(self.out, " zext"),
-            Abi::ByVal { size, align } => write!(self.out, " byval({size}, align {align})"),
+            Abi::ByVal { size, align, drains } => {
+                let drains = match drains {
+                    Drains::Nothing => "",
+                    Drains::Integers => ", drains integers",
+                    Drains::Floats => ", drains floats",
+                };
+                write!(self.out, " byval({size}, align {align}{drains})")
+            }
             Abi::Sret { size, align } => write!(self.out, " sret({size}, align {align})"),
         };
     }
@@ -1228,7 +1235,7 @@ mod tests {
             names.intern("puts"),
             puts,
             &[p, slot],
-            &[Abi::ByVal { size: 16, align: 8 }],
+            &[Abi::ByVal { size: 16, align: 8, drains: Drains::Nothing }],
         );
         let indirect =
             b.func().add_signature(Signature::new().with_params(&[i32_]).with_returns(&[i32_]));
@@ -1411,7 +1418,10 @@ mod tests {
             names.intern("f"),
             Signature::new()
                 .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 24, align: 8 }))
-                .and_param(Param::with_abi(Type::PTR, Abi::ByVal { size: 16, align: 8 }))
+                .and_param(Param::with_abi(
+                    Type::PTR,
+                    Abi::ByVal { size: 16, align: 8, drains: Drains::Nothing },
+                ))
                 .and_param(Param::with_abi(Type::int(8), Abi::Zext))
                 .and_param(Param::new(Type::int(32))),
         );
@@ -1450,7 +1460,7 @@ block0(%0: ptr, %1: ptr, %2: i8, %3: i32):
             names.intern("printf"),
             sig,
             &[p, one, p],
-            &[Abi::Plain, Abi::ByVal { size: 24, align: 8 }],
+            &[Abi::Plain, Abi::ByVal { size: 24, align: 8, drains: Drains::Floats }],
         );
         b.ret(&[]);
 
@@ -1460,7 +1470,7 @@ block0(%0: ptr, %1: ptr, %2: i8, %3: i32):
 func @f(ptr), linkage(external) {
 block0(%0: ptr):
     %1 = iconst.i32 1
-    %2 = call @printf(%0, %1, %0 byval(24, align 8)) : (ptr, ...) -> i32
+    %2 = call @printf(%0, %1, %0 byval(24, align 8, drains floats)) : (ptr, ...) -> i32
     return
 }
 "

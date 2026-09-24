@@ -628,6 +628,21 @@ impl<'a> Places<'a> {
         Where::Stack(at)
     }
 
+    /// Leaves no general purpose register for the values after this one.
+    ///
+    /// AAPCS64 asks for it after a record of sixteen bytes or less that found too few of them
+    /// left and went to memory, so an `int` after it goes to memory too rather than into the one
+    /// register the record could not use.
+    pub fn drain_integers(&mut self) {
+        self.int = self.regs.int_args.len();
+    }
+
+    /// Leaves no vector register for the values after this one, which AAPCS64 asks for after a
+    /// homogeneous floating point aggregate that found too few of them left.
+    pub fn drain_floats(&mut self) {
+        self.sse = self.regs.sse_args.len();
+    }
+
     /// How many bytes of argument area the values so far need, shadow space included.
     #[must_use]
     pub fn size(&self) -> u32 {
@@ -896,5 +911,19 @@ mod tests {
         // is there.
         assert_eq!(places.on_stack(1, 1), Where::Stack(48));
         assert_eq!(places.size(), 56);
+    }
+
+    #[test]
+    fn draining_one_kind_of_register_sends_the_rest_of_that_kind_to_memory_and_no_other() {
+        let regs = convention(false, 0);
+        let mut places = Places::new(&regs);
+        assert_eq!(places.float(4), Where::Reg(PhysReg::new(10)));
+        places.drain_floats();
+        // The second vector register is still free and nothing may have it.
+        assert_eq!(places.float(4), Where::Stack(0));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(0)));
+        places.drain_integers();
+        assert_eq!(places.integer(8), Where::Stack(8));
+        assert_eq!((places.integers(), places.floats()), (2, 2));
     }
 }

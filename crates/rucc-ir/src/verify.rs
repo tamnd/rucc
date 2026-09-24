@@ -396,7 +396,7 @@ impl<'a> Verifier<'a> {
                     self.error(format!("{at} is extended and {} is not an integer", param.ty));
                 }
             }
-            Abi::ByVal { size, align } | Abi::Sret { size, align } => {
+            Abi::ByVal { size, align, .. } | Abi::Sret { size, align } => {
                 if !param.ty.is_ptr() {
                     self.error(format!(
                         "{at} travels indirectly and {} is not a pointer",
