@@ -20,7 +20,7 @@
 //!
 //! [`stubs`] is every file a glibc link line wants from this crate for one target: `libc.so`,
 //! `libm.so` and `librt.so` out of the blobs, cut at the release the target asked for, and the empty
-//! compatibility libraries of [`crate::compat`]. The file names are what `-l` opens and the
+//! compatibility libraries of [`crate::compat()`]. The file names are what `-l` opens and the
 //! `SONAME`s inside them are what the loader will be asked for, which differ, and [`Library::file`]
 //! and [`Library::soname`] are the two columns.
 //!
