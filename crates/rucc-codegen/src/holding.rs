@@ -15,7 +15,7 @@
 //! disagree, or one no path reaches, has no answer, and the back end reads that as nothing to
 //! choose by rather than as a choice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use rucc_ir::{Block, Def, Func, Inst, Value};
 
@@ -57,15 +57,13 @@ pub fn on_entry(func: &Func) -> Vec<(u32, Block, Value)> {
     let count = func.counts().blocks;
     // Where each instruction is in its block, one past the top so that the top itself is nought.
     let mut position = vec![0usize; func.counts().insts];
-    let mut preds: Vec<Vec<Block>> = vec![Vec::new(); count];
+    let mut succs: Vec<Vec<Block>> = vec![Vec::new(); count];
     for &block in &blocks {
         for (at, inst) in func.insts(block).enumerate() {
             position[inst.index()] = at + 1;
         }
         if let Some(terminator) = func.terminator(block) {
-            for call in func.successors(terminator) {
-                preds[call.block.index()].push(block);
-            }
+            succs[block.index()].extend(func.successors(terminator).map(|call| call.block));
         }
     }
     let entry = func.entry();
@@ -94,22 +92,40 @@ pub fn on_entry(func: &Func) -> Vec<(u32, Block, Value)> {
         }
         // Forward to a fixed point. Every block starts unvisited, the entry starts with nothing
         // said, and a block's way in is what all of its predecessors agree on at their way out.
+        //
+        // A list of blocks whose way out changed rather than sweeps over every block until none
+        // does, since a sweep in an order that runs against the edges moves an answer one block
+        // at a time, and jtckdint's test is 22000 blocks of that. A way in only ever goes from
+        // unvisited to one value to none, so meeting it with each way out as it arrives is the
+        // same as meeting all of them at once, and each block goes on the list at most twice.
         let mut into: Vec<Held> = vec![Held::Unvisited; count];
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for &block in &blocks {
-                let now = if Some(block) == entry {
-                    Held::Unknown
-                } else {
-                    preds[block.index()].iter().fold(Held::Unvisited, |held, &pred| {
-                        let out = last[pred.index()].map_or(into[pred.index()], |(_, held)| held);
-                        held.meet(out)
-                    })
-                };
-                if now != into[block.index()] {
-                    into[block.index()] = now;
-                    changed = true;
+        let mut queued = vec![false; count];
+        let mut waiting = VecDeque::new();
+        if let Some(entry) = entry {
+            into[entry.index()] = Held::Unknown;
+            queued[entry.index()] = true;
+            waiting.push_back(entry);
+        }
+        for &(block, _, _) in &assigned[&decl] {
+            if !queued[block.index()] {
+                queued[block.index()] = true;
+                waiting.push_back(block);
+            }
+        }
+        while let Some(block) = waiting.pop_front() {
+            queued[block.index()] = false;
+            let out = last[block.index()].map_or(into[block.index()], |(_, held)| held);
+            for &succ in &succs[block.index()] {
+                if Some(succ) == entry {
+                    continue;
+                }
+                let now = into[succ.index()].meet(out);
+                if now != into[succ.index()] {
+                    into[succ.index()] = now;
+                    if !queued[succ.index()] {
+                        queued[succ.index()] = true;
+                        waiting.push_back(succ);
+                    }
                 }
             }
         }
