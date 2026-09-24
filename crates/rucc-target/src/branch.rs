@@ -58,6 +58,18 @@
 //! three it found. Which of the two jumps it writes is the same question as before and gets the
 //! same answer, so an entry names both.
 //!
+//! # The select a comparison makes unnecessary
+//!
+//! A rule selects a choice between two values as a test of a condition byte and a conditional move
+//! on the answer, because the byte is the only thing a rule can name. When the byte came from a
+//! comparison that is the same three instructions a branch was, a comparison keeping a byte, a
+//! test of it and an instruction that reads what the test left, and the same two do the work: the
+//! comparison keeping nothing and a move on the condition the comparison was asked about.
+//!
+//! [`Move`] is that pair written down, one entry per select and condition. The condition is named
+//! by the jump a [`Fusion`] takes when its comparison held, so a comparison has one name for what
+//! it asked whether a branch or a select reads it.
+//!
 //! It stays a table rather than becoming an operation on the names. `cmp_set_ae_ri_64` and
 //! `cmp_ri_64` and `jcc_ae` are strings a target chose and not a spelling anything here may
 //! derive, and a target whose comparisons are shaped differently, or which has no condition state
@@ -105,6 +117,10 @@ pub struct BranchInsts {
     ///
     /// Empty is a target that does not do this, and the layout then writes the test every time.
     pub fused: &'static [Fusion],
+    /// The conditional moves a select on a comparison's answer can become.
+    ///
+    /// Empty is a target that does not do this, and every select keeps the test of its byte.
+    pub moves: &'static [Move],
 }
 
 /// A comparison, and the two instructions a branch on its answer becomes.
@@ -121,4 +137,17 @@ pub struct Fusion {
     pub if_true: &'static str,
     /// Goes to the block's first successor when the comparison did not hold.
     pub if_false: &'static str,
+}
+
+/// A select, a condition, and the move that makes the choice straight off that condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Move {
+    /// What a rule selects for a choice on a byte, which tests the byte and then moves.
+    pub select: &'static str,
+    /// The condition, named by the jump a [`Fusion`] takes when its comparison held.
+    pub when: &'static str,
+    /// The same move reading the condition state a comparison left, with no test in front of it.
+    ///
+    /// Its operands are the select's without the byte at the end, in the same order.
+    pub cmov: &'static str,
 }

@@ -157,6 +157,7 @@ pub mod abi;
 pub mod bits;
 pub mod capability;
 pub mod changes;
+pub mod choice;
 pub mod combine;
 pub mod compare;
 pub mod copies;

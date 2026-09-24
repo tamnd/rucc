@@ -378,9 +378,11 @@ mod tests {
     /// shape a select has. The move on its own computes the same term and what makes it right is the
     /// comparison somewhere behind it rather than anything about its own operands, so no pattern
     /// could say what it means. The compare pass does not write one either, because it replaces a
-    /// comparison it found was already made and there is no earlier move here to replace: what
+    /// comparison it found was already made and there is no earlier move here to replace. What
     /// writes one is a program that put the comparison on one line of a template and the move on the
-    /// next, which is what zstd does to keep a bounds check from becoming a branch.
+    /// next, which is what zstd does to keep a bounds check from becoming a branch, and
+    /// [`crate::choice`] after the layout, out of a select a rule did write and the comparison its
+    /// byte came from.
     ///
     /// So these have operands a rule could have named, unlike everything in [`TEMPLATE`], and they
     /// are still not instructions a rule could have been written for.

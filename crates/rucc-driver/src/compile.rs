@@ -3376,7 +3376,8 @@ decl #0 x : int object external static defined
 
     /// A store one path makes to a local the loop has just read, which GCC also turns into a
     /// conditional move and an unconditional store. The branch was on data, so it was the one the
-    /// machine gets wrong half the time.
+    /// machine gets wrong half the time. The move reads the flags of the comparison itself, so no
+    /// byte is set and tested in between.
     #[test]
     fn a_store_to_a_local_the_loop_just_read_is_a_conditional_move() {
         let text = optimized(
@@ -3384,7 +3385,9 @@ decl #0 x : int object external static defined
              for (int i = 0; i < n; i++) if (v[i] > best[i & 7]) best[i & 7] = v[i]; \
              return best[k & 7]; }\n",
         );
-        assert!(text.contains("\tcmovnel"), "{text}");
+        assert!(text.contains("\tcmovgl"), "{text}");
+        assert!(!text.contains("\tset"), "{text}");
+        assert!(!text.contains("\ttestb"), "{text}");
     }
 
     /// The same loop on a global keeps its branch, because another thread may own the slot.
