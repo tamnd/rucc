@@ -6651,9 +6651,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("icmp slt %1, %2"), "{text}");
 
         // The same question of a value in the target's widest format, where the bits are eighty
-        // and the object they sit in is sixteen bytes.
+        // and the object they sit in is sixteen bytes. No integer is that wide, so the sign is
+        // read from the word at the top of the value once it is in memory.
         let text = body("int f(long double x) { return __builtin_signbitl(x); }\n");
-        assert!(text.contains("%1 = bitcast.i80 %0"), "{text}");
+        assert!(text.contains("load.i16"), "{text}");
+        assert!(text.contains("icmp slt"), "{text}");
+        assert!(!text.contains("i80"), "{text}");
 
         // The operand is evaluated once however many times it is compared, which is the whole
         // reason these are nodes rather than a rewriting into the operators.
@@ -6734,10 +6737,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         // The same question in the target's widest format, where the smallest normal has the
         // leading significand bit stored rather than implied, so its encoding is two bits and not
-        // one.
+        // one. There is no integer that wide to compare the bits in, so it is the magnitude that
+        // is compared, as a value.
         let text = body("int f(long double x) { return __builtin_isnormal(x); }\n");
-        assert!(text.contains("%4 = iconst.i80 27670116110564327424"), "{text}");
-        assert!(text.contains("%5 = iconst.i80 604453686435277732577280"), "{text}");
+        assert!(text.contains("fconst.f80 0x18000000000000000"), "{text}");
+        assert!(text.contains("fconst.f80 0x7fff8000000000000000"), "{text}");
+        assert!(text.contains("fcmp oge"), "{text}");
+        assert!(text.contains("fcmp olt"), "{text}");
 
         let text = body("int f(double x) { return __builtin_isinf_sign(x); }\n");
         assert!(text.contains("%3 = fcmp oeq %0, %1"), "{text}");
@@ -6929,11 +6935,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("%8 = or %4, %7"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
-        // The x87 format, whose value is eighty bits sitting in an object of sixteen. The mask is
-        // as wide as the value and not as wide as the object, so the padding is not part of it.
+        // The x87 format, whose value is eighty bits sitting in an object of sixteen. There is no
+        // integer that wide, so the mask is on the word at the top of the value, in memory.
         let text = body("long double f(long double x) { return __builtin_fabsl(x); }\n");
-        assert!(text.contains("bitcast.i80 %0"), "{text}");
-        assert!(text.contains("bitcast.f80"), "{text}");
+        assert!(text.contains("iconst.i16 32767"), "{text}");
+        assert!(text.contains("load.f80"), "{text}");
+        assert!(!text.contains("call"), "{text}");
 
         // The width a name does not spell out is `double`, so a `float` argument widens first and
         // the answer is a `double`, which is what gcc's declaration of it says.
@@ -7056,6 +7063,26 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("global @g : f32 = 0x0,"), "{text}");
         assert!(text.contains("f80 0xbfff8000000000000000"), "{text}");
         assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
+    }
+
+    /// The sign of a `long double` is read and written in the word at the top of it.
+    ///
+    /// The other formats have their sign tested and set on an integer as wide as the value, and
+    /// there is no eighty bit integer for the x87 one to go to: no rule lowers it, and
+    /// `execute/20080502-1.c` and `execute/ieee/copysign1.c` in the torture suite stopped on that.
+    /// The value goes through memory instead, and the word holding its sign is what is looked at.
+    #[test]
+    fn the_sign_of_a_long_double_is_in_the_word_at_the_top_of_it() {
+        for source in [
+            "int f(long double x) { return __builtin_signbit(x); }\n",
+            "long double f(long double x) { return __builtin_fabsl(x); }\n",
+            "long double f(long double x, long double y) { return __builtin_copysignl(x, y); }\n",
+            "int f(long double x) { return __builtin_isnormal(x); }\n",
+        ] {
+            let text = body(source);
+            assert!(!text.contains("i80"), "{text}");
+            assert!(text.contains("i16"), "{text}");
+        }
     }
 
     /// The complex builtins are the halves of the value, and are not a call.

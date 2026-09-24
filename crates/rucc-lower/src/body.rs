@@ -258,6 +258,33 @@ const BUFFER: u64 = 8;
 /// answer is one that suits anything, and sixteen suits every type this target has.
 const ALLOCA_ALIGN: u32 = 16;
 
+/// How many bytes an x87 value is given when it is written down to have its sign read or
+/// changed, which is the most any ABI gives the object and is also its alignment.
+const X87_SLOT: u64 = 16;
+
+/// Where in those bytes the word holding the sign and the exponent starts: the last two of the ten
+/// bytes the value has, on the little endian machines that have the format.
+const X87_TOP: u64 = 8;
+
+/// Whether a floating point type is the x87 format, which is the one whose value no integer type is
+/// as wide as.
+fn is_x87(ty: Type) -> bool {
+    ty.lane().bits() == 80
+}
+
+/// An access that names no type, for the reads and writes of a value's own bytes where the type the
+/// bytes are read as is not the type they were written as.
+fn untyped(align: u32) -> MemInfo {
+    MemInfo {
+        size: 0,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    }
+}
+
 /// What `-finstrument-functions` calls on the way into a function, and on the way out of one.
 /// gcc's names, which are what a profiler linked with the program defines.
 const ENTER_HOOK: &str = "__cyg_profile_func_enter";
@@ -5731,6 +5758,12 @@ impl<'u> Body<'_, 'u> {
         }
         let ir = self.func[value].ty;
         if op == Classify::SignBit {
+            if is_x87(ir) {
+                let (_, _, word) = self.x87_top(value, span);
+                let mut build = self.build(span);
+                let zero = build.iconst(Type::int(16), 0);
+                return build.icmp(IntPred::Slt, word, zero);
+            }
             let bits = Type::int(ir.lane().bits());
             let mut build = self.build(span);
             let number = build.unary(Opcode::Bitcast, value, bits);
@@ -5788,6 +5821,22 @@ impl<'u> Body<'_, 'u> {
     /// is above the infinity in that order and so is out, which is what an ordered comparison
     /// would have done for its own reason.
     fn normal(&mut self, value: Value, format: Format, span: Span) -> Value {
+        // Except for the x87 format, whose magnitude is an eighty bit integer nothing can hold. It
+        // is compared as a value instead, which gives the same answer for every value the format
+        // can spell: the magnitude has no sign to get in the way of an ordered comparison, and a
+        // NaN fails both of them.
+        let ir = self.func[value].ty;
+        if is_x87(ir) {
+            let magnitude = self.x87_sign(value, None, span);
+            let low = Real::smallest_normal(format, false).to_bits();
+            let high = Real::infinity(format, false).to_bits();
+            let mut build = self.build(span);
+            let low = build.fconst(ir, low);
+            let high = build.fconst(ir, high);
+            let above = build.fcmp(FloatPred::Oge, magnitude, low, Flags::NONE);
+            let below = build.fcmp(FloatPred::Olt, magnitude, high, Flags::NONE);
+            return build.binary(Opcode::And, above, below, Flags::NONE);
+        }
         let magnitude = self.magnitude(value, span);
         let bits = self.func[magnitude].ty;
         let low = Real::smallest_normal(format, false).to_bits();
@@ -5932,6 +5981,9 @@ impl<'u> Body<'_, 'u> {
             Sign::Of => Some(self.value(rhs.expect("copysign takes a second operand"))),
         };
         let float = self.func[value].ty;
+        if is_x87(float) {
+            return self.x87_sign(value, from, span);
+        }
         let bits = Type::int(float.lane().bits());
         // The sign bit of the format, which is the highest bit of the value in every one of them.
         let top = 1i128 << (bits.bits() - 1);
@@ -5947,6 +5999,46 @@ impl<'u> Body<'_, 'u> {
             }
         };
         build.unary(Opcode::Bitcast, whole, float)
+    }
+
+    /// An x87 value written to a slot of its own, and the word at the top of it read back, which
+    /// holds the sign bit and the exponent.
+    ///
+    /// The other formats have their sign bit tested and set on an integer as wide as the value,
+    /// and there is no eighty bit integer: nothing holds one and no instruction reads one. The
+    /// sign is the top bit of the last two of the ten bytes, so that word is what is read, and it
+    /// is a width every target has.
+    ///
+    /// The slot, the address of the word in it and the word are what come back.
+    fn x87_top(&mut self, value: Value, span: Span) -> (Value, Value, Value) {
+        let at = self.scratch(X87_SLOT, X87_SLOT as u32, span);
+        let top = self.offset(at, X87_TOP, span);
+        let mut build = self.build(span);
+        build.store(value, at, untyped(X87_SLOT as u32), Flags::NONE);
+        let word = build.load(Type::int(16), top, untyped(2), Flags::NONE);
+        (at, top, word)
+    }
+
+    /// `fabs` of an x87 value, or `copysign` of one when `from` is the value the sign comes from,
+    /// with the sign word changed in memory and the value read back.
+    ///
+    /// Only the word is written, so every other bit of the value, payload and all, comes back
+    /// the way it went in. See [`Self::x87_top`] for why it goes through memory at all.
+    fn x87_sign(&mut self, value: Value, from: Option<Value>, span: Span) -> Value {
+        let (at, top, word) = self.x87_top(value, span);
+        let sign = from.map(|from| self.x87_top(from, span).2);
+        let word_type = Type::int(16);
+        let float = self.func[value].ty;
+        let mut build = self.build(span);
+        let rest = build.iconst(word_type, 0x7fff);
+        let mut word = build.binary(Opcode::And, word, rest, Flags::NONE);
+        if let Some(sign) = sign {
+            let bit = build.iconst(word_type, -0x8000);
+            let sign = build.binary(Opcode::And, sign, bit, Flags::NONE);
+            word = build.binary(Opcode::Or, word, sign, Flags::NONE);
+        }
+        build.store(word, top, untyped(2), Flags::NONE);
+        build.load(float, at, untyped(X87_SLOT as u32), Flags::NONE)
     }
 
     /// `abs`, `labs` and `llabs`, which are the magnitude of a two's complement integer.
