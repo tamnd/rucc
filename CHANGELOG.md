@@ -22,6 +22,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `--fetch` for a glibc tuple that pins a release, such as `x86_64-linux-gnu.2.28`, now fetches the archive of the same tuple without the release and installs it under the pinned spelling. One glibc sysroot serves every release, because its headers pick the release with `__GLIBC_MINOR__` and the stubs a link reads are cut at the release, so there is one archive per target rather than one per release. The link's check for a missing sysroot names that archive too.
 
+- The eight glibc targets now have sysroots to fetch: x86_64, i686, aarch64, armv7 hard float, riscv64, powerpc64le, s390x and loongarch64, from the `tamnd/rucc-cross` release `sysroots-2026-09-24`. Each holds the merged glibc headers for every release from 2.28 to 2.44 and glibc 2.44's start files and `libc_nonshared.a`, and is under 600 KB, because the shared libraries are the stubs the driver writes. `PROVENANCE` lists them as pinned.
+
 ## 0.11.2
 
 ### Added
