@@ -87,7 +87,8 @@
 //! from. Block frequencies are worked out in `rucc-opt`, which is above this crate rather than
 //! below it, and what would carry the number down is the IR, which has nowhere to put it yet.
 
-use rucc_cost::heuristics::JUMP_TABLE_MIN_TARGETS;
+use rucc_cost::Goal;
+use rucc_cost::heuristics::{JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE};
 use rucc_diag::Span;
 use rucc_ir::{
     Block, BlockCall, Builder, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value,
@@ -134,19 +135,22 @@ pub const LINEAR: usize = 32;
 /// The function is changed in place, which is what makes this the last thing that reads the IR as
 /// the front end built it. `--emit=ir` prints before this runs, and nothing after this asks what
 /// the program said, only what the machine has to do.
-pub fn switches(func: &mut Func) {
+///
+/// `goal` is whether the level asked for small code, which decides how dense a stretch has to be
+/// and how many clusters it needs before it is a table. See `JUMP_TABLE_GROWTH_FOR_SIZE`.
+pub fn switches(func: &mut Func, goal: Goal) {
     let found: Vec<Inst> = func
         .blocks()
         .filter_map(|block| func.terminator(block))
         .filter(|&inst| func[inst].opcode == Opcode::Switch)
         .collect();
     for inst in found {
-        lower(func, inst);
+        lower(func, inst, goal);
     }
 }
 
 /// One `switch`, as the clusters its cases fall into and a decision tree over them.
-fn lower(func: &mut Func, inst: Inst) {
+fn lower(func: &mut Func, inst: Inst, goal: Goal) {
     let block = func.block_of(inst).expect("a terminator is in a block");
     let span = func.span(inst);
     let Extra::Switch(info) = func[inst].extra else { return };
@@ -158,7 +162,7 @@ fn lower(func: &mut Func, inst: Inst) {
     let calls: Vec<BlockCall> = func[info.targets].to_vec();
     let cases: Vec<Imm> = func[info.cases].to_vec();
     let Some((&default, arms)) = calls.split_first() else { return };
-    let clusters = group(func, tables(func, clusters(func, &cases, arms, ty), ty));
+    let clusters = group(func, tables(func, clusters(func, &cases, arms, ty), ty, goal));
 
     // Before anything is written, because the builder appends and the `switch` is where the
     // appending has to happen.
@@ -283,6 +287,13 @@ impl Cluster {
 /// the corpus reports compare.
 const JUMP_TABLE_GROWTH: i128 = 8;
 
+/// What [`JUMP_TABLE_GROWTH`] becomes when the level asked for small code.
+///
+/// Three, which is gcc's `jump-table-max-growth-ratio-for-size`, so a `switch` that is a table at
+/// `-O2` can be a search at `-Os`. The bound is on bytes, and at `-Os` bytes are what the level is
+/// asking about, so a table has to replace more of them before it is worth its cells.
+const JUMP_TABLE_GROWTH_FOR_SIZE: i128 = 3;
+
 /// The clusters again, with each stretch dense enough for a table turned into one.
 ///
 /// Greedy, the way [`group`] is: each position takes the longest stretch from there that is dense
@@ -295,14 +306,14 @@ const JUMP_TABLE_GROWTH: i128 = 8;
 /// values once there are enough of them, and after it the single values a table wants would
 /// already be gone into masks. Only on an operand a word wide or narrower, since the index a
 /// table is read with is a word and a wider operand does not fit in one.
-fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type) -> Vec<Cluster> {
+fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, goal: Goal) -> Vec<Cluster> {
     if ty.bits() == 0 || ty.bits() > u64::BITS {
         return clusters;
     }
     let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
     let mut at = 0;
     while at < clusters.len() {
-        match dense(func, &clusters[at..]) {
+        match dense(func, &clusters[at..], goal) {
             Some(end) => {
                 out.push(table(&clusters[at..at + end]));
                 at += end;
@@ -322,17 +333,22 @@ fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type) -> Vec<Cluster> {
 /// Dense is what gcc's `jump_table_cluster::can_be_handled` says it is: the values the table
 /// covers are at most [`JUMP_TABLE_GROWTH`] times the comparisons it replaces. Worth writing is at
 /// least [`JUMP_TABLE_MIN_TARGETS`] clusters, below which the range check, the load and the
-/// indirect jump are more than the compares they replace.
+/// indirect jump are more than the compares they replace. For size both are the other constant,
+/// [`JUMP_TABLE_GROWTH_FOR_SIZE`] and [`JUMP_TABLE_MIN_TARGETS_FOR_SIZE`].
 ///
 /// A stretch inside one word going to [`BIT_TEST_TARGETS`] places or fewer is left for [`group`],
 /// because a bit test over it is that many tests and no load, which is the choice gcc makes too.
 ///
 /// The scan stops once the span is wider than every cluster left could pay for even if each were
 /// a run, since the span only grows and the count cannot catch it after that.
-fn dense(func: &Func, clusters: &[Cluster]) -> Option<usize> {
+fn dense(func: &Func, clusters: &[Cluster], goal: Goal) -> Option<usize> {
+    let (growth, least) = match goal {
+        Goal::Speed => (JUMP_TABLE_GROWTH, JUMP_TABLE_MIN_TARGETS),
+        Goal::Size => (JUMP_TABLE_GROWTH_FOR_SIZE, JUMP_TABLE_MIN_TARGETS_FOR_SIZE),
+    };
     let low = clusters.first()?.low();
     let most = 2 * i128::try_from(clusters.len()).ok()?;
-    let least = usize::try_from(JUMP_TABLE_MIN_TARGETS).ok()?;
+    let least = usize::try_from(least).ok()?;
     let mut compares: i128 = 0;
     let mut places: Vec<BlockCall> = Vec::new();
     let mut best = None;
@@ -352,11 +368,11 @@ fn dense(func: &Func, clusters: &[Cluster]) -> Option<usize> {
             places.push(call);
         }
         let span = cluster.high() - low + 1;
-        if span > JUMP_TABLE_GROWTH * most {
+        if span > growth * most {
             break;
         }
         let masks = span <= WORD && places.len() <= BIT_TEST_TARGETS;
-        if index + 1 >= least && span <= JUMP_TABLE_GROWTH * compares && !masks {
+        if index + 1 >= least && span <= growth * compares && !masks {
             best = Some(index + 1);
         }
     }
@@ -799,7 +815,7 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{LINEAR, blocks_for, switches};
+    use super::{Goal, LINEAR, blocks_for, switches};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -963,7 +979,7 @@ mod tests {
 
     /// Every probe arrives where the case list says it should, whatever shape the lowering picked.
     fn routes(built: &mut Built, cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) {
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         verified(built);
         for &x in probes {
             let wanted = cases
@@ -993,7 +1009,7 @@ mod tests {
     fn a_small_switch_is_a_compare_and_a_branch_for_each_case() {
         let mut built = built(&[1, 2]);
         let before = count(&built.func);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         assert_eq!(count(&built.func), before + blocks_for(2));
 
         let text = printed(&built.func, &mut built.names);
@@ -1006,7 +1022,7 @@ mod tests {
     fn the_last_case_falls_to_the_default_rather_than_to_a_block_of_its_own() {
         let mut built = built(&[7]);
         let before = count(&built.func);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         // One case needs no chain block at all: the one compare goes to the arm or to the default.
         assert_eq!(count(&built.func), before);
         assert_eq!(blocks_for(1), 0);
@@ -1015,7 +1031,7 @@ mod tests {
     #[test]
     fn a_switch_with_only_a_default_is_a_jump() {
         let mut built = built(&[]);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         let entry = built.func.entry().expect("an entry block");
         let term = built.func.terminator(entry).expect("a terminator");
         assert_eq!(built.func[term].opcode, Opcode::Jump);
@@ -1026,7 +1042,7 @@ mod tests {
     #[test]
     fn what_comes_out_is_valid_ir() {
         let mut built = built(&[1, 2, 3, 4]);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         verified(&mut built);
     }
 
@@ -1043,7 +1059,7 @@ mod tests {
         Builder::new(&mut func, entry).ret(&[x]);
 
         let before = printed(&func, &mut names);
-        switches(&mut func);
+        switches(&mut func, Goal::Speed);
         assert_eq!(printed(&func, &mut names), before);
     }
 
@@ -1052,7 +1068,7 @@ mod tests {
         let cases = [3, 4, 5, 6, 7, 8, 9, 10];
         let arms = [0; 8];
         let mut built = built_sharing(&cases, &arms, Type::int(32));
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("icmp").count(), 1, "eight cases, one test: {text}");
@@ -1065,7 +1081,7 @@ mod tests {
         let cases = [0, 1, 2, 3, 4];
         let arms = [0; 5];
         let mut built = built_sharing(&cases, &arms, Type::int(32));
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("icmp ule").count(), 1, "one range test: {text}");
@@ -1079,7 +1095,7 @@ mod tests {
         let cases: Vec<i128> = (0..30).collect();
         let arms: Vec<usize> = (0..30).map(|at: usize| at / 10).collect();
         let mut built = built_sharing(&cases, &arms, Type::int(32));
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("icmp").count(), 3, "three runs, three tests: {text}");
@@ -1096,7 +1112,7 @@ mod tests {
         let count = 4 * LINEAR as i128;
         let cases: Vec<i128> = (0..count).map(|at| at * SPARSE).collect();
         let mut built = built(&cases);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let worst = deepest(&built.func);
         assert!(worst <= LINEAR + 2, "{count} cases in {worst} comparisons at worst");
@@ -1184,7 +1200,7 @@ mod tests {
         let arms = vec![0; cases.len()];
         let ty = Type::int(8);
         let mut built = built_sharing(&cases, &arms, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         verified(&mut built);
 
         let text = printed(&built.func, &mut built.names);
@@ -1210,7 +1226,7 @@ mod tests {
         let cases = [4, 9, 4];
         let arms = [0, 1, 2];
         let mut built = built_sharing(&cases, &arms, Type::int(32));
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
     }
 
     /// Two consecutive cases whose arms are the same block but which pass it different arguments
@@ -1255,7 +1271,7 @@ mod tests {
         let zero = build.iconst(int, 0);
         build.ret(&[zero]);
 
-        switches(&mut func);
+        switches(&mut func, Goal::Speed);
         let text = printed(&func, &mut names);
         assert_eq!(text.matches("icmp eq").count(), 2, "two cases, two equality tests: {text}");
         assert!(!text.contains("icmp ule"), "and no range test over them: {text}");
@@ -1267,7 +1283,7 @@ mod tests {
     fn the_leaf_size_is_where_the_search_starts() {
         let flat: Vec<i128> = (0..LINEAR as i128).map(|at| at * SPARSE).collect();
         let mut walked = built(&flat);
-        switches(&mut walked.func);
+        switches(&mut walked.func, Goal::Speed);
         assert!(
             !printed(&walked.func, &mut walked.names).contains("icmp slt"),
             "a leaf's worth of clusters is still a chain"
@@ -1275,7 +1291,7 @@ mod tests {
 
         let one_more: Vec<i128> = (0..LINEAR as i128 + 1).map(|at| at * SPARSE).collect();
         let mut split = built(&one_more);
-        switches(&mut split.func);
+        switches(&mut split.func, Goal::Speed);
         assert!(
             printed(&split.func, &mut split.names).contains("icmp slt"),
             "one more than a leaf splits"
@@ -1290,7 +1306,7 @@ mod tests {
         let cases = [97, 101, 105, 111, 117];
         let arms = [0; 5];
         let mut built = built_sharing(&cases, &arms, Type::int(32));
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert!(!text.contains("icmp eq"), "no case is compared on its own: {text}");
@@ -1319,7 +1335,7 @@ mod tests {
         let cases: Vec<i128> = (0..9).map(|at| at * 3).collect();
         let arms: Vec<usize> = (0..9).map(|at: usize| at % 3).collect();
         let mut built = built_sharing(&cases, &arms, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("shl").count(), 1, "nine cases, one shift: {text}");
@@ -1338,7 +1354,7 @@ mod tests {
         let cases: Vec<i128> = (0..6).collect();
         let arms: Vec<usize> = (0..6).map(|at: usize| at % 2).collect();
         let mut built = built_sharing(&cases, &arms, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("icmp ne").count(), 1, "two arms, one mask asked about: {text}");
@@ -1354,7 +1370,7 @@ mod tests {
         let cases = [0, 3, 6];
         let arms = [0, 1, 2];
         let mut built = built_sharing(&cases, &arms, Type::int(32));
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert!(!text.contains("shl"), "three values and three arms buys nothing: {text}");
@@ -1370,7 +1386,7 @@ mod tests {
         let cases = [0, 2, 4, 6, 64];
         let arms = [0; 5];
         let mut built = built_sharing(&cases, &arms, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("shl").count(), 1, "one group, not two: {text}");
@@ -1401,7 +1417,7 @@ mod tests {
         let cases = [0, 1, 2, 3, 10, 12, 14, 16];
         let arms = [0, 0, 0, 0, 1, 1, 1, 1];
         let mut built = built_sharing(&cases, &arms, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
 
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("icmp ule").count(), 2, "a run's bound and a group's: {text}");
@@ -1428,7 +1444,7 @@ mod tests {
     fn a_dense_switch_is_one_bound_and_a_table() {
         let cases: Vec<i128> = (0..13).collect();
         let mut built = built(&cases);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         verified(&mut built);
 
         let text = printed(&built.func, &mut built.names);
@@ -1456,7 +1472,7 @@ mod tests {
     #[test]
     fn every_value_reaches_its_arm_through_a_table_that_straddles_zero() {
         let ty = Type::int(8);
-        let cases: Vec<i128> = (-6..7).filter(|x| x % 4 != 0).collect();
+        let cases: Vec<i128> = (-7..8).filter(|x| x % 4 != 0).collect();
         let arms: Vec<usize> = (0..cases.len()).map(|at| at % 5).collect();
         let mut built = built_sharing(&cases, &arms, ty);
         let probes: Vec<i128> = (-128..128).collect();
@@ -1470,16 +1486,16 @@ mod tests {
     #[test]
     fn a_few_destinations_stay_a_bit_test_and_more_become_a_table() {
         let ty = Type::int(32);
-        let cases: Vec<i128> = (0..10).map(|at| at * 3).collect();
-        let few: Vec<usize> = (0..10).map(|at: usize| at % 3).collect();
+        let cases: Vec<i128> = (0..12).map(|at| at * 3).collect();
+        let few: Vec<usize> = (0..12).map(|at: usize| at % 3).collect();
         let mut built = built_sharing(&cases, &few, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         let text = printed(&built.func, &mut built.names);
         assert!(!text.contains("switch"), "three arms are masks: {text}");
 
-        let many: Vec<usize> = (0..10).map(|at: usize| at % 5).collect();
+        let many: Vec<usize> = (0..12).map(|at: usize| at % 5).collect();
         let mut built = built_sharing(&cases, &many, ty);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("switch").count(), 1, "five arms are a table: {text}");
         let mut built = built_sharing(&cases, &many, ty);
@@ -1490,11 +1506,44 @@ mod tests {
     /// more than a few compares that predict well.
     #[test]
     fn too_few_cases_for_a_table_are_compared() {
-        let cases: Vec<i128> = (0..7).collect();
+        let cases: Vec<i128> = (0..10).collect();
         let mut built = built(&cases);
-        switches(&mut built.func);
+        switches(&mut built.func, Goal::Speed);
         let text = printed(&built.func, &mut built.names);
-        assert!(!text.contains("switch"), "seven cases are not a table: {text}");
+        assert!(!text.contains("switch"), "ten cases are not a table: {text}");
+    }
+
+    /// For size the smallest table is where a table is fewer bytes than the compares, which is
+    /// six cases, and not where it is faster than them.
+    #[test]
+    fn for_size_a_table_starts_at_six_cases() {
+        let tabled = |count: i128, goal: Goal| {
+            let cases: Vec<i128> = (0..count).collect();
+            let mut built = built(&cases);
+            switches(&mut built.func, goal);
+            printed(&built.func, &mut built.names).contains("switch")
+        };
+        assert!(!tabled(5, Goal::Size), "five cases are compared");
+        assert!(tabled(6, Goal::Size), "six are a table");
+        assert!(!tabled(6, Goal::Speed), "which for speed they are not");
+    }
+
+    /// A stretch dense enough for a table at speed can be too sparse for one at size, since each
+    /// cell has to replace more bytes of compares there.
+    #[test]
+    fn a_table_for_speed_can_be_too_sparse_for_size() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..12).map(|at| at * 8).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Speed);
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "at speed a span of 89 is a table: {text}");
+
+        let mut built = built_sharing(&cases, &arms, ty);
+        switches(&mut built.func, Goal::Size);
+        let text = printed(&built.func, &mut built.names);
+        assert!(!text.contains("switch"), "at size it is searched: {text}");
     }
 
     /// An operand wider than a word has no index the machine can load with, so a dense switch over
@@ -1529,7 +1578,7 @@ mod tests {
         let param = func.append_param(join, int);
 
         let mut build = Builder::new(&mut func, entry);
-        let values: Vec<Value> = (0..10).map(|at| build.iconst(int, 100 + at)).collect();
+        let values: Vec<Value> = (0..12).map(|at| build.iconst(int, 100 + at)).collect();
         let none = func.push_values(&[]);
         let mut calls = vec![BlockCall::new(default, none)];
         for &value in &values {
@@ -1537,7 +1586,7 @@ mod tests {
             calls.push(BlockCall::new(join, args));
         }
         let targets = func.push_block_calls(&calls);
-        let imms: Vec<Imm> = (0..10).map(|at| Imm::int(at, int)).collect();
+        let imms: Vec<Imm> = (0..12).map(|at| Imm::int(at, int)).collect();
         let cases = func.push_imms(&imms);
         let info = func.add_switch(SwitchInfo { targets, cases });
         let args = func.push_values(&[x]);
@@ -1550,7 +1599,7 @@ mod tests {
         let zero = build.iconst(int, 0);
         build.ret(&[zero]);
 
-        switches(&mut func);
+        switches(&mut func, Goal::Speed);
         let module = Module::new(names.intern("sw.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
         let text = printed(&func, &mut names);
@@ -1564,9 +1613,9 @@ mod tests {
             assert!(func[call.args].is_empty(), "a cell passes nothing itself: {text}");
             assert_ne!(call.block, join, "a cell goes to a block of its own: {text}");
         }
-        for at in 0..10 {
+        for at in 0..12 {
             assert_eq!(arrives(&func, x, at, int), join, "case {at} reaches the join");
         }
-        assert_eq!(arrives(&func, x, 10, int), default, "and a value past the end does not");
+        assert_eq!(arrives(&func, x, 12, int), default, "and a value past the end does not");
     }
 }

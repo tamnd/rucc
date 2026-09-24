@@ -57,6 +57,7 @@
 //! somebody adds a lowering to whichever line of the pipeline looked convenient.
 
 use rucc_base::Interner;
+use rucc_cost::Goal;
 use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
@@ -260,9 +261,9 @@ impl Step {
     ///
     /// Only the two that [`Step::whole_function`] names ever answer `false`, because they are the
     /// only two that know. The rest work instruction by instruction and are not asked.
-    fn run(self, func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
+    fn run(self, func: &mut Func, names: &mut Interner, conv: &CallRegs, goal: Goal) -> bool {
         match self {
-            Self::Switches => switch::switches(func),
+            Self::Switches => switch::switches(func, goal),
             Self::Retries => retry::loops(func),
             Self::Orderings => expand::orderings(func, conv.word),
             Self::Overflows => expand::overflows(func),
@@ -434,15 +435,24 @@ impl Lowerings {
 /// `counting` is whether to work out what each step found and left, which is what
 /// [`Lowerings::wanted`] answers and which costs what it says there. The steps run either way and
 /// the function comes out the same; what a `false` gives back is an empty [`Ran`].
-pub fn group(func: &mut Func, names: &mut Interner, conv: &CallRegs, counting: bool) -> Ran {
+///
+/// `goal` is whether the level asked for small code, which the `switch` lowering reads to decide
+/// when a table is worth writing.
+pub fn group(
+    func: &mut Func,
+    names: &mut Interner,
+    conv: &CallRegs,
+    goal: Goal,
+    counting: bool,
+) -> Ran {
     let mut ran = Ran::default();
     for &step in Step::GROUP {
         if !counting {
-            step.run(func, names, conv);
+            step.run(func, names, conv, goal);
             continue;
         }
         let (before, found) = tally(func, step);
-        let did = step.run(func, names, conv);
+        let did = step.run(func, names, conv, goal);
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
@@ -475,7 +485,7 @@ mod tests {
     };
     use rucc_target::x86_64;
 
-    use super::{Lowerings, Ran, Step, group};
+    use super::{Goal, Lowerings, Ran, Step, group};
 
     /// A function with a body somebody else writes, which is the same helper the passes being
     /// grouped are each tested with.
@@ -497,7 +507,7 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, true)
+        group(func, names, &x86_64::SYSV, Goal::Speed, true)
     }
 
     fn i32() -> Type {
@@ -719,14 +729,14 @@ mod tests {
             build.ret(&[swapped]);
         };
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let quiet = group(&mut func, &mut names, &x86_64::SYSV, false);
+        let quiet = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, false);
         assert!(quiet.did.is_empty(), "nothing was counted");
         assert_eq!(super::tally(&func, Step::Bytes), (super::tally(&func, Step::Bytes).0, 0));
 
         // The same function through the counting path comes out the same size, so what the flag
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let loud = group(&mut func, &mut names, &x86_64::SYSV, true);
+        let loud = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, true);
         assert_eq!(loud.of(Step::Bytes).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,

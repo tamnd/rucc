@@ -3095,7 +3095,7 @@ decl #0 x : int object external static defined
         let source = "int f(int x) { switch (x) { case 0: return 10; case 1: return 21; \
                       case 2: return 32; case 3: return 43; case 4: return 54; case 5: return 65; \
                       case 6: return 76; case 7: return 87; case 8: return 98; case 9: return 9; \
-                      default: return 0; } }\n";
+                      case 10: return 19; case 11: return 29; default: return 0; } }\n";
         let result = run(&opts, source);
         assert!(!result.failed(), "{:?}", result.messages);
         let text = result.text();
