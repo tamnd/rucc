@@ -49,7 +49,9 @@ use rucc_types::{
 };
 
 use crate::check::Checker;
-use crate::decl::{DeclId, DeclKind, Effects, Priority, Startup, StorageDuration, Visibility};
+use crate::decl::{
+    DeclFlags, DeclId, DeclKind, Effects, Priority, Startup, StorageDuration, Visibility,
+};
 use crate::eval;
 use crate::expr::ExprKind;
 use crate::scope::Binding;
@@ -656,6 +658,58 @@ impl Checker<'_> {
             !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
                 && rucc_gnu::unarmour(self.text(attr.name)) == "naked"
         })
+    }
+
+    /// What an attribute list says about inlining, as the two bits it can set.
+    ///
+    /// `always_inline` and `noinline`, under the namespace test [`Self::never_returns`] is under and
+    /// through the same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are
+    /// both read. Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for
+    /// almost every declaration.
+    pub(in crate::check) fn inlining(&mut self, attrs: AttrList) -> DeclFlags {
+        let mut flags = DeclFlags::NONE;
+        let ast = self.ast;
+        for &attr in &ast[attrs] {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            let name = rucc_gnu::unarmour(self.text(attr.name)).to_string();
+            match name.as_str() {
+                "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
+                "noinline" => flags |= DeclFlags::NOINLINE,
+                "optimize"
+                    if self.optimize_options(attr).iter().any(|option| {
+                        option.trim_start_matches('-').trim_start_matches('f')
+                            == "no-strict-aliasing"
+                    }) =>
+                {
+                    flags |= DeclFlags::NO_STRICT_ALIASING;
+                }
+                _ => {}
+            }
+        }
+        flags
+    }
+
+    /// The options an `optimize` attribute names, one for each string and each comma in one.
+    ///
+    /// A number, such as `optimize (2)`, is a level and names no option, so it gives nothing.
+    fn optimize_options(&mut self, attr: rucc_ast::Attribute) -> Vec<String> {
+        let mut options = Vec::new();
+        let ast = self.ast;
+        for &arg in &ast[attr.args] {
+            let AttrArg::Expr(expr) = arg else { continue };
+            let checked = self.expr(expr);
+            let ExprKind::Str(id) = self.tast[checked].kind else { continue };
+            let literal = &self.tast[id];
+            if literal.encoding != Encoding::Plain {
+                continue;
+            }
+            let text: String =
+                literal.elements.iter().map(|&unit| char::from(unit as u8)).collect();
+            options.extend(text.split(',').map(|part| part.trim().to_string()));
+        }
+        options
     }
 
     /// What an attribute list promises a call to this function does.

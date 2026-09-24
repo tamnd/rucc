@@ -1381,6 +1381,15 @@ impl<'a> Verifier<'a> {
                     ));
                 }
             }
+            Opcode::VaArgPack | Opcode::VaArgPackLen => {
+                if self.takes(opcode, arity, 0) && results == 1 && res(0) != Type::int(32) {
+                    self.error(format!(
+                        "{} produces an i32 and this one produces {}",
+                        opcode.name(),
+                        res(0)
+                    ));
+                }
+            }
             Opcode::VaCopy => {
                 if self.takes(opcode, arity, 2) {
                     self.pointer(opcode, arg(0), 0);

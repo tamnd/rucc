@@ -89,6 +89,9 @@ struct Declared {
     noreturn: bool,
     /// Whether this declaration said the function is written without a prologue or an epilogue.
     naked: bool,
+    /// What this declaration said about inlining it, as [`DeclFlags::ALWAYS_INLINE`] and
+    /// [`DeclFlags::NOINLINE`] and nothing else.
+    inlining: DeclFlags,
     /// What this declaration promised a call to it does, from `const` and `pure`.
     effects: Effects,
     /// Where this declaration asked for the function to go in the run-up to `main` and the
@@ -314,6 +317,9 @@ impl Checker<'_> {
             // usual place for it: a naked function is written where its body is, since the body is
             // the only part of it the compiler is being asked to keep.
             naked: self.is_naked(specs.attrs),
+            // The specifiers only, for the reason `noreturn` above reads them only. glibc writes
+            // `__fortify_function` in front of the definition, which is here.
+            inlining: self.inlining(specs.attrs),
             // The specifiers only, for the reason `noreturn` above reads them only, and read
             // on a definition at all because a promise made over a body is still a promise.
             // The analysis that reads the body keeps its own answer somewhere else, so the two
@@ -659,6 +665,8 @@ impl Checker<'_> {
             // a program usually writes this one, since the definition is, but a header that
             // declares an interrupt handler and defines it elsewhere writes it here.
             naked: self.is_naked(specs.attrs) || self.is_naked(item.attrs),
+            // Both places, for the reason `noreturn` above reads both.
+            inlining: self.inlining(specs.attrs) | self.inlining(item.attrs),
             // Both places, for the reason `noreturn` above reads both. A header writing
             // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
             // one writing `int look(const int *) __attribute__((pure));` puts it after the
@@ -1267,6 +1275,10 @@ impl Checker<'_> {
         if declared.naked {
             flags |= DeclFlags::NAKED;
         }
+        // One declaration saying it is enough, for the reason `noreturn` above is under that
+        // rule: a prototype that says `always_inline` and a definition that does not is a
+        // function gcc inlines.
+        flags |= declared.inlining;
         // One declaration of a name saying it is enough, which is the rule `retained` above
         // is under and is there for the same reason: a library writes the attribute once, in
         // the header, and the file that defines the name writes an ordinary definition. gcc
@@ -1539,7 +1551,8 @@ impl Checker<'_> {
                 .with(DeclFlags::GNU_INLINE, declared.gnu_inline)
                 .with(DeclFlags::NORETURN, declared.noreturn)
                 .with(DeclFlags::NAKED, declared.naked)
-                .with(DeclFlags::WEAK, declared.weak.is_some()),
+                .with(DeclFlags::WEAK, declared.weak.is_some())
+                | declared.inlining,
             asm_label: declared.asm_label,
             register: declared.register,
             alias: declared.alias,

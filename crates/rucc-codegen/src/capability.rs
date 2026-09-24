@@ -178,6 +178,10 @@ pub static HAND: &[(Opcode, &str)] = &[
     // pass runs and at every level, so the back end never sees one.
     (Opcode::ObjectSize, "nothing at all, since `rucc_opt::objsize` answers it first"),
     (Opcode::IsConstant, "nothing at all, since `rucc_opt::constant_p` answers it first"),
+    // The anonymous arguments of a call that was inlined, which the inliner puts in its place, and
+    // a body still holding one is a body that is not emitted.
+    (Opcode::VaArgPack, "nothing at all, since `rucc_opt::inline` replaces it first"),
+    (Opcode::VaArgPackLen, "nothing at all, since `rucc_opt::inline` replaces it first"),
     // The edges and the two ways of writing down that control does not arrive.
     (Opcode::Jump, "`crate::layout`, since an edge is on the block and not in the block"),
     // The one terminator selection does write, because what it reads is a value. How many arms it

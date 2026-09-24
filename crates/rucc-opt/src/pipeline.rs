@@ -40,8 +40,8 @@ use rucc_session::OptLevel;
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
-    heap, image, ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside, params,
-    pass, purity, readonly, reload,
+    heap, image, inline, ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside,
+    params, pass, purity, readonly, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -803,6 +803,23 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // of `spec/optimizer/04-pass-manager.md` step over the rewrite it was looking for.
     let mut allowance = opts.fuel.clone();
     let passes = opts.passes();
+    // Before everything, at every level, because `always_inline` is a promise gcc keeps at `-O0`
+    // and a fortified header relies on it: the wrapper's body has to be where the call was
+    // before `objsize` below asks what the destination is. See [`inline`].
+    for (id, stats) in inline::run(module) {
+        if opts.verify {
+            if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                let func = names.resolve(module[id].name);
+                for error in errors {
+                    report.broke.push(format!(
+                        "the {} pass left invalid IR in {func}, {error}",
+                        inline::NAME
+                    ));
+                }
+            }
+        }
+        report.remarks.push(Remark { pass: inline::NAME, func: module[id].name, stats });
+    }
     // First of all and whatever the pass list says, because the instruction is a question the
     // front end left for the IR and nothing after this is allowed to see one. The walk is skipped
     // at `-O0`, which answers every question as not known, the way gcc does at that level.

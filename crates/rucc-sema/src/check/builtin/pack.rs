@@ -8,29 +8,28 @@
 //! written at the call site and the length becomes how many of them there were. Neither means
 //! anything in a function that was compiled on its own, and gcc refuses them there.
 //!
-//! This compiler does not inline, so the pack cannot be filled in and the length cannot be counted.
-//! What it can do is accept them in the one place where nothing has to be filled in, which is a
-//! variadic definition that nothing is emitted for. GNU's `extern inline` gives exactly that: the
-//! definition is read, checked and then dropped, and the calls in it never reach the IR, so a call
-//! to a builtin with no meaning is a call nothing ever has to give a meaning to. That is also the
-//! only place either of them is written in practice, since every use in glibc is in a wrapper
-//! declared `__extern_always_inline`.
+//! This compiler accepts them in the same place glibc writes them, which is a variadic definition
+//! that nothing is emitted for. GNU's `extern inline` gives exactly that, and every use in glibc
+//! is in a wrapper declared `__extern_always_inline`. The lowering turns each into an instruction,
+//! `va_arg_pack` or `va_arg_pack_len`, and `rucc_opt::inline`, which runs at every level for an
+//! `always_inline` function, puts the anonymous arguments of the call it inlines in place of the
+//! first and their count in place of the second. A copy of the wrapper that still holds either
+//! after that, because some call to it could not be inlined, becomes a declaration again, so that
+//! call goes to the library's function of the same name, which is where it went before any of this
+//! was done.
 //!
-//! So the rule here is the pairing rather than either half: variadic, and not emitted. Anywhere
-//! else the call is refused, because anywhere else it would reach the IR as a call to a name no
-//! object file defines, and a link error naming a builtin is a worse way to learn this than a
-//! diagnostic at the line that wrote it.
+//! So the rule here is the pairing: variadic, and not emitted. Anywhere else the call is refused,
+//! because anywhere else it would reach the IR as a call to a name no object file defines, and a
+//! link error naming a builtin is a worse way to learn this than a diagnostic at the line that
+//! wrote it. gcc also takes them in a `static inline` function marked `always_inline`, which this
+//! compiler does not yet.
 //!
-//! # What this costs
+//! # What this gives
 //!
-//! The fortification, and nothing else. `bits/stdio2.h` defines `sprintf` as a wrapper that calls
-//! `__builtin___sprintf_chk` with the pack on the end, and a program compiled here calls the
-//! library's own `sprintf` instead, because the wrapper is an inline definition and this compiler
-//! emits none. That is already what happens to every other wrapper in those headers: the fortified
-//! `memcpy` in `bits/string_fortified.h` needs no pack, compiles today, and still ends up as a call
-//! to `memcpy` rather than to `__memcpy_chk`. So the three headers that use the pack now behave the
-//! way the dozen that do not already behaved, which is the point of doing it this way rather than
-//! leaving them failing to compile.
+//! The fortification. `bits/stdio2.h` defines `sprintf` as a wrapper that calls
+//! `__builtin___sprintf_chk` with the pack on the end, and `bits/fcntl2.h` defines `open` as one
+//! that counts the pack to catch a missing mode. Both are inlined now, so a program built with
+//! `_FORTIFY_SOURCE` calls the checking functions the way it does under gcc.
 //!
 //! # Why this is answered after the call is checked
 //!
@@ -57,7 +56,7 @@ impl Checker<'_> {
     ///
     /// Gives back a poisoned node for a call that is refused, and nothing for every other call in
     /// the program, including an accepted one: an accepted call stands as the call the prototype
-    /// checked, because the body it is in is dropped whole and the node in it is never read.
+    /// checked, and the lowering reads the name and not the call.
     ///
     /// Answers nothing for almost every call, so the test that costs a byte goes first, and the
     /// name decides it rather than the declaration for the reason it does next door: the reserved
@@ -83,7 +82,7 @@ impl Checker<'_> {
             Diagnostic::error(
                 format!(
                     "'{spelled}' is only accepted in a variadic function nothing is emitted for, \
-                     since this compiler does not inline and has nothing to forward"
+                     which is the one place it can be forwarded from"
                 ),
                 span,
             )
@@ -169,7 +168,7 @@ mod tests {
                     messages,
                     vec![format!(
                         "'{name}' is only accepted in a variadic function nothing is emitted for, \
-                         since this compiler does not inline and has nothing to forward"
+                         which is the one place it can be forwarded from"
                     )],
                     "{name} in a body with variadic {variadic} and emitted {emitted}"
                 );

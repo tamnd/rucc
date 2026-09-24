@@ -384,9 +384,10 @@ notes = "The claim reaches the IR as `attrs(noreturn)` on the function, and `_No
 name = "always_inline"
 kind = "attribute"
 gcc_version = "3.1"
-status = "unimplemented"
+status = "partial"
 used_by = ["linux", "glibc", "ffmpeg"]
-tests = []
+tests = ["rucc::a_fortified_wrapper_forwards_its_arguments", "rucc-opt::a_call_to_an_always_inline_function_is_replaced_by_its_body"]
+notes = "Every direct call is inlined at every level, `-O0` included, by `rucc_opt::inline`, which settles each callee before its callers and leaves a call inside a cycle alone. A call it refuses, which is one to a function that takes a structure by value, calls `va_start`, takes a label's address or calls `setjmp`, stays a call and is reported as missed under `-fopt-info`, where gcc gives an error."
 
 [[feature]]
 name = "gnu_inline"
@@ -401,9 +402,10 @@ notes = "Which of the two readings of `inline` the name is under, and so whether
 name = "noinline"
 kind = "attribute"
 gcc_version = "3.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc::a_fortified_wrapper_forwards_its_arguments"]
+notes = "Read and carried to the IR as an attribute of the function. The only inliner so far is the one for `always_inline`, which never inlines anything else, so nothing here inlines a `noinline` function. A name that says both is under `always_inline`, as it is under gcc."
 
 [[feature]]
 name = "flatten"
@@ -512,9 +514,10 @@ tests = []
 name = "optimize"
 kind = "attribute"
 gcc_version = "4.4"
-status = "unimplemented"
+status = "partial"
 used_by = ["linux"]
-tests = []
+tests = ["rucc::an_inlined_body_keeps_the_aliasing_it_asked_for"]
+notes = "Only `no-strict-aliasing` is honoured, spelled with or without the `-f`, which lowers the function's accesses with no aliasing node. That matters once the body can be inlined into a function under the rule, as `gcc.c-torture/execute/pr79043.c` does. Every other option and every level is accepted and ignored."
 
 [[feature]]
 name = "interrupt"
@@ -1159,8 +1162,8 @@ gcc_version = "4.3"
 status = "partial"
 signature = "int(void)"
 used_by = ["glibc"]
-tests = ["rucc-sema::the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it"]
-notes = "Every anonymous argument of the function around it, forwarded to another variadic call. gcc accepts it only inside a function it is going to inline, and it forwards the arguments while inlining. This compiler does not inline, so what it accepts is the one place that needs no inlining: a variadic definition nothing is emitted for, which is what GNU's `extern inline` gives and is where every use of it in glibc is. Accepted there and refused everywhere else, and since nothing is emitted for the function the call never reaches the IR. What that costs is the fortification: a call to `sprintf` in a program compiled with `_FORTIFY_SOURCE` reaches the library's `sprintf` rather than `__sprintf_chk`, which is the same thing that happens today to every other wrapper in those headers because none of them is inlined either. The signature is a fiction for the type checker, since this is not a function and has no type."
+tests = ["rucc-sema::the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it", "rucc-opt::a_pack_is_the_anonymous_arguments_of_the_call_inlined", "rucc-opt::a_structure_that_would_straddle_the_registers_goes_to_memory"]
+notes = "Every anonymous argument of the function around it, forwarded to another variadic call. gcc accepts it only inside a function it is going to inline, and it forwards the arguments while inlining, which `rucc_opt::inline` does here too for a function marked `always_inline` at every level. What is accepted is a variadic definition nothing is emitted for, which is what GNU's `extern inline` gives and is where every use of it in glibc is, so a program compiled with `_FORTIFY_SOURCE` calls `__sprintf_chk` the way it does under gcc. gcc also takes it in a `static inline` function marked `always_inline`, which is still refused here. A copy that some call could not be inlined into becomes a declaration, so the call goes to the library. The signature is a fiction for the type checker, since this is not a function and has no type."
 
 [[feature]]
 name = "__builtin_va_arg_pack_len"
@@ -1169,8 +1172,8 @@ gcc_version = "4.3"
 status = "partial"
 signature = "int(void)"
 used_by = ["glibc"]
-tests = ["rucc-sema::the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it"]
-notes = "How many anonymous arguments the function around it was handed, which glibc's `open` wrapper tests to catch a mode argument that is missing or a third argument that should not be there. Accepted in the same one place as `__builtin_va_arg_pack` and refused in the same way everywhere else, and the count is never worked out because nothing is emitted for the function it stands in."
+tests = ["rucc-sema::the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it", "rucc-opt::a_pack_length_is_the_count_of_the_anonymous_arguments"]
+notes = "How many anonymous arguments the function around it was handed, which glibc's `open` wrapper tests to catch a mode argument that is missing or a third argument that should not be there. Accepted in the same one place as `__builtin_va_arg_pack` and refused in the same way everywhere else, and `rucc_opt::inline` puts the count in its place when it inlines the function."
 
 # The library builtins, the family where the answer is the library function of the same name
 # with the prefix taken off. A program writes `__builtin_memcpy` rather than `memcpy` to reach
