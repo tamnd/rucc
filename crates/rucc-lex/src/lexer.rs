@@ -388,7 +388,6 @@ impl<'a> Lexer<'a> {
         let start = self.cursor.pos();
         self.cursor.bump();
         self.cursor.bump();
-        let mut spans_lines = false;
         loop {
             // Same trade as the line comment, with `*` added because that is what can end this
             // one. A license block is a couple of thousand bytes of nothing, and this walks it
@@ -399,24 +398,18 @@ impl<'a> Lexer<'a> {
                 self.diagnostics.push(Diagnostic::error("unterminated comment", span));
                 break;
             }
-            let b = self.cursor.first();
-            if b == b'\n' {
-                spans_lines = true;
-            }
-            if b == b'*' && self.cursor.nth(1) == b'/' {
+            if self.cursor.first() == b'*' && self.cursor.nth(1) == b'/' {
                 self.cursor.bump();
                 self.cursor.bump();
                 break;
             }
             self.cursor.bump();
         }
+        // A comment is one space, and a newline inside it is part of that space rather than the
+        // end of a line. So a `#define` whose body has a comment running across lines goes on
+        // after it, and a `#` after the comment is a directive only when the comment itself
+        // began its line, which is what GCC does with both.
         self.leading_space = true;
-        if spans_lines {
-            // A comment is whitespace, so a `#` after a comment that crossed a newline is
-            // still the first thing on its line and is still a directive. GCC agrees, and
-            // real headers write directives this way.
-            self.at_line_start = true;
-        }
     }
 
     fn ident_or_prefixed_literal(&mut self, b: u8, start: u32) -> PpTokenKind {
