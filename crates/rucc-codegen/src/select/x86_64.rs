@@ -33,6 +33,12 @@ pub static SELECTOR: super::Selector = super::Selector {
         near: super::Reach::Mode("lea_64"),
         far: super::Reach::Mode("mov_rm_64"),
     },
+    jumps: &super::Jumps {
+        near: "lea_64",
+        cell: "movsxd_rm_32_64",
+        add: "add_rr_64",
+        two_address: true,
+    },
 };
 
 #[cfg(test)]

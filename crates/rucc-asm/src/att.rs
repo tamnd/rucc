@@ -383,7 +383,9 @@ impl Writer<'_> {
             let at =
                 a64::Context { names: self.names, symbol: self.directives.symbol(), func_name };
             let mut line = String::new();
-            a64::inst(&mut line, &at, func, block, inst, |to| self.label(func_name, to))?;
+            let label = |to| self.label(func_name, to);
+            let table = |at: u32| self.table(func_name, at as usize);
+            a64::inst(&mut line, &at, func, block, inst, label, table)?;
             self.out.push_str(&line);
             return Ok(());
         }

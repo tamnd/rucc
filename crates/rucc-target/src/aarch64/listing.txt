@@ -217,6 +217,7 @@ f100045f	cmp x2, #1	cmp_set_hs_ri_64
 91004121	add x1, x9, #16	lea_64
 90000001	adrp x1, s	addr_64
 91000021	add x1, x1, :lo12:s	addr_64
+10000001	adr x1, s	adr_64
 90000001	adrp x1, :got:s	got_64
 f9400021	ldr x1, [x1, :got_lo12:s]	got_64
 d53bd041	mrs x1, tpidr_el0	tls_64

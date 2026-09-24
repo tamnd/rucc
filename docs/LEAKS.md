@@ -12,6 +12,8 @@ The registers `__builtin_longjmp` may hold things in come from the selector's sc
 
 A symbol's address is reached through the selector's `Symbols`, which says whether the machine does it with an addressing mode, the way x86-64 does with `lea` and a load from the global offset table, or with its own instruction, the way AArch64 does with `adrp` and `add` or a load from the table.
 
+A jump table and the address of a label are built from the selector's `Jumps`, which names the instruction that takes the address of a place in this function, the load of a cell and the add. On x86-64 those are `lea`, `movslq` and a two address `add`, and on AArch64 they are `adr`, `ldrsw` and a three address `add`.
+
 The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::Address`, because the rule files for both machines use the same names for the same shapes. AArch64 lists the two it has.
 
 ## Still there
@@ -20,7 +22,7 @@ These are in code that runs, not in tests. A test that builds x86-64 instruction
 
 - `lower.rs` writes `va_start` as the SysV x86-64 `va_list` with its four fields and the register save area. AAPCS64 has a five field `va_list` with two save areas, and Darwin uses a plain pointer. The `Varargs::Pointer` case already covers the Darwin shape. A variadic definition is refused on AArch64 until its list is written.
 
-- `lower.rs` builds a jump table and reaches a thread-local variable only the x86-64 way. Both are refused on any other machine through `Unsupported::Unported`.
+- `lower.rs` reaches a thread-local variable only the x86-64 way. It is refused on any other machine through `Unsupported::Unported`.
 
 - `lower.rs` lowers every `long double` operation through x87 instructions. AArch64 Linux has a 128-bit IEEE `long double` that goes through soft float calls, and Darwin makes it a `double`. The x87 arm has to become a question for the target rather than the only answer.
 

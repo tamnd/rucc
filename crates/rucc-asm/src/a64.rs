@@ -44,8 +44,8 @@ pub(crate) struct Context<'a> {
 /// One instruction of the machine IR, as however many instructions of the machine it is, each on
 /// a line of its own.
 ///
-/// `label` is the name the block a branch goes to is written with, which the file hands in since
-/// it is the one that numbered them.
+/// `label` is the name the block a branch goes to is written with, and `table` the name of a jump
+/// table, which the file hands in since it is the one that numbered them.
 pub(crate) fn inst(
     out: &mut String,
     at: &Context<'_>,
@@ -53,6 +53,7 @@ pub(crate) fn inst(
     block: Block,
     inst: Inst,
     label: impl Fn(Block) -> String,
+    table: impl Fn(u32) -> String,
 ) -> Result<(), Error> {
     let data = func[inst];
     let spelled = at.names.resolve(data.opcode.name());
@@ -76,7 +77,15 @@ pub(crate) fn inst(
         };
         regs.push(phys.number());
     }
+    // A block or a table of this function is a label rather than an addressing mode, which `adr`
+    // takes as its symbol.
+    let near = data.mem.map(|mem| &func[mem]).and_then(|amode| match amode {
+        Amode { base: None, index: None, disp: 0, block: Some(to), .. } => Some(label(*to)),
+        Amode { base: None, index: None, disp: 0, table: Some(at), .. } => Some(table(*at)),
+        _ => None,
+    });
     let mem = match data.mem {
+        Some(_) if near.is_some() => None,
         Some(mem) => Some(address(&func[mem], &regs).ok_or_else(refused)?),
         None => None,
     };
@@ -92,6 +101,8 @@ pub(crate) fn inst(
     let branches = written.iter().any(|machine| machine.args.contains(&Arg::Label));
     let symbol = if branches {
         func[block].succs.first().map(|to| label(to.block))
+    } else if near.is_some() {
+        near
     } else {
         data.symbol.map(|symbol| format!("{}{}", at.symbol, at.names.resolve(symbol)))
     };
