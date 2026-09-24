@@ -48,7 +48,7 @@ pub use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Encoded, Error, Extend, Fixup, Mode, Offset, Operator, Scalar, Shift,
     Value, Width, encode,
 };
-pub use crate::aarch64::insts::{ADDRESSES, Form, INSTS, address, form};
+pub use crate::aarch64::insts::{ADDRESSES, Form, INSTS, TEMPLATE, address, form};
 pub use crate::aarch64::read::{Error as ReadError, Line, read};
 pub use crate::aarch64::text::{Arg, Missing, Operands, Written, fill, operand_width, written};
 pub use crate::aarch64::timing::{LOAD, MODEL, TIMING};
@@ -106,6 +106,32 @@ pub const FP: PhysReg = x(29);
 pub const LR: PhysReg = x(30);
 /// The stack pointer.
 pub const SP: PhysReg = PhysReg::new(31);
+
+/// The register a name in an `asm` statement means, and the file it is in, or `None` for a name
+/// that is not one a program may hand the allocator.
+///
+/// A clobber list and a local register variable both name a register this way, and either width
+/// of it means the whole of it: `w19` in a clobber list is `x19` gone, and `d8` is `v8`. `fp` and
+/// `lr` are the names GNU as gives `x29` and `x30`. The stack pointer and the zero register are
+/// not here, since neither is somewhere a value can be put or taken away.
+#[must_use]
+pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
+    match name {
+        "fp" => return Some((FP, GPR)),
+        "lr" => return Some((LR, GPR)),
+        _ => {}
+    }
+    let (file, number) = name.split_at_checked(1)?;
+    if number.len() > 1 && number.starts_with('0') {
+        return None;
+    }
+    let number: u8 = number.parse().ok()?;
+    match file {
+        "x" | "w" if number < 31 => Some((x(number), GPR)),
+        "v" | "q" | "d" | "s" | "h" | "b" if number < 32 => Some((v(number), FPR)),
+        _ => None,
+    }
+}
 
 static GPR_NAMES: [&str; 32] = [
     "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
@@ -1067,5 +1093,17 @@ mod tests {
         assert!(MACHINE.has("a64.cset_eq"));
         assert!(!MACHINE.has("a64.adds_rr_64"));
         assert!(MACHINE.scales(1) && !MACHINE.scales(8));
+    }
+
+    #[test]
+    fn a_register_named_in_an_asm_statement_is_the_whole_register_at_either_width() {
+        assert_eq!(named("x19"), Some((x(19), GPR)));
+        assert_eq!(named("w19"), Some((x(19), GPR)));
+        assert_eq!(named("lr"), Some((LR, GPR)));
+        assert_eq!(named("d8"), Some((v(8), FPR)));
+        assert_eq!(named("q31"), Some((v(31), FPR)));
+        for wrong in ["sp", "xzr", "wzr", "x31", "v32", "x07", "r1", "x", ""] {
+            assert_eq!(named(wrong), None, "{wrong}");
+        }
     }
 }

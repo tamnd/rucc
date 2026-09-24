@@ -742,6 +742,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("nop", &[spell("nop", &[])]),
     ("trap", &[spell("brk", &[Lit(1)])]),
     ("fence", &[spell("dmb", &[Barrier(0b1011)])]),
+    // Nothing from the table. The text it carries is the program's and the writer puts it down.
+    ("template", &[]),
 ];
 
 /// The instructions the opcode of that name is written as.

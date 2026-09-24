@@ -85,10 +85,11 @@ use rucc_ir::{
     Linkage, MemOrder, Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
 };
 use rucc_mir as mir;
-use rucc_target::x86_64;
+use rucc_target::template::{template_name, template_reg};
 use rucc_target::{
     Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, VaList, Variadic,
 };
+use rucc_target::{aarch64, x86_64};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -309,6 +310,35 @@ fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
         }
         None => operand.fixed.and_then(x86_64::gpr_letter),
     }
+}
+
+/// Whether a constraint says nothing but what it says on every machine.
+///
+/// [`AsmOperands::read`] gives the x86 meaning to every letter it knows, and most of the letters
+/// mean something else on AArch64: `Q` is an address in one register there rather than one of four
+/// registers, `w` is a vector register, and `a` to `d` name nothing. So an AArch64 statement is
+/// taken only with the letters the two agree on, which are a register, a constant, memory, the
+/// immediate ranges and a matching number, and anything else is refused rather than read as x86. A
+/// register the front end named in braces is read against AArch64's own names, so what is inside
+/// them is not a letter.
+fn shared_letters(constraint: &str) -> bool {
+    let mut inside = false;
+    constraint.chars().all(|c| match c {
+        '{' => {
+            inside = true;
+            true
+        }
+        '}' => {
+            inside = false;
+            true
+        }
+        _ if inside => true,
+        _ => matches!(
+            c,
+            '=' | '+' | '&' | '%' | 'r' | 'm' | 'o' | 'V' | 'g' | 'X' | 'i' | 'n' | 'p' | 'I'..='N'
+                | '0'..='9'
+        ),
+    })
 }
 
 /// Whether a line of a template names, by number, an operand `wanted` says yes to.
@@ -1360,8 +1390,12 @@ impl<'a> Lowering<'a> {
                 // rather than as an instruction nothing computes.
                 Opcode::InlineAsm => {
                     // The template is read as x86 assembly, and that reader is the only one there
-                    // is. Another machine's `asm` is refused here rather than read as the wrong
-                    // language.
+                    // is. AArch64 keeps every template as text, and any other machine's `asm` is
+                    // refused here rather than read as the wrong language.
+                    if self.on_aarch64() {
+                        self.spelled(inst)?;
+                        continue;
+                    }
                     if !std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
                         return Err(self.unsupported(inst));
                     }
@@ -3174,8 +3208,13 @@ impl<'a> Lowering<'a> {
             return Err(self.unsupported(inst));
         }
         let spelled = self.names.resolve(symbol).to_owned();
-        let named = x86_64::gpr_named(spelled.strip_prefix('%').unwrap_or(&spelled));
-        let Some((held, _)) = named else {
+        let bare = spelled.strip_prefix('%').unwrap_or(&spelled);
+        let named = if self.on_aarch64() {
+            aarch64::named(bare).and_then(|(reg, class)| (class == aarch64::GPR).then_some(reg))
+        } else {
+            x86_64::gpr_named(bare).map(|(reg, _)| reg)
+        };
+        let Some(held) = named else {
             return Err(Unsupported::Register { inst, name: spelled });
         };
         let block = self.at.expect("a block is being filled");
@@ -3826,11 +3865,17 @@ impl<'a> Lowering<'a> {
         // there, and taking these away from the allocator across the template is what gives the
         // same answer here. Nothing is written to them by this, so a register one template leaves
         // a value in is still holding it when the next template reads it.
+        let a64 = self.on_aarch64();
         let mut clobbered: Vec<(PhysReg, RegClass)> =
             self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect();
-        for reg in Self::clobbered(inst, &clobbers)? {
-            if !clobbered.iter().any(|&(had, _)| had == reg) {
-                clobbered.push((reg, self.gpr));
+        let named = if a64 {
+            Self::clobbered_a64(inst, &clobbers)?
+        } else {
+            Self::clobbered(inst, &clobbers)?.into_iter().map(|reg| (reg, self.gpr)).collect()
+        };
+        for (reg, class) in named {
+            if !clobbered.iter().any(|&(had, of)| had == reg && of == class) {
+                clobbered.push((reg, class));
             }
         }
 
@@ -3856,7 +3901,7 @@ impl<'a> Lowering<'a> {
                     mir::Operand::write(reg, self.gpr)
                 };
                 def_of[index] = Some(defs.len());
-                defs.push(match pinned(operand) {
+                defs.push(match self.pinned_here(operand) {
                     Some(at) => written.with(Constraint::Fixed(at)),
                     None => written,
                 });
@@ -3867,7 +3912,9 @@ impl<'a> Lowering<'a> {
                     && operand.tied.is_none()
                     && operand.immediate
                     && (self.number(value).is_some() || self.named_address(value).is_some());
-                if operand.memory || spelled {
+                // An operand in memory is spelled on AArch64 as the register its address is in,
+                // which is `[x3]` and is an address every instruction that takes one reads.
+                if (operand.memory && !a64) || spelled {
                     continue;
                 }
                 let ty = self.source[value].ty;
@@ -3876,7 +3923,7 @@ impl<'a> Lowering<'a> {
                 }
                 let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
                 use_of[index] = Some(uses.len());
-                uses.push(match pinned(operand) {
+                uses.push(match self.pinned_here(operand) {
                     Some(at) => read.with(Constraint::Fixed(at)),
                     None => read,
                 });
@@ -3926,7 +3973,7 @@ impl<'a> Lowering<'a> {
         // assembler what the reader already said no to. `addq %1, %k0` is that: a quadword add
         // into half a register. What is kept is a line with an instruction nothing here knows.
         let registered = |index: usize| def_of[index].is_some() || use_of[index].is_some();
-        if (0..list.len()).any(registered) {
+        if !a64 && (0..list.len()).any(registered) {
             for line in template.split(['\n', ';']) {
                 if names_one(line, registered)
                     && x86_64::known(line, widths, memory)
@@ -3943,12 +3990,13 @@ impl<'a> Lowering<'a> {
             text.push_str(template);
         } else {
             let mut chars = template.chars().peekable();
-            // Inside `{att|intel}`, and past the `|` in it, which is the half nobody reads.
+            // Inside `{att|intel}`, and past the `|` in it, which is the half nobody reads. AArch64
+            // has one dialect, and a brace there is a list of vector registers.
             let mut dialect = false;
             let mut skipped = false;
             while let Some(c) = chars.next() {
                 match c {
-                    '{' => {
+                    '{' if !a64 => {
                         dialect = true;
                         continue;
                     }
@@ -3995,6 +4043,16 @@ impl<'a> Lowering<'a> {
                 }
                 let index: usize = digits.parse().map_err(|_| refused())?;
                 let operand = list.get(index).ok_or_else(refused)?;
+                if operand.memory && a64 {
+                    let at = use_of[index].map(|at| first_use + at).ok_or_else(refused)?;
+                    if modifier.is_some() {
+                        return Err(refused());
+                    }
+                    text.push('[');
+                    text.push_str(&template_reg(at, 'x'));
+                    text.push(']');
+                    continue;
+                }
                 if operand.memory {
                     if modifier.is_some() || memory.is_some_and(|had| had != index) {
                         return Err(refused());
@@ -4006,21 +4064,34 @@ impl<'a> Lowering<'a> {
                 let placed = def_of[index].or(use_of[index].map(|at| first_use + at));
                 if let Some(at) = placed {
                     let value = operand.result.or(operand.value).ok_or_else(refused)?;
-                    let width = match modifier {
-                        None => match held_bits(self.source[value].ty) {
-                            8 => 'b',
-                            16 => 'w',
-                            32 => 'k',
-                            64 => 'q',
+                    let bits = held_bits(self.source[value].ty);
+                    // `w` and `x` are the two names every general purpose register has, and one
+                    // with no modifier is named at the width of its type, as gcc names it.
+                    let width = if a64 {
+                        match (modifier, bits) {
+                            (None, 8 | 16 | 32) | (Some('w'), _) => 'w',
+                            (None, 64) | (Some('x'), _) => 'x',
                             _ => return Err(refused()),
-                        },
-                        Some(width @ ('b' | 'w' | 'k' | 'q')) => width,
-                        // The second byte is a name only four registers have, so it is taken for
-                        // an operand pinned to one of them and for nothing the allocator chose.
-                        Some('h') if pinned(operand).and_then(x86_64::gpr_high).is_some() => 'h',
-                        Some(_) => return Err(refused()),
+                        }
+                    } else {
+                        match modifier {
+                            None => match held_bits(self.source[value].ty) {
+                                8 => 'b',
+                                16 => 'w',
+                                32 => 'k',
+                                64 => 'q',
+                                _ => return Err(refused()),
+                            },
+                            Some(width @ ('b' | 'w' | 'k' | 'q')) => width,
+                            // The second byte is a name only four registers have, so it is taken for
+                            // an operand pinned to one of them and for nothing the allocator chose.
+                            Some('h') if pinned(operand).and_then(x86_64::gpr_high).is_some() => {
+                                'h'
+                            }
+                            Some(_) => return Err(refused()),
+                        }
                     };
-                    text.push_str(&x86_64::template_reg(at, width));
+                    text.push_str(&template_reg(at, width));
                     continue;
                 }
                 let value = operand.value.ok_or_else(refused)?;
@@ -4029,13 +4100,15 @@ impl<'a> Lowering<'a> {
                     Some('c' | 'P' | 'p') => true,
                     Some(_) => return Err(refused()),
                 };
-                if !bare {
+                // A constant is bare on AArch64 whatever the modifier, which is how gcc prints one
+                // there and a form GNU as takes wherever `#` would go.
+                if !bare && !a64 {
                     text.push('$');
                 }
                 if let Some(number) = self.number(value) {
                     text.push_str(&number.to_string());
                 } else if let Some(symbol) = self.named_address(value) {
-                    text.push_str(&x86_64::template_name(self.names.resolve(symbol)));
+                    text.push_str(&template_name(self.names.resolve(symbol)));
                 } else {
                     return Err(refused());
                 }
@@ -4047,7 +4120,7 @@ impl<'a> Lowering<'a> {
         // registers it does not declare, and tcc's tests do: one that writes `%ecx` behind the
         // compiler's back would otherwise take the address with it.
         let mut local = None;
-        let at = match memory {
+        let at = match memory.filter(|_| !a64) {
             Some(index) => {
                 let value = list[index].value.ok_or_else(refused)?;
                 local = self.local_of(value);
@@ -4060,7 +4133,7 @@ impl<'a> Lowering<'a> {
             None => None,
         };
         let symbol = self.names.intern(&text);
-        let opcode = self.named(x86_64::TEMPLATE);
+        let opcode = self.named(if a64 { aarch64::TEMPLATE } else { x86_64::TEMPLATE });
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let mut build = self.out.build(block, opcode).at(span).symbol(symbol);
@@ -4395,7 +4468,12 @@ impl<'a> Lowering<'a> {
         let conv = self.conv;
         let ints = conv.int_order.iter().filter(|&&reg| !conv.preserves_int(reg));
         let sses = conv.sse_order.iter().filter(|&&reg| !conv.preserves_sse(reg));
-        ints.map(|&reg| (reg, conv.int_class, bound(list, reg, Role::Def)))
+        let written = |reg| {
+            list.iter().position(|operand| {
+                operand.result.is_some() && self.pinned_here(operand) == Some(reg)
+            })
+        };
+        ints.map(|&reg| (reg, conv.int_class, written(reg)))
             .chain(sses.map(|&reg| (reg, conv.sse_class, None)))
             .collect()
     }
@@ -4465,6 +4543,74 @@ impl<'a> Lowering<'a> {
             }
         }
         Ok(named)
+    }
+
+    /// [`Self::clobbered`] on AArch64, where a clobber may name a vector register as well as a
+    /// general purpose one, so each comes back with the file it is in. See [`aarch64::named`].
+    fn clobbered_a64(inst: Inst, clobbers: &str) -> Result<Vec<(PhysReg, RegClass)>, Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Clobber };
+        let mut named = Vec::new();
+        for entry in clobbers.split(',') {
+            let entry = entry.trim().trim_matches('"');
+            if entry.is_empty() || matches!(entry, "memory" | "cc") {
+                continue;
+            }
+            let reg = aarch64::named(entry).ok_or_else(refused)?;
+            if !named.contains(&reg) {
+                named.push(reg);
+            }
+        }
+        Ok(named)
+    }
+
+    /// Whether the machine being lowered for is AArch64.
+    fn on_aarch64(&self) -> bool {
+        std::ptr::eq(self.selector.shapes, &aarch64::MACHINE)
+    }
+
+    /// The register an operand is pinned to on the machine being lowered for.
+    ///
+    /// [`pinned`] on x86. AArch64 has no constraint letter for one register, so there only a local
+    /// register variable pins anything, and its name is read against [`aarch64::named`]. A vector
+    /// register pins nothing, since an operand in that file is refused before it is placed.
+    fn pinned_here(&self, operand: &AsmOperand<'_>) -> Option<PhysReg> {
+        if !self.on_aarch64() {
+            return pinned(operand);
+        }
+        let name = operand.named?;
+        match aarch64::named(name.strip_prefix('%').unwrap_or(name))? {
+            (reg, aarch64::GPR) => Some(reg),
+            _ => None,
+        }
+    }
+
+    /// An `asm` statement on AArch64, which is kept as text whatever is in it.
+    ///
+    /// Nothing reads AArch64 assembly back into instructions yet, so every template goes the way
+    /// one the x86 reader could not take apart goes, which is [`Self::kept`]: the text is carried
+    /// to the listing with a hole for each operand, and the operands are the instruction's own. A
+    /// constraint with a letter whose meaning differs between the two machines is refused first.
+    /// See [`shared_letters`].
+    fn spelled(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[asm];
+        if !self.source[info.targets].is_empty() {
+            return Err(Unsupported::Assembly { inst, refused: Written::Goto });
+        }
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let constraints = self.names.resolve(info.constraints).to_string();
+        if !constraints.split(',').all(shared_letters) {
+            return Err(refused());
+        }
+        let results: Vec<Value> = data.results().collect();
+        let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
+            .ok_or_else(refused)?;
+        let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
+        let widths = vec![None; list.len()];
+        let memory: Vec<bool> = list.iter().map(|operand| operand.memory).collect();
+        let template = self.names.resolve(info.template).to_string();
+        self.kept(inst, &template, &list, &widths, &memory)
     }
 
     /// One instruction of a template, as the machine instruction it was read back into.
@@ -5625,15 +5771,80 @@ mod tests {
         let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
         build.ret(&[sum]);
 
-        let conv = &rucc_target::aarch64::AAPCS64;
+        let conv = &aarch64::AAPCS64;
         let selector = &crate::select::aarch64::SELECTOR;
         let out = super::func(&func, &mut names, selector, conv, &Elsewhere::default())
             .expect("an addition and a return have AArch64 rules");
-        let text = mir::print_func(&out.func, &names, &rucc_target::aarch64::REGS);
+        let text = mir::print_func(&out.func, &names, &aarch64::REGS);
         assert!(!text.contains("x64."), "{text}");
         assert!(text.contains("= a64.arg_val_32"), "{text}");
         assert!(text.contains("= a64.add_rr_32 %0, %1"), "{text}");
         assert!(text.contains("a64.ret_val_32 %2"), "{text}");
+    }
+
+    /// Lowers one function for AArch64 and prints it, or says why it could not.
+    fn lower_a64(names: &mut Interner, func: &Func) -> Result<String, String> {
+        let conv = &aarch64::AAPCS64;
+        let selector = &crate::select::aarch64::SELECTOR;
+        let out = super::func(func, names, selector, conv, &Elsewhere::default())
+            .map_err(|why| why.to_string())?;
+        Ok(mir::print_func(&out.func, names, &aarch64::REGS))
+    }
+
+    /// Nothing reads AArch64 assembly back into instructions, so every template there is kept as
+    /// its text. The operands are the instruction's own, with the output first and the inputs
+    /// last, a hole in the text asks for the `w` or the `x` name of one, and a vector register the
+    /// clobber list names is written by it as well as every register a call may leave anything in.
+    #[test]
+    fn a_template_on_aarch64_is_kept_as_text_with_its_operands_in_registers() {
+        let (i32, i64) = (Type::int(32), Type::int(64));
+        let (mut names, mut source, block, args) = blank(&[i32, i64]);
+        let out = clobbering(
+            &mut source,
+            block,
+            &mut names,
+            "add %w0, %w1, #1\n\tstr %2, [sp]",
+            "=r,r,r",
+            "d8",
+            &[args[0], args[1]],
+            &[i32],
+        );
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+
+        // Forty one registers between the output and the inputs: `x0` to `x15`, the sixteen vector
+        // registers a call does not keep, and `v8`, which is the one the program named.
+        let text = lower_a64(&mut names, &source).expect("kept as text");
+        assert!(text.contains("%2:gpr, early $x0, early $x1,"), "{text}");
+        assert!(text.contains(
+            "early $v31, early $v8 = a64.template %0, %1, \
+             @add \u{1}r0w\u{2}, \u{1}r42w\u{2}, #1\n\tstr \u{1}r43x\u{2}, [sp]\n"
+        ));
+    }
+
+    /// A letter that means one thing on x86 and another on AArch64 is refused there rather than
+    /// read as x86. `w` is a vector register on AArch64 and `Q` an address in one register, and
+    /// the reader of the constraint list knows them as neither.
+    #[test]
+    fn a_constraint_letter_the_two_machines_disagree_about_is_refused_on_aarch64() {
+        let i64 = Type::int(64);
+        for constraints in ["=w,r", "=r,Q", "=a,r", "=r,S"] {
+            let (mut names, mut source, block, args) = blank(&[i64]);
+            let out = clobbering(
+                &mut source,
+                block,
+                &mut names,
+                "mov %0, %1",
+                constraints,
+                "",
+                &[args[0]],
+                &[i64],
+            );
+            let produced = source[out].results().next().expect("one result");
+            Builder::new(&mut source, block).ret(&[produced]);
+            let refused = lower_a64(&mut names, &source).expect_err(constraints);
+            assert!(refused.contains("has an operand this cannot place"), "{refused}");
+        }
     }
 
     #[test]

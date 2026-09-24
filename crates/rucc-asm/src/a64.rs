@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, defs};
 use rucc_target::aarch64::{self, Addr, Arg, Extend, Mode, Offset, Operands};
+use rucc_target::template::template_filled;
 
 use crate::Error;
 
@@ -61,6 +62,9 @@ pub(crate) fn inst(
     let spelled = at.names.resolve(data.opcode.name());
     let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
     let refused = || Error::Opcode { func: at.func_name.to_owned(), opcode: spelled.to_owned() };
+    if opcode == aarch64::TEMPLATE {
+        return template(out, at, func, inst);
+    }
     let Some(written) = aarch64::written(opcode) else {
         return Err(refused());
     };
@@ -123,6 +127,35 @@ pub(crate) fn inst(
         }
         let line = aarch64::write(machine.mnemonic, &values, symbol.as_deref(), at.spelling);
         let _ = writeln!(out, "\t{line}");
+    }
+    Ok(())
+}
+
+/// An `asm` template kept as text, as its own lines with each register it names spelled as the
+/// register its operand was given.
+///
+/// A hole says the operand and whether it is the `w` or the `x` name of the register, and a name
+/// gets the prefix this object format puts in front of every symbol. The text is not handed to the
+/// encoder, since nothing reads it back into instructions, so what is wrong with it is the
+/// assembler's to say.
+fn template(out: &mut String, at: &Context<'_>, func: &Func, inst: Inst) -> Result<(), Error> {
+    let data = func[inst];
+    let spelled = at.names.resolve(data.opcode.name());
+    let Some(text) = data.symbol else {
+        return Err(Error::Opcode { func: at.func_name.to_owned(), opcode: spelled.to_owned() });
+    };
+    let operands = &func[data.operands];
+    if operands.iter().any(|operand| operand.reg.phys().is_none()) {
+        return Err(Error::Virtual { func: at.func_name.to_owned(), opcode: spelled.to_owned() });
+    }
+    let reg = |held: usize, width: char| match operands.get(held).and_then(|op| op.reg.phys()) {
+        Some(phys) => format!("{width}{}", phys.number()),
+        None => String::from("?"),
+    };
+    let filled =
+        template_filled(at.names.resolve(text), "", |name| format!("{}{name}", at.symbol), reg);
+    for line in filled.lines() {
+        let _ = writeln!(out, "\t{}", line.trim_start());
     }
     Ok(())
 }
