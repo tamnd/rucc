@@ -1,10 +1,8 @@
 //! The AArch64 lowering table.
 //!
 //! Everything below the module comment is generated from `rules/aarch64.rules` by `rucc-rules`
-//! when this crate is built, the same way the x86-64 table is. Nothing selects with it yet: the
-//! pipeline has no AArch64 machine to hand it to until `crate::pipeline::Machine::for_target`
-//! returns one, and what is here until then is a rule set that compiles, is proved, and names
-//! only instructions `rucc_target::aarch64` describes.
+//! when this crate is built, the same way the x86-64 table is, and `crate::pipeline::Machine`
+//! hands it to the lowering for any target whose architecture is AArch64.
 
 // The guards are emitted as the comparisons the rules write, for the reason the x86-64 table gives.
 #![allow(clippy::manual_range_contains)]
@@ -23,6 +21,10 @@ pub static SELECTOR: super::Selector = super::Selector {
     trap: "trap",
     abi: &crate::abi::aarch64::INSTS,
     scratch: &crate::pipeline::AARCH64_SCRATCH,
+    symbols: &super::Symbols {
+        near: super::Reach::Own("addr_64"),
+        far: super::Reach::Own("got_64"),
+    },
 };
 
 #[cfg(test)]

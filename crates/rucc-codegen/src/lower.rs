@@ -92,15 +92,16 @@ use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::frame::{Layout, Local};
-use crate::select::{Match, Piece, Rule, Selector};
+use crate::select::{Match, Piece, Reach, Rule, Selector};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 use crate::varargs;
 
-/// The instruction a global offset table slot is read with.
+/// The instruction the x86-64 thread-local block is read with.
 ///
 /// Not in [`x86_64::FRAME`] with the other opcodes this file names, because a frame has no use for
 /// it. It is spelled out here because the relocation it takes is only legal on a `mov` with a REX
-/// prefix, so the width is part of the requirement rather than a choice.
+/// prefix, so the width is part of the requirement rather than a choice. The address of an ordinary
+/// symbol is [`Selector::symbols`], which is how another machine says the same thing.
 const GOT_LOAD: &str = "mov_rm_64";
 
 /// The instruction a template's `jmp` to a name outside it becomes.
@@ -425,6 +426,44 @@ pub enum Unsupported {
         /// How many bytes it wanted, which is the whole of what is wrong.
         bytes: u32,
     },
+    /// Something the x86-64 lowering writes by hand and nothing has written for this machine yet.
+    ///
+    /// Refused rather than written with the x86 instructions, which is what the walk would do
+    /// otherwise, since these are the places it names them itself.
+    Unported {
+        /// The instruction, or nothing for the one that is about a signature.
+        inst: Option<Inst>,
+        /// Which of them.
+        what: Unported,
+    },
+}
+
+/// What [`Unsupported::Unported`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unported {
+    /// A definition that takes arguments its signature does not name, whose save area and list are
+    /// the SysV and Windows shapes and not the AAPCS64 one.
+    Variadic,
+    /// A `switch` dense enough to go through a table of distances.
+    Table,
+    /// A thread-local variable or the thread pointer.
+    Thread,
+}
+
+impl Unported {
+    /// The whole message, since there is nothing to put in front of it.
+    #[must_use]
+    pub fn why(self) -> &'static str {
+        match self {
+            Unported::Variadic => {
+                "a function that takes arguments it does not name is not written for this machine yet"
+            }
+            Unported::Table => {
+                "a `switch` dense enough for a jump table is not written for this machine yet"
+            }
+            Unported::Thread => "a thread-local variable is not written for this machine yet",
+        }
+    }
 }
 
 /// What about an `asm` statement is not built yet.
@@ -518,6 +557,7 @@ impl Unsupported {
             | Unsupported::Dynamic { inst, .. }
             | Unsupported::Assembly { inst, .. }
             | Unsupported::Register { inst, .. } => Some(inst),
+            Unsupported::Unported { inst, .. } => inst,
             Unsupported::Argument { .. } | Unsupported::Phi { .. } | Unsupported::Naked { .. } => {
                 None
             }
@@ -558,6 +598,7 @@ impl fmt::Display for Unsupported {
                 )
             }
             Unsupported::Assembly { refused, .. } => write!(f, "this `asm` {}", refused.why()),
+            Unsupported::Unported { what, .. } => f.write_str(what.why()),
             Unsupported::Register { ref name, .. } => {
                 write!(
                     f,
@@ -2334,6 +2375,10 @@ impl<'a> Lowering<'a> {
 
     /// The address of a name: one `lea` off the instruction pointer, with the name on it.
     ///
+    /// That is x86-64, and [`Selector::symbols`] is what says so. AArch64 writes the same thing as
+    /// an `adrp` of the page and an `add` of the low twelve bits, which is one opcode with the name
+    /// as its own symbol and no addressing mode, and the table read is an `adrp` and an `ldr`.
+    ///
     /// The same instruction an `alloca` gets and for a related reason. An address that is not in
     /// the program is a `lea` of an addressing mode that names no register, and the mode carries
     /// the symbol so that [`rucc_asm`] can write it relative to `%rip` and leave the relocation
@@ -2370,13 +2415,19 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
         let span = self.source.span(inst);
-        let (mnemonic, mem) = if self.elsewhere.holds(symbol) {
-            (GOT_LOAD, mir::Mem::got(symbol))
-        } else {
-            (self.selector.frame.lea, mir::Mem::of(symbol))
-        };
-        let opcode = self.named(mnemonic);
-        self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
+        let far = self.elsewhere.holds(symbol);
+        let symbols = self.selector.symbols;
+        match if far { symbols.far } else { symbols.near } {
+            Reach::Mode(name) => {
+                let mem = if far { mir::Mem::got(symbol) } else { mir::Mem::of(symbol) };
+                let opcode = self.named(name);
+                self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
+            }
+            Reach::Own(name) => {
+                let opcode = self.named(name);
+                self.out.build(block, opcode).at(span).def(reg, self.gpr).symbol(symbol).finish();
+            }
+        }
         Ok(())
     }
 
@@ -2422,6 +2473,7 @@ impl<'a> Lowering<'a> {
         symbol: Symbol,
         result: Value,
     ) -> Result<(), Unsupported> {
+        self.only_x86(Some(inst), Unported::Thread)?;
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let gpr = self.gpr;
@@ -2522,6 +2574,7 @@ impl<'a> Lowering<'a> {
     /// across in the IR's own order, the default first and then one per case. See
     /// [`mir::Table`] for why a place and not a block.
     fn jump_table(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        self.only_x86(Some(inst), Unported::Table)?;
         let data = &self.source[inst];
         let Extra::Switch(info) = data.extra else { return Err(self.unsupported(inst)) };
         let &index = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
@@ -2841,6 +2894,15 @@ impl<'a> Lowering<'a> {
             .collect()
     }
 
+    /// Refuses one of the things only the x86-64 half of this file writes, on any other machine.
+    fn only_x86(&self, inst: Option<Inst>, what: Unported) -> Result<(), Unsupported> {
+        if std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
+            Ok(())
+        } else {
+            Err(Unsupported::Unported { inst, what })
+        }
+    }
+
     /// A machine opcode of this target from the name the target gives it.
     fn named(&mut self, name: &str) -> mir::Opcode {
         mir::Opcode::new(self.names.intern(&format!("{}{name}", self.selector.prefix())))
@@ -2918,6 +2980,7 @@ impl<'a> Lowering<'a> {
     /// come by, rather than a variable of its own in the block, so there is no relocation here and
     /// no name for the link to resolve.
     fn thread_pointer(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        self.only_x86(Some(inst), Unported::Thread)?;
         let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
@@ -4584,6 +4647,9 @@ impl<'a> Lowering<'a> {
         // reserved on the other. Which of the two it is is [`varargs::Area::of`]'s answer and
         // [`Self::save_area`] is where the difference is spent.
         let variadic = self.source.signature().variadic;
+        if variadic {
+            self.only_x86(None, Unported::Variadic)?;
+        }
         let area = variadic.then(|| varargs::Area::of(self.conv));
         let arrived =
             abi::entry(&mut self.out, out, &types, self.conv, self.selector.abi, self.names, area)

@@ -205,13 +205,14 @@ impl Machine {
     ///
     /// [`TargetInfo`] already carries the convention, because the front end needs it to lay a
     /// `va_list` out, so the only thing this decides is which architecture's frame instructions
-    /// and register file go with it. AArch64 and RISC-V are `None` until M6 fills them in, and a
-    /// caller that gets one reports a target it cannot compile for rather than compiling wrongly.
+    /// and register file go with it. RISC-V is `None` until it has a rule file, and a caller that
+    /// gets one reports a target it cannot compile for rather than compiling wrongly.
     #[must_use]
     pub fn for_target(target: &TargetInfo) -> Option<Self> {
         let conv = target.call_regs?;
         match target.tuple.arch() {
             Arch::X86_64 => Some(Self::x86_64(conv)),
+            Arch::Aarch64 => Some(Self::aarch64(conv)),
             _ => None,
         }
     }
@@ -1598,9 +1599,15 @@ mod tests {
         let machine = Machine::for_target(&info).expect("x86-64 is the target this crate covers");
         assert!(std::ptr::eq(machine.conv, &WIN64));
 
-        // Not a target this crate has a backend for, and saying so is the whole point: a caller
-        // that got a machine here would compile x86-64 instructions for an AArch64 program.
+        // The AArch64 machine, with its own selector, so nothing compiles x86-64 instructions for
+        // an AArch64 program.
         let info = TargetInfo::new(triple("aarch64-unknown-linux-gnu"));
+        let machine = Machine::for_target(&info).expect("aarch64 has a back end");
+        assert!(std::ptr::eq(machine.conv, &aarch64::AAPCS64));
+        assert!(std::ptr::eq(machine.selector, &select::aarch64::SELECTOR));
+
+        // Not a target this crate has a back end for, and saying so is the whole point.
+        let info = TargetInfo::new(triple("riscv64-unknown-linux-gnu"));
         assert!(Machine::for_target(&info).is_none());
     }
 }

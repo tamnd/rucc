@@ -1420,6 +1420,44 @@ mod tests {
     }
 
     #[test]
+    fn an_aarch64_access_through_an_index_shifts_it_by_the_size() {
+        use rucc_target::aarch64::{self, x};
+        let text = write_a64(|func, names| {
+            let block = func.create_block();
+            let store = Opcode::new(names.intern("a64.str_32"));
+            let base = Operand::read(Reg::physical(x(0)), aarch64::GPR);
+            let index = Operand::read(Reg::physical(x(2)), aarch64::GPR);
+            func.build(block, store)
+                .operand(Operand::read(Reg::physical(x(3)), aarch64::GPR))
+                .mem(Mem::at(base).indexed(index, 4))
+                .finish();
+            let load = Opcode::new(names.intern("a64.ldr_64"));
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(x(1)), aarch64::GPR))
+                .mem(Mem::at(base).indexed(index, 1))
+                .finish();
+        })
+        .expect("an allocated function");
+        assert_eq!(body(&text), ["str w3, [x0, x2, lsl #2]", "ldr x1, [x0, x2]"]);
+    }
+
+    #[test]
+    fn an_aarch64_offset_the_encoder_refuses_is_not_written() {
+        use rucc_target::aarch64::{self, x};
+        let error = write_a64(|func, names| {
+            let block = func.create_block();
+            let load = Opcode::new(names.intern("a64.ldr_64"));
+            let base = Operand::read(Reg::physical(x(0)), aarch64::GPR);
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(x(1)), aarch64::GPR))
+                .mem(Mem::at(base).plus(1 << 20))
+                .finish();
+        })
+        .expect_err("an offset no load can hold");
+        assert!(matches!(error, Error::Encode { .. }), "{error:?}");
+    }
+
+    #[test]
     fn an_opcode_aarch64_does_not_have_is_refused_rather_than_written_as_x86() {
         let error = write_a64(|func, names| {
             let block = func.create_block();

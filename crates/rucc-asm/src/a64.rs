@@ -10,16 +10,21 @@
 //! listing is written from the values an object file would be encoded from and the two cannot come
 //! to say different things.
 //!
-//! An addressing mode here is a base register and a constant, which is every mode the rule file
-//! writes today. A symbol is reached with `adrp` and a low twelve bits argument rather than through
-//! a mode, so a mode with a symbol, an index or a label in it is a function this writer has not
-//! been taught and is refused rather than written as something else.
+//! An addressing mode here is a base register and either a constant or an index register, which is
+//! every mode this machine has for an ordinary access. The index can be shifted by the size of the
+//! access and there is no room for a constant beside it. A symbol is reached with `adrp` and a low
+//! twelve bits argument rather than through a mode, so a mode with a symbol or a label in it is a
+//! function this writer has not been taught and is refused rather than written as something else.
+//!
+//! Every line is also handed to the encoder before it is written. What the assembler would reject,
+//! such as a constant too wide for the instruction, is refused here with the encoder's reason
+//! rather than written for the assembler to find.
 
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, defs};
-use rucc_target::aarch64::{self, Addr, Arg, Mode, Offset, Operands};
+use rucc_target::aarch64::{self, Addr, Arg, Extend, Mode, Offset, Operands};
 
 use crate::Error;
 
@@ -96,17 +101,26 @@ pub(crate) fn inst(
         for &arg in machine.args {
             values.push(aarch64::fill(arg, &with).map_err(|_| refused())?);
         }
+        if let Err(why) = aarch64::encode(machine.mnemonic, &values) {
+            return Err(Error::Encode {
+                func: at.func_name.to_owned(),
+                opcode: spelled.to_owned(),
+                why: why.to_string(),
+            });
+        }
         let line = aarch64::write(machine.mnemonic, &values, symbol.as_deref());
         let _ = writeln!(out, "\t{line}");
     }
     Ok(())
 }
 
-/// A base register and a constant as the address the encoder takes, or `None` for a mode with
-/// anything else in it.
+/// A base register and a constant or an index as the address the encoder takes, or `None` for a
+/// mode with anything else in it.
+///
+/// An index scaled by anything but a power of two, or with a constant beside it, is a mode this
+/// machine has no way to say in one instruction.
 fn address(amode: &Amode, regs: &[u8]) -> Option<Addr> {
-    if amode.index.is_some()
-        || amode.symbol.is_some()
+    if amode.symbol.is_some()
         || amode.block.is_some()
         || amode.table.is_some()
         || amode.segment.is_some()
@@ -114,5 +128,15 @@ fn address(amode: &Amode, regs: &[u8]) -> Option<Addr> {
         return None;
     }
     let base = *regs.get(usize::from(amode.base?))?;
-    Some(Addr { base, offset: Offset::Imm(i64::from(amode.disp)), mode: Mode::Offset })
+    let offset = match amode.index {
+        None => Offset::Imm(i64::from(amode.disp)),
+        Some(at) if amode.disp == 0 && amode.scale.is_power_of_two() => Offset::Reg {
+            reg: *regs.get(usize::from(at))?,
+            extend: Extend::Uxtx,
+            amount: (amode.scale > 1)
+                .then(|| u8::try_from(amode.scale.trailing_zeros()).unwrap_or(0)),
+        },
+        Some(_) => return None,
+    };
+    Some(Addr { base, offset, mode: Mode::Offset })
 }

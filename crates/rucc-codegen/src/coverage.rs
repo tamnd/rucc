@@ -288,13 +288,14 @@ pub fn report(table: &Table) -> Report {
 ///
 /// The same question [`crate::pipeline::Machine::for_target`] answers about the rest of a machine,
 /// and it is here as well because a caller that wants to write down what a run covered has a
-/// target and no machine. An architecture that gets a rule file at M6 gets an arm here at the same
-/// time, and until then it has no rules to report coverage of rather than an empty set of them.
+/// target and no machine. An architecture gets an arm here when it gets a rule file, and until then
+/// it has no rules to report coverage of rather than an empty set of them.
 #[must_use]
 pub fn table(arch: Arch) -> Option<&'static Table> {
     match arch {
         Arch::X86_64 => Some(&crate::select::x86_64::TABLE),
-        Arch::Aarch64 | Arch::Riscv64 => None,
+        Arch::Aarch64 => Some(&crate::select::aarch64::TABLE),
+        Arch::Riscv64 => None,
     }
 }
 
@@ -542,7 +543,7 @@ mod tests {
         }
     }
 
-    /// The one target with a rule file, and the two that get one at M6. A machine that can be
+    /// The two targets with a rule file, and the one still waiting for one. A machine that can be
     /// compiled for has rules to report the coverage of, and one that cannot has none rather than
     /// an empty set of them, which are different answers and would read the same as a number.
     #[test]
@@ -550,7 +551,9 @@ mod tests {
         let x86 = table(Arch::X86_64).expect("x86-64 is what this crate lowers for");
         assert_eq!(x86.source, TABLE.source);
         assert!(!x86.rules.is_empty());
-        assert!(table(Arch::Aarch64).is_none(), "there is no aarch64 rule file yet");
+        let arm = table(Arch::Aarch64).expect("aarch64 has a rule file");
+        assert_eq!(arm.source, crate::select::aarch64::TABLE.source);
+        assert!(!arm.rules.is_empty());
         assert!(table(Arch::Riscv64).is_none(), "there is no riscv64 rule file yet");
     }
 
