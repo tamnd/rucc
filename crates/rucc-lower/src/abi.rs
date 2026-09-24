@@ -206,13 +206,27 @@ pub(crate) fn plan(
     let mut varargs = Vec::new();
     for index in 0..count {
         let ty = *params.get(index).or_else(|| actual.get(index)).expect("one of the two");
-        let shaped = shape(types, target, ty).ok_or("passing a value of this type")?;
+        // An object of no fixed size goes by reference on every target gcc has an answer for
+        // there: `ix86_pass_by_reference` says so for any type without a constant size. The
+        // caller copies it and passes where the copy is, which travels as any pointer does.
+        let variable = repr::is_variable_length(types, ty);
+        let shaped = if variable {
+            let word = u64::from(target.pointer_width / 8);
+            Shaped::Scalar(Scalar { kind: Kind::Integer, size: word, align: word })
+        } else {
+            shape(types, target, ty).ok_or("passing a value of this type")?
+        };
         // Past the parameter list is past the `...`, and only if the callee has one. A call with
         // more arguments than parameters and no `...` is a program with no prototype in scope,
         // where every argument is a fixed one that nothing declared.
         let position =
             if variadic && index >= params.len() { Position::Variadic } else { Position::Fixed };
-        let travel = travel(types, target, &mut call, &shaped, position, ty);
+        let mut travel = travel(types, target, &mut call, &shaped, position, ty);
+        if variable {
+            travel.pass = Pass::Reference;
+            travel.types = vec![Type::PTR];
+            travel.align = repr::align_of(types, target, ty);
+        }
         if index < params.len() {
             signature.params.extend(travel.types.iter().map(|ty| param(&travel, *ty)));
         } else {

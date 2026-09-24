@@ -153,7 +153,9 @@ A structure or a union declared inside a function may have a member of such a ty
 
 A whole object of such a type is copied and filled the way any other object is. That needs a `memcpy` and a `memset` whose byte count is a value rather than a number, which is the optional third operand document 08 gives the three bulk opcodes, so `y = x` between two of them is one instruction here the way it is between two of a fixed size. The empty initializer, which is the only initializer C allows on one of these, is the fill of the same length, and 6.7.11p11 is why it has to be a fill of the whole object rather than nothing: an automatic object written that way holds what a static one would, which is zero in every element and in the padding.
 
-A bit-field after a member of no fixed size is refused. gcc decides at run time which storage unit such a field lands in, which was measured rather than assumed, and nothing here builds a bit offset that is a value rather than a number yet. Passing a whole object of such a record by value is refused too, which is a question about the argument area rather than about the layout, since how much room the call needs is not known where the frame is laid out.
+A bit-field after a member of no fixed size is refused. gcc decides at run time which storage unit such a field lands in, which was measured rather than assumed, and nothing here builds a bit offset that is a value rather than a number yet.
+
+Passing a whole object of such a record as an argument sends it by reference, which is what gcc does on x86-64 and on Windows for any type without a constant size. The caller makes a copy as big as the program says the object is, on the stack where the call is, and passes its address the way it passes any pointer. A callee that reads one with `va_arg` reads that address off the list and copies the object out of it, so what crosses between a function built here and one built by gcc is the same pointer.
 
 ## 7.11 `_Generic` and type introspection
 

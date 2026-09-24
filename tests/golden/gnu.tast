@@ -759,3 +759,64 @@ decl #116 both_ways : void(void) function internal defined constructor(101) dest
             convert lvalue : int
               decl #113 ran : int lvalue
             const 1 : int
+decl #118 measured : int(int, ...) function external defined
+  params
+    decl #117 size : int object automatic defined
+  body
+    block
+      decls
+        decl #119 d : struct <anonymous> object automatic defined
+      decls
+        decl #120 ap : struct __va_list_tag[1] object automatic defined
+      expr
+        va-start : void
+          convert array-decay : struct __va_list_tag *
+            decl #120 ap : struct __va_list_tag[1] lvalue
+      expr
+        assign = : struct <anonymous>
+          decl #119 d : struct <anonymous> lvalue
+          va-arg : struct <anonymous>
+            convert array-decay : struct __va_list_tag *
+              decl #120 ap : struct __va_list_tag[1] lvalue
+      expr
+        va-end : void
+          convert array-decay : struct __va_list_tag *
+            decl #120 ap : struct __va_list_tag[1] lvalue
+      return
+        convert arithmetic : int
+          convert lvalue : char
+            subscript : char lvalue
+              convert array-decay : char *
+                member #0 x : char[*] lvalue
+                  decl #119 d : struct <anonymous> lvalue
+              binary - : int
+                convert lvalue : int
+                  decl #117 size : int lvalue
+                const 1 : int
+decl #122 sends_measured : int(int) function external defined
+  params
+    decl #121 z : int object automatic defined
+  body
+    block
+      decls
+        decl #123 x : struct <anonymous> object automatic defined
+      expr
+        assign = : char
+          subscript : char lvalue
+            convert array-decay : char *
+              member #0 a : char[*] lvalue
+                decl #123 x : struct <anonymous> lvalue
+            binary - : int
+              convert lvalue : int
+                decl #121 z : int lvalue
+              const 1 : int
+          convert arithmetic : char
+            const 7 : int
+      return
+        call : int
+          convert function-decay : int (*)(int, ...)
+            decl #118 measured : int(int, ...) function
+          convert lvalue : int
+            decl #121 z : int lvalue
+          convert lvalue : struct <anonymous>
+            decl #123 x : struct <anonymous> lvalue

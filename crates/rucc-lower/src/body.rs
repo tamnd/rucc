@@ -1443,7 +1443,11 @@ impl<'u> Body<'_, 'u> {
                         self.ssa.write(var, entry, value);
                     }
                     Some(Local::Slot(slot)) => {
-                        self.memcpy(slot, addr, travel.size, travel.align, span);
+                        if repr::is_variable_length(self.types(), travel.ty) {
+                            self.copy_bytes(slot, addr, travel.ty, span);
+                        } else {
+                            self.memcpy(slot, addr, travel.size, travel.align, span);
+                        }
                     }
                     None => {}
                 }
@@ -3272,7 +3276,19 @@ impl<'u> Body<'_, 'u> {
             // whatever wanted the object reads it where it is, which is the assignment that
             // copies it into a variable or the call that loads it into the registers it travels
             // in.
-            ExprKind::VaArg { list } => Place::new(Where::Addr(self.va_object(list, ty, span)), ty),
+            ExprKind::VaArg { list } => {
+                // An object of no fixed size was passed by reference, so what is on the list is
+                // where it is.
+                let at = if repr::is_variable_length(self.types(), ty) {
+                    let list = self.value(list);
+                    let mut build = self.build(span);
+                    let args = build.func().push_values(&[list]);
+                    build.value(InstData { args, ..InstData::new(Opcode::VaArg) }, Type::PTR)
+                } else {
+                    self.va_object(list, ty, span)
+                };
+                Place::new(Where::Addr(at), ty)
+            }
             // `d = e = a[0] = c` where each of the four is a structure. What an assignment is
             // worth is the value it stored, and the value of an object is the object, so the
             // answer is the place it wrote to rather than a copy of it. That makes a chain of
@@ -7511,6 +7527,17 @@ impl<'u> Body<'_, 'u> {
                 // made here and the object the program wrote is not what travels.
                 Pass::Reference => {
                     let ty = tast[arg].ty;
+                    // An object of no fixed size, whose copy is as big as the program says it
+                    // is here and so is made where the call is rather than in the entry block.
+                    if repr::is_variable_length(self.types(), ty) {
+                        let length = self.size_value(ty, span);
+                        let copy = self.dynamic(length, travel.align, span);
+                        let place = self.place(arg);
+                        let from = self.address_of(place, span);
+                        self.copy_bytes(copy, from, ty, span);
+                        values.push(copy);
+                        continue;
+                    }
                     let copy = self.scratch(travel.size, travel.align, span);
                     match repr::value_type(self.types(), self.target(), ty) {
                         // A scalar that travels that way, which is a `long double` on Windows.
