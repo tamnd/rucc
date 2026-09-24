@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn a_substitution_moves_a_name_to_the_value_the_readers_were_pointed_at() {
+    fn a_substitution_moves_a_name_to_the_value_the_readers_were_pointed_at_from_where_it_was() {
         let mut names = Interner::new();
         let (mut func, held) = three(&mut names);
         func.declare_value(held[0], 7);
@@ -134,7 +134,13 @@ mod tests {
         let entry = func.blocks().next().expect("a block");
         let ret = func.insts(entry).last().expect("the return");
         assert_eq!(func[func[ret].args], [held[2]], "the readers went to the end of the chain");
-        assert_eq!(func.value_decls(held[2]).collect::<Vec<u32>>(), vec![7, 8]);
+        // Each name holds the value left from where the one it spelled was computed, since that is
+        // where the declaration was given it.
+        let first = func.insts(entry).next();
+        let starts: Vec<(u32, Option<rucc_ir::Inst>)> =
+            func.value_starts(held[2]).map(|start| (start.decl, start.after)).collect();
+        assert_eq!(starts, vec![(7, None), (8, first)]);
+        assert_eq!(func.value_decls(held[2]).count(), 0);
         assert_eq!(func.value_decls(held[0]).count(), 0, "nothing is left on what is read no more");
         assert_eq!(func.value_decls(held[1]).count(), 0);
     }

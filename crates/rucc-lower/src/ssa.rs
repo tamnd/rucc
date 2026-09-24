@@ -189,12 +189,15 @@ impl Ssa {
                 self.owned.insert(value, decl);
                 self.holds.push((value, decl));
             }
-            Some(&owner) if owner != decl => {
+            // A copy from another variable, or this one given back a value it had before, as in
+            // `i = saved;` after `saved = i;`. Either way the value was computed somewhere else and
+            // the assignment is where the variable has it again from, which the back end has to
+            // hear about to know the variable is no longer whatever it was given in between.
+            Some(_) => {
                 if let Some(start) = start {
                     self.starts.push((value, Start { decl, ..start }));
                 }
             }
-            Some(_) => {}
         }
     }
 
@@ -793,14 +796,21 @@ mod tests {
         let made = func.insts(entry).last();
         let read = ssa.read(&mut func, a, entry, I32);
         ssa.assign(m, entry, read, made);
-        // And the first one written it again is not a start, since it held it all along.
+        // And the first one written it again is a start as well. It held the value all along, but
+        // the write is still an assignment, and the back end asks where the last one was.
         ssa.assign(a, entry, read, made);
         Builder::new(&mut func, entry).ret(&[read]);
         ssa.finish(&mut func);
 
         assert_eq!(named(&func), vec![(one.index(), vec![41])]);
         let starts: Vec<Start> = func.value_starts(one).collect();
-        assert_eq!(starts, vec![Start { decl: 42, block: entry, after: made }]);
+        assert_eq!(
+            starts,
+            vec![
+                Start { decl: 42, block: entry, after: made },
+                Start { decl: 41, block: entry, after: made },
+            ]
+        );
     }
 
     /// A variable nothing named leaves nothing behind, which is every temporary an expression
