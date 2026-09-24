@@ -12,6 +12,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A parameter, a local or a file-scope object declared with a typedef name, as in `size_type n`, now has that name's `DW_TAG_typedef` as its type, so gdb says `size_type` for it where it used to say `unsigned long`, the same as for gcc. On SQLite at `-O2`, 1794 of the 15452 parameters and variables with a type now name a typedef, against 1950 of 16192 for gcc. One written `const size_type` or `size_type *` still names the underlying type, which #1817 tracks (#1640).
 - A declaration written over a typedef name, as in `const size_type m`, `size_type *p` or `size_type arr[2]`, and a function's return type written with one, now have their debug types built over the typedef's entry, so gdb prints `const size_type`, `size_type *` and `size_type [2]` the same as for gcc. A parameter's entry now keeps the qualifiers the parameter was declared with, so `const int x` is `const int`. On SQLite at `-O2`, 8527 of the 15452 parameters and variables with a type reach a typedef, against 9005 of 16192 for gcc (#1817).
 
+### Changed
+
+- phiopt no longer counts an integer constant in an arm as work, since it is an immediate on the machine. A count written as `acc = c ? acc + 1 : acc` used to keep its branch whenever `acc` was not an `int`, because the front end writes the `1` as an `int` and converts it, and the leftover constant put the arm over the budget of two. It is now a select, and after tier six an add of the widened comparison, at every width.
+
 ### Fixed
 
 - A local copied from another at the top of a loop body, as in `int j = i;` in `while (i < n) { int j = i; i = i + 1; ... }`, now shows the old value of `i` under `-g` at `-O1` and `-O2`, where gdb printed the new one. Header copying gives the body its own copy of the counter and now moves the names and start points in the body onto it, instead of leaving them on the header's value, which the loop hands the next value when it comes round. See tamnd/rucc#1810.
