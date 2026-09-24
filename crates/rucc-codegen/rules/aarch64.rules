@@ -887,6 +887,10 @@
       (a64.ret_val_f64 v)
       (spec (= v (result))))
 
+(rule (lower (ret.f128 (value.f128 v)))
+      (a64.ret_val_f128 v)
+      (spec (= v (result))))
+
 
 ;; Reading a float out of memory and writing one back, with the same two addressing modes.
 
@@ -958,6 +962,72 @@
                        (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 64 v)))
                        (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 64 v))) (result))))
 
+
+;; A quad is sixteen bytes in one vector register, and `ldr q` and `str q` move all of it.
+
+(rule (lower (load.f128 (value.i64 a)))
+      (a64.ldr_f128 (amode_base a))
+      (spec (= (float_from_bits 128 (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                       (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                       (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                       (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                       (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                       (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                       (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
+
+(rule (lower (load.f128 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -256) (< k 256)))
+      (a64.ldr_f128 (amode_base_offset a k))
+      (spec (= (float_from_bits 128 (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
+                       (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
+                       (select (mem) (bvadd (bvadd a k) 11)) (select (mem) (bvadd (bvadd a k) 10))
+                       (select (mem) (bvadd (bvadd a k) 9)) (select (mem) (bvadd (bvadd a k) 8))
+                       (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
+                       (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
+                       (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
+
+(rule (lower (store.f128 (value.f128 v) (value.i64 a)))
+      (a64.str_f128 (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                       a (extract 7 0 (bits_from_float 128 v)))
+                       (bvadd a 1) (extract 15 8 (bits_from_float 128 v)))
+                       (bvadd a 2) (extract 23 16 (bits_from_float 128 v)))
+                       (bvadd a 3) (extract 31 24 (bits_from_float 128 v)))
+                       (bvadd a 4) (extract 39 32 (bits_from_float 128 v)))
+                       (bvadd a 5) (extract 47 40 (bits_from_float 128 v)))
+                       (bvadd a 6) (extract 55 48 (bits_from_float 128 v)))
+                       (bvadd a 7) (extract 63 56 (bits_from_float 128 v)))
+                       (bvadd a 8) (extract 71 64 (bits_from_float 128 v)))
+                       (bvadd a 9) (extract 79 72 (bits_from_float 128 v)))
+                       (bvadd a 10) (extract 87 80 (bits_from_float 128 v)))
+                       (bvadd a 11) (extract 95 88 (bits_from_float 128 v)))
+                       (bvadd a 12) (extract 103 96 (bits_from_float 128 v)))
+                       (bvadd a 13) (extract 111 104 (bits_from_float 128 v)))
+                       (bvadd a 14) (extract 119 112 (bits_from_float 128 v)))
+                       (bvadd a 15) (extract 127 120 (bits_from_float 128 v))) (result))))
+
+(rule (lower (store.f128 (value.f128 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -256) (< k 256)))
+      (a64.str_f128 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                       (bvadd a k) (extract 7 0 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 4) (extract 39 32 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 5) (extract 47 40 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 8) (extract 71 64 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 9) (extract 79 72 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 10) (extract 87 80 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 11) (extract 95 88 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 12) (extract 103 96 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 13) (extract 111 104 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 14) (extract 119 112 (bits_from_float 128 v)))
+                       (bvadd (bvadd a k) 15) (extract 127 120 (bits_from_float 128 v))) (result))))
 
 ;; Conversions with a float on one side. The instruction names put the destination format second
 ;; for `fcvt` and the source first for the rest, which is how `rucc_target::aarch64` spells them.
