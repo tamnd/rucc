@@ -25,12 +25,15 @@
 
 use std::path::{Path, PathBuf};
 
-use rucc_tuple::{Abi, Arch, DataModel, Endian, Env, ObjectFormat, Os, TargetTuple};
+use rucc_tuple::{Abi, Arch, DataModel, Endian, Env, ObjectFormat, Os, TargetTuple, Version};
 
 use crate::layout::Sysroot;
 
 /// How the program is linked, which decides the first start file and the flags.
 ///
+/// The glibc release that moved the `stat` family out of `libc_nonshared.a` and into `libc.so.6`.
+const STAT_IN_LIBC: Version = Version::new(2, 33);
+
 /// Five cases rather than two booleans for static and position independent, because the two are not
 /// independent and the start file is a different file in four of the five. A pair of flags would
 /// admit a sixth combination, a shared object that is not position independent, which is not a thing
@@ -260,6 +263,13 @@ impl LinkLine {
     /// libc, which is the order glibc's script gives them. It is glibc's alone, so bionic and the
     /// BSDs get the stub and nothing between it and our runtime.
     ///
+    /// The archive in the sysroot is 2.44's, and 2.44's has no `stat` in it, because 2.33 moved the
+    /// family into `libc.so.6`. A target pinned before 2.33 gets `libc_nonshared_stat.a` after it,
+    /// which rucc-cross builds the way 2.32 built those ten functions, each a call to `__xstat` or
+    /// one of its siblings. Without it a program that calls `stat` links at -O2, where the old
+    /// headers inline the call, and not at -O0. A target with no pin is the newest release and
+    /// does not get it.
+    ///
     /// `libm.so` is not on the line, and that is a decision. glibc's `libm` is real code and a
     /// program that wants it passes `-lm`, which every build system that does arithmetic already
     /// does, so putting it on every line would record a dependency the program does not have.
@@ -274,6 +284,9 @@ impl LinkLine {
         let mut libraries = vec![sysroot.stubs().join("libc.so")];
         if sysroot.target().env() == Env::Gnu {
             libraries.push(lib.join("libc_nonshared.a"));
+            if sysroot.target().env_version().is_some_and(|version| !version.at_least(STAT_IN_LIBC)) {
+                libraries.push(lib.join("libc_nonshared_stat.a"));
+            }
         }
         libraries.extend(ours(builtins));
         LinkLine { start: start_files(&lib, mode), libraries, end: vec![lib.join("crtn.o")] }

@@ -139,6 +139,17 @@ fn the_libc_the_target_names_picks_the_line() {
     let tuple = "x86_64-linux-gnu";
     assert!(dirs[0].ends_with(format!("stubs/{tuple}")), "{:?}", dirs[0]);
     assert!(dirs[1].ends_with(format!("sysroots/{tuple}/lib")), "{:?}", dirs[1]);
+    // A pin before 2.33 adds the stat family that release kept in the archive, and a pin at 2.33
+    // or later is the same line as no pin.
+    let old =
+        LinkLine::for_target(&sysroot("x86_64-linux-gnu.2.28"), LinkMode::Dynamic, Some(&builtins()));
+    assert_eq!(
+        names(&old.libraries),
+        ["libc.so", "libc_nonshared.a", "libc_nonshared_stat.a", "librucc_builtins.a"]
+    );
+    let new =
+        LinkLine::for_target(&sysroot("x86_64-linux-gnu.2.33"), LinkMode::Dynamic, Some(&builtins()));
+    assert_eq!(names(&new.libraries), names(&gnu.libraries));
     // bionic's line is the same shape without glibc's archive in it.
     let android = LinkLine::for_target(
         &sysroot("aarch64-linux-android"),

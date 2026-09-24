@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A union with a bit-field in it on `windows-gnu` now takes the bit-field's alignment, as MinGW's gcc does, so `union { unsigned m:3; char c; }` is four bytes aligned to four there rather than aligned to one. The rule that gives the bit-field no say in the alignment is MSVC's and now applies only to `windows-msvc`. clang aligns the union to one on both, and section 6.9 of the cross specification says gcc wins where it is the incumbent, so the layout corpus declares that record on `windows-gnu` without asserting it. The corpus also drops `flexible_only`, a struct whose only member is a flexible array, which ISO C forbids and gcc refuses, so the nightly run against gcc has been failing on every row since it was added.
+- A program pinned before glibc 2.33, such as `--target=x86_64-linux-gnu.2.28`, that calls `stat`, `fstat`, `lstat`, `fstatat`, `mknod`, `mknodat` or one of their 64-bit spellings now links at `-O0`. Those releases kept the ten functions in `libc_nonshared.a` and the sysroots carry 2.44's, which has none of them, so the link failed with an undefined symbol and only worked at `-O2`, where the old headers inline the call. The glibc sysroots are now the ones in rucc-cross's `sysroots-2026-09-24b`, which adds `libc_nonshared_stat.a` to the seven ABIs that have a release that old, and the link line puts it after `libc_nonshared.a` for a pin before 2.33.
 
 ## 0.11.3
 
