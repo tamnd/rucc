@@ -127,7 +127,7 @@ pub fn of(
         let Some(area) = allocation.live.area(reg) else { continue };
         let dominated = under.entry(block).or_insert_with(|| dominated(func, block));
         for piece in area.pieces() {
-            for run in &line {
+            for run in line.reached(piece) {
                 let stretch = if run.block == block {
                     run.stretch_from(piece, first)
                 } else if dominated[run.block.index()] && !other(func, decl, reg, run, piece) {
@@ -210,12 +210,12 @@ fn over(
     decl: u32,
     at: Where,
     pieces: impl Iterator<Item = Range>,
-    line: &[Run],
+    line: &Line,
     held: impl Fn(&Run, Range) -> bool,
     out: &mut Vec<Kept>,
 ) {
     for piece in pieces {
-        for run in line {
+        for run in line.reached(piece) {
             if !held(run, piece) {
                 continue;
             }
@@ -223,6 +223,37 @@ fn over(
                 out.push(Kept { decl, at, from, to });
             }
         }
+    }
+}
+
+/// The runs of a function, and the same runs in the order of the points they span.
+///
+/// Asking every block about every piece was a third of jtckdint's build at O0, as its test has one
+/// function of 22000 blocks. Each block spans points no other block has any of, so a piece only
+/// needs the few blocks its own points fall in, and sorting them by where they start finds those.
+struct Line {
+    runs: Vec<Run>,
+    /// Where each run starts and ends, and which it is, sorted by where it starts. A run the
+    /// liveness cannot say anything about is left out, as no piece covers any of it.
+    by_start: Vec<(Point, Point, usize)>,
+    /// The furthest any run up to and including this one in `by_start` ends, which goes up along
+    /// it even if two runs were ever to overlap.
+    reach: Vec<Point>,
+}
+
+impl Line {
+    /// The runs a piece has any points in, in the order the blocks are laid out in, which is the
+    /// order the stretches were always written in. Every run before `first` ends before the piece
+    /// starts, and the walk stops at the first run starting after it ends.
+    fn reached(&self, piece: Range) -> impl Iterator<Item = &Run> {
+        let first = self.reach.partition_point(|&last| last < piece.start);
+        let mut found: Vec<usize> = self.by_start[first..]
+            .iter()
+            .take_while(|&&(start, _, _)| start <= piece.end)
+            .map(|&(_, _, index)| index)
+            .collect();
+        found.sort_unstable();
+        found.into_iter().map(|index| &self.runs[index])
     }
 }
 
@@ -241,6 +272,16 @@ struct Run {
 }
 
 impl Run {
+    /// The first and the last point a piece has to reach for [`Run::span`] to find anything in
+    /// this block, or `None` for a block it never does.
+    fn extent(&self) -> Option<(Point, Point)> {
+        match (self.bounds, self.sorted) {
+            (Some(bounds), _) => Some(bounds),
+            (None, true) => Some((self.insts.first()?.0, self.insts.last()?.0)),
+            (None, false) => None,
+        }
+    }
+
     /// The first and the last instruction of this block a piece of a live range covers, or `None`
     /// for a piece that covers none of them or one this cannot say about.
     fn stretch(&self, piece: Range) -> Option<(Inst, Inst)> {
@@ -291,7 +332,7 @@ impl Run {
 /// question the liveness answers is still answerable about each of them on its own. What is not
 /// answerable is a stretch that runs from one block into another, which is why a piece of a live
 /// range turns into a stretch per block rather than into one stretch.
-fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Vec<Run> {
+fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Line {
     let order = &allocation.order;
     let mut known = vec![false; func.inst_count()];
     for &inst in before {
@@ -310,7 +351,20 @@ fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Vec<Run> {
         let sorted = insts.windows(2).all(|pair| pair[0].0 < pair[1].0);
         out.push(Run { block, insts, sorted, bounds: order.bounds(block) });
     }
-    out
+    let mut by_start: Vec<(Point, Point, usize)> = out
+        .iter()
+        .enumerate()
+        .filter_map(|(index, run)| run.extent().map(|(start, end)| (start, end, index)))
+        .collect();
+    by_start.sort_unstable();
+    let reach = by_start
+        .iter()
+        .scan(0, |furthest, &(_, end, _)| {
+            *furthest = end.max(*furthest);
+            Some(*furthest)
+        })
+        .collect();
+    Line { runs: out, by_start, reach }
 }
 
 #[cfg(test)]

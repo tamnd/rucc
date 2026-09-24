@@ -51,6 +51,7 @@
 //! one piece over the whole loop rather than one per block in it.
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 
 use rucc_mir::{Block, Func, Reg, Role};
 
@@ -360,31 +361,60 @@ fn exposed(func: &Func, order: &Order) -> (Rows, Rows) {
 }
 
 /// The fixpoint: what arrives live in each block, and what leaves live.
+///
+/// A list of blocks to look at again rather than rounds over all of them. Every block is looked at
+/// once, in reverse, and after that a block is only looked at when what arrives live in one of the
+/// blocks after it changed, which is the only thing that can change its own answer. Rounds over
+/// every block cost the whole function each time for the few blocks a loop moved, and jtckdint's
+/// function of 22000 blocks spent more than half of its build doing that.
 fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows) {
-    let mut live_in = Rows::new(func.block_count());
-    let mut live_out = Rows::new(func.block_count());
-    let (mut out, mut scratch, mut rest, mut next) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &block in order.blocks().iter().rev() {
-            let row = block.index();
-            out.clear();
-            for call in &func[block].succs {
-                union(&out, live_in.row(call.block.index()), &mut scratch);
-                std::mem::swap(&mut out, &mut scratch);
-            }
-            without(&out, defined.row(row), &mut rest);
-            union(used.row(row), &rest, &mut next);
-            if live_in.row(row) != next.as_slice() {
-                live_in.set(row, &next);
-                changed = true;
-            }
-            live_out.set(row, &out);
+    let count = func.block_count();
+    let mut live_in = Rows::new(count);
+    let mut live_out = Rows::new(count);
+    let mut placed = vec![false; count];
+    for &block in order.blocks() {
+        placed[block.index()] = true;
+    }
+    let mut preds: Vec<Vec<Block>> = vec![Vec::new(); count];
+    for &block in order.blocks() {
+        for call in &func[block].succs {
+            preds[call.block.index()].push(block);
         }
     }
+    let mut waiting: VecDeque<Block> = order.blocks().iter().rev().copied().collect();
+    let mut queued = placed.clone();
+    let (mut out, mut scratch, mut rest, mut next) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    while let Some(block) = waiting.pop_front() {
+        let row = block.index();
+        queued[row] = false;
+        leaving(func, block, &live_in, &mut out, &mut scratch);
+        without(&out, defined.row(row), &mut rest);
+        union(used.row(row), &rest, &mut next);
+        if live_in.row(row) != next.as_slice() {
+            live_in.set(row, &next);
+            for &pred in &preds[row] {
+                if placed[pred.index()] && !queued[pred.index()] {
+                    queued[pred.index()] = true;
+                    waiting.push_back(pred);
+                }
+            }
+        }
+    }
+    for &block in order.blocks() {
+        leaving(func, block, &live_in, &mut out, &mut scratch);
+        live_out.set(block.index(), &out);
+    }
     (live_in, live_out)
+}
+
+/// What leaves a block live, which is what arrives live in any block it goes to.
+fn leaving(func: &Func, block: Block, live_in: &Rows, out: &mut Vec<u32>, scratch: &mut Vec<u32>) {
+    out.clear();
+    for call in &func[block].succs {
+        union(out, live_in.row(call.block.index()), scratch);
+        std::mem::swap(out, scratch);
+    }
 }
 
 /// Everything in either list, in order, into a buffer the caller keeps.
