@@ -16,6 +16,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - phiopt no longer counts an integer constant in an arm as work, since it is an immediate on the machine. A count written as `acc = c ? acc + 1 : acc` used to keep its branch whenever `acc` was not an `int`, because the front end writes the `1` as an `int` and converts it, and the leftover constant put the arm over the budget of two. It is now a select, and after tier six an add of the widened comparison, at every width.
 
+- `rucc_target::aarch64` describes the AArch64 register file and the two calling conventions over it, AAPCS64 and Apple's, with DWARF's numbering, the registers each one preserves, and an allocation order that keeps `x16`, `x17` and `x18` out. `TargetInfo` now answers them for every AArch64 target except Windows, which has no ABI description yet. This is the first piece of the AArch64 back end in M6 and generates no code yet, so `--target=aarch64-linux-gnu` still stops with the message that there is no back end.
+
 ### Fixed
 
 - A local copied from another at the top of a loop body, as in `int j = i;` in `while (i < n) { int j = i; i = i + 1; ... }`, now shows the old value of `i` under `-g` at `-O1` and `-O2`, where gdb printed the new one. Header copying gives the body its own copy of the counter and now moves the names and start points in the body onto it, instead of leaving them on the header's value, which the loop hands the next value when it comes round. See tamnd/rucc#1810.

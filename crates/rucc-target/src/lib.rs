@@ -29,8 +29,9 @@
 //! this crate selects between. x86-64's register file is written down,
 //! in [`x86_64`], along with what each of the two conventions over it does with each register,
 //! what each of its machine instructions does with its operands, and which instructions a frame
-//! is made of, which is [`FrameInsts`]. AArch64's and RISC-V's arrive with their backends.
-//! Machine models land in `M6`.
+//! is made of, which is [`FrameInsts`]. AArch64's register file and the two conventions over it,
+//! AAPCS64 and Apple's, are in [`aarch64`], and its instructions arrive with its backend in `M6`.
+//! RISC-V's arrive with its own. Machine models land in `M6`.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
 //! explicitly unstable and will change without a major version bump.
@@ -44,6 +45,7 @@ use rucc_abi::DataLayout;
 use rucc_base::float::Format;
 use rucc_tuple::{self as tuple, TargetTuple};
 
+pub mod aarch64;
 mod abi;
 mod bits;
 mod branch;
@@ -741,11 +743,14 @@ impl TargetInfo {
         // sixteen bytes and not a `double`: Apple made that change on AArch64 and left the Intel
         // answer alone, and a rule keyed on the operating system takes both.
         let layout = DataLayout::for_target(target);
-        // AArch64, RISC-V and everything else with a row and no backend have register files and
-        // this crate has not written them down yet. They arrive with the backends that need them,
-        // in M6 and M7.
+        // RISC-V and everything else with a row and no backend have register files and this crate
+        // has not written them down yet. They arrive with the backends that need them. AArch64's is
+        // here ahead of its backend, because the convention over it is what the ABI tests and the
+        // debugging information read, and [`TargetInfo::regs`] having it does not make anything
+        // try to generate code: that is `rucc_codegen::Machine::for_target`'s decision.
         let regs = match target.arch() {
             tuple::Arch::X86_64 => &x86_64::REGS,
+            tuple::Arch::Aarch64 => &aarch64::REGS,
             _ => &RegFile::EMPTY,
         };
         let call_regs = match (target.arch(), target.os(), target.env()) {
@@ -758,6 +763,11 @@ impl TargetInfo {
             (tuple::Arch::X86_64, tuple::Os::Windows, _) => Some(&x86_64::WIN64),
             // Apple's x86-64 follows SysV, and its divergences from it are on AArch64.
             (tuple::Arch::X86_64, _, _) => Some(&x86_64::SYSV),
+            // Windows on AArch64 reserves `x18` and passes a variadic `double` in an integer
+            // register, and `rucc_abi` has no description of it yet, so it has no registers either.
+            (tuple::Arch::Aarch64, tuple::Os::Windows, _) => None,
+            (tuple::Arch::Aarch64, os, _) if os.is_darwin() => Some(&aarch64::DARWIN),
+            (tuple::Arch::Aarch64, _, _) => Some(&aarch64::AAPCS64),
             _ => None,
         };
         // The same rule as the register file. A model is a measurement of a processor, and there
@@ -1296,10 +1306,16 @@ mod tests {
         let windows = of("x86_64-pc-windows-msvc");
         assert_eq!(windows.regs.len(x86_64::GPR), 16);
         assert_eq!(windows.call_regs.map(|regs| regs.int_args[0]), Some(x86_64::RCX));
-        // Not described yet, and saying nothing is the answer rather than saying x86-64's.
         let arm = of("aarch64-unknown-linux-gnu");
-        assert!(arm.regs.is_empty());
-        assert!(arm.call_regs.is_none());
+        assert_eq!(arm.regs.len(aarch64::GPR), 32);
+        assert_eq!(arm.call_regs.map(|regs| regs.int_args[0]), Some(aarch64::x(0)));
+        assert_eq!(arm.call_regs.map(|regs| regs.red_zone), Some(0));
+        assert_eq!(of("aarch64-apple-darwin").call_regs.map(|regs| regs.red_zone), Some(128));
+        // Not described yet, and saying nothing is the answer rather than saying Linux's.
+        assert!(of("aarch64-pc-windows-msvc").call_regs.is_none());
+        let riscv = of("riscv64-unknown-linux-gnu");
+        assert!(riscv.regs.is_empty());
+        assert!(riscv.call_regs.is_none());
     }
 
     /// The two maps from a triple, held against each other.
