@@ -72,7 +72,8 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_cost::heuristics;
 use rucc_ir::{
-    Block, BlockCall, Builder, ExtraKind, Func, Inst, InstData, Opcode, Type, Value, ValueList,
+    Block, BlockCall, Builder, ExtraKind, Func, Inst, InstData, Opcode, Start, Type, Value,
+    ValueList,
 };
 
 use crate::cfg::Cfg;
@@ -578,6 +579,21 @@ fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) 
             func.set_block_call(at, BlockCall { args, ..call });
         }
     }
+    // The names go where the readers go. The header still has the value and the rest of the loop
+    // has the parameter, so a declaration named on the value is the parameter as well, and a start
+    // anywhere but the header is a place the declaration was given the parameter. Left on the
+    // value, it would say the declaration holds whatever the header is handed once the loop has
+    // turned round, which is the next value rather than this one. tamnd/rucc#1810.
+    for decl in func.value_decls(value).collect::<Vec<u32>>() {
+        func.declare_value(param, decl);
+    }
+    let elsewhere: Vec<Start> = func
+        .value_starts(value)
+        .filter(|&start| {
+            func.start_place(start).map_or(start.block, |(block, _)| block) != job.header
+        })
+        .collect();
+    func.move_starts(value, param, &elsewhere);
     // Everything the header used to reach reads the parameter now. The header itself does not:
     // what it hands the body is still its own definition, and that is the edge the parameter was
     // put there to distinguish.
@@ -644,7 +660,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
         Block, Builder, Def, Flags, Func, IntPred, MemInfo, MemOrder, Module, Opcode, Restrict,
-        Signature, Type, verify_func,
+        Signature, Start, Type, verify_func,
     };
     use rucc_target::{TargetInfo, Triple};
 
@@ -757,6 +773,30 @@ mod tests {
             2,
             "one edge from the header and one from the copy"
         );
+        sound(&func, &mut names);
+    }
+
+    /// `int j = i;` at the top of the body is a place `j` was given the counter, and once the body
+    /// has a parameter of its own that place is where `j` was given the parameter. The header is
+    /// handed the next value when the loop comes round, so a start left on its value would follow
+    /// that one instead.
+    #[test]
+    fn a_name_on_the_value_the_body_now_takes_as_a_parameter_goes_with_it() {
+        let (mut func, mut names, blocks) = counted(None);
+        let (head, body) = (blocks[1], blocks[2]);
+        let i = func[head].params[0];
+        let test = func.insts(head).next();
+        func.declare_value(i, 3);
+        func.declare_value_from(i, Start { decl: 4, block: body, after: None });
+        func.declare_value_from(i, Start { decl: 5, block: head, after: test });
+
+        copied(&mut func, &SPEED);
+        let param = func[body].params[0];
+        assert_eq!(func.value_decls(param).collect::<Vec<u32>>(), vec![3]);
+        assert_eq!(func.value_decls(i).collect::<Vec<u32>>(), vec![3], "still the header's");
+        let decls = |value| func.value_starts(value).map(|start| start.decl).collect::<Vec<u32>>();
+        assert_eq!(decls(param), vec![4], "the body's start is on the body's parameter");
+        assert_eq!(decls(i), vec![5], "and the header's stays on the header's value");
         sound(&func, &mut names);
     }
 
