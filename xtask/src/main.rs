@@ -75,6 +75,7 @@ tasks:
   stubs             write a sysroot's libraries per ELF target and read them back with readelf
   implib            write an import library per Windows target and hold it against llvm-dlltool
   real-libc         hold a stub written from a glibc abilist against this machine's libc.so.6
+  glibc-blob        repack the glibc descriptions the compiler carries from RUCC_ABILISTS
   dso               build a shared library out of what we emit, link a program against it, run it
   unwind            walk a stack through frames we wrote and count what came back
   debugger          stop in a function under gdb and print its locals, both compilers
@@ -133,6 +134,7 @@ fn main() -> ExitCode {
         Some("stubs") => stubs::stubs(),
         Some("implib") => implib::implib(),
         Some("real-libc") => real_libc::real_libc(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("glibc-blob") => real_libc::glibc_blob(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("dso") => dso::dso(),
         Some("unwind") => unwind::unwind(),
         Some("debugger") => debugger::debugger(),

@@ -253,6 +253,45 @@ fn abilist(args: &[String], arch: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Repacks the glibc blobs `rucc-stub` compiles in, out of the abilists `bin/abilist` extracts.
+///
+/// Run by hand when `tamnd/rucc-cross` moves its glibc pin, and the three files it rewrites are then
+/// committed. The directory is the first argument or `RUCC_ABILISTS`, the same as for `real-libc`,
+/// and it has to hold every architecture, because a blob missing one would fail the first link for
+/// that architecture and nothing before it.
+pub(crate) fn glibc_blob(args: &[String]) -> Result<()> {
+    let from = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .or_else(|| std::env::var("RUCC_ABILISTS").ok())
+        .ok_or_else(|| {
+            Error::Io(
+                "glibc-blob wants the abilists bin/abilist in tamnd/rucc-cross extracts, as the \
+                 first argument or in RUCC_ABILISTS"
+                    .to_owned(),
+            )
+        })?;
+    let into = root().join("crates/rucc-stub/glibc");
+    let out = Command::new("cargo")
+        .args(["run", "-q", "-p", "rucc-stub", "--example", "pack-glibc", "--"])
+        .arg(&from)
+        .arg(&into)
+        .current_dir(root())
+        .output()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::Io(format!(
+            "the pack-glibc example failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        println!("xtask: glibc-blob {line}");
+    }
+    Ok(())
+}
+
 /// Runs the example that turns an `abilist` into a stub, and says what it printed.
 ///
 /// The description, the blob and the writer are all in the example, because xtask depends on no crate

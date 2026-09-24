@@ -254,6 +254,7 @@ pub mod compat;
 pub mod def;
 pub mod describe;
 pub mod elf;
+pub mod glibc;
 
 pub use compat::{Compat, Form, compat};
 pub use describe::{Binding, Error, Kind, Library, Symbol, Version};
