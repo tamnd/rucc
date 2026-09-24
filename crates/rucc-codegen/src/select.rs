@@ -16,7 +16,9 @@ pub mod aarch64;
 pub mod x86_64;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};
-use rucc_target::{Address, BranchInsts, FrameInsts, MachineInsts, OperandDesc, PhysReg, RegClass};
+use rucc_target::{
+    Address, BranchInsts, FrameInsts, MachineInsts, OperandDesc, PhysReg, RegClass, Segment,
+};
 
 /// What `crate::lower` has to know about the machine it selects instructions for.
 ///
@@ -84,6 +86,21 @@ pub struct Symbols {
     pub near: Reach,
     /// A symbol another image may define, whose address is read out of the global offset table.
     pub far: Reach,
+    /// How far a thread-local variable is from the thread pointer, which is read out of the global
+    /// offset table too, from a slot the link fills in with that distance.
+    pub thread: Reach,
+    /// The thread pointer itself.
+    pub pointer: Pointer,
+}
+
+/// Where the thread pointer is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pointer {
+    /// A load at zero in a segment, since the word at the front of the block is its own address.
+    /// That is x86-64, whose `%fs` is not a register a program can read.
+    Segment(&'static str, Segment),
+    /// An instruction that reads a system register, which is AArch64's `mrs` of `tpidr_el0`.
+    Own(&'static str),
 }
 
 /// One instruction that puts the address of a symbol in a register, and where it carries the

@@ -24,6 +24,8 @@ pub static SELECTOR: super::Selector = super::Selector {
     symbols: &super::Symbols {
         near: super::Reach::Own("addr_64"),
         far: super::Reach::Own("got_64"),
+        thread: super::Reach::Own("gottprel_64"),
+        pointer: super::Pointer::Own("thread_64"),
     },
     jumps: &super::Jumps {
         near: "adr_64",

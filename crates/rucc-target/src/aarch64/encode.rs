@@ -255,6 +255,11 @@ pub enum Operator {
     Got,
     /// The low twelve bits of that entry's address, `:got_lo12:`.
     GotLo12,
+    /// The page of the entry in the global offset table that holds a thread-local variable's
+    /// offset from the thread pointer, `:gottprel:`.
+    GotTprel,
+    /// The low twelve bits of that entry's address, `:gottprel_lo12:`.
+    GotTprelLo12,
     /// Bits twelve to twenty three of the offset from the thread pointer, `:tprel_hi12:`.
     TprelHi12,
     /// The low twelve bits of it, `:tprel_lo12_nc:`.
@@ -374,6 +379,10 @@ pub enum Fixup {
     GotPage21,
     /// The low twelve bits of that entry, as the offset of the eight byte load that reads it.
     GotLo12,
+    /// The page of the entry holding a thread-local variable's offset from the thread pointer.
+    GotTprelPage21,
+    /// The low twelve bits of that entry, as the offset of the eight byte load that reads it.
+    GotTprelLo12Nc,
     /// Bits twelve to twenty three of the offset from the thread pointer, for `add` with a shift.
     TprelHi12,
     /// The low twelve bits of it, for `add`.
@@ -400,6 +409,8 @@ impl Fixup {
             Fixup::Ldst128Lo12 => 299,
             Fixup::GotPage21 => 311,
             Fixup::GotLo12 => 312,
+            Fixup::GotTprelPage21 => 541,
+            Fixup::GotTprelLo12Nc => 542,
             Fixup::TprelHi12 => 549,
             Fixup::TprelLo12Nc => 551,
         }
@@ -424,6 +435,8 @@ impl Fixup {
             Fixup::Ldst128Lo12 => "R_AARCH64_LDST128_ABS_LO12_NC",
             Fixup::GotPage21 => "R_AARCH64_ADR_GOT_PAGE",
             Fixup::GotLo12 => "R_AARCH64_LD64_GOT_LO12_NC",
+            Fixup::GotTprelPage21 => "R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21",
+            Fixup::GotTprelLo12Nc => "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC",
             Fixup::TprelHi12 => "R_AARCH64_TLSLE_ADD_TPREL_HI12",
             Fixup::TprelLo12Nc => "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC",
         }
@@ -445,7 +458,7 @@ impl Fixup {
             Fixup::CondBr19 | Fixup::Literal19 => Some(word | pc_relative(value, 19)? << 5),
             Fixup::TestBr14 => Some(word | pc_relative(value, 14)? << 5),
             Fixup::AdrLo21 => Some(word | adr_bits(value)?),
-            Fixup::AdrPage21 | Fixup::GotPage21 => {
+            Fixup::AdrPage21 | Fixup::GotPage21 | Fixup::GotTprelPage21 => {
                 if value & 0xfff != 0 {
                     return None;
                 }
@@ -459,7 +472,7 @@ impl Fixup {
             Fixup::Ldst8Lo12 => Some(word | low << 10),
             Fixup::Ldst16Lo12 => scaled_low(word, low, 1),
             Fixup::Ldst32Lo12 => scaled_low(word, low, 2),
-            Fixup::Ldst64Lo12 | Fixup::GotLo12 => scaled_low(word, low, 3),
+            Fixup::Ldst64Lo12 | Fixup::GotLo12 | Fixup::GotTprelLo12Nc => scaled_low(word, low, 3),
             Fixup::Ldst128Lo12 => scaled_low(word, low, 4),
         }
     }
@@ -810,6 +823,7 @@ impl At<'_> {
                         ("adr", Operator::Plain) => Fixup::AdrLo21,
                         ("adrp", Operator::Plain) => Fixup::AdrPage21,
                         ("adrp", Operator::Got) => Fixup::GotPage21,
+                        ("adrp", Operator::GotTprel) => Fixup::GotTprelPage21,
                         _ => return Err(self.unwritten()),
                     };
                     let page = u32::from(m == "adrp");
@@ -1548,6 +1562,9 @@ impl At<'_> {
                     (Operator::Lo12, 3) => Fixup::Ldst64Lo12,
                     (Operator::Lo12, 4) => Fixup::Ldst128Lo12,
                     (Operator::GotLo12, 3) if m == "ldr" && access.v == 0 => Fixup::GotLo12,
+                    (Operator::GotTprelLo12, 3) if m == "ldr" && access.v == 0 => {
+                        Fixup::GotTprelLo12Nc
+                    }
                     _ => return Err(self.unwritten()),
                 };
                 return Ok((front | 1 << 24 | rn << 5, Some(fixup)));

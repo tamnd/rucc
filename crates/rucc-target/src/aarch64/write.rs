@@ -146,6 +146,8 @@ fn reference(line: &mut String, operator: Operator, symbol: Option<&str>) {
         Operator::Lo12 => ":lo12:",
         Operator::Got => ":got:",
         Operator::GotLo12 => ":got_lo12:",
+        Operator::GotTprel => ":gottprel:",
+        Operator::GotTprelLo12 => ":gottprel_lo12:",
         Operator::TprelHi12 => ":tprel_hi12:",
         Operator::TprelLo12Nc => ":tprel_lo12_nc:",
     };

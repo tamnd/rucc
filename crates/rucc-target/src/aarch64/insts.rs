@@ -461,6 +461,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // code and carried in the addressing mode, the way x86-64 carries it in a `lea`.
     ("adr_64", Lea),
     ("got_64", Address),
+    ("gottprel_64", Address),
+    ("thread_64", Address),
     ("tls_64", Address),
     // Loads, which write a whole register whatever they read.
     ("ldr_8", Load),

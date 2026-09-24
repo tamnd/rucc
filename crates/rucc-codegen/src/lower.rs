@@ -86,30 +86,21 @@ use rucc_ir::{
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{
-    Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, Segment, VaList,
-};
+use rucc_target::{Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, VaList};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::frame::{Layout, Local};
-use crate::select::{Match, Piece, Reach, Rule, Selector};
+use crate::select::{Match, Piece, Pointer, Reach, Rule, Selector};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 use crate::varargs;
 
-/// The instruction the x86-64 thread-local block is read with.
-///
-/// Not in [`x86_64::FRAME`] with the other opcodes this file names, because a frame has no use for
-/// it. It is spelled out here because the relocation it takes is only legal on a `mov` with a REX
-/// prefix, so the width is part of the requirement rather than a choice. The address of an ordinary
-/// symbol is [`Selector::symbols`], which is how another machine says the same thing.
-const GOT_LOAD: &str = "mov_rm_64";
-
 /// The instruction a template's `jmp` to a name outside it becomes.
 ///
-/// Named here for [`GOT_LOAD`]'s reason turned round: a frame never writes one, because the only
-/// function it appears in has no prologue and no epilogue for the frame to write anything into.
+/// Not in [`x86_64::FRAME`] with the other opcodes this file names, because a frame never writes
+/// one: the only function it appears in has no prologue and no epilogue for the frame to write
+/// anything into.
 /// See [`x86_64::Step::Away`].
 const AWAY: &str = "jmp_away";
 
@@ -465,10 +456,11 @@ pub enum Unsupported {
 /// What [`Unsupported::Unported`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unported {
-    /// A definition that takes arguments its signature does not name, whose save area and list are
-    /// the SysV and Windows shapes and not the AAPCS64 one.
+    /// A definition that takes arguments its signature does not name, on AArch64 for Apple's
+    /// platforms, whose variadic arguments are all on the stack.
     Variadic,
-    /// A thread-local variable or the thread pointer.
+    /// A thread-local variable or the thread pointer on AArch64 for Apple's platforms, which reach
+    /// them through a descriptor.
     Thread,
 }
 
@@ -2540,44 +2532,83 @@ impl<'a> Lowering<'a> {
     /// So this is the model gcc writes under `-ftls-model=initial-exec`: right for an executable,
     /// right for a library the program is linked against, and a load that either works or is
     /// refused out loud for a library something opens later. What it is never is quietly wrong.
+    ///
+    /// AArch64 Linux is the same three steps. The slot is reached with `adrp` and `ldr` against
+    /// `:gottprel:`, the thread pointer is `tpidr_el0` read with `mrs`, and the add has three
+    /// operands. Apple's platforms reach a thread-local variable through a descriptor call instead,
+    /// which is not written, so it is refused there.
     fn thread_address(
         &mut self,
         inst: Inst,
         symbol: Symbol,
         result: Value,
     ) -> Result<(), Unsupported> {
-        self.only_x86(Some(inst), Unported::Thread)?;
+        self.threads_written(inst)?;
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let gpr = self.gpr;
-        let load = self.named(GOT_LOAD);
 
         let offset = self.out.new_vreg(gpr);
-        self.out
-            .build(block, load)
-            .at(span)
-            .def(offset, gpr)
-            .mem(mir::Mem::thread(symbol))
-            .finish();
-        // The front of the block, which is the one thing on this machine that no instruction can
-        // work out: `%fs` is not a register a program can read, and what it points at is a word
-        // holding its own address, so reading through it at zero is how the address is come by.
+        match self.selector.symbols.thread {
+            Reach::Mode(name) => {
+                let load = self.named(name);
+                let mem = mir::Mem::thread(symbol);
+                self.out.build(block, load).at(span).def(offset, gpr).mem(mem).finish();
+            }
+            Reach::Own(name) => {
+                let load = self.named(name);
+                self.out.build(block, load).at(span).def(offset, gpr).symbol(symbol).finish();
+            }
+        }
         let pointer = self.out.new_vreg(gpr);
-        let at = mir::Mem::in_segment(Segment::Fs, 0);
-        self.out.build(block, load).at(span).def(pointer, gpr).mem(at).finish();
+        self.read_thread_pointer(block, span, pointer);
 
-        // Two address, spelled out for the reason `x87_to_int` gives: this machine adds into the
+        // Two address on x86-64, for the reason `x87_to_int` gives: that machine adds into the
         // register it read, and only the constraint says the two are the same one.
         let reg = self.new_reg(result);
-        let add = self.named("add_rr_64");
+        let jumps = self.selector.jumps;
+        let add = self.named(jumps.add);
+        let written = mir::Operand::write(reg, gpr);
+        let written = if jumps.two_address { written.with(Constraint::Reuse(1)) } else { written };
         self.out
             .build(block, add)
             .at(span)
-            .operand(mir::Operand::write(reg, gpr).with(Constraint::Reuse(1)))
+            .operand(written)
             .operand(mir::Operand::read(offset, gpr))
             .operand(mir::Operand::read(pointer, gpr))
             .finish();
         Ok(())
+    }
+
+    /// Refuses a thread-local variable or the thread pointer where neither is written, which is
+    /// AArch64 on Apple's platforms. Its list being one pointer on a convention that counts the
+    /// two register files apart is what tells it from every other target.
+    fn threads_written(&self, inst: Inst) -> Result<(), Unsupported> {
+        if self.conv.list == VaList::CharPointer && !self.conv.shared_positions {
+            return Err(Unsupported::Unported { inst: Some(inst), what: Unported::Thread });
+        }
+        Ok(())
+    }
+
+    /// The front of this thread's block into `reg`.
+    ///
+    /// On x86-64 that is the one thing no instruction can work out: `%fs` is not a register a
+    /// program can read, and what it points at is a word holding its own address, so reading
+    /// through it at zero is how the address is come by. AArch64 keeps it in `tpidr_el0`, which
+    /// `mrs` reads.
+    fn read_thread_pointer(&mut self, block: mir::Block, span: Span, reg: mir::Reg) {
+        let gpr = self.gpr;
+        match self.selector.symbols.pointer {
+            Pointer::Segment(name, segment) => {
+                let load = self.named(name);
+                let at = mir::Mem::in_segment(segment, 0);
+                self.out.build(block, load).at(span).def(reg, gpr).mem(at).finish();
+            }
+            Pointer::Own(name) => {
+                let read = self.named(name);
+                self.out.build(block, read).at(span).def(reg, gpr).finish();
+            }
+        }
     }
 
     /// `&&label`, GNU's address of a label, which is the same `lea` a global gets against a place
@@ -2970,15 +3001,6 @@ impl<'a> Lowering<'a> {
             .collect()
     }
 
-    /// Refuses one of the things only the x86-64 half of this file writes, on any other machine.
-    fn only_x86(&self, inst: Option<Inst>, what: Unported) -> Result<(), Unsupported> {
-        if std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
-            Ok(())
-        } else {
-            Err(Unsupported::Unported { inst, what })
-        }
-    }
-
     /// A machine opcode of this target from the name the target gives it.
     fn named(&mut self, name: &str) -> mir::Opcode {
         mir::Opcode::new(self.names.intern(&format!("{}{name}", self.selector.prefix())))
@@ -3056,14 +3078,12 @@ impl<'a> Lowering<'a> {
     /// come by, rather than a variable of its own in the block, so there is no relocation here and
     /// no name for the link to resolve.
     fn thread_pointer(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        self.only_x86(Some(inst), Unported::Thread)?;
+        self.threads_written(inst)?;
         let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let reg = self.new_reg(result);
-        let load = self.named(GOT_LOAD);
-        let at = mir::Mem::in_segment(Segment::Fs, 0);
-        self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
+        self.read_thread_pointer(block, span, reg);
         Ok(())
     }
 

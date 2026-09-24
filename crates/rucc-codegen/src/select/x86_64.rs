@@ -32,6 +32,10 @@ pub static SELECTOR: super::Selector = super::Selector {
     symbols: &super::Symbols {
         near: super::Reach::Mode("lea_64"),
         far: super::Reach::Mode("mov_rm_64"),
+        // The relocation a thread-local variable's slot takes is only legal on a `mov` with a REX
+        // prefix, so the width here is part of the requirement rather than a choice.
+        thread: super::Reach::Mode("mov_rm_64"),
+        pointer: super::Pointer::Segment("mov_rm_64", rucc_target::Segment::Fs),
     },
     jumps: &super::Jumps {
         near: "lea_64",
