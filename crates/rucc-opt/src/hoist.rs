@@ -43,8 +43,9 @@
 //! block that decides and the block that goes round are two different blocks in every loop this
 //! pass actually sees. What it says either way is that the only way out is one test that every
 //! iteration reaches. No block in the loop ends without a successor, so an iteration that starts
-//! finishes, and there is no loop inside it, which is what rules out an iteration that starts and
-//! spins forever without ever reaching the test. There is no call anywhere inside, which is
+//! finishes, and every loop inside it is one of the same shape with a count of its own, which is
+//! what rules out an iteration that starts and spins forever without ever reaching the test. There
+//! is no call anywhere inside, which is
 //! stronger than what `discharge` asks of a call and is asked for a different reason: `discharge`
 //! cares whether a call frees, and this pass cares whether it comes back, because a call that does
 //! not come back leaves the loop having run fewer times than its count says and the hoisted check
@@ -117,6 +118,23 @@
 //! constant offset. The other two planes do not read the capability at all, which is why they are
 //! where this earns anything: the loops it opens up are the ones whose bounds checks loop splitting
 //! has already taken care of.
+//!
+//! # Loops inside loops
+//!
+//! A check that comes out of an inner loop lands in its preheader, which is in the body of the loop
+//! around it, and what it covers there is often something the outer loop walks too. So the pass goes
+//! again over the checks it has just written, up to three loops out. For that the outer loop has to
+//! allow a loop inside it, and it does when every loop inside is one this pass could have counted,
+//! since then an outer iteration that starts is one that finishes. A loop inside that has no count
+//! still keeps the outer loop's checks where they are.
+//!
+//! The case that pays is a column walk. `grid[i * N + col]` round `i` is a plane check with a step
+//! of `N` elements, and the outer loop moves `col` along by one element each time. Each column is one
+//! access out of every row and the next column is the access beside it, so where the outer loop
+//! walks every column the columns together are every byte from the first to the last, and one dense
+//! check in front of the nest asks what all of them were going to ask. Where it walks fewer, the
+//! columns together are a wider access at the same step, and the check in front is written that way.
+//! `beside` is where that arithmetic is.
 //!
 //! # What it does not do yet
 //!
@@ -232,8 +250,8 @@ const NO_PREHEADER: &str = "loop left alone, it has no block in front of it to p
 const ANOTHER_WAY_OUT: &str =
     "loop left alone, it can be left somewhere other than its bottom test";
 
-/// What is reported for a loop with a loop inside it.
-const A_LOOP_INSIDE: &str = "loop left alone, it has another loop inside it";
+/// What is reported for a loop with a loop inside it that might not stop.
+const A_LOOP_INSIDE: &str = "loop left alone, a loop inside it might not stop";
 
 /// What is reported for a loop with a call in it.
 const A_CALL_INSIDE: &str = "loop left alone, a call in it might not come back";
@@ -265,6 +283,10 @@ const NOT_EVERY_TIME: &str = "check kept, an iteration can finish without reachi
 
 /// What is reported for a check whose step does not keep its alignment.
 const MISALIGNED: &str = "check kept, its step is not a whole number of its alignment";
+
+/// What is reported for a walk with gaps whose columns this loop does not lay side by side.
+const NOT_BESIDE: &str = "check kept, the walk it stands for does not move over by its own width \
+                          a fixed number of times";
 
 /// What is reported when the rule declines the range the loop sweeps.
 const TOO_WIDE: &str = "check kept, the range the loop sweeps is too wide for the rule";
@@ -317,35 +339,57 @@ impl Pass for Hoist {
         // the transformation writes it. Nothing in a plan can be invalidated by another plan being
         // applied: each one adds instructions to a preheader and removes one from a body, and no
         // plan mentions an instruction another plan removes.
-        let mut plans = Vec::new();
-        {
-            let mut scev = Scev::new(func, cfg, loops);
-            // Beside the evolution rather than instead of it. What the counter does each time round
-            // is scalar evolution's answer and how large the value it stops at can be is the
-            // ranges' answer, and a counter as wide as the arithmetic needs both.
-            let mut ranges = Ranges::new(func, cfg, doms);
-            for id in loops.all() {
-                sweep(func, cfg, doms, loops, &mut scev, &mut ranges, id, &mut plans, &mut stats);
+        // A check this pass writes in front of a loop is in the body of the loop around that one,
+        // and it may come out of that loop in turn, so the pass goes again over the checks it has
+        // just written and nothing else. Nothing else, because every other check was planned or
+        // refused the first time with the same answer it would get now, and asking again would
+        // report each refusal once a round. Each round moves a check out by one loop, so a nest
+        // deeper than this keeps what it has left in the loop the last round put it in front of.
+        let mut fresh: Option<Vec<Inst>> = None;
+        for _ in 0..ROUNDS {
+            let mut plans = Vec::new();
+            {
+                let mut scev = Scev::new(func, cfg, loops);
+                // Beside the evolution rather than instead of it. What the counter does each time
+                // round is scalar evolution's answer and how large the value it stops at can be is
+                // the ranges' answer, and a counter as wide as the arithmetic needs both.
+                let mut ranges = Ranges::new(func, cfg, doms);
+                let mut cx = Sweep { func, cfg, doms, loops, scev: &mut scev, ranges: &mut ranges };
+                for id in loops.all() {
+                    cx.sweep(id, fresh.as_deref(), &mut plans, &mut stats);
+                }
             }
-        }
 
-        let mut written = Vec::new();
-        for plan in plans {
-            if !fuel.take() {
-                stats.missed(NO_FUEL);
-                continue;
+            let mut written = Vec::new();
+            let mut made = Vec::new();
+            for plan in plans {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    continue;
+                }
+                let done = match plan.opcode {
+                    Opcode::CheckType => HOISTED_TYPE,
+                    Opcode::CheckInit => HOISTED_INIT,
+                    _ => HOISTED,
+                };
+                made.push(apply(func, &plan, &mut written));
+                stats.optimized(done);
             }
-            let done = match plan.opcode {
-                Opcode::CheckType => HOISTED_TYPE,
-                Opcode::CheckInit => HOISTED_INIT,
-                _ => HOISTED,
-            };
-            apply(func, &plan, &mut written);
-            stats.optimized(done);
+            if made.is_empty() {
+                break;
+            }
+            fresh = Some(made);
         }
         stats
     }
 }
+
+/// How many times the pass goes over what it has just written, which is how many loops deep a check
+/// can come out from.
+///
+/// Three is a matrix multiply's nest and a column sum inside a loop of rounds, which is as deep as
+/// the loops that pay for their checks usually are.
+const ROUNDS: usize = 3;
 
 /// One check to take out of one loop, and the check to put in front of it.
 ///
@@ -393,61 +437,94 @@ enum Extent {
     Computed { count: Plain, step: i128, reach: i128, reading: Reading },
 }
 
-/// Plans what can come out of one loop, and counts what cannot and why.
-///
-/// Nothing is reported for a loop with no check in it that this pass could ever move, because a
-/// loop that does no memory access is not a missed opportunity and a report for every one of them
-/// would bury the loops that are.
-#[expect(clippy::too_many_arguments, reason = "four analyses, a plan list and a report to fill")]
-fn sweep(
-    func: &Func,
-    cfg: &Cfg,
-    doms: &Dominators,
-    loops: &Loops,
-    scev: &mut Scev<'_>,
-    ranges: &mut Ranges<'_>,
-    id: LoopId,
-    plans: &mut Vec<Plan>,
-    stats: &mut Stats,
-) {
-    let checks: Vec<Inst> = loops
-        .blocks(id)
-        .iter()
-        .filter(|&&block| loops.innermost(block) == Some(id))
-        .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
-        .filter(|&inst| {
-            matches!(func[inst].opcode, Opcode::CheckBounds | Opcode::CheckInit | Opcode::CheckType)
-        })
-        .collect();
-    if checks.is_empty() {
-        return;
+/// The function and its analyses, which every question about one loop is asked of.
+struct Sweep<'a, 's> {
+    func: &'a Func,
+    cfg: &'a Cfg,
+    doms: &'a Dominators,
+    loops: &'a Loops,
+    scev: &'s mut Scev<'a>,
+    ranges: &'s mut Ranges<'a>,
+}
+
+impl Sweep<'_, '_> {
+    /// Plans what can come out of one loop, and counts what cannot and why.
+    ///
+    /// Nothing is reported for a loop with no check in it that this pass could ever move, because a
+    /// loop that does no memory access is not a missed opportunity and a report for every one of them
+    /// would bury the loops that are.
+    ///
+    /// `only` is the checks the round before wrote, when this is not the first round, and a check that
+    /// is not one of them is left alone without a word.
+    fn sweep(
+        &mut self,
+        id: LoopId,
+        only: Option<&[Inst]>,
+        plans: &mut Vec<Plan>,
+        stats: &mut Stats,
+    ) {
+        let Self { func, cfg, doms, loops, .. } = *self;
+        let checks: Vec<Inst> = loops
+            .blocks(id)
+            .iter()
+            .filter(|&&block| loops.innermost(block) == Some(id))
+            .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
+            .filter(|&inst| {
+                matches!(
+                    func[inst].opcode,
+                    Opcode::CheckBounds | Opcode::CheckInit | Opcode::CheckType
+                )
+            })
+            .filter(|inst| only.is_none_or(|only| only.contains(inst)))
+            .collect();
+        if checks.is_empty() {
+            return;
+        }
+
+        let nested = loops.children(id).iter().all(|&inner| self.finite(inner));
+        let (preheader, guard) = match enclosing(func, cfg, doms, loops, id, nested) {
+            Ok(shape) => shape,
+            Err(why) => {
+                stats.missed(why);
+                return;
+            }
+        };
+        let around = match counted(self.scev, id) {
+            Ok(around) => around,
+            Err(why) => {
+                stats.missed(why);
+                return;
+            }
+        };
+        let written = writes(func, loops, id);
+
+        for check in checks {
+            if let Some(why) = written.refusing(func, check) {
+                stats.missed(why);
+                continue;
+            }
+            match planned(func, doms, self.scev, self.ranges, id, preheader, guard, around, check) {
+                Ok(plan) => plans.push(plan),
+                Err(why) => stats.missed(why),
+            }
+        }
     }
 
-    let (preheader, guard) = match shaped(func, cfg, doms, loops, id) {
-        Ok(shape) => shape,
-        Err(why) => {
-            stats.missed(why);
-            return;
-        }
-    };
-    let around = match counted(scev, id) {
-        Ok(around) => around,
-        Err(why) => {
-            stats.missed(why);
-            return;
-        }
-    };
-    let written = writes(func, loops, id);
-
-    for check in checks {
-        if let Some(why) = written.refusing(func, check) {
-            stats.missed(why);
-            continue;
-        }
-        match planned(func, doms, scev, ranges, id, preheader, guard, around, check) {
-            Ok(plan) => plans.push(plan),
-            Err(why) => stats.missed(why),
-        }
+    /// Whether a loop inside the one a check is coming out of finishes every time it starts.
+    ///
+    /// The check in front of the outer loop stands for the checks one per iteration of it, which is
+    /// only true if every iteration it starts gets to the end, and an iteration with a loop in it gets
+    /// to the end when that loop does. So the loop inside has to be one this pass could have counted:
+    /// one latch, one way out that the going round passes through, and a count the analysis has,
+    /// which is a loop that stops. The same of every loop inside it in turn. Calls, returns and
+    /// everything else that could leave in the middle are [`shaped`]'s, which looks at every block of
+    /// the outer loop and so at these as well.
+    fn finite(&mut self, id: LoopId) -> bool {
+        let Self { doms, loops, .. } = *self;
+        let ([latch], [exit]) = (loops.latches(id), loops.exits(id)) else { return false };
+        doms.dominates(exit.from, *latch)
+            && counted(self.scev, id).is_ok()
+            && loops.children(id).iter().all(|&inner| self.finite(inner))
     }
 }
 
@@ -589,6 +666,21 @@ pub(crate) fn shaped(
     loops: &Loops,
     id: LoopId,
 ) -> Result<(Block, Block), &'static str> {
+    enclosing(func, cfg, doms, loops, id, false)
+}
+
+/// [`shaped`], for a loop that may have loops inside it when `nested` says each of them finishes.
+///
+/// A loop inside is the one thing [`shaped`] refuses that is about whether an iteration ends rather
+/// than about how it could end early, and [`Sweep::finite`] is what answers it.
+fn enclosing(
+    func: &Func,
+    cfg: &Cfg,
+    doms: &Dominators,
+    loops: &Loops,
+    id: LoopId,
+    nested: bool,
+) -> Result<(Block, Block), &'static str> {
     let Some(preheader) = loops.preheader(cfg, id) else {
         return Err(NO_PREHEADER);
     };
@@ -607,7 +699,7 @@ pub(crate) fn shaped(
     for &block in loops.blocks(id) {
         // A loop inside this one is an iteration that can start and never reach the test, which the
         // successor walk below does not catch because every block in it has a successor.
-        if loops.innermost(block) != Some(id) {
+        if !nested && loops.innermost(block) != Some(id) {
             return Err(A_LOOP_INSIDE);
         }
         // A block with no successor at all is a `ret` or an `unreachable`, and control that
@@ -652,16 +744,23 @@ fn planned(
     }
     let args = &func[func[check].args];
     // A check that already carries its own extent is one this pass put somewhere, and how many
-    // bytes it covers is not a number this pass can multiply.
-    if args.len() > 2 {
-        return Err(ALREADY_COMPUTED);
-    }
+    // bytes it covers is not a number this pass can multiply. The one it can is a walk that leaves
+    // gaps written with its span and its step as numbers, which is the check a column walk left in
+    // front of its loop, and that is carried through to the arms below.
+    let columns = match args {
+        [_, _] => None,
+        [_, _, span, step] if func[check].opcode != Opcode::CheckBounds => Some((
+            number(func, *span).ok_or(ALREADY_COMPUTED)?,
+            number(func, *step).ok_or(ALREADY_COMPUTED)?,
+        )),
+        _ => return Err(ALREADY_COMPUTED),
+    };
     let (Some(&capability), Some(&pointer)) = (args.first(), args.get(1)) else {
         return Err(NOT_A_SWEEP);
     };
     let named = named_by(func, capability);
     let Extra::Mem(held) = func[check].extra else { return Err(NOT_A_SWEEP) };
-    let info = func[held];
+    let mut info = func[held];
 
     let reach = i128::from(info.size);
     let mut stride = None;
@@ -681,10 +780,17 @@ fn planned(
                 return Err(NOT_A_SWEEP);
             };
             plain_enough(func, start)?;
-            if !swept(reach, 0, reach) {
-                return Err(TOO_WIDE);
+            // A walk with gaps moves as it is, the same span and the same step from the same
+            // address, since every iteration asks it about the same accesses.
+            if let Some((span, step)) = columns {
+                stride = Some(step);
+                (base, start, Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?))
+            } else {
+                if !swept(reach, 0, reach) {
+                    return Err(TOO_WIDE);
+                }
+                (base, start, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
             }
-            (base, start, Extent::Bytes(u64::try_from(reach).map_err(|_| TOO_WIDE)?))
         }
         Evolution::Affine(chrec) => {
             let Some(step) = chrec.step.as_number() else {
@@ -703,38 +809,49 @@ fn planned(
             if step % i128::from(info.align) != 0 {
                 return Err(MISALIGNED);
             }
-            // What the range in front costs is what separates the bounds check from the other two.
-            // A bounds check is two comparisons whatever the range, so one of them in front of a
-            // walk that reads one element out of every two hundred is still one of them. The two
-            // plane checks answer by reading the plane over the range, so their cost goes up with
-            // the range rather than with what the loop reads, and covering bytes nobody touches is
-            // work nobody needed. `b[k * N + j]` round `k` is the shape that says so: two hundred
-            // reads of eight bytes each, three hundred and eighteen kilobytes between the first and
-            // the last, and one check over all of it is thirty three times the whole program. So a
-            // plane check over a walk that leaves gaps is handed the step as well, and asks about
-            // the accesses the loop makes rather than about the ground between them.
-            if matches!(func[check].opcode, Opcode::CheckInit | Opcode::CheckType) && step > reach {
-                stride = Some(step);
-            }
-            // The check runs once before the loop goes round for the first time and once more each
-            // time it does, so the furthest address it sees is the one it is at after the last of
-            // those, which is `around` steps along rather than one fewer. That is `counted`'s doc
-            // comment cashed out.
-            let span = match around {
-                Around::Number(around) => {
-                    let far = around.checked_mul(step).ok_or(TOO_WIDE)?;
-                    let span = far.checked_add(reach).ok_or(TOO_WIDE)?;
-                    if !swept(span, far, reach) {
-                        return Err(TOO_WIDE);
-                    }
-                    Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
+            let span = if let Some((span, down)) = columns {
+                let (span, width) = beside(span, down, reach, step, around)?;
+                if width < down {
+                    stride = Some(down);
                 }
-                Around::Computed(count, reading) => {
-                    fits(func, ranges, preheader, count, step, reach, reading)?;
-                    if !swept_sym(reach) {
-                        return Err(TOO_WIDE);
+                info.size = u64::try_from(width).map_err(|_| TOO_WIDE)?;
+                Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
+            } else {
+                // What the range in front costs is what separates the bounds check from the other two.
+                // A bounds check is two comparisons whatever the range, so one of them in front of a
+                // walk that reads one element out of every two hundred is still one of them. The two
+                // plane checks answer by reading the plane over the range, so their cost goes up with
+                // the range rather than with what the loop reads, and covering bytes nobody touches is
+                // work nobody needed. `b[k * N + j]` round `k` is the shape that says so: two hundred
+                // reads of eight bytes each, three hundred and eighteen kilobytes between the first and
+                // the last, and one check over all of it is thirty three times the whole program. So a
+                // plane check over a walk that leaves gaps is handed the step as well, and asks about
+                // the accesses the loop makes rather than about the ground between them.
+                if matches!(func[check].opcode, Opcode::CheckInit | Opcode::CheckType)
+                    && step > reach
+                {
+                    stride = Some(step);
+                }
+                // The check runs once before the loop goes round for the first time and once more each
+                // time it does, so the furthest address it sees is the one it is at after the last of
+                // those, which is `around` steps along rather than one fewer. That is `counted`'s doc
+                // comment cashed out.
+                match around {
+                    Around::Number(around) => {
+                        let far = around.checked_mul(step).ok_or(TOO_WIDE)?;
+                        let span = far.checked_add(reach).ok_or(TOO_WIDE)?;
+                        if !swept(span, far, reach) {
+                            return Err(TOO_WIDE);
+                        }
+                        Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
                     }
-                    Extent::Computed { count, step, reach, reading }
+                    Around::Computed(count, reading) => {
+                        fits(func, ranges, preheader, count, step, reach, reading)?;
+                        if !swept_sym(reach) {
+                            return Err(TOO_WIDE);
+                        }
+                        Extent::Computed { count, step, reach, reading }
+                    }
                 }
             };
             (base, start, span)
@@ -778,6 +895,50 @@ fn planned(
         }
     }
     Ok(Plan { preheader, base, start, span, stride, info, opcode, check })
+}
+
+/// What a walk with gaps covers once the loop around it has moved it over, as a span and the width of
+/// each access, or why it cannot say.
+///
+/// The walk inside reads `width` bytes every `down` bytes for `span` bytes, which is a column, and
+/// the loop around it moves where the column starts by `step` a fixed number of times. When the step
+/// is the width, each time round puts the next column hard up against the last, so the accesses of
+/// all of them together are the same walk with each access as wide as all the columns side by side.
+/// That is the column sum's shape, `grid[row * COLS + col]` round `row` inside a loop round `col`,
+/// and the matrix multiply's `b[k * N + j]`.
+///
+/// Once the columns together are as wide as the step down they close up, and what they cover is one
+/// run of bytes with no gaps in it, which is a dense check of that many bytes. That is not a claim
+/// the rule for a range has to make: the bytes the one check asks about are exactly the bytes the
+/// accesses inside were going to ask about, each of them once, and both planes answer a byte or a
+/// granule the same whichever check it came in. A step other than the width leaves the columns
+/// apart or on top of each other, and a count that is not a number leaves the width not one either,
+/// so both keep the check where it is.
+fn beside(
+    span: i128,
+    down: i128,
+    width: i128,
+    step: i128,
+    around: Around,
+) -> Result<(i128, i128), &'static str> {
+    let Around::Number(around) = around else { return Err(NOT_BESIDE) };
+    if step != width || down <= 0 || span < width {
+        return Err(NOT_BESIDE);
+    }
+    let last = (span - width) / down * down;
+    let wide = around.checked_add(1).and_then(|n| n.checked_mul(width)).ok_or(TOO_WIDE)?;
+    let span = last.checked_add(wide).ok_or(TOO_WIDE)?;
+    if span > i128::from(i64::MAX) {
+        return Err(TOO_WIDE);
+    }
+    Ok((span, if wide >= down { span } else { wide }))
+}
+
+/// What a value is, when it is a number written down.
+fn number(func: &Func, value: Value) -> Option<i128> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let Extra::Imm(imm) = func[inst].extra else { return None };
+    (func[inst].opcode == Opcode::IConst).then(|| func[imm].signed(func[value].ty))
 }
 
 /// The pointer an invariant is an address off, and how far past it, when it is one.
@@ -1035,8 +1196,9 @@ struct Operands {
     operands: Vec<Value>,
 }
 
-/// Puts the one check in front of the loop and takes the one inside it out.
-fn apply(func: &mut Func, plan: &Plan, written: &mut Vec<Operands>) {
+/// Puts the one check in front of the loop and takes the one inside it out, and says which check it
+/// put there.
+fn apply(func: &mut Func, plan: &Plan, written: &mut Vec<Operands>) -> Inst {
     let term = func.terminator(plan.preheader).expect("a preheader ends in a jump to the header");
     let same = |w: &&Operands| {
         (w.preheader, w.base, w.start, w.span, w.stride)
@@ -1071,6 +1233,7 @@ fn apply(func: &mut Func, plan: &Plan, written: &mut Vec<Operands>) {
     // `dce` after this pass is what makes that a smaller function rather than a dangling
     // instruction, which is the same arrangement `crate::discharge` is in.
     func.remove_inst(plan.check);
+    check
 }
 
 /// Writes what the check in front of a loop is asked about into the preheader, in front of its
@@ -1145,7 +1308,7 @@ mod tests {
     use rucc_ir::{Flags, IntPred, MemInfo, MemOrder, Module, Restrict, Signature, verify_func};
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{HOISTED, HOISTED_INIT, HOISTED_TYPE, Hoist};
+    use super::{A_LOOP_INSIDE, HOISTED, HOISTED_INIT, HOISTED_TYPE, Hoist};
     use crate::canon::Canon;
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
@@ -2365,6 +2528,176 @@ mod tests {
             assert_eq!(extent(&func, left[0]), 4, "{kind:?}");
             sound(&func, &mut names);
         }
+    }
+
+    /// Two loops, one inside the other, with a check in one of them.
+    ///
+    /// ```text
+    /// entry:    jump outer(0)
+    /// outer(j): [check a + 4*(j*across)]  when outside
+    ///           jump inner(0)
+    /// inner(i): [check a + 4*(i*down + j*across)]  when not
+    ///           next = i + 1
+    ///           br next < rows -> inner(next), latch
+    /// latch:    after = j + 1
+    ///           br after < cols -> outer(after), done
+    /// done:     ret
+    /// ```
+    ///
+    /// `flags` is what the inner counter's increment promises, which is how a test makes the inner
+    /// loop one the analysis cannot count.
+    fn nest(
+        rows: i128,
+        cols: i128,
+        down: i128,
+        across: i128,
+        flags: Flags,
+        outside: bool,
+        kind: Opcode,
+    ) -> (Interner, Func, Vec<Block>) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let outer = func.create_block();
+        let inner = func.create_block();
+        let latch = func.create_block();
+        let done = func.create_block();
+        let array = func.append_param(entry, Type::PTR);
+        let col = func.append_param(outer, Type::int(64));
+        let row = func.append_param(inner, Type::int(64));
+
+        let zero = Builder::new(&mut func, entry).iconst(Type::int(64), 0);
+        Builder::new(&mut func, entry).jump(outer, &[zero]);
+
+        let at = |build: &mut Builder<'_>, index: Value| {
+            let width = build.iconst(Type::int(64), WIDTH);
+            let scaled = build.binary(Opcode::Mul, index, width, Flags::NSW);
+            let args = build.func().push_values(&[array, scaled]);
+            let pointer =
+                build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+            check(build, pointer, 4, 4);
+        };
+
+        let mut build = Builder::new(&mut func, outer);
+        let by = build.iconst(Type::int(64), across);
+        let moved = build.binary(Opcode::Mul, col, by, Flags::NSW);
+        if outside {
+            at(&mut build, moved);
+        }
+        let start = build.iconst(Type::int(64), 0);
+        build.jump(inner, &[start]);
+
+        let mut build = Builder::new(&mut func, inner);
+        if !outside {
+            let by = build.iconst(Type::int(64), down);
+            let went = build.binary(Opcode::Mul, row, by, Flags::NSW);
+            let index = build.binary(Opcode::Add, went, moved, Flags::NSW);
+            at(&mut build, index);
+        }
+        let one = build.iconst(Type::int(64), 1);
+        let next = build.binary(Opcode::Add, row, one, flags);
+        let limit = build.iconst(Type::int(64), rows);
+        let again = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(again, inner, &[next], latch, &[]);
+
+        let mut build = Builder::new(&mut func, latch);
+        let one = build.iconst(Type::int(64), 1);
+        let after = build.binary(Opcode::Add, col, one, Flags::NSW);
+        let limit = build.iconst(Type::int(64), cols);
+        let again = build.icmp(IntPred::Slt, after, limit);
+        build.br_if(again, outer, &[after], done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+
+        let checking = func
+            .blocks()
+            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .expect("the nest checks the address it works out");
+        func[checking].opcode = kind;
+        (names, func, vec![entry, outer, inner, latch, done])
+    }
+
+    /// The one check of a kind left, which a test of a nest expects to be in front of both loops.
+    fn only(func: &Func, kind: Opcode, blocks: &[Block]) -> Inst {
+        let left = kinds(func, kind);
+        assert_eq!(left.len(), 1, "{kind:?}");
+        let (block, check) = left[0];
+        assert!(!blocks[1..4].contains(&block), "{kind:?} is still in the nest");
+        check
+    }
+
+    #[test]
+    fn a_check_the_outer_loop_does_not_move_comes_out_of_both_loops() {
+        // The inner loop reads the same four bytes every time round, so the first round puts one
+        // check of them in front of it, which is in the outer loop's body. The outer loop does not
+        // move them either, and the second round takes that check out in front of the whole nest.
+        let (mut names, mut func, blocks) =
+            nest(8, 4, 0, 0, Flags::NSW, false, Opcode::CheckBounds);
+        assert_eq!(hoisted(&mut func).count(Kind::Optimized, HOISTED), 2);
+        let check = only(&func, Opcode::CheckBounds, &blocks);
+        assert_eq!(extent(&func, check), 4);
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn columns_that_close_up_across_the_outer_loop_become_one_dense_check() {
+        // Eight rows of four elements, read one column at a time, and the outer loop walks all four
+        // columns. Each column is four bytes out of every sixteen, and the next one starts four
+        // bytes along, so the four of them together are every byte from the first to the last. The
+        // plane checks come out of the whole nest as one check of those hundred and twenty eight
+        // bytes with no step beside it, and the bounds check comes out over the same bytes.
+        for (kind, done) in [
+            (Opcode::CheckBounds, HOISTED),
+            (Opcode::CheckInit, HOISTED_INIT),
+            (Opcode::CheckType, HOISTED_TYPE),
+        ] {
+            let (mut names, mut func, blocks) = nest(8, 4, 4, 1, Flags::NSW, false, kind);
+            assert_eq!(hoisted(&mut func).count(Kind::Optimized, done), 2, "{kind:?}");
+            let check = only(&func, kind, &blocks);
+            assert_eq!(func[func[check].args].len(), 2, "{kind:?}");
+            assert_eq!(extent(&func, check), 128, "{kind:?}");
+            sound(&func, &mut names);
+        }
+    }
+
+    #[test]
+    fn columns_that_leave_gaps_across_the_outer_loop_keep_a_step() {
+        // The same rows, with the outer loop walking only the first two columns. What the nest
+        // reads is eight bytes out of every sixteen, so the plane checks come out as eight byte
+        // accesses sixteen bytes apart over the hundred and twenty bytes from the first to the last,
+        // and not as a check of the bytes in the other two columns nobody reads.
+        for (kind, done) in [(Opcode::CheckInit, HOISTED_INIT), (Opcode::CheckType, HOISTED_TYPE)] {
+            let (mut names, mut func, blocks) = nest(8, 2, 4, 1, Flags::NSW, false, kind);
+            assert_eq!(hoisted(&mut func).count(Kind::Optimized, done), 2, "{kind:?}");
+            let check = only(&func, kind, &blocks);
+            let &[_, _, span, step] = &func[func[check].args] else {
+                panic!("{kind:?} carries the span and the step");
+            };
+            assert_eq!(crate::discharge::constant(&func, span), Some(120), "{kind:?}");
+            assert_eq!(crate::discharge::constant(&func, step), Some(16), "{kind:?}");
+            assert_eq!(extent(&func, check), 8, "{kind:?}");
+            sound(&func, &mut names);
+        }
+    }
+
+    #[test]
+    fn a_check_comes_out_over_a_loop_inside_only_when_that_loop_is_counted() {
+        // The check is in the outer loop itself, in front of the inner one. With a counter that
+        // promises not to wrap the inner loop stops, every outer iteration ends, and the check
+        // comes out in the first round. Without the promise the analysis has no count for it, so
+        // it is a loop that might never end and the outer loop keeps its check.
+        let (mut names, mut func, blocks) = nest(8, 4, 0, 1, Flags::NSW, true, Opcode::CheckBounds);
+        assert_eq!(hoisted(&mut func).count(Kind::Optimized, HOISTED), 1);
+        let check = only(&func, Opcode::CheckBounds, &blocks);
+        assert_eq!(extent(&func, check), 16);
+        sound(&func, &mut names);
+
+        let (_, mut func, blocks) = nest(8, 4, 0, 1, Flags::NONE, true, Opcode::CheckBounds);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(stats.count(Kind::Missed, A_LOOP_INSIDE), 1);
+        assert_eq!(func.block_of(kinds(&func, Opcode::CheckBounds)[0].1), Some(blocks[1]));
     }
 
     #[test]
