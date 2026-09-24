@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.5
+
 ### Added
 
 - `signbit`, `isnormal`, `fabs` and `copysign` work on an x87 `long double`. They used to reinterpret the value as an eighty bit integer, which nothing lowers, so a program using any of them on a `long double` did not build. The value now goes through a stack slot and the sixteen bit word holding its sign is read or changed there.
