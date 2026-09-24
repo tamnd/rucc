@@ -7492,6 +7492,18 @@ impl<'u> Body<'_, 'u> {
         into: Option<Value>,
         span: Span,
     ) -> Option<Value> {
+        let pack = match self.builtin_named(callee) {
+            Some("__builtin_va_arg_pack") => Some(Opcode::VaArgPack),
+            Some("__builtin_va_arg_pack_len") => Some(Opcode::VaArgPackLen),
+            _ => None,
+        };
+        if let Some(opcode) = pack {
+            // A stand-in for arguments this function has not been handed yet, or for how many
+            // there were, which sema only lets through inside a variadic inline definition.
+            // `rucc_opt::inline` replaces it with what the call it inlines passed, and a copy of
+            // the function still holding one after that is not emitted, which is gcc's answer too.
+            return Some(self.build(span).value(InstData::new(opcode), Type::int(32)));
+        }
         if self.missing_builtin(callee, span) {
             return None;
         }
@@ -7513,7 +7525,11 @@ impl<'u> Body<'_, 'u> {
             into
         };
 
+        // Where each argument's values start, so that a call the inliner may forward the anonymous
+        // arguments of can say which values were one argument. See [`Func::set_arg_groups`].
+        let mut starts = Vec::with_capacity(count + 1);
         for index in 0..count {
+            starts.push(values.len());
             let arg = tast[args][index];
             let travel = &plan.args[index];
             match travel.pass {
@@ -7592,8 +7608,19 @@ impl<'u> Body<'_, 'u> {
                     settled.signature.params.pop();
                     symbol = plain;
                 }
+                let variadic = settled.signature.variadic;
                 let sig = self.func.add_signature(settled.signature);
-                self.build(span).call_varargs(symbol, sig, &values, &settled.varargs)
+                let inst = self.build(span).call_varargs(symbol, sig, &values, &settled.varargs);
+                if variadic && self.always_inlined(callee) {
+                    starts.push(values.len());
+                    let first = usize::from(destination.is_some());
+                    let mut groups: Vec<u32> = vec![1; first];
+                    groups.extend(starts.windows(2).map(|pair| {
+                        u32::try_from(pair[1] - pair[0]).expect("fewer arguments than that")
+                    }));
+                    self.func.set_arg_groups(inst, groups);
+                }
+                inst
             }
             None => {
                 let addr = self.value(callee);
@@ -7807,22 +7834,42 @@ impl<'u> Body<'_, 'u> {
     /// not the reason this exists, but a definition in front of us is a definition and the call
     /// to it links.
     fn missing_builtin(&mut self, callee: ExprId, span: Span) -> bool {
+        let Some(spelled) = self.builtin_named(callee) else { return false };
+        if !rucc_sema::unimplemented_builtin(spelled) {
+            return false;
+        }
+        let spelled = spelled.to_string();
+        self.unit.missing_builtin(&spelled, span);
+        true
+    }
+
+    /// Whether a call's callee is a function declared `always_inline`, by name.
+    fn always_inlined(&self, callee: ExprId) -> bool {
         let tast = self.tast();
+        let callee = self.named_callee(callee).1;
         let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
         else {
             return false;
         };
         let ExprKind::Decl(decl) = tast[operand].kind else { return false };
+        tast[decl].flags.contains(DeclFlags::ALWAYS_INLINE)
+    }
+
+    /// The name a call's callee is, when it names a function this unit has no body for.
+    ///
+    /// Which is the only way a builtin is ever called, and [`None`] for a call through a pointer
+    /// or to a function defined here, neither of which can be one.
+    fn builtin_named(&self, callee: ExprId) -> Option<&str> {
+        let tast = self.tast();
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
+        else {
+            return None;
+        };
+        let ExprKind::Decl(decl) = tast[operand].kind else { return None };
         if tast[decl].body.is_some() {
-            return false;
+            return None;
         }
-        let Some(name) = tast[decl].name else { return false };
-        if !rucc_sema::unimplemented_builtin(self.unit.names.resolve(name)) {
-            return false;
-        }
-        let spelled = self.unit.names.resolve(name).to_string();
-        self.unit.missing_builtin(&spelled, span);
-        true
+        Some(self.unit.names.resolve(tast[decl].name?))
     }
 
     /// Reports a construct the walk does not build IR for yet.

@@ -121,6 +121,14 @@ pub struct Func {
     /// The starts [`Func::remove_inst`] made out of the names on an instruction's results, by the
     /// instruction, so that putting the instruction back somewhere turns them back into names.
     unplaced: HashMap<Inst, Vec<(Value, Start)>>,
+    /// How many of a call's arguments each C argument became, for the calls the lowering says.
+    ///
+    /// Not part of the IR's text and not something the verifier reads. It is there for one
+    /// reader, `rucc_opt::inline`, which forwards the anonymous arguments of a call to an
+    /// `always_inline` function into a call inside it and has to know which values were one
+    /// structure, since the ABI puts all of a structure in registers or none of it. A module read
+    /// back from text has none of these, and the inliner forwards less for it.
+    arg_groups: HashMap<Inst, Vec<u32>>,
     /// Where each instruction some start is after was when a pass took it out, as the block and
     /// the instruction in front of it. See [`Func::start_place`].
     gone: HashMap<Inst, (Block, Option<Inst>)>,
@@ -170,6 +178,7 @@ impl Func {
             value_starts: Vec::new(),
             anchors: HashSet::new(),
             unplaced: HashMap::new(),
+            arg_groups: HashMap::new(),
             gone: HashMap::new(),
             first_block: None,
             last_block: None,
@@ -806,6 +815,20 @@ impl Func {
     pub fn add_call(&mut self, info: CallInfo) -> Idx<CallInfo> {
         self.calls.push(info);
         Idx::from_usize(self.calls.len() - 1)
+    }
+
+    /// Says how many of a call's arguments each C argument became, in order.
+    pub fn set_arg_groups(&mut self, call: Inst, groups: Vec<u32>) {
+        self.arg_groups.insert(call, groups);
+    }
+
+    /// How many of a call's arguments each C argument became, where the lowering said.
+    ///
+    /// `None` for almost every call, since the lowering only says it for a call that the inliner
+    /// might forward the arguments of. See [`Func::set_arg_groups`].
+    #[must_use]
+    pub fn arg_groups(&self, call: Inst) -> Option<&[u32]> {
+        self.arg_groups.get(&call).map(Vec::as_slice)
     }
 
     /// Records a `switch`'s targets and case values.

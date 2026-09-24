@@ -715,8 +715,16 @@ impl Unit<'_> {
             Effects::Pure => AttrSet::READONLY,
             Effects::Const => AttrSet::READNONE,
         };
-        // An inline definition this unit calls, which this unit has to put a copy of out of line
-        // because it has no inliner to make the call go away. See [`Self::out_of_line`].
+        // Whether to inline it, which `rucc_opt::inline` reads for `always_inline` at every level.
+        // The IR will not have both, so a name that said both gets the one gcc keeps, which is
+        // `always_inline` after a warning that the other was ignored.
+        if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
+            func.attrs.set |= AttrSet::ALWAYS_INLINE;
+        } else if node.flags.contains(DeclFlags::NOINLINE) {
+            func.attrs.set |= AttrSet::NOINLINE;
+        }
+        // An inline definition this unit calls, which this unit puts a copy of out of line for
+        // every call the inliner leaves alone. See [`Self::out_of_line`].
         let copied = body.is_some() && self.out_of_line(decl, node.inline);
         func.linkage = if copied { IrLinkage::LinkOnce } else { self.told(decl, linkage) };
         // The same question as for an object, and the same answer, with one wrinkle: an inline
@@ -731,7 +739,13 @@ impl Unit<'_> {
         // of a name the library already defines. Unless this unit is one of the callers, which is
         // the case [`Self::out_of_line`] is about.
         if body.is_some() && (node.inline.emits() || copied) {
+            // `optimize ("no-strict-aliasing")` on the function, which has to be kept in the IR
+            // rather than on the command line because the inliner may copy this body into a
+            // function that is under the rule.
+            let strict = self.aliasing;
+            self.aliasing &= !node.flags.contains(DeclFlags::NO_STRICT_ALIASING);
             body::lower(self, decl, &mut func, &plan);
+            self.aliasing = strict;
             // Only for a definition, because an entry is an address and a declaration of something
             // another file defines has none to put there. gcc reads the attribute off whichever
             // declaration carried it and then waits for the definition in the same way, which is
@@ -1014,9 +1028,9 @@ impl Unit<'_> {
     ///
     /// C 6.7.4p7 says an inline definition is not an external definition, and the bargain it
     /// offers is that the call is replaced by the body, so nobody ever has to resolve the name.
-    /// A compiler that inlines keeps its end of it. This one does not inline, so a call left
-    /// standing is a call to a name no object file defines, and the program fails at the link on
-    /// a function it can see the body of. micropython is a program that does exactly that:
+    /// A compiler that inlines keeps its end of it. This one inlines only a function marked
+    /// `always_inline`, so any other call left standing is a call to a name no object file
+    /// defines, and the program fails at the link on a function it can see the body of. micropython is a program that does exactly that:
     /// `py/misc.h` writes `MP_COMPRESSED_ROM_TEXT` as `inline __attribute__((always_inline))`,
     /// nothing anywhere defines it out of line, and every file that reports an error calls it.
     ///

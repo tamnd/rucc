@@ -174,14 +174,15 @@ pub struct Decl {
 /// nearly free until the byte that spills past a word, and then it costs four, which happened once
 /// for `constexpr` and again for `noreturn` and would have happened a third time for `naked`. A
 /// byte with six bits in it takes the node below the size it was before all three, and leaves
-/// enough room that the next several questions of this kind cost nothing at all.
+/// enough room that the next several questions of this kind cost nothing at all. The ninth took
+/// it to sixteen bits, which is the story in `tast.rs` beside the size of a declaration.
 ///
 /// What that trades away is where the paragraphs live. A field carries its explanation on the
 /// field, where a reader of the struct meets it; a bit carries it on a constant here, one step
 /// away. The constants below are written the way the fields were so the step is the only
 /// difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DeclFlags(u8);
+pub struct DeclFlags(u16);
 
 impl DeclFlags {
     /// Nothing written.
@@ -258,6 +259,33 @@ impl DeclFlags {
     /// It is refused on a name with internal linkage, since what it asks for is that the linker
     /// let somebody else win and a `static` name is one the linker never sees.
     pub const WEAK: Self = Self(1 << 5);
+
+    /// `__attribute__((always_inline))` was written on a declaration of this name.
+    ///
+    /// Not a hint. gcc inlines every direct call to one of these at every level including `-O0`,
+    /// and a header that defines one and nothing else is relying on that: an inline definition
+    /// under it may have no out of line copy anywhere, and glibc's fortified wrappers forward
+    /// their arguments with `__builtin_va_arg_pack`, which only means something once the body is
+    /// where the call was. `rucc_opt::inline` is what keeps the promise.
+    ///
+    /// A fact about the name rather than about one declaration of it, merged the way
+    /// [`Self::NORETURN`] is.
+    pub const ALWAYS_INLINE: Self = Self(1 << 6);
+
+    /// `__attribute__((noinline))` was written on a declaration of this name.
+    ///
+    /// Merged the way [`Self::ALWAYS_INLINE`] is. A name that ends up with both is under
+    /// `always_inline`, which is what gcc does after warning that it ignored the other one.
+    pub const NOINLINE: Self = Self(1 << 7);
+
+    /// `__attribute__((optimize ("no-strict-aliasing")))` was written on a declaration of this
+    /// name, the one part of `optimize` that is honoured.
+    ///
+    /// It matters once a body can be inlined: without it an access in the body carries the node
+    /// for its type, and in the caller that lets a load of an `int` move past a store through a
+    /// `float *` that the function was written to be allowed to make. Merged the way
+    /// [`Self::NORETURN`] is.
+    pub const NO_STRICT_ALIASING: Self = Self(1 << 8);
 
     /// Whether every bit of `other` is set here.
     #[must_use]

@@ -157,6 +157,15 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NAKED) {
             head.push_str(" naked");
         }
+        if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
+            head.push_str(" always_inline");
+        }
+        if node.flags.contains(DeclFlags::NOINLINE) {
+            head.push_str(" noinline");
+        }
+        if node.flags.contains(DeclFlags::NO_STRICT_ALIASING) {
+            head.push_str(" no_strict_aliasing");
+        }
         // Written under the name the attribute was written under rather than the name of the
         // bit it becomes, because what a dump of the tree shows is what the source said.
         match node.effects {

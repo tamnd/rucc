@@ -4,8 +4,9 @@
 //!
 //! The bargain an inline definition offers is that the call is replaced by the body, so nobody
 //! ever has to resolve the name and no object file has to hold one. A compiler that inlines keeps
-//! its end of it. This one does not inline, so a call left standing is a call to a name nothing
-//! defines and the program fails at the link on a function it can see the body of. micropython is
+//! its end of it. This one inlines only a function marked `always_inline`, so a call left standing
+//! is a call to a name nothing defines and the program fails at the link on a function it can see
+//! the body of. micropython is
 //! a program that does exactly that: `py/misc.h` writes `MP_COMPRESSED_ROM_TEXT` as `inline
 //! __attribute__((always_inline))`, nothing defines it out of line, and every file that reports an
 //! error calls it.

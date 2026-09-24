@@ -619,11 +619,18 @@ mod tests {
     /// `asm` is read as a register only on an object with automatic storage and such an object is
     /// declared once. A side table was not taken either, and this time the argument is the
     /// stronger of the two: the lowering asks about it at every local in the program.
+    ///
+    /// Seventy two to seventy six when [`DeclFlags`](crate::decl::DeclFlags) went from eight bits
+    /// to sixteen for `optimize ("no-strict-aliasing")`, the ninth yes or no question. The one
+    /// byte fields filled their four bytes exactly, so the ninth byte costs four. A side table was
+    /// the alternative, and it was not taken because the answer has to follow the name through
+    /// the merge of its declarations the way `always_inline` does, which is what the bits already
+    /// do. The seven bits past it are free again.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 72);
+        assert_eq!(size_of::<Decl>(), 76);
         assert_eq!(size_of::<Case>(), 48);
     }
 

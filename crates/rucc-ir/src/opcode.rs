@@ -613,6 +613,21 @@ pub enum Opcode {
     /// time it runs and zero everywhere else, which is when gcc answers it too, and at `-O0` it
     /// answers zero before any other pass runs, which is what gcc answers at that level.
     IsConstant,
+    /// `__builtin_va_arg_pack`, which stands for every anonymous argument of the call the function
+    /// it is in was inlined into.
+    ///
+    /// No operands, and an `i32` result that is only ever the last argument of a variadic call,
+    /// which is the one place gcc lets the builtin be written. It never reaches the back end:
+    /// `rucc_opt::inline` takes the argument out of that call and puts the anonymous arguments of
+    /// the call it is inlining in its place, and a body still holding one after that is a body the
+    /// unit does not emit.
+    VaArgPack,
+    /// `__builtin_va_arg_pack_len`, which is how many anonymous arguments the call the function it
+    /// is in was inlined into had.
+    ///
+    /// No operands and an `i32` result. `rucc_opt::inline` puts the count in its place, and a body
+    /// still holding one after that is not emitted, the same as for [`Self::VaArgPack`].
+    VaArgPackLen,
     /// What is in a machine register, for `register long x asm ("rbx");`.
     ///
     /// The GNU extension that puts an object in a named register rather than in the frame. The
@@ -797,6 +812,8 @@ impl Opcode {
             Self::ThreadPointer => "thread_pointer",
             Self::ObjectSize => "object_size",
             Self::IsConstant => "is_constant",
+            Self::VaArgPack => "va_arg_pack",
+            Self::VaArgPackLen => "va_arg_pack_len",
             Self::RegisterValue => "register_value",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
@@ -942,6 +959,9 @@ impl Opcode {
                 | Self::ObjectSize
                 // A question about a value, whose answer is the same wherever it is asked.
                 | Self::IsConstant
+                // Nothing yet, and something the inliner fills in before any pass asks.
+                | Self::VaArgPack
+                | Self::VaArgPackLen
                 | Self::MemEntry
                 // Three of the capability instructions are arithmetic on a pointer's
                 // provenance and touch nothing. The other four do: `cap_load`, `cap_store` and
@@ -1510,6 +1530,8 @@ static ALL: &[Opcode] = &[
     Opcode::ThreadPointer,
     Opcode::ObjectSize,
     Opcode::IsConstant,
+    Opcode::VaArgPack,
+    Opcode::VaArgPackLen,
     Opcode::RegisterValue,
     Opcode::VaStart,
     Opcode::VaArg,
