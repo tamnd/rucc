@@ -27,6 +27,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - AArch64 now has every description a pipeline pass reads a machine through: `FRAME`, `BRANCH`, `BITS`, `FLAGS`, `MACHINE`, `SHORT`, and a `TIMING` model taken from Arm's Neoverse N1 optimization guide. `rucc_codegen::Machine::aarch64` puts them together with `x16` and `x17` as the scratch registers. Fourteen opcodes were added for them: `cset` on its own for each condition, which is what is left of a comparison once the layout finds it already made, `probe_64` for stack clash probes, and `align_sp_64`, which aligns the stack pointer through `x16`. Those lines match GNU as too. `Machine::for_target` still returns `None` for AArch64 until the lowering rules are in.
 
+- `rules/aarch64.rules` is the first AArch64 lowering rule set, 172 rules over constants, integer arithmetic at every width the machine can do it at, shifts, the twenty comparisons with a register and with a twelve bit constant, selects, widening, loads and stores at two addressing modes, returns, the conditional branch, and float arithmetic and conversions. `rucc-verify` proves every one of them against the new `aarch64.model`, and `rucc-codegen` builds them into `select::aarch64::TABLE` beside the x86-64 table. Nothing selects with it yet.
+
 ### Fixed
 
 - A function with a comparison against memory that keeps a byte, such as `cmpl (%rbx), %eax; setg %dl`, now gets `xorl` for its zeros like any other. The size pass asked whether any block read a condition a predecessor left, and it took that comparison for such a read, since it compares against memory and so is not in the table of comparisons, and then kept `movl $0` for every zero in the function. See tamnd/rucc#1822.
