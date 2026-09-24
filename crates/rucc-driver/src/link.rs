@@ -560,7 +560,7 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
         let tuple = target_tuple(target, opts).to_canonical_string();
         return Err(Error::Sysroot {
             dir: sysroot.root().display().to_string(),
-            pinned: rucc_sysroot::pinned_for(&tuple).is_some(),
+            pinned: rucc_sysroot::pinned_for_target(target_tuple(target, opts)).is_some(),
             target: tuple,
         });
     }

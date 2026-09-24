@@ -133,7 +133,9 @@ pub mod sha256;
 pub mod wall;
 
 pub use argv::{Invocation, Item, Unsupported};
-pub use artifact::{KERNEL_HEADERS, PINNED, Pinned, pinned_for, pinned_targets};
+pub use artifact::{
+    KERNEL_HEADERS, PINNED, Pinned, glibc_base, pinned_for, pinned_for_target, pinned_targets,
+};
 pub use distribution::Arrival;
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
 pub use link::{Libc, LinkLine, LinkMode, libc};

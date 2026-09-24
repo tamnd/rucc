@@ -20,6 +20,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A cross link to a glibc target now links against stubs the compiler writes itself. Before the link the driver writes `libc.so`, `libm.so`, `librt.so` and the empty compatibility libraries into `<cache>/stubs/<tuple>`, cut at the glibc release the tuple names, and only rewrites a file when its bytes changed. The link line names that `libc.so`, puts the directory on a `-L` so `-lm` finds its stub, and adds the sysroot's `libc_nonshared.a` after the stub, which is the order glibc's own linker script uses. `-print-search-dirs` lists the directory too.
 
+- `--fetch` for a glibc tuple that pins a release, such as `x86_64-linux-gnu.2.28`, now fetches the archive of the same tuple without the release and installs it under the pinned spelling. One glibc sysroot serves every release, because its headers pick the release with `__GLIBC_MINOR__` and the stubs a link reads are cut at the release, so there is one archive per target rather than one per release. The link's check for a missing sysroot names that archive too.
+
 ## 0.11.2
 
 ### Added
