@@ -100,11 +100,12 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{Abi, Param, Type};
 use rucc_mir as mir;
-use rucc_target::x86_64;
 use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Where};
 
 use crate::capability;
 use crate::varargs::Area;
+
+pub mod aarch64;
 
 /// Why a parameter could not be brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,8 +197,8 @@ pub(crate) const X87_AREA: (u32, u32) = (16, 16);
 /// here is the value that comes back, because coming back is the one direction where it is not
 /// bytes: it arrives in `st(0)`, which is a register file this cannot name.
 #[must_use]
-pub fn refuses(ty: Type) -> Option<Missing> {
-    if head_of(ty).is_some() {
+pub fn refuses(ty: Type, insts: &Insts) -> Option<Missing> {
+    if (insts.arg)(ty).is_some() {
         return None;
     }
     // A `long double` is the one type here that is in neither of the two files. Saying so is worth
@@ -259,6 +260,7 @@ pub fn entry(
     block: mir::Block,
     params: &[Param],
     conv: &CallRegs,
+    insts: &Insts,
     names: &mut Interner,
     save: Option<Area>,
 ) -> Result<Arrived, (usize, Missing)> {
@@ -293,7 +295,7 @@ pub fn entry(
             continue;
         }
         let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
-        if let Some(missing) = refuses(ty) {
+        if let Some(missing) = refuses(ty, insts) {
             return Err((index, missing));
         }
         where_from.push((ty, at, abi));
@@ -323,16 +325,15 @@ pub fn entry(
         let reg = out.new_vreg(class);
         arrived.regs.push(reg);
         let Where::Reg(arrived_in) = at else { continue };
-        let head = head_of(ty).ok_or((index, Missing::Width))?;
+        let head = (insts.arg)(ty).ok_or((index, Missing::Width))?;
         let opcode = mir::Opcode::new(names.intern(head));
         let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
         out.build(block, opcode).operand(operand).finish();
     }
     if let Some(area) = save {
-        arrived.spare = spare(out, block, conv, names, area, arrived.took);
+        arrived.spare = spare(out, block, conv, insts, names, area, arrived.took);
     }
 
-    let lea = format!("{}{}", x86_64::MACHINE.prefix, x86_64::FRAME.lea);
     // The stack pointer is written down as the register to read through because it is the one that
     // reaches the caller's stack in almost every function, and a realigned frame is the exception
     // that [`crate::finish`] rewrites. Putting something here rather than nothing keeps the
@@ -346,8 +347,8 @@ pub fn entry(
         // [`crate::finish`] fills in, because where the caller's argument area is is the same
         // question for both.
         let name = match abi {
-            Abi::ByVal { .. } => lea.as_str(),
-            _ => load_of(ty).ok_or((index, Missing::Width))?,
+            Abi::ByVal { .. } => insts.lea,
+            _ => (insts.load)(ty).ok_or((index, Missing::Width))?,
         };
         let opcode = mir::Opcode::new(names.intern(name));
         let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
@@ -374,6 +375,7 @@ fn spare(
     out: &mut mir::Func,
     block: mir::Block,
     conv: &CallRegs,
+    insts: &Insts,
     names: &mut Interner,
     area: Area,
     took: (usize, usize),
@@ -388,7 +390,7 @@ fn spare(
     let mut spare = Vec::new();
     for (regs, taken, ty, float) in files {
         let held = usize::try_from(area.holds(float)).unwrap_or(0);
-        let Some(head) = head_of(ty) else { continue };
+        let Some(head) = (insts.arg)(ty) else { continue };
         let class = class_of(ty, conv);
         for (index, &arrived_in) in regs.iter().enumerate().take(held).skip(taken) {
             let reg = out.new_vreg(class);
@@ -401,6 +403,48 @@ fn spare(
     }
     spare
 }
+
+/// The instructions this file writes, for one machine.
+///
+/// Every one of them is written here by hand rather than by a rule, for the reasons the module
+/// comment gives, so this file is where a machine's names for them have to come from. Each answer
+/// is the whole name, prefix and all, because each is interned as it is.
+///
+/// The four functions answer for the same set of types, and a type one of them has no name for is
+/// a type none of them should have: an argument that can arrive in a register but not be read off
+/// the stack is a function turned away for where its sixth argument happened to land.
+#[derive(Debug)]
+pub struct Insts {
+    /// The pseudo a parameter of that type arrives in a register as. See [`head_of`].
+    pub arg: fn(Type) -> Option<&'static str>,
+    /// The load that reads one of that type out of the argument area. See [`load_of`].
+    pub load: fn(Type) -> Option<&'static str>,
+    /// The store that writes one of that type into the argument area. See [`store_of`].
+    pub store: fn(Type) -> Option<&'static str>,
+    /// The pseudo a value of that type leaves in the register at that place. See [`ret_of`].
+    pub ret: fn(Type, usize) -> Option<&'static str>,
+    /// The call of a name. See [`CALL`].
+    pub call: &'static str,
+    /// The call of an address in a register. See [`CALL_REG`].
+    pub call_reg: &'static str,
+    /// The instruction that puts an address in a register without reading what is at it.
+    pub lea: &'static str,
+    /// The instruction that writes a small constant into a general purpose register, which is
+    /// what a byte count and a SysV vector count are.
+    pub small: &'static str,
+}
+
+/// The x86-64 ones.
+pub static X86_64: Insts = Insts {
+    arg: head_of,
+    load: load_of,
+    store: store_of,
+    ret: ret_of,
+    call: CALL,
+    call_reg: CALL_REG,
+    lea: "x64.lea_64",
+    small: "x64.mov_ri_32",
+};
 
 /// What the instruction that calls a name is called.
 ///
@@ -531,6 +575,7 @@ pub fn call(
     block: mir::Block,
     made: &Calling<'_>,
     conv: &CallRegs,
+    insts: &Insts,
     names: &mut Interner,
 ) -> Result<Made, Refused> {
     let &Calling { callee, args, returns, variadic, named, at: span } = made;
@@ -585,7 +630,7 @@ pub fn call(
             continue;
         }
         let at = if ty.is_float() { places.float(float_bytes(ty)) } else { places.integer() };
-        if let Some(missing) = refuses(ty) {
+        if let Some(missing) = refuses(ty, insts) {
             return Err(refused(missing));
         }
         let class = class_of(ty, conv);
@@ -609,7 +654,7 @@ pub fn call(
                 position += 1;
             }
             Where::Stack(up) => {
-                let store = store_of(ty).ok_or(refused(Missing::Width))?;
+                let store = (insts.store)(ty).ok_or(refused(Missing::Width))?;
                 on_stack.push((reg, class, names.intern(store), up));
             }
         }
@@ -623,7 +668,7 @@ pub fn call(
     let comes_back = if matches!(returns, [ty] if on_the_stack(*ty)) {
         Vec::new()
     } else {
-        places_back(returns, conv)?
+        places_back(returns, conv, insts)?
     };
 
     // A variadic callee on SysV reads how many vector registers the call passed arguments in and
@@ -661,20 +706,22 @@ pub fn call(
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
         let Some(plan) = plan else {
             let what = Copying { from, up, count, span };
-            nested = nested.max(by_runtime(out, block, conv, names, what));
+            nested = nested.max(by_runtime(out, block, conv, insts, names, what));
             continue;
         };
         for (at, width) in plan {
             let ty = Type::int(width * 8);
             let at = i32::try_from(at).expect("an object under two gigabytes");
             let word = out.new_vreg(conv.int_class);
-            let load = names
-                .intern(load_of(ty).ok_or(Refused { argument: None, missing: Missing::Width })?);
+            let load = names.intern(
+                (insts.load)(ty).ok_or(Refused { argument: None, missing: Missing::Width })?,
+            );
             let there = mir::Operand::read(from, conv.int_class);
             let build = out.build(block, mir::Opcode::new(load)).at(span);
             build.def(word, conv.int_class).mem(mir::Mem::at(there).plus(at)).finish();
-            let store = names
-                .intern(store_of(ty).ok_or(Refused { argument: None, missing: Missing::Width })?);
+            let store = names.intern(
+                (insts.store)(ty).ok_or(Refused { argument: None, missing: Missing::Width })?,
+            );
             let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
             let build = out.build(block, mir::Opcode::new(store)).at(span);
             build.uses(word, conv.int_class).mem(mir::Mem::at(sp).plus(up + at)).finish();
@@ -743,14 +790,14 @@ pub fn call(
     }
     if let Some(at) = counted {
         let count = out.new_vreg(conv.int_class);
-        let zero = mir::Opcode::new(names.intern("x64.mov_ri_32"));
+        let zero = mir::Opcode::new(names.intern(insts.small));
         out.build(block, zero).at(span).def(count, conv.int_class).imm(i64::from(vectors)).finish();
         operands.push(mir::Operand::read(count, conv.int_class).with(Constraint::Fixed(at)));
     }
 
     let opcode = mir::Opcode::new(names.intern(match callee {
-        Callee::Named(_) => CALL,
-        Callee::Through(_) => CALL_REG,
+        Callee::Named(_) => insts.call,
+        Callee::Through(_) => insts.call_reg,
     }));
     let mut build = out.build(block, opcode).at(span);
     if let Callee::Named(symbol) = callee {
@@ -787,6 +834,7 @@ fn by_runtime(
     out: &mut mir::Func,
     block: mir::Block,
     conv: &CallRegs,
+    insts: &Insts,
     names: &mut Interner,
     what: Copying,
 ) -> u32 {
@@ -800,7 +848,7 @@ fn by_runtime(
     // choosing.
     let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
     let into = out.new_vreg(conv.int_class);
-    let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+    let lea = mir::Opcode::new(names.intern(insts.lea));
     out.build(block, lea)
         .at(span)
         .def(into, conv.int_class)
@@ -812,7 +860,7 @@ fn by_runtime(
     // half, so the sixty four bit count it becomes is the count as long as the count fits in the
     // immediate, which is what the caller checked before anything was built.
     let bytes = out.new_vreg(conv.int_class);
-    let mov = mir::Opcode::new(names.intern("x64.mov_ri_32"));
+    let mov = mir::Opcode::new(names.intern(insts.small));
     out.build(block, mov).at(span).def(bytes, conv.int_class).imm(i64::from(count)).finish();
 
     let args = [
@@ -831,7 +879,7 @@ fn by_runtime(
     // Three pointer sized arguments and nothing coming back is a call every convention here has
     // registers for, so the only way this could refuse is a convention with fewer than three
     // argument registers, and there is no such convention.
-    call(out, block, &made, conv, names)
+    call(out, block, &made, conv, insts, names)
         .expect("the runtime's copy passes three words and takes nothing back")
         .outgoing
 }
@@ -847,12 +895,16 @@ fn by_runtime(
 /// The first value that cannot come back at all, and why, so that a call this cannot make leaves
 /// nothing behind. Nothing here reports which value it was, because the caller has one answer for
 /// all of them: the value that comes back is not an argument and has no position among them.
-fn places_back(returns: &[Type], conv: &CallRegs) -> Result<Vec<(PhysReg, RegClass)>, Refused> {
+fn places_back(
+    returns: &[Type],
+    conv: &CallRegs,
+    insts: &Insts,
+) -> Result<Vec<(PhysReg, RegClass)>, Refused> {
     let refused = |missing| Refused { argument: None, missing };
     let mut back = Vec::with_capacity(returns.len());
     let (mut ints, mut sses) = (0usize, 0usize);
     for &ty in returns {
-        if let Some(missing) = refuses(ty) {
+        if let Some(missing) = refuses(ty, insts) {
             return Err(refused(missing));
         }
         let class = class_of(ty, conv);
@@ -1037,7 +1089,7 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        entry(&mut out, block, &plain(params), conv, &mut names, None)
+        entry(&mut out, block, &plain(params), conv, &X86_64, &mut names, None)
             .expect("every parameter arrives");
         mir::print_func(&out, &names, &REGS)
     }
@@ -1070,7 +1122,7 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let arrived = entry(&mut out, block, &plain(params), conv, &mut names, None)
+        let arrived = entry(&mut out, block, &plain(params), conv, &X86_64, &mut names, None)
             .expect("every parameter");
         let up = arrived.stack.iter().map(|&(_, up)| up).collect();
         (mir::print_func(&out, &names, &REGS), up)
@@ -1107,8 +1159,8 @@ mod tests {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
         let block = out.create_block();
-        let arrived =
-            entry(&mut out, block, params, conv, &mut names, None).expect("every parameter");
+        let arrived = entry(&mut out, block, params, conv, &X86_64, &mut names, None)
+            .expect("every parameter");
         let up = arrived.stack.iter().map(|&(_, up)| up).collect();
         (mir::print_func(&out, &names, &REGS), up)
     }
@@ -1208,9 +1260,9 @@ mod tests {
     /// which is the one thing about this type that used to turn a whole function away.
     #[test]
     fn a_quad_float_is_no_longer_a_width_nothing_can_carry() {
-        assert_eq!(refuses(Type::float(rucc_ir::Float::F128)), None);
-        assert_eq!(refuses(Type::float(rucc_ir::Float::F80)), Some(Missing::OnX87));
-        assert_eq!(refuses(Type::int(128)), Some(Missing::Width));
+        assert_eq!(refuses(Type::float(rucc_ir::Float::F128), &X86_64), None);
+        assert_eq!(refuses(Type::float(rucc_ir::Float::F80), &X86_64), Some(Missing::OnX87));
+        assert_eq!(refuses(Type::int(128), &X86_64), Some(Missing::Width));
     }
 
     /// A float arrives in the other file, and the two files are counted apart on SysV: the
@@ -1303,7 +1355,7 @@ mod tests {
             .collect();
         let callee = Callee::Named(names.intern("g"));
         let what = Calling { callee, args: &passed, returns, variadic, named, at: Span::DUMMY };
-        let made = call(&mut out, block, &what, conv, &mut names);
+        let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
         (names, out, made)
     }
 
@@ -1464,7 +1516,8 @@ mod tests {
             named: passed.len(),
             at: Span::DUMMY,
         };
-        call(&mut out, block, &what, &SYSV, &mut names).expect("one integer fits in a register");
+        call(&mut out, block, &what, &SYSV, &X86_64, &mut names)
+            .expect("one integer fits in a register");
 
         // The address is the first thing read and the arguments follow it, which is the order the
         // assembler counts on, and it is in no particular register because every register a call
@@ -1528,7 +1581,7 @@ mod tests {
             named: args.len(),
             at: Span::DUMMY,
         };
-        let made = call(&mut out, block, &what, conv, &mut names);
+        let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
         (names, out, made)
     }
 

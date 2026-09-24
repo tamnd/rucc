@@ -1411,7 +1411,7 @@ impl<'a> Lowering<'a> {
             named: named.len(),
             at: self.source.span(inst),
         };
-        let made = abi::call(&mut self.out, block, &what, self.conv, self.names)
+        let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         let calls = &mut self.stack.calls;
         *calls = Some(calls.unwrap_or(0).max(made.outgoing));
@@ -1500,8 +1500,9 @@ impl<'a> Lowering<'a> {
             let at = if crate::term::in_vector_file(ty) { &mut floats } else { &mut ints };
             // Why it cannot come back, and not only that it cannot. A type that travels nowhere
             // says so itself, and a type that travels perfectly well ran out of registers.
-            let missing = abi::refuses(ty).unwrap_or(Missing::NoRoom);
-            let name = abi::ret_of(ty, *at).ok_or(Unsupported::Returned { inst, missing })?;
+            let missing = abi::refuses(ty, self.selector.abi).unwrap_or(Missing::NoRoom);
+            let name =
+                (self.selector.abi.ret)(ty, *at).ok_or(Unsupported::Returned { inst, missing })?;
             *at += 1;
             // The register is the target's answer and not one worked out here, the same as it is
             // for a return of one value, so that both halves of a pair and every rule that writes
@@ -4584,8 +4585,9 @@ impl<'a> Lowering<'a> {
         // [`Self::save_area`] is where the difference is spent.
         let variadic = self.source.signature().variadic;
         let area = variadic.then(|| varargs::Area::of(self.conv));
-        let arrived = abi::entry(&mut self.out, out, &types, self.conv, self.names, area)
-            .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
+        let arrived =
+            abi::entry(&mut self.out, out, &types, self.conv, self.selector.abi, self.names, area)
+                .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
         for (&param, reg) in params.iter().zip(&arrived.regs) {
             self.regs[param.index()] = Some(*reg);
         }
@@ -5186,6 +5188,28 @@ mod tests {
         let out = func(source, names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         mir::print_func(&out.func, names, &REGS)
+    }
+
+    /// The same function lowered for AArch64, which is the first thing this file writes for a
+    /// machine other than x86-64. Nothing past selection runs here, so what is checked is that the
+    /// arguments, the rule and the return all come out named for the machine that was asked for.
+    #[test]
+    fn an_addition_lowers_for_aarch64_with_its_own_names() {
+        let i32 = Type::int(32);
+        let (mut names, mut func, block, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut func, block);
+        let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
+        build.ret(&[sum]);
+
+        let conv = &rucc_target::aarch64::AAPCS64;
+        let selector = &crate::select::aarch64::SELECTOR;
+        let out = super::func(&func, &mut names, selector, conv, &Elsewhere::default())
+            .expect("an addition and a return have AArch64 rules");
+        let text = mir::print_func(&out.func, &names, &rucc_target::aarch64::REGS);
+        assert!(!text.contains("x64."), "{text}");
+        assert!(text.contains("= a64.arg_val_32"), "{text}");
+        assert!(text.contains("= a64.add_rr_32 %0, %1"), "{text}");
+        assert!(text.contains("a64.ret_val_32 %2"), "{text}");
     }
 
     #[test]

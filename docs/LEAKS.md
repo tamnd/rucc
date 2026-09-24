@@ -6,13 +6,13 @@
 
 The instruction selector in `lower.rs` is handed a `select::Selector` instead of assuming x86-64. The selector holds the compiled rule table, the operand shapes, the address constructors, the frame and branch instructions, the address class, and the names of the fence and the trap. Before this, `lower.rs` had its own `x64.` prefix constant, a static pointing at the x86-64 table, and called `x86_64::form`, `x86_64::address`, `x86_64::FRAME`, `x86_64::BRANCH` and `x86_64::GPR` directly. `pipeline::Machine` now carries the selector next to the other tables, so `Machine::aarch64` already comes with the AArch64 rules.
 
+The calling convention in `abi.rs` writes its pseudos, loads, stores and calls through an `abi::Insts` the selector carries, with one for each machine. The AArch64 one uses the 32 bit pseudo for anything narrower than 32 bits, since that is the register such a value lives in. The one x86 name left there is the `movq` that copies an unprototyped float into a general purpose register, which only the Windows x64 convention asks for.
+
 The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::Address`, because the rule files for both machines use the same names for the same shapes. AArch64 lists the two it has.
 
 ## Still there
 
 These are in code that runs, not in tests. A test that builds x86-64 instructions by hand to exercise a pass is not a leak, since the pass under test only sees names.
-
-- `abi.rs` names the x86-64 argument and return opcodes (`x64.arg_val_*`) and uses the x86-64 frame `lea` for a parameter that arrived on the stack. This is the argument lowering, and AAPCS64 needs its own, so it is the next thing to move.
 
 - `lower.rs` writes `va_start` as the SysV x86-64 `va_list` with its four fields and the register save area. AAPCS64 has a five field `va_list` with two save areas, and Darwin uses a plain pointer. The `Varargs::Pointer` case already covers the Darwin shape.
 
