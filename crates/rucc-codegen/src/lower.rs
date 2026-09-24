@@ -1482,16 +1482,18 @@ impl<'a> Lowering<'a> {
         // An eighty bit value came back on the x87 stack, and the one thing that has to happen
         // before anything else touches that stack is taking it off. So the `fstp` goes here, in
         // front of everything the block does next, and after it the value is in its slot and is
-        // read the way every other one is.
+        // read the way every other one is. A complex one is two of them, the real half on top, so
+        // taking them off in order leaves each in its own slot and the stack empty.
         let results: Vec<Value> = self.source[inst].results().collect();
-        if let [result] = results[..] {
-            if abi::on_the_stack(self.source[result].ty) {
-                let span = self.source.span(inst);
+        let types: Vec<Type> = results.iter().map(|&result| self.source[result].ty).collect();
+        if abi::back_on_x87(&types) {
+            let span = self.source.span(inst);
+            for result in results {
                 let into = self.x87_slot(result);
                 let into = self.through(into);
                 self.x87_at("fstp_t", span, into);
-                return Ok(());
             }
+            return Ok(());
         }
         for (result, &reg) in results.into_iter().zip(&made.results) {
             self.regs[result.index()] = Some(reg);
@@ -1533,10 +1535,11 @@ impl<'a> Lowering<'a> {
     ///
     /// Where everything goes is worked out before anything is written, so a return this cannot
     /// make leaves no half of one behind.
-    /// Whether what a `return` gives back is the one value that goes back on the x87 stack.
+    /// Whether what a `return` gives back goes back on the x87 stack, per [`abi::back_on_x87`].
     fn gives_back_x87(&self, inst: Inst) -> bool {
-        let [value] = self.source[self.source[inst].args] else { return false };
-        abi::on_the_stack(self.source[value].ty)
+        let values = &self.source[self.source[inst].args];
+        let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
+        abi::back_on_x87(&types)
     }
 
     fn returned(&mut self, inst: Inst) -> Result<(), Unsupported> {
@@ -1548,16 +1551,16 @@ impl<'a> Lowering<'a> {
         // return is an `fld` of its slot, and the stack it leaves the value on is not empty at the
         // `ret`, which is the one time in this file that is true and is what the convention asks
         // for. What comes after is the epilogue, which gives the frame back and touches nothing in
-        // the unit.
-        if let [value] = values[..] {
-            let ty = self.source[value].ty;
-            if abi::on_the_stack(ty) && self.sret().is_none() {
-                let span = self.source.span(inst);
+        // the unit. A complex one loads its imaginary half first so that the real half ends up on
+        // top of it, in `st(0)`, with the imaginary half under it in `st(1)`.
+        if self.gives_back_x87(inst) && self.sret().is_none() {
+            let span = self.source.span(inst);
+            for &value in values.iter().rev() {
                 let from = self.x87_slot(value);
                 let from = self.through(from);
                 self.x87_at("fld_t", span, from);
-                return Ok(());
             }
+            return Ok(());
         }
         for value in self.sret().into_iter().chain(values) {
             let ty = self.source[value].ty;

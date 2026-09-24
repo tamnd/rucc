@@ -201,6 +201,16 @@ pub fn on_the_stack(ty: Type) -> bool {
     ty.is_float() && ty.is_scalar() && ty.bits() == 80
 }
 
+/// Whether what a function gives back is left on the x87 stack, which is one `long double` in
+/// `st(0)` or a `_Complex long double` with its real half there and its imaginary half in `st(1)`.
+///
+/// Those two are the whole of what SysV returns on that stack, and a structure holding a `long
+/// double` is not one of them, since the lowering sends that back through memory.
+#[must_use]
+pub fn back_on_x87(returns: &[Type]) -> bool {
+    matches!(returns.len(), 1 | 2) && returns.iter().all(|&ty| on_the_stack(ty))
+}
+
 /// How much room one takes in the argument area, as a size and an alignment.
 pub(crate) const X87_AREA: (u32, u32) = (16, 16);
 
@@ -711,13 +721,10 @@ pub fn call(
     // this call can be said to write. So nothing is placed for it and nothing is constrained, and
     // the call gives back no register at all: what takes the value off that stack is the `fstp`
     // [`crate::lower`] writes straight after the call, which is the same shape every other use of
-    // the x87 stack is written in. Only on its own, because a value that comes back beside another
-    // one comes back in a pair of registers and there is no pair with that stack in it.
-    let comes_back = if matches!(returns, [ty] if on_the_stack(*ty)) {
-        Vec::new()
-    } else {
-        places_back(returns, conv, insts)?
-    };
+    // the x87 stack is written in. A complex one is the same with its imaginary half in `st(1)`,
+    // and a second `fstp` takes that one off.
+    let comes_back =
+        if back_on_x87(returns) { Vec::new() } else { places_back(returns, conv, insts)? };
 
     // A variadic callee on SysV reads how many vector registers the call passed arguments in and
     // skips saving them when the answer is none, which is what makes `printf` with no floating

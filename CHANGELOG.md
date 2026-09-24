@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A `_Complex long double` can be returned from a function and taken back from a call on x86-64 SysV. It comes back on the x87 stack with the real half in `st(0)` and the imaginary half in `st(1)`, which the back end used to refuse because only a lone `long double` was handled there.
 - AArch64 compares two floats. Each of the IR's fourteen predicates is an `fcmp` and a `cset` on the condition that means it, and ordered but not equal and unordered or equal add a `csinc`, as gcc writes them. Every float comparison in C used to fail to build for AArch64.
 
 ### Fixed

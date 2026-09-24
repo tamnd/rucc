@@ -1245,9 +1245,10 @@ mod tests {
         let (mut names, mut source, block, args) = blank(&[f80, Type::int(64)]);
         Builder::new(&mut source, block).ret(&args);
 
-        // One of these comes back on the x87 stack and a pair comes back in a pair of registers,
-        // and there is no pair with that stack in it. So this is refused rather than lowered, and
-        // it is the convention that refuses it rather than anything about the instructions.
+        // One of these comes back on the x87 stack and the other in a register, and the only pair
+        // that stack holds is two `long double` halves of one complex value. So this is refused
+        // rather than lowered, and it is the convention that refuses it rather than anything about
+        // the instructions.
         let machine = Machine::x86_64(&SYSV);
         let failed =
             compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
@@ -1290,6 +1291,45 @@ mod tests {
         // nothing in the unit, so the value is where the caller looks for it when the `ret` runs.
         let end: Vec<&str> = text.lines().rev().skip(1).take(3).map(str::trim).collect();
         assert_eq!(end, ["x64.ret", "$rsp = x64.add_ri_64 $rsp, 24", "x64.fld_t [$rsp]"], "{text}");
+    }
+
+    /// A `_Complex long double` goes back on the x87 stack as two values, the real half on top.
+    ///
+    /// Each half arrives in memory like any `long double`, and the return loads the imaginary half
+    /// first so that the real one is in `st(0)` above it, which is where the caller looks for each.
+    /// A call to such a function takes both off again, the real half first, so the stack is empty
+    /// by the time anything else touches it.
+    #[test]
+    fn a_complex_long_double_goes_back_on_the_x87_stack_as_a_pair() {
+        let f80 = Type::float(rucc_ir::Float::F80);
+        let (mut names, mut source, block, args) = blank(&[f80, f80]);
+        Builder::new(&mut source, block).ret(&[args[1], args[0]]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("the pair is what the convention asks for");
+        let text = mir::print_func(&out, &names, &REGS);
+        // The second parameter is the real half here, so it is loaded last and ends up on top. There
+        // is no frame, so the first parameter is right above the return address.
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let imaginary = lines.iter().position(|&line| line == "x64.fld_t [$rsp + 8]");
+        let real = lines.iter().position(|&line| line == "x64.fld_t [$rsp + 24]");
+        assert!(imaginary.is_some() && real == imaginary.map(|at| at + 1), "{text}");
+        assert!(!text.contains("x64.ret_val"), "nothing comes back in a register: {text}");
+
+        let (mut names, mut source, block, _) = blank(&[]);
+        let sig = source.add_signature(Signature::new().with_returns(&[f80, f80]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &[]);
+        let halves: Vec<ir::Value> = source[call].results().collect();
+        Builder::new(&mut source, block).ret(&[halves[1], halves[0]]);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("a call can take the pair off");
+        let text = mir::print_func(&out, &names, &REGS);
+        assert_eq!(text.matches("x64.fstp_t").count(), 2, "{text}");
+        assert_eq!(text.matches("x64.fld_t").count(), 2, "{text}");
     }
 
     /// The whole of the second register class, end to end: two floats arrive in vector registers,
