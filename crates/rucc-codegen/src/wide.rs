@@ -94,7 +94,7 @@ use rucc_ir::{
     Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred,
     MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
 };
-use rucc_target::{AbiDescription, CallRegs, Places, Where};
+use rucc_target::{AbiDescription, CallRegs, Places, Variadic, Where};
 
 use crate::capability;
 use crate::expand;
@@ -304,10 +304,11 @@ fn can_split(
     // call is laid out as a whole, with the arguments past the `...` named as parameters, and that
     // is only right where naming them changes nothing. On a convention that counts the two files as
     // one run it does, because a float past the `...` goes in both files and one before it does
-    // not.
+    // not, and on Apple's AArch64 it does too, because everything past the `...` goes in memory.
     if matches!(data.opcode, Opcode::Call | Opcode::CallIndirect) {
         let Some((site, variadic)) = site(func, inst) else { return false };
-        if variadic && (conv.shared_positions || plan(&site, conv).is_none()) {
+        let in_memory = conv.abi.variadic == Variadic::AlwaysMemory;
+        if variadic && (conv.shared_positions || in_memory || plan(&site, conv).is_none()) {
             return false;
         }
     }

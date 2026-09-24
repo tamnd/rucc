@@ -86,7 +86,9 @@ use rucc_ir::{
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, VaList};
+use rucc_target::{
+    Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, VaList, Variadic,
+};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -456,9 +458,6 @@ pub enum Unsupported {
 /// What [`Unsupported::Unported`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unported {
-    /// A definition that takes arguments its signature does not name, on AArch64 for Apple's
-    /// platforms, whose variadic arguments are all on the stack.
-    Variadic,
     /// A thread-local variable or the thread pointer on AArch64 for Apple's platforms, which reach
     /// them through a descriptor.
     Thread,
@@ -469,9 +468,6 @@ impl Unported {
     #[must_use]
     pub fn why(self) -> &'static str {
         match self {
-            Unported::Variadic => {
-                "a function that takes arguments it does not name is not written for this machine yet"
-            }
             Unported::Thread => "a thread-local variable is not written for this machine yet",
         }
     }
@@ -4877,14 +4873,12 @@ impl<'a> Lowering<'a> {
         // reserved on the other. Which of the two it is is [`varargs::Area::of`]'s answer and
         // [`Self::save_area`] is where the difference is spent.
         //
-        // Apple's AArch64 passes every argument a signature does not name on the stack, which is
-        // a list that is a pointer on a convention that counts the files apart, and the walk for
-        // that is not written.
+        // Apple's AArch64 is neither. Every argument a signature does not name is in the caller's
+        // memory, so there is nothing to save and the list starts at the first word past the named
+        // ones.
         let variadic = self.source.signature().variadic;
-        if variadic && self.conv.list == VaList::CharPointer && !self.conv.shared_positions {
-            return Err(Unsupported::Unported { inst: None, what: Unported::Variadic });
-        }
-        let area = variadic.then(|| varargs::Area::of(self.conv));
+        let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory;
+        let area = (variadic && !in_memory).then(|| varargs::Area::of(self.conv));
         let arrived =
             abi::entry(&mut self.out, out, &types, self.conv, self.selector.abi, self.names, area)
                 .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
@@ -4893,6 +4887,9 @@ impl<'a> Lowering<'a> {
         }
         if let Some(area) = area {
             self.save_area(out, &arrived, area);
+        } else if variadic {
+            let incoming = arrived.beyond.next_multiple_of(self.conv.word);
+            self.varargs = Some(Varargs::Pointer { incoming });
         }
         self.stack.arguments.extend(arrived.stack);
         Ok(())

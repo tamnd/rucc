@@ -24,9 +24,9 @@ The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::A
 
 These are in code that runs, not in tests. A test that builds x86-64 instructions by hand to exercise a pass is not a leak, since the pass under test only sees names.
 
-- `lower.rs` refuses a variadic definition on Darwin, whose list is one pointer and whose variadic arguments are all on the stack. The `Varargs::Pointer` case already covers the shape, and what is missing is the entry that puts nothing in the save area.
+- `lower.rs` refuses a thread-local variable on Darwin, which reaches one through a descriptor call. It tells Darwin apart by asking whether the list is one pointer on a convention that counts the register files apart, which is a stand in for a real per platform answer.
 
-- `lower.rs` refuses a thread-local variable on Darwin, which reaches one through a descriptor call. It tells Darwin apart with the same `VaList` question the variadic refusal asks, which is a stand in for a real per platform answer.
+- `wide.rs` does not split an `__int128` passed past the `...` on Darwin, since the split names every argument and Darwin puts the unnamed ones in memory. Such a call is refused.
 
 - `lower.rs` still has an x87 arm for an eighty bit float, and it is reached only on x86-64, where `long double` is that format. AArch64 Linux has a 128-bit IEEE `long double` that goes through the same soft float calls `_Float128` does on x86-64, and Darwin makes it a `double`, so neither reaches the arm, but the question of which float the machine computes in is still answered by the format and not by the target.
 
