@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `signbit`, `isnormal`, `fabs` and `copysign` work on an x87 `long double`. They used to reinterpret the value as an eighty bit integer, which nothing lowers, so a program using any of them on a `long double` did not build. The value now goes through a stack slot and the sixteen bit word holding its sign is read or changed there.
 - Two rules can now share a pattern when the earlier one has a guard, and the first whose guard holds fires. AArch64 uses it to build a constant too wide for one `mov` as a `mov` of its low sixteen bits and a `movk` for each piece above, so `0x12345678` is two instructions, a 64-bit constant under `2^32` is two, and any other is four. A rule after an unguarded one with the same pattern is still refused as one that can never fire.
 - AArch64 has a rule for every widening and narrowing between integer types, including to and from one bit values, which are widened and narrowed with an `and` so nothing above the bit is taken on trust.
 - AArch64 builds a dense `switch` as a jump table, reached with `adr` and read with `ldrsw`, and takes the address of a label with `adr`, so computed `goto` works there too. Both used to be refused.
