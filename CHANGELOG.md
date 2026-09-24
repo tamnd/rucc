@@ -27,6 +27,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The eight glibc targets now have sysroots to fetch: x86_64, i686, aarch64, armv7 hard float, riscv64, powerpc64le, s390x and loongarch64, from the `tamnd/rucc-cross` release `sysroots-2026-09-24`. Each holds the merged glibc headers for every release from 2.28 to 2.44 and glibc 2.44's start files and `libc_nonshared.a`, and is under 600 KB, because the shared libraries are the stubs the driver writes. `PROVENANCE` lists them as pinned.
 
+### Fixed
+
+- The length past which phiopt charges an arm whole rather than looking for the work the head already does is now `PHIOPT_ARM_SCAN_INSTRUCTIONS` in `rucc_cost::heuristics`, 16, derived from `PHIOPT_ARM_INSTRUCTIONS`. It was a bare `4 * ... + 8` in `phiopt.rs`, which `cargo xtask thresholds` refuses, so the gate on main has been red since #1799.
+
 ## 0.11.2
 
 ### Added

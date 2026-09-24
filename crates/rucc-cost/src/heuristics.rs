@@ -148,6 +148,16 @@ pub const IF_CONVERSION_BLOCK_LIMIT: u32 = 10;
 /// arm of two cheap operations is a value being worked out. An arm of ten is a program.
 pub const PHIOPT_ARM_INSTRUCTIONS: u32 = 2;
 
+/// How long an arm may be before phiopt stops looking for the work in it that the head already
+/// does, per section 22.6.
+///
+/// An arm is charged only for work the head is not doing, since GVN merges the rest, and finding
+/// that is a walk over the head for each instruction of the arm. Past this length the arm is
+/// charged whole and so refused, which keeps the walk bounded on a long arm. Four times
+/// [`PHIOPT_ARM_INSTRUCTIONS`] and eight more, so an arm is only charged whole when most of it would
+/// have to be repeated work to fit.
+pub const PHIOPT_ARM_SCAN_INSTRUCTIONS: u32 = 4 * PHIOPT_ARM_INSTRUCTIONS + 8;
+
 /// How near even a branch's probability has to be before if-conversion will speculate an arm into
 /// it, per section 22.2, as a percentage.
 ///
@@ -584,6 +594,14 @@ pub const ALL: &[Constant] = &[
         document: "22.2",
         gcc: "",
         provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "PHIOPT_ARM_SCAN_INSTRUCTIONS",
+        value: 16,
+        unit: "instructions per arm",
+        document: "22.6",
+        gcc: "",
+        provenance: Provenance::Derived,
     },
     Constant {
         name: "PHIOPT_UNPREDICTABLE_MARGIN_PERCENT",
