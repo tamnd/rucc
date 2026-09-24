@@ -121,8 +121,9 @@
 //! nothing has to be proved. One store before and one store after, to the same address, of a value
 //! the program was going to write there on one path or the other. Nothing new is written, nothing
 //! is written twice, and the order of that store against everything else in the function is where
-//! it was. So this is the case that goes in, and the one armed case is refused by name rather than
-//! by falling through the effects check, so that `-fopt-info-all` says which of the two it was.
+//! it was. So this is the case that goes in with nothing more to ask. The one armed case goes in
+//! only with the proof the next section gives, and is refused by name when that proof is missing,
+//! so that `-fopt-info-all` says which of the two it was.
 //!
 //! What has to match beyond the address is the access itself: the flags, and the alignment, size,
 //! aliasing node and `restrict` scope that a store carries alongside them, because the one store
@@ -145,6 +146,38 @@
 //! both observable, and a value that arrives through a select is a different program from one that
 //! arrives through a branch. Atomic for the ordering rather than the access, since a store with an
 //! order on it is a fence as much as a write.
+//!
+//! # The store one arm made
+//!
+//! The other half of section 22.2's fourth transformation, for the one kind of location where the
+//! proof section 22.6 asks for can be given. `if (v > best[k]) best[k] = v;` becomes a load of
+//! `best[k]`, a select between `v` and what the load found, and a store of the select, on both
+//! paths. GCC does the same thing to the same loop and under the same two conditions.
+//!
+//! The location is a local whose address never leaves the function. That answers the race, since
+//! another thread can only write bytes it can name and nothing outside this function can name
+//! these, and it answers the read only page, since a local is on the stack. Where the address
+//! points is `alias::origin` and whether anything else was ever handed it is `alias::Escapes`. A
+//! function that gives stack back part way through, which is what a variable length array going
+//! out of scope does, is refused whole.
+//!
+//! The head read or wrote the same address at the same width, with nothing after that access that
+//! could have given the memory back. That answers the fault. `best[k]` with a `k` the branch was
+//! guarding is an address the other path never reaches, and a local is only in the frame for the
+//! offsets it has. An access the head already made there means the other path reached it anyway.
+//! The same address is a structural question, two chains of the same pure operations over the same
+//! values, because nothing before value numbering has made the arm's copy of a subscript and the
+//! head's copy one value.
+//!
+//! A load in an arm is taken on the second condition alone. An arm that reads an address the head
+//! already touched cannot fault on the path that did not read it, and a plain load is not something
+//! another thread can see. That is what lets `if (v[i] > best[k]) best[k] = v[i];` go, where the arm
+//! reads `v[i]` a second time. The loads an arm makes have to come before its store, since the one
+//! store is written below everything the arms did.
+//!
+//! The store is counted as work, because it now happens on a path that did not make one, so the
+//! predictability half of the cost rule still has its say about it. The load that finds the old
+//! value is not counted, since the head has just touched the same bytes.
 //!
 //! # What a select is built for
 //!
@@ -184,13 +217,13 @@
 //! dead code elimination deletes an instruction under, so an arm this pass will hoist is an arm
 //! whose instructions could have been deleted outright had nothing read them. A call, a `volatile`
 //! access and a load are all effects by that answer, which closes the second and sixth failures in
-//! section 22.6 with one question. The one exception is the pair of stores above, which is the one
-//! effect this pass moves and is allowed to because moving it does not change what happens.
+//! section 22.6 with one question. The exceptions are the stores and the loads the sections above
+//! give a proof for, which are the effects this pass moves, and each of them only with its proof.
 //!
-//! A store the other side does not match. That is the first failure in section 22.6 and it gets a
-//! reason of its own rather than the general one, because it is a different answer rather than a
-//! stricter one: the transformation exists, it is section 22.2's fourth, and what is missing is the
-//! proof that the location is written whatever happens.
+//! A store the other side does not match, to a location the section above cannot prove anything
+//! about. That is the first failure in section 22.6 and it gets a reason of its own rather than the
+//! general one, because it is a different answer rather than a stricter one: the transformation
+//! exists, it is section 22.2's fourth, and what is missing is the proof.
 //!
 //! An arm that divides. Division is not an effect, because nothing observes it and dead code
 //! elimination is right to delete one, but it traps, and a trap on a path that did not have one is
@@ -233,6 +266,12 @@
 //! nothing is being speculated. A diamond whose arms factor away entirely converts on the same
 //! terms as a diamond with empty arms, and one that factors down to two instructions is judged on
 //! the two rather than on what it started as.
+//!
+//! What the head already worked out does not count either. The arm of `if (v[i] > best[k])` works
+//! out the address of `best[k]` a second time, because lowering a subscript does not know it has
+//! lowered it before, and once that copy is moved into the head it sits in the same block as the
+//! first one and `number` makes the two one value. Counting it would refuse the diamond for work
+//! nobody ends up doing.
 //!
 //! Arms with work left in them: up to [`heuristics::PHIOPT_ARM_INSTRUCTIONS`] instructions each,
 //! and only when the branch probability is within
@@ -279,6 +318,7 @@ use rucc_ir::{
     Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemOrder, Opcode, Type, Value,
 };
 
+use crate::alias::{self, Escapes, Origin};
 use crate::cfg::Cfg;
 use crate::fold::constant;
 use crate::profile::Probability;
@@ -300,6 +340,14 @@ const VALUE_IMPLIED: &str =
 
 /// Recorded once for each pair of stores to one place that became one store below the branch.
 const STORE_REPLACED: &str = "store both arms made to the same place made once below the branch";
+
+/// Recorded once for each store only one arm made, to a local the head had already touched.
+const STORE_GUARDED: &str =
+    "store one path made to a local the branch had already touched made on both paths";
+
+/// Recorded once for each load an arm made of an address the head had already touched.
+const LOAD_SPECULATED: &str =
+    "load one path made of an address the branch had already touched made on both paths";
 
 /// Recorded for a diamond one of whose arms does something that has to happen.
 const ARM_HAS_EFFECTS: &str =
@@ -381,11 +429,13 @@ impl Pass for PhiOpt {
             // The store both arms made comes off the count for the same reason a factored operation
             // does. One of the two was always going to run, and afterwards one copy of it runs
             // whichever way the branch would have gone, so nothing about memory is being speculated.
-            let replaced = plan.iter().flatten().count() + usize::from(store.is_some());
+            // A store only one arm made stays on it, since the other path now makes it too.
+            let paired = store.as_ref().is_some_and(|one| one.insts.len() == 2);
+            let replaced = plan.iter().flatten().count() + usize::from(paired);
             let saved = u32::try_from(replaced).unwrap_or(u32::MAX);
             let work = shape
                 .arms
-                .map(|arm| arm.map_or(0, |block| length(func, block)).saturating_sub(saved));
+                .map(|arm| arm.map_or(0, |block| work(func, head, block)).saturating_sub(saved));
             if work.iter().any(|&count| count > 0) {
                 if work.iter().any(|&count| count > heuristics::PHIOPT_ARM_INSTRUCTIONS) {
                     stats.missed(ARMS_TOO_LONG);
@@ -407,6 +457,13 @@ impl Pass for PhiOpt {
                 stats.missed(NO_FUEL);
                 break;
             }
+            let loads = shape
+                .arms
+                .iter()
+                .flatten()
+                .flat_map(|&arm| func.insts(arm))
+                .filter(|&inst| func[inst].opcode == Opcode::Load)
+                .count();
             convert(func, &shape, &plan, store.as_ref(), &implied);
             // The graph was about the function as it was a moment ago, and the manager clears the
             // cache after the pass returns, which is too late for the next block.
@@ -417,8 +474,13 @@ impl Pass for PhiOpt {
             for _ in implied.iter().flatten() {
                 stats.optimized(VALUE_IMPLIED);
             }
-            if store.is_some() {
-                stats.optimized(STORE_REPLACED);
+            match store.as_ref().map(|one| one.insts.len()) {
+                Some(2) => stats.optimized(STORE_REPLACED),
+                Some(_) => stats.optimized(STORE_GUARDED),
+                None => {}
+            }
+            for _ in 0..loads {
+                stats.optimized(LOAD_SPECULATED);
             }
             stats.optimized(CONVERTED);
         }
@@ -544,10 +606,13 @@ fn refused(
     if simplify_cfg::taken(func, term, &Bindings::new()).is_some() {
         return Some(CONDITION_IS_DECIDED);
     }
-    let moving = store.map(|one| one.insts);
+    let moving: &[Inst] = store.map_or(&[], |one| &one.insts);
     for &arm in shape.arms.iter().flatten() {
         for inst in func.insts(arm) {
-            if func.is_terminator(inst) || moving.is_some_and(|two| two.contains(&inst)) {
+            if func.is_terminator(inst) || moving.contains(&inst) {
+                continue;
+            }
+            if readable(func, shape.head, inst) {
                 continue;
             }
             if func[inst].opcode == Opcode::Store {
@@ -556,8 +621,8 @@ fn refused(
                 // fourth transformation without its proof, and section 22.6 calls it the worst bug
                 // in the document: making it on both paths writes memory the program was not going
                 // to write, which is not a no-op if another thread is writing the same bytes and is
-                // not a no-op if the page is read only. What would license it is knowing the
-                // location is written whatever happens, and nothing here knows that yet.
+                // not a no-op if the page is read only. What licenses it is a local nothing else
+                // can name that the head already touched, and a store that got here had neither.
                 return Some(mismatch(func, shape));
             }
             if func[inst].opcode.has_effects() {
@@ -625,20 +690,24 @@ pub(crate) fn speculatable(func: &Func, inst: Inst) -> bool {
     imm.signed(ty) != -1
 }
 
-/// A store both arms make to the same place, which becomes one store below the branch.
+/// A store one or both arms make, which becomes one store below the branch.
 ///
-/// Section 22.2's fourth transformation, in the half of it that needs no proof. `if (c) *p = a;
-/// else *p = b;` is `*p = c ? a : b`, and the number of stores is one before and one after, to the
-/// same address, of a value the program was going to write there on one path or the other.
+/// Section 22.2's fourth transformation. `if (c) *p = a; else *p = b;` is `*p = c ? a : b`, and
+/// the number of stores is one before and one after, to the same address, of a value the program
+/// was going to write there on one path or the other. With one arm storing, the other side writes
+/// back what it finds, and that is only done where the module comment says it can be.
 struct Stored {
-    /// The store each side wrote, which goes when the one copy below replaces both.
-    insts: [Inst; 2],
-    /// What each side wrote, taken in the order the branch names its targets.
-    values: [Value; 2],
+    /// The store each side wrote, which goes when the one copy below replaces them.
+    insts: Vec<Inst>,
+    /// What each side wrote, taken in the order the branch names its targets, and `None` on a side
+    /// that wrote nothing and so writes back what is already there.
+    values: [Option<Value>; 2],
     /// The address, which is one value both sides named.
     addr: Value,
     /// The store to write once, whose value operand is replaced by the select above it.
     data: InstData,
+    /// What is stored.
+    ty: Type,
 }
 
 /// Which side's value serves for both, for each join parameter the branch condition settles.
@@ -730,13 +799,20 @@ fn mismatch(func: &Func, shape: &Diamond) -> &'static str {
 
 /// The store this diamond can move below the branch, if it has one.
 ///
-/// Both sides have to have a block, which is what makes this the safe half of the transformation.
-/// A triangle has one side that is the join, and a store in the join already runs whichever way the
-/// branch went, so there is nothing here to move and the shape that reaches this with one arm is
-/// the one where a store happens on one path only. That one is refused above.
+/// Two stores to the same place are the half of the transformation that needs no proof. One store
+/// is the half that does, and [`alone`] is where it is asked for.
 fn storing(func: &Func, shape: &Diamond) -> Option<Stored> {
-    let [Some(then), Some(other)] = shape.arms else { return None };
-    let insts = [stored_in(func, then)?, stored_in(func, other)?];
+    let found = shape.arms.map(|arm| arm.and_then(|block| stored_in(func, block)));
+    match found {
+        [Some(then), Some(other)] => both(func, [then, other]),
+        [Some(one), None] => alone(func, shape, one, 0),
+        [None, Some(one)] => alone(func, shape, one, 1),
+        [None, None] => None,
+    }
+}
+
+/// The one store two stores to the same place become.
+fn both(func: &Func, insts: [Inst; 2]) -> Option<Stored> {
     let data = [func[insts[0]], func[insts[1]]];
     // The flags are what the optimizer is licensed to assume about the access, so one store written
     // under the union of two sets of assumptions would be claiming on one path something only the
@@ -766,7 +842,144 @@ fn storing(func: &Func, shape: &Diamond) -> Option<Stored> {
     if !agree(func, then, other) && !selectable(func[then].ty) {
         return None;
     }
-    Some(Stored { insts, values: [then, other], addr, data: data[0] })
+    let ty = func[then].ty;
+    Some(Stored {
+        insts: insts.to_vec(),
+        values: [Some(then), Some(other)],
+        addr,
+        data: data[0],
+        ty,
+    })
+}
+
+/// The store only one side makes, when the module comment's proof for it is there.
+///
+/// The side is the one that stores. The other side stores too once this is done, and what it
+/// stores is what it would have found had it looked.
+fn alone(func: &Func, shape: &Diamond, inst: Inst, side: usize) -> Option<Stored> {
+    let data = func[inst];
+    if data.flags.contains(Flags::VOLATILE) {
+        return None;
+    }
+    let Extra::Mem(mem) = data.extra else { return None };
+    if func[mem].order != MemOrder::NotAtomic {
+        return None;
+    }
+    let &[value, addr] = func[data.args].first_chunk::<2>()?;
+    let ty = func[value].ty;
+    if !selectable(ty) || !touched(func, shape.head, addr, ty) {
+        return None;
+    }
+    let (Origin::Local(slot), _) = alias::origin(func, addr) else { return None };
+    let gives_back = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .any(|one| func[one].opcode == Opcode::StackRestore);
+    if gives_back || Escapes::of(func).escaped(slot) {
+        return None;
+    }
+    let mut values = [None, None];
+    values[side] = Some(value);
+    Some(Stored { insts: vec![inst], values, addr, data, ty })
+}
+
+/// Whether the head reads or writes this address at this type, with nothing after that access that
+/// could have given the memory back.
+///
+/// Walked from the branch upward, and the walk stops at the first thing with an effect that is not
+/// a load or a store, because a call is what frees memory and everything above it proves nothing
+/// about the memory below it.
+fn touched(func: &Func, head: Block, addr: Value, ty: Type) -> bool {
+    let insts: Vec<Inst> = func.insts(head).collect();
+    for &inst in insts.iter().rev() {
+        let data = func[inst];
+        if func.is_terminator(inst) || !data.opcode.has_effects() {
+            continue;
+        }
+        let access = match data.opcode {
+            Opcode::Load => func[data.args].first().copied().zip(data.first_result),
+            Opcode::Store => func[data.args].first_chunk::<2>().map(|&[value, at]| (at, value)),
+            _ => return false,
+        };
+        let Some((at, value)) = access else { return false };
+        if plain(func, data) && func[value].ty == ty && same(func, at, addr, 0) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether this load in an arm is one the head has already shown can be made on both paths.
+fn readable(func: &Func, head: Block, inst: Inst) -> bool {
+    let data = func[inst];
+    if data.opcode != Opcode::Load || !plain(func, data) {
+        return false;
+    }
+    let (Some(&addr), Some(value)) = (func[data.args].first(), data.first_result) else {
+        return false;
+    };
+    touched(func, head, addr, func[value].ty)
+}
+
+/// Whether this access is neither `volatile` nor atomic.
+fn plain(func: &Func, data: InstData) -> bool {
+    let Extra::Mem(mem) = data.extra else { return false };
+    !data.flags.contains(Flags::VOLATILE) && func[mem].order == MemOrder::NotAtomic
+}
+
+/// How deep [`same`] follows two chains of operations before it gives up on them.
+///
+/// A subscript is a sign extension, a shift and an add, and a field of an element of a local
+/// array is one more add, so this is that with room to spare.
+const SAME_DEPTH: usize = 6;
+
+/// Whether two values are worked out the same way from the same things.
+///
+/// The operations are the pure ones an address is made of, compared on everything
+/// `number` compares them on, so that two values this calls the same are two values that pass
+/// would make one.
+fn same(func: &Func, one: Value, two: Value, depth: usize) -> bool {
+    if agree(func, one, two) {
+        return true;
+    }
+    if depth == SAME_DEPTH || func[one].ty != func[two].ty {
+        return false;
+    }
+    let (Def::Result { inst: left, .. }, Def::Result { inst: right, .. }) =
+        (func[one].def, func[two].def)
+    else {
+        return false;
+    };
+    let (left, right) = (func[left], func[right]);
+    if left.opcode != right.opcode || left.flags != right.flags || left.extra != right.extra {
+        return false;
+    }
+    if left.results != 1 || right.results != 1 || !addressing(left.opcode) {
+        return false;
+    }
+    let (left, right) = (&func[left.args], &func[right.args]);
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(&one, &two)| same(func, one, two, depth + 1))
+}
+
+/// Whether this is one of the operations [`same`] follows.
+fn addressing(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::PtrAdd
+            | Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Shl
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::SExt
+            | Opcode::ZExt
+            | Opcode::Trunc
+            | Opcode::Bitcast
+            | Opcode::GlobalAddr
+    )
 }
 
 /// The one store this arm makes, if it makes exactly one and does nothing else that has to happen.
@@ -779,6 +992,12 @@ fn stored_in(func: &Func, arm: Block) -> Option<Inst> {
     let mut store = None;
     for inst in func.insts(arm) {
         if func.is_terminator(inst) || !func[inst].opcode.has_effects() {
+            continue;
+        }
+        // A load ahead of the store is judged on its own by the refusals. One after it is not
+        // allowed, because the one store is written below everything the arms did, and a load that
+        // came after it would then read memory from before it.
+        if func[inst].opcode == Opcode::Load && store.is_none() {
             continue;
         }
         if func[inst].opcode != Opcode::Store || store.is_some() {
@@ -916,6 +1135,33 @@ pub(crate) fn length(func: &Func, block: Block) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+/// How much work an arm does that the head is not already doing, not counting the jump.
+///
+/// An arm longer than this bothers to look through is counted whole, since it is refused as too
+/// long either way and the question is a walk over the head for each of its instructions.
+fn work(func: &Func, head: Block, arm: Block) -> u32 {
+    let whole = length(func, arm);
+    if whole > 4 * heuristics::PHIOPT_ARM_INSTRUCTIONS + 8 {
+        return whole;
+    }
+    let done: Vec<Value> = func
+        .insts(head)
+        .filter(|&inst| func[inst].results == 1 && !func[inst].opcode.has_effects())
+        .filter_map(|inst| func[inst].first_result)
+        .collect();
+    let repeated = |inst: Inst| {
+        let data = func[inst];
+        if data.results != 1 || data.opcode.has_effects() {
+            return false;
+        }
+        let Some(value) = data.first_result else { return false };
+        done.iter().any(|&there| same(func, there, value, 0))
+    };
+    let count =
+        func.insts(arm).filter(|&inst| !func.is_terminator(inst) && !repeated(inst)).count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
 /// Whether the estimate leaves enough doubt about this branch to be worth removing it.
 pub(crate) fn unpredictable(taken: Probability) -> bool {
     let margin = heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT * (Probability::SCALE / 100);
@@ -939,7 +1185,7 @@ fn convert(
     let span = func.span(term);
     func.remove_inst(term);
     let mut dropped: Vec<Inst> = plan.iter().flatten().flat_map(|one| one.insts).collect();
-    dropped.extend(store.iter().flat_map(|one| one.insts));
+    dropped.extend(store.iter().flat_map(|one| one.insts.iter().copied()));
     for &arm in shape.arms.iter().flatten() {
         for inst in func.insts(arm).collect::<Vec<Inst>>() {
             if func.is_terminator(inst) {
@@ -979,7 +1225,17 @@ fn convert(
     // After everything the arms were doing has moved, because the value being stored is often one
     // of the things they were working out, and before the jump because the jump is the terminator.
     if let Some(one) = store {
-        let [then, other] = one.values;
+        // The side that made no store writes back what it finds, and it finds it here, after
+        // everything the arms did and before the one store, which is where the side that stored
+        // had not yet done it.
+        let old = one.values.contains(&None).then(|| {
+            let Extra::Mem(mem) = one.data.extra else { unreachable!("a store says what it is") };
+            let info = build.func()[mem];
+            build.load(one.ty, one.addr, info, one.data.flags)
+        });
+        let [then, other] = one
+            .values
+            .map(|value| value.or(old).expect("a side that stored nothing reads what is there"));
         let same = agree(build.func(), then, other);
         let what = if same { then } else { build.select(shape.cond, then, other) };
         let list = build.func().push_values(&[what, one.addr]);
@@ -998,8 +1254,8 @@ fn convert(
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Float, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict,
-        Signature, Type, Value,
+        Block, Builder, Extra, Flags, Float, Func, InstData, IntPred, MemInfo, MemOrder, Opcode,
+        Restrict, Signature, Type, Value,
     };
 
     use super::PhiOpt;
@@ -1461,7 +1717,7 @@ mod tests {
             .find(|&inst| func[inst].opcode == Opcode::Store)
             .expect("the second arm's store");
         let mem = func.add_mem(MemInfo { align: 1, ..plain() });
-        func[store].extra = rucc_ir::Extra::Mem(mem);
+        func[store].extra = Extra::Mem(mem);
 
         let stats = phiopt(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::STORE_REPLACED), 0);
@@ -1522,6 +1778,129 @@ mod tests {
         let stats = phiopt(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
         assert_eq!(stats.count(Kind::Missed, super::STORE_ON_ONE_PATH), 1);
+        assert_eq!(goes_to(&func, 0), vec![1, 2]);
+    }
+
+    /// `if (x < a[2]) a[2] = x;` on a local `int a[8]`, which is the one armed store section 22.6
+    /// needs a proof for.
+    ///
+    /// Block 0 is the head, which makes the local and branches. Block 1 is the arm, which works the
+    /// slot's address out a second time, the way a subscript is lowered, and stores to it. Block 2
+    /// is the join. `escape` hands the local's address to memory first, and `read` says whether the
+    /// head reads the slot or compares against zero instead.
+    fn one_arm_stores(escape: bool, read: bool) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let written = func.append_param(head, Type::int(32));
+        let arm = func.create_block();
+        let join = func.create_block();
+
+        let mut build = Builder::new(&mut func, head);
+        let mem = build.func().add_mem(MemInfo { size: 32, align: 16, ..plain() });
+        let alloca = InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
+        let local = build.value(alloca, Type::PTR);
+        if escape {
+            let somewhere = build.iconst(Type::int(64), 16);
+            let somewhere = build.unary(Opcode::IntToPtr, somewhere, Type::PTR);
+            build.store(local, somewhere, MemInfo { size: 8, align: 8, ..plain() }, Flags::NONE);
+        }
+        let eight = build.iconst(Type::int(64), 8);
+        let slot = build.binary(Opcode::PtrAdd, local, eight, Flags::NONE);
+        let against = if read {
+            build.load(Type::int(32), slot, plain(), Flags::NONE)
+        } else {
+            build.iconst(Type::int(32), 0)
+        };
+        let test = build.icmp(IntPred::Slt, written, against);
+        build.br_if(test, arm, &[], join, &[]);
+        let mut build = Builder::new(&mut func, arm);
+        let eight = build.iconst(Type::int(64), 8);
+        let slot = build.binary(Opcode::PtrAdd, local, eight, Flags::NONE);
+        build.store(written, slot, plain(), Flags::NONE);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[]);
+        func
+    }
+
+    /// The fold GCC makes too, and the second address the arm works out costs nothing, since it is
+    /// the head's address worked out again and would otherwise have put the arm over the limit.
+    #[test]
+    fn a_store_one_arm_makes_to_a_local_the_head_read_is_made_on_both_paths() {
+        let mut func = one_arm_stores(false, true);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::STORE_GUARDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(blocks(&func), vec![0, 2]);
+        let ops = opcodes(&func, 0);
+        assert_eq!(ops.iter().filter(|&&op| op == Opcode::Load).count(), 2);
+        assert_eq!(ops[ops.len() - 3..], [Opcode::Select, Opcode::Store, Opcode::Jump]);
+    }
+
+    /// A local whose address has left the function is one another thread could be writing.
+    #[test]
+    fn a_store_one_arm_makes_to_a_local_that_escaped_keeps_its_branch() {
+        let mut func = one_arm_stores(true, true);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::STORE_ON_ONE_PATH), 1);
+        assert_eq!(goes_to(&func, 0), vec![1, 2]);
+    }
+
+    /// Without the head's read nothing says the other path ever reached the slot, and `a[k]` with a
+    /// `k` the branch was guarding is the case where it did not.
+    #[test]
+    fn a_store_one_arm_makes_to_a_slot_the_head_never_touched_keeps_its_branch() {
+        let mut func = one_arm_stores(false, false);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::STORE_ON_ONE_PATH), 1);
+        assert_eq!(goes_to(&func, 0), vec![1, 2]);
+    }
+
+    /// `x = *p; if (x < 0) x = *p;`, with the arm's load told `flags`.
+    fn arm_reads(flags: Flags) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let address = func.append_param(head, Type::PTR);
+        let arm = func.create_block();
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+
+        let mut build = Builder::new(&mut func, head);
+        let first = build.load(Type::int(32), address, plain(), Flags::NONE);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Slt, first, zero);
+        build.br_if(test, arm, &[], join, &[zero]);
+        let mut build = Builder::new(&mut func, arm);
+        let again = build.load(Type::int(32), address, plain(), flags);
+        build.jump(join, &[again]);
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        func
+    }
+
+    #[test]
+    fn a_load_in_an_arm_of_an_address_the_head_read_is_made_on_both_paths() {
+        let mut func = arm_reads(Flags::NONE);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::LOAD_SPECULATED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(blocks(&func), vec![0, 2]);
+    }
+
+    /// How many reads there are is what `volatile` makes observable, so the head's read proves
+    /// nothing about a second one.
+    #[test]
+    fn a_volatile_load_in_an_arm_keeps_its_branch() {
+        let mut func = arm_reads(Flags::VOLATILE);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::ARM_HAS_EFFECTS), 1);
         assert_eq!(goes_to(&func, 0), vec![1, 2]);
     }
 
