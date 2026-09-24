@@ -108,7 +108,8 @@ fn plain(form: Form) -> Timing {
         FCmpSet => (3, Unit::Float),
         Jump | Jcc | JumpAway => (1, Unit::Branch),
         JumpReg | Call | Ret => (2, Unit::Branch),
-        RetVal | RetVal2 | RetValFp | RetVal2Fp | ArgVal | ArgValFp | BrCond => (0, Unit::Free),
+        RetVal | RetVal2 | RetValFp | RetVal2Fp | RetVal3Fp | RetVal4Fp | ArgVal | ArgValFp
+        | BrCond => (0, Unit::Free),
         Barrier | Trap | Nop => (1, Unit::Fixed),
     };
     Timing { latency, unit }
