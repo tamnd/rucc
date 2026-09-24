@@ -79,9 +79,9 @@
 //! rewrite that turns one written in the source into it, because the walk has already gone past
 //! the place it was built and would not come back to it.
 //!
-//! ## The four written by hand
+//! ## The five written by hand
 //!
-//! All four are about comparisons, and all four are here rather than in `rules/` for the same
+//! The first four are about comparisons, and all four are here rather than in `rules/` for the same
 //! reason: what each one is, is one statement quantified over the predicates, and the rule language
 //! has no way to say that, so writing any of them as rules would mean writing out every predicate,
 //! every operand order and every width by hand and keeping the enumeration in step with the two
@@ -172,6 +172,18 @@
 //! at the levels that keep the `||` as two branches, where the second test is only reached when the
 //! pair is ordered.
 //!
+//! ### A sign extension of a sum that does not wrap
+//!
+//! The fifth is about an extension, and it is here because the rule language cannot see a flag.
+//! `p[i + 1]` with an `int` index is `sext.i64 (add.nsw i 1)`, the addition done at thirty two bits
+//! and the answer extended. The `nsw` is the promise that the narrow sum did not wrap, and a sum
+//! that did not wrap is the same number at any width, so the extension of it is the extension of
+//! `i` with the constant added afterwards at sixty four. Written that way the constant is one the
+//! back end can put in the address as a displacement, and the one extension of `i` is shared by
+//! `p[i + 1]` and `p[i + 2]` and anything else that reads it, which is what gcc writes. A
+//! difference with a constant comes along as the sum with the constant negated. The wide addition
+//! keeps `nsw`, since what it adds up is the narrow sum and that fits. tamnd/rucc#1839.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -233,6 +245,13 @@ const BOUNDED: &str = "floating point comparison settled by a constant or by one
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_BOUNDED: &str =
     "floating point comparison against a bound left alone, the pass ran out of fuel";
+
+/// Recorded once for each extension of a sum rewritten as a sum of the extension.
+const WIDENED: &str =
+    "sign extension of a sum that does not wrap done before the constant is added";
+
+/// Recorded for one of those that would have been rewritten if there had been fuel for it.
+const NO_FUEL_WIDENED: &str = "extension of a sum left alone, the pass ran out of fuel";
 
 /// Recorded for a rule that would have fired if there had been fuel for it.
 const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
@@ -347,7 +366,7 @@ impl Pass for Simplify {
     }
 
     fn describe(&self) -> &'static str {
-        "the identities, the strength reductions, the canonicalisations, and the four comparison \
+        "the identities, the strength reductions, the canonicalisations, the extension of a sum, and the four comparison \
          rewrites written by hand"
     }
 
@@ -436,6 +455,21 @@ impl Pass for Simplify {
                     }
                     fold_composite(func, inst, settled);
                     stats.optimized(BOUNDED);
+                    continue;
+                }
+                if let Some((from, number)) = widened_sum(func, inst) {
+                    if !fuel.take() {
+                        stats.missed(NO_FUEL_WIDENED);
+                        continue;
+                    }
+                    let result = func[inst].first_result.expect("an extension has a result");
+                    let bits = func[result].ty.bits();
+                    let args = vec![Operand::Value(from)];
+                    let extended = Nested { opcode: Opcode::SExt, pred: None, bits, args };
+                    let extended = Operand::Built(Box::new(extended));
+                    let constant = Operand::Constant { number, bits };
+                    become_instruction(func, inst, Opcode::Add, None, extended, constant);
+                    stats.optimized(WIDENED);
                     continue;
                 }
                 let Some((rewrite, pattern)) = identity(func, inst) else { continue };
@@ -846,12 +880,20 @@ fn become_instruction(
 ///   so every `k` below the width less one. At the width less one the constant read as signed is
 ///   the most negative number and nothing is kept. `nuw` is the same on both.
 ///
+/// - `sext (x + k)` written as `sext x + k`, when the narrow sum has `nsw`. The wide sum is that
+///   same number, which fits the narrow width and so fits the wide one, so it keeps `nsw` and
+///   nothing else. See [`widened_sum`].
+///
 /// It matters because of what reads the flags afterwards. `row * 128` that loses its `nsw` on the
 /// way to a shift is a subscript scalar evolution can no longer widen to the address width, and
 /// every check on `grid[row * 128 + col]` stays inside the loop, which was `a-strided-column-sum`.
 /// See #1748.
 fn carried(func: &Func, inst: Inst, now: Opcode, lhs: &Operand, rhs: &Operand) -> Flags {
     let data = func[inst];
+    if data.opcode == Opcode::SExt {
+        let widened = now == Opcode::Add && widened_sum(func, inst).is_some();
+        return if widened { Flags::NSW } else { Flags::NONE };
+    }
     let args = &func[data.args];
     let (Opcode::Mul, Some(&first), Some(&second)) = (data.opcode, args.first(), args.get(1))
     else {
@@ -881,6 +923,36 @@ fn carried(func: &Func, inst: Inst, now: Opcode, lhs: &Operand, rhs: &Operand) -
             both
         }
         _ => Flags::NONE,
+    }
+}
+
+/// Whether this instruction is a sign extension of a sum with a constant that does not wrap, and
+/// if it is, the other operand of the sum and the constant, negated for a difference.
+///
+/// The constant is read with its own sign at the narrow width, which is the number the sum added,
+/// and it is that same number at the wide one. A constant on the left of a difference is not
+/// taken, since `k - x` is not a sum of `x`.
+fn widened_sum(func: &Func, inst: Inst) -> Option<(Value, i128)> {
+    let data = func[inst];
+    if data.opcode != Opcode::SExt {
+        return None;
+    }
+    let [sum] = func[data.args] else { return None };
+    let wide = func[data.first_result?].ty;
+    if !wide.is_scalar() || !wide.is_int() {
+        return None;
+    }
+    let Def::Result { inst: added, .. } = func[sum].def else { return None };
+    let added = func[added];
+    if !added.flags.contains(Flags::NSW) {
+        return None;
+    }
+    let [lhs, rhs] = func[added.args] else { return None };
+    match (added.opcode, constant(func, lhs), constant(func, rhs)) {
+        (Opcode::Add, None, Some(k)) => Some((lhs, k)),
+        (Opcode::Add, Some(k), None) => Some((rhs, k)),
+        (Opcode::Sub, None, Some(k)) => Some((lhs, k.checked_neg()?)),
+        _ => None,
     }
 }
 
@@ -3647,5 +3719,53 @@ mod tests {
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL_COMPOSITE), 1);
         assert_eq!(came_from(&func, first).0, Opcode::IConst);
         assert_eq!(came_from(&func, second).0, Opcode::And);
+    }
+
+    /// `sext (x op k)` over a parameter at thirty two bits, extended to sixty four.
+    fn extended_sum(opcode: Opcode, flags: Flags, k: i128) -> (Func, Block, Value) {
+        let (_, mut func, block) = narrow_to_wide(Type::int(32), Type::int(64));
+        let x = func.append_param(block, Type::int(32));
+        let mut build = Builder::new(&mut func, block);
+        let k = build.iconst(Type::int(32), k);
+        let sum = build.binary(opcode, x, k, flags);
+        let wide = build.unary(Opcode::SExt, sum, Type::int(64));
+        build.ret(&[wide]);
+        (func, block, x)
+    }
+
+    /// `p[i + 1]` with an `int` index, which has to become a wide sum for the constant to reach
+    /// the address.
+    #[test]
+    fn an_extension_of_a_sum_that_does_not_wrap_is_a_sum_of_the_extension() {
+        let (mut func, block, x) = extended_sum(Opcode::Add, Flags::NSW, 3);
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::Add);
+        let rucc_ir::Def::Result { inst, .. } = func[result].def else { panic!("not a result") };
+        assert_eq!(func[inst].flags, Flags::NSW, "the wide sum does not wrap either");
+        let [extended, k] = operands(&func, result)[..] else { panic!("not two operands") };
+        assert_eq!(came_from(&func, extended).0, Opcode::SExt);
+        assert_eq!(operands(&func, extended), vec![x]);
+        assert_eq!(func[extended].ty, Type::int(64));
+        assert_eq!(number(&func, k), 3);
+        assert_eq!(func[k].ty, Type::int(64));
+    }
+
+    #[test]
+    fn an_extension_of_a_difference_adds_the_constant_negated() {
+        let (mut func, block, _) = extended_sum(Opcode::Sub, Flags::NSW, 1);
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::Add);
+        assert_eq!(number(&func, operands(&func, result)[1]), -1);
+    }
+
+    /// A sum that may wrap at the narrow width is a different number at the wide one, so the
+    /// extension has to stay where it is.
+    #[test]
+    fn an_extension_of_a_sum_that_may_wrap_is_left_alone() {
+        let (mut func, block, _) = extended_sum(Opcode::Add, Flags::NONE, 3);
+        simplify(&mut func);
+        assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::SExt);
     }
 }
