@@ -120,6 +120,9 @@ pub struct Text {
     /// What an unwinder is told about the functions, which is empty for a format that has no such
     /// section or a build that asked for none.
     pub unwind: Unwind,
+    /// The jump tables that are read rather than run, and so go in a read only section of data
+    /// rather than in these bytes. Empty on a format that keeps its tables after the function.
+    pub tables: Vec<Table>,
 }
 
 impl Default for Text {
@@ -131,6 +134,7 @@ impl Default for Text {
             labels: Vec::new(),
             align: FUNC_ALIGN,
             unwind: Unwind::default(),
+            tables: Vec::new(),
         }
     }
 }
@@ -239,6 +243,27 @@ pub struct Marker {
     pub name: String,
     /// Where it is, as an offset into the same bytes [`Extent::start`] is one into.
     pub at: usize,
+}
+
+/// One jump table of one function, kept out of the instructions.
+///
+/// A table is data the function reads, and gcc and clang put it in `.rodata` rather than in the
+/// code. Keeping it there keeps data out of the lines the instruction fetcher reads and keeps the
+/// executable sections to what is executed, which is also what a size counted by section is
+/// measuring. The cost is that the two ends of every cell are now in different sections, so each
+/// cell is a relocation the linker fills in rather than a number the assembler writes, which is
+/// what gas does with the same `.long .L3-.L4` when the `.L4` is in `.rodata`.
+///
+/// Each cell is still the distance from the front of the table to a block, so the code that reads
+/// one is the same code wherever the table is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    /// The name the instruction that reads it gives it, which is local to this file.
+    pub name: String,
+    /// Which of [`Text::funcs`] it belongs to.
+    pub func: usize,
+    /// Where each cell's block is, counted from [`Extent::start`] of that function.
+    pub cells: Vec<usize>,
 }
 
 /// Where one function ended up.

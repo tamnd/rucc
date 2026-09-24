@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - AArch64 compiles `asm` statements with operands. The template is kept as text and each operand is spelled into it once it has a register, as `w` or `x` at the width of its type or the one `%w0` or `%x0` asks for. A constant under `i` or `n` is written bare, the way gcc writes it there, and an operand under `m` is `[xN]`. Outputs tied to inputs by `+` or by a number, `&`, a clobber list naming general purpose or vector registers, and a local register variable such as `register long x asm ("x8")` all work. A constraint letter that means something else on AArch64 than on x86, such as `w`, `Q` or `S`, is refused rather than read the x86 way. A test program with eleven kinds of statement prints what gcc's build prints under qemu at O0, O1 and O2.
 
+### Changed
+
+- A jump table on x86-64 ELF goes in `.rodata`, or `.rodata.` and the function's name under `-fdata-sections`, the way gcc puts it, rather than after the function's last instruction. Each cell is still the distance from the table to a block, now written as a `R_X86_64_PC32` against the function's section for the linker to fill in, so the code that reads a table has not changed. The table's bytes are no longer in the lines the instruction fetcher reads, and they no longer count as code when an executable section is measured, which is how the corpus compares sizes with gcc (#1759).
+
 ## 0.11.6
 
 ### Added

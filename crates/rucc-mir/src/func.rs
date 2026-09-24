@@ -360,8 +360,9 @@ pub struct Func {
     /// one, and read by the debugging information once the encoder has given every instruction an
     /// address. Empty until the first of those.
     pub kept: Vec<Kept>,
-    /// The jump tables, each one written after the function's last instruction and read by the
-    /// address [`Mem::table`] names. See [`Table`].
+    /// The jump tables, each one read by the address [`Mem::table`] names and written where the
+    /// assembler puts a table on the target, which is `.rodata` on x86-64 ELF and after the
+    /// function's last instruction everywhere else. See [`Table`].
     pub tables: Vec<Table>,
     /// The blocks that start on a boundary of their own, which are the heads of loops, in the
     /// order the blocks are laid out.

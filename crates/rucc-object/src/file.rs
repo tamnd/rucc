@@ -440,6 +440,10 @@ pub fn write(
         placed.push((section.id(), offset));
     }
 
+    // The jump tables, which the code reaches by name and which reach the code in turn. Placed
+    // before any relocation of the text is added, since the instruction that reads one names it.
+    let tables = tables(&mut obj, text, &split, &mut named, sections, flavour)?;
+
     // The distances between two labels, written into the images just placed. Both labels were
     // added above with the section they are in and where in it, so the distance is the one value
     // less the other, and it is a number only when the section is the same one.
@@ -499,7 +503,7 @@ pub fn write(
     let wanted: Vec<&String> =
         relocs().map(|reloc| &reloc.symbol).chain(data.weak.iter()).collect();
     for name in wanted {
-        if symbols.contains_key(name) {
+        if symbols.contains_key(name) || tables.contains_key(name) {
             continue;
         }
         let id = obj.add_symbol(Symbol {
@@ -546,6 +550,19 @@ pub fn write(
         } else {
             (whole, reloc.at as u64)
         };
+        // The address of a jump table, which is against the section the table is in and not a
+        // name of its own, the way gas writes a reference to a `.L` label: such a name is not
+        // kept in the symbol table, so what the linker is told is the section and how far in.
+        if let Some(&(table, offset)) = tables.get(&reloc.symbol) {
+            let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
+                why: format!("no relocation is {:?}", reloc.kind),
+            })?;
+            let symbol = obj.section_symbol(table);
+            let addend = reloc.addend + offset as i64;
+            obj.add_relocation(section, Relocation { offset: at, symbol, addend, flags })
+                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            continue;
+        }
         add(&mut obj, section, at, reloc, &symbols, flavour)?;
     }
 
@@ -889,6 +906,62 @@ fn put(
         obj.append_section_data(section, &object.bytes, object.align)
     };
     (SymbolSection::Section(section), offset)
+}
+
+/// Every jump table of the text, in `.rodata`, each cell a distance the linker works out, giving
+/// back the section each one went in and where in it, by the name the code gives it.
+///
+/// The section is `.rodata` for all of them, or `.rodata.` and the function's name under
+/// `-fdata-sections`, which is where gcc puts a table in each case. Not split under
+/// `-ffunction-sections` alone, which is gcc's answer too.
+///
+/// A cell is the distance from the front of the table to a block, and the block is in the text
+/// while the table is not, so it is `R_X86_64_PC32` against the function's section with the block's
+/// offset and the cell's own place in the table as the addend. Against the section rather than the
+/// function's name for the reason the unwind records are: a global name may be answered by another
+/// object at load time, and a linker refuses a distance to one.
+fn tables(
+    obj: &mut Writer<'_>,
+    text: &Text,
+    split: &[(object::write::SectionId, u64)],
+    named: &mut HashMap<String, object::write::SectionId>,
+    sections: Sections,
+    flavour: Flavour,
+) -> Result<HashMap<String, (object::write::SectionId, u64)>, Error> {
+    let mut placed = HashMap::new();
+    if text.tables.is_empty() {
+        return Ok(placed);
+    }
+    if flavour != Flavour::Elf {
+        let why = "a jump table outside the code is written on ELF only".to_owned();
+        return Err(Error::Refused { why });
+    }
+    let flags = flavour.reloc(Reference::Away, 0).ok_or_else(|| Error::Refused {
+        why: "no relocation is a distance from where it is written".to_owned(),
+    })?;
+    for table in &text.tables {
+        let func = text.funcs.get(table.func).ok_or_else(|| Error::Refused {
+            why: format!("'{}' belongs to function {}, which is not here", table.name, table.func),
+        })?;
+        let section = if sections.data {
+            let name = format!(".rodata.{}", func.name);
+            made(obj, named, &name, SectionKind::ReadOnlyData)
+        } else {
+            obj.section_id(StandardSection::ReadOnlyData)
+        };
+        let offset = obj.append_section_data(section, &vec![0; 4 * table.cells.len()], 4);
+        placed.insert(table.name.clone(), (section, offset));
+        let (code, at) = split[table.func];
+        let symbol = obj.section_symbol(code);
+        for (index, &cell) in table.cells.iter().enumerate() {
+            let place = 4 * index as u64;
+            let addend = at as i64 + cell as i64 + place as i64;
+            let record = Relocation { offset: offset + place, symbol, addend, flags };
+            obj.add_relocation(section, record)
+                .map_err(|why| Error::Refused { why: why.to_string() })?;
+        }
+    }
+    Ok(placed)
 }
 
 /// Whether the section this goes in says how big the variable is and holds none of its bytes.
@@ -1570,6 +1643,98 @@ mod tests {
             assert_eq!(offset, 1, "{name}");
             assert_eq!(section.relocations().count(), 1, "{name}");
         }
+    }
+
+    /// The second of `two` with a table of two cells, to its first byte and to its return.
+    fn switching() -> Text {
+        let mut text = two();
+        let name = ".Lg_j0".to_owned();
+        text.tables.push(crate::Table { name, func: 1, cells: vec![0, 5] });
+        text
+    }
+
+    /// Where each relocation of that section is, what it is against and what it adds.
+    fn cells(file: &object::File<'_>, section: &str) -> Vec<(u64, String, i64)> {
+        let section = file.section_by_name(section).expect("the table's section");
+        section
+            .relocations()
+            .map(|(offset, reloc)| {
+                assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_X86_64_PC32 });
+                let object::RelocationTarget::Symbol(index) = reloc.target() else {
+                    panic!("a cell against something that is not a symbol");
+                };
+                let symbol = file.symbol_by_index(index).expect("a symbol");
+                assert_eq!(symbol.kind(), SymbolKind::Section);
+                let at = symbol.section_index().expect("a section symbol is in one");
+                let name = file.section_by_index(at).expect("a section").name().expect("a name");
+                (offset, name.to_owned(), reloc.addend())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_jump_table_is_read_only_data_whose_cells_the_linker_fills_in() {
+        // And the code reaches it by the name the table was given, which here is the second of the
+        // two references in `two`.
+        let mut text = switching();
+        text.relocs[1].symbol = ".Lg_j0".to_owned();
+        text.relocs[1].kind = Reference::Data;
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Output::default(), &Info::default())
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let rodata = file.section_by_name(".rodata").expect("the table's section");
+        assert_eq!(rodata.data().expect("the bytes"), &[0; 8]);
+        assert_eq!(rodata.kind(), SectionKind::ReadOnlyData);
+        assert!(file.symbols().all(|s| s.name() != Ok(".Lg_j0")), "a table leaves no name behind");
+        let (at, reloc) = file
+            .section_by_name(".text")
+            .expect("the code")
+            .relocations()
+            .find(|(at, _)| *at == 17)
+            .expect("the reference to the table");
+        assert_eq!((at, reloc.addend()), (17, -4));
+        let object::RelocationTarget::Symbol(index) = reloc.target() else {
+            panic!("a reference against something that is not a symbol");
+        };
+        let symbol = file.symbol_by_index(index).expect("a symbol");
+        assert_eq!(symbol.section_index(), Some(rodata.index()));
+        assert_eq!(symbol.kind(), SymbolKind::Section);
+        // `g` starts sixteen bytes into `.text`, and each cell is its block's place in the text
+        // and its own place in the table, so that the linker's answer is block less table.
+        assert_eq!(
+            cells(&file, ".rodata"),
+            [(0, ".text".to_owned(), 16), (4, ".text".to_owned(), 25)]
+        );
+    }
+
+    #[test]
+    fn a_jump_table_under_data_sections_is_in_a_section_named_after_its_function() {
+        let sections =
+            Output { sections: Sections { functions: true, data: true }, ..Output::default() };
+        let bytes =
+            write(&switching(), &Data::default(), &[], &target(), sections, &Info::default())
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        // Against the function's own section now, where it starts at nothing.
+        assert_eq!(
+            cells(&file, ".rodata.g"),
+            [(0, ".text.g".to_owned(), 0), (4, ".text.g".to_owned(), 9)]
+        );
+    }
+
+    #[test]
+    fn a_jump_table_outside_the_code_is_refused_on_windows() {
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Windows, Env::Gnu));
+        let written = write(
+            &switching(),
+            &Data::default(),
+            &[],
+            &target,
+            Output::default(),
+            &Info::default(),
+        );
+        assert!(matches!(written, Err(Error::Refused { .. })), "{written:?}");
     }
 
     /// One variable of four bytes, in whichever section its own answer puts it.
