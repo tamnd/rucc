@@ -50,9 +50,8 @@
 //! return type written with a file-scope typedef name then has its type built over that name's
 //! `DW_TAG_typedef`: `size_type n` points at it, `const size_type m` at a const over it and
 //! `size_type *p` at a pointer to it, the way gcc writes them, and a debugger printing any of
-//! them says `size_type`. A record member written with one still points at the type it has,
-//! because the members are in the type table and the table does not keep the name. That is open
-//! on tamnd/rucc#1817.
+//! them says `size_type`. A record member is the same, from a list the type table keeps beside
+//! the records rather than from the tree, since a member is not a declaration there.
 
 use std::collections::{HashMap, HashSet};
 
@@ -209,6 +208,11 @@ pub(crate) fn collect(
         written: types.aliases().iter().map(|alias| (alias.name, alias.of)).collect(),
         aliases: HashMap::new(),
         through: HashMap::new(),
+        members: types
+            .member_spellings()
+            .iter()
+            .map(|one| ((one.record, one.member), (one.name, one.of)))
+            .collect(),
     };
     // The first time a declaration was written is the one that counts, which is the order the
     // checker saw them in.
@@ -442,6 +446,9 @@ struct Walk<'a> {
     /// is two entries: `size_type *` and `unsigned long *` are the same type and a debugger prints
     /// them differently.
     through: HashMap<(Type, Symbol, TypeId), Option<usize>>,
+    /// The typedef name each record member named its type with, for the ones that did, keyed by
+    /// the record and the member's name.
+    members: HashMap<(RecordId, Symbol), (Symbol, TypeId)>,
 }
 
 impl Walk<'_> {
@@ -785,7 +792,13 @@ impl Walk<'_> {
             // A member whose type has no entry is left out and the rest of the record stands. See
             // the module documentation: the alternative loses every function that mentions the
             // record, which in a real program is a far larger hole than one field.
-            let Some(ty) = self.told(field.ty) else { continue };
+            let spelled =
+                field.name.and_then(|member| self.members.get(&(record, member)).copied());
+            let ty = match spelled {
+                Some((name, of)) => self.over(field.ty, name, of),
+                None => self.told(field.ty),
+            };
+            let Some(ty) = ty else { continue };
             let bits = match field.bits {
                 Some(width) => match u64::try_from(field.bit_offset()) {
                     Ok(start) => Some(Bits { at: start, width: u64::from(width) }),

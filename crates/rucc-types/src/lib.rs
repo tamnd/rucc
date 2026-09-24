@@ -114,7 +114,7 @@ pub use crate::record::{
     Extent, Field, FieldDecl, RecordError, RecordLayout, RecordOptions, VariableLayout,
     layout_record,
 };
-pub use crate::types::{Alias, EnumInfo, Enumerator, RecordInfo, TypeId, Types};
+pub use crate::types::{Alias, EnumInfo, Enumerator, RecordInfo, Spelled, TypeId, Types};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";
