@@ -140,3 +140,15 @@ fn an_operand_wanted_in_memory_and_in_a_named_register_is_refused() {
     assert!(!ok, "an operand in memory and in a register at once was accepted");
     assert!(said.contains("in memory and in a named register"), "{said}");
 }
+
+#[test]
+fn a_register_named_at_file_scope_is_refused_by_name() {
+    // The other extension under the same syntax, which takes the register away from every function
+    // in the file. Read as an ordinary global it would compile and then disagree with whatever
+    // assembly expected the value in the register, so it is refused and the message says what it
+    // is rather than that no register was named.
+    let source = "register long gr asm (\"r12\");\nlong f(void) { return gr; }\n";
+    let (ok, _, said) = run("global", source);
+    assert!(!ok, "a global register variable was compiled");
+    assert!(said.contains("'gr' is a global register variable"), "{said}");
+}

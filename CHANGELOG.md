@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - An `asm` template kept as text now takes operands in registers. `%0` of an `"=r"` output or an `"r"` input is spelled after allocation as the register the operand was given, at the width of its type or the one `%b0`, `%w0`, `%k0`, `%q0` or `%h0` asks for, so `mov %1,%0; jmp 1f; 1:` builds where it was refused. Tied operands, `&` and pinned letters work the way they do for gcc, and a constant under a constraint that only allows a register is loaded into one. The same programs give gcc's answers at every level (#1781).
 - A unit with an `asm` template kept as text now builds with `-g` when the template reaches nothing outside itself. The template is filled in and read by the assembler on its own, and its bytes go into the object with the rest, so the line table and frame rules are written as for any other function. A template that defines a label, switches section or aligns what follows still sends the unit through its listing, which still refuses `-g` (#1781).
+- A global register variable such as `register long gr asm ("r12");` at file scope is now refused as what it is, where the message used to say no register was named (#1673).
 
 ## 0.11.4
 

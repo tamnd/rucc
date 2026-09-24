@@ -273,7 +273,7 @@ impl Checker<'_> {
             );
             return None;
         }
-        let (linkage, duration) = self.placement(&specs, DeclKind::Function, name, span);
+        let (linkage, duration) = self.placement(&specs, DeclKind::Function, name, false, span);
         let alignment = match specs.align {
             Some(align) => self.alignment(align, ty, DeclKind::Function, name, span),
             None => None,
@@ -623,7 +623,8 @@ impl Checker<'_> {
             return self.typedef(name, ty, &specs, item, span);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
-        let (linkage, duration) = self.placement(&specs, kind, name, span);
+        let named = item.asm_label.is_some();
+        let (linkage, duration) = self.placement(&specs, kind, name, named, span);
         let state = self.definition_state(&specs, kind, item.init.is_some());
         self.check_initializer_placement(&specs, item.init.is_some(), name, span);
         self.check_specifiers(&specs, kind, name, span);
@@ -879,6 +880,7 @@ impl Checker<'_> {
         specs: &ast::DeclSpecs,
         kind: DeclKind,
         name: Symbol,
+        named: bool,
         span: Span,
     ) -> (Linkage, StorageDuration) {
         let file_scope = self.scopes.at_file_scope();
@@ -921,9 +923,25 @@ impl Checker<'_> {
                         .with_code("E0594"),
                     );
                 }
-                // gcc words this after the GNU extension that ties a register variable to a
-                // named register, since that is the only thing `register` at file scope could
-                // mean.
+                // The GNU extension that ties a variable to a register for the whole program,
+                // `register char *stack_ptr asm ("sp")`. It is not the local form with a wider
+                // scope: the register is taken away from every function in the file, which is a
+                // promise the allocator would have to keep everywhere, so it is refused by name
+                // rather than read as an ordinary global that some other code would then write.
+                Some(StorageClass::Register) if named => {
+                    self.report(
+                        Diagnostic::error(
+                            format!(
+                                "'{spelled}' is a global register variable, which this compiler \
+                                 does not support"
+                            ),
+                            span,
+                        )
+                        .with_code("E0714"),
+                    );
+                }
+                // gcc words this after the same extension, since a register it names is the only
+                // thing `register` at file scope could mean.
                 Some(StorageClass::Register) => {
                     self.report(
                         Diagnostic::error(
@@ -3249,6 +3267,24 @@ mod tests {
                 "file-scope declaration of 'x' specifies 'auto'",
                 "register name not specified for 'y'",
             ]
+        );
+    }
+
+    #[test]
+    fn a_register_named_at_file_scope_is_refused_as_the_extension_it_is() {
+        // `register char *stack_ptr asm ("sp")`, which takes the register away from every function
+        // in the file and is not the local form with a wider scope.
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Register);
+        let global = f.labelled(specs, "g", &[], "r12");
+
+        let mut c = f.checker();
+        c.check_decl(global);
+
+        assert_eq!(
+            messages(&c),
+            ["'g' is a global register variable, which this compiler does not support"]
         );
     }
 
