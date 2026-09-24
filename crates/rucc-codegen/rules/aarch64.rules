@@ -892,6 +892,123 @@
       (spec (= v (result))))
 
 
+;; Comparing two floats, which is an `fcmp` and the `cset` behind it as one term, for the reason the
+;; integer comparisons are. The machine has a condition for each of the IR's fourteen predicates but
+;; two, and those two take a second instruction, so no rule needs its operands the other way round.
+
+(rule (lower (fcmp_ogt.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_gt_f32 x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ge_f32 x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_lt_f32 x y)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_le_f32 x y)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_one.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_one_f32 x y)
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ord_f32 x y)
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_uno_f32 x y)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ueq_f32 x y)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ult_f32 x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ule_f32 x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ugt_f32 x y)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_uge_f32 x y)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_eq_f32 x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f32.i1 (value.f32 x) (value.f32 y)))
+      (a64.fcmp_set_ne_f32 x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ogt.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_gt_f64 x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ge_f64 x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_lt_f64 x y)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_le_f64 x y)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_one.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_one_f64 x y)
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ord_f64 x y)
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_uno_f64 x y)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ueq_f64 x y)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ult_f64 x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ule_f64 x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ugt_f64 x y)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_uge_f64 x y)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_eq_f64 x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f64.i1 (value.f64 x) (value.f64 y)))
+      (a64.fcmp_set_ne_f64 x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
+
+
 ;; Reading a float out of memory and writing one back, with the same two addressing modes.
 
 (rule (lower (load.f32 (value.i64 a)))

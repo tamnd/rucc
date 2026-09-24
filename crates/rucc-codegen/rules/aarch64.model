@@ -356,6 +356,37 @@
 (semantics (a64.fdiv_f32 l r) (fp.div l r))
 (semantics (a64.fdiv_f64 l r) (fp.div l r))
 
+;; A float compare and the `cset` behind it. The head is named after the condition C's operator
+;; asks for where the machine has one, and after the IR's predicate for the rest.
+(semantics (a64.fcmp_set_gt_f32 l r) (ite (fp.gt l r) 1 0))
+(semantics (a64.fcmp_set_gt_f64 l r) (ite (fp.gt l r) 1 0))
+(semantics (a64.fcmp_set_ge_f32 l r) (ite (fp.geq l r) 1 0))
+(semantics (a64.fcmp_set_ge_f64 l r) (ite (fp.geq l r) 1 0))
+(semantics (a64.fcmp_set_lt_f32 l r) (ite (fp.lt l r) 1 0))
+(semantics (a64.fcmp_set_lt_f64 l r) (ite (fp.lt l r) 1 0))
+(semantics (a64.fcmp_set_le_f32 l r) (ite (fp.leq l r) 1 0))
+(semantics (a64.fcmp_set_le_f64 l r) (ite (fp.leq l r) 1 0))
+(semantics (a64.fcmp_set_one_f32 l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (a64.fcmp_set_one_f64 l r) (ite (or (fp.lt l r) (fp.gt l r)) 1 0))
+(semantics (a64.fcmp_set_ord_f32 l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (a64.fcmp_set_ord_f64 l r) (ite (and (not (fp.isNaN l)) (not (fp.isNaN r))) 1 0))
+(semantics (a64.fcmp_set_uno_f32 l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (a64.fcmp_set_uno_f64 l r) (ite (or (fp.isNaN l) (fp.isNaN r)) 1 0))
+(semantics (a64.fcmp_set_ueq_f32 l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (a64.fcmp_set_ueq_f64 l r) (ite (not (or (fp.lt l r) (fp.gt l r))) 1 0))
+(semantics (a64.fcmp_set_ult_f32 l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (a64.fcmp_set_ult_f64 l r) (ite (not (fp.geq l r)) 1 0))
+(semantics (a64.fcmp_set_ule_f32 l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (a64.fcmp_set_ule_f64 l r) (ite (not (fp.gt l r)) 1 0))
+(semantics (a64.fcmp_set_ugt_f32 l r) (ite (not (fp.leq l r)) 1 0))
+(semantics (a64.fcmp_set_ugt_f64 l r) (ite (not (fp.leq l r)) 1 0))
+(semantics (a64.fcmp_set_uge_f32 l r) (ite (not (fp.lt l r)) 1 0))
+(semantics (a64.fcmp_set_uge_f64 l r) (ite (not (fp.lt l r)) 1 0))
+(semantics (a64.fcmp_set_eq_f32 l r) (ite (fp.eq l r) 1 0))
+(semantics (a64.fcmp_set_eq_f64 l r) (ite (fp.eq l r) 1 0))
+(semantics (a64.fcmp_set_ne_f32 l r) (ite (not (fp.eq l r)) 1 0))
+(semantics (a64.fcmp_set_ne_f64 l r) (ite (not (fp.eq l r)) 1 0))
+
 ;; Conversions. `fcvt_f32_f64` widens a float to a double and `fcvt_f64_f32` narrows the other way,
 ;; `fcvtzs` rounds toward zero into a signed integer, `scvtf` goes back, and the two `fmov` pairs
 ;; move the bits between the register files without looking at them.

@@ -598,6 +598,90 @@ static TEXT: &[(&str, &[Written])] = &[
         "fcmp_set_ge_f64",
         &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ge)])],
     ),
+    // After `fcmp` a NaN on either side sets C and V and clears N and Z, so `lt`, `le`, `hi` and
+    // `pl` are the unordered forms of the four orderings, `vs` is unordered and `vc` is ordered.
+    // Ordered and not equal is `mi` or `gt`, and unordered or equal is `eq` or `vs`, and each of
+    // those is a `cset` of one and a `csinc` that makes it one when the other held, as gcc does.
+    (
+        "fcmp_set_ult_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "fcmp_set_ult_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Lt)])],
+    ),
+    (
+        "fcmp_set_ule_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "fcmp_set_ule_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Le)])],
+    ),
+    (
+        "fcmp_set_ugt_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "fcmp_set_ugt_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hi)])],
+    ),
+    (
+        "fcmp_set_uge_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Pl)])],
+    ),
+    (
+        "fcmp_set_uge_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Pl)])],
+    ),
+    (
+        "fcmp_set_uno_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vs)])],
+    ),
+    (
+        "fcmp_set_uno_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vs)])],
+    ),
+    (
+        "fcmp_set_ord_f32",
+        &[spell("fcmp", &[Fp(1, S), Fp(2, S)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vc)])],
+    ),
+    (
+        "fcmp_set_ord_f64",
+        &[spell("fcmp", &[Fp(1, D), Fp(2, D)]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Vc)])],
+    ),
+    (
+        "fcmp_set_one_f32",
+        &[
+            spell("fcmp", &[Fp(1, S), Fp(2, S)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Le)]),
+        ],
+    ),
+    (
+        "fcmp_set_one_f64",
+        &[
+            spell("fcmp", &[Fp(1, D), Fp(2, D)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Mi)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Le)]),
+        ],
+    ),
+    (
+        "fcmp_set_ueq_f32",
+        &[
+            spell("fcmp", &[Fp(1, S), Fp(2, S)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Vc)]),
+        ],
+    ),
+    (
+        "fcmp_set_ueq_f64",
+        &[
+            spell("fcmp", &[Fp(1, D), Fp(2, D)]),
+            spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)]),
+            spell("csinc", &[Reg(0, W), Reg(0, W), Fixed(31, W), Arg::Cond(Cond::Vc)]),
+        ],
+    ),
     // Values arriving and leaving in the registers the convention names. None is an instruction,
     // and each is here so the allocator knows which register the value has to be in.
     ("ret_val_32", &[]),
