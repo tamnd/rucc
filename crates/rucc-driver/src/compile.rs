@@ -3225,6 +3225,27 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.globl\t_g\n\t.zerofill\t__DATA,__bss,_g,16,2\n"), "{text}");
     }
 
+    /// A `signed char` read from memory and added to at 32 bits is widened with its sign first.
+    ///
+    /// The widening was being taken out as unneeded, because its source is written as a `w`
+    /// register and was taken to have 32 bits in it, so `*p + 1` added one to the byte `ldrb` had
+    /// loaded and -9 came out as 248. At every level, since the pass runs at `-O0` too.
+    #[test]
+    fn a_signed_char_on_aarch64_is_widened_with_its_sign_before_it_is_added_to() {
+        for target in ["aarch64-linux-gnu", "aarch64-apple-darwin"] {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.target = target.parse::<Triple>().unwrap();
+            let source = "int f(signed char *p) { return *p + 1; }\n\
+                          unsigned g(unsigned short *p) { return *p + 1u; }\n";
+            let result = run(&opts, source);
+            assert!(!result.failed(), "{:?}", result.messages);
+            let text = result.text();
+            let signed = text.contains("\tsxtb w") || text.contains("\tldrsb w");
+            assert!(signed, "{target}: {text}");
+        }
+    }
+
     /// A construct the rule set does not reach yet is named, along with the function it is in.
     ///
     /// The message is about this compiler being unfinished rather than about the program, which

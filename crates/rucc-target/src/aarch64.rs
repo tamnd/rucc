@@ -209,8 +209,30 @@ pub static PROBE: Probe = Probe { inst: "probe_64", interval: 4096 };
 ///
 /// The widths come from the assembly description, where every general register is named as a `w`
 /// or an `x`, and the instructions that copy the low bits of their source are [`Form::Convert`],
-/// which is the eight widenings and nothing else.
-pub static BITS: BitInsts = BitInsts { prefix: "a64.", width: operand_width, copies_low };
+/// which is the widenings and nothing else. The source of a widening is the one place the
+/// description says too much, which `bit_width` is there for.
+pub static BITS: BitInsts = BitInsts { prefix: "a64.", width: bit_width, copies_low };
+
+/// How many bits of the operand at that index an instruction reads.
+///
+/// What the assembly description says, except for the source of a widening. `sxtb w0, w1` names
+/// all of `w1` because there is no byte register to name, and reads eight bits of it. Taking the
+/// name at its word said a widening kept every bit a 32 bit reader of its result could ask for,
+/// so the pass that takes out a widening nothing needs took out every `sxtb` and `uxtb` whose
+/// readers were 32 bit instructions, and a `signed char` was added to as the byte it was loaded
+/// as. The letter after `xt` is the width, as it is in the mnemonic.
+#[must_use]
+fn bit_width(name: &str, operand: u8) -> Option<u32> {
+    if operand == 1 && copies_low(name) {
+        match name.as_bytes().get(3) {
+            Some(b'b') => return Some(8),
+            Some(b'h') => return Some(16),
+            Some(b'w') => return Some(32),
+            _ => {}
+        }
+    }
+    operand_width(name, operand)
+}
 
 /// What an AArch64 instruction has to look like for this machine to have one.
 ///
@@ -951,13 +973,33 @@ mod tests {
         assert_eq!((BITS.width)("add_rr_32", 0), Some(32));
         assert_eq!((BITS.width)("add_rr_64", 2), Some(64));
         assert_eq!((BITS.width)("sxtb_64", 0), Some(64));
-        assert_eq!((BITS.width)("sxtb_64", 1), Some(32));
         assert_eq!((BITS.width)("sel_64", 3), Some(32));
         assert_eq!((BITS.width)("fadd_f64", 0), None);
         assert_eq!((BITS.width)("scvtf_64_f64", 1), Some(64));
         assert_eq!((BITS.width)("ldr_64", 0), Some(64));
         assert!((BITS.copies_low)("uxtb_32"));
         assert!(!(BITS.copies_low)("mov_rr_64"));
+    }
+
+    /// Except the source of a widening, which is written as a `w` and read as however much the
+    /// mnemonic says.
+    #[test]
+    fn a_widening_reads_as_much_of_its_source_as_its_name_says() {
+        for (name, bits) in [
+            ("sxtb_16", 8),
+            ("sxtb_32", 8),
+            ("sxtb_64", 8),
+            ("uxtb_32", 8),
+            ("uxtb_64", 8),
+            ("sxth_32", 16),
+            ("uxth_64", 16),
+            ("sxtw_64", 32),
+            ("uxtw_64", 32),
+        ] {
+            assert_eq!((BITS.width)(name, 1), Some(bits), "{name}");
+        }
+        // What it writes is still what the listing says.
+        assert_eq!((BITS.width)("sxtb_32", 0), Some(32));
     }
 
     #[test]
