@@ -3138,16 +3138,38 @@ decl #0 x : int object external static defined
         assert!(text.contains("tpidr_el0"), "{text}");
     }
 
-    /// Apple's platforms reach a thread-local variable through a descriptor, which is not written,
-    /// so it is refused there rather than given the Linux sequence.
+    /// Apple's platforms reach a thread-local variable by calling through its descriptor, which
+    /// is what clang writes on both machines, and the variable is the image and the descriptor.
     #[test]
-    fn a_thread_local_is_refused_on_darwin_until_its_descriptor_is_written() {
+    fn a_darwin_thread_local_is_reached_through_its_descriptor() {
+        let source = "__thread int n = 5;\nint *f(void) { return &n; }\n";
+        for (triple, wanted) in [
+            ("aarch64-apple-darwin", &["_n@TLVPPAGE\n", "_n@TLVPPAGEOFF]\n", "\tblr x"][..]),
+            ("x86_64-apple-darwin", &["_n@TLVP(%rip), %rdi\n", "\tcall\t*%"][..]),
+        ] {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.target = triple.parse::<Triple>().unwrap();
+            let result = run(&opts, source);
+            assert!(!result.failed(), "{triple}: {:?}", result.messages);
+            let text = result.text();
+            for want in wanted {
+                assert!(text.contains(want), "{triple} wanted {want:?}:\n{text}");
+            }
+            assert!(text.contains("\n_n:\n\t.quad\t__tlv_bootstrap\n"), "{text}");
+            assert!(!text.contains("tpidr_el0") && !text.contains("%fs"), "{text}");
+        }
+    }
+
+    /// The thread pointer itself is somewhere else on Apple's platforms and is still refused.
+    #[test]
+    fn the_thread_pointer_is_refused_on_darwin() {
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
-        let result = run(&opts, "__thread int n;\nint *f(void) { return &n; }\n");
+        let result = run(&opts, "void *f(void) { return __builtin_thread_pointer(); }\n");
         assert!(result.failed());
-        assert!(result.messages[0].contains("thread-local"), "{:?}", result.messages);
+        assert!(result.messages[0].contains("thread pointer"), "{:?}", result.messages);
     }
 
     /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, so a

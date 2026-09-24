@@ -331,6 +331,9 @@ impl Directives {
             (Directives::MachO, Place::Named(name)) => {
                 let _ = writeln!(out, "\t.section\t{name}");
             }
+            (Directives::MachO, Place::Thread { .. }) => {
+                out.push_str("\t.section\t__DATA,__thread_data,thread_local_regular\n");
+            }
             (Directives::MachO, _) => out.push_str("\t.section\t__DATA,__data\n"),
         }
     }
@@ -350,6 +353,20 @@ impl Directives {
                 let name = &var.name;
                 let _ = writeln!(out, "\t{comm}\t{symbol}{name},{},{}", var.size, var.align);
                 return false;
+            }
+            // Apple's `.tbss` is `.zerofill` for the per thread image, and the name a program uses is
+            // the descriptor written after it, so that is the one that gets the binding.
+            (Directives::MachO, Place::Thread { zero: true }) => {
+                let name = &var.name;
+                let _ = writeln!(out, "\t.tbss\t{symbol}{name}$tlv$init,{},{align}", var.size);
+                self.descriptor(out, var);
+                return false;
+            }
+            (Directives::MachO, Place::Thread { zero: false }) => {
+                self.section(out, &var.place, &var.name, sections);
+                let _ = writeln!(out, "\t.p2align\t{align}");
+                let _ = writeln!(out, "{symbol}{}$tlv$init:", var.name);
+                return true;
             }
             // The directive defines the symbol and says nothing about who may see it, so the
             // binding is written first, the same as it is above a label.
@@ -380,6 +397,30 @@ impl Directives {
         }
         let _ = writeln!(out, "{symbol}{}:", var.name);
         true
+    }
+
+    /// What a thread-local variable on Mach-O is known by, which is not its image.
+    ///
+    /// The image above is only what each thread's copy starts out as. The name the program uses is
+    /// a descriptor of three words: the function that finds this thread's copy, a key it fills in,
+    /// and where the image is. Code reaches the variable by loading the descriptor's address and
+    /// calling the first word with it. `dyld` points the first word at its own function the first
+    /// time the image is loaded, and `__tlv_bootstrap` is only what it starts as. Nothing on any
+    /// other format or for any other variable.
+    pub fn descriptor(self, out: &mut String, var: &Variable) {
+        if self != Directives::MachO || !matches!(var.place, Place::Thread { .. }) {
+            return;
+        }
+        let symbol = self.symbol();
+        let name = &var.name;
+        out.push_str("\t.section\t__DATA,__thread_vars,thread_local_variables\n");
+        self.bind(out, name, var.binding);
+        self.seen(out, name, var.binding, var.visibility);
+        out.push_str("\t.p2align\t3\n");
+        let _ = writeln!(out, "{symbol}{name}:");
+        let _ = writeln!(out, "\t.quad\t{symbol}_tlv_bootstrap");
+        out.push_str("\t.quad\t0\n");
+        let _ = writeln!(out, "\t.quad\t{symbol}{name}$tlv$init");
     }
 
     /// The directive that makes a variable visible outside the file, if it is.

@@ -225,8 +225,9 @@ impl Globals {
 /// Every variable a module defines, laid out.
 ///
 /// The format is an argument because one question here is the format's rather than the module's:
-/// a thread-local variable is a section flag and a symbol type on ELF and is neither of those on
-/// the other two, so which of them is being written decides whether there is anything to write.
+/// a thread-local variable is a section flag and a symbol type on ELF and an image and a descriptor
+/// on Mach-O, and is neither on COFF, so which of them is being written decides whether there is
+/// anything to write.
 ///
 /// # Errors
 ///
@@ -302,7 +303,7 @@ fn variable(
 ) -> Result<Variable, Error> {
     let global = &module[id];
     let name = names.resolve(global.name).to_owned();
-    if global.tls.is_some() && format != ObjectFormat::Elf {
+    if global.tls.is_some() && !matches!(format, ObjectFormat::Elf | ObjectFormat::MachO) {
         return Err(Error::Thread { name, format: format.as_str() });
     }
     let init = global.init.expect("a definition has an image");
@@ -854,17 +855,16 @@ mod tests {
         assert_eq!(data.objects[1].size, 4);
     }
 
-    /// Windows and Mach-O reach a thread-local through a table and through a descriptor, neither
-    /// of which is a section with a flag on it, so the variable is refused by name there.
+    /// Windows reaches a thread-local through a table of its own, which is not a section with a
+    /// flag on it, so the variable is refused by name there.
     #[test]
     fn a_thread_local_variable_is_refused_on_a_format_that_does_not_spell_one_this_way() {
-        for format in [ObjectFormat::MachO, ObjectFormat::Coff] {
-            let mut names = Interner::new();
-            let mut module = module(&mut names);
-            let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
-            module[id].tls = Some(TlsModel::GlobalDynamic);
-            let error = globals(&module, &names, format).expect_err("a thread-local variable");
-            assert_eq!(error, Error::Thread { name: "x".to_owned(), format: format.as_str() });
-        }
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+        module[id].tls = Some(TlsModel::GlobalDynamic);
+        let format = ObjectFormat::Coff;
+        let error = globals(&module, &names, format).expect_err("a thread-local variable");
+        assert_eq!(error, Error::Thread { name: "x".to_owned(), format: format.as_str() });
     }
 }
