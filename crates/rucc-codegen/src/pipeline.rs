@@ -427,7 +427,7 @@ pub fn compile_recording(
     // than as a dozen lines here. What is in the group and what the order between its members is
     // for are both in `crate::lowering`, which is where a new lowering is added.
     let counting = recording.lowerings.wanted();
-    let ran = lowering::group(source, names, machine.conv, counting);
+    let ran = lowering::group(source, names, machine.conv, flags.goal, counting);
     if counting {
         let called = names.resolve(source.name).to_owned();
         recording.lowerings.record(&called, ran);

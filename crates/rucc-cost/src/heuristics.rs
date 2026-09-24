@@ -36,6 +36,13 @@ pub enum Provenance {
     /// this file has.
     Gcc,
 
+    /// Measured here, on the shapes its own documentation names.
+    ///
+    /// As strong as [`Provenance::Gcc`] and more particular, since it is the number this
+    /// compiler's own code gave on the machines it was timed on. It is the one to measure again
+    /// when either of those changes.
+    Measured,
+
     /// Somebody picked it and it has not been measured.
     ///
     /// The weakest. A constant marked this way is a constant to attack first when a heuristic
@@ -58,6 +65,7 @@ impl Provenance {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Gcc => "adopted from gcc",
+            Self::Measured => "measured here",
             Self::Chosen => "chosen, not measured",
             Self::Derived => "derived from another constant here",
             Self::Awaiting => "placeholder, awaiting measurement",
@@ -67,7 +75,7 @@ impl Provenance {
     /// Whether this constant is standing on evidence.
     #[must_use]
     pub const fn is_evidence(self) -> bool {
-        matches!(self, Self::Gcc)
+        matches!(self, Self::Gcc | Self::Measured)
     }
 }
 
@@ -528,15 +536,27 @@ pub const SCHEDULER_READY_LIST_BOUND: usize = 100;
 /// here.
 pub const SWITCH_CONVERSION_MAX_GROWTH: u32 = 8;
 
-/// How many targets a switch needs before a jump table beats a chain of compares, per section 40.10.
+/// How many targets a switch needs before a jump table beats a walk of compares, per section 40.10.
 ///
-/// Not measured. The right answer depends on what a mispredicted indirect branch costs against
-/// what a run of well predicted compares costs, and both are machine numbers, so section 40.10
-/// asks for a measurement and document 42 owes it. `rucc_codegen`'s switch lowering reads it as the
-/// fewest clusters a table may replace. gcc 16 builds a table from five cases on x86-64, so eight
-/// is the more careful of the two until something here measures the difference, and it should
-/// not be quoted at anybody.
-pub const JUMP_TABLE_MIN_TARGETS: u32 = 8;
+/// Eleven, measured on an interpreter's shape: a `noinline` function whose `switch` has one dense
+/// case per arm, each arm doing different work, called in a loop over 4096 inputs that come either
+/// in order or at random. Each count of arms was built both ways and timed with `perf stat` on one
+/// pinned core of an AMD EPYC. In order the table is slower up to six arms and faster from seven,
+/// since the walk grows with the arms and a predicted indirect jump does not. At random the table
+/// is slower up to twelve arms and faster from sixteen, since it misses its one prediction nearly
+/// every time and the walk misses less. Where the two meet is where the geometric mean of the two
+/// ratios crosses one, which is between ten arms (1.02) and eleven (0.90). gcc 16 builds a table
+/// from five cases, and at five arms on this machine that is 8 percent slower in order and 58
+/// percent slower at random than the walk. tamnd/rucc#1759 has the table of numbers.
+pub const JUMP_TABLE_MIN_TARGETS: u32 = 11;
+
+/// How many targets a switch needs before a jump table is smaller than a walk of compares, which
+/// is what [`JUMP_TABLE_MIN_TARGETS`] becomes when optimizing for size.
+///
+/// Six, measured on the same shapes at `-Os`. With the four bytes each cell takes counted in, the
+/// table is 132 bytes against the walk's 129 at five arms and 156 against 157 at six, and it is
+/// smaller by more with every arm after that. gcc builds one from five cases at `-Os` as well.
+pub const JUMP_TABLE_MIN_TARGETS_FOR_SIZE: u32 = 6;
 
 /// How much worse than the reference the allocator may do before it counts as a regression, as a
 /// percentage, per section 39.4.
@@ -928,11 +948,19 @@ pub const ALL: &[Constant] = &[
     },
     Constant {
         name: "JUMP_TABLE_MIN_TARGETS",
-        value: 8,
+        value: 11,
         unit: "case targets",
         document: "40.10",
         gcc: "param_case_values_threshold",
-        provenance: Provenance::Awaiting,
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "JUMP_TABLE_MIN_TARGETS_FOR_SIZE",
+        value: 6,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "param_case_values_threshold",
+        provenance: Provenance::Measured,
     },
     Constant {
         name: "ALLOCATOR_DEGRADATION_PERCENT",
@@ -949,7 +977,8 @@ mod tests {
     use super::{
         ALL, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED, BRANCH_COST_FOR_SIZE,
         BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
-        IF_CONVERSION_BUDGET_UNPREDICTABLE, Provenance,
+        IF_CONVERSION_BUDGET_UNPREDICTABLE, JUMP_TABLE_MIN_TARGETS,
+        JUMP_TABLE_MIN_TARGETS_FOR_SIZE, Provenance,
     };
     use crate::Cycles;
 
@@ -964,6 +993,11 @@ mod tests {
         assert_eq!(by_name("BRANCH_COST_PREDICTABLE") * 100, BRANCH_COST_PREDICTABLE.raw());
         assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SPEED"), i64::from(BLOCK_COPY_MOVES_FOR_SPEED));
         assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SIZE"), i64::from(BLOCK_COPY_MOVES_FOR_SIZE));
+        assert_eq!(by_name("JUMP_TABLE_MIN_TARGETS"), i64::from(JUMP_TABLE_MIN_TARGETS));
+        assert_eq!(
+            by_name("JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
+            i64::from(JUMP_TABLE_MIN_TARGETS_FOR_SIZE)
+        );
     }
 
     #[test]
@@ -995,13 +1029,14 @@ mod tests {
     }
 
     #[test]
-    fn the_two_unmeasured_constants_are_marked_and_not_dressed_up() {
-        // Section 40.10 and section 39.4 both said the number would have to be measured. Until it
-        // is, the honest thing is that a report can find them, and this test is what keeps them
-        // findable when somebody later picks a value that looks confident.
+    fn the_unmeasured_constant_is_marked_and_not_dressed_up() {
+        // Section 39.4 said the number would have to be measured. Until it is, the honest thing
+        // is that a report can find it, and this test is what keeps it findable when somebody
+        // later picks a value that looks confident. Section 40.10's jump table threshold was the
+        // other one here until tamnd/rucc#1759 measured it.
         let waiting: Vec<&str> =
             ALL.iter().filter(|c| c.provenance == Provenance::Awaiting).map(|c| c.name).collect();
-        assert_eq!(waiting, ["JUMP_TABLE_MIN_TARGETS", "ALLOCATOR_DEGRADATION_PERCENT"]);
+        assert_eq!(waiting, ["ALLOCATOR_DEGRADATION_PERCENT"]);
     }
 
     #[test]
