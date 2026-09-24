@@ -59,6 +59,22 @@ pub struct Selector {
     /// rule's because whether it goes through the global offset table is a fact about the link and
     /// not about the instruction.
     pub symbols: &'static Symbols,
+    /// The instructions a jump through a table is built from, and the address of a label.
+    pub jumps: &'static Jumps,
+}
+
+/// The instructions a place in this function is reached with: the address of a block or a jump
+/// table, and the read of one cell of a table and the add that turns it back into an address.
+#[derive(Debug)]
+pub struct Jumps {
+    /// The address of a block or a table, which is carried in the addressing mode.
+    pub near: &'static str,
+    /// A load of a 32-bit cell, sign extended to the width of an address.
+    pub cell: &'static str,
+    /// The add of two addresses.
+    pub add: &'static str,
+    /// Whether the add writes its first operand, the way it does on x86-64.
+    pub two_address: bool,
 }
 
 /// The two ways the address of a symbol is come by.

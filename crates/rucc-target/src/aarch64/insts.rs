@@ -457,6 +457,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // offset into that page.
     ("lea_64", Lea),
     ("addr_64", Address),
+    // The address of a block or a jump table of this function, which is a fixed distance from the
+    // code and carried in the addressing mode, the way x86-64 carries it in a `lea`.
+    ("adr_64", Lea),
     ("got_64", Address),
     ("tls_64", Address),
     // Loads, which write a whole register whatever they read.

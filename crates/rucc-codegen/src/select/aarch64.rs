@@ -25,6 +25,12 @@ pub static SELECTOR: super::Selector = super::Selector {
         near: super::Reach::Own("addr_64"),
         far: super::Reach::Own("got_64"),
     },
+    jumps: &super::Jumps {
+        near: "adr_64",
+        cell: "ldrs_32_64",
+        add: "add_rr_64",
+        two_address: false,
+    },
 };
 
 #[cfg(test)]

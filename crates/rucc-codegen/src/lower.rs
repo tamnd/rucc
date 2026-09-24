@@ -466,8 +466,6 @@ pub enum Unported {
     /// A definition that takes arguments its signature does not name, whose save area and list are
     /// the SysV and Windows shapes and not the AAPCS64 one.
     Variadic,
-    /// A `switch` dense enough to go through a table of distances.
-    Table,
     /// A thread-local variable or the thread pointer.
     Thread,
 }
@@ -479,9 +477,6 @@ impl Unported {
         match self {
             Unported::Variadic => {
                 "a function that takes arguments it does not name is not written for this machine yet"
-            }
-            Unported::Table => {
-                "a `switch` dense enough for a jump table is not written for this machine yet"
             }
             Unported::Thread => "a thread-local variable is not written for this machine yet",
         }
@@ -2551,7 +2546,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
         let span = self.source.span(inst);
-        let opcode = self.named(self.selector.frame.lea);
+        let opcode = self.named(self.selector.jumps.near);
         let mem = mir::Mem::block(self.out_block(call.block));
         self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
         Ok(())
@@ -2596,7 +2591,6 @@ impl<'a> Lowering<'a> {
     /// across in the IR's own order, the default first and then one per case. See
     /// [`mir::Table`] for why a place and not a block.
     fn jump_table(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        self.only_x86(Some(inst), Unported::Table)?;
         let data = &self.source[inst];
         let Extra::Switch(info) = data.extra else { return Err(self.unsupported(inst)) };
         let &index = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
@@ -2619,21 +2613,25 @@ impl<'a> Lowering<'a> {
         let gpr = self.gpr;
         let table = u32::try_from(self.out.tables.len()).expect("fewer tables than that");
 
+        let jumps = self.selector.jumps;
+
         let base = self.out.new_vreg(gpr);
-        let lea = self.named(self.selector.frame.lea);
-        self.out.build(block, lea).at(span).def(base, gpr).mem(mir::Mem::table(table)).finish();
+        let near = self.named(jumps.near);
+        self.out.build(block, near).at(span).def(base, gpr).mem(mir::Mem::table(table)).finish();
         let offset = self.out.new_vreg(gpr);
         let cell =
             mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4);
-        let load = self.named("movsxd_rm_32_64");
+        let load = self.named(jumps.cell);
         self.out.build(block, load).at(span).def(offset, gpr).mem(cell).finish();
-        // Two address, for the reason `thread_pointer` gives.
+        // Two address on x86-64, for the reason `thread_pointer` gives.
         let to = self.out.new_vreg(gpr);
-        let add = self.named("add_rr_64");
+        let add = self.named(jumps.add);
+        let written = mir::Operand::write(to, gpr);
+        let written = if jumps.two_address { written.with(Constraint::Reuse(1)) } else { written };
         self.out
             .build(block, add)
             .at(span)
-            .operand(mir::Operand::write(to, gpr).with(Constraint::Reuse(1)))
+            .operand(written)
             .operand(mir::Operand::read(offset, gpr))
             .operand(mir::Operand::read(base, gpr))
             .finish();

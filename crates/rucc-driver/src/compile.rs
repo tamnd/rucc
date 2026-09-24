@@ -3058,6 +3058,27 @@ decl #0 x : int object external static defined
         assert!(at("udiv x") < at("msub x"), "{text}");
     }
 
+    /// A dense `switch` on AArch64 reads a cell of a table after the function with `adr` and
+    /// `ldrsw`, and each cell is the distance from the table to an arm.
+    #[test]
+    fn an_aarch64_jump_table_is_reached_with_adr() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "int f(int x) { switch (x) { case 0: return 10; case 1: return 21; \
+                      case 2: return 32; case 3: return 43; case 4: return 54; case 5: return 65; \
+                      case 6: return 76; case 7: return 87; case 8: return 98; case 9: return 9; \
+                      default: return 0; } }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        let at = |what: &str| text.find(what).unwrap_or_else(|| panic!("{what} is not in\n{text}"));
+        assert!(at("adr x") < at("ldrsw x"), "{text}");
+        assert!(at("ldrsw x") < at("br x"), "{text}");
+        assert!(text.contains("_j0:"), "{text}");
+        assert!(text.contains(".long"), "{text}");
+    }
+
     /// What only the x86-64 lowering writes yet is refused on AArch64 with a reason, rather than
     /// written with x86 instructions.
     #[test]
