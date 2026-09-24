@@ -4218,12 +4218,25 @@ impl<'u> Body<'_, 'u> {
         let base =
             self.alignment(addr).unwrap_or(repr::align_of(self.types(), self.target(), record));
         self.aligns(addr, base);
+        // A member that comes after one whose length the program computes does not sit where the
+        // number in the layout says, and where it does sit is worked out here from the sizes the
+        // program has by now.
+        let recipe = self
+            .types()
+            .record_info(id)
+            .variable
+            .as_ref()
+            .and_then(|found| found.offsets.get(field as usize).cloned().flatten());
         if let Some(width) = member.bits {
             // The address is of the byte the first of its bits is in, and the run says which
             // bit of that byte it starts at. A member of a record aligned to eight bytes at
             // byte offset four is aligned to four, which is what the run needs to know to say
-            // how the loads under it are aligned.
-            let addr = self.offset(addr, byte, span);
+            // how the loads under it are aligned. One whose byte is only known at run time is
+            // read a byte at a time, since nothing says how that byte is aligned.
+            let (addr, base, byte) = match &recipe {
+                Some(recipe) => (self.moved(id, addr, recipe, span), 1, 0),
+                None => (self.offset(addr, byte, span), base, byte),
+            };
             let run = Run::at(base, byte, member.bit, width).reversed(reverse);
             return Place {
                 punned,
@@ -4233,23 +4246,10 @@ impl<'u> Body<'_, 'u> {
                 ..Place::new(Where::Bits(addr, run), ty)
             };
         }
-        // A member that comes after one whose length the program computes does not sit where the
-        // number in the layout says, and where it does sit is worked out here from the sizes the
-        // program has by now. Its offset is a multiple of the alignment it was placed at, so the
-        // address is as aligned as the lesser of that and what the record's own address is.
-        let recipe = self
-            .types()
-            .record_info(id)
-            .variable
-            .as_ref()
-            .and_then(|found| found.offsets.get(field as usize).cloned().flatten());
+        // Its offset is a multiple of the alignment it was placed at, so the address is as
+        // aligned as the lesser of that and what the record's own address is.
         if let Some(recipe) = recipe {
-            let amount = self.extent_value(id, &recipe, span);
-            let moved = {
-                let mut build = self.build(span);
-                let args = build.func().push_values(&[addr, amount]);
-                build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
-            };
+            let moved = self.moved(id, addr, &recipe, span);
             let placed = u32::try_from(member.align).unwrap_or(u32::MAX);
             self.aligns(moved, base.min(placed));
             let where_ = Where::Addr(moved);
@@ -4269,6 +4269,14 @@ impl<'u> Body<'_, 'u> {
             reverse,
             ..Place::new(Where::Addr(addr), ty)
         }
+    }
+
+    /// The address a recipe from the layout says a member is at, past the record's own.
+    fn moved(&mut self, id: RecordId, addr: Value, recipe: &Extent, span: Span) -> Value {
+        let amount = self.extent_value(id, recipe, span);
+        let mut build = self.build(span);
+        let args = build.func().push_values(&[addr, amount]);
+        build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
     }
 
     /// How many bytes of its record a member at `byte` owns, counting the padding after it.

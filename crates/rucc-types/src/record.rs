@@ -441,15 +441,6 @@ impl Builder {
         decl: &FieldDecl,
         last: bool,
     ) -> Result<(), RecordError> {
-        // Where a bit-field goes depends on the bit the record has got to, and once a member of
-        // no fixed size has gone by nothing here knows which bit that is. gcc works it out where
-        // the declaration is reached, in arithmetic that decides at run time whether the field
-        // straddles its storage; this compiler does not do that yet, and refusing is the answer
-        // until it does, because the alternative is a member at an offset that is right for some
-        // lengths and wrong for others.
-        if decl.bits.is_some() && self.base.is_some() {
-            return Err(RecordError::VariableBitField { index });
-        }
         let flexible = last && self.kind == RecordKind::Struct && flexible_array(types, decl.ty);
         let member = match member_layout(types, decl.ty, flexible, target) {
             Ok(member) => member,
@@ -459,6 +450,22 @@ impl Builder {
             Err(error) => return Err(RecordError::Member { index, error }),
         };
         let align = self.member_align(decl, member.align);
+        // Once a member of no fixed size has gone by, the bit the record has got to is counted
+        // from the end of that member rather than from its start. Under the Itanium rule that
+        // settles every bit-field of non-zero width, because gcc only asks whether one straddles
+        // its storage while the offset is a number, and after such a member it places them one
+        // after another as if packed. What is left is a field that rounds to a unit, which is a
+        // zero width one or any under Microsoft's rule, and where the end of the member is not
+        // known to be as aligned as that unit, which unit the field lands in depends on the
+        // lengths. Those are refused rather than placed right for some lengths and wrong for
+        // the others.
+        if let (Some(width), Some(_)) = (decl.bits, &self.base) {
+            let unit = if width == 0 { member.align } else { align };
+            let loose = width != 0 && target.bit_field_style == BitFieldStyle::Itanium;
+            if !loose && unit > self.base_align {
+                return Err(RecordError::VariableBitField { index });
+            }
+        }
         match decl.bits {
             Some(0) => self.zero_width(target, decl, member.align)?,
             Some(width) => self.bit_field(target, index, decl, member, align, width)?,
@@ -603,7 +610,9 @@ impl Builder {
         if align <= self.base_align && self.at % boundary == 0 {
             return Ok(self.at);
         }
-        let bytes = u64::try_from(self.at / 8).map_err(|_| RecordError::TooLarge)?;
+        // A bit-field may have left the position part way into a byte, and the member being
+        // placed starts after all of it.
+        let bytes = u64::try_from(self.at.div_ceil(8)).map_err(|_| RecordError::TooLarge)?;
         self.base = Some(Extent::sum(vec![base, Extent::Bytes(bytes)]).round_up(align));
         self.base_align = align;
         self.at = 0;
@@ -666,7 +675,9 @@ impl Builder {
     ) -> Result<u128, RecordError> {
         let offset = match self.kind {
             RecordKind::Union => 0,
-            RecordKind::Struct if self.packing(decl) => self.at,
+            // Packed, or after a member of no fixed size, where gcc does not ask whether the
+            // field straddles anything because the offset it would ask about is not a number.
+            RecordKind::Struct if self.packing(decl) || self.base.is_some() => self.at,
             RecordKind::Struct => {
                 let boundary = u128::from(align) * 8;
                 let used = self.at % boundary + u128::from(width);

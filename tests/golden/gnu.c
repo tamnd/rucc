@@ -429,3 +429,16 @@ int sends_measured(int z) {
   x.a[z - 1] = 7;
   return measured(z, x);
 }
+
+// A bit-field after a member of no fixed size, which gcc places right after the array with no
+// question about straddling, so the address of its first byte is worked out from the length and
+// the bits are read from there a byte at a time.
+unsigned after_measured(int n) {
+  struct {
+    int i[n];
+    unsigned b : 3;
+    unsigned c : 30;
+  } s;
+  s.c = 5;
+  return s.c;
+}

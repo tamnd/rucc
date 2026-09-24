@@ -2092,18 +2092,46 @@ mod tests {
     }
 
     #[test]
-    fn a_bit_field_after_a_member_of_no_fixed_size_is_turned_down() {
+    fn bit_fields_after_a_member_of_no_fixed_size_are_placed_one_after_another() {
         let mut interner = Interner::new();
         let mut types = Types::new();
         let int = types.int(IntKind::Int);
+        let char_ty = types.int(IntKind::Char);
         let rows = measured(&mut types, 0);
-        let fields = [member(rows), bits(&mut interner, "b", int, 3)];
+        let fields = [
+            member(rows),
+            bits(&mut interner, "b", int, 3),
+            bits(&mut interner, "c", int, 30),
+            member(char_ty),
+        ];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+
+        // `c` would straddle its `int` if the offset were a number, and gcc 16 puts it at bit
+        // three all the same, because it only asks that question of an offset it knows. So the
+        // `char` is five bytes past the array and the record is `4 * n + 8` long.
+        assert_eq!((laid_out.fields[2].offset, laid_out.fields[2].bit), (0, 3));
+        let variable = laid_out.variable.expect("a record with a member of no fixed size");
+        let after = variable.offsets[3].as_ref().expect("an offset the program works out");
+        for count in 0..6u64 {
+            let sizes = [4 * count, 4, 4, 1];
+            assert_eq!(work_out(after, &sizes), 4 * count + 5);
+            assert_eq!(work_out(&variable.size, &sizes), 4 * count + 8);
+        }
+    }
+
+    #[test]
+    fn a_zero_width_bit_field_that_needs_more_alignment_than_is_known_is_turned_down() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let char_ty = types.int(IntKind::Char);
+        let letters = types.array(char_ty, ArrayLen::Variable(VlaId(0)));
+        let fields = [member(letters), unnamed_bits(int, 0)];
         let options = RecordOptions::default();
         let failed = layout_record(&types, RecordKind::Struct, &fields, &options, &linux());
 
-        // Which unit such a bit-field lands in is a question about an address the program has
-        // not worked out yet, and gcc answers it while the program runs. Nothing here does, so
-        // the layout says so rather than putting the member somewhere plausible.
+        // A `char` array may end on any byte, so which four byte boundary `int : 0` rounds to is a
+        // question about an address the program has not worked out yet. The layout says so
+        // rather than putting the member somewhere plausible.
         assert_eq!(failed, Err(RecordError::VariableBitField { index: 1 }));
     }
 }
