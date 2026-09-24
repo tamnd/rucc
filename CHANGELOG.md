@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.3
+
 ### Added
 
 - `rucc-stub` carries glibc's description. Three blobs, for libc, libm and librt, are packed from glibc 2.44's abilists for all eight architectures and compiled in, 103 KB between them against the 1 MB section 13.1 budgets. `rucc_stub::glibc::stubs` writes a target's `libc.so`, `libm.so`, `librt.so` and the empty compatibility libraries from them, cut at whatever glibc release the target asked for. `cargo xtask glibc-blob` repacks them when the pinned glibc moves, and `cargo xtask size` now measures the row.
