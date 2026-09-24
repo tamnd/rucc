@@ -261,13 +261,19 @@ fn travel(
     position: Position,
     ty: TypeId,
 ) -> Travel {
-    let (size, align) = shaped.extent();
+    let (size, mut align) = shaped.extent();
     let arg = shaped.arg();
     let pass = match position {
         Position::Return => call.returns(&arg),
         Position::Fixed => call.argument(&arg),
         Position::Variadic => call.variadic_argument(&arg),
     };
+    // Where the ABI packs the argument area, the alignment an object in it gets is the ABI's
+    // answer rather than the type's. Only the alignment, because the size is also how many bytes
+    // the caller copies there, and the backend takes the size up to the alignment on its own.
+    if let (Position::Fixed, Pass::Memory, Arg::Aggregate(shape)) = (position, &pass, &arg) {
+        align = u32::try_from(call.in_memory(shape)).unwrap_or(align);
+    }
     let types = match &pass {
         Pass::Ignore => Vec::new(),
         Pass::Direct => match repr::value_type(types, target, ty) {

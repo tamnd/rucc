@@ -18,7 +18,7 @@
 //! source order. Asking out of order answers for a different program.
 
 use crate::describe::{
-    AbiDescription, Banks, ReturnPointer, Rule, Scalars, Short, Test, Travel, Variadic,
+    AbiDescription, Banks, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel, Variadic,
 };
 use crate::shape::{Arg, Format, Kind, Pass, Scalar, Shape, Slot};
 
@@ -128,6 +128,30 @@ impl Call {
                 empty.apply(self.abi.arguments, &shape, false)
             }
         }
+    }
+
+    /// What a fixed argument that travels as [`Pass::Memory`] is aligned to in the argument area.
+    ///
+    /// Its own alignment on every ABI but the one that packs the area, and the backend rounds that
+    /// to a word. Darwin arm64 packs, and there the answer depends on what the aggregate is. A
+    /// homogeneous floating point aggregate keeps the alignment of its members, so three `float`s
+    /// are twelve bytes on a four byte boundary. Anything else is on a word boundary, which is what
+    /// clang makes of it by passing it as an array of `i64`, and the backend takes the size rounded
+    /// up to the alignment, so a record of three `char`s is one word. An argument past the `...`
+    /// is not packed, so this is not asked about one.
+    #[must_use]
+    pub fn in_memory(&self, shape: &Shape<'_>) -> u64 {
+        if self.abi.stack_args != StackArgs::Packed {
+            return shape.align;
+        }
+        let limit = self.abi.arguments.iter().find_map(|rule| match rule.when {
+            Test::Homogeneous { limit } => Some(limit),
+            _ => None,
+        });
+        if limit.is_some_and(|limit| homogeneous(shape, limit).is_some()) {
+            return shape.align;
+        }
+        shape.align.max(self.abi.banks.integer_width)
     }
 
     /// Whether a scalar travels as the address of a copy rather than as itself.

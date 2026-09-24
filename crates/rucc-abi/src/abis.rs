@@ -152,9 +152,10 @@ pub static AAPCS64: AbiDescription = AAPCS64_BASE;
 ///
 /// Stack arguments are packed at their natural size rather than taking a register's worth each,
 /// so a function with more than eight arguments returns garbage from the ninth onward if the
-/// backend assumed otherwise. Nothing in this crate reads that field; it is here because the
-/// backend that does read it should be reading it from the same description the tests are
-/// generated from.
+/// backend assumed otherwise. The backend reads that field to place each argument, and
+/// [`crate::Call::in_memory`] reads it to say what an aggregate in the argument area is aligned
+/// to, which is its own alignment for a homogeneous floating point aggregate and a word for
+/// anything else.
 ///
 /// The third divergence, `long double` being a `double`, is in the data layout rather than here,
 /// because it is a fact about the type and not about how a value of the type travels. The

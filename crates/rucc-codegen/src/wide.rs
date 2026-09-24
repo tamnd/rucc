@@ -403,11 +403,13 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
     let mut moved = false;
     for (index, &param) in signature.params.iter().enumerate() {
         if !is_wide(param.ty) {
-            meant.push((Slot::Whole(index), param, place(&mut places, param)));
+            meant.push((Slot::Whole(index), param, place(&mut places, param, conv)));
             continue;
         }
         let mut ahead = places.clone();
-        if let (low @ Where::Reg(_), high @ Where::Reg(_)) = (ahead.integer(), ahead.integer()) {
+        if let (low @ Where::Reg(_), high @ Where::Reg(_)) =
+            (ahead.integer(HALF / 8), ahead.integer(HALF / 8))
+        {
             places = ahead;
             meant.push((Slot::Low(index), word, low));
             meant.push((Slot::High(index), word, high));
@@ -455,7 +457,7 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
     let mut places = Places::new(conv);
     let mut slots = Vec::with_capacity(order.len() + stacked.len());
     for (slot, param, meant) in order {
-        let at = place(&mut places, param);
+        let at = place(&mut places, param, conv);
         if !in_reg(&at) || meant.is_some_and(|meant| meant != at) {
             return None;
         }
@@ -464,12 +466,12 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
     for &&(slot, param, meant) in &stacked {
         let Where::Stack(up) = meant else { return None };
         while places.size() < up {
-            if in_reg(&place(&mut places, word)) {
+            if in_reg(&place(&mut places, word, conv)) {
                 return None;
             }
             slots.push(Slot::Filler(word.ty));
         }
-        if place(&mut places, param) != meant {
+        if place(&mut places, param, conv) != meant {
             return None;
         }
         slots.push(slot);
@@ -478,19 +480,19 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
 }
 
 /// Where the next parameter goes, asked the way [`crate::abi::entry`] asks.
-fn place(places: &mut Places<'_>, param: Param) -> Where {
+fn place(places: &mut Places<'_>, param: Param, conv: &CallRegs) -> Where {
     // A structure the classification put in the argument area, which is the one parameter whose
     // place is bytes rather than a register. Everything else is a value, the pointer an `sret`
     // hands over included, and a value takes the next register of its own kind.
     if let Abi::ByVal { size, align } = param.abi {
-        places.on_stack(u32::try_from(size).unwrap_or(u32::MAX), align)
+        places.object(u32::try_from(size).unwrap_or(u32::MAX), align)
     } else if crate::abi::on_the_stack(param.ty) {
         let (size, align) = crate::abi::X87_AREA;
         places.on_stack(size, align)
     } else if param.ty.is_float() {
         places.float(crate::abi::float_bytes(param.ty))
     } else {
-        places.integer()
+        places.integer(crate::abi::int_bytes(param.ty, conv))
     }
 }
 

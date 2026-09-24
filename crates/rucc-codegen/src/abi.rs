@@ -167,6 +167,15 @@ pub(crate) fn float_bytes(ty: Type) -> u32 {
     ty.bits().div_ceil(8).saturating_mul(ty.lanes())
 }
 
+/// How many bytes of the argument area a value in the general purpose file takes.
+///
+/// Its own width, which only a convention that packs the argument area reads, since everywhere
+/// else anything this narrow takes a word. A pointer has no width of its own in the IR, so it is
+/// the word.
+pub(crate) fn int_bytes(ty: Type, conv: &CallRegs) -> u32 {
+    if ty.is_ptr() { conv.word } else { ty.bits().saturating_mul(ty.lanes()).div_ceil(8).max(1) }
+}
+
 /// Whether a value of that type travels as bytes in the argument area because of what it is.
 ///
 /// One type does, and it is the `long double`. SysV classifies it X87 and X87UP, which is the
@@ -277,7 +286,7 @@ pub fn entry(
         // are already in this function's frame, and what the pointer holds is where they are.
         if let Abi::ByVal { size, align } = abi {
             let size = u32::try_from(size).map_err(|_| (index, Missing::TooBig))?;
-            where_from.push((ty, places.on_stack(size, align), abi));
+            where_from.push((ty, places.object(size, align), abi));
             continue;
         }
         // And an eighty bit float, which arrives the same way for the same reason and is told
@@ -299,7 +308,7 @@ pub fn entry(
             // for it, which takes no position from the arguments after it.
             (Abi::Sret { .. }, Some(sret)) => Where::Reg(sret),
             _ if ty.is_float() => places.float(float_bytes(ty)),
-            _ => places.integer(),
+            _ => places.integer(int_bytes(ty, conv)),
         };
         if let Some(missing) = refuses(ty, insts) {
             return Err((index, missing));
@@ -624,7 +633,13 @@ pub fn call(
         };
         if let Abi::ByVal { size, align } = abi {
             let size = u32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
-            let Where::Stack(up) = places.on_stack(size, align) else {
+            // One past the `...` is never packed, so it is words wherever it is.
+            let at = if variadic && index >= named {
+                places.on_stack(size, align)
+            } else {
+                places.object(size, align)
+            };
+            let Where::Stack(up) = at else {
                 unreachable!("an object in the argument area is in the argument area")
             };
             // Nothing here refuses a plan it did not get, because a copy the words give up on is
@@ -645,13 +660,12 @@ pub fn call(
         // whatever registers are left.
         let unnamed = variadic && index >= named && conv.abi.variadic == Variadic::AlwaysMemory;
         let at = if unnamed {
-            let bytes =
-                if ty.is_ptr() { conv.word } else { (ty.bits() * ty.lanes()).div_ceil(8).max(1) };
+            let bytes = int_bytes(ty, conv);
             places.on_stack(bytes, bytes)
         } else if ty.is_float() {
             places.float(float_bytes(ty))
         } else {
-            places.integer()
+            places.integer(int_bytes(ty, conv))
         };
         if let Some(missing) = refuses(ty, insts) {
             return Err(refused(missing));

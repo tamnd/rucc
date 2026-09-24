@@ -21,7 +21,7 @@
 
 use std::fmt;
 
-use rucc_abi::AbiDescription;
+use rucc_abi::{AbiDescription, StackArgs};
 
 /// One class of registers, and the registers in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,13 +548,16 @@ impl<'a> Places<'a> {
     }
 
     /// Where the next value is, when it travels in a general purpose register.
-    pub fn integer(&mut self) -> Where {
+    ///
+    /// `bytes` is how wide the value is, which only matters once the registers have run out and
+    /// only on a convention that packs the argument area, for the reason `Places::scalar` gives.
+    pub fn integer(&mut self, bytes: u32) -> Where {
         match self.regs.int_args.get(self.position(false)) {
             Some(&reg) => {
                 self.int += 1;
                 Where::Reg(reg)
             }
-            None => self.on_stack(self.regs.word, self.regs.word),
+            None => self.scalar(bytes),
         }
     }
 
@@ -574,10 +577,27 @@ impl<'a> Places<'a> {
                 self.sse += 1;
                 Where::Reg(reg)
             }
-            // The alignment is the width, which [`Places::on_stack`] raises to a word for anything
-            // narrower, so this is the natural alignment of the value and not a rule of its own.
-            None => self.on_stack(bytes, bytes),
+            None => self.scalar(bytes),
         }
+    }
+
+    /// Where a scalar that got no register is, which is its natural size and alignment on a
+    /// convention that packs the argument area and a whole number of words everywhere else.
+    ///
+    /// Apple's AArch64 is the one that packs, so a `char` in the ninth place there takes one byte
+    /// and the `short` after it starts at the second. That covers only the arguments a signature
+    /// names. One it does not is a word or more wherever it goes, and the caller asks for that
+    /// with [`Places::on_stack`] rather than here.
+    fn scalar(&mut self, bytes: u32) -> Where {
+        if self.regs.abi.stack_args == StackArgs::Packed {
+            let bytes = bytes.max(1);
+            let at = self.stack.next_multiple_of(bytes);
+            self.stack = at.saturating_add(bytes);
+            return Where::Stack(at);
+        }
+        // The alignment is the width, which [`Places::on_stack`] raises to a word for anything
+        // narrower, so this is the natural alignment of the value and not a rule of its own.
+        self.on_stack(bytes, bytes)
     }
 
     /// Where the next value is, when it travels in memory whatever is left.
@@ -589,6 +609,22 @@ impl<'a> Places<'a> {
         let word = self.regs.word;
         let at = self.stack.next_multiple_of(align.max(word));
         self.stack = at.saturating_add(size.max(word).next_multiple_of(word));
+        Where::Stack(at)
+    }
+
+    /// Where an object a signature names and passes by value is.
+    ///
+    /// The same as [`Places::on_stack`] on every convention but one that packs the argument area.
+    /// There the alignment is the one the ABI gave the object, which is a word for most of them,
+    /// and the object takes its size rounded up to that, so a record of three `char`s is still a
+    /// word and three `float`s are twelve bytes.
+    pub fn object(&mut self, size: u32, align: u32) -> Where {
+        if self.regs.abi.stack_args != StackArgs::Packed {
+            return self.on_stack(size, align);
+        }
+        let align = align.max(1);
+        let at = self.stack.next_multiple_of(align);
+        self.stack = at.saturating_add(size.next_multiple_of(align));
         Where::Stack(at)
     }
 
@@ -766,8 +802,8 @@ mod tests {
     fn counting_each_kind_separately_leaves_the_first_vector_register_to_the_first_float() {
         let regs = convention(false, 0);
         let mut places = Places::new(&regs);
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(1)));
         // Two integers went past, and a convention that counts separately has not spent a vector
         // register on either of them.
         assert_eq!(places.float(8), Where::Reg(PhysReg::new(10)));
@@ -778,20 +814,20 @@ mod tests {
     fn counting_one_position_for_both_skips_the_register_the_other_kind_would_have_used() {
         let regs = convention(true, 0);
         let mut places = Places::new(&regs);
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(0)));
         // The second position, so the second vector register, and the second integer register is
         // spent whether anything is in it or not.
         assert_eq!(places.float(8), Where::Reg(PhysReg::new(11)));
-        assert_eq!(places.integer(), Where::Stack(0));
+        assert_eq!(places.integer(8), Where::Stack(0));
     }
 
     #[test]
     fn running_out_of_one_kind_of_register_does_not_touch_the_other() {
         let regs = convention(false, 0);
         let mut places = Places::new(&regs);
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
-        assert_eq!(places.integer(), Where::Stack(0));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(1)));
+        assert_eq!(places.integer(8), Where::Stack(0));
         assert_eq!(places.float(8), Where::Reg(PhysReg::new(10)));
         assert_eq!(places.size(), 8);
     }
@@ -822,14 +858,43 @@ mod tests {
         // this is in the area. The word the integer took is not where the first quad starts,
         // because sixteen bytes aligned to sixteen skips the odd word above it, and the second
         // quad is sixteen bytes above the first rather than eight.
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(0)));
-        assert_eq!(places.integer(), Where::Reg(PhysReg::new(1)));
-        assert_eq!(places.integer(), Where::Stack(0));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(8), Where::Reg(PhysReg::new(1)));
+        assert_eq!(places.integer(8), Where::Stack(0));
         assert_eq!(places.float(16), Where::Stack(16));
         assert_eq!(places.float(16), Where::Stack(32));
         assert_eq!(places.size(), 48);
         // A float narrower than a word still takes one, which is what it took before any of this.
         assert_eq!(places.float(4), Where::Stack(48));
+        assert_eq!(places.size(), 56);
+    }
+
+    #[test]
+    fn apple_packs_the_arguments_that_got_no_register_at_their_own_size() {
+        let mut regs = convention(false, 0);
+        regs.abi = &rucc_abi::abis::DARWIN_ARM64;
+        let mut places = Places::new(&regs);
+        assert_eq!(places.integer(4), Where::Reg(PhysReg::new(0)));
+        assert_eq!(places.integer(4), Where::Reg(PhysReg::new(1)));
+        // A byte, a short and an int, each on its own alignment and nothing more, so the short
+        // skips the one byte after the char.
+        assert_eq!(places.integer(1), Where::Stack(0));
+        assert_eq!(places.integer(2), Where::Stack(2));
+        assert_eq!(places.integer(4), Where::Stack(4));
+        assert_eq!(places.float(8), Where::Reg(PhysReg::new(10)));
+        assert_eq!(places.float(4), Where::Reg(PhysReg::new(11)));
+        // The float goes straight after the int, and the long after it skips four bytes to get to
+        // its own alignment.
+        assert_eq!(places.float(4), Where::Stack(8));
+        assert_eq!(places.integer(8), Where::Stack(16));
+        assert_eq!(places.size(), 24);
+        // An object keeps the alignment it was given and takes its size up to it.
+        assert_eq!(places.object(12, 4), Where::Stack(24));
+        assert_eq!(places.object(3, 8), Where::Stack(40));
+        assert_eq!(places.size(), 48);
+        // Anything asked for as bytes is still a word or more, which is what an unnamed argument
+        // is there.
+        assert_eq!(places.on_stack(1, 1), Where::Stack(48));
         assert_eq!(places.size(), 56);
     }
 }
