@@ -17,10 +17,12 @@
 ;; same way, as a `mov` of its low sixteen bits with a `movk` for each piece above them.
 
 ;; Constants. One `mov` builds anything sixteen bits wide and anything whose complement is, and
-;; that covers every constant of eight and sixteen bits as the IR holds them, sign extended. A wider
-;; one is built a piece at a time. The rules for one width share a pattern and the first whose guard
-;; holds is the one that fires, so a constant takes as few instructions as these rules know how to
-;; give it.
+;; that covers every constant of eight and sixteen bits as the IR holds them, sign extended. A
+;; wider one is built a piece at a time, unless all but one of its sixteen bit pieces are zero or
+;; all of them ones, which is a single `movz` or `movn` with a shift and is what a `double` like
+;; 3.0 looks like as bits. The rules for one width share a pattern and the first whose guard
+;; holds is the one that fires, so a constant takes as few instructions as these rules know how
+;; to give it.
 
 (rule (lower (iconst.i1 k))
       (a64.mov_ri_32 k)
@@ -40,6 +42,11 @@
       (spec (= k (result))))
 
 (rule (lower (iconst.i32 k))
+      (if (or (= (extract 15 0 k) 0) (= (extract 15 0 k) 65535)))
+      (a64.mov_ri_32 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i32 k))
       (a64.movk_ri_16_32 (a64.mov_ri_32 (zero_extend 16 32 (extract 15 0 k)))
                          (zero_extend 16 32 (extract 31 16 k)))
       (spec (= k (result))))
@@ -50,9 +57,27 @@
       (spec (= k (result))))
 
 (rule (lower (iconst.i64 k))
+      (if (or (and (= (extract 15 0 k) 0) (= (extract 63 32 k) 0))
+              (and (= (extract 31 0 k) 0) (= (extract 63 48 k) 0))
+              (= (extract 47 0 k) 0)
+              (and (= (extract 15 0 k) 65535) (= (extract 63 32 k) 4294967295))
+              (and (= (extract 31 0 k) 4294967295) (= (extract 63 48 k) 65535))
+              (= (extract 47 0 k) 281474976710655)))
+      (a64.mov_ri_64 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i64 k))
       (if (and (>= k 0) (< k 4294967296)))
       (a64.movk_ri_16_64 (a64.mov_ri_64 (zero_extend 16 64 (extract 15 0 k)))
                          (zero_extend 16 64 (extract 31 16 k)))
+      (spec (= k (result))))
+
+(rule (lower (iconst.i64 k))
+      (if (= (extract 63 48 k) 0))
+      (a64.movk_ri_32_64
+        (a64.movk_ri_16_64 (a64.mov_ri_64 (zero_extend 16 64 (extract 15 0 k)))
+                           (zero_extend 16 64 (extract 31 16 k)))
+        (zero_extend 16 64 (extract 47 32 k)))
       (spec (= k (result))))
 
 (rule (lower (iconst.i64 k))

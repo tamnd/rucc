@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - A jump table on x86-64 ELF goes in `.rodata`, or `.rodata.` and the function's name under `-fdata-sections`, the way gcc puts it, rather than after the function's last instruction. Each cell is still the distance from the table to a block, now written as a `R_X86_64_PC32` against the function's section for the linker to fill in, so the code that reads a table has not changed. The table's bytes are no longer in the lines the instruction fetcher reads, and they no longer count as code when an executable section is measured, which is how the corpus compares sizes with gcc (#1759).
+- AArch64 builds a 64 bit constant with one `mov` when all but one of its sixteen bit pieces are zero or all ones, so a `double` like 3.0 is one instruction instead of four, and a 32 bit one when its low half is zero or all ones. A 64 bit constant whose top piece is zero takes three instructions instead of four.
 
 ## 0.11.6
 
