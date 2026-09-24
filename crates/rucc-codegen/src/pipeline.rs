@@ -784,6 +784,22 @@ mod tests {
     }
 
     #[test]
+    fn an_addition_compiles_for_aarch64_end_to_end() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, args[0], args[1], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::aarch64(&rucc_target::aarch64::AAPCS64);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &rucc_target::aarch64::REGS);
+        panic!("{text}");
+    }
+
+    #[test]
     fn a_function_comes_out_with_no_virtual_register_left_in_it() {
         let i32 = Type::int(32);
         let (mut names, mut source, block, args) = blank(&[i32, i32]);
