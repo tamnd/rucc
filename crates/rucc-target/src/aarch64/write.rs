@@ -167,16 +167,19 @@ fn address(line: &mut String, addr: Addr, named: Named<'_>) {
 fn reference(line: &mut String, operator: Operator, named: Named<'_>) {
     let symbol = named.symbol.unwrap_or("?");
     if named.spelling == Spelling::Apple {
-        // The thread-local operators have no suffix here, because Darwin reaches such a variable
-        // through a descriptor and the code generator refuses one before it gets this far. They
-        // are written the GNU way, which Apple's assembler rejects rather than misreads.
+        // The slot a thread-local's offset is in is a slot holding its descriptor's address on
+        // Apple's platforms, which the code calls through. The two offsets from the thread pointer
+        // have no suffix here, since Darwin has no such offsets, and are written the GNU way,
+        // which Apple's assembler rejects rather than misreads.
         let suffix = match operator {
             Operator::Plain if named.page => Some("@PAGE"),
             Operator::Plain => Some(""),
             Operator::Lo12 => Some("@PAGEOFF"),
             Operator::Got => Some("@GOTPAGE"),
             Operator::GotLo12 => Some("@GOTPAGEOFF"),
-            _ => None,
+            Operator::GotTprel => Some("@TLVPPAGE"),
+            Operator::GotTprelLo12 => Some("@TLVPPAGEOFF"),
+            Operator::TprelHi12 | Operator::TprelLo12Nc => None,
         };
         if let Some(suffix) = suffix {
             let _ = write!(line, "{symbol}{suffix}");
@@ -293,5 +296,8 @@ mod tests {
         assert_eq!(apple("ldr x0, [x0, :got_lo12:counter]"), "ldr x0, [x0, _counter@GOTPAGEOFF]");
         assert_eq!(apple("bl counter"), "bl _counter");
         assert_eq!(apple("adr x0, counter"), "adr x0, _counter");
+        assert_eq!(apple("adrp x0, :gottprel:counter"), "adrp x0, _counter@TLVPPAGE");
+        let slot = "ldr x0, [x0, :gottprel_lo12:counter]";
+        assert_eq!(apple(slot), "ldr x0, [x0, _counter@TLVPPAGEOFF]");
     }
 }

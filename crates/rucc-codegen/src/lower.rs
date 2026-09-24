@@ -458,8 +458,7 @@ pub enum Unsupported {
 /// What [`Unsupported::Unported`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unported {
-    /// A thread-local variable or the thread pointer on AArch64 for Apple's platforms, which reach
-    /// them through a descriptor.
+    /// The thread pointer on Apple's platforms, which keep it somewhere other than Linux does.
     Thread,
 }
 
@@ -468,7 +467,7 @@ impl Unported {
     #[must_use]
     pub fn why(self) -> &'static str {
         match self {
-            Unported::Thread => "a thread-local variable is not written for this machine yet",
+            Unported::Thread => "the thread pointer is not written for this platform yet",
         }
     }
 }
@@ -2532,14 +2531,16 @@ impl<'a> Lowering<'a> {
     /// AArch64 Linux is the same three steps. The slot is reached with `adrp` and `ldr` against
     /// `:gottprel:`, the thread pointer is `tpidr_el0` read with `mrs`, and the add has three
     /// operands. Apple's platforms reach a thread-local variable through a descriptor call instead,
-    /// which is not written, so it is refused there.
+    /// which is [`Self::thread_descriptor`].
     fn thread_address(
         &mut self,
         inst: Inst,
         symbol: Symbol,
         result: Value,
     ) -> Result<(), Unsupported> {
-        self.threads_written(inst)?;
+        if self.elsewhere.described() {
+            return self.thread_descriptor(inst, symbol, result);
+        }
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let gpr = self.gpr;
@@ -2576,11 +2577,71 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// Refuses a thread-local variable or the thread pointer where neither is written, which is
-    /// AArch64 on Apple's platforms. Its list being one pointer on a convention that counts the
-    /// two register files apart is what tells it from every other target.
+    /// A thread-local variable on Mach-O, which is a call.
+    ///
+    /// The slot the machine's thread load reads holds the address of the variable's descriptor
+    /// there, `_v@TLVP` on x86-64 and `_v@TLVPPAGE` with `_v@TLVPPAGEOFF` on AArch64. The first
+    /// word of the descriptor is the function that finds this thread's copy, and it takes the
+    /// descriptor's address as its one argument and gives back the copy's address. That is the
+    /// sequence clang writes on both machines.
+    ///
+    /// The call is built as an ordinary call through an address, so it costs what any call costs:
+    /// everything the convention does not preserve is taken to be gone across it. Apple's function
+    /// keeps more than that, all but the result and the two scratch registers on AArch64, and
+    /// taking the fewer registers as gone would be faster. What this gives up is speed, and a
+    /// function that reads a thread-local is no longer a leaf.
+    fn thread_descriptor(
+        &mut self,
+        inst: Inst,
+        symbol: Symbol,
+        result: Value,
+    ) -> Result<(), Unsupported> {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+
+        let descriptor = self.out.new_vreg(gpr);
+        match self.selector.symbols.thread {
+            Reach::Mode(name) => {
+                let load = self.named(name);
+                let mem = mir::Mem::thread(symbol);
+                self.out.build(block, load).at(span).def(descriptor, gpr).mem(mem).finish();
+            }
+            Reach::Own(name) => {
+                let load = self.named(name);
+                let build = self.out.build(block, load).at(span);
+                build.def(descriptor, gpr).symbol(symbol).finish();
+            }
+        }
+        let finder = self.out.new_vreg(gpr);
+        let word = (self.selector.abi.load)(Type::PTR).ok_or_else(|| self.unsupported(inst))?;
+        let word = mir::Opcode::new(self.names.intern(word));
+        let mem = mir::Mem::at(mir::Operand::read(descriptor, gpr));
+        self.out.build(block, word).at(span).def(finder, gpr).mem(mem).finish();
+
+        let args = [abi::Passing { ty: Type::PTR, reg: descriptor, abi: Abi::default() }];
+        let what = abi::Calling {
+            callee: abi::Callee::Through(finder),
+            args: &args,
+            returns: &[Type::PTR],
+            variadic: false,
+            named: 1,
+            at: span,
+        };
+        let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
+            .map_err(|refused| Unsupported::Call { inst, refused })?;
+        let calls = &mut self.stack.calls;
+        *calls = Some(calls.unwrap_or(0).max(made.outgoing));
+        let &[reg] = &made.results[..] else { return Err(self.unsupported(inst)) };
+        self.regs[result.index()] = Some(reg);
+        Ok(())
+    }
+
+    /// Refuses the thread pointer where it is not written, which is Mach-O. Apple keeps it in a
+    /// different register from the one Linux does on both machines, and nothing written for it
+    /// has been checked on one.
     fn threads_written(&self, inst: Inst) -> Result<(), Unsupported> {
-        if self.conv.list == VaList::CharPointer && !self.conv.shared_positions {
+        if self.elsewhere.described() {
             return Err(Unsupported::Unported { inst: Some(inst), what: Unported::Thread });
         }
         Ok(())

@@ -24,7 +24,7 @@ The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::A
 
 These are in code that runs, not in tests. A test that builds x86-64 instructions by hand to exercise a pass is not a leak, since the pass under test only sees names.
 
-- `lower.rs` refuses a thread-local variable on Darwin, which reaches one through a descriptor call. It tells Darwin apart by asking whether the list is one pointer on a convention that counts the register files apart, which is a stand in for a real per platform answer.
+- `lower.rs` reaches a thread-local variable on Mach-O through its descriptor and refuses `__builtin_thread_pointer` there. It knows to by asking `Elsewhere::described`, which is set from the object format, and it treats the descriptor call as a full call, so it saves every register the convention lets a callee clobber even though the real function clobbers far fewer.
 
 - `wide.rs` does not split an `__int128` passed past the `...` on Darwin, since the split names every argument and Darwin puts the unnamed ones in memory. Such a call is refused.
 

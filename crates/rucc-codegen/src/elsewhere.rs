@@ -70,6 +70,7 @@ use rucc_target::ObjectFormat;
 pub struct Elsewhere {
     names: HashSet<Symbol>,
     threads: HashSet<Symbol>,
+    described: bool,
 }
 
 impl Elsewhere {
@@ -81,7 +82,8 @@ impl Elsewhere {
             .filter(|&id| module[id].tls.is_some())
             .map(|id| module[id].name)
             .collect();
-        Self { threads, ..Self::table(module, pic, format) }
+        let described = format == ObjectFormat::MachO;
+        Self { threads, described, ..Self::table(module, pic, format) }
     }
 
     /// The half of the above that is about the global offset table, which is the older one.
@@ -151,6 +153,18 @@ impl Elsewhere {
     pub fn thread(&self, name: Symbol) -> bool {
         self.threads.contains(&name)
     }
+
+    /// Whether a thread-local variable is reached by calling through its descriptor, which is how
+    /// Mach-O does it on both architectures.
+    ///
+    /// The slot the table holds for such a variable is the address of the descriptor rather than an
+    /// offset from the thread pointer, and the first word of the descriptor is a function that takes
+    /// that address and gives back this thread's copy. So there is no thread pointer to add to,
+    /// and the answer is the value the call returns.
+    #[must_use]
+    pub const fn described(&self) -> bool {
+        self.described
+    }
 }
 
 /// The same set, written out by hand.
@@ -160,7 +174,7 @@ impl Elsewhere {
 /// module for it to be outside of.
 impl FromIterator<Symbol> for Elsewhere {
     fn from_iter<T: IntoIterator<Item = Symbol>>(names: T) -> Self {
-        Self { names: names.into_iter().collect(), threads: HashSet::new() }
+        Self { names: names.into_iter().collect(), threads: HashSet::new(), described: false }
     }
 }
 
@@ -169,6 +183,14 @@ impl Elsewhere {
     #[must_use]
     pub fn with_threads<T: IntoIterator<Item = Symbol>>(mut self, threads: T) -> Self {
         self.threads = threads.into_iter().collect();
+        self
+    }
+
+    /// The same set with thread-locals reached through a descriptor, for a test that lowers one
+    /// function the way Mach-O would.
+    #[must_use]
+    pub const fn with_descriptors(mut self) -> Self {
+        self.described = true;
         self
     }
 }

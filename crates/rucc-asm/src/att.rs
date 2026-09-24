@@ -292,6 +292,7 @@ impl Writer<'_> {
             self.piece(piece);
         }
         self.directives.close(&mut self.out, &var.name);
+        self.directives.descriptor(&mut self.out, var);
     }
 
     /// One piece of an image, as the directive that says it.
@@ -607,10 +608,13 @@ impl Writer<'_> {
             // The slot rather than the thing, which the assembler is told by the suffix and not by
             // the instruction: the two are the same `movq` and differ only in what goes in the
             // four bytes, so there is nowhere else to say it. The third one is a slot as well, and
-            // what it holds is an offset into a thread's own block rather than an address.
+            // what it holds is an offset into a thread's own block rather than an address. On
+            // Mach-O the slot holds the address of the variable's descriptor instead, which is
+            // what the code calls through.
             match amode.reach {
                 Reach::Itself => {}
                 Reach::Table => out.push_str("@GOTPCREL"),
+                Reach::Thread if self.directives == Directives::MachO => out.push_str("@TLVP"),
                 Reach::Thread => out.push_str("@GOTTPOFF"),
             }
             if amode.disp != 0 {
@@ -1289,6 +1293,33 @@ mod tests {
         assert!(text.contains("\t.section\t.tbss,\"awT\",@nobits\n"), "{text}");
         assert!(text.contains("\t.type\tcounter, @tls_object\n"), "{text}");
         assert!(text.contains("\ncounter:\n\t.space\t4\n"), "{text}");
+    }
+
+    /// What clang writes for `__thread int counter = 42;` on either Apple architecture: the image
+    /// under a name of its own, and the name the program uses on a descriptor that points at it.
+    #[test]
+    fn a_thread_local_variable_on_mach_o_is_an_image_and_a_descriptor() {
+        let text = data(
+            vec![var(
+                "counter",
+                Place::Thread { zero: false },
+                vec![Piece::Scalar(vec![42, 0, 0, 0])],
+            )],
+            Os::Darwin,
+        );
+        let image = "\t.section\t__DATA,__thread_data,thread_local_regular\n\t.p2align\t2\n\
+                     _counter$tlv$init:\n\t.long\t42\n";
+        assert!(text.contains(image), "{text}");
+        let descriptor = "\t.section\t__DATA,__thread_vars,thread_local_variables\n\
+                          \t.globl\t_counter\n\t.p2align\t3\n_counter:\n\
+                          \t.quad\t__tlv_bootstrap\n\t.quad\t0\n\t.quad\t_counter$tlv$init\n";
+        assert!(text.contains(descriptor), "{text}");
+        let zero = data(
+            vec![var("counter", Place::Thread { zero: true }, vec![Piece::Zero(4)])],
+            Os::Darwin,
+        );
+        assert!(zero.contains("\t.tbss\t_counter$tlv$init,4,2\n"), "{zero}");
+        assert!(zero.contains(descriptor), "{zero}");
     }
 
     #[test]
