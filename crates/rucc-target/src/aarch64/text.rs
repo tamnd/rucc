@@ -187,14 +187,31 @@ static TEXT: &[(&str, &[Written])] = &[
     ("rev16_r_32", &[spell("rev16", &[Reg(0, W), Reg(1, W)])]),
     // Widening. Each reads the low bits of its source and agrees with it about every one of them,
     // which is what `copies_low` asks.
+    // A value of eight or sixteen bits lives in a W register, so widening to sixteen bits is the
+    // thirty two bit instruction under a head that says how much of it the result is.
+    ("sxtb_16", &[spell("sxtb", &[Reg(0, W), Reg(1, W)])]),
     ("sxtb_32", &[spell("sxtb", &[Reg(0, W), Reg(1, W)])]),
     ("sxtb_64", &[spell("sxtb", &[Reg(0, X), Reg(1, W)])]),
     ("sxth_32", &[spell("sxth", &[Reg(0, W), Reg(1, W)])]),
     ("sxth_64", &[spell("sxth", &[Reg(0, X), Reg(1, W)])]),
+    ("uxtb_16", &[spell("uxtb", &[Reg(0, W), Reg(1, W)])]),
     ("uxtb_32", &[spell("uxtb", &[Reg(0, W), Reg(1, W)])]),
+    // Writing a W register clears the top half of the X register, so the widening to sixty four
+    // bits is the thirty two bit instruction under a head that says so.
+    ("uxtb_64", &[spell("uxtb", &[Reg(0, W), Reg(1, W)])]),
     ("uxth_32", &[spell("uxth", &[Reg(0, W), Reg(1, W)])]),
+    ("uxth_64", &[spell("uxth", &[Reg(0, W), Reg(1, W)])]),
     ("sxtw_64", &[spell("sxtw", &[Reg(0, X), Reg(1, W)])]),
     ("uxtw_64", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("bit_to_8", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("bit_to_16", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("bit_to_32", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("bit_to_64", &[spell("and", &[Reg(0, W), Reg(1, W), Lit(1)])]),
+    ("low_8", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("low_16", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("low_32", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
+    ("bit_of_32", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("bit_of_64", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
     // Comparisons that keep nothing but the condition state, which is what a branch on one is
     // folded into.
     ("cmp_rr_32", &[spell("cmp", &[Reg(0, W), Reg(1, W)])]),

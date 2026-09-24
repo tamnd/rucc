@@ -122,14 +122,34 @@
 
 ;; Widening. `uxtw_64` is a `mov` of one W register to another, which clears the top half of the X
 ;; register it writes, and that is the whole of a zero extension from thirty two bits.
+(semantics (a64.sxtb_16 v) (sign_extend 8 16 v))
 (semantics (a64.sxtb_32 v) (sign_extend 8 32 v))
 (semantics (a64.sxtb_64 v) (sign_extend 8 64 v))
 (semantics (a64.sxth_32 v) (sign_extend 16 32 v))
 (semantics (a64.sxth_64 v) (sign_extend 16 64 v))
 (semantics (a64.sxtw_64 v) (sign_extend 32 64 v))
+(semantics (a64.uxtb_16 v) (zero_extend 8 16 v))
 (semantics (a64.uxtb_32 v) (zero_extend 8 32 v))
 (semantics (a64.uxth_32 v) (zero_extend 16 32 v))
 (semantics (a64.uxtw_64 v) (zero_extend 32 64 v))
+(semantics (a64.uxtb_64 v) (zero_extend 8 64 v))
+(semantics (a64.uxth_64 v) (zero_extend 16 64 v))
+
+;; Widening one bit is an `and` with one, which keeps the bit and clears the rest, so it does not
+;; matter what was above the bit in the register it came from.
+(semantics (a64.bit_to_8 v) (zero_extend 1 8 v))
+(semantics (a64.bit_to_16 v) (zero_extend 1 16 v))
+(semantics (a64.bit_to_32 v) (zero_extend 1 32 v))
+(semantics (a64.bit_to_64 v) (zero_extend 1 64 v))
+
+;; Narrowing. A value narrower than its register lives in the low end of it and what is above means
+;; nothing, so a narrowing is a `mov` of the W register. Narrowing to one bit is an `and` that keeps
+;; the bit and clears the rest, which is what every reader of a one bit value on this machine wants.
+(semantics (a64.low_8 v) (extract 7 0 v))
+(semantics (a64.low_16 v) (extract 15 0 v))
+(semantics (a64.low_32 v) (extract 31 0 v))
+(semantics (a64.bit_of_32 l r) (bvand (extract 0 0 l) r))
+(semantics (a64.bit_of_64 l r) (bvand (extract 0 0 l) r))
 
 ;; The two addressing modes a load and a store reach through, which are an addition and nothing
 ;; about memory.

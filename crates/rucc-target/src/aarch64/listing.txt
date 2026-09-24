@@ -72,14 +72,27 @@ dac00041	rbit x1, x2	rbit_r_64
 5ac00841	rev w1, w2	rev_r_32
 dac00c41	rev x1, x2	rev_r_64
 5ac00441	rev16 w1, w2	rev16_r_32
+13001c41	sxtb w1, w2	sxtb_16
 13001c41	sxtb w1, w2	sxtb_32
 93401c41	sxtb x1, w2	sxtb_64
 13003c41	sxth w1, w2	sxth_32
 93403c41	sxth x1, w2	sxth_64
+53001c41	uxtb w1, w2	uxtb_16
 53001c41	uxtb w1, w2	uxtb_32
+53001c41	uxtb w1, w2	uxtb_64
 53003c41	uxth w1, w2	uxth_32
+53003c41	uxth w1, w2	uxth_64
 93407c41	sxtw x1, w2	sxtw_64
 2a0203e1	mov w1, w2	uxtw_64
+12000041	and w1, w2, #1	bit_to_8
+12000041	and w1, w2, #1	bit_to_16
+12000041	and w1, w2, #1	bit_to_32
+12000041	and w1, w2, #1	bit_to_64
+2a0203e1	mov w1, w2	low_8
+2a0203e1	mov w1, w2	low_16
+2a0203e1	mov w1, w2	low_32
+12000041	and w1, w2, #1	bit_of_32
+12000041	and w1, w2, #1	bit_of_64
 6b02003f	cmp w1, w2	cmp_rr_32
 7100043f	cmp w1, #1	cmp_ri_32
 7100003f	cmp w1, #0	test_32

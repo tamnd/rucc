@@ -615,6 +615,86 @@
       (a64.uxtw_64 x)
       (spec (= (zero_extend 32 64 x) (result))))
 
+;; A sixteen bit value lives in a W register the same as a thirty two bit one, so widening to it is
+;; the thirty two bit instruction under a head held to the sixteen bits the result has.
+
+(rule (lower (sext.i8.i16 (value.i8 x)))
+      (a64.sxtb_16 x)
+      (spec (= (sign_extend 8 16 x) (result))))
+
+(rule (lower (zext.i8.i16 (value.i8 x)))
+      (a64.uxtb_16 x)
+      (spec (= (zero_extend 8 16 x) (result))))
+
+(rule (lower (zext.i8.i64 (value.i8 x)))
+      (a64.uxtb_64 x)
+      (spec (= (zero_extend 8 64 x) (result))))
+
+(rule (lower (zext.i16.i64 (value.i16 x)))
+      (a64.uxth_64 x)
+      (spec (= (zero_extend 16 64 x) (result))))
+
+;; A one bit value is widened with an `and`, so nothing is taken on trust about the bits above it.
+
+(rule (lower (zext.i1.i8 (value.i1 x)))
+      (a64.bit_to_8 x)
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (lower (zext.i1.i16 (value.i1 x)))
+      (a64.bit_to_16 x)
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (lower (zext.i1.i32 (value.i1 x)))
+      (a64.bit_to_32 x)
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (lower (zext.i1.i64 (value.i1 x)))
+      (a64.bit_to_64 x)
+      (spec (= (zero_extend 1 64 x) (result))))
+
+;; Narrowing. The narrow value is the low end of the wide register, and a `mov` of the W register
+;; puts it in one of its own. Narrowing to one bit keeps that bit and clears the rest.
+
+(rule (lower (trunc.i16.i8 (value.i16 x)))
+      (a64.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i32.i8 (value.i32 x)))
+      (a64.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i64.i8 (value.i64 x)))
+      (a64.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i32.i16 (value.i32 x)))
+      (a64.low_16 x)
+      (spec (= (extract 15 0 x) (result))))
+
+(rule (lower (trunc.i64.i16 (value.i64 x)))
+      (a64.low_16 x)
+      (spec (= (extract 15 0 x) (result))))
+
+(rule (lower (trunc.i64.i32 (value.i64 x)))
+      (a64.low_32 x)
+      (spec (= (extract 31 0 x) (result))))
+
+(rule (lower (trunc.i8.i1 (value.i8 x)))
+      (a64.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i16.i1 (value.i16 x)))
+      (a64.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i32.i1 (value.i32 x)))
+      (a64.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i64.i1 (value.i64 x)))
+      (a64.bit_of_64 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
 
 ;; Reading memory. Two addressing modes, a register and a register plus a constant. The constant is
 ;; held to the nine signed bits every load can take, which is the unscaled form; a larger one that
