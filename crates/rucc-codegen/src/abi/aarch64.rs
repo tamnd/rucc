@@ -79,14 +79,22 @@ fn store_of(ty: Type) -> Option<&'static str> {
 /// a name nothing asks for.
 fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
-        return Some(*["a64.ret_val_f128", "a64.ret_val2_f128"].get(at)?);
+        let names =
+            ["a64.ret_val_f128", "a64.ret_val2_f128", "a64.ret_val3_f128", "a64.ret_val4_f128"];
+        return Some(*names.get(at)?);
     }
     if crate::term::is_half(ty) {
         return None;
     }
     if let Some(width) = crate::term::float_slot(ty) {
-        let names =
-            [["a64.ret_val_f32", "a64.ret_val_f64"], ["a64.ret_val2_f32", "a64.ret_val2_f64"]];
+        // Four, since a homogeneous aggregate of up to four floating point members comes back
+        // one member to a register.
+        let names = [
+            ["a64.ret_val_f32", "a64.ret_val_f64"],
+            ["a64.ret_val2_f32", "a64.ret_val2_f64"],
+            ["a64.ret_val3_f32", "a64.ret_val3_f64"],
+            ["a64.ret_val4_f32", "a64.ret_val4_f64"],
+        ];
         return Some(names.get(at)?[width]);
     }
     let names = [
@@ -119,7 +127,10 @@ mod tests {
             assert!(aarch64::form(bare).is_some(), "{name}");
         };
         for ty in types() {
-            for name in [head_of(ty), load_of(ty), store_of(ty), ret_of(ty, 0), ret_of(ty, 1)] {
+            for name in [head_of(ty), load_of(ty), store_of(ty)]
+                .into_iter()
+                .chain((0..4).map(|at| ret_of(ty, at)))
+            {
                 name.map(described);
             }
         }
@@ -148,6 +159,16 @@ mod tests {
         assert_eq!(ret_of(Type::int(1), 0), Some("a64.ret_val_32"));
         assert_eq!(ret_of(Type::int(64), 1), Some("a64.ret_val2_64"));
         assert_eq!(ret_of(Type::int(64), 2), None);
+    }
+
+    /// A structure of four `float`, `double` or `long double` members comes back one member to a
+    /// vector register, so the vector file has four places where the integer one has two.
+    #[test]
+    fn a_floating_point_aggregate_comes_back_in_up_to_four_registers() {
+        assert_eq!(ret_of(Type::float(Float::F32), 2), Some("a64.ret_val3_f32"));
+        assert_eq!(ret_of(Type::float(Float::F64), 3), Some("a64.ret_val4_f64"));
+        assert_eq!(ret_of(Type::float(Float::F128), 3), Some("a64.ret_val4_f128"));
+        assert_eq!(ret_of(Type::float(Float::F64), 4), None);
     }
 
     #[test]

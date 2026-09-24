@@ -39,8 +39,8 @@ use Form::{
     Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet, CmpSetI,
     Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FpToInt, Insert, IntToFp, Jcc,
     Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, PopPair, Probe,
-    Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetValFp, Select, Set, Store, StoreFp, Test,
-    Trap, Unary,
+    Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set,
+    Store, StoreFp, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -118,6 +118,11 @@ pub enum Form {
     RetValFp,
     /// [`Form::RetVal2`] in the other register file.
     RetVal2Fp,
+    /// The third member of a homogeneous floating point aggregate coming back, which is the one
+    /// kind of value that comes back in more than two registers.
+    RetVal3Fp,
+    /// The fourth member of one.
+    RetVal4Fp,
     /// A value arriving in a register, which the lowering pins to the register it arrives in.
     ArgVal,
     /// [`Form::ArgVal`] in the other register file.
@@ -186,6 +191,8 @@ static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixe
 static RET_VAL_2: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(x(1)))];
 static RET_VAL_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(0)))];
 static RET_VAL_2_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(1)))];
+static RET_VAL_3_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(2)))];
+static RET_VAL_4_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(3)))];
 static NONE: [OperandDesc; 0] = [];
 
 impl Form {
@@ -218,6 +225,8 @@ impl Form {
             RetVal2 => &RET_VAL_2,
             RetValFp => &RET_VAL_FP,
             RetVal2Fp => &RET_VAL_2_FP,
+            RetVal3Fp => &RET_VAL_3_FP,
+            RetVal4Fp => &RET_VAL_4_FP,
             Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe => &NONE,
         }
     }
@@ -602,6 +611,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ret_val2_f32", RetVal2Fp),
     ("ret_val2_f64", RetVal2Fp),
     ("ret_val2_f128", RetVal2Fp),
+    ("ret_val3_f32", RetVal3Fp),
+    ("ret_val3_f64", RetVal3Fp),
+    ("ret_val3_f128", RetVal3Fp),
+    ("ret_val4_f32", RetVal4Fp),
+    ("ret_val4_f64", RetVal4Fp),
+    ("ret_val4_f128", RetVal4Fp),
     ("arg_val_32", ArgVal),
     ("arg_val_64", ArgVal),
     ("arg_val_f32", ArgValFp),
