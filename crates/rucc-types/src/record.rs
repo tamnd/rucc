@@ -24,6 +24,7 @@
 //! decided here, and `tests/abi-corpus` is where the numbers they change are written down.
 
 use rucc_target::{BitFieldStyle, TargetInfo};
+use rucc_tuple::Env;
 
 use crate::kind::{ArrayLen, RecordKind, TypeKind};
 use crate::layout::{Layout, LayoutError, align, layout};
@@ -740,12 +741,17 @@ impl Builder {
     /// field unnamed is four bytes aligned to one, and AAPCS64 and Windows are the two places in
     /// this table that say otherwise.
     ///
-    /// Microsoft's `union` is the exception to all of it: there a bit-field gets storage and no
-    /// say in the alignment at all, so `union { unsigned m:3; char c; }` is four bytes aligned to
-    /// one, which is an alignment smaller than any member of it would have on its own.
+    /// MSVC's `union` is the exception to all of it: there a bit-field gets storage and no say in
+    /// the alignment at all, so `union { unsigned m:3; char c; }` is four bytes aligned to one,
+    /// which is an alignment smaller than any member of it would have on its own. MinGW's gcc lays
+    /// the same union out aligned to four even under `-mms-bitfields`, and clang does not follow it
+    /// there, so this is one of the rows where the two references disagree. Section 6.9 settles it
+    /// for the incumbent, which on `windows-gnu` is gcc.
     fn contributes_alignment(&self, target: &TargetInfo, named: bool) -> bool {
         match (self.kind, target.bit_field_style) {
-            (RecordKind::Union, BitFieldStyle::Microsoft) => false,
+            (RecordKind::Union, BitFieldStyle::Microsoft) if target.tuple.env() == Env::Msvc => {
+                false
+            }
             _ => named || target.unnamed_bit_field_aligns,
         }
     }

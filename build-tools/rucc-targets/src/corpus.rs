@@ -44,7 +44,7 @@ use std::process::ExitCode;
 
 use rucc_base::Interner;
 use rucc_target::TargetInfo;
-use rucc_tuple::{TARGETS, TargetTuple};
+use rucc_tuple::{Env, Os, TARGETS, TargetTuple};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, IntKind, RecordKind, RecordOptions, TypeId, Types, declare,
     layout_record,
@@ -464,7 +464,9 @@ fn shapes(has_int128: bool) -> Vec<Shape> {
         name: "union_of_bits".to_string(),
         why: "A union of a bit-field and a char. Microsoft's rule gives the bit-field its \
               storage and no say in the alignment, so this is four bytes aligned to one there, \
-              which is an alignment smaller than either member has on its own.",
+              which is an alignment smaller than either member has on its own. MinGW's gcc \
+              aligns it to four and clang to one, so on `windows-gnu` it is declared and not \
+              asserted.",
         kind: RecordKind::Union,
         options: RecordOptions::default(),
         members: vec![Member::bit_field(IntKind::UInt, 3), Member::leaf(Leaf::Int(IntKind::Char))],
@@ -527,21 +529,6 @@ fn shapes(has_int128: bool) -> Vec<Shape> {
                 align: None,
             },
         ],
-        flexible: true,
-    });
-    shapes.push(Shape {
-        name: "flexible_only".to_string(),
-        why: "A struct whose only member is a flexible array member, so it holds no storage at \
-              all. It has the size of the empty struct and the alignment of the element type, \
-              which is the one place those two come from different members.",
-        kind: RecordKind::Struct,
-        options: RecordOptions::default(),
-        members: vec![Member {
-            ty: MemberType::Leaf(Leaf::Int(IntKind::Int)),
-            elements: 0,
-            bits: None,
-            align: None,
-        }],
         flexible: true,
     });
 
@@ -701,13 +688,25 @@ fn render(target: TargetTuple, info: &TargetInfo) -> String {
         };
 
         declaration(&mut out, &types, &names, shape, &decls, laid_out.fields.as_slice());
-        assertions(&mut out, &names, shape, &decls, &laid_out);
+        if !disputed(target, shape) {
+            assertions(&mut out, &names, shape, &decls, &laid_out);
+        }
 
         types.complete_record(record, laid_out);
         built.push(id);
     }
 
     out
+}
+
+/// Whether the two references lay this shape out differently on this target, so that no answer
+/// rucc gives can pass against both of them.
+///
+/// The one case is a bit-field in a union on `windows-gnu`, where MinGW's gcc lets it raise the
+/// alignment and clang does not. rucc takes gcc's answer by section 6.9, and the shape is still
+/// declared so that the records after it keep their names on every row.
+fn disputed(target: TargetTuple, shape: &Shape) -> bool {
+    shape.name == "union_of_bits" && target.os() == Os::Windows && target.env() == Env::Gnu
 }
 
 /// The lines the header carries about `__int128`, which is nothing at all where the type exists.

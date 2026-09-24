@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn microsoft_gives_a_unions_bit_field_storage_and_no_say_in_the_alignment() {
+    fn msvc_gives_a_unions_bit_field_storage_and_no_say_in_the_alignment() {
         let mut interner = Interner::new();
         let types = Types::new();
         let char_ = types.int(IntKind::Char);
@@ -1056,6 +1056,13 @@ mod tests {
             Layout::new(4, 1)
         );
         assert_eq!(lay_out(&types, RecordKind::Union, &fields).layout, Layout::new(4, 4));
+        // MinGW's gcc aligns it to four with the same bit-field rule otherwise, and clang aligns
+        // it to one. gcc is the incumbent there, so its answer is the one taken.
+        let mingw = target("x86_64-pc-windows-gnu");
+        assert_eq!(
+            lay_out_on(&mingw, &types, RecordKind::Union, &fields).layout,
+            Layout::new(4, 4)
+        );
     }
 
     #[test]
