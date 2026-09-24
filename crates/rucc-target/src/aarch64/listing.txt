@@ -337,6 +337,8 @@ d63f0020	blr x1	blr
 d65f03c0	ret	ret
 f81f0fe1	str x1, [sp, #-16]!	push_64
 f84107e1	ldr x1, [sp], #16	pop_64
+a9bf0be1	stp x1, x2, [sp, #-16]!	push_pair_64
+a8c10be1	ldp x1, x2, [sp], #16	pop_pair_64
 aa0203f0	mov x16, x2	align_sp_64
 92400201	and x1, x16, #1	align_sp_64
 f900093f	str xzr, [x9, #16]	probe_64

@@ -76,6 +76,19 @@ pub struct Probe {
     pub interval: u32,
 }
 
+/// The two instructions that put two registers on the stack in one go and take them back.
+///
+/// AArch64 has these as `stp` and `ldp` with a writeback, and it is how the frame pointer and the
+/// link register go on the stack together as the frame record. The first register named is the one
+/// that ends up at the lower address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pair {
+    /// Stores two registers below the stack pointer and moves it down past both.
+    pub push: &'static str,
+    /// Loads two registers from the stack pointer and moves it back up past both.
+    pub pop: &'static str,
+}
+
 /// Every instruction a prologue, an epilogue, a spill or a reload is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInsts {
@@ -93,6 +106,9 @@ pub struct FrameInsts {
     pub push: &'static str,
     /// Takes a word off the stack into a register and moves the stack pointer back up.
     pub pop: &'static str,
+    /// Pushes two registers at once, or `None` on a machine that pushes one at a time. See
+    /// [`Pair`].
+    pub pair: Option<Pair>,
     /// Adds a constant to the stack pointer, which is how an epilogue gives the frame back.
     pub add: &'static str,
     /// Takes a constant off the stack pointer, which is how a prologue takes the frame.

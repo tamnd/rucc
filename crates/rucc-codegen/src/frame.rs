@@ -271,6 +271,12 @@ impl Frame {
     pub fn of(func: &Func, allocation: &Allocation, layout: &Layout<'_>) -> Self {
         let conv = layout.conv;
         let word = conv.word;
+        // How far one push moves the stack pointer, which is the word on x86-64 and the whole
+        // alignment on AArch64. A machine where it is the whole alignment is one whose stack
+        // pointer is never allowed off it, and so a leaf there owes itself an aligned frame even
+        // though it owes nobody else one.
+        let push = conv.push;
+        let aligned = push % conv.stack_align == 0;
         let (saved_int, vectors) = saved(func, allocation, layout);
 
         // The vector registers are saved in the frame rather than pushed, because no machine here
@@ -377,18 +383,26 @@ impl Frame {
         // reaches the rest of the frame from, and the frame pointer is the register that still
         // does. Forcing an alignment is one of the two and growing while the function runs is the
         // other.
-        let frame_pointer = layout.frame_pointer || realign.is_some() || layout.grows;
+        //
+        // A function that calls something on a machine whose call leaves the return address in a
+        // register is a third. The call writes over that register, so the prologue has to put it
+        // away, and it goes with the frame pointer as the one frame record the machine's unwinders
+        // and `__builtin_frame_address` expect to find.
+        let frame_pointer = layout.frame_pointer
+            || realign.is_some()
+            || layout.grows
+            || (!layout.leaf && conv.link.is_some());
         // Where in the prologue the pointer is established, which is the platform's answer except
         // in the one frame that has an answer of its own. See `Late` above.
         let late = conv.late_frame_pointer && realign.is_none();
 
         // Where the stack pointer sits once the prologue has finished pushing: one return address
-        // short of aligned when the function starts, and one word further off for every push. The
-        // frame pointer is a push like any other here, which is why this is asked after the two
-        // frames that keep one without being asked to have said so.
+        // short of aligned when the function starts, and one push further off for every push. The
+        // frame pointer is a push like any other here, which is why this is asked after the frames
+        // that keep one without being asked to have said so.
         let pushed = u32::from(frame_pointer) + u32::try_from(saved_int.len()).expect("a frame");
         let entry = wrap(conv.stack_align, conv.return_address);
-        let after = (entry + wrap(conv.stack_align, word * pushed)) % conv.stack_align;
+        let after = (entry + wrap(conv.stack_align, push * pushed)) % conv.stack_align;
 
         // A frame that grows cannot be one of the free ones. The red zone is the bytes below the
         // stack pointer, and the first thing a variable length array does is move the stack pointer
@@ -405,7 +419,7 @@ impl Frame {
             // everything in the frame aligned too.
             Some(to) => body.next_multiple_of(to),
             // A leaf owes nobody an aligned stack pointer, so it takes exactly what it uses.
-            None if layout.leaf && align <= word => body,
+            None if layout.leaf && align <= word && !aligned => body,
             // The smallest frame that lands the stack pointer back on a multiple of the alignment
             // given where the pushes left it.
             None => body + (after + conv.stack_align - body % conv.stack_align) % conv.stack_align,
@@ -425,7 +439,7 @@ impl Frame {
         // when the body starts and every distance from one is a distance from the other.
         let mut shift = if free { -offset(body) } else { offset(shifted) };
         if layout.grows && !late {
-            shift -= offset(size) + offset(word) * i32::try_from(saved_int.len()).expect("a frame");
+            shift -= offset(size) + offset(push) * i32::try_from(saved_int.len()).expect("a frame");
         }
         for at in slots
             .iter_mut()
@@ -451,15 +465,15 @@ impl Frame {
                 // caller's stack is the whole frame and every push above it, which is the same
                 // number a frame with no pointer counts from the stack pointer.
                 () if late && layout.grows => {
-                    Incoming::from_frame(offset(size + word * pushed + conv.return_address))
+                    Incoming::from_frame(offset(size + push * pushed + conv.return_address))
                 }
                 // The prologue saves the frame pointer before it does anything else and points it
-                // at where it saved it, so the caller's stack is one word for that and one return
+                // at where it saved it, so the caller's stack is one push for that and one return
                 // address above it, whatever the prologue did to the stack pointer afterwards.
                 () if realign.is_some() || layout.grows => {
-                    Incoming::from_frame(offset(word + conv.return_address))
+                    Incoming::from_frame(offset(push + conv.return_address))
                 }
-                () => Incoming::from_stack(offset(size + word * pushed + conv.return_address)),
+                () => Incoming::from_stack(offset(size + push * pushed + conv.return_address)),
             },
             frame_pointer,
             late,

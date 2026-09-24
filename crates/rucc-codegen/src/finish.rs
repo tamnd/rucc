@@ -444,6 +444,7 @@ impl Writer<'_> {
         let int = self.conv.int_class;
         let sse = self.conv.sse_class;
         let word = offset(self.conv.word);
+        let push = offset(self.conv.push);
         let mut out = Vec::new();
         // What the prologue wrote before it had described anything, which is what decides whether
         // there is a rule to remember at the end of it. Neither of these moves a register or takes
@@ -491,11 +492,16 @@ impl Writer<'_> {
         let mut below = offset(self.conv.return_address);
         let mut from_sp = true;
         if frame.frame_pointer() {
-            let inst = self.push(fp);
+            let inst = self.push_frame();
             out.push(inst);
-            below += word;
+            below += push;
             self.row(inst, CfiOp::DefCfaOffset(below));
             self.saved(inst, int, fp, -below);
+            // The frame record, where the return address a call left in a register goes on with
+            // the frame pointer and sits the word above it.
+            if let Some(link) = self.record() {
+                self.saved(inst, int, link, word - below);
+            }
             // Straight away unless the platform wants it after the frame, where the same two
             // instructions go at the bottom of this function instead. See `Late` in
             // [`crate::frame`].
@@ -511,7 +517,7 @@ impl Writer<'_> {
         for &reg in frame.saved_int() {
             let inst = self.push(reg);
             out.push(inst);
-            below += word;
+            below += push;
             if from_sp {
                 self.row(inst, CfiOp::DefCfaOffset(below));
             }
@@ -559,7 +565,7 @@ impl Writer<'_> {
             // `tamnd/rucc#1422`.
             if frame.realign().is_none() {
                 let above = if frame.grows() && !frame.late() {
-                    word + offset(self.conv.return_address)
+                    push + offset(self.conv.return_address)
                 } else {
                     below
                 };
@@ -1008,12 +1014,12 @@ impl Writer<'_> {
         let fp = self.conv.frame_pointer;
         let int = self.conv.int_class;
         let sse = self.conv.sse_class;
-        let word = self.conv.word;
+        let push = self.conv.push;
         let described = !self.func.cfi.is_empty();
         let mut out = Vec::new();
         // Where the body left things, which is where every epilogue starts from.
         let mut below = offset(self.conv.return_address)
-            + offset(word) * self.pushes(frame)
+            + offset(push) * self.pushes(frame)
             + offset(frame.size());
         let from_sp = !frame.frame_pointer();
         for save in frame.saved_sse() {
@@ -1030,11 +1036,11 @@ impl Writer<'_> {
             // was true before it is still true after it.
             //
             // Where the pointer is decides how far back this has to go. The early order left it one
-            // word above the first push, so the pops start that many words below it. The late one
+            // push above the first push, so the pops start that many pushes below it. The late one
             // left it where the body's stack pointer was, so they start the whole frame above it,
             // and in both cases the distance is a constant even in a frame that grew while it ran,
             // which is why this is written rather than an addition to the stack pointer.
-            let back = if frame.late() { offset(frame.size()) } else { -offset(word * pushed) };
+            let back = if frame.late() { offset(frame.size()) } else { -offset(push * pushed) };
             if back == 0 {
                 let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
                 out.push(self.two(mov, sp, fp));
@@ -1053,15 +1059,18 @@ impl Writer<'_> {
             let inst = self.pop(reg);
             out.push(inst);
             self.restored(inst, int, reg);
-            below -= offset(word);
+            below -= offset(push);
             if from_sp {
                 self.row(inst, CfiOp::DefCfaOffset(below));
             }
         }
         if frame.frame_pointer() {
-            let inst = self.pop(fp);
+            let inst = self.pop_frame();
             out.push(inst);
             self.restored(inst, int, fp);
+            if let Some(link) = self.record() {
+                self.restored(inst, int, link);
+            }
             // The frame pointer holds the caller's value again, so the address goes back to being
             // counted from the stack pointer, which by now is at the return address.
             let number = self.dwarf(int, sp);
@@ -1212,6 +1221,44 @@ impl Writer<'_> {
     fn pop(&mut self, reg: PhysReg) -> Inst {
         let pop = self.opcode(self.insts.pop);
         self.func.build_loose(pop).def(Reg::physical(reg), self.conv.int_class).finish()
+    }
+
+    /// The register that goes on the stack with the frame pointer, which is the one a call leaves
+    /// the return address in on a machine that pushes the two together, and nothing anywhere else.
+    fn record(&self) -> Option<PhysReg> {
+        self.conv.link.filter(|_| self.insts.pair.is_some())
+    }
+
+    /// Puts the caller's frame pointer on the stack, together with the return address on a machine
+    /// that keeps it in a register. The frame pointer goes at the lower address, so the pointer set
+    /// to it straight after names the caller's copy and the return address is the word above.
+    fn push_frame(&mut self) -> Inst {
+        let fp = self.conv.frame_pointer;
+        let (Some(link), Some(pair)) = (self.record(), self.insts.pair) else {
+            return self.push(fp);
+        };
+        let push = self.opcode(pair.push);
+        let class = self.conv.int_class;
+        self.func
+            .build_loose(push)
+            .uses(Reg::physical(fp), class)
+            .uses(Reg::physical(link), class)
+            .finish()
+    }
+
+    /// Takes back what [`Self::push_frame`] put on the stack.
+    fn pop_frame(&mut self) -> Inst {
+        let fp = self.conv.frame_pointer;
+        let (Some(link), Some(pair)) = (self.record(), self.insts.pair) else {
+            return self.pop(fp);
+        };
+        let pop = self.opcode(pair.pop);
+        let class = self.conv.int_class;
+        self.func
+            .build_loose(pop)
+            .def(Reg::physical(fp), class)
+            .def(Reg::physical(link), class)
+            .finish()
     }
 
     /// One general purpose register written with another.

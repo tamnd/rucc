@@ -57,7 +57,7 @@ pub use crate::aarch64::write::{cond_name, write};
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
-use crate::frame::{ClassMoves, FrameInsts, Probe};
+use crate::frame::{ClassMoves, FrameInsts, Pair, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
@@ -165,7 +165,9 @@ static AARCH64_MOVES: [ClassMoves; 2] = [
 /// The same arrangement as `rucc_target::x86_64::FRAME`, and three things about this machine show
 /// through it. A push and a pop move the stack pointer by sixteen rather than by a word, because
 /// the machine faults on an access through a stack pointer that is not a multiple of sixteen, so
-/// the frame code has to count them that way. The stack pointer is register thirty one, which the
+/// the frame code has to count them that way. The frame pointer and the link register go on together
+/// as one pair, the frame record, which is what a debugger and `__builtin_frame_address` walk. The
+/// stack pointer is register thirty one, which the
 /// shifted register forms read as zero, so every instruction here that reads it is one the encoder
 /// writes in a form that can say it: an addition of a register to it is the extended form, and the
 /// alignment goes through `x16`, since the one instruction that can mask the stack pointer cannot
@@ -177,6 +179,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     classes: &AARCH64_MOVES,
     push: "push_64",
     pop: "pop_64",
+    pair: Some(Pair { push: "push_pair_64", pop: "pop_pair_64" }),
     add: "add_ri_64",
     sub: "sub_ri_64",
     grow: "sub_rr_64",
@@ -689,9 +692,9 @@ const fn aapcs64(abi: &'static rucc_abi::AbiDescription, red_zone: u32) -> CallR
         sse_order: &FP_ORDER,
         stack_pointer: SP,
         frame_pointer: FP,
-        // The frame record goes at the bottom of the saved area and the pointer is set to it once
-        // the frame is taken, which is still the order that keeps the chain: the word it names is
-        // the caller's frame pointer and the one above it is the return address.
+        // The frame record is the first thing pushed and the pointer is set to it straight away,
+        // which is the order that keeps the chain: the word it names is the caller's frame pointer
+        // and the one above it is the return address.
         late_frame_pointer: false,
         // Nothing says how many vector registers a variadic call used. The callee saves all eight
         // in its prologue if it is variadic at all, which is cheaper on this machine than the
@@ -704,6 +707,8 @@ const fn aapcs64(abi: &'static rucc_abi::AbiDescription, red_zone: u32) -> CallR
         // stack pointer is aligned on entry, which is the thing x86-64's frame layout has to undo.
         return_address: 0,
         word: 8,
+        push: 16,
+        link: Some(LR),
         dwarf: &AARCH64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
         // None for now, and it is a different mechanism rather than a missing number. glibc and

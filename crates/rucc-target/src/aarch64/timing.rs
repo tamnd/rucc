@@ -88,8 +88,8 @@ fn plain(form: Form) -> Timing {
         MulAdd => (2, Unit::Mul),
         Load => (LOAD, Unit::Load),
         Store | Probe => (1, Unit::Store),
-        Push => (1, Unit::Store),
-        Pop => (LOAD, Unit::Load),
+        Push | PushPair => (1, Unit::Store),
+        Pop | PopPair => (LOAD, Unit::Load),
         LoadFp => (LOAD + 1, Unit::Load),
         StoreFp => (1, Unit::Store),
         // Floating point. An addition is two cycles and a multiply three on this core, and the
