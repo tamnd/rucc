@@ -45,6 +45,7 @@ use rucc_abi::DataLayout;
 use rucc_base::float::Format;
 use rucc_tuple::{self as tuple, TargetTuple};
 
+pub mod aarch64;
 mod abi;
 mod bits;
 mod branch;
@@ -55,7 +56,6 @@ mod operand;
 mod regs;
 mod short;
 mod timing;
-pub mod aarch64;
 pub mod x86_64;
 
 pub use crate::abi::{AbiDescription, Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot};
