@@ -2364,15 +2364,17 @@ impl Writer<'_> {
     }
 }
 
-/// The instructions that do nothing, one for each length from one byte to ten.
+/// The instructions that do nothing, one for each length from one byte to eleven.
 ///
 /// The lengths the manuals recommend, which is what gas writes in front of a loop as well: one
 /// `nop` for a byte, `nopw` with an operand size prefix for two, and past that the `nopl` and
 /// `nopw` forms that take an address they never read, grown by a displacement and then by prefixes
-/// until the ten byte one is `cs nopw 0(%rax,%rax,1)`. One instruction rather than a run of
-/// single bytes because the processor may walk into the padding, and ten one byte nops are ten
+/// until the ten byte one is `cs nopw 0(%rax,%rax,1)`. The eleven byte one is that with a second
+/// operand size prefix, which is where gas stops, and stopping at the same length is what makes a
+/// run of padding come out as the same instructions gas writes. One instruction rather than a run
+/// of single bytes because the processor may walk into the padding, and ten one byte nops are ten
 /// instructions to decode where this is one.
-const NOPS: [&[u8]; 10] = [
+const NOPS: [&[u8]; 11] = [
     &[0x90],
     &[0x66, 0x90],
     &[0x0f, 0x1f, 0x00],
@@ -2383,13 +2385,14 @@ const NOPS: [&[u8]; 10] = [
     &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
     &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
     &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
 
 /// That many bytes of instructions that do nothing, as few instructions as they can be.
 ///
 /// Padding the processor may run through, which is the space in front of a loop that the block
-/// before it falls into. The longest is ten bytes, `cs nopw 0(%rax,%rax,1)`, and a longer run is
-/// more than one of them.
+/// before it falls into. The longest is eleven bytes, and a longer run is as many of those as fit
+/// and then one for what is left, which is the order gas writes them in.
 pub fn nops(count: usize, out: &mut Vec<u8>) {
     let mut left = count;
     while left > 0 {
@@ -3265,7 +3268,7 @@ mod tests {
         assert_eq!(encoding("addl", &[Kind::Reg], 0), None);
     }
 
-    /// Every length of padding is exactly that many bytes, and it is one instruction up to ten.
+    /// Every length of padding is exactly that many bytes, and it is one instruction up to eleven.
     #[test]
     fn padding_is_as_long_as_asked_and_one_instruction_while_it_can_be() {
         for count in 0..=25 {
@@ -3280,7 +3283,11 @@ mod tests {
         nops(3, &mut out);
         assert_eq!(out, [0x0f, 0x1f, 0x00], "nopl (%rax)");
         let mut out = Vec::new();
-        nops(12, &mut out);
-        assert_eq!(out[10..], [0x66, 0x90], "ten bytes and then two");
+        nops(11, &mut out);
+        assert_eq!(out, [0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0], "data16 cs nopw");
+        // What gas 2.42 writes for thirteen bytes in front of a `ret`.
+        let mut out = Vec::new();
+        nops(13, &mut out);
+        assert_eq!(out[11..], [0x66, 0x90], "eleven bytes and then two");
     }
 }

@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The assembler now writes a `jmp` or conditional jump in its two byte form when the target is close enough, the way gas does. Each jump starts short and the file is read again with the ones that do not reach made long, until nothing changes. A jump to another section or to a weak name stays long, since it is a relocation.
 - The assembler writes a shift or rotate by `$1` without the count byte, and `cmp`, `add`, `test` and the rest with a four byte immediate into `%eax` (or `%rax`, `%ax`, `%al`) in the form with no addressing byte. gas picks both, so a `.s` file now comes out the same size.
 - The assembler now picks the short and long forms of a jump exactly as gas does when an alignment sits between a jump and its target. On `gcc -S` output for lua, zlib, cJSON, lz4, tinf and xxHash at `-O0` to `-O3` and `-Os`, all 96 files that assemble give the same `.text` size as gas 2.42.
+- Padding in code now uses an eleven byte nop, `data16 cs nopw 0(%rax,%rax,1)`, and a longer run is as many of those as fit and then one for the rest, the same instructions gas writes. Code sections from the compiler and from a `.s` file now pad the way gas does.
 
 ### Fixed
 
