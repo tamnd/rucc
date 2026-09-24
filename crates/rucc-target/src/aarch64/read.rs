@@ -267,54 +267,62 @@ fn reference(text: &str, symbol: &mut Option<String>) -> Result<Operator, Error>
     Ok(operator)
 }
 
+/// The barrier options by name, as the number the encoding gives each.
+pub(super) static BARRIERS: [(&str, u8); 12] = [
+    ("oshld", 1),
+    ("oshst", 2),
+    ("osh", 3),
+    ("nshld", 5),
+    ("nshst", 6),
+    ("nsh", 7),
+    ("ishld", 9),
+    ("ishst", 10),
+    ("ish", 11),
+    ("ld", 13),
+    ("st", 14),
+    ("sy", 15),
+];
+
 /// A barrier option, as the number the encoding gives it.
 fn barrier(name: &str) -> Option<u8> {
-    Some(match name {
-        "oshld" => 1,
-        "oshst" => 2,
-        "osh" => 3,
-        "nshld" => 5,
-        "nshst" => 6,
-        "nsh" => 7,
-        "ishld" => 9,
-        "ishst" => 10,
-        "ish" => 11,
-        "ld" => 13,
-        "st" => 14,
-        "sy" => 15,
-        _ => return None,
-    })
+    BARRIERS.iter().find(|(known, _)| *known == name).map(|&(_, option)| option)
+}
+
+/// The system registers a compiler reads by name, as the op0, op1, CRn, CRm and op2 fields.
+pub(super) static SYSTEM: [(&str, [u16; 5]); 9] = [
+    ("nzcv", [3, 3, 4, 2, 0]),
+    ("fpcr", [3, 3, 4, 4, 0]),
+    ("fpsr", [3, 3, 4, 4, 1]),
+    ("tpidr_el0", [3, 3, 13, 0, 2]),
+    ("tpidrro_el0", [3, 3, 13, 0, 3]),
+    ("cntfrq_el0", [3, 3, 14, 0, 0]),
+    ("cntvct_el0", [3, 3, 14, 0, 2]),
+    ("dczid_el0", [3, 3, 0, 0, 7]),
+    ("ctr_el0", [3, 3, 0, 0, 1]),
+];
+
+/// The fifteen bits `mrs` and `msr` carry for a system register with those five fields.
+pub(super) const fn system_field([op0, op1, crn, crm, op2]: [u16; 5]) -> u16 {
+    (op0 - 2) << 14 | op1 << 11 | crn << 7 | crm << 3 | op2
 }
 
 /// A system register, as the fifteen bits `mrs` and `msr` carry for it.
 ///
-/// The ones a compiler reads by name, and any of them written the generic way, as
-/// `s3_3_c13_c0_2`.
+/// The ones in [`SYSTEM`], and any of them written the generic way, as `s3_3_c13_c0_2`.
 fn system(name: &str) -> Option<u16> {
-    let (op0, op1, crn, crm, op2) = match name {
-        "nzcv" => (3, 3, 4, 2, 0),
-        "fpcr" => (3, 3, 4, 4, 0),
-        "fpsr" => (3, 3, 4, 4, 1),
-        "tpidr_el0" => (3, 3, 13, 0, 2),
-        "tpidrro_el0" => (3, 3, 13, 0, 3),
-        "cntfrq_el0" => (3, 3, 14, 0, 0),
-        "cntvct_el0" => (3, 3, 14, 0, 2),
-        "dczid_el0" => (3, 3, 0, 0, 7),
-        "ctr_el0" => (3, 3, 0, 0, 1),
-        _ => {
-            let mut parts = name.strip_prefix('s')?.split('_');
-            let mut next = |prefix: &str, below: u16| {
-                let part = parts.next()?;
-                part.strip_prefix(prefix)?.parse::<u16>().ok().filter(|&n| n < below)
-            };
-            let fields = (next("", 4)?, next("", 8)?, next("c", 16)?, next("c", 16)?, next("", 8)?);
-            if parts.next().is_some() || fields.0 < 2 {
-                return None;
-            }
-            fields
-        }
+    if let Some(&(_, fields)) = SYSTEM.iter().find(|(known, _)| *known == name) {
+        return Some(system_field(fields));
+    }
+    let mut parts = name.strip_prefix('s')?.split('_');
+    let mut next = |prefix: &str, below: u16| {
+        let part = parts.next()?;
+        part.strip_prefix(prefix)?.parse::<u16>().ok().filter(|&n| n < below)
     };
-    Some((op0 - 2) << 14 | op1 << 11 | crn << 7 | crm << 3 | op2)
+    let fields = [next("", 4)?, next("", 8)?, next("c", 16)?, next("c", 16)?, next("", 8)?];
+    if parts.next().is_some() || fields[0] < 2 {
+        return None;
+    }
+    Some(system_field(fields))
 }
 
 /// An address, `[x0]`, `[x0, #8]`, `[x0, #8]!`, `[x0, x1, lsl #3]` or `[x0, :lo12:name]`.

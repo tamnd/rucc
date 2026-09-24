@@ -19,23 +19,36 @@
 //!
 //! # Instructions
 //!
-//! [`encode`] writes one instruction as its word, and [`read`] reads one written the way GNU as
-//! takes it, which together are enough to check every word against the ones GNU as writes. The
-//! table of what each instruction does with its operands arrives with the lowering that selects
-//! them, and so does the frame's list of what a prologue is made of.
+//! [`encode`] writes one instruction as its word, [`read`] reads one written the way GNU as takes
+//! it, and [`write()`] writes one the way GNU as takes it, which together are enough to check every
+//! word against the ones GNU as writes and every line against what it reads back as.
 //!
-//! The flags register, for the reason x86-64 leaves it out: a comparison and whatever reads it are
-//! one rule. And the scalable vector and predicate registers, which arrive with the target features
-//! that have them.
+//! [`INSTS`] is what each opcode of the machine IR does with its operands, which is what the
+//! allocator reads, and [`written`] is what it is written as. [`fill`] turns an argument of one of
+//! those into the value the encoder and the writer both take, so a listing and the object beside it
+//! are written from the same values.
+//!
+//! # What is not here yet
+//!
+//! The frame's list of what a prologue is made of, and the other descriptions a pipeline pass reads
+//! a machine through, which arrive with the lowering that selects these opcodes. The flags register,
+//! for the reason x86-64 leaves it out: a comparison and whatever reads it are one rule. And the
+//! scalable vector and predicate registers, which arrive with the target features that have them.
 
 mod encode;
+mod insts;
 mod read;
+mod text;
+mod write;
 
 pub use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Encoded, Error, Extend, Fixup, Mode, Offset, Operator, Scalar, Shift,
     Value, Width, encode,
 };
+pub use crate::aarch64::insts::{Form, INSTS, form};
 pub use crate::aarch64::read::{Error as ReadError, Line, read};
+pub use crate::aarch64::text::{Arg, Missing, Operands, Written, fill, written};
+pub use crate::aarch64::write::{cond_name, write};
 
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
