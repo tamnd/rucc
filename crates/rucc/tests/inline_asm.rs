@@ -787,6 +787,55 @@ fn a_template_kept_as_text_spells_a_constant_and_a_name_the_way_gcc_does() {
 }
 
 #[test]
+fn a_template_kept_as_text_spells_a_register_operand_as_the_register_it_was_given() {
+    // The jump with no condition is what keeps it as text. The input and the output are in
+    // registers the allocator chose, which it only chose after the text was written down, so each
+    // is spelled at the width of its type once it has one.
+    let source = "int f(int x) { int r; asm (\"mov %1,%0; jmp 1f; 1:\" : \"=r\" (r) : \"r\" (x)); \
+                  return r; }\n";
+    let f = body(&asm("kept-register", source), "f");
+    let line = f.lines().find(|line| line.contains("jmp 1f")).unwrap_or_default();
+    assert!(line.trim_start().starts_with("mov %e") || line.contains("mov %r"), "{f}");
+    assert_eq!(line.matches('%').count(), 2, "{f}");
+    assert!(!f.contains('\u{1}'), "a hole was left in the text:\n{f}");
+}
+
+#[test]
+fn a_register_operand_of_a_kept_template_is_spelled_at_the_width_its_modifier_asks_for() {
+    // `+r` is one register read and written, and `%k0` of a `long` is its low four bytes. A pinned
+    // operand is in the register its letter names.
+    let source = "long f(long x) { asm (\"addl %k0,%k0; jmp 1f; 1:\" : \"+r\" (x)); return x; }\n\
+                  int g(int x) { int r; asm (\"movb %h1,%b0; jmp 1f; 1:\" : \"=r\" (r) : \"a\" (x)); \
+                  return r; }\n";
+    let text = asm("kept-widths", source);
+    let f = body(&text, "f");
+    let line = f.lines().find(|line| line.contains("jmp 1f")).unwrap_or_default();
+    let spelled: Vec<&str> = line.split([' ', ',', ';']).collect();
+    assert!(spelled[1].starts_with("%e") || spelled[1].ends_with('d'), "{f}");
+    assert_eq!(spelled[1], spelled[2], "one register read and written:\n{f}");
+    let g = body(&text, "g");
+    assert!(g.contains("movb %ah,%"), "{g}");
+}
+
+#[test]
+fn an_output_of_a_kept_template_written_early_shares_no_register_with_an_input() {
+    // `&` says the text writes the output before it has read every input, so the three inputs and
+    // the output are four registers. Without it the output could have been given the first input's.
+    let source = "int f(int a, int b, int c) { int r; \
+                  asm (\"mov %1,%0; add %2,%0; add %3,%0; jmp 1f; 1:\" \
+                  : \"=&r\" (r) : \"r\" (a), \"r\" (b), \"r\" (c)); return r; }\n";
+    let f = body(&asm("kept-early", source), "f");
+    let line = f.lines().find(|line| line.contains("jmp 1f")).unwrap_or_default();
+    let named: Vec<&str> = line
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter(|word| word.starts_with('%'))
+        .collect();
+    assert_eq!(named.len(), 6, "{f}");
+    let output = named[1];
+    assert!(named[0] != output && named[2] != output && named[4] != output, "{f}");
+}
+
+#[test]
 fn a_unit_with_a_template_kept_as_text_is_assembled_from_its_listing() {
     // A jump from one statement to a label another one defines, which only an assembler reading
     // the whole unit can resolve.

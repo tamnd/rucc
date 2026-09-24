@@ -316,6 +316,28 @@ fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
     }
 }
 
+/// Whether a line of a template names, by number, an operand `wanted` says yes to.
+///
+/// `%%` is a percent sign rather than an operand, and a modifier letter may stand between the sign
+/// and the number.
+fn names_one(line: &str, wanted: impl Fn(usize) -> bool) -> bool {
+    let mut rest = line;
+    while let Some(at) = rest.find('%') {
+        let after = &rest[at + 1..];
+        if let Some(escaped) = after.strip_prefix('%') {
+            rest = escaped;
+            continue;
+        }
+        let after = after.strip_prefix(|c: char| c.is_ascii_alphabetic()).unwrap_or(after);
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if after[..digits].parse().is_ok_and(&wanted) {
+            return true;
+        }
+        rest = &after[digits..];
+    }
+    false
+}
+
 /// Why a function could not be lowered.
 ///
 /// One reason and then nothing. A function with no rule for something in it is a function this
@@ -3443,7 +3465,7 @@ impl<'a> Lowering<'a> {
         } else {
             match x86_64::read_in(&template, &widths, &memory) {
                 Some(steps) => steps,
-                None => return self.kept(inst, &template, &list),
+                None => return self.kept(inst, &template, &list, &widths, &memory),
             }
         };
 
@@ -3628,8 +3650,19 @@ impl<'a> Lowering<'a> {
     /// An object in memory is the one thing that cannot be spelled yet, since where it is depends on
     /// registers nothing has chosen, so it is left as a hole the writer fills and its address is the
     /// instruction's memory operand. One is all an instruction has room for, and every template this
-    /// has met names one at most. An operand in a register is refused for now, as is a template
-    /// that names one by name rather than by number.
+    /// has met names one at most. A template that names an operand by name rather than by number is
+    /// refused for now.
+    ///
+    /// # An operand in a register
+    ///
+    /// Which register is not known until the allocator has run, and the text is written down before
+    /// then, so an operand in a register is a hole too. It names the instruction's own operand and
+    /// the width the modifier asked for, or the width of the operand's type when there was none,
+    /// and the writer spells whatever register the operand ended up in. What the text writes goes
+    /// in first as definitions and what it reads goes in last as uses, with the registers below in
+    /// between, so the allocator sees the statement as one instruction with every operand said. An
+    /// output tied to an input, by `+` or by a number, reuses the input's register, and one written
+    /// `&` is written early. Anything wider than a general purpose register is refused.
     ///
     /// A statement written with no colons is basic assembly, where `%` is a character like any
     /// other and a register is written `%eax`. The front end keeps no mark of which kind a statement
@@ -3642,6 +3675,8 @@ impl<'a> Lowering<'a> {
         inst: Inst,
         template: &str,
         list: &[AsmOperand<'_>],
+        widths: &[Option<x86_64::Width>],
+        memory: &[bool],
     ) -> Result<(), Unsupported> {
         // Refused as the template it is, since keeping it is what was tried after reading it
         // failed, and what could not be kept is what it names rather than any one operand.
@@ -3650,6 +3685,123 @@ impl<'a> Lowering<'a> {
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let clobbers = self.names.resolve(self.source[asm].clobbers).to_string();
         let basic = list.is_empty() && clobbers.trim().is_empty();
+
+        // Every register a call may leave anything in, as well as the ones the list names. The
+        // text can write any register it likes without saying so, and tcc's tests do: gcc gets
+        // away with that at `-O0` because nothing lives in a register between two statements
+        // there, and taking these away from the allocator across the template is what gives the
+        // same answer here. Nothing is written to them by this, so a register one template leaves
+        // a value in is still holding it when the next template reads it.
+        let mut clobbered: Vec<(PhysReg, RegClass)> =
+            self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect();
+        for reg in Self::clobbered(inst, &clobbers)? {
+            if !clobbered.iter().any(|&(had, _)| had == reg) {
+                clobbered.push((reg, self.gpr));
+            }
+        }
+
+        // The operands in a register, as the instruction's own. An input the text is handed as a
+        // constant or as the address of a name is spelled into the text instead, when its
+        // constraint allows a constant at all and no output is tied to it. `"a" (0x1234)` is a
+        // register holding the number, the way gcc loads it, since the text may ask for `%h0`.
+        let mut defs: Vec<mir::Operand> = Vec::new();
+        let mut uses: Vec<mir::Operand> = Vec::new();
+        let mut def_of: Vec<Option<usize>> = vec![None; list.len()];
+        let mut use_of: Vec<Option<usize>> = vec![None; list.len()];
+        if !basic {
+            for (index, operand) in list.iter().enumerate() {
+                let Some(result) = operand.result else { continue };
+                let ty = self.source[result].ty;
+                if on_x87(ty) || self.class_of(ty) != self.gpr {
+                    return Err(refused());
+                }
+                let reg = self.new_reg(result);
+                let written = if operand.early {
+                    mir::Operand::write_early(reg, self.gpr)
+                } else {
+                    mir::Operand::write(reg, self.gpr)
+                };
+                def_of[index] = Some(defs.len());
+                defs.push(match pinned(operand) {
+                    Some(at) => written.with(Constraint::Fixed(at)),
+                    None => written,
+                });
+            }
+            for (index, operand) in list.iter().enumerate() {
+                let Some(value) = operand.value else { continue };
+                let spelled = operand.result.is_none()
+                    && operand.tied.is_none()
+                    && operand.immediate
+                    && (self.number(value).is_some() || self.named_address(value).is_some());
+                if operand.memory || spelled {
+                    continue;
+                }
+                let ty = self.source[value].ty;
+                if on_x87(ty) || self.class_of(ty) != self.gpr {
+                    return Err(refused());
+                }
+                let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
+                use_of[index] = Some(uses.len());
+                uses.push(match pinned(operand) {
+                    Some(at) => read.with(Constraint::Fixed(at)),
+                    None => read,
+                });
+            }
+        }
+        // A register an output is pinned to is that output's definition and not a clobber as well.
+        // One an input is pinned to is written as the instruction finishes, the way a call writes
+        // the register its argument came in, and every other one is written early, since the text
+        // may write it before it has read its inputs and an input must not be in it.
+        let mut written: Vec<mir::Operand> = Vec::new();
+        for (reg, class) in clobbered {
+            let fixed = |operand: &mir::Operand| {
+                class == self.gpr && operand.constraint == Constraint::Fixed(reg)
+            };
+            if defs.iter().any(fixed) {
+                continue;
+            }
+            let reg = mir::Reg::physical(reg);
+            written.push(if uses.iter().any(fixed) {
+                mir::Operand::write(reg, class)
+            } else {
+                mir::Operand::write_early(reg, class)
+            });
+        }
+        // An output tied to an input is one register, which the definition says by reusing the
+        // use, or by both being fixed to the same one when the output was pinned.
+        let first_use = defs.len() + written.len();
+        for (output, operand) in list.iter().enumerate() {
+            let Some(def) = def_of[output] else { continue };
+            let input = if operand.value.is_some() {
+                Some(output)
+            } else {
+                list.iter().position(|entry| entry.tied == Some(output))
+            };
+            let Some(read) = input.and_then(|input| use_of[input]) else { continue };
+            match defs[def].constraint {
+                Constraint::Fixed(_) => uses[read].constraint = defs[def].constraint,
+                _ => {
+                    let at = u8::try_from(first_use + read).map_err(|_| refused())?;
+                    defs[def].constraint = Constraint::Reuse(at);
+                }
+            }
+        }
+
+        // A line naming an operand in a register, with an instruction on it the reader knows, is
+        // one the reader refused for a reason of its own, and keeping it as text would hand the
+        // assembler what the reader already said no to. `addq %1, %k0` is that: a quadword add
+        // into half a register. What is kept is a line with an instruction nothing here knows.
+        let registered = |index: usize| def_of[index].is_some() || use_of[index].is_some();
+        if (0..list.len()).any(registered) {
+            for line in template.split(['\n', ';']) {
+                if names_one(line, registered)
+                    && x86_64::known(line, widths, memory)
+                    && x86_64::read_in(line, widths, memory).is_none()
+                {
+                    return Err(refused());
+                }
+            }
+        }
 
         let mut text = String::with_capacity(template.len());
         let mut memory: Option<usize> = None;
@@ -3717,8 +3869,25 @@ impl<'a> Lowering<'a> {
                     text.push_str(x86_64::TEMPLATE_MEM);
                     continue;
                 }
-                if operand.result.is_some() {
-                    return Err(refused());
+                let placed = def_of[index].or(use_of[index].map(|at| first_use + at));
+                if let Some(at) = placed {
+                    let value = operand.result.or(operand.value).ok_or_else(refused)?;
+                    let width = match modifier {
+                        None => match held_bits(self.source[value].ty) {
+                            8 => 'b',
+                            16 => 'w',
+                            32 => 'k',
+                            64 => 'q',
+                            _ => return Err(refused()),
+                        },
+                        Some(width @ ('b' | 'w' | 'k' | 'q')) => width,
+                        // The second byte is a name only four registers have, so it is taken for
+                        // an operand pinned to one of them and for nothing the allocator chose.
+                        Some('h') if pinned(operand).and_then(x86_64::gpr_high).is_some() => 'h',
+                        Some(_) => return Err(refused()),
+                    };
+                    text.push_str(&x86_64::template_reg(at, width));
+                    continue;
                 }
                 let value = operand.value.ok_or_else(refused)?;
                 let bare = match modifier {
@@ -3739,19 +3908,6 @@ impl<'a> Lowering<'a> {
             }
         }
 
-        // Every register a call may leave anything in, as well as the ones the list names. The
-        // text can write any register it likes without saying so, and tcc's tests do: gcc gets
-        // away with that at `-O0` because nothing lives in a register between two statements
-        // there, and taking these away from the allocator across the template is what gives the
-        // same answer here. Nothing is written to them by this, so a register one template leaves
-        // a value in is still holding it when the next template reads it.
-        let mut clobbered: Vec<(PhysReg, RegClass)> =
-            self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect();
-        for reg in Self::clobbered(inst, &clobbers)? {
-            if !clobbered.iter().any(|&(had, _)| had == reg) {
-                clobbered.push((reg, self.gpr));
-            }
-        }
         // An object in this function's frame is named by where it is in the frame, the way gcc
         // names it, rather than by a register its address was put in first. The text may write
         // registers it does not declare, and tcc's tests do: one that writes `%ecx` behind the
@@ -3774,8 +3930,8 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let mut build = self.out.build(block, opcode).at(span).symbol(symbol);
-        for (reg, class) in clobbered {
-            build = build.operand(mir::Operand::write(mir::Reg::physical(reg), class));
+        for operand in defs.into_iter().chain(written).chain(uses) {
+            build = build.operand(operand);
         }
         if let Some(mem) = at {
             build = build.mem(mem);
@@ -7075,21 +7231,23 @@ mod tests {
         assert!(printed.contains("@hcf"), "{printed}");
     }
 
-    /// A template kept as text with an operand in a register is refused, since nothing here spells
-    /// a register into the text yet, and the refusal is about the template.
+    /// A template kept as text with an operand in a register reads the operand, and its text holds
+    /// a hole naming that operand of the instruction, which the writer fills with the register the
+    /// allocator chose. The input is the instruction's only use, behind every register a call may
+    /// write.
     #[test]
-    fn a_template_kept_as_text_with_an_operand_in_a_register_is_refused() {
+    fn a_template_kept_as_text_reads_an_operand_in_a_register_through_a_hole() {
         let i32 = Type::int(32);
         let (mut names, mut source, block, args) = blank(&[i32]);
         assembly(&mut source, block, &mut names, "hcf %0", "r", &[args[0]], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
-        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
-            .expect_err("a register is not spelled into kept text");
-        assert_eq!(
-            failed.to_string(),
-            "this `asm` has instructions in its template, which nothing here assembles"
-        );
+        let printed = lower(&mut names, &source);
+        let line = printed.lines().find(|line| line.contains("x64.template")).unwrap_or_default();
+        // Twenty five registers are written ahead of it, so the operand read is the twenty sixth,
+        // spelled at the width of an `int`.
+        assert!(line.contains("x64.template %0, @hcf \u{1}r25k\u{2}"), "{printed}");
+        assert!(line.contains("early $rax"), "{printed}");
     }
 
     /// A register the template named is placed as itself, fixed to the register the program wrote
