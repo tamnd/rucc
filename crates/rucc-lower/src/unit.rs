@@ -715,13 +715,16 @@ impl Unit<'_> {
             Effects::Pure => AttrSet::READONLY,
             Effects::Const => AttrSet::READNONE,
         };
-        // Whether to inline it, which `rucc_opt::inline` reads for `always_inline` at every level.
-        // The IR will not have both, so a name that said both gets the one gcc keeps, which is
-        // `always_inline` after a warning that the other was ignored.
+        // Whether to inline it, which `rucc_opt::inline` reads for `always_inline` at every level
+        // and for a plain `inline` from `-O1` up. The IR will not have both of the first two, so a
+        // name that said both gets the one gcc keeps, which is `always_inline` after a warning that
+        // the other was ignored, and either of them says more than the keyword does.
         if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
             func.attrs.set |= AttrSet::ALWAYS_INLINE;
         } else if node.flags.contains(DeclFlags::NOINLINE) {
             func.attrs.set |= AttrSet::NOINLINE;
+        } else if node.flags.contains(DeclFlags::DECLARED_INLINE) {
+            func.attrs.set |= AttrSet::INLINE_HINT;
         }
         // An inline definition this unit calls, which this unit puts a copy of out of line for
         // every call the inliner leaves alone. See [`Self::out_of_line`].

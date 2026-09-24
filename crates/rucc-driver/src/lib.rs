@@ -1627,9 +1627,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-fvect-cost-model=") || arg.starts_with("-fsimd-cost-model=") => {
             }
             "-fearly-inlining" | "-fno-early-inlining" => {}
-            "-finline"
-            | "-fno-inline"
-            | "-finline-functions"
+            // The one of the family that does reach the optimizer, since the step it names is built:
+            // `-fno-inline` stops a function declared `inline` from being inlined and leaves
+            // `always_inline` alone, which is what it does in gcc.
+            "-finline" => opts.passes.push((rucc_opt::inline::NAME.to_owned(), true)),
+            "-fno-inline" => opts.passes.push((rucc_opt::inline::NAME.to_owned(), false)),
+            "-finline-functions"
             | "-fno-inline-functions"
             | "-finline-small-functions"
             | "-fno-inline-small-functions"
@@ -3780,6 +3783,12 @@ mod tests {
     /// it. Eighteen programs in the suite stopped on the driver before anything read them, and
     /// tamnd/rucc#1019 is the list.
     #[test]
+    fn no_inline_turns_off_the_inlining_of_a_function_declared_inline() {
+        let (opts, _) = compile(&["-c", "-O2", "-fno-inline", "a.c"]);
+        assert_eq!(opts.passes, [(rucc_opt::inline::NAME.to_owned(), false)]);
+    }
+
+    #[test]
     fn the_flags_that_name_a_pass_of_gccs_own_are_taken_and_dropped() {
         for flag in [
             "-fno-tree-ccp",
@@ -3796,7 +3805,6 @@ mod tests {
             "-fsimd-cost-model=cheap",
             "-fexpensive-optimizations",
             "-fno-early-inlining",
-            "-fno-inline",
             "-finline-functions",
             "-foptimize-strlen",
             "-fno-ira-share-spill-slots",

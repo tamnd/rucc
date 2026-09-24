@@ -232,6 +232,17 @@ pub const INLINE_FREQUENCY_CLAMP: u32 = 100;
 /// finish.
 pub const INLINE_GROWTH_SQUARING_BOUND: u32 = 256;
 
+/// The largest body a callee declared `inline` may have and still be inlined, per section 33.6.
+///
+/// GCC's `max-inline-insns-single`, which is seventy at every level but `-O3`. GCC counts in its
+/// own estimate of the instructions a body comes to and this counts IR instructions before the
+/// caller's constants have folded anything away, which comes out larger for the same body, so the
+/// number is on the careful side of GCC's rather than the same limit.
+pub const INLINE_INSNS_SINGLE: u32 = 70;
+
+/// The same at `-O3`, per section 33.6, where GCC raises it to two hundred.
+pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -673,6 +684,22 @@ pub const ALL: &[Constant] = &[
         unit: "instructions of growth",
         document: "40.11",
         gcc: "overall_growth in edge_badness",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_SINGLE",
+        value: 70,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-single",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_SINGLE_O3",
+        value: 200,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-single at -O3",
         provenance: Provenance::Gcc,
     },
     Constant {

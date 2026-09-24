@@ -35,6 +35,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use rucc_base::{Interner, Symbol};
+use rucc_cost::heuristics;
 use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic};
 use rucc_session::OptLevel;
 
@@ -805,8 +806,16 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     let passes = opts.passes();
     // Before everything, at every level, because `always_inline` is a promise gcc keeps at `-O0`
     // and a fortified header relies on it: the wrapper's body has to be where the call was
-    // before `objsize` below asks what the destination is. See [`inline`].
-    for (id, stats) in inline::run(module) {
+    // before `objsize` below asks what the destination is. See [`inline`]. From `-O1` up the same
+    // step takes a small function declared `inline` too, unless `-fno-inline` said not to, with
+    // gcc's limit for the level.
+    let limit = match opts.level {
+        OptLevel::O0 => None,
+        _ if !opts.wants(inline::NAME) => None,
+        OptLevel::O3 => Some(heuristics::INLINE_INSNS_SINGLE_O3),
+        _ => Some(heuristics::INLINE_INSNS_SINGLE),
+    };
+    for (id, stats) in inline::run(module, limit) {
         if opts.verify {
             if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
                 let func = names.resolve(module[id].name);

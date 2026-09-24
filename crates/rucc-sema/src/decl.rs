@@ -287,6 +287,15 @@ impl DeclFlags {
     /// [`Self::NORETURN`] is.
     pub const NO_STRICT_ALIASING: Self = Self(1 << 8);
 
+    /// `inline` was written on a declaration of this name.
+    ///
+    /// The hint half of the keyword, apart from what it says about which unit emits the body, which
+    /// is [`Emission`]. A `static inline` function has nothing to say about that and still asked to
+    /// be inlined, and gcc reads the word the same way whatever the linkage: a callee declared
+    /// inline is allowed a larger body before the inliner gives up on it. Merged the way
+    /// [`Self::ALWAYS_INLINE`] is, since gcc marks the name once any declaration of it says it.
+    pub const DECLARED_INLINE: Self = Self(1 << 9);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
