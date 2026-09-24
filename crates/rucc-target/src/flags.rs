@@ -87,6 +87,14 @@ pub struct FlagInsts {
     pub writes: fn(&str) -> bool,
     /// Every instruction that makes a comparison, whether or not it keeps the answer.
     pub compares: &'static [Compare],
+    /// Whether the instruction of that name makes the comparison it reads, all in the one
+    /// instruction.
+    ///
+    /// Every entry in [`Self::compares`] that keeps a byte does, and so do the ones whose operand
+    /// is in memory. Those are left out of that table on purpose, because a comparison against
+    /// memory is not one a pass can prove was already made. What they read is still what they
+    /// found, and that is all this asks. False for a name this target does not have.
+    pub compares_itself: fn(&str) -> bool,
     /// Every instruction that reads the condition state and names which part of it.
     pub readers: &'static [Reader],
     /// Every instruction that leaves what a comparison of what it wrote against zero would leave.
@@ -185,7 +193,8 @@ impl FlagInsts {
     /// instruction, so it is a [`Compare`] and a [`Reader`] at once. What it reads is not what it
     /// found. An add with carry is the other kind: it reads the bit the instruction in front left,
     /// and it is a [`Reader`] and no [`Compare`], which is what tells the two apart without a
-    /// second table.
+    /// second table. The comparisons against memory are the exception that needs one, and
+    /// [`Self::compares_itself`] is where they are named.
     ///
     /// The difference is the whole question for a pass asking whether some state is still needed
     /// behind an instruction. A state arriving at an add with carry is a state that is read. A
@@ -194,7 +203,7 @@ impl FlagInsts {
     /// same way makes a pass decline rewrites in most of the functions a C program has.
     #[must_use]
     pub fn asks_what_it_reads(&self, name: &str) -> bool {
-        self.reads(name).is_some() && self.compare(name).is_some()
+        self.reads(name).is_some() && (self.compare(name).is_some() || (self.compares_itself)(name))
     }
 
     /// The entry for the instruction of that name, if it leaves a comparison against zero.

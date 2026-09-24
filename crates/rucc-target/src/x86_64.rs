@@ -567,6 +567,7 @@ pub static FLAGS: FlagInsts = FlagInsts {
     width: operand_width,
     writes: writes_flags,
     compares: &COMPARES,
+    compares_itself,
     readers: &READERS,
     zeroing: &ZEROING,
 };
@@ -710,6 +711,17 @@ static BARE_ADDRESSES: [Copied; 1] = [Copied { name: "lea_64", into: "mov_rr_64"
 /// not have, which is what keeps a rule set that grows an opcode from quietly growing a wrong
 /// answer here.
 #[must_use]
+/// Whether the instruction of that name compares and keeps the answer in a byte, whatever its
+/// operands are.
+///
+/// The comparisons against memory are in here and not in [`COMPARES`]. A pass taking out a
+/// comparison that was already made cannot tell that memory still holds what it held, so it is
+/// not given them, but a pass asking whether the state arriving at one is read needs to know that
+/// it is not, and before this every function with one in it lost every shorter zero.
+fn compares_itself(name: &str) -> bool {
+    matches!(form(name), Some(Form::CmpSet | Form::CmpSetRi | Form::CmpSetRm | Form::CmpSetMi))
+}
+
 fn writes_flags(name: &str) -> bool {
     let Some(shape) = form(name) else { return true };
     !matches!(
@@ -1672,6 +1684,21 @@ mod tests {
                 assert!(writes_flags(name), "{name} is said to leave the state alone");
             }
         }
+    }
+
+    /// Every comparison that keeps a byte reads only what it found, including the ones against
+    /// memory that the comparison table leaves out, and an add with carry reads what it was left.
+    #[test]
+    fn a_comparison_that_keeps_a_byte_asks_what_it_reads_whatever_its_operands() {
+        for &(name, shape) in INSTS {
+            if matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::CmpSetRm | Form::CmpSetMi) {
+                assert!(FLAGS.asks_what_it_reads(name), "{name} reads what it found");
+            }
+        }
+        assert!(FLAGS.asks_what_it_reads("cmp_set_g_rm_32"));
+        assert!(FLAGS.compare("cmp_set_g_rm_32").is_none());
+        assert!(!FLAGS.asks_what_it_reads("adc_rr_32"));
+        assert!(!FLAGS.asks_what_it_reads("set_g"));
     }
 
     /// Every instruction that reads the condition state says which part of it it reads.
