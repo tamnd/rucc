@@ -168,24 +168,23 @@ impl Checker<'_> {
         self.build_type(specs, declarator, Place::default())
     }
 
-    /// The typedef name a declaration's type is, when the name is the whole of it.
+    /// The typedef name a declaration's specifiers named, and the type it stands for.
     ///
-    /// `size_type n;` is one and `const size_type n;`, `size_type *p;` and `constexpr size_type
-    /// n = 1;` are not, since each builds a type on top of the name and the name is no longer what
-    /// the declaration has. The answer is what was written and nothing more: an attribute that
-    /// changes the type, or an initializer that gives an array its length, still leaves the name
-    /// here, and whoever reads it checks the type it stands for against the declaration's.
+    /// The declaration's type is built on top of that type, by the qualifiers beside the name and
+    /// by whatever the declarator derives from it: `const size_type n;` is a const over it and
+    /// `size_type *p;` a pointer to it. The answer is what was written and nothing more, so an
+    /// attribute that changes the type, or an initializer that gives an array its length, still
+    /// leaves the name here, and whoever reads it looks for the type inside the declaration's and
+    /// finds it or does not.
     pub(in crate::check) fn spelled_with(
         &self,
         specs: ast::DeclSpecsId,
-        declarator: ast::DeclaratorId,
-    ) -> Option<Symbol> {
-        let written = &self.ast[specs];
-        let TypeSpec::Typedef(name) = written.ty else { return None };
-        let bare = written.quals == ast::Quals::NONE
-            && !written.constexpr
-            && self.ast[self.ast[declarator].derived].is_empty();
-        bare.then_some(name)
+    ) -> Option<(Symbol, TypeId)> {
+        let TypeSpec::Typedef(name) = self.ast[specs].ty else { return None };
+        match self.scopes.lookup(name) {
+            Some(Binding::Typedef(of)) => Some((name, of)),
+            _ => None,
+        }
     }
 
     /// The type a declaration with no declarator names, which is what declares a tag.
@@ -1100,10 +1099,8 @@ impl Checker<'_> {
             }
             // The typedef name the parameter was written with, which the type does not keep and
             // which a debugger printing the parameter says in place of what the name stands for.
-            if let Some(name) =
-                param.specs.and_then(|specs| self.spelled_with(specs, param.declarator))
-            {
-                self.tast.record_spelling(decl, name);
+            if let Some((name, of)) = param.specs.and_then(|specs| self.spelled_with(specs)) {
+                self.tast.record_spelling(decl, name, of);
             }
             declared.push(decl);
         }
