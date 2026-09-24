@@ -244,21 +244,23 @@ impl LinkLine {
     /// enough to link against it, and that is what `rucc-stub` produces. The paragraphs below about
     /// `libc_nonshared.a` and `libm` are glibc's own.
     ///
-    /// The same start files as musl's and a different library, and the library is the whole
-    /// difference between them here. A stub libc is linked against dynamically, so what goes on the
-    /// line is the generated `libc.so` from `rucc-stub` rather than an archive, and the version nodes
-    /// in it are what make a program built here run on an older machine.
+    /// The same start files as musl's and different libraries. A stub libc is linked against
+    /// dynamically, so what goes on the line is the `libc.so` `rucc-stub` wrote into
+    /// [`Sysroot::stubs`] rather than an archive, and the version nodes in it are what make a
+    /// program built here run on an older machine. The driver writes it before the link, cut at
+    /// the release the tuple names, and the directory is on the line as a `-L` too so that `-lm`
+    /// and `-lpthread` find their stubs there.
     ///
-    /// `libc_nonshared.a` is deliberately absent and it is a known gap rather than a decision.
-    /// glibc's own `libc.so` is a linker script naming `libc.so.6`, `libc_nonshared.a` and the
-    /// loader as a group, and that archive holds real compiled objects: `atexit`, `__stack_chk_fail_local`
-    /// on i386, and the `stat` family on releases before 2.33. None of it can be synthesized from a
-    /// description, because a stub is a list of names and these are bodies, so it has to be built
-    /// from glibc's sources and that is M9.5's work. A program that needs nothing from it links
-    /// today and a program that does gets an undefined symbol, which is the loud failure rather
-    /// than the quiet one.
+    /// `libc_nonshared.a` comes next and out of the sysroot. glibc's own `libc.so` is a linker
+    /// script naming `libc.so.6`, `libc_nonshared.a` and the loader as a group, and that archive
+    /// holds real compiled objects: `atexit`, `__stack_chk_fail_local` on i386, and the `stat`
+    /// family on releases before 2.33. None of it can be written from a description, because a
+    /// stub is a list of names and these are bodies, so it is built from glibc's sources and
+    /// fetched with the start files. It goes after the stub because what is in it calls into
+    /// libc, which is the order glibc's script gives them. It is glibc's alone, so bionic and the
+    /// BSDs get the stub and nothing between it and our runtime.
     ///
-    /// `libm.so` is not here either, and that is a decision. glibc's `libm` is real code and a
+    /// `libm.so` is not on the line, and that is a decision. glibc's `libm` is real code and a
     /// program that wants it passes `-lm`, which every build system that does arithmetic already
     /// does, so putting it on every line would record a dependency the program does not have.
     ///
@@ -269,7 +271,10 @@ impl LinkLine {
     #[must_use]
     pub fn glibc(sysroot: &Sysroot, mode: LinkMode, builtins: Option<&Path>) -> Self {
         let lib = sysroot.lib();
-        let mut libraries = vec![lib.join("libc.so")];
+        let mut libraries = vec![sysroot.stubs().join("libc.so")];
+        if sysroot.target().env() == Env::Gnu {
+            libraries.push(lib.join("libc_nonshared.a"));
+        }
         libraries.extend(ours(builtins));
         LinkLine { start: start_files(&lib, mode), libraries, end: vec![lib.join("crtn.o")] }
     }

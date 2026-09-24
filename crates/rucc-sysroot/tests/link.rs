@@ -133,7 +133,19 @@ fn the_libc_the_target_names_picks_the_line() {
     // are not, which is why the dispatch is one function.
     let gnu =
         LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic, Some(&builtins()));
-    assert_eq!(names(&gnu.libraries), ["libc.so", "librucc_builtins.a"]);
+    assert_eq!(names(&gnu.libraries), ["libc.so", "libc_nonshared.a", "librucc_builtins.a"]);
+    // The stub is the one the driver writes beside the sysroot and the archive is the sysroot's.
+    let dirs: Vec<_> = gnu.libraries.iter().filter_map(|path| path.parent()).collect();
+    let tuple = "x86_64-linux-gnu";
+    assert!(dirs[0].ends_with(format!("stubs/{tuple}")), "{:?}", dirs[0]);
+    assert!(dirs[1].ends_with(format!("sysroots/{tuple}/lib")), "{:?}", dirs[1]);
+    // bionic's line is the same shape without glibc's archive in it.
+    let android = LinkLine::for_target(
+        &sysroot("aarch64-linux-android"),
+        LinkMode::Dynamic,
+        Some(&builtins()),
+    );
+    assert_eq!(names(&android.libraries), ["libc.so", "librucc_builtins.a"]);
     let musl =
         LinkLine::for_target(&sysroot("x86_64-linux-musl"), LinkMode::Static, Some(&builtins()));
     assert_eq!(names(&musl.libraries), ["libc.a", "librucc_builtins.a"]);

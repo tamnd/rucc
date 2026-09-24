@@ -31,8 +31,10 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   <cache>/sysroots/armv7-linux-gnueabihf/lib/Scrt1.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
+  -L<cache>/stubs/armv7-linux-gnueabihf
   main.o
-  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
+  <cache>/stubs/armv7-linux-gnueabihf/libc.so
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o
 
@@ -57,8 +59,10 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crt1.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
+  -L<cache>/stubs/armv7-linux-gnueabihf
   main.o
-  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
+  <cache>/stubs/armv7-linux-gnueabihf/libc.so
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o
 
@@ -80,7 +84,9 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   --build-id=none
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
+  -L<cache>/stubs/armv7-linux-gnueabihf
   main.o
-  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc.so
+  <cache>/stubs/armv7-linux-gnueabihf/libc.so
+  <cache>/sysroots/armv7-linux-gnueabihf/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crtn.o

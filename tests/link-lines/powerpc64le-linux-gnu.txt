@@ -31,8 +31,10 @@ sysroot   <cache>/sysroots/powerpc64le-linux-gnu
   <cache>/sysroots/powerpc64le-linux-gnu/lib/Scrt1.o
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crti.o
   -L<cache>/sysroots/powerpc64le-linux-gnu/lib
+  -L<cache>/stubs/powerpc64le-linux-gnu
   main.o
-  <cache>/sysroots/powerpc64le-linux-gnu/lib/libc.so
+  <cache>/stubs/powerpc64le-linux-gnu/libc.so
+  <cache>/sysroots/powerpc64le-linux-gnu/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crtn.o
 
@@ -57,8 +59,10 @@ sysroot   <cache>/sysroots/powerpc64le-linux-gnu
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crt1.o
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crti.o
   -L<cache>/sysroots/powerpc64le-linux-gnu/lib
+  -L<cache>/stubs/powerpc64le-linux-gnu
   main.o
-  <cache>/sysroots/powerpc64le-linux-gnu/lib/libc.so
+  <cache>/stubs/powerpc64le-linux-gnu/libc.so
+  <cache>/sysroots/powerpc64le-linux-gnu/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crtn.o
 
@@ -80,7 +84,9 @@ sysroot   <cache>/sysroots/powerpc64le-linux-gnu
   --build-id=none
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crti.o
   -L<cache>/sysroots/powerpc64le-linux-gnu/lib
+  -L<cache>/stubs/powerpc64le-linux-gnu
   main.o
-  <cache>/sysroots/powerpc64le-linux-gnu/lib/libc.so
+  <cache>/stubs/powerpc64le-linux-gnu/libc.so
+  <cache>/sysroots/powerpc64le-linux-gnu/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crtn.o

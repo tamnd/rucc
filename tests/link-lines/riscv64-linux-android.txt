@@ -31,8 +31,9 @@ sysroot   <cache>/sysroots/riscv64-linux-android
   <cache>/sysroots/riscv64-linux-android/lib/Scrt1.o
   <cache>/sysroots/riscv64-linux-android/lib/crti.o
   -L<cache>/sysroots/riscv64-linux-android/lib
+  -L<cache>/stubs/riscv64-linux-android
   main.o
-  <cache>/sysroots/riscv64-linux-android/lib/libc.so
+  <cache>/stubs/riscv64-linux-android/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/riscv64-linux-android/lib/crtn.o
 
@@ -57,8 +58,9 @@ sysroot   <cache>/sysroots/riscv64-linux-android
   <cache>/sysroots/riscv64-linux-android/lib/crt1.o
   <cache>/sysroots/riscv64-linux-android/lib/crti.o
   -L<cache>/sysroots/riscv64-linux-android/lib
+  -L<cache>/stubs/riscv64-linux-android
   main.o
-  <cache>/sysroots/riscv64-linux-android/lib/libc.so
+  <cache>/stubs/riscv64-linux-android/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/riscv64-linux-android/lib/crtn.o
 
@@ -80,7 +82,8 @@ sysroot   <cache>/sysroots/riscv64-linux-android
   --build-id=none
   <cache>/sysroots/riscv64-linux-android/lib/crti.o
   -L<cache>/sysroots/riscv64-linux-android/lib
+  -L<cache>/stubs/riscv64-linux-android
   main.o
-  <cache>/sysroots/riscv64-linux-android/lib/libc.so
+  <cache>/stubs/riscv64-linux-android/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/riscv64-linux-android/lib/crtn.o

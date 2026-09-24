@@ -65,6 +65,7 @@ use rucc_tuple::{Arch, DataModel, Endian, Env, Os, TargetTuple, Version};
 pub struct Sysroot {
     target: TargetTuple,
     root: PathBuf,
+    stubs: PathBuf,
 }
 
 impl Sysroot {
@@ -76,8 +77,10 @@ impl Sysroot {
     /// field only when it changes how a call is made or a struct is laid out.
     #[must_use]
     pub fn in_cache(cache: &Path, target: TargetTuple) -> Self {
-        let root = cache.join("sysroots").join(target.to_canonical_string());
-        Sysroot { target, root }
+        let key = target.to_canonical_string();
+        let root = cache.join("sysroots").join(&key);
+        let stubs = cache.join("stubs").join(&key);
+        Sysroot { target, root, stubs }
     }
 
     /// A sysroot rooted at a directory the user named, with `--sysroot` or `-isysroot`.
@@ -88,7 +91,8 @@ impl Sysroot {
     /// wholesale rather than assuming a shape.
     #[must_use]
     pub fn at(root: PathBuf, target: TargetTuple) -> Self {
-        Sysroot { target, root }
+        let stubs = root.join("lib");
+        Sysroot { target, root, stubs }
     }
 
     /// The target this sysroot is for.
@@ -169,6 +173,22 @@ impl Sysroot {
     #[must_use]
     pub fn lib(&self) -> PathBuf {
         self.root.join("lib")
+    }
+
+    /// Where the stub libraries a glibc link reads are, which is `<cache>/stubs/<canonical tuple>`
+    /// for a sysroot in the cache and [`Sysroot::lib`] for one the user named.
+    ///
+    /// Beside the sysroot rather than inside it, because the sysroot is a fetched archive whose
+    /// every file is in its manifest with a hash, and the stubs are written by the compiler out of
+    /// the description it carries, so they would be files the manifest does not know about. A tree
+    /// somebody assembled has its own `libc.so`, and that is where it is.
+    ///
+    /// The same key as the sysroot, release included, because a stub cut at glibc 2.28 and one cut
+    /// at 2.39 are different files and a program linked against the wrong one either runs on a
+    /// machine it should not or refuses one it could.
+    #[must_use]
+    pub fn stubs(&self) -> &Path {
+        &self.stubs
     }
 
     /// The manifest naming every input with its source, its hash and its licence.

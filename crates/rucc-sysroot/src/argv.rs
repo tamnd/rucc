@@ -377,6 +377,13 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
         args.push(format!("-L{}", dir.display()));
     }
     args.push(format!("-L{}", sysroot.lib().display()));
+    // And the stubs after the sysroot's own files, so that `-lm` finds the one the driver wrote.
+    // Only for a libc that is a stub and only where they are somewhere else, which is a sysroot in
+    // the cache: a tree the user named keeps its libraries in one place and a second `-L` to it
+    // would be noise.
+    if libc(sysroot.target()) == Libc::Stub && sysroot.stubs() != sysroot.lib() {
+        args.push(format!("-L{}", sysroot.stubs().display()));
+    }
 
     for input in options.inputs {
         match input {

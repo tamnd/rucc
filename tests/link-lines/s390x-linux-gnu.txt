@@ -31,8 +31,10 @@ sysroot   <cache>/sysroots/s390x-linux-gnu
   <cache>/sysroots/s390x-linux-gnu/lib/Scrt1.o
   <cache>/sysroots/s390x-linux-gnu/lib/crti.o
   -L<cache>/sysroots/s390x-linux-gnu/lib
+  -L<cache>/stubs/s390x-linux-gnu
   main.o
-  <cache>/sysroots/s390x-linux-gnu/lib/libc.so
+  <cache>/stubs/s390x-linux-gnu/libc.so
+  <cache>/sysroots/s390x-linux-gnu/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/s390x-linux-gnu/lib/crtn.o
 
@@ -57,8 +59,10 @@ sysroot   <cache>/sysroots/s390x-linux-gnu
   <cache>/sysroots/s390x-linux-gnu/lib/crt1.o
   <cache>/sysroots/s390x-linux-gnu/lib/crti.o
   -L<cache>/sysroots/s390x-linux-gnu/lib
+  -L<cache>/stubs/s390x-linux-gnu
   main.o
-  <cache>/sysroots/s390x-linux-gnu/lib/libc.so
+  <cache>/stubs/s390x-linux-gnu/libc.so
+  <cache>/sysroots/s390x-linux-gnu/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/s390x-linux-gnu/lib/crtn.o
 
@@ -80,7 +84,9 @@ sysroot   <cache>/sysroots/s390x-linux-gnu
   --build-id=none
   <cache>/sysroots/s390x-linux-gnu/lib/crti.o
   -L<cache>/sysroots/s390x-linux-gnu/lib
+  -L<cache>/stubs/s390x-linux-gnu
   main.o
-  <cache>/sysroots/s390x-linux-gnu/lib/libc.so
+  <cache>/stubs/s390x-linux-gnu/libc.so
+  <cache>/sysroots/s390x-linux-gnu/lib/libc_nonshared.a
   <builtins>/librucc_builtins.a
   <cache>/sysroots/s390x-linux-gnu/lib/crtn.o
