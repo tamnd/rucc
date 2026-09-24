@@ -276,6 +276,15 @@
       (x64.lea_64 (amode_base_index_scale x y 8))
       (spec (= (bvadd x (bvshl y 3)) (result))))
 
+;; And the doubling the optimizer writes as a value added to itself, which is what `i * 2` and
+;; `i << 1` both come to by the time selection sees them. The name written twice is a test that
+;; the two sources are one value, so `x + (y + z)` with two different ones is left to the rules
+;; for an addition.
+
+(rule (lower (add.i64 (value.i64 x) (add.i64 (value.i64 y) (value.i64 y))))
+      (x64.lea_64 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvadd y y)) (result))))
+
 (rule (lower (mul.i64 (value.i64 y) (iconst.i64 2)))
       (x64.lea_64 (amode_index_scale y 2))
       (spec (= (bvmul y 2) (result))))
