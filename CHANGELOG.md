@@ -14,6 +14,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A read inside one granule under `-fsafety=detect` is answered from the one type slot and the one init shadow byte for that granule, where it used to walk both planes with loops set up for a read of any width. Only a yes is taken from the two slots. A granule stored through more than one type, or only partly written, goes to the walk as before, so every answer is the one it was. On server2 at `-O2` that takes `a-string-scan` from 4.14G instructions to 3.30G, `a-pointer-chasing-hash-table` from 6.04G to 5.25G, `a-linked-list-traversal` from 2.15G to 1.90G and `a-binary-tree-walk` from 4.32G to 3.90G, and 29, under 1, 9 and 5 percent off their clock times.
 
+- A cross link to a glibc target now links against stubs the compiler writes itself. Before the link the driver writes `libc.so`, `libm.so`, `librt.so` and the empty compatibility libraries into `<cache>/stubs/<tuple>`, cut at the glibc release the tuple names, and only rewrites a file when its bytes changed. The link line names that `libc.so`, puts the directory on a `-L` so `-lm` finds its stub, and adds the sysroot's `libc_nonshared.a` after the stub, which is the order glibc's own linker script uses. `-print-search-dirs` lists the directory too.
+
 ## 0.11.2
 
 ### Added

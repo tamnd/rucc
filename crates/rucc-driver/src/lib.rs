@@ -2684,6 +2684,11 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     if let Err(why) = link::suitable(opts.target, &linker) {
         return complain(why);
     }
+    // The glibc stubs, which are the one part of a cross sysroot written here rather than fetched.
+    // Before compiling for the same reason as the rest, and never for `-###`, which writes nothing.
+    if let Err(why) = link::write_stubs(opts.target, link) {
+        return complain(why);
+    }
 
     let scratch = match Scratch::new() {
         Ok(scratch) => scratch,

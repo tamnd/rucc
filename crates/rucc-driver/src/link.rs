@@ -570,6 +570,55 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     Ok(())
 }
 
+/// Writes the stub libraries a glibc cross link reads, into [`Sysroot::stubs`].
+///
+/// `spec/cross-compile/09-libc-stubs.md` section 9.1: the stubs are generated on demand rather than
+/// shipped, out of the description `rucc-stub` carries, cut at the release the tuple names or at
+/// the bundled one when it names none. So there is nothing to fetch for them and nothing to go
+/// stale, and a pin is a different directory rather than a different download.
+///
+/// A file is written only when its bytes differ from what is there, and then through a temporary
+/// name and a rename, because two builds for one target run side by side all the time and a
+/// linker must never read a half written `libc.so`. The bytes are the same on every host, so two
+/// processes racing to write them race to write the same thing.
+///
+/// Nothing for a link against this machine, a `--sysroot` the user named, or a target that is not
+/// glibc. A glibc release newer than the bundled tree was already refused when the headers were
+/// chosen, so it is quietly nothing here too.
+///
+/// # Errors
+///
+/// [`Error::Cross`] when the stubs cannot be generated for this target or cannot be written.
+pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
+    let tuple = sysroot.target();
+    if rucc_stub::glibc::architecture(tuple).is_none() {
+        return Ok(());
+    }
+    let Ok(Some(minor)) = rucc_sysroot::bundled_glibc_minor(tuple) else { return Ok(()) };
+    let files = rucc_stub::glibc::stubs(tuple, minor).map_err(|why| Error::Cross {
+        why: format!("the glibc stubs for {}: {why}", tuple.to_canonical_string()),
+    })?;
+    let dir = sysroot.stubs();
+    let failed = |path: &Path, why: std::io::Error| Error::Cross {
+        why: format!("{} cannot be written: {why}", path.display()),
+    };
+    fs::create_dir_all(dir).map_err(|why| failed(dir, why))?;
+    for file in files {
+        let path = dir.join(&file.name);
+        if fs::read(&path).is_ok_and(|there| there == file.bytes) {
+            continue;
+        }
+        let temporary = dir.join(format!(".{}.{}", file.name, std::process::id()));
+        fs::write(&temporary, &file.bytes).map_err(|why| failed(&temporary, why))?;
+        fs::rename(&temporary, &path).map_err(|why| {
+            let _ = fs::remove_file(&temporary);
+            failed(&path, why)
+        })?;
+    }
+    Ok(())
+}
+
 /// The linker to use, looked for where a linker is.
 ///
 /// `-B` prefixes first, since the point of one is to put a toolchain in front of the machine's,
@@ -1067,12 +1116,15 @@ fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 #[must_use]
 pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     let mut dirs = link.search.clone();
-    // A cross link searches one directory and it is the sysroot's, so this is that and not the
-    // machine's. What `-print-search-dirs` says is what a build system pastes into a link line of its
-    // own, and an answer that named `/usr/lib` for a target whose link line never goes near it would
-    // be worse than no answer at all.
+    // A cross link searches the sysroot's directory and, for a libc that is a stub, the one its
+    // stubs are written to, so this is those and not the machine's. What `-print-search-dirs` says is what a build
+    // system pastes into a link line of its own, and an answer that named `/usr/lib` for a target
+    // whose link line never goes near it would be worse than no answer at all.
     if let Some(sysroot) = cross_sysroot(target, link) {
         dirs.push(sysroot.lib());
+        if rucc_sysroot::link::libc(sysroot.target()) == rucc_sysroot::link::Libc::Stub {
+            dirs.push(sysroot.stubs().to_path_buf());
+        }
         return dirs;
     }
     dirs.extend(candidates(target, link.sysroot.as_deref()));
@@ -1697,6 +1749,41 @@ mod tests {
         // machine, which is what every native compile has always been.
         let bare = LinkOptions { pinned: None, ..cached() };
         assert!(cross_for(host, &bare, Some(host)).is_none());
+    }
+
+    #[test]
+    fn a_glibc_cross_link_writes_its_stubs_beside_the_sysroot_once() {
+        let cache = std::env::temp_dir().join(format!("rucc-link-stubs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        let target = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let pinned = LinkOptions {
+            cache: Some(cache.clone()),
+            pinned: Some("x86_64-linux-gnu.2.28".parse().expect("a spelling with a release")),
+            ..LinkOptions::default()
+        };
+        write_stubs(target, &pinned).expect("x86_64 glibc has a description");
+        let dir = cache.join("stubs").join("x86_64-linux-gnu.2.28");
+        let libc = dir.join("libc.so");
+        let bytes = fs::read(&libc).expect("libc.so was written");
+        assert!(bytes.starts_with(b"\x7fELF"));
+        assert!(dir.join("libm.so").is_file());
+        // 2.28 is before the release that emptied libpthread, so there is no empty one to write.
+        assert!(!dir.join("libpthread.so").exists());
+        // The second time finds the same bytes and leaves the file alone, which is what keeps a
+        // linker in another build from ever reading one that is being replaced.
+        let before = fs::metadata(&libc).and_then(|m| m.modified()).expect("a time");
+        write_stubs(target, &pinned).expect("again");
+        let after = fs::metadata(&libc).and_then(|m| m.modified()).expect("a time");
+        assert_eq!(before, after);
+        // And nothing for a libc that is not glibc, whose sysroot has a real one in it.
+        let musl = LinkOptions {
+            cache: Some(cache.clone()),
+            pinned: Some("x86_64-linux-musl".parse().expect("musl")),
+            ..LinkOptions::default()
+        };
+        write_stubs(Triple::new(Arch::X86_64, Os::Linux, Env::Musl), &musl).expect("nothing");
+        assert!(!cache.join("stubs").join("x86_64-linux-musl").exists());
+        let _ = fs::remove_dir_all(&cache);
     }
 
     #[test]

@@ -29,8 +29,9 @@ sysroot   <cache>/sysroots/aarch64-freebsd
   <cache>/sysroots/aarch64-freebsd/lib/Scrt1.o
   <cache>/sysroots/aarch64-freebsd/lib/crti.o
   -L<cache>/sysroots/aarch64-freebsd/lib
+  -L<cache>/stubs/aarch64-freebsd
   main.o
-  <cache>/sysroots/aarch64-freebsd/lib/libc.so
+  <cache>/stubs/aarch64-freebsd/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-freebsd/lib/crtn.o
 
@@ -53,8 +54,9 @@ sysroot   <cache>/sysroots/aarch64-freebsd
   <cache>/sysroots/aarch64-freebsd/lib/crt1.o
   <cache>/sysroots/aarch64-freebsd/lib/crti.o
   -L<cache>/sysroots/aarch64-freebsd/lib
+  -L<cache>/stubs/aarch64-freebsd
   main.o
-  <cache>/sysroots/aarch64-freebsd/lib/libc.so
+  <cache>/stubs/aarch64-freebsd/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-freebsd/lib/crtn.o
 
@@ -76,7 +78,8 @@ sysroot   <cache>/sysroots/aarch64-freebsd
   --build-id=none
   <cache>/sysroots/aarch64-freebsd/lib/crti.o
   -L<cache>/sysroots/aarch64-freebsd/lib
+  -L<cache>/stubs/aarch64-freebsd
   main.o
-  <cache>/sysroots/aarch64-freebsd/lib/libc.so
+  <cache>/stubs/aarch64-freebsd/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/aarch64-freebsd/lib/crtn.o

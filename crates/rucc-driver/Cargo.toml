@@ -41,6 +41,9 @@ rucc-pp.workspace = true
 rucc-safety.workspace = true
 rucc-sema.workspace = true
 rucc-session.workspace = true
+# glibc's description, which a cross link to a glibc target is written from. The driver rather than
+# the sysroot crate, because writing files into the cache is the driver's business.
+rucc-stub.workspace = true
 rucc-sysroot.workspace = true
 rucc-target.workspace = true
 rucc-tuple.workspace = true

@@ -29,8 +29,9 @@ sysroot   <cache>/sysroots/x86_64-illumos
   <cache>/sysroots/x86_64-illumos/lib/Scrt1.o
   <cache>/sysroots/x86_64-illumos/lib/crti.o
   -L<cache>/sysroots/x86_64-illumos/lib
+  -L<cache>/stubs/x86_64-illumos
   main.o
-  <cache>/sysroots/x86_64-illumos/lib/libc.so
+  <cache>/stubs/x86_64-illumos/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-illumos/lib/crtn.o
 
@@ -53,8 +54,9 @@ sysroot   <cache>/sysroots/x86_64-illumos
   <cache>/sysroots/x86_64-illumos/lib/crt1.o
   <cache>/sysroots/x86_64-illumos/lib/crti.o
   -L<cache>/sysroots/x86_64-illumos/lib
+  -L<cache>/stubs/x86_64-illumos
   main.o
-  <cache>/sysroots/x86_64-illumos/lib/libc.so
+  <cache>/stubs/x86_64-illumos/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-illumos/lib/crtn.o
 
@@ -76,7 +78,8 @@ sysroot   <cache>/sysroots/x86_64-illumos
   --build-id=none
   <cache>/sysroots/x86_64-illumos/lib/crti.o
   -L<cache>/sysroots/x86_64-illumos/lib
+  -L<cache>/stubs/x86_64-illumos
   main.o
-  <cache>/sysroots/x86_64-illumos/lib/libc.so
+  <cache>/stubs/x86_64-illumos/libc.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-illumos/lib/crtn.o

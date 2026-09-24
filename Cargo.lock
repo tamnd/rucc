@@ -206,6 +206,7 @@ dependencies = [
  "rucc-safety",
  "rucc-sema",
  "rucc-session",
+ "rucc-stub",
  "rucc-sysroot",
  "rucc-target",
  "rucc-tuple",
