@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - Two rules can now share a pattern when the earlier one has a guard, and the first whose guard holds fires. AArch64 uses it to build a constant too wide for one `mov` as a `mov` of its low sixteen bits and a `movk` for each piece above, so `0x12345678` is two instructions, a 64-bit constant under `2^32` is two, and any other is four. A rule after an unguarded one with the same pattern is still refused as one that can never fire.
+- AArch64 has a rule for every widening and narrowing between integer types, including to and from one bit values, which are widened and narrowed with an `and` so nothing above the bit is taken on trust.
 
 ### Changed
 

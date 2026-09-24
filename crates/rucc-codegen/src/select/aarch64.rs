@@ -178,6 +178,30 @@ mod tests {
         assert_eq!(selects(&terms, k), Some("a64.movk_ri_16_32"));
     }
 
+    /// Every widening and narrowing the IR has between its integer types has a rule.
+    #[test]
+    fn every_widening_and_narrowing_has_an_instruction() {
+        let mut terms = Terms::default();
+        let wanted = [
+            ("sext", "i8", "i16", "a64.sxtb_16"),
+            ("zext", "i8", "i16", "a64.uxtb_16"),
+            ("zext", "i8", "i64", "a64.uxtb_64"),
+            ("zext", "i16", "i64", "a64.uxth_64"),
+            ("zext", "i1", "i8", "a64.bit_to_8"),
+            ("zext", "i1", "i64", "a64.bit_to_64"),
+            ("trunc", "i64", "i32", "a64.low_32"),
+            ("trunc", "i32", "i16", "a64.low_16"),
+            ("trunc", "i16", "i8", "a64.low_8"),
+            ("trunc", "i8", "i1", "a64.bit_of_32"),
+            ("trunc", "i64", "i1", "a64.bit_of_64"),
+        ];
+        for (op, from, to, want) in wanted {
+            let x = terms.value(from, "v0");
+            let term = terms.app(&format!("{op}.{from}.{to}"), &[x]);
+            assert_eq!(selects(&terms, term), Some(want), "{op}.{from}.{to}");
+        }
+    }
+
     #[test]
     fn an_immediate_is_taken_when_twelve_bits_hold_it() {
         let mut terms = Terms::default();

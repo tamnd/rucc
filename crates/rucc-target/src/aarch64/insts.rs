@@ -342,14 +342,30 @@ pub static INSTS: &[(&str, Form)] = &[
     ("rev16_r_32", Unary),
     // Widening. Each reads the low bits of its source and agrees with it about every one of them,
     // which is what `copies_low` asks.
+    ("sxtb_16", Convert),
     ("sxtb_32", Convert),
     ("sxtb_64", Convert),
     ("sxth_32", Convert),
     ("sxth_64", Convert),
+    ("uxtb_16", Convert),
     ("uxtb_32", Convert),
+    ("uxtb_64", Convert),
     ("uxth_32", Convert),
+    ("uxth_64", Convert),
     ("sxtw_64", Convert),
     ("uxtw_64", Convert),
+    // Widening one bit, which keeps that bit and clears everything above it. Not a `Convert`,
+    // because the bits above the one it keeps are not copied from anywhere.
+    ("bit_to_8", Unary),
+    ("bit_to_16", Unary),
+    ("bit_to_32", Unary),
+    ("bit_to_64", Unary),
+    // Narrowing, which keeps the low bits of a register. The one bit case clears the rest.
+    ("low_8", Convert),
+    ("low_16", Convert),
+    ("low_32", Convert),
+    ("bit_of_32", AluI),
+    ("bit_of_64", AluI),
     // Comparisons that keep nothing but the condition state, which is what a branch on one is
     // folded into.
     ("cmp_rr_32", Cmp),
