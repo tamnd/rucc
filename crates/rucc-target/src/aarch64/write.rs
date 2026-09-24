@@ -7,6 +7,11 @@
 //!
 //! The spelling is GNU as's where there is a choice. A number is written in decimal, which is not
 //! always what objdump prints but is always what the assembler reads.
+//!
+//! The one place the two assemblers disagree is how a line asks for part of a symbol's address.
+//! GNU as puts an operator in front of the name, as in `:lo12:counter`, and Apple's assembler puts
+//! one after it, as in `_counter@PAGEOFF`, and neither reads the other's. A bare name in `adrp`
+//! means its page to GNU as and is an error to Apple's, which wants `@PAGE` said out loud.
 
 use std::fmt::Write;
 
@@ -15,22 +20,41 @@ use crate::aarch64::encode::{
 };
 use crate::aarch64::read::{BARRIERS, SYSTEM, system_field};
 
+/// Which assembler a line is written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spelling {
+    /// GNU as, and anything that reads what it reads, which is every ELF and COFF target.
+    Gnu,
+    /// The assembler in Apple's toolchain, which is the one that writes Mach-O.
+    Apple,
+}
+
 /// One instruction, as a line with no indentation and no newline.
 ///
 /// The symbol is the name every [`Value::Symbol`] and [`Offset::Symbol`] in the operands stands
 /// for, which is how [`read`](crate::aarch64::read) hands it back as well. An operand that names
 /// one when there is none is written as `?`, which nothing reads.
 #[must_use]
-pub fn write(mnemonic: &str, values: &[Value], symbol: Option<&str>) -> String {
+pub fn write(mnemonic: &str, values: &[Value], symbol: Option<&str>, spelling: Spelling) -> String {
+    let named = Named { symbol, spelling, page: mnemonic == "adrp" };
     let mut line = mnemonic.to_owned();
     for (at, value) in values.iter().enumerate() {
         line.push_str(if at == 0 { " " } else { ", " });
-        operand(&mut line, value, symbol);
+        operand(&mut line, value, named);
     }
     line
 }
 
-fn operand(line: &mut String, value: &Value, symbol: Option<&str>) {
+/// What a symbol in an operand is written with.
+#[derive(Clone, Copy)]
+struct Named<'a> {
+    symbol: Option<&'a str>,
+    spelling: Spelling,
+    /// Whether the instruction is `adrp`, where a bare name means the page it is on.
+    page: bool,
+}
+
+fn operand(line: &mut String, value: &Value, named: Named<'_>) {
     match *value {
         Value::Gpr(width, number) => line.push_str(&gpr(width, number)),
         Value::Sp(Width::X) => line.push_str("sp"),
@@ -70,8 +94,8 @@ fn operand(line: &mut String, value: &Value, symbol: Option<&str>) {
             }
         }
         Value::Cond(cond) => line.push_str(cond_name(cond)),
-        Value::Mem(addr) => address(line, addr, symbol),
-        Value::Symbol(operator) => reference(line, operator, symbol),
+        Value::Mem(addr) => address(line, addr, named),
+        Value::Symbol(operator) => reference(line, operator, named),
         Value::Barrier(option) => match BARRIERS.iter().find(|&&(_, known)| known == option) {
             Some((name, _)) => line.push_str(name),
             None => {
@@ -100,7 +124,7 @@ fn gpr(width: Width, number: u8) -> String {
     }
 }
 
-fn address(line: &mut String, addr: Addr, symbol: Option<&str>) {
+fn address(line: &mut String, addr: Addr, named: Named<'_>) {
     let base = if addr.base == 31 { "sp".to_owned() } else { format!("x{}", addr.base) };
     let _ = write!(line, "[{base}");
     match (addr.offset, addr.mode) {
@@ -134,13 +158,31 @@ fn address(line: &mut String, addr: Addr, symbol: Option<&str>) {
         }
         (Offset::Symbol(operator), _) => {
             line.push_str(", ");
-            reference(line, operator, symbol);
+            reference(line, operator, named);
             line.push(']');
         }
     }
 }
 
-fn reference(line: &mut String, operator: Operator, symbol: Option<&str>) {
+fn reference(line: &mut String, operator: Operator, named: Named<'_>) {
+    let symbol = named.symbol.unwrap_or("?");
+    if named.spelling == Spelling::Apple {
+        // The thread-local operators have no suffix here, because Darwin reaches such a variable
+        // through a descriptor and the code generator refuses one before it gets this far. They
+        // are written the GNU way, which Apple's assembler rejects rather than misreads.
+        let suffix = match operator {
+            Operator::Plain if named.page => Some("@PAGE"),
+            Operator::Plain => Some(""),
+            Operator::Lo12 => Some("@PAGEOFF"),
+            Operator::Got => Some("@GOTPAGE"),
+            Operator::GotLo12 => Some("@GOTPAGEOFF"),
+            _ => None,
+        };
+        if let Some(suffix) = suffix {
+            let _ = write!(line, "{symbol}{suffix}");
+            return;
+        }
+    }
     let prefix = match operator {
         Operator::Plain => "",
         Operator::Lo12 => ":lo12:",
@@ -151,7 +193,7 @@ fn reference(line: &mut String, operator: Operator, symbol: Option<&str>) {
         Operator::TprelHi12 => ":tprel_hi12:",
         Operator::TprelLo12Nc => ":tprel_lo12_nc:",
     };
-    let _ = write!(line, "{prefix}{}", symbol.unwrap_or("?"));
+    let _ = write!(line, "{prefix}{symbol}");
 }
 
 fn shift_name(shift: Shift) -> &'static str {
@@ -212,7 +254,8 @@ mod tests {
                 continue;
             };
             let first = read(text).expect("golden.txt reads");
-            let written = write(&first.mnemonic, &first.values, first.symbol.as_deref());
+            let written =
+                write(&first.mnemonic, &first.values, first.symbol.as_deref(), Spelling::Gnu);
             match read(&written) {
                 Ok(again) if again == first => {}
                 Ok(again) => wrong.push(format!("{text} was written as {written}: {again:?}")),
@@ -226,7 +269,7 @@ mod tests {
     fn a_line_is_spelled_the_way_gnu_as_spells_it() {
         let line = |text: &str| {
             let read = read(text).unwrap();
-            write(&read.mnemonic, &read.values, read.symbol.as_deref())
+            write(&read.mnemonic, &read.values, read.symbol.as_deref(), Spelling::Gnu)
         };
         assert_eq!(line("ldr x0, [sp, #0x10]"), "ldr x0, [sp, #16]");
         assert_eq!(line("str x19, [sp, #-16]!"), "str x19, [sp, #-16]!");
@@ -236,5 +279,19 @@ mod tests {
         assert_eq!(line("mrs x0, tpidr_el0"), "mrs x0, tpidr_el0");
         assert_eq!(line("dmb ish"), "dmb ish");
         assert_eq!(line("ldr w0, [x1, w2, sxtw #2]"), "ldr w0, [x1, w2, sxtw #2]");
+    }
+
+    #[test]
+    fn apple_asks_for_part_of_an_address_after_the_name_rather_than_before_it() {
+        let apple = |text: &str| {
+            let read = read(text).unwrap();
+            write(&read.mnemonic, &read.values, Some("_counter"), Spelling::Apple)
+        };
+        assert_eq!(apple("adrp x0, counter"), "adrp x0, _counter@PAGE");
+        assert_eq!(apple("add x0, x0, :lo12:counter"), "add x0, x0, _counter@PAGEOFF");
+        assert_eq!(apple("adrp x0, :got:counter"), "adrp x0, _counter@GOTPAGE");
+        assert_eq!(apple("ldr x0, [x0, :got_lo12:counter]"), "ldr x0, [x0, _counter@GOTPAGEOFF]");
+        assert_eq!(apple("bl counter"), "bl _counter");
+        assert_eq!(apple("adr x0, counter"), "adr x0, _counter");
     }
 }

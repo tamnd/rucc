@@ -776,7 +776,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
 mod tests {
     use super::*;
     use crate::aarch64::insts::{Form, INSTS, form};
-    use crate::aarch64::{FPR, GPR, encode, write};
+    use crate::aarch64::{FPR, GPR, Spelling, encode, write};
     use crate::operand::Role;
 
     #[test]
@@ -839,8 +839,10 @@ mod tests {
                 let values: Vec<Value> =
                     inst.args.iter().map(|&arg| fill(arg, &with).unwrap()).collect();
                 if let Err(e) = encode(inst.mnemonic, &values) {
-                    wrong
-                        .push(format!("{name}: {}: {e}", write(inst.mnemonic, &values, Some("s"))));
+                    wrong.push(format!(
+                        "{name}: {}: {e}",
+                        write(inst.mnemonic, &values, Some("s"), Spelling::Gnu)
+                    ));
                 }
             }
         }
@@ -858,8 +860,10 @@ mod tests {
                 let values: Vec<Value> =
                     inst.args.iter().map(|&arg| fill(arg, &with).unwrap()).collect();
                 let word = encode(inst.mnemonic, &values).unwrap().word;
-                let got =
-                    format!("{word:08x}\t{}\t{name}", write(inst.mnemonic, &values, Some("s")));
+                let got = format!(
+                    "{word:08x}\t{}\t{name}",
+                    write(inst.mnemonic, &values, Some("s"), Spelling::Gnu)
+                );
                 match want.next() {
                     Some(line) if line == got => {}
                     line => wrong.push(format!("{got}, GNU as: {line:?}")),
@@ -877,7 +881,7 @@ mod tests {
             .map(|inst| {
                 let values: Vec<Value> =
                     inst.args.iter().map(|&arg| fill(arg, with).unwrap()).collect();
-                write(inst.mnemonic, &values, Some("s"))
+                write(inst.mnemonic, &values, Some("s"), Spelling::Gnu)
             })
             .collect()
     }

@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - AArch64 Linux handles `long double`, which is IEEE binary128 there. It is loaded, stored and returned in a vector register with `ldr q` and `str q`, and the arithmetic, comparisons and conversions are calls to libgcc's `__addtf3` family, the same ones `_Float128` uses on x86-64.
 - AArch64 on Apple's platforms compiles variadic functions and calls to them. A call puts every argument past the named ones in memory, one word or more each, even with registers left, and a variadic definition saves no registers and walks the caller's memory with a list that is one pointer. Structs up to sixteen bytes and floating point aggregates of up to four members are read in place and larger structs by reference. An `__int128` passed past the `...` is still refused there.
 - AArch64 Linux reaches a thread-local variable with the initial exec sequence gcc writes under `-ftls-model=initial-exec`: `adrp` and `ldr` against `:gottprel:` for its offset, `mrs` of `tpidr_el0` for the thread pointer, and one `add`. `__builtin_thread_pointer` is the `mrs` on its own. Darwin still refuses both, since it reaches them through a descriptor call.
+- AArch64 assembly for Apple's platforms is written the way Apple's assembler reads it. A symbol's page and the offset into it are `_x@PAGE` and `_x@PAGEOFF` rather than a bare name and `:lo12:x`, and a table slot is `_x@GOTPAGE` and `_x@GOTPAGEOFF`. Before this `-S` for `aarch64-apple-darwin` gave a listing only GNU as would take.
 
 ### Changed
 
@@ -24,6 +25,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A variable a Mach-O file only declares is read through the global offset table, the way clang reads it, on both x86-64 and arm64. `dyld` never copies a variable into the executable, so reaching one a library defines directly from the code was a link ld64 refuses. A hidden declaration is still reached directly.
+- A zeroed global variable on Mach-O is written with its `.globl` above the `.zerofill` that defines it. It used to come out with no binding at all, so `int g[4];` in one file was invisible to every other.
 - The pass that folds an address into the load or store reading it asks the target whether an index and a displacement can share one address. AArch64 has no such mode, and a load of a register plus a register plus a constant used to reach the assembler and be refused there.
 
 ## 0.11.4

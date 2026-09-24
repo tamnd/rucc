@@ -37,6 +37,8 @@ pub(crate) struct Context<'a> {
     pub names: &'a Interner,
     /// What goes in front of a symbol on this object format.
     pub symbol: &'a str,
+    /// Which assembler the line is for, which decides how it asks for part of an address.
+    pub spelling: aarch64::Spelling,
     /// The name of the function the instruction is in.
     pub func_name: &'a str,
 }
@@ -119,7 +121,7 @@ pub(crate) fn inst(
                 why: why.to_string(),
             });
         }
-        let line = aarch64::write(machine.mnemonic, &values, symbol.as_deref());
+        let line = aarch64::write(machine.mnemonic, &values, symbol.as_deref(), at.spelling);
         let _ = writeln!(out, "\t{line}");
     }
     Ok(())

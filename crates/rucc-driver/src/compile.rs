@@ -3181,6 +3181,28 @@ decl #0 x : int object external static defined
         assert!(text.contains("str d0, [sp, #8]"), "{text}");
     }
 
+    /// Apple's assembler asks for part of an address after the name, a variable another image
+    /// defines is read through the table because nothing copies it in, and the directive that
+    /// makes a zeroed variable is also its definition, so its binding goes above it.
+    #[test]
+    fn a_darwin_listing_is_one_apples_assembler_reads() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
+        let source = "extern int ext;\n\
+                      int g[4];\n\
+                      int f(int i) { return g[i] + ext; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains(", _g@PAGE\n"), "{text}");
+        assert!(text.contains(", _g@PAGEOFF\n"), "{text}");
+        assert!(text.contains(", _ext@GOTPAGE\n"), "{text}");
+        assert!(text.contains(", _ext@GOTPAGEOFF]\n"), "{text}");
+        assert!(!text.contains(":lo12:"), "{text}");
+        assert!(text.contains("\t.globl\t_g\n\t.zerofill\t__DATA,__bss,_g,16,2\n"), "{text}");
+    }
+
     /// A construct the rule set does not reach yet is named, along with the function it is in.
     ///
     /// The message is about this compiler being unfinished rather than about the program, which
