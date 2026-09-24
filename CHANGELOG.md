@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.4
+
 ### Added
 
 - An AArch64 function that returns a structure through memory now takes the address in `x8`, and a call to one passes it there, as AAPCS64 says, where both used to put it in `x0` and move every argument along by one. A new `CallRegs::sret` names the register, and it is `None` on SysV and Windows x64, which keep passing it as the first argument. A caller built by rucc and a callee built by gcc now agree under qemu.
