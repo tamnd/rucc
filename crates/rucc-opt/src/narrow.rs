@@ -241,6 +241,10 @@ enum Plan {
     Already(Value),
     /// A constant, written down again at the narrow width.
     Constant(i128),
+    /// An extension from something narrower still, written again as the same extension to the
+    /// narrow width. The kind of extension comes along, since the bits it makes up are ones the
+    /// narrow width keeps.
+    Widened(Opcode, Value),
     /// An operation redone, which is the recursive case and the reason this is a tree.
     Nested(Box<Redo>),
 }
@@ -321,6 +325,9 @@ fn plan(func: &Func, value: Value, ty: Type, seen: Seen<'_>, depth: u32) -> Opti
     }
     if let Some((imm, wide)) = constant(func, value) {
         return Some(Plan::Constant(imm.signed(wide)));
+    }
+    if let Some((kind, narrower)) = widened_from_below(func, value, ty, seen) {
+        return Some(Plan::Widened(kind, narrower));
     }
     redo(func, value, ty, seen, depth - 1).map(|redo| Plan::Nested(Box::new(redo)))
 }
@@ -584,6 +591,27 @@ fn extended(func: &Func, value: Value, ty: Type) -> Option<Value> {
     (from == ty).then_some(narrow)
 }
 
+/// An extension from a width below that one, as the kind and what it extended, when nothing else
+/// reads it.
+///
+/// This is how a comparison gets into a narrow sum. `c = d[i] < k ? c + 1 : c` on a `char` is,
+/// once if-conversion has been at it, the truth of the comparison zero extended to `int` and added
+/// to the widened count, and the truth is one bit and not eight. The low eight bits of that
+/// extension are the same extension to eight bits, so it is written again at the narrow width and
+/// the wide one is left with no reader. Having only the one reader is what keeps this free: the
+/// narrow extension replaces the wide one rather than joining it, which is the same count of
+/// instructions and no widening left behind.
+fn widened_from_below(
+    func: &Func,
+    value: Value,
+    ty: Type,
+    seen: Seen<'_>,
+) -> Option<(Opcode, Value)> {
+    let (kind, from, narrower) = widening(func, value)?;
+    let fits = from.is_int() && from.is_scalar() && from.bits() < ty.bits();
+    (fits && seen.uses[value.index()] == 1).then_some((kind, narrower))
+}
+
 /// The constant this value is, with the type it has.
 fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
     let Def::Result { inst, .. } = func[value].def else { return None };
@@ -648,6 +676,11 @@ fn build(func: &mut Func, before: Inst, ty: Type, plan: &Plan, uses: &mut Vec<u3
         Plan::Constant(value) => {
             let at = func.add_imm(Imm::int(*value, ty.lane()));
             let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+            written(func, before, data, ty, uses)
+        }
+        Plan::Widened(kind, narrower) => {
+            let args = listed(func, (*narrower, None), uses);
+            let data = InstData { args, ..InstData::new(*kind) };
             written(func, before, data, ty, uses)
         }
         Plan::Nested(redo) => {
@@ -755,6 +788,73 @@ mod tests {
         // Nothing new was written. The two extensions and the wide add are still there, read by
         // nothing, which is what dead code elimination takes out after this.
         assert_eq!(left(&func, block), 5);
+    }
+
+    #[test]
+    fn a_widened_truth_in_a_narrow_sum_is_widened_to_the_narrow_width_instead() {
+        let (mut func, block) = blank();
+        let count = func.append_param(block, Type::int(8));
+        let truth = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_count = build.unary(Opcode::SExt, count, Type::int(32));
+        let wide_truth = build.unary(Opcode::ZExt, truth, Type::int(32));
+        let sum = build.binary(Opcode::Add, wide_count, wide_truth, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
+        build.ret(&[narrow]);
+        assert!(
+            Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, narrow), (Opcode::Add, vec![Type::int(8), Type::int(8)]));
+        let rucc_ir::Def::Result { inst, .. } = func[narrow].def else { panic!("a result") };
+        let bit = func[func[inst].args][1];
+        assert_eq!(shape(&func, bit), (Opcode::ZExt, vec![Type::int(1)]));
+        assert_eq!(under(&func, bit), truth);
+        // One extension written, and the wide one it replaces is read by nothing now.
+        assert_eq!(left(&func, block), 6);
+    }
+
+    #[test]
+    fn a_sign_extended_byte_in_a_sum_truncated_to_sixteen_bits_comes_along_as_a_sign_extension() {
+        let (mut func, block) = blank();
+        let a = func.append_param(block, Type::int(16));
+        let b = func.append_param(block, Type::int(8));
+        let mut build = Builder::new(&mut func, block);
+        let wide_a = build.unary(Opcode::ZExt, a, Type::int(32));
+        let wide_b = build.unary(Opcode::SExt, b, Type::int(32));
+        let sum = build.binary(Opcode::Sub, wide_a, wide_b, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, sum, Type::int(16));
+        build.ret(&[narrow]);
+        assert!(
+            Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        assert_eq!(shape(&func, narrow), (Opcode::Sub, vec![Type::int(16), Type::int(16)]));
+        let rucc_ir::Def::Result { inst, .. } = func[narrow].def else { panic!("a result") };
+        let byte = func[func[inst].args][1];
+        assert_eq!(shape(&func, byte), (Opcode::SExt, vec![Type::int(8)]));
+    }
+
+    #[test]
+    fn a_widened_truth_something_else_reads_keeps_the_sum_wide() {
+        let (mut func, block) = blank();
+        let count = func.append_param(block, Type::int(8));
+        let truth = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let wide_count = build.unary(Opcode::SExt, count, Type::int(32));
+        let wide_truth = build.unary(Opcode::ZExt, truth, Type::int(32));
+        let sum = build.binary(Opcode::Add, wide_count, wide_truth, Flags::NONE);
+        let narrow = build.unary(Opcode::Trunc, sum, Type::int(8));
+        build.ret(&[narrow, wide_truth]);
+        assert!(
+            !Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed()
+        );
+        // The wide extension stays for the return, so a narrow one would be an extra instruction.
+        assert_eq!(shape(&func, narrow), (Opcode::Trunc, vec![Type::int(32)]));
     }
 
     #[test]

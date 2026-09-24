@@ -142,6 +142,14 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// an identity left standing is a second one. Both sides costs one more walk over each function
 /// and is what the pass is for.
 ///
+/// `narrow` itself runs a second time after the late peephole, and `phiopt` is the reason. A `char`
+/// count bumped under a condition, `c = d[i] < k ? c + 1 : c`, is a diamond when the first run
+/// sees it, and the truncation back to `char` sits at the join where no arithmetic is under it.
+/// If-conversion and the peephole behind it turn the diamond into the sum of the widened count and
+/// the widened truth of the comparison, which is a truncated sum the pass narrows, but only if it
+/// runs again to see it. Without the second run the loop sign extends the count and truncates it
+/// back on every trip, which is issue 1821.
+///
 /// `phiopt` comes after `thread` and the order between them is not arbitrary. Both look at a
 /// diamond whose arms carry a value to a join. Where the join then branches on that value,
 /// threading removes a branch and costs nothing, and if-conversion would have turned the same
@@ -276,6 +284,7 @@ const O1: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "narrow",
     "simplify-cfg",
     "hoist",
     "discharge",
@@ -355,6 +364,7 @@ const O2: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "narrow",
     "hoist",
     "plane-sink",
     "split",
@@ -397,6 +407,7 @@ const O3: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "narrow",
     "hoist",
     "plane-sink",
     "split",
@@ -461,6 +472,7 @@ const OS: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "narrow",
     "simplify-cfg",
     "discharge",
     "dead-plane",
@@ -497,6 +509,7 @@ const OZ: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "narrow",
     "simplify-cfg",
     "discharge",
     "dead-plane",
@@ -1646,12 +1659,12 @@ mod tests {
     #[test]
     fn the_pipeline_listing_says_which_passes_a_gate_touched() {
         let mut opts = Options::for_level(OptLevel::O2);
-        // `narrow` rather than `fold`, because a gate names a pass and the level runs some of its
+        // `thread` rather than `fold`, because a gate names a pass and the level runs some of its
         // passes more than once. A note on one of those is printed against every run of it, and
         // the count at the bottom would then be counting repeats rather than what it is asking.
-        opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
+        opts.gates.add(false, "thread=2-4").expect("thread is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("6: narrow, "), "{text}");
+        assert!(text.contains("10: thread, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
