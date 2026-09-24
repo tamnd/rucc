@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A local copied from another at the top of a loop body, as in `int j = i;` in `while (i < n) { int j = i; i = i + 1; ... }`, now shows the old value of `i` under `-g` at `-O1` and `-O2`, where gdb printed the new one. Header copying gives the body its own copy of the counter and now moves the names and start points in the body onto it, instead of leaving them on the header's value, which the loop hands the next value when it comes round. See tamnd/rucc#1810.
 - A union with a bit-field in it on `windows-gnu` now takes the bit-field's alignment, as MinGW's gcc does, so `union { unsigned m:3; char c; }` is four bytes aligned to four there rather than aligned to one. The rule that gives the bit-field no say in the alignment is MSVC's and now applies only to `windows-msvc`. clang aligns the union to one on both, and section 6.9 of the cross specification says gcc wins where it is the incumbent, so the layout corpus declares that record on `windows-gnu` without asserting it. The corpus also drops `flexible_only`, a struct whose only member is a flexible array, which ISO C forbids and gcc refuses, so the nightly run against gcc has been failing on every row since it was added.
 
 ## 0.11.3

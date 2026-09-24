@@ -1045,6 +1045,32 @@ impl Func {
             .map(|&(_, start)| start)
     }
 
+    /// Hands some of the starts on one value over to another, for a pass that gives part of the
+    /// function a value of its own in place of one it read before.
+    ///
+    /// The starts are the ones in `which` that `from` has, and the rest stay where they are. A
+    /// start is a place in the function, so one in the part that now reads `into` is a place the
+    /// declaration was given `into`, and one left on `from` there would say the declaration holds
+    /// whatever `from` turns into later.
+    pub fn move_starts(&mut self, from: Value, into: Value, which: &[Start]) {
+        if from == into {
+            return;
+        }
+        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end =
+            at + self.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let (moving, staying): (Vec<Start>, Vec<Start>) = self
+            .value_starts
+            .drain(at..end)
+            .map(|(_, start)| start)
+            .partition(|start| which.contains(start));
+        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        self.value_starts.splice(at..at, staying.into_iter().map(|start| (from, start)));
+        for start in moving {
+            self.declare_value_from(into, start);
+        }
+    }
+
     /// Turns every declaration that holds a value from where it was computed into one that holds it
     /// from a place, for a value whose definition is about to stop saying where that was.
     ///
@@ -2253,6 +2279,25 @@ mod tests {
         func.rename_value(late, early);
         assert_eq!(func.value_decls(early).count(), 0);
         assert_eq!(places(&func, early), [Some((block, Some(middle)))]);
+    }
+
+    /// Moving some of a value's starts to another leaves the rest where they were, in order.
+    #[test]
+    fn moving_starts_moves_the_ones_asked_for_and_no_others() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let from = build.iconst(Type::int(32), 1);
+        let into = build.iconst(Type::int(32), 2);
+        let first = func.insts(block).next();
+        let starts: Vec<Start> = (5..8).map(|decl| Start { decl, block, after: first }).collect();
+        for &start in &starts {
+            func.declare_value_from(from, start);
+        }
+
+        func.move_starts(from, into, &starts[1..2]);
+        assert_eq!(func.value_starts(from).collect::<Vec<Start>>(), [starts[0], starts[2]]);
+        assert_eq!(func.value_starts(into).collect::<Vec<Start>>(), [starts[1]]);
     }
 
     #[test]
