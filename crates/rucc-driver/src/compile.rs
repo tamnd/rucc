@@ -2998,11 +2998,41 @@ decl #0 x : int object external static defined
     fn a_target_this_has_no_back_end_for_is_reported_rather_than_generated() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        opts.target = "riscv64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let result = run(&opts, "int f(int a) { return a; }\n");
         assert!(result.failed());
-        assert!(result.messages[0].contains("no back end for aarch64"), "{:?}", result.messages);
+        assert!(result.messages[0].contains("no back end for riscv64"), "{:?}", result.messages);
         assert!(result.text().is_empty());
+    }
+
+    /// AArch64 is written as its own assembly, with a function that calls keeping its return
+    /// address in the frame record.
+    #[test]
+    fn an_aarch64_target_is_written_as_aarch64_assembly() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "int g(int);\nint f(int a, int b) { return g(a) + b; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        for line in ["stp x29, x30, [sp, #-16]!", "mov x29, sp", "bl g", "ldp x29, x30, [sp], #16"]
+        {
+            assert!(text.contains(line), "{line} is not in\n{text}");
+        }
+        assert!(!text.contains('%'), "{text}");
+    }
+
+    /// What only the x86-64 lowering writes yet is refused on AArch64 with a reason, rather than
+    /// written with x86 instructions.
+    #[test]
+    fn a_variadic_definition_is_refused_on_aarch64_until_its_list_is_written() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, "int f(int n, ...) { return n; }\n");
+        assert!(result.failed());
+        assert!(result.messages[0].contains("does not name"), "{:?}", result.messages);
     }
 
     /// A construct the rule set does not reach yet is named, along with the function it is in.

@@ -29,6 +29,10 @@ pub static SELECTOR: super::Selector = super::Selector {
     trap: "ud2",
     abi: &crate::abi::X86_64,
     scratch: &crate::pipeline::SCRATCH,
+    symbols: &super::Symbols {
+        near: super::Reach::Mode("lea_64"),
+        far: super::Reach::Mode("mov_rm_64"),
+    },
 };
 
 #[cfg(test)]

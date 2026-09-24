@@ -55,6 +55,31 @@ pub struct Selector {
     /// The address registers held back from the allocator for the rewriter's reloads, which are
     /// the ones the walk must not keep anything in across more than one instruction.
     pub scratch: &'static [PhysReg],
+    /// How the walk comes by the address of a symbol, which is its own business rather than a
+    /// rule's because whether it goes through the global offset table is a fact about the link and
+    /// not about the instruction.
+    pub symbols: &'static Symbols,
+}
+
+/// The two ways the address of a symbol is come by.
+#[derive(Debug)]
+pub struct Symbols {
+    /// A symbol this image defines, whose address is a fixed distance from the code.
+    pub near: Reach,
+    /// A symbol another image may define, whose address is read out of the global offset table.
+    pub far: Reach,
+}
+
+/// One instruction that puts the address of a symbol in a register, and where it carries the
+/// symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// In its addressing mode, which is how x86-64 does both: a `lea` or a `mov` relative to the
+    /// instruction pointer.
+    Mode(&'static str),
+    /// As the instruction's own symbol with no addressing mode at all, which is how AArch64 does
+    /// both: an `adrp` for the page and a second instruction for the rest, written as one opcode.
+    Own(&'static str),
 }
 
 impl Selector {
