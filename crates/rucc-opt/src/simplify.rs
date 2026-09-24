@@ -17,7 +17,7 @@
 //!
 //! ## The rules
 //!
-//! Four tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4 so far.
+//! Six tiers of `spec/optimizer/13-rewrite-rules.md` section 13.4.
 //!
 //! Tier one is the identities. Adding nothing, multiplying by one, and'ing a value with itself.
 //! None of them needs anything known about the operands and each leaves a term strictly smaller
@@ -44,7 +44,14 @@
 //! so that hash consing can see two spellings of one expression as one. They are tried last rather
 //! than third, because rearranging a term is only worth doing when no rule that improves it fires.
 //!
-//! Every rule in all four has been proved against `crates/rucc-ir/rules/ir.model` by
+//! Tier five is the comparisons a type answers on its own, and tier six is the selects. A select
+//! between a value and one more or one less than it, or between one and zero, is the value plus
+//! or minus the condition widened, and that is a compare and a set where the select was a compare,
+//! two moves and a conditional move. Tier six is matched with each arm offered as a number and
+//! then with each arm expanded into the instruction that computed it, which is the only table
+//! matched with a choice of which operand to expand.
+//!
+//! Every rule in every tier has been proved against `crates/rucc-ir/rules/ir.model` by
 //! `rucc-verify` before it may be used.
 //!
 //! Which plans a tier is matched under belongs to the tier. Tiers one and two are matched with
@@ -64,6 +71,13 @@
 //! rule wrote as a number gets an `iconst` in front of the instruction to hold it. A conversion is
 //! that same rewrite in place with one operand instead of two, and it is its own case because a
 //! conversion is the one instruction whose operand is not the width of its result.
+//!
+//! An operand of either can itself be an instruction, which is what tier six writes and no tier
+//! before it did. Those are built in front of the rewritten one, innermost first, the same way a
+//! number the rule wrote is, and each is at the width its head names. One of them that is an
+//! exclusive or with one on a comparison is the opposite comparison straight away, by the same
+//! rewrite that turns one written in the source into it, because the walk has already gone past
+//! the place it was built and would not come back to it.
 //!
 //! ## The four written by hand
 //!
@@ -188,7 +202,9 @@ use rucc_ir::{
 
 use crate::cfg::Cfg;
 use crate::discharge::constant;
-use crate::rules::{Match, Piece, Subject, Table, canonical, compare, identities, strength, width};
+use crate::rules::{
+    Match, Piece, Subject, Table, canonical, compare, identities, select, strength, width,
+};
 use crate::uses::{count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -275,6 +291,22 @@ const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
 const COMPARE: [Plan; 2] =
     [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Expand, Shown::Const, Shown::Reg]];
 
+/// How the operands are shown to a select rule, which is the three plans tier six is matched
+/// under.
+///
+/// The condition is a register in all three, since what the tier asks of it is only that it is
+/// one bit. The arms are what differ. The first plan shows both as numbers, for the rules about a
+/// select between two constants, and the other two expand one arm each into the instruction that
+/// computed it, for the rules about a value and one more or less than it. Two plans rather than
+/// one that expands both, because the arm that is not expanded is the value the other was computed
+/// from, and a pattern can only say that two places are the same value when both are shown as
+/// registers.
+const SELECT: [Plan; 3] = [
+    [Shown::Reg, Shown::Const, Shown::Const],
+    [Shown::Reg, Shown::Expand, Shown::Reg],
+    [Shown::Reg, Shown::Reg, Shown::Expand],
+];
+
 /// The rule tables, one per tier, in the order they are tried, each with the plans it is matched
 /// under.
 ///
@@ -294,12 +326,14 @@ const COMPARE: [Plan; 2] =
 ///
 /// Tier five sits where it does because nothing turns on it either. It is the only table about a
 /// comparison and no other table mentions one, so there is no instruction two of them have
-/// something to say about and no order in which one of them gets there first.
-const TABLES: [(&Table, &[Plan]); 5] = [
+/// something to say about and no order in which one of them gets there first. Tier six is the
+/// same: it is the only table about a select.
+const TABLES: [(&Table, &[Plan]); 6] = [
     (&identities::TABLE, &PLANS),
     (&strength::TABLE, &PLANS),
     (&width::TABLE, &EXPAND),
     (&compare::TABLE, &COMPARE),
+    (&select::TABLE, &SELECT),
     (&canonical::TABLE, &CANONICAL),
 ];
 
@@ -373,12 +407,7 @@ impl Pass for Simplify {
                         stats.missed(NO_FUEL);
                         continue;
                     }
-                    let args = func.push_values(&[flip.lhs, flip.rhs]);
-                    let data = &mut func[inst];
-                    data.opcode = flip.opcode;
-                    data.flags = flip.flags;
-                    data.args = args;
-                    data.extra = flip.extra;
+                    become_flipped(func, inst, &flip);
                     stats.optimized(FLIPPED);
                     continue;
                 }
@@ -424,6 +453,9 @@ impl Pass for Simplify {
                         become_instruction(func, inst, opcode, pred, lhs, rhs);
                     }
                     Rewrite::Converted { opcode, from } => {
+                        let ty =
+                            func[func[inst].first_result.expect("the rule matched a result")].ty;
+                        let from = defined(func, inst, ty, from);
                         become_conversion(func, inst, opcode, from);
                     }
                 }
@@ -438,7 +470,7 @@ impl Pass for Simplify {
 }
 
 /// What a rule says an instruction's result is instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Rewrite {
     /// A value the function already has, which every reader of the result is pointed at.
     Value(Value),
@@ -466,17 +498,17 @@ enum Rewrite {
     /// conversion is the one instruction a rule writes whose operand is not the width of its
     /// result. That is what makes it the one whose operand cannot be a number the rule wrote:
     /// there would be no width to give the constant, and every rule that writes one of these
-    /// writes a value the pattern bound.
+    /// writes a value the pattern bound or an instruction built out of those.
     Converted {
         /// Which of the three it is.
         opcode: Opcode,
-        /// What it converts, which is always a value the pattern bound.
-        from: Value,
+        /// What it converts, which is never [`Operand::Constant`].
+        from: Operand,
     },
 }
 
 /// One operand of an instruction a rule writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Operand {
     /// A value the pattern bound.
     Value(Value),
@@ -495,6 +527,21 @@ enum Operand {
         /// was asked for.
         bits: u32,
     },
+    /// An instruction the rule wrote under the one it rewrites, which is built in front of it.
+    Built(Box<Nested>),
+}
+
+/// An instruction a rule writes as an operand of another, which has no value until it is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Nested {
+    /// What it is.
+    opcode: Opcode,
+    /// Which comparison it is, when it is one, for the reason [`Rewrite::Built`] gives.
+    pred: Option<IntPred>,
+    /// How wide its result is, which is the width its head names. A comparison's is one.
+    bits: u32,
+    /// Its operands, one for a conversion and two for anything else.
+    args: Vec<Operand>,
 }
 
 /// The rule that fires on this instruction, and the pattern it came from.
@@ -530,10 +577,12 @@ fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
                 Rewrite::Constant(*number)
             }
             // An instruction the rule writes, which this one becomes. That is the third shape and
-            // the last one: a replacement deeper than one instruction would need somewhere to put
-            // the ones under it, and a rule that wanted it can be written as two rules that each
-            // leave one.
+            // the last one. What is under it, when the rule wrote something deeper than one
+            // instruction, is built in front of it.
             pieces => match built(pieces, &found, &matched(&terms, &found)) {
+                // Something built under the instruction is built at the width its head names,
+                // which is a scalar, so the rule is not one about a vector whatever it matched.
+                Some(rewrite) if nests(&rewrite) && func[result].ty.is_vector() => continue,
                 Some(rewrite) => rewrite,
                 // Any other shape, which no rule in the file has. A test below says so, because a
                 // rule that fell through here would be a rule that never fires and nothing would
@@ -557,7 +606,7 @@ fn built(
     found: &Match<Term>,
     matched: &[Option<i128>],
 ) -> Option<Rewrite> {
-    if let Some(rewrite) = converted(pieces, found) {
+    if let Some(rewrite) = converted(pieces, found, matched) {
         return Some(rewrite);
     }
     let [Piece::App { head, arity: 2 }, rest @ ..] = pieces else { return None };
@@ -593,24 +642,34 @@ fn matched(terms: &Terms<'_>, found: &Match<Term>) -> Vec<Option<i128>> {
 /// neither is an instruction, and [`identity`] has already dealt with both by the time anything
 /// gets here, so a test would not catch the day one slipped past.
 ///
-/// The operand is a value the pattern bound, and nothing else. A number would need a width to be
-/// written at and the result's width is the wrong one for a conversion, which is the whole reason
-/// this is separate from [`built`].
-fn converted(pieces: &'static [Piece], found: &Match<Term>) -> Option<Rewrite> {
+/// The operand is a value the pattern bound or an instruction built out of those, and never a
+/// number. A number would need a width to be written at and the result's width is the wrong one
+/// for a conversion, which is the whole reason this is separate from [`built`].
+fn converted(
+    pieces: &'static [Piece],
+    found: &Match<Term>,
+    matched: &[Option<i128>],
+) -> Option<Rewrite> {
     let [Piece::App { head, arity: 1 }, rest @ ..] = pieces else { return None };
     let opcode = match opcode_of(head)? {
         opcode @ (Opcode::SExt | Opcode::ZExt | Opcode::Trunc) => opcode,
         _ => return None,
     };
-    let [Piece::App { head: inner, arity: 1 }, Piece::Var { index, .. }] = rest else {
-        return None;
-    };
-    if !inner.starts_with("value.") {
-        return None;
-    }
-    match found.bindings.get(*index) {
-        Some(&Term::Reg(from)) => Some(Rewrite::Converted { opcode, from }),
+    match operand(rest, found, matched)? {
+        (Operand::Constant { .. }, _) => None,
+        (from, []) => Some(Rewrite::Converted { opcode, from }),
         _ => None,
+    }
+}
+
+/// Whether a rewrite builds anything in front of the instruction it rewrites, beyond a number.
+fn nests(rewrite: &Rewrite) -> bool {
+    match rewrite {
+        Rewrite::Built { lhs, rhs, .. } => {
+            matches!(lhs, Operand::Built(_)) || matches!(rhs, Operand::Built(_))
+        }
+        Rewrite::Converted { from, .. } => matches!(from, Operand::Built(_)),
+        Rewrite::Value(_) | Rewrite::Constant(_) => false,
     }
 }
 
@@ -657,8 +716,46 @@ fn operand(
                 _ => None,
             }
         }
+        [Piece::App { head, arity }, rest @ ..] => nested(head, *arity, rest, found, matched),
         _ => None,
     }
+}
+
+/// An instruction the rule wrote as an operand, and the pieces after it.
+///
+/// The same two shapes [`built`] and [`converted`] take at the top, a conversion of one operand
+/// that is not a number and anything else of two, with the predicate read off the head for a
+/// comparison. A constant is not one of these: an `iconst` head the arms of [`operand`] did not
+/// take is one with something other than a number under it.
+fn nested(
+    head: &str,
+    arity: usize,
+    pieces: &'static [Piece],
+    found: &Match<Term>,
+    matched: &[Option<i128>],
+) -> Option<(Operand, &'static [Piece])> {
+    let opcode = opcode_of(head)?;
+    let pred = rucc_ir::term::int_pred(head);
+    let converts = matches!(opcode, Opcode::SExt | Opcode::ZExt | Opcode::Trunc);
+    if opcode == Opcode::IConst
+        || (opcode == Opcode::ICmp) != pred.is_some()
+        || converts != (arity == 1)
+        || !(1..=2).contains(&arity)
+    {
+        return None;
+    }
+    let bits = bits_of(head)?;
+    let mut args = Vec::with_capacity(arity);
+    let mut rest = pieces;
+    for _ in 0..arity {
+        let (arg, after) = operand(rest, found, matched)?;
+        if converts && matches!(arg, Operand::Constant { .. }) {
+            return None;
+        }
+        args.push(arg);
+        rest = after;
+    }
+    Some((Operand::Built(Box::new(Nested { opcode, pred, bits, args })), rest))
 }
 
 /// The width a head names, out of the `iN` after its last dot.
@@ -707,7 +804,7 @@ fn become_instruction(
 ) {
     let result = func[inst].first_result.expect("the rule matched a result");
     let ty = func[result].ty;
-    let kept = carried(func, inst, opcode, lhs, rhs);
+    let kept = carried(func, inst, opcode, &lhs, &rhs);
     let lhs = defined(func, inst, ty, lhs);
     let rhs = defined(func, inst, ty, rhs);
     let args = func.push_values(&[lhs, rhs]);
@@ -753,7 +850,7 @@ fn become_instruction(
 /// way to a shift is a subscript scalar evolution can no longer widen to the address width, and
 /// every check on `grid[row * 128 + col]` stays inside the loop, which was `a-strided-column-sum`.
 /// See #1748.
-fn carried(func: &Func, inst: Inst, now: Opcode, lhs: Operand, rhs: Operand) -> Flags {
+fn carried(func: &Func, inst: Inst, now: Opcode, lhs: &Operand, rhs: &Operand) -> Flags {
     let data = func[inst];
     let args = &func[data.args];
     let (Opcode::Mul, Some(&first), Some(&second)) = (data.opcode, args.first(), args.get(1))
@@ -767,18 +864,18 @@ fn carried(func: &Func, inst: Inst, now: Opcode, lhs: Operand, rhs: Operand) -> 
     };
     let both = data.flags.intersection(Flags::NSW.union(Flags::NUW));
     match (now, lhs, rhs) {
-        (Opcode::Mul, Operand::Value(v), Operand::Constant { number, bits })
+        (Opcode::Mul, &Operand::Value(v), &Operand::Constant { number, bits })
             if v == x && bits < i128::BITS && (number ^ k) & ((1 << bits) - 1) == 0 =>
         {
             both
         }
-        (Opcode::Add, Operand::Value(v), Operand::Value(w)) if v == x && w == x && k == 2 => both,
-        (Opcode::Sub, Operand::Constant { number: 0, .. }, Operand::Value(v))
+        (Opcode::Add, &Operand::Value(v), &Operand::Value(w)) if v == x && w == x && k == 2 => both,
+        (Opcode::Sub, &Operand::Constant { number: 0, .. }, &Operand::Value(v))
             if v == x && k == -1 =>
         {
             data.flags.intersection(Flags::NSW)
         }
-        (Opcode::Shl, Operand::Value(v), Operand::Constant { number, bits })
+        (Opcode::Shl, &Operand::Value(v), &Operand::Constant { number, bits })
             if v == x && (0..i128::from(bits) - 1).contains(&number) && k == 1 << number =>
         {
             both
@@ -826,7 +923,35 @@ fn defined(func: &mut Func, before: Inst, ty: Type, operand: Operand) -> Value {
             func.insert_before(iconst, before);
             func[iconst].first_result.expect("one result was asked for")
         }
+        Operand::Built(nested) => {
+            let Nested { opcode, pred, bits, args } = *nested;
+            let ty = Type::int(bits);
+            let args: Vec<Value> =
+                args.into_iter().map(|arg| defined(func, before, ty, arg)).collect();
+            let args = func.push_values(&args);
+            let extra = pred.map_or(Extra::None, Extra::IntPred);
+            let data = InstData { args, extra, ..InstData::new(opcode) };
+            let span = func.span(before);
+            let inst = func.create_inst(data, &[ty], span);
+            func.insert_before(inst, before);
+            // The walk is past this point already, so a negation built here would be left for the
+            // next run of the pass, and at `-O2` there is none after the one that builds it.
+            if let Some(flip) = negated_comparison(func, inst) {
+                become_flipped(func, inst, &flip);
+            }
+            func[inst].first_result.expect("one result was asked for")
+        }
     }
+}
+
+/// Turns a negation of a comparison into the opposite comparison, where it stands.
+fn become_flipped(func: &mut Func, inst: Inst, flip: &Flip) {
+    let args = func.push_values(&[flip.lhs, flip.rhs]);
+    let data = &mut func[inst];
+    data.opcode = flip.opcode;
+    data.flags = flip.flags;
+    data.args = args;
+    data.extra = flip.extra;
 }
 
 /// Turns an instruction into the constant a rule says its result is.
@@ -1471,8 +1596,8 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::{
-        CANONICAL, COMPARE, EXPAND, PLANS, Shown, TABLES, canonical, compare, identities, strength,
-        width,
+        CANONICAL, COMPARE, EXPAND, PLANS, SELECT, Shown, TABLES, canonical, compare, identities,
+        select, strength, width,
     };
     use crate::rules::Piece;
     use crate::stats::Kind;
@@ -1567,11 +1692,8 @@ mod tests {
         let [Piece::App { head, arity: 1 }, rest @ ..] = pieces else { return false };
         let converts =
             matches!(super::opcode_of(head), Some(Opcode::SExt | Opcode::ZExt | Opcode::Trunc));
-        converts
-            && matches!(
-                rest,
-                [Piece::App { head, arity: 1 }, Piece::Var { .. }] if head.starts_with("value.")
-            )
+        let number = matches!(rest, [Piece::App { head, .. }, ..] if head.starts_with("iconst."));
+        converts && !number && shape(rest).is_some_and(<[Piece]>::is_empty)
     }
 
     /// Every rule in the width table writes a term ending at the width the one it matched ended
@@ -1610,30 +1732,31 @@ mod tests {
         if super::opcode_of(head).is_none() {
             return false;
         }
-        let operand = |pieces: &'static [Piece]| match pieces {
+        shape(rest).and_then(shape).is_some_and(<[Piece]>::is_empty)
+    }
+
+    /// One operand of a replacement, read the way [`super::operand`] reads it, and the pieces
+    /// after it. An instruction under the one a rule writes is an operand too, and its own
+    /// operands are read the same way.
+    fn shape(pieces: &'static [Piece]) -> Option<&'static [Piece]> {
+        match pieces {
             [Piece::App { head, arity: 1 }, Piece::Var { .. }, rest @ ..]
                 if head.starts_with("value.") =>
             {
                 Some(rest)
             }
-            [Piece::App { head, arity: 1 }, Piece::Int(_), rest @ ..]
-                if head.starts_with("iconst.") =>
+            [
+                Piece::App { head, arity: 1 },
+                Piece::Int(_) | Piece::Var { .. } | Piece::Computed { .. },
+                rest @ ..,
+            ] if head.starts_with("iconst.") => Some(rest),
+            [Piece::App { head, arity }, rest @ ..]
+                if super::opcode_of(head).is_some_and(|opcode| opcode != Opcode::IConst) =>
             {
-                Some(rest)
-            }
-            [Piece::App { head, arity: 1 }, Piece::Var { .. }, rest @ ..]
-                if head.starts_with("iconst.") =>
-            {
-                Some(rest)
-            }
-            [Piece::App { head, arity: 1 }, Piece::Computed { .. }, rest @ ..]
-                if head.starts_with("iconst.") =>
-            {
-                Some(rest)
+                (0..*arity).try_fold(rest, |rest, _| shape(rest))
             }
             _ => None,
-        };
-        operand(rest).and_then(operand).is_some_and(<[Piece]>::is_empty)
+        }
     }
 
     /// And each table holds every rule its file writes. The tables are generated, so this is
@@ -1646,12 +1769,14 @@ mod tests {
         let tier_three = include_str!("../rules/canonical.rules");
         let tier_four = include_str!("../rules/width.rules");
         let tier_five = include_str!("../rules/compare.rules");
+        let tier_six = include_str!("../rules/select.rules");
         let count = |text: &str| text.matches("(rule (simplify ").count();
         assert_eq!(identities::TABLE.rules.len(), count(tier_one));
         assert_eq!(strength::TABLE.rules.len(), count(tier_two));
         assert_eq!(canonical::TABLE.rules.len(), count(tier_three));
         assert_eq!(width::TABLE.rules.len(), count(tier_four));
         assert_eq!(compare::TABLE.rules.len(), count(tier_five));
+        assert_eq!(select::TABLE.rules.len(), count(tier_six));
         assert!(
             identities::TABLE.rules.len() > 100,
             "tier one is about a hundred rules and there are fewer"
@@ -1676,6 +1801,11 @@ mod tests {
             72,
             "tier five is four predicates against each of four constants at four widths, and a \
              widened boolean against zero under two predicates at the same four"
+        );
+        assert_eq!(
+            select::TABLE.rules.len(),
+            32,
+            "tier six is eight shapes of select at the four widths a select comes in"
         );
     }
 
@@ -1716,7 +1846,7 @@ mod tests {
     /// somebody adding the shared plans to the tier three row is a pass that does not stop.
     #[test]
     fn a_canonicalisation_is_only_matched_with_the_right_operand_refused() {
-        let (_, plans) = TABLES[4];
+        let (_, plans) = TABLES[5];
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0], CANONICAL[0]);
         assert_eq!(plans[0][1], Shown::Var);
@@ -1741,6 +1871,162 @@ mod tests {
         }
         assert_eq!(plans[0][0], Shown::Reg);
         assert_eq!(plans[1][0], Shown::Expand);
+    }
+
+    /// Tier six is matched with the arms as numbers, and then with one arm expanded at a time.
+    ///
+    /// The condition is a register under every plan, since every rule in the tier binds it as a
+    /// value. Expanding both arms at once would match nothing in the tier, because the arm that is
+    /// not expanded is the value the other was computed from and only two registers can be said to
+    /// be the same value.
+    #[test]
+    fn a_select_rule_is_matched_with_one_arm_expanded_at_a_time() {
+        let (_, plans) = TABLES[4];
+        assert_eq!(plans, SELECT);
+        for plan in plans {
+            assert_eq!(plan[0], Shown::Reg);
+            assert!(plan[1] != Shown::Expand || plan[2] != Shown::Expand);
+        }
+    }
+
+    /// A function of two numbers at a width that compares them with `slt` and hands the answer to
+    /// `arms`, which builds a select from it and returns what to return.
+    fn selecting(
+        width: u32,
+        arms: impl FnOnce(&mut Builder<'_>, Value, Value) -> Value,
+    ) -> (Func, Block, Value, Value) {
+        let ty = Type::int(width);
+        let (_, mut func, block) = blank();
+        let x = func.append_param(block, ty);
+        let y = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let cmp = build.icmp(IntPred::Slt, x, y);
+        let out = arms(&mut build, cmp, x);
+        build.ret(&[out]);
+        (func, block, x, y)
+    }
+
+    /// The comparison a value was widened from, with its predicate and its two operands.
+    fn widened(func: &Func, value: Value) -> (IntPred, Vec<Value>) {
+        assert_eq!(came_from(func, value).0, Opcode::ZExt);
+        let bit = operands(func, value)[0];
+        let (opcode, extra) = came_from(func, bit);
+        assert_eq!(opcode, Opcode::ICmp);
+        let Extra::IntPred(pred) = extra else { panic!("a comparison with no predicate") };
+        (pred, operands(func, bit))
+    }
+
+    /// `a < b ? 1 : 0` is the comparison widened, at every width, and `a < b ? 0 : 1` is the
+    /// opposite comparison widened, with no exclusive or left between the two.
+    #[test]
+    fn a_select_between_one_and_zero_is_the_comparison_widened() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            for (then, other, pred) in [(1, 0, IntPred::Slt), (0, 1, IntPred::Sge)] {
+                let (mut func, block, x, y) = selecting(width, |build, cmp, _| {
+                    let then = build.iconst(ty, then);
+                    let other = build.iconst(ty, other);
+                    build.select(cmp, then, other)
+                });
+                assert!(simplify(&mut func), "i{width} {then} {other} was left alone");
+                let got = returned(&func, block);
+                assert_eq!(func[got].ty, ty);
+                assert_eq!(widened(&func, got), (pred, vec![x, y]), "i{width} {then} {other}");
+            }
+        }
+    }
+
+    /// A condition that is not a comparison has nothing to flip, and the exclusive or stays.
+    #[test]
+    fn a_select_between_zero_and_one_on_a_bit_is_the_bit_negated_and_widened() {
+        let (_, mut func, block) = blank();
+        let bit = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let zero = build.iconst(Type::int(32), 0);
+        let one = build.iconst(Type::int(32), 1);
+        let out = build.select(bit, zero, one);
+        build.ret(&[out]);
+        assert!(simplify(&mut func));
+        let got = returned(&func, block);
+        assert_eq!(came_from(&func, got).0, Opcode::ZExt);
+        let negated = operands(&func, got)[0];
+        assert_eq!(came_from(&func, negated).0, Opcode::Xor);
+        let args = operands(&func, negated);
+        assert_eq!(args[0], bit);
+        assert_eq!(func[args[1]].ty, Type::int(1));
+    }
+
+    /// `a < b ? -1 : 0` is nothing less the comparison widened, and `a < b ? 0 : -1` is the
+    /// comparison widened less one.
+    #[test]
+    fn a_select_between_minus_one_and_zero_is_the_comparison_widened_and_moved() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            for (then, other, opcode) in [(-1, 0, Opcode::Sub), (0, -1, Opcode::Add)] {
+                let (mut func, block, x, y) = selecting(width, |build, cmp, _| {
+                    let then = build.iconst(ty, then);
+                    let other = build.iconst(ty, other);
+                    build.select(cmp, then, other)
+                });
+                assert!(simplify(&mut func), "i{width} {then} {other} was left alone");
+                let got = returned(&func, block);
+                assert_eq!(came_from(&func, got).0, opcode, "i{width} {then} {other}");
+                let args = operands(&func, got);
+                let (number_at, widened_at) = if opcode == Opcode::Sub { (0, 1) } else { (1, 0) };
+                assert_eq!(
+                    number(&func, args[number_at]),
+                    if opcode == Opcode::Sub { 0 } else { -1 }
+                );
+                assert_eq!(func[args[number_at]].ty, ty);
+                assert_eq!(widened(&func, args[widened_at]), (IntPred::Slt, vec![x, y]));
+            }
+        }
+    }
+
+    /// `a < b ? x + 1 : x` is `x` plus the comparison, and `a < b ? x - 1 : x` is `x` less it,
+    /// and with the arms the other way round the comparison is the opposite one.
+    #[test]
+    fn a_select_between_a_value_and_one_step_from_it_is_the_value_moved_by_the_comparison() {
+        for width in [8u32, 16, 32, 64] {
+            let ty = Type::int(width);
+            for step in [Opcode::Add, Opcode::Sub] {
+                for stepped_first in [true, false] {
+                    let (mut func, block, x, y) = selecting(width, |build, cmp, x| {
+                        let one = build.iconst(ty, 1);
+                        let stepped = build.binary(step, x, one, Flags::NSW);
+                        if stepped_first {
+                            build.select(cmp, stepped, x)
+                        } else {
+                            build.select(cmp, x, stepped)
+                        }
+                    });
+                    let case = format!("i{width} {step:?} first {stepped_first}");
+                    assert!(simplify(&mut func), "{case} was left alone");
+                    let got = returned(&func, block);
+                    assert_eq!(came_from(&func, got).0, step, "{case}");
+                    // What the select chose between made no promise the new instruction keeps.
+                    let rucc_ir::Def::Result { inst, .. } = func[got].def else { panic!() };
+                    assert_eq!(func[inst].flags, Flags::NONE, "{case}");
+                    let args = operands(&func, got);
+                    assert_eq!(args[0], x, "{case}");
+                    let pred = if stepped_first { IntPred::Slt } else { IntPred::Sge };
+                    assert_eq!(widened(&func, args[1]), (pred, vec![x, y]), "{case}");
+                }
+            }
+        }
+    }
+
+    /// A step of two is not one step, and the select is left for the back end.
+    #[test]
+    fn a_select_between_a_value_and_two_more_is_left_alone() {
+        let (mut func, block, _, _) = selecting(32, |build, cmp, x| {
+            let two = build.iconst(Type::int(32), 2);
+            let stepped = build.binary(Opcode::Add, x, two, Flags::NONE);
+            build.select(cmp, stepped, x)
+        });
+        simplify(&mut func);
+        let got = returned(&func, block);
+        assert_eq!(came_from(&func, got).0, Opcode::Select);
     }
 
     /// The edge of a type, at each width, read each way.
