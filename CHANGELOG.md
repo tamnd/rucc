@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- AArch64 compiles `asm` statements with operands. The template is kept as text and each operand is spelled into it once it has a register, as `w` or `x` at the width of its type or the one `%w0` or `%x0` asks for. A constant under `i` or `n` is written bare, the way gcc writes it there, and an operand under `m` is `[xN]`. Outputs tied to inputs by `+` or by a number, `&`, a clobber list naming general purpose or vector registers, and a local register variable such as `register long x asm ("x8")` all work. A constraint letter that means something else on AArch64 than on x86, such as `w`, `Q` or `S`, is refused rather than read the x86 way. A test program with eleven kinds of statement prints what gcc's build prints under qemu at O0, O1 and O2.
+
 ## 0.11.6
 
 ### Added

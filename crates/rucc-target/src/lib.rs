@@ -55,6 +55,7 @@ mod machine;
 mod operand;
 mod regs;
 mod short;
+pub mod template;
 mod timing;
 mod typenames;
 pub mod x86_64;

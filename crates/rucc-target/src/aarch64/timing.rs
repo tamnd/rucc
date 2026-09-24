@@ -110,7 +110,7 @@ fn plain(form: Form) -> Timing {
         JumpReg | Call | Ret => (2, Unit::Branch),
         RetVal | RetVal2 | RetValFp | RetVal2Fp | RetVal3Fp | RetVal4Fp | ArgVal | ArgValFp
         | BrCond => (0, Unit::Free),
-        Barrier | Trap | Nop => (1, Unit::Fixed),
+        Barrier | Trap | Nop | Template => (1, Unit::Fixed),
     };
     Timing { latency, unit }
 }

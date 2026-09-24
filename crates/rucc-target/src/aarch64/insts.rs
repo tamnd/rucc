@@ -40,7 +40,7 @@ use Form::{
     Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FpToInt, Insert, IntToFp, Jcc,
     Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, PopPair, Probe,
     Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set,
-    Store, StoreFp, Test, Trap, Unary,
+    Store, StoreFp, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -160,6 +160,14 @@ pub enum Form {
     Trap,
     /// A fence between the memory accesses before it and the ones after it.
     Barrier,
+    /// An `asm` template kept as the text the program wrote, with its operands spelled into it once
+    /// they have registers.
+    ///
+    /// The same thing as `crate::x86_64::Form::Template` and empty for the same reason: what the
+    /// text reads and writes is what its constraints said, and the lowering builds the operand list
+    /// from those. Nothing reads the text back into instructions on this machine, so every template
+    /// is one of these.
+    Template,
 }
 
 static ONE_WRITTEN: [OperandDesc; 1] = [OperandDesc::write(GPR)];
@@ -227,7 +235,7 @@ impl Form {
             RetVal2Fp => &RET_VAL_2_FP,
             RetVal3Fp => &RET_VAL_3_FP,
             RetVal4Fp => &RET_VAL_4_FP,
-            Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe => &NONE,
+            Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe | Template => &NONE,
         }
     }
 
@@ -264,6 +272,7 @@ impl Form {
                 | Call
                 | Ret
                 | Barrier
+                | Template
         )
     }
 }
@@ -659,7 +668,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("nop", Nop),
     ("trap", Trap),
     ("fence", Barrier),
+    // An `asm` statement's text, which is spelled into the listing rather than chosen by anything.
+    ("template", Template),
 ];
+
+/// The opcode that is a template kept as text, named so that the lowering and the writer are
+/// asking about the same opcode. See [`Form::Template`].
+pub const TEMPLATE: &str = "template";
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
 ///
