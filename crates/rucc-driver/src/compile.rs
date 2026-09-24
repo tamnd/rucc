@@ -3102,6 +3102,22 @@ decl #0 x : int object external static defined
         assert!(text.contains("str q"), "{text}");
     }
 
+    /// A `long double` on AArch64 Linux is a quad, moved with `ldr q` and `str q` and added with a
+    /// call to the same routine libgcc has.
+    #[test]
+    fn an_aarch64_long_double_is_a_quad_in_a_vector_register() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "void f(long double *p, long double x) { *p = *p + x; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("ldr q"), "{text}");
+        assert!(text.contains("str q"), "{text}");
+        assert!(text.contains("__addtf3"), "{text}");
+    }
+
     /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, which is
     /// not written yet, so a variadic definition there is refused rather than given the Linux list.
     #[test]

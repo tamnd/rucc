@@ -26,7 +26,7 @@ These are in code that runs, not in tests. A test that builds x86-64 instruction
 
 - `lower.rs` reaches a thread-local variable only the x86-64 way. It is refused on any other machine through `Unsupported::Unported`.
 
-- `lower.rs` lowers every `long double` operation through x87 instructions. AArch64 Linux has a 128-bit IEEE `long double` that goes through soft float calls, and Darwin makes it a `double`. The x87 arm has to become a question for the target rather than the only answer.
+- `lower.rs` still has an x87 arm for an eighty bit float, and it is reached only on x86-64, where `long double` is that format. AArch64 Linux has a 128-bit IEEE `long double` that goes through the same soft float calls `_Float128` does on x86-64, and Darwin makes it a `double`, so neither reaches the arm, but the question of which float the machine computes in is still answered by the format and not by the target.
 
 - `lower.rs` lowers inline `asm` with the x86 template reader. A function with an `asm` statement is now refused on any other machine instead of being read as the wrong language.
 

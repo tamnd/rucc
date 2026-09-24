@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - AArch64 builds a dense `switch` as a jump table, reached with `adr` and read with `ldrsw`, and takes the address of a label with `adr`, so computed `goto` works there too. Both used to be refused.
 - `-finstrument-functions` is taken rather than refused. Every function calls `__cyg_profile_func_enter` in front of its body and `__cyg_profile_func_exit` in front of every return, with its own address and the address it returns to, and `__attribute__((no_instrument_function))` takes a function back out. The calls go in while the body is lowered, before inlining, as gcc does. `execute/eeprof-1.c` passes at every level.
 - AArch64 Linux writes `va_start` and `va_arg` the AAPCS64 way, with the five field `va_list`, a save area of eight general purpose and eight vector registers, and the walk that falls back to the stack once either half runs out. Structs over sixteen bytes are read by reference and floating point aggregates of up to four members from the vector half, so `vprintf` and friends get a list they can read. Darwin still refuses a variadic definition.
+- AArch64 Linux handles `long double`, which is IEEE binary128 there. It is loaded, stored and returned in a vector register with `ldr q` and `str q`, and the arithmetic, comparisons and conversions are calls to libgcc's `__addtf3` family, the same ones `_Float128` uses on x86-64.
 
 ### Changed
 

@@ -275,7 +275,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 12, "the store rules moved and this test did not follow them");
+        assert_eq!(seen, 14, "the store rules moved and this test did not follow them");
     }
 
     /// An offset the unscaled form holds goes into the address, and one it does not leaves the
