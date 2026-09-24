@@ -786,6 +786,66 @@ mod tests {
         assert_eq!(machine.timing.prefix, machine.shapes.prefix);
     }
 
+    /// `int f(int a) { return g(a) + a; }` compiled for AArch64 and printed.
+    fn aarch64_call() -> String {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
+        let got = source[call].first_result.expect("an integer comes back");
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, got, args[0], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::aarch64(&aarch64::AAPCS64);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+        mir::print_func(&out, &names, &aarch64::REGS)
+    }
+
+    #[test]
+    fn an_aarch64_function_that_calls_keeps_its_return_address_in_a_frame_record() {
+        let text = aarch64_call();
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let first = |what: &str| lines.iter().position(|line| line.contains(what));
+        // The call writes over x30, so it goes on the stack with x29 before anything else, and the
+        // frame pointer is pointed at the pair.
+        let record = first("a64.push_pair_64 $x29, $x30").unwrap_or_else(|| panic!("{text}"));
+        let pointed = first("$x29 = a64.mov_rr_64 $sp").unwrap_or_else(|| panic!("{text}"));
+        let call = first("a64.bl").unwrap_or_else(|| panic!("{text}"));
+        let back = first("a64.pop_pair_64").unwrap_or_else(|| panic!("{text}"));
+        let ret =
+            lines.iter().position(|&line| line == "a64.ret").unwrap_or_else(|| panic!("{text}"));
+        assert!(record < pointed && pointed < call && call < back && back < ret, "{text}");
+        // Every push moves the stack pointer by sixteen, so whatever the frame takes on top of them
+        // is a multiple of sixteen too, and nothing is taken for the word x86 would have owed.
+        for line in &lines {
+            if let Some(rest) = line.split("a64.sub_ri_64 $sp, ").nth(1) {
+                let size: u32 = rest.parse().unwrap_or_else(|_| panic!("{text}"));
+                assert_eq!(size % 16, 0, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_aarch64_leaf_keeps_no_frame_record() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32, i32]);
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, args[0], args[1], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::aarch64(&aarch64::AAPCS64);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &aarch64::REGS);
+        assert!(!text.contains("push"), "{text}");
+        assert!(text.contains("a64.add_rr_32"), "{text}");
+    }
+
     #[test]
     fn a_function_comes_out_with_no_virtual_register_left_in_it() {
         let i32 = Type::int(32);

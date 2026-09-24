@@ -38,8 +38,9 @@ use crate::operand::{Constraint, OperandDesc};
 use Form::{
     Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet, CmpSetI,
     Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FpToInt, Insert, IntToFp, Jcc,
-    Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, Probe, Push, Ret,
-    RetVal, RetVal2, RetVal2Fp, RetValFp, Select, Set, Store, StoreFp, Test, Trap, Unary,
+    Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, PopPair, Probe,
+    Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetValFp, Select, Set, Store, StoreFp, Test,
+    Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -139,6 +140,12 @@ pub enum Form {
     Push,
     /// A register loaded from the stack pointer, moving the pointer up.
     Pop,
+    /// Two registers stored below the stack pointer, the first at the lower address, moving the
+    /// pointer down past both.
+    PushPair,
+    /// Two registers loaded from the stack pointer, the first from the lower address, moving the
+    /// pointer up past both.
+    PopPair,
     /// A page of the stack written without anything being put there, which is an address and a
     /// constant the machine has no use for and the prologue hands over anyway.
     Probe,
@@ -151,6 +158,7 @@ pub enum Form {
 }
 
 static ONE_WRITTEN: [OperandDesc; 1] = [OperandDesc::write(GPR)];
+static TWO_WRITTEN: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::write(GPR)];
 static INSERT: [OperandDesc; 2] =
     [OperandDesc::write(GPR).with(Constraint::Reuse(1)), OperandDesc::read(GPR)];
 static ONE_TO_ONE: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(GPR)];
@@ -194,9 +202,10 @@ impl Form {
             AluI | Unary | Convert | Move | CmpSetI => &ONE_TO_ONE,
             Alu | CmpSet | Csel => &TWO_TO_ONE,
             MulAdd | Select => &THREE_TO_ONE,
-            Cmp => &TWO_READ,
+            Cmp | PushPair => &TWO_READ,
             CmpI | Test | Store | BrCond | JumpReg | Push => &ONE_READ,
             Pop => &ONE_WRITTEN,
+            PopPair => &TWO_WRITTEN,
             LoadFp | ArgValFp => &ONE_WRITTEN_FP,
             StoreFp => &ONE_READ_FP,
             FUnary | FMove | FConvert => &FP_TO_FP,
@@ -233,7 +242,20 @@ impl Form {
     /// while the program runs, so nothing moved past the read can change what it reads.
     #[must_use]
     pub fn touches_mem(self) -> bool {
-        matches!(self, Load | Store | LoadFp | StoreFp | Push | Pop | Probe | Call | Ret | Barrier)
+        matches!(
+            self,
+            Load | Store
+                | LoadFp
+                | StoreFp
+                | Push
+                | Pop
+                | PushPair
+                | PopPair
+                | Probe
+                | Call
+                | Ret
+                | Barrier
+        )
     }
 }
 
@@ -571,6 +593,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // multiple of sixteen whenever it is used to reach memory.
     ("push_64", Push),
     ("pop_64", Pop),
+    ("push_pair_64", PushPair),
+    ("pop_pair_64", PopPair),
     // The two a prologue writes that no rule selects. A frame aligned harder than sixteen goes
     // through `x16`, since the one instruction that can write the stack pointer with a mask cannot
     // read it, and a page is touched by storing the zero register to it.

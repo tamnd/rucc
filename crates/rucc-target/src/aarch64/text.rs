@@ -610,6 +610,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // multiple of sixteen whenever it is used to reach memory.
     ("push_64", &[spell("str", &[Reg(0, X), Push])]),
     ("pop_64", &[spell("ldr", &[Reg(0, X), Pop])]),
+    ("push_pair_64", &[spell("stp", &[Reg(0, X), Reg(1, X), Push])]),
+    ("pop_pair_64", &[spell("ldp", &[Reg(0, X), Reg(1, X), Pop])]),
     (
         "align_sp_64",
         &[spell("mov", &[Fixed(16, X), Reg(1, X)]), spell("and", &[Reg(0, X), Fixed(16, X), Imm])],
@@ -893,6 +895,24 @@ mod tests {
         }
         let load = Operands { regs: &[9], ..sp };
         assert_eq!(listing("ldr_64", &load), ["ldr x9, [sp, #24]"]);
+        // The frame record and the way back from the frame pointer to it, which is the one address
+        // with a negative distance a prologue or epilogue hands this machine.
+        let record = Operands { regs: &[29, 30], ..sp };
+        assert_eq!(listing("push_pair_64", &record), ["stp x29, x30, [sp, #-16]!"]);
+        assert_eq!(listing("pop_pair_64", &record), ["ldp x29, x30, [sp], #16"]);
+        let back = Operands {
+            regs: &[31, 29],
+            mem: Some(Addr { base: 29, offset: Offset::Imm(-16), mode: Mode::Offset }),
+            ..sp
+        };
+        for name in ["push_pair_64", "pop_pair_64", "lea_64"] {
+            let with = if name == "lea_64" { &back } else { &record };
+            for inst in written(name).unwrap() {
+                let values: Vec<Value> =
+                    inst.args.iter().map(|&arg| fill(arg, with).unwrap()).collect();
+                assert!(encode(inst.mnemonic, &values).is_ok(), "{name}");
+            }
+        }
         assert_eq!(listing("str_f64", &load), ["str d9, [sp, #24]"]);
     }
 

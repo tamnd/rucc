@@ -200,6 +200,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     classes: &X86_64_MOVES,
     push: "push_64",
     pop: "pop_64",
+    pair: None,
     add: "add_ri_64",
     sub: "sub_ri_64",
     grow: "sub_rr_64",
@@ -1239,6 +1240,8 @@ pub static SYSV: CallRegs = CallRegs {
     stack_align: 16,
     return_address: 8,
     word: 8,
+    push: 8,
+    link: None,
     dwarf: &X86_64_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,
     // Forty bytes into the block a thread has to itself, which is where glibc, musl and every
@@ -1315,6 +1318,8 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         stack_align: 16,
         return_address: 8,
         word: 8,
+        push: 8,
+        link: None,
         dwarf: &X86_64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
         // None, and not because the platform has no protector. Windows has one and it is a

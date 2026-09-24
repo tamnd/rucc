@@ -403,6 +403,20 @@ pub struct CallRegs {
     pub return_address: u32,
     /// How many bytes one general purpose register takes when it is saved on the stack.
     pub word: u32,
+    /// How far one push moves the stack pointer.
+    ///
+    /// The word on x86-64. Sixteen on AArch64, where the stack pointer has to stay a multiple of
+    /// sixteen whenever memory is reached through it, so a push of one register leaves eight bytes
+    /// of its slot unused and a push of two fills it.
+    pub push: u32,
+    /// The register a call leaves the return address in, or `None` on a machine whose call pushes
+    /// it.
+    ///
+    /// A function that calls anything has to put this register away first, since the call writes
+    /// over it. It goes with the frame pointer as one push, which is the pair AAPCS64 calls a frame
+    /// record, and so a function that calls keeps a frame pointer on such a machine whatever the
+    /// flags say. gcc does the same there.
+    pub link: Option<PhysReg>,
     /// What DWARF calls each register, one list per class in the order the file numbers the
     /// classes, and inside a list in the order the class numbers its registers.
     ///
@@ -720,6 +734,8 @@ mod tests {
             stack_align: 16,
             return_address: 8,
             word: 8,
+            push: 8,
+            link: None,
             // Empty, which is all a convention made up for a test of argument placement needs to
             // say about a question it never asks.
             dwarf: &[],
