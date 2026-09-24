@@ -4941,11 +4941,29 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    /// Build the machine instruction a match calls for.
+    /// Build the machine instructions a match calls for.
     fn emit(&mut self, inst: Inst, matched: &Match<Term>) -> Result<(), Unsupported> {
         let rule: &Rule = self.selector.table.rule(matched);
-        let pieces = rule.replacement;
-        let Some(Piece::App { head, arity }) = pieces.first() else {
+        self.build(inst, rule.replacement, 0, &matched.bindings, true).map(|_| ())
+    }
+
+    /// Build the machine term that starts at `at`, and give back the position after it and the
+    /// register it wrote, if it wrote one.
+    ///
+    /// The outermost term computes what the IR instruction does, so what it writes is the
+    /// register of the instruction's result. A term inside another is a step on the way and
+    /// writes a register of its own, which the term around it then reads. Its operands are read
+    /// before it is built and it is built before the term around it, so the instructions come
+    /// out in the order the values are needed.
+    fn build(
+        &mut self,
+        inst: Inst,
+        pieces: &'static [Piece],
+        at: usize,
+        bindings: &[Term],
+        outermost: bool,
+    ) -> Result<(usize, Option<mir::Reg>), Unsupported> {
+        let Some(Piece::App { head, arity }) = pieces.get(at) else {
             return Err(self.unsupported(inst));
         };
         let opcode =
@@ -4953,9 +4971,9 @@ impl<'a> Lowering<'a> {
         let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
 
         let mut read = Read::default();
-        let mut at = 1;
+        let mut at = at + 1;
         for _ in 0..*arity {
-            at = self.read(inst, pieces, at, &matched.bindings, &mut read)?;
+            at = self.read(inst, pieces, at, bindings, &mut read)?;
         }
 
         let writes = descs.iter().take_while(|desc| desc.role.is_def()).count();
@@ -4970,17 +4988,28 @@ impl<'a> Lowering<'a> {
         // anywhere.
         let mut regs = Vec::new();
         if writes > 0 {
-            let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
-            regs.push(self.new_reg(result));
+            // A term inside another computes a step rather than the result, into a register only
+            // the term around it reads.
+            let first = match outermost {
+                true => {
+                    let result =
+                        self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+                    self.new_reg(result)
+                }
+                false => self.out.new_vreg(descs[0].class),
+            };
+            regs.push(first);
             // The rest are the registers the machine destroys on the way, and the class each is in
             // is the one the instruction's description gives it rather than a guess, so that an
             // instruction that wrecks a register in the other file says so.
             regs.extend(descs[1..writes].iter().map(|desc| self.out.new_vreg(desc.class)));
-        } else if self.source[inst].first_result.is_some() {
+        } else if !outermost || self.source[inst].first_result.is_some() {
             // A rule that throws away a value the IR gave a name to would leave every reader of
             // that name with nothing to read, so it is a rule this and the target disagree about.
+            // So is a term inside another that writes nothing for the one around it to read.
             return Err(self.unsupported(inst));
         }
+        let written = regs.first().copied();
         regs.extend(read.regs.iter().copied());
 
         let block = self.at.expect("a block is being filled");
@@ -5003,13 +5032,15 @@ impl<'a> Lowering<'a> {
             build = build.imm(imm);
         }
         build.finish();
-        Ok(())
+        Ok((at, written))
     }
 
-    /// Read one argument of a replacement, which is a register, a number or an address.
+    /// Read one argument of a replacement, which is a register, a number, an address or another
+    /// machine term.
     ///
-    /// Gives back the position after it, because a replacement is flat and an address takes
-    /// arguments of its own.
+    /// Gives back the position after it, because a replacement is flat and an address or a term
+    /// takes arguments of its own. A machine term is built on the spot, and what is read is the
+    /// register it wrote.
     fn read(
         &mut self,
         inst: Inst,
@@ -5052,6 +5083,11 @@ impl<'a> Lowering<'a> {
                     _ => return Err(self.unsupported(inst)),
                 }
                 Ok(at + 1)
+            }
+            Some(Piece::App { head, .. }) if (self.selector.address)(head).is_none() => {
+                let (next, reg) = self.build(inst, pieces, at, bindings, false)?;
+                out.regs.push(reg.ok_or_else(|| self.unsupported(inst))?);
+                Ok(next)
             }
             Some(Piece::App { head, arity }) => {
                 let kind = (self.selector.address)(head).ok_or_else(|| self.unsupported(inst))?;

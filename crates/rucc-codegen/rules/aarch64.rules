@@ -11,9 +11,10 @@
 ;; rest, which is right shifts, division and comparisons, has no rule below thirty two bits yet,
 ;; since each of those has to widen first and that is two instructions.
 ;;
-;; Every rule here is one instruction. A constant too wide for one `mov` and a remainder, which is a
-;; division and a multiply subtract, are two, and they come with the selector that can build a
-;; pair.
+;; A machine term inside another one is an instruction of its own, built first into a register of its
+;; own, which is how a remainder is written: the division, then a multiply subtract that takes the
+;; quotient times the divisor away from the dividend. A constant too wide for one `mov` needs more
+;; than one rule for the same pattern and waits for that.
 
 ;; Constants. One `mov` builds anything sixteen bits wide and anything whose complement is, and
 ;; that covers every constant of eight and sixteen bits as the IR holds them, sign extended.
@@ -253,6 +254,25 @@
 (rule (lower (udiv.i64 (value.i64 x) (value.i64 y)))
       (a64.udiv_rr_64 x y)
       (spec (= (bvudiv x y) (result))))
+
+
+;; Remainder, as what is left of the dividend once the quotient times the divisor is taken away.
+
+(rule (lower (srem.i32 (value.i32 x) (value.i32 y)))
+      (a64.msub_rrr_32 (a64.sdiv_rr_32 x y) y x)
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (srem.i64 (value.i64 x) (value.i64 y)))
+      (a64.msub_rrr_64 (a64.sdiv_rr_64 x y) y x)
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (urem.i32 (value.i32 x) (value.i32 y)))
+      (a64.msub_rrr_32 (a64.udiv_rr_32 x y) y x)
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (urem.i64 (value.i64 x) (value.i64 y)))
+      (a64.msub_rrr_64 (a64.udiv_rr_64 x y) y x)
+      (spec (= (bvurem x y) (result))))
 
 
 ;; Shifts by a constant. A left shift keeps its low bits whatever is above them, so it is the one
