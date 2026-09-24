@@ -26,6 +26,7 @@
 //! the useful question is whether it still does when the pass that was building it says it has
 //! finished.
 
+use std::collections::HashSet;
 use std::ops::{Index, IndexMut};
 
 use rucc_base::{Idx, Symbol};
@@ -113,6 +114,10 @@ pub struct Func {
     labels: Vec<(Block, Symbol)>,
     mem_decls: Vec<(Idx<MemInfo>, u32)>,
     value_decls: Vec<(Value, u32)>,
+    value_starts: Vec<(Value, Start)>,
+    /// The instructions some start in [`Func::value_starts`] is after, so that taking one out
+    /// only has to look through the starts when it is one of them.
+    anchors: HashSet<Inst>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -156,6 +161,8 @@ impl Func {
             labels: Vec::new(),
             mem_decls: Vec::new(),
             value_decls: Vec::new(),
+            value_starts: Vec::new(),
+            anchors: HashSet::new(),
             first_block: None,
             last_block: None,
         }
@@ -499,6 +506,20 @@ impl Func {
             None => self.blocks[block.index()].last = at.prev,
         }
         self.inst_layout[inst.index()] = InstLayout::default();
+        // A start after this instruction is after the one in front of it now, which is the same
+        // place: nothing was between the two but this. A pass that replaces an instruction puts the
+        // new one in front of the old one before taking the old one out, so the start ends up after
+        // the replacement, and one that moves an instruction leaves the start where it was.
+        if self.anchors.remove(&inst) {
+            for (_, start) in &mut self.value_starts {
+                if start.after == Some(inst) {
+                    start.after = at.prev;
+                }
+            }
+            if let Some(prev) = at.prev {
+                self.anchors.insert(prev);
+            }
+        }
     }
 
     /// The block an instruction is in, or `None` if it has been removed from one.
@@ -919,12 +940,69 @@ impl Func {
         for decl in moving {
             self.declare_value(to, decl);
         }
+        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end =
+            at + self.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let moving: Vec<Start> = self.value_starts.drain(at..end).map(|(_, start)| start).collect();
+        for start in moving {
+            self.declare_value_from(to, start);
+        }
+    }
+
+    /// Says that a declaration holds a value from a point in a block onward, rather than from
+    /// where the value was computed.
+    ///
+    /// What `int m = a;` is. The assignment computes nothing, so the value `m` is given is one
+    /// `a` already holds, and naming it with [`Func::declare_value`] would say `m` held it from
+    /// wherever `a` was written. This says where the assignment was instead, as the instruction in
+    /// front of it, or `None` for one at the top of the block.
+    ///
+    /// A pass that takes that instruction out moves the start onto the one in front of it, which
+    /// is the same place. A block that is taken out or emptied into another takes its starts with
+    /// it, and the back end reads those as saying nothing rather than guess. See [`Start`].
+    pub fn declare_value_from(&mut self, value: Value, start: Start) {
+        let at = self.value_starts.partition_point(|&(held, _)| held.raw() <= value.raw());
+        if !self.value_starts[..at]
+            .iter()
+            .rev()
+            .take_while(|&&(held, _)| held == value)
+            .any(|&(_, have)| have == start)
+        {
+            self.value_starts.insert(at, (value, start));
+            self.anchors.extend(start.after);
+        }
+    }
+
+    /// Every place a declaration starts holding a value part of the way through, in the order they
+    /// were said. See [`Func::declare_value_from`].
+    pub fn value_starts(&self, value: Value) -> impl Iterator<Item = Start> + '_ {
+        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
+        self.value_starts[at..]
+            .iter()
+            .take_while(move |&&(held, _)| held == value)
+            .map(|&(_, start)| start)
     }
 
     fn add_value(&mut self, data: ValueData) -> Value {
         self.values.push(data);
         Idx::from_usize(self.values.len() - 1)
     }
+}
+
+/// Where a declaration starts holding a value, when that is not where the value was computed.
+///
+/// The block and the instruction in front of the assignment, because an assignment that computes
+/// nothing is not an instruction and the one in front of it is the nearest thing that is. The block
+/// is carried as well because the start is a place in that block, and an instruction a pass moves
+/// out of it leaves the start behind on the one in front of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Start {
+    /// The declaration, in whatever numbering the front end gave it.
+    pub decl: u32,
+    /// The block the assignment is in.
+    pub block: Block,
+    /// The instruction in front of the assignment, or `None` for one at the top of the block.
+    pub after: Option<Inst>,
 }
 
 /// How many of each thing a function holds.
@@ -1883,6 +1961,61 @@ mod tests {
         // And renaming a value nothing named moves nothing rather than inventing a pair.
         func.rename_value(second, third);
         assert_eq!(func.value_decls(third).count(), 0);
+    }
+
+    /// A declaration that starts holding a value part of the way through says where, and a rename
+    /// carries that over as it does a name.
+    #[test]
+    fn a_start_part_of_the_way_through_is_kept_and_a_rename_carries_it_over() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let first = func.append_param(block, Type::int(32));
+        let second = func.append_param(block, Type::int(32));
+        let one = Builder::new(&mut func, block).iconst(Type::int(32), 1);
+        let inst = func.insts(block).next().expect("the constant");
+
+        let top = Start { decl: 4, block, after: None };
+        let later = Start { decl: 4, block, after: Some(inst) };
+        func.declare_value_from(first, later);
+        func.declare_value_from(first, top);
+        // The same ask twice is one start.
+        func.declare_value_from(first, later);
+        assert_eq!(func.value_starts(first).collect::<Vec<_>>(), vec![later, top]);
+        assert_eq!(func.value_starts(one).count(), 0);
+
+        func.rename_value(first, second);
+        assert_eq!(func.value_starts(second).collect::<Vec<_>>(), vec![later, top]);
+        assert_eq!(func.value_starts(first).count(), 0);
+    }
+
+    /// Taking out the instruction a start is after leaves it after the one in front, which is the
+    /// same place, and a replacement put in front of the old one is what it ends up after.
+    #[test]
+    fn a_start_after_an_instruction_that_is_taken_out_stays_where_it_was() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let value = func.append_param(block, Type::int(32));
+        let mut build = Builder::new(&mut func, block);
+        build.iconst(Type::int(32), 1);
+        build.iconst(Type::int(32), 2);
+        let [one, two]: [Inst; 2] = func.insts(block).collect::<Vec<_>>().try_into().expect("two");
+        func.declare_value_from(value, Start { decl: 4, block, after: Some(two) });
+
+        func.remove_inst(two);
+        assert_eq!(
+            func.value_starts(value).map(|start| start.after).collect::<Vec<_>>(),
+            [Some(one)]
+        );
+        let data = func[one];
+        let fresh = func.create_inst(data, &[Type::int(32)], Span::DUMMY);
+        func.insert_before(fresh, one);
+        func.remove_inst(one);
+        assert_eq!(
+            func.value_starts(value).map(|start| start.after).collect::<Vec<_>>(),
+            [Some(fresh)]
+        );
+        func.remove_inst(fresh);
+        assert_eq!(func.value_starts(value).map(|start| start.after).collect::<Vec<_>>(), [None]);
     }
 
     #[test]

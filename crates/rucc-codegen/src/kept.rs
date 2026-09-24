@@ -41,6 +41,16 @@
 //! value live into it or out of it. A piece that starts or ends at a spill, a reload or an edge
 //! move has an end that is neither, and it gets no stretch in that block rather than a guess.
 //!
+//! # A declaration that took a value part of the way through
+//!
+//! `int m = a;` computes nothing, so `m` is handed a value `a` already holds, and the value's live
+//! range says nothing about where the assignment was. Selection says it instead, as the first
+//! instruction after it in [`Func::starts`]. In that instruction's block the stretch starts no
+//! earlier than it, and in any other block the declaration holds the value only where every path
+//! from the entry goes through the assignment's block first, which is where it is sure to have
+//! run. A block the other arm of a branch reaches as well is left out, since there the
+//! declaration may never have been given the value at all.
+//!
 //! # What is left out
 //!
 //! A value the allocator spilled is in the frame over its stretch rather than in a register, which
@@ -49,7 +59,9 @@
 //! frame address is not a constant there, which is what `crate::frame` says about a local in the
 //! same function.
 
-use rucc_mir::{Func, Inst, Kept, Where};
+use std::collections::HashMap;
+
+use rucc_mir::{Block, Func, Inst, Kept, Reg, Where};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::live::Range;
@@ -82,28 +94,86 @@ pub fn of(
     frame: &Frame,
     framed: &[(u32, i32, &[Range])],
 ) -> Vec<Kept> {
-    if func.named.is_empty() && framed.is_empty() {
+    if func.named.is_empty() && func.starts.is_empty() && framed.is_empty() {
         return Vec::new();
     }
     let line = line(func, before, allocation);
     let mut out = Vec::new();
     for &(decl, reg) in &func.named {
-        let Some(class) = func.class_of(reg) else { continue };
-        let at = match allocation.assignment.place(reg) {
-            Some(Place::Reg(reg)) => Where::Reg { reg, class },
-            Some(Place::Slot(slot)) => match frame.slot_from_frame_base(slot) {
-                Some(at) => Where::Frame(at),
-                None => continue,
-            },
-            None => continue,
-        };
+        let Some(at) = place(func, allocation, frame, reg) else { continue };
         let Some(area) = allocation.live.area(reg) else { continue };
         over(decl, at, area.pieces(), &line, &mut out);
     }
     for &(decl, at, area) in framed {
         over(decl, Where::Frame(at), area.iter().copied(), &line, &mut out);
     }
+    // A declaration that took a value another one already held, from the instruction the
+    // assignment became onward. An instruction something took out since is nowhere to start from.
+    let mut under: HashMap<Block, Vec<bool>> = HashMap::new();
+    for &(decl, reg, first) in &func.starts {
+        let Some(block) = func.block_of(first) else { continue };
+        let Some(at) = place(func, allocation, frame, reg) else { continue };
+        let Some(area) = allocation.live.area(reg) else { continue };
+        let dominated = under.entry(block).or_insert_with(|| dominated(func, block));
+        for piece in area.pieces() {
+            for run in &line {
+                let stretch = if run.block == block {
+                    run.stretch_from(piece, first)
+                } else if dominated[run.block.index()] {
+                    run.stretch(piece)
+                } else {
+                    None
+                };
+                if let Some((from, to)) = stretch {
+                    out.push(Kept { decl, at, from, to });
+                }
+            }
+        }
+    }
     out
+}
+
+/// Where the allocator put a register, as a place a debugger can read, or `None` for a register
+/// it put nowhere or in a slot this frame cannot name.
+fn place(func: &Func, allocation: &Allocation, frame: &Frame, reg: Reg) -> Option<Where> {
+    let class = func.class_of(reg)?;
+    match allocation.assignment.place(reg)? {
+        Place::Reg(reg) => Some(Where::Reg { reg, class }),
+        Place::Slot(slot) => frame.slot_from_frame_base(slot).map(Where::Frame),
+    }
+}
+
+/// Which blocks every path from the entry to them goes through `from` on, by block number.
+///
+/// A block is one of them when the entry reaches it and stops reaching it once `from` is taken
+/// away, which is the definition read straight off rather than a dominator tree, since the question
+/// is asked of a handful of blocks and a tree would answer it for all of them. `from` itself is
+/// not, because what holds in it holds from part of the way through and is asked separately.
+fn dominated(func: &Func, from: Block) -> Vec<bool> {
+    let reach = |skip: Option<Block>| {
+        let mut seen = vec![false; func.block_count()];
+        let mut stack: Vec<Block> =
+            func.entry().filter(|&entry| Some(entry) != skip).into_iter().collect();
+        for &block in &stack {
+            seen[block.index()] = true;
+        }
+        while let Some(block) = stack.pop() {
+            for call in &func[block].succs {
+                if Some(call.block) != skip && !seen[call.block.index()] {
+                    seen[call.block.index()] = true;
+                    stack.push(call.block);
+                }
+            }
+        }
+        seen
+    };
+    let all = reach(None);
+    let around = reach(Some(from));
+    all.iter()
+        .zip(&around)
+        .enumerate()
+        .map(|(index, (&all, &around))| all && !around && index != from.index())
+        .collect()
 }
 
 /// The stretches one declaration is in one place over, a piece of where it is wanted at a time.
@@ -125,6 +195,8 @@ fn over(
 
 /// One block's instructions the liveness knows a point for, in the order the block is in now.
 struct Run {
+    /// Which block it is.
+    block: Block,
     /// Each instruction, with the point it reads its operands at and the one it writes at.
     insts: Vec<(Point, Point, Inst)>,
     /// Whether the points go up along the block, which is every block the scheduler left alone.
@@ -139,6 +211,20 @@ impl Run {
     /// The first and the last instruction of this block a piece of a live range covers, or `None`
     /// for a piece that covers none of them or one this cannot say about.
     fn stretch(&self, piece: Range) -> Option<(Inst, Inst)> {
+        let (lo, hi) = self.span(piece)?;
+        Some((self.insts[lo].2, self.insts[hi].2))
+    }
+
+    /// The same stretch, starting no earlier than `first`, for a declaration that only holds the
+    /// value from there on. `None` as well for a `first` the liveness has no point for.
+    fn stretch_from(&self, piece: Range, first: Inst) -> Option<(Inst, Inst)> {
+        let (lo, hi) = self.span(piece)?;
+        let lo = lo.max(self.insts.iter().position(|&(_, _, inst)| inst == first)?);
+        (lo <= hi).then(|| (self.insts[lo].2, self.insts[hi].2))
+    }
+
+    /// Where in [`Run::insts`] the first and the last instruction of a stretch are.
+    fn span(&self, piece: Range) -> Option<(usize, usize)> {
         if self.sorted {
             // Strictly after where the value is written and up to and including where it is last
             // read. Both ends of a piece are points the value is live at, and the front one is the
@@ -146,7 +232,7 @@ impl Run {
             // not hold the value at the start of.
             let lo = self.insts.partition_point(|&(early, _, _)| early <= piece.start);
             let hi = self.insts.partition_point(|&(early, _, _)| early <= piece.end);
-            return (lo < hi).then(|| (self.insts[lo].2, self.insts[hi - 1].2));
+            return (lo < hi).then(|| (lo, hi - 1));
         }
         let (start, end) = self.bounds?;
         if piece.end < start || piece.start > end {
@@ -159,7 +245,7 @@ impl Run {
         };
         let lo = if piece.start <= start { 0 } else { at(piece.start)? + 1 };
         let hi = if piece.end >= end { self.insts.len().checked_sub(1)? } else { at(piece.end)? };
-        (lo <= hi).then(|| (self.insts[lo].2, self.insts[hi].2))
+        (lo <= hi).then_some((lo, hi))
     }
 }
 
@@ -189,7 +275,7 @@ fn line(func: &Func, before: &[Inst], allocation: &Allocation) -> Vec<Run> {
             continue;
         }
         let sorted = insts.windows(2).all(|pair| pair[0].0 < pair[1].0);
-        out.push(Run { insts, sorted, bounds: order.bounds(block) });
+        out.push(Run { block, insts, sorted, bounds: order.bounds(block) });
     }
     out
 }
@@ -302,6 +388,44 @@ mod tests {
         let area = [Range { start: order.early(line[0]), end: order.late(line[1]) }];
         let kept = of(&func, &line, &allocation, &frame, &[(41, -24, &area)]);
         assert_eq!(kept, [Kept { decl: 41, at: Where::Frame(-24), from: line[1], to: line[1] }]);
+    }
+
+    #[test]
+    fn a_declaration_that_took_a_value_part_of_the_way_through_holds_it_from_there() {
+        // `int m = a;` with the assignment in front of the third instruction: `a` holds the value
+        // over the whole of its stretch and `m` only from there.
+        let (mut func, line) = three(&[(41, 0)]);
+        func.starts = vec![(42, Reg::virtual_reg(0), line[2])];
+        let kept = about(&mut func, &line);
+        let said: Vec<(u32, Inst, Inst)> =
+            kept.iter().map(|kept| (kept.decl, kept.from, kept.to)).collect();
+        assert_eq!(said, [(41, line[1], line[2]), (42, line[2], line[2])]);
+    }
+
+    #[test]
+    fn a_declaration_that_took_a_value_holds_it_in_the_blocks_its_own_dominates_only() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let [head, left, below, right, tail] = std::array::from_fn(|_| func.create_block());
+        let value = func.new_vreg(GPR);
+        func.build(head, opcode).def(value, GPR).finish();
+        let first = func.build(left, opcode).uses(value, GPR).finish();
+        let under = func.build(below, opcode).uses(value, GPR).finish();
+        func.build(right, opcode).uses(value, GPR).finish();
+        func.build(tail, opcode).uses(value, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(left), BlockCall::to(right)];
+        *func.succs_mut(left) = vec![BlockCall::to(below)];
+        *func.succs_mut(below) = vec![BlockCall::to(tail)];
+        *func.succs_mut(right) = vec![BlockCall::to(tail)];
+        func.starts = vec![(42, value, first)];
+        let line = before(&func);
+        let kept = about(&mut func, &line);
+
+        // The block the assignment is in and the one only it leads to. Not the other arm, which
+        // never ran the assignment, and not the join, which the other arm reaches too.
+        let said: Vec<(Inst, Inst)> = kept.iter().map(|kept| (kept.from, kept.to)).collect();
+        assert_eq!(said, [(first, first), (under, under)]);
     }
 
     #[test]

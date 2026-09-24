@@ -322,6 +322,16 @@ pub struct Func {
     /// Written by whatever selects instructions, because that is what turns a value into a
     /// register, and read by the allocator's answer below. Empty until the first of those.
     pub named: Vec<(u32, Reg)>,
+    /// The declarations that start holding a register's value part of the way through, as the
+    /// declaration, the register and the first instruction it holds it at.
+    ///
+    /// What `int m = a;` turns into. The value is `a`'s from where it was computed and `m`'s only
+    /// from the assignment, so `m` is here rather than in [`Func::named`], and it holds the value
+    /// from that instruction to the end of its block and in the blocks that one dominates, for as
+    /// long as the value is live. An instruction a pass later takes out takes the start with it,
+    /// and then the declaration says nothing about the register, which is what it said before
+    /// there were starts at all.
+    pub starts: Vec<(u32, Reg, Inst)>,
     /// Where each of those registers ended up, once the allocator has said, and over which of the
     /// function's instructions the answer holds.
     ///
@@ -377,6 +387,7 @@ impl Func {
             locals: Vec::new(),
             sharing: Vec::new(),
             named: Vec::new(),
+            starts: Vec::new(),
             kept: Vec::new(),
             tables: Vec::new(),
             insts: Vec::new(),
@@ -560,6 +571,12 @@ impl Func {
     #[must_use]
     pub fn block_of(&self, inst: Inst) -> Option<Block> {
         self.inst_layout[inst.index()].block
+    }
+
+    /// The instruction after this one in its block, or `None` for the last one.
+    #[must_use]
+    pub fn next_inst(&self, inst: Inst) -> Option<Inst> {
+        self.inst_layout[inst.index()].next
     }
 
     /// Where an instruction came from.

@@ -4501,7 +4501,8 @@ impl<'u> Body<'_, 'u> {
         match place.at {
             Where::Var(var) => {
                 let block = self.block();
-                self.ssa.write(var, block, value);
+                let after = self.func.insts_backwards(block).next();
+                self.ssa.assign(var, block, value, after);
                 None
             }
             Where::Addr(addr) => {

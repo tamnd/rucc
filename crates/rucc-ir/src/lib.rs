@@ -52,7 +52,7 @@ pub use asm::{AsmOperand, AsmOperands, AsmRole};
 pub use attrs::{AttrSet, Attrs, FpContract};
 pub use facts::{Bounds, Facts};
 pub use flags::{Flags, MemOrder, Owner, PrefetchHint, RmwOp, StorageClass};
-pub use func::{Builder, Counts, Func};
+pub use func::{Builder, Counts, Func, Start};
 pub use inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Extra,
     Hint, Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param, PlaneNode,

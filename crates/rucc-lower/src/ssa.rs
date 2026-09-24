@@ -37,11 +37,11 @@
 //! and then drops the parameters and the arguments that went with them. One pass over the
 //! function rather than one walk per removal, and no use lists to keep in step.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use rucc_base::Idx;
 use rucc_diag::Span;
-use rucc_ir::{Block, BlockCall, Extra, Func, Imm, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{Block, BlockCall, Extra, Func, Imm, Inst, InstData, Opcode, Start, Type, Value};
 
 /// A variable, which is somewhere in the source that can be written more than once.
 ///
@@ -109,9 +109,12 @@ pub struct Ssa {
     named: HashMap<Var, u32>,
     /// Every value a named variable was given, in the order they were recorded.
     holds: Vec<(Value, u32)>,
-    /// Which values a named variable has already been given, so that the second variable to be
-    /// written the same value is not given it again. See [`Ssa::write`].
-    owned: HashSet<Value>,
+    /// Every value a named variable was given part of the way through, because another one held
+    /// it first, and where. See [`Ssa::assign`].
+    starts: Vec<(Value, Start)>,
+    /// Which named variable was given each value first, so that the second variable to be written
+    /// the same value is not given it again. See [`Ssa::write`].
+    owned: HashMap<Value, u32>,
 }
 
 impl Ssa {
@@ -135,7 +138,8 @@ impl Ssa {
             zero: Vec::new(),
             named: HashMap::new(),
             holds: Vec::new(),
-            owned: HashSet::new(),
+            starts: Vec::new(),
+            owned: HashMap::new(),
         }
     }
 
@@ -160,12 +164,38 @@ impl Ssa {
     /// nothing rather than something wrong. It gets an answer again at the next assignment that
     /// computes anything, which is where a value of its own comes from.
     pub fn write(&mut self, var: Var, block: Block, value: Value) {
-        if let Some(&decl) = self.named.get(&var) {
-            if self.owned.insert(value) {
+        self.written(var, value, None);
+        self.defs.insert((var, block), value);
+    }
+
+    /// The same write, made by an assignment the program wrote, after the instruction `after` in
+    /// the block or at the top of it for `None`.
+    ///
+    /// The difference is what happens to a copy. Where [`Ssa::write`] says nothing about a variable
+    /// written a value another one already holds, this says where it started holding it, so that
+    /// `int m = a;` gives `m` the value from the assignment onward and leaves `a` with the whole of
+    /// it. See [`rucc_ir::Func::declare_value_from`].
+    pub fn assign(&mut self, var: Var, block: Block, value: Value, after: Option<Inst>) {
+        self.written(var, value, Some(Start { decl: 0, block, after }));
+        self.defs.insert((var, block), value);
+    }
+
+    /// The name half of a write: the value is the variable's from where it was computed if nobody
+    /// had it before, and from the start given if somebody else did.
+    fn written(&mut self, var: Var, value: Value, start: Option<Start>) {
+        let Some(&decl) = self.named.get(&var) else { return };
+        match self.owned.get(&value) {
+            None => {
+                self.owned.insert(value, decl);
                 self.holds.push((value, decl));
             }
+            Some(&owner) if owner != decl => {
+                if let Some(start) = start {
+                    self.starts.push((value, Start { decl, ..start }));
+                }
+            }
+            Some(_) => {}
         }
-        self.defs.insert((var, block), value);
     }
 
     /// The value a variable holds at this point in a block, which is the whole algorithm.
@@ -343,6 +373,10 @@ impl Ssa {
         for (value, decl) in std::mem::take(&mut self.holds) {
             let value = self.resolve(value);
             func.declare_value(value, decl);
+        }
+        for (value, start) in std::mem::take(&mut self.starts) {
+            let value = self.resolve(value);
+            func.declare_value_from(value, start);
         }
     }
 
@@ -742,6 +776,31 @@ mod tests {
         ssa.finish(&mut func);
 
         assert_eq!(named(&func), vec![(one.index(), vec![41])]);
+    }
+
+    /// The same copy made by an assignment says where it was, so the second variable holds the
+    /// value from there on and the first one still holds all of it.
+    #[test]
+    fn a_variable_assigned_a_value_another_one_holds_says_where_it_started() {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, _) = start(&mut names);
+        let (a, m) = (Var::new(0), Var::new(1));
+        ssa.stands_for(a, 41);
+        ssa.stands_for(m, 42);
+
+        let one = Builder::new(&mut func, entry).iconst(I32, 1);
+        ssa.assign(a, entry, one, None);
+        let made = func.insts(entry).last();
+        let read = ssa.read(&mut func, a, entry, I32);
+        ssa.assign(m, entry, read, made);
+        // And the first one written it again is not a start, since it held it all along.
+        ssa.assign(a, entry, read, made);
+        Builder::new(&mut func, entry).ret(&[read]);
+        ssa.finish(&mut func);
+
+        assert_eq!(named(&func), vec![(one.index(), vec![41])]);
+        let starts: Vec<Start> = func.value_starts(one).collect();
+        assert_eq!(starts, vec![Start { decl: 42, block: entry, after: made }]);
     }
 
     /// A variable nothing named leaves nothing behind, which is every temporary an expression
