@@ -106,6 +106,17 @@ fn a_glibc_version_survives_being_read() {
 }
 
 #[test]
+fn zig_puts_a_glibc_version_after_the_float_suffix_and_that_is_read_too() {
+    let ours = parse("armv7-linux-gnu.2.31eabihf");
+    assert_eq!(parse("armv7-linux-gnueabihf.2.31"), ours);
+    assert_eq!(ours.to_canonical_string(), "armv7-linux-gnu.2.31eabihf");
+    assert_eq!(parse("arm-linux-gnueabi.2.28"), parse("arm-linux-gnu.2.28eabi"));
+    assert_eq!(parse("x86_64-linux-gnux32.2.34"), parse("x86_64-linux-gnu.2.34x32"));
+    // A suffix with no version after it is read the way it always was.
+    assert_eq!(parse("armv7-linux-gnueabihf").env_version(), None);
+}
+
+#[test]
 fn an_android_api_level_is_a_version_spelled_differently() {
     let api = parse("aarch64-linux-android31");
     assert_eq!(api.env(), Env::Android);

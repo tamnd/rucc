@@ -235,7 +235,18 @@ struct ParsedEnv {
 
 /// Read the environment component, undoing the suffixes GCC fuses into it.
 fn parse_env(s: &str) -> Result<ParsedEnv, Error> {
-    let lower = s.to_ascii_lowercase();
+    let mut lower = s.to_ascii_lowercase();
+
+    // zig writes a version after the whole component, `gnueabihf.2.31`, where our canonical
+    // spelling puts it before the fused suffix, `gnu.2.31eabihf`. Both mean the same target, so
+    // zig's order is moved into ours before the suffix is read.
+    for suffix in ["eabihf", "eabi", "x32"] {
+        if let Some(at) = lower.find(&format!("{suffix}.")) {
+            let version = &lower[at + suffix.len() + 1..];
+            lower = format!("{}.{version}{suffix}", &lower[..at]);
+            break;
+        }
+    }
 
     let mut abi = Abi::Default;
     let mut data_model = None;
