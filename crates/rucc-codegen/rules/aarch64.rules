@@ -455,6 +455,92 @@
       (spec (= (ite (bvuge x y) 1 0) (result))))
 
 
+;; A byte or a half is compared as the thirty two bit value it widens to, sign extended for the
+;; signed predicates and zero extended for the rest, since the bits above it in the register are
+;; whatever the instruction that wrote it left there. The optimizer narrows a comparison of two
+;; `char` values to one of this width, so C reaches these at -O1 and above.
+
+(rule (lower (icmp_eq.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_eq_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_ne_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_lt_32 (a64.sxtb_32 x) (a64.sxtb_32 y))
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_le_32 (a64.sxtb_32 x) (a64.sxtb_32 y))
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_gt_32 (a64.sxtb_32 x) (a64.sxtb_32 y))
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_ge_32 (a64.sxtb_32 x) (a64.sxtb_32 y))
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_lo_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_ls_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_hi_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i8 x) (value.i8 y)))
+      (a64.cmp_set_hs_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_eq_32 (a64.uxth_32 x) (a64.uxth_32 y))
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_ne_32 (a64.uxth_32 x) (a64.uxth_32 y))
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_lt_32 (a64.sxth_32 x) (a64.sxth_32 y))
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_le_32 (a64.sxth_32 x) (a64.sxth_32 y))
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_gt_32 (a64.sxth_32 x) (a64.sxth_32 y))
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_ge_32 (a64.sxth_32 x) (a64.sxth_32 y))
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_lo_32 (a64.uxth_32 x) (a64.uxth_32 y))
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_ls_32 (a64.uxth_32 x) (a64.uxth_32 y))
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_hi_32 (a64.uxth_32 x) (a64.uxth_32 y))
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i16 x) (value.i16 y)))
+      (a64.cmp_set_hs_32 (a64.uxth_32 x) (a64.uxth_32 y))
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+
 ;; The same against a constant the compare can hold, which is twelve bits.
 
 (rule (lower (icmp_eq.i1 (value.i32 x) (iconst.i32 k)))

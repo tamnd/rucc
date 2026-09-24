@@ -194,7 +194,29 @@ pub static FRAME: FrameInsts = FrameInsts {
     probe: Some(PROBE),
     landing: None,
     pad: Some("nop"),
+    step_bits: Some(12),
+    reaches: Some(frame_reaches),
 };
+
+/// Whether the instruction of that name can carry that displacement from the stack pointer.
+///
+/// The encoder's answer for the instruction written with every register numbered zero and the
+/// stack pointer as its base, which is what the displacement is ever from. Only a refused number
+/// is a no. An instruction with no addressing mode, or one written against registers zero cannot
+/// stand for, is not something a displacement makes any worse.
+fn frame_reaches(name: &str, disp: i32) -> bool {
+    let Some(insts) = written(name) else { return true };
+    let mem = Addr { base: 31, offset: Offset::Imm(i64::from(disp)), mode: Mode::Offset };
+    let with = Operands { regs: &[0; 8], reads: 0, imm: 0, mem: Some(mem) };
+    insts.iter().all(|inst| {
+        let Ok(values) =
+            inst.args.iter().map(|&arg| fill(arg, &with)).collect::<Result<Vec<_>, _>>()
+        else {
+            return true;
+        };
+        !matches!(encode(inst.mnemonic, &values), Err(Error::Immediate { .. }))
+    })
+}
 
 /// How an AArch64 prologue touches a page of the stack it has just reached.
 ///
@@ -831,6 +853,40 @@ mod tests {
             assert!(described(name), "{name} is not an opcode");
         }
         assert_eq!(FRAME.classes.len(), 2, "both files are spilled");
+    }
+
+    /// A frame is taken in steps the `sub` can carry, the shifted part first, and each step is one
+    /// the encoder writes.
+    #[test]
+    fn a_frame_is_taken_in_steps_one_sub_can_carry() {
+        assert_eq!(FRAME.steps(4080), [4080]);
+        assert_eq!(FRAME.steps(4096), [4096]);
+        assert_eq!(FRAME.steps(4608), [4096, 512]);
+        assert_eq!(FRAME.steps(70016), [69632, 384]);
+        assert_eq!(FRAME.steps(0x0100_0010), [0x00ff_f000, 0x1000, 0x10]);
+        for bytes in [16, 4608, 70016, 0x0100_0010] {
+            let steps = FRAME.steps(bytes);
+            assert_eq!(steps.iter().sum::<u32>(), bytes);
+            for step in steps {
+                let fits = step < 4096 || (step % 4096 == 0 && step >> 12 < 4096);
+                assert!(fits, "{step} is not a step one sub can carry");
+            }
+        }
+    }
+
+    #[test]
+    fn how_far_from_the_stack_pointer_an_instruction_reaches_is_the_encoders_answer() {
+        let reaches = FRAME.reaches.unwrap();
+        assert!(reaches("lea_64", 4095));
+        assert!(reaches("lea_64", 4096));
+        assert!(!reaches("lea_64", 5008));
+        assert!(reaches("ldr_64", 32760));
+        assert!(!reaches("ldr_64", 32768));
+        assert!(reaches("ldr_64", -256));
+        assert!(!reaches("ldr_64", -264));
+        assert!(reaches("ldr_8", 4095));
+        assert!(!reaches("ldr_8", 4096));
+        assert!(reaches("ret", 1 << 20));
     }
 
     /// Every comparison that keeps its answer has a branch it folds into, and the two branches of
