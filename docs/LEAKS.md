@@ -16,6 +16,8 @@ A jump table and the address of a label are built from the selector's `Jumps`, w
 
 `va_start` writes the list the convention's `VaList` names. SysV x86-64 gets its four fields, AAPCS64 gets its five with the two offsets counted up from minus what is left of each half, and Windows x64 gets a pointer. The spare registers go into the save area through the selector's own stores, so a vector register is saved sixteen bytes wide on both machines.
 
+A thread-local variable is reached through the selector's `Symbols` too, which name the load of its offset from the thread pointer and how the thread pointer is read. On x86-64 those are a `mov` through the global offset table and a load at `%fs:0`, and on AArch64 they are `adrp` and `ldr` against `:gottprel:` and an `mrs` of `tpidr_el0`.
+
 The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::Address`, because the rule files for both machines use the same names for the same shapes. AArch64 lists the two it has.
 
 ## Still there
@@ -24,12 +26,12 @@ These are in code that runs, not in tests. A test that builds x86-64 instruction
 
 - `lower.rs` refuses a variadic definition on Darwin, whose list is one pointer and whose variadic arguments are all on the stack. The `Varargs::Pointer` case already covers the shape, and what is missing is the entry that puts nothing in the save area.
 
-- `lower.rs` reaches a thread-local variable only the x86-64 way. It is refused on any other machine through `Unsupported::Unported`.
+- `lower.rs` refuses a thread-local variable on Darwin, which reaches one through a descriptor call. It tells Darwin apart with the same `VaList` question the variadic refusal asks, which is a stand in for a real per platform answer.
 
 - `lower.rs` still has an x87 arm for an eighty bit float, and it is reached only on x86-64, where `long double` is that format. AArch64 Linux has a 128-bit IEEE `long double` that goes through the same soft float calls `_Float128` does on x86-64, and Darwin makes it a `double`, so neither reaches the arm, but the question of which float the machine computes in is still answered by the format and not by the target.
 
 - `lower.rs` lowers inline `asm` with the x86 template reader. A function with an `asm` statement is now refused on any other machine instead of being read as the wrong language.
 
-- `lower.rs` reads the thread block's slot in the global offset table with `mov_rm_64`, jumps away with `jmp_away`, and reads a global register variable with `x86_64::gpr_named`. The last needs a register name table per machine.
+- `lower.rs` jumps away with `jmp_away`, and reads a global register variable with `x86_64::gpr_named`. The last needs a register name table per machine.
 
 - `lower.rs` assumes a 64-bit address in `ADDRESS_BITS`. That holds for every target in plan tier 1 and fails for i686, armv7 and x32.

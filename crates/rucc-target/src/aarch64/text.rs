@@ -31,7 +31,7 @@ use crate::aarch64::read::system_field;
 
 use Arg::{
     Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Page, Pop, Push,
-    Reg, Symbol, Thread, Through, TprelHi, TprelLo, Vector,
+    Reg, Symbol, Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
 };
 use Scalar::{D, Q, S};
 use Width::{W, X};
@@ -73,6 +73,11 @@ pub enum Arg {
     /// The global offset table slot of the instruction's symbol, reached from the page in the
     /// register the operand at that index was given.
     GotSlot(u8),
+    /// The page of the global offset table slot that holds the offset of the instruction's symbol
+    /// from the thread pointer.
+    TlsPage,
+    /// That slot, reached from the page in the register the operand at that index was given.
+    TlsSlot(u8),
     /// The high twelve bits of the offset of the instruction's symbol from the thread pointer.
     TprelHi,
     /// The low twelve bits of the same offset.
@@ -434,6 +439,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("addr_64", &[spell("adrp", &[Reg(0, X), Page]), spell("add", &[Reg(0, X), Reg(0, X), Low])]),
     ("adr_64", &[spell("adr", &[Reg(0, X), Symbol])]),
     ("got_64", &[spell("adrp", &[Reg(0, X), GotPage]), spell("ldr", &[Reg(0, X), GotSlot(0)])]),
+    // A thread-local variable's offset from the thread pointer sits in a slot of the global offset
+    // table the link fills in, and the thread pointer is read on its own. Adding the two is the
+    // initial exec model, which works in a shared library as well as in the program.
+    (
+        "gottprel_64",
+        &[spell("adrp", &[Reg(0, X), TlsPage]), spell("ldr", &[Reg(0, X), TlsSlot(0)])],
+    ),
+    ("thread_64", &[spell("mrs", &[Reg(0, X), Thread])]),
     (
         "tls_64",
         &[
@@ -667,7 +680,7 @@ pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
         for arg in inst.args {
             let bits = match *arg {
                 Reg(at, width) if at == operand => width.bits(),
-                GotSlot(at) if at == operand => 64,
+                GotSlot(at) | TlsSlot(at) if at == operand => 64,
                 Fp(at, _) | Vector(at) if at == operand => return None,
                 _ => continue,
             };
@@ -741,6 +754,12 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
             offset: Offset::Symbol(Operator::GotLo12),
             mode: Mode::Offset,
         }),
+        TlsPage => Value::Symbol(Operator::GotTprel),
+        TlsSlot(at) => Value::Mem(Addr {
+            base: reg(at)?,
+            offset: Offset::Symbol(Operator::GotTprelLo12),
+            mode: Mode::Offset,
+        }),
         TprelHi => Value::Symbol(Operator::TprelHi12),
         TprelLo => Value::Symbol(Operator::TprelLo12Nc),
         Thread => Value::System(TPIDR_EL0),
@@ -777,7 +796,7 @@ mod tests {
             for inst in written(name).unwrap() {
                 for arg in inst.args {
                     let (at, class) = match *arg {
-                        Reg(at, _) | GotSlot(at) => (at, GPR),
+                        Reg(at, _) | GotSlot(at) | TlsSlot(at) => (at, GPR),
                         Fp(at, _) | Vector(at) => (at, FPR),
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
@@ -872,6 +891,11 @@ mod tests {
         assert_eq!(listing("movk_ri_32_64", &with), ["movk x0, #42, lsl #32"]);
         assert_eq!(listing("addr_64", &with), ["adrp x0, s", "add x0, x0, :lo12:s"]);
         assert_eq!(listing("got_64", &with), ["adrp x0, :got:s", "ldr x0, [x0, :got_lo12:s]"]);
+        assert_eq!(
+            listing("gottprel_64", &with),
+            ["adrp x0, :gottprel:s", "ldr x0, [x0, :gottprel_lo12:s]"]
+        );
+        assert_eq!(listing("thread_64", &with), ["mrs x0, tpidr_el0"]);
         assert_eq!(
             listing("tls_64", &with),
             [

@@ -250,6 +250,8 @@ fn reference(text: &str, symbol: &mut Option<String>) -> Result<Operator, Error>
                 "lo12" => Operator::Lo12,
                 "got" => Operator::Got,
                 "got_lo12" => Operator::GotLo12,
+                "gottprel" => Operator::GotTprel,
+                "gottprel_lo12" => Operator::GotTprelLo12,
                 "tprel_hi12" => Operator::TprelHi12,
                 "tprel_lo12_nc" => Operator::TprelLo12Nc,
                 _ => return Err(error(text)),

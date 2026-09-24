@@ -3120,6 +3120,36 @@ decl #0 x : int object external static defined
         assert!(text.contains("__addtf3"), "{text}");
     }
 
+    /// A thread-local variable on AArch64 Linux is initial exec: its offset comes out of the
+    /// global offset table, the thread pointer out of `tpidr_el0`, and one `add` joins them.
+    #[test]
+    fn an_aarch64_thread_local_is_reached_through_tpidr_el0() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "__thread int n;\nint *f(void) { return &n; }\n\
+                      void *g(void) { return __builtin_thread_pointer(); }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains(":gottprel:n"), "{text}");
+        assert!(text.contains(":gottprel_lo12:n]"), "{text}");
+        assert_eq!(text.matches("mrs x").count(), 2, "{text}");
+        assert!(text.contains("tpidr_el0"), "{text}");
+    }
+
+    /// Apple's platforms reach a thread-local variable through a descriptor, which is not written,
+    /// so it is refused there rather than given the Linux sequence.
+    #[test]
+    fn a_thread_local_is_refused_on_darwin_until_its_descriptor_is_written() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
+        let result = run(&opts, "__thread int n;\nint *f(void) { return &n; }\n");
+        assert!(result.failed());
+        assert!(result.messages[0].contains("thread-local"), "{:?}", result.messages);
+    }
+
     /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, which is
     /// not written yet, so a variadic definition there is refused rather than given the Linux list.
     #[test]
