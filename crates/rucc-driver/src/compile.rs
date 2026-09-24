@@ -970,12 +970,13 @@ fn generate(
                 );
                 *assembly = Some(listing.map_err(refused)?);
             }
-            // A template kept as text has no bytes until an assembler reads it, and it may jump to
-            // a label another statement's text defines or switch section halfway through. So a
-            // unit with one in it is assembled the way gcc assembles every unit: written out as a
-            // listing and read back. The listing carries no line table yet, so a build that asked
-            // for one is refused rather than handed an object without it.
-            if rucc_asm::kept(&funcs, names) {
+            // A template kept as text has no bytes until an assembler reads it. Most are read on
+            // their own where they are, but one may jump to a label another statement's text
+            // defines or switch section halfway through, and a unit with one of those in it is
+            // assembled the way gcc assembles every unit: written out as a listing and read back.
+            // The listing carries no line table yet, so a build that asked for one is refused
+            // rather than handed an object without it.
+            if rucc_asm::kept(&funcs, names, target) {
                 if opts.debug_info {
                     return Err(vec![unsupported(
                         "debug information for a unit with an `asm` template kept as text",

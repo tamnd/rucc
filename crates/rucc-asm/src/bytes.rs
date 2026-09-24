@@ -41,10 +41,12 @@ use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
 use rucc_target::{PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
-use rucc_object::{Chunk, Extent, FUNC_ALIGN, Marker, Patch, Reference, Reloc, Text};
+use rucc_object::{
+    Binding, Chunk, Extent, FUNC_ALIGN, Held, Marker, Patch, Reference, Reloc, Text, Visibility,
+};
 
 use crate::Error;
-use crate::format::{binding, visibility};
+use crate::format::{Directives, binding, visibility};
 use crate::unwind::{self, Rows};
 
 /// The prefix every x86-64 opcode carries in the machine IR.
@@ -162,6 +164,7 @@ pub fn assemble(
         let name = names.resolve(func.name).to_owned();
         let mut assembler = Assembler {
             names,
+            directives: Directives::of(target.object_format),
             func,
             name: &name,
             text: &mut text,
@@ -214,6 +217,51 @@ pub fn assemble(
     Ok(Assembled { text, lines: all, frames })
 }
 
+/// A template kept as text, as the bytes the assembler reads out of it on its own and the places in
+/// them that name something outside it, counted from the front of the template.
+///
+/// Read on its own when nothing in it reaches past its own text: no second section, no alignment,
+/// which counts from the front of a section this is not the front of, and no name it defines, since
+/// another template may be the one that jumps to it and the two are only put together in a
+/// listing. A numbered label it writes and goes to itself is a place rather than a name, and the
+/// reader has already turned every jump to one into a distance. What it names and does not define
+/// is left for the linker, the way gas would leave it, except for a local name, which is always in
+/// the same file and so is another template's. Anything else is an error with what about the text
+/// it was, and the unit goes to the assembler as a listing instead.
+pub(crate) fn template(
+    func: &Func,
+    block: Block,
+    inst: Inst,
+    names: &Interner,
+    directives: Directives,
+) -> Result<(Vec<u8>, Vec<Reloc>), String> {
+    // On a format whose names carry a prefix the text and the linker spell a name differently, and
+    // which one a name in the template meant is not a question this can answer.
+    if !directives.symbol().is_empty() {
+        return Err("names on this format carry a prefix".to_owned());
+    }
+    let text = crate::att::template(func, block, inst, names, directives)
+        .map_err(|trouble| trouble.to_string())?;
+    let read = crate::source::read(&format!("{}\n{text}", directives.text()))
+        .map_err(|trouble| trouble.why)?;
+    for name in &read.names {
+        let outside = name.at == Held::Undefined
+            && name.binding == Binding::Global
+            && name.visibility == Visibility::Default
+            && !name.name.starts_with(directives.local());
+        if !outside {
+            return Err(format!("it names '{}' in a way only the whole file can say", name.name));
+        }
+    }
+    match read.parts.as_slice() {
+        [] => Ok((Vec::new(), Vec::new())),
+        [part] if part.name == ".text" && part.align <= 1 => {
+            Ok((part.bytes.clone(), part.relocs.clone()))
+        }
+        _ => Err("it writes into a section of its own or aligns what follows".to_owned()),
+    }
+}
+
 /// A jump inside a function, waiting for the block it goes to to have a place.
 struct Jump {
     /// Where the four bytes the distance goes in begin.
@@ -237,6 +285,9 @@ enum To {
 /// One function being written out.
 struct Assembler<'a> {
     names: &'a Interner,
+    /// How the listing spells things, which a template kept as text is filled in with before it is
+    /// read. See [`template`].
+    directives: Directives,
     func: &'a Func,
     name: &'a str,
     text: &'a mut Text,
@@ -426,12 +477,21 @@ impl Assembler<'_> {
             }
             return Ok(());
         }
-        // A template kept as text has no bytes until an assembler reads the text, and a unit with
-        // one in it goes to the assembler as a listing rather than coming here. See
-        // [`crate::kept`]. Refused rather than written as nothing, which is what its empty row in
-        // the table would give.
+        // A template kept as text, read on its own and laid down as what it came to. One the
+        // reader cannot take on its own sends the whole unit to the assembler as a listing instead
+        // and never comes here, see [`crate::kept`], so a refusal here is that check and this one
+        // disagreeing.
         if opcode == x86_64::TEMPLATE {
-            return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
+            let (bytes, relocs) =
+                template(self.func, block, inst, self.names, self.directives).map_err(|why| {
+                    Error::Encode { func: self.name.to_owned(), opcode: spelled.to_owned(), why }
+                })?;
+            let at = self.text.bytes.len();
+            self.text.bytes.extend(bytes);
+            self.text
+                .relocs
+                .extend(relocs.into_iter().map(|reloc| Reloc { at: reloc.at + at, ..reloc }));
+            return Ok(());
         }
         let Some(written) = x86_64::written(opcode) else {
             return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });

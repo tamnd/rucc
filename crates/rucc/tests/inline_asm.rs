@@ -848,6 +848,20 @@ fn a_unit_with_a_template_kept_as_text_is_assembled_from_its_listing() {
 }
 
 #[test]
+fn a_template_kept_as_text_that_reaches_nothing_past_itself_builds_with_debug_information() {
+    // The label and the jump to it are both inside the one template, and what it names outside
+    // itself is a variable the linker places, so the assembler reads it on its own where it is and
+    // the rest of the unit keeps its line table.
+    let source = "int kept_data; long f(long a, long b) { long r; \
+                  asm (\"lea kept_data(%%rip), %0; add %1, %0; add %2, %0; jmp 1f; 1:\" \
+                  : \"=&r\" (r) : \"r\" (a), \"r\" (b)); return r; }\n";
+    let (ok, bytes, said) = object("kept-alone-debug", source, &["-g"]);
+    assert!(ok, "{said}");
+    assert!(bytes.windows(11).any(|at| at == b".debug_line"), "no line table in the object");
+    assert!(bytes.windows(9).any(|at| at == b"kept_data"), "the variable never reached the object");
+}
+
+#[test]
 fn a_unit_with_a_template_kept_as_text_asked_for_debug_information_says_so() {
     // The listing has no line table in it yet, and an object without one is not what `-g` asked
     // for, so it is refused rather than written.
