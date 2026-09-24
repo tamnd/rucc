@@ -18,6 +18,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `rucc_target::aarch64` describes the AArch64 register file and the two calling conventions over it, AAPCS64 and Apple's, with DWARF's numbering, the registers each one preserves, and an allocation order that keeps `x16`, `x17` and `x18` out. `TargetInfo` now answers them for every AArch64 target except Windows, which has no ABI description yet. This is the first piece of the AArch64 back end in M6 and generates no code yet, so `--target=aarch64-linux-gnu` still stops with the message that there is no back end.
 
+- `rucc_target::aarch64::encode` writes AArch64 instructions as their words, covering the integer, bitfield, conditional, load and store, pair, exclusive, branch, system and scalar floating point instructions and the aliases GNU as takes for them, such as `mov`, `cmp`, `lsl` with a number and `cset`, and `rucc_target::aarch64::read` reads them in GNU syntax. A symbol or a label is left as zeros with the ELF relocation that fills it in. Every word is checked against the word GNU as 2.42 writes for the same line, 477 lines in all.
+
 ### Fixed
 
 - A local copied from another at the top of a loop body, as in `int j = i;` in `while (i < n) { int j = i; i = i + 1; ... }`, now shows the old value of `i` under `-g` at `-O1` and `-O2`, where gdb printed the new one. Header copying gives the body its own copy of the counter and now moves the names and start points in the body onto it, instead of leaving them on the header's value, which the loop hands the next value when it comes round. See tamnd/rucc#1810.

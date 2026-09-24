@@ -1,0 +1,480 @@
+# Every line is a word GNU as 2.42 wrote for aarch64-linux-gnu, the line it was given, and the
+# relocation it left when there was one. Made with aarch64-linux-gnu-as and objdump -dr, one
+# instruction per source line, and checked word for word by the tests in encode.rs.
+8b020020	add x0, x1, x2
+0b020020	add w0, w1, w2
+8b050c83	add x3, x4, x5, lsl #3
+0b451c83	add w3, w4, w5, lsr #7
+8b85fc83	add x3, x4, x5, asr #63
+91001020	add x0, x1, #4
+913ffc20	add x0, x1, #4095
+91400420	add x0, x1, #1, lsl #12
+11032149	add w9, w10, #200
+910043ff	add sp, sp, #16
+910003fd	add x29, sp, #0
+8b2163e0	add x0, sp, x1
+8b22c020	add x0, x1, w2, sxtw
+8b224820	add x0, x1, w2, uxtw #2
+8b22ec20	add x0, x1, x2, sxtx #3
+ab020020	adds x0, x1, x2
+31000420	adds w0, w1, #1
+cb020020	sub x0, x1, x2
+4b020820	sub w0, w1, w2, lsl #2
+d10083ff	sub sp, sp, #32
+d14007ff	sub sp, sp, #1, lsl #12
+d13ffc20	sub x0, x1, #4095
+eb020020	subs x0, x1, x2
+71001420	subs w0, w1, #5
+eb01001f	cmp x0, x1
+7100281f	cmp w0, #10
+f100001f	cmp x0, #0
+eb22c03f	cmp x1, w2, sxtw
+ab01001f	cmn x0, x1
+31000c1f	cmn w0, #3
+cb0103e0	neg x0, x1
+4b0103e0	neg w0, w1
+eb0103e0	negs x0, x1
+aa0103e0	mov x0, x1
+2a0103e0	mov w0, w1
+910003e0	mov x0, sp
+9100001f	mov sp, x0
+910003fd	mov x29, sp
+aa1f03e0	mov x0, xzr
+2a1f03e0	mov w0, wzr
+8a020020	and x0, x1, x2
+0a020020	and w0, w1, w2
+92401c20	and x0, x1, #0xff
+12003c20	and w0, w1, #0xffff
+927cec20	and x0, x1, #0xfffffffffffffff0
+12010020	and w0, w1, #0x80000000
+9200f020	and x0, x1, #0x5555555555555555
+9200cc20	and x0, x1, #0x0f0f0f0f0f0f0f0f
+92400020	and x0, x1, #0x1
+9240f820	and x0, x1, #0x7fffffffffffffff
+927cec3f	and sp, x1, #0xfffffffffffffff0
+aa020020	orr x0, x1, x2
+2a021020	orr w0, w1, w2, lsl #4
+b2600020	orr x0, x1, #0x100000000
+320003e0	orr w0, wzr, #0x1
+ca020020	eor x0, x1, x2
+5201f020	eor w0, w1, #0xaaaaaaaa
+cac22420	eor x0, x1, x2, ror #9
+ea020020	ands x0, x1, x2
+72000c20	ands w0, w1, #0xf
+8a220020	bic x0, x1, x2
+0a220020	bic w0, w1, w2
+ea220020	bics x0, x1, x2
+aa220020	orn x0, x1, x2
+4a220020	eon w0, w1, w2
+aa2103e0	mvn x0, x1
+2a2103e0	mvn w0, w1
+ea01001f	tst x0, x1
+7219001f	tst w0, #0x80
+f241001f	tst x0, #0x8000000000000000
+d2800000	movz x0, #0
+d2800020	movz x0, #1
+d2bfffe0	movz x0, #0xffff, lsl #16
+d2e24680	movz x0, #0x1234, lsl #48
+52a24680	movz w0, #0x1234, lsl #16
+92800000	movn x0, #0
+128000a0	movn w0, #5
+f297dde0	movk x0, #0xbeef
+f2bbd5a0	movk x0, #0xdead, lsl #16
+f2c00020	movk x0, #0x1, lsl #32
+f2e00040	movk x0, #0x2, lsl #48
+72afffe0	movk w0, #0x7fff, lsl #16
+9b027c20	mul x0, x1, x2
+1b027c20	mul w0, w1, w2
+9b020c20	madd x0, x1, x2, x3
+1b020c20	madd w0, w1, w2, w3
+9b028c20	msub x0, x1, x2, x3
+1b028c20	msub w0, w1, w2, w3
+9b02fc20	mneg x0, x1, x2
+9b427c20	smulh x0, x1, x2
+9bc27c20	umulh x0, x1, x2
+9b227c20	smull x0, w1, w2
+9ba27c20	umull x0, w1, w2
+9b220c20	smaddl x0, w1, w2, x3
+9ba20c20	umaddl x0, w1, w2, x3
+9ac20c20	sdiv x0, x1, x2
+1ac20c20	sdiv w0, w1, w2
+9ac20820	udiv x0, x1, x2
+1ac20820	udiv w0, w1, w2
+9ac22020	lsl x0, x1, x2
+1ac22020	lsl w0, w1, w2
+9ac22420	lsr x0, x1, x2
+1ac22820	asr w0, w1, w2
+9ac22c20	ror x0, x1, x2
+9ac22020	lslv x0, x1, x2
+1ac22420	lsrv w0, w1, w2
+9ac22820	asrv x0, x1, x2
+1ac22c20	rorv w0, w1, w2
+d37df020	lsl x0, x1, #3
+53010020	lsl w0, w1, #31
+d340fc20	lsl x0, x1, #0
+d343fc20	lsr x0, x1, #3
+531f7c20	lsr w0, w1, #31
+937ffc20	asr x0, x1, #63
+13017c20	asr w0, w1, #1
+93c11c20	ror x0, x1, #7
+13817c20	ror w0, w1, #31
+93401c20	sxtb x0, w1
+13001c20	sxtb w0, w1
+93403c20	sxth x0, w1
+13003c20	sxth w0, w1
+93407c20	sxtw x0, w1
+53001c20	uxtb w0, w1
+53003c20	uxth w0, w1
+d3442c20	ubfx x0, x1, #4, #8
+53000020	ubfx w0, w1, #0, #1
+937cfc20	sbfx x0, x1, #60, #4
+13031c20	sbfx w0, w1, #3, #5
+b3783c20	bfi x0, x1, #8, #16
+33001c20	bfi w0, w1, #0, #8
+b3505c20	bfxil x0, x1, #16, #8
+d37e7420	ubfiz x0, x1, #2, #30
+937d7c20	sbfiz x0, x1, #3, #32
+d3410820	ubfm x0, x1, #1, #2
+13031020	sbfm w0, w1, #3, #4
+b3451820	bfm x0, x1, #5, #6
+93c23420	extr x0, x1, x2, #13
+13827c20	extr w0, w1, w2, #31
+9a820020	csel x0, x1, x2, eq
+1a821020	csel w0, w1, w2, ne
+9a822020	csel x0, x1, x2, hs
+9a822020	csel x0, x1, x2, cs
+9a823020	csel x0, x1, x2, lo
+9a823020	csel x0, x1, x2, cc
+9a824020	csel x0, x1, x2, mi
+9a825020	csel x0, x1, x2, pl
+9a826020	csel x0, x1, x2, vs
+9a827020	csel x0, x1, x2, vc
+9a828020	csel x0, x1, x2, hi
+9a829020	csel x0, x1, x2, ls
+9a82a020	csel x0, x1, x2, ge
+9a82b020	csel x0, x1, x2, lt
+9a82c020	csel x0, x1, x2, gt
+9a82d020	csel x0, x1, x2, le
+9a82e020	csel x0, x1, x2, al
+9a820420	csinc x0, x1, x2, eq
+5a82b020	csinv w0, w1, w2, lt
+da82c420	csneg x0, x1, x2, gt
+9a9f17e0	cset x0, eq
+1a9fa7e0	cset w0, lt
+da9f03e0	csetm x0, ne
+9a819420	cinc x0, x1, hi
+5a81b020	cinv w0, w1, ge
+da815420	cneg x0, x1, mi
+fa410000	ccmp x0, x1, #0, eq
+7a5f180f	ccmp w0, #31, #15, ne
+ba41b004	ccmn x0, x1, #4, lt
+ba41a802	ccmn x0, #1, #2, ge
+dac01020	clz x0, x1
+5ac01020	clz w0, w1
+dac01420	cls x0, x1
+dac00020	rbit x0, x1
+5ac00020	rbit w0, w1
+dac00c20	rev x0, x1
+5ac00820	rev w0, w1
+dac00420	rev16 x0, x1
+5ac00420	rev16 w0, w1
+dac00820	rev32 x0, x1
+f9400020	ldr x0, [x1]
+f9400420	ldr x0, [x1, #8]
+f97ffc20	ldr x0, [x1, #32760]
+b9400420	ldr w0, [x1, #4]
+b97ffc20	ldr w0, [x1, #16380]
+f9400be0	ldr x0, [sp, #16]
+f85f8020	ldr x0, [x1, #-8]
+f8403020	ldr x0, [x1, #3]
+b8500020	ldr w0, [x1, #-256]
+f8410c20	ldr x0, [x1, #16]!
+f8410420	ldr x0, [x1], #16
+b85fcc20	ldr w0, [x1, #-4]!
+b85fc420	ldr w0, [x1], #-4
+f8626820	ldr x0, [x1, x2]
+f8627820	ldr x0, [x1, x2, lsl #3]
+b8627820	ldr w0, [x1, x2, lsl #2]
+f862c820	ldr x0, [x1, w2, sxtw]
+f862d820	ldr x0, [x1, w2, sxtw #3]
+b8625820	ldr w0, [x1, w2, uxtw #2]
+f862e820	ldr x0, [x1, x2, sxtx]
+39400020	ldrb w0, [x1]
+397ffc20	ldrb w0, [x1, #4095]
+385ff020	ldrb w0, [x1, #-1]
+38626820	ldrb w0, [x1, x2]
+38401c20	ldrb w0, [x1, #1]!
+38401420	ldrb w0, [x1], #1
+79400420	ldrh w0, [x1, #2]
+797ffc20	ldrh w0, [x1, #8190]
+78401020	ldrh w0, [x1, #1]
+78627820	ldrh w0, [x1, x2, lsl #1]
+39800020	ldrsb x0, [x1]
+39c00c20	ldrsb w0, [x1, #3]
+79800420	ldrsh x0, [x1, #2]
+78dfe020	ldrsh w0, [x1, #-2]
+b9800420	ldrsw x0, [x1, #4]
+b89fc020	ldrsw x0, [x1, #-4]
+b8a27820	ldrsw x0, [x1, x2, lsl #2]
+f85f8020	ldur x0, [x1, #-8]
+b8401020	ldur w0, [x1, #1]
+385ff020	ldurb w0, [x1, #-1]
+785fe020	ldurh w0, [x1, #-2]
+389ff020	ldursb x0, [x1, #-1]
+78dfd020	ldursh w0, [x1, #-3]
+b89fc020	ldursw x0, [x1, #-4]
+f9000020	str x0, [x1]
+f9000420	str x0, [x1, #8]
+b9000420	str w0, [x1, #4]
+f81f0fe0	str x0, [sp, #-16]!
+f80107e0	str x0, [sp], #16
+f81f0ffe	str x30, [sp, #-16]!
+f81f8020	str x0, [x1, #-8]
+b8227820	str w0, [x1, x2, lsl #2]
+f900003f	str xzr, [x1]
+b900043f	str wzr, [x1, #4]
+39000020	strb w0, [x1]
+39000420	strb w0, [x1, #1]
+381ff03f	strb wzr, [x1, #-1]
+79000420	strh w0, [x1, #2]
+78226820	strh w0, [x1, x2]
+f81f8020	stur x0, [x1, #-8]
+b8003020	stur w0, [x1, #3]
+381ff020	sturb w0, [x1, #-1]
+781fe020	sturh w0, [x1, #-2]
+a9400440	ldp x0, x1, [x2]
+a9410440	ldp x0, x1, [x2, #16]
+a9600440	ldp x0, x1, [x2, #-512]
+a95f8440	ldp x0, x1, [x2, #504]
+a8c17bfd	ldp x29, x30, [sp], #16
+a9c17bfd	ldp x29, x30, [sp, #16]!
+29410440	ldp w0, w1, [x2, #8]
+28ff0440	ldp w0, w1, [x2], #-8
+69410440	ldpsw x0, x1, [x2, #8]
+a9bf7bfd	stp x29, x30, [sp, #-16]!
+a9be7bfd	stp x29, x30, [sp, #-32]!
+a90153f3	stp x19, x20, [sp, #16]
+a8810440	stp x0, x1, [x2], #16
+29008440	stp w0, w1, [x2, #4]
+a9007c1f	stp xzr, xzr, [x0]
+6d0127e8	stp d8, d9, [sp, #16]
+6d4127e8	ldp d8, d9, [sp, #16]
+2d010400	stp s0, s1, [x0, #8]
+ad410400	ldp q0, q1, [x0, #32]
+ac810400	stp q0, q1, [x0], #32
+fd400020	ldr d0, [x1]
+fd400420	ldr d0, [x1, #8]
+bd400420	ldr s0, [x1, #4]
+3dc00420	ldr q0, [x1, #16]
+3d400420	ldr b0, [x1, #1]
+7d400420	ldr h0, [x1, #2]
+fc5f8020	ldr d0, [x1, #-8]
+fc627820	ldr d0, [x1, x2, lsl #3]
+bc62d820	ldr s0, [x1, w2, sxtw #2]
+3cc10c20	ldr q0, [x1, #16]!
+fc408420	ldr d0, [x1], #8
+fd000020	str d0, [x1]
+fd0007e0	str d0, [sp, #8]
+bd000420	str s0, [x1, #4]
+3d800420	str q0, [x1, #16]
+3c9f0fe0	str q0, [sp, #-16]!
+fc1f8020	str d0, [x1, #-8]
+bc227820	str s0, [x1, x2, lsl #2]
+fc5f8020	ldur d0, [x1, #-8]
+3c9f0020	stur q0, [x1, #-16]
+c85f7c20	ldxr x0, [x1]
+885f7c20	ldxr w0, [x1]
+085f7c20	ldxrb w0, [x1]
+485f7c20	ldxrh w0, [x1]
+c85ffc20	ldaxr x0, [x1]
+885ffc20	ldaxr w0, [x1]
+085ffc20	ldaxrb w0, [x1]
+c8027c20	stxr w2, x0, [x1]
+88027c20	stxr w2, w0, [x1]
+08027c20	stxrb w2, w0, [x1]
+c802fc20	stlxr w2, x0, [x1]
+8802fc20	stlxr w2, w0, [x1]
+4802fc20	stlxrh w2, w0, [x1]
+c8dffc20	ldar x0, [x1]
+88dffc20	ldar w0, [x1]
+08dffc20	ldarb w0, [x1]
+48dffc20	ldarh w0, [x1]
+c89ffc20	stlr x0, [x1]
+889ffc20	stlr w0, [x1]
+089ffc20	stlrb w0, [x1]
+489ffc20	stlrh w0, [x1]
+d61f0200	br x16
+d63f0100	blr x8
+d65f03c0	ret
+d65f0020	ret x1
+d503201f	nop
+d4200000	brk #0
+d4207d00	brk #1000
+d4000001	svc #0
+d4400000	hlt #0
+d5033bbf	dmb ish
+d50339bf	dmb ishld
+d5033abf	dmb ishst
+d5033fbf	dmb sy
+d5033b9f	dsb ish
+d5033f9f	dsb sy
+d5033fdf	isb
+d503203f	yield
+d53bd040	mrs x0, tpidr_el0
+d51bd040	msr tpidr_el0, x0
+d53b4200	mrs x0, nzcv
+d51b4200	msr nzcv, x0
+d53b4400	mrs x0, fpcr
+d51b4400	msr fpcr, x0
+d53b4420	mrs x0, fpsr
+d51b4420	msr fpsr, x0
+d53be040	mrs x0, cntvct_el0
+1e222820	fadd s0, s1, s2
+1e622820	fadd d0, d1, d2
+1e223820	fsub s0, s1, s2
+1e623820	fsub d0, d1, d2
+1e220820	fmul s0, s1, s2
+1e620820	fmul d0, d1, d2
+1e221820	fdiv s0, s1, s2
+1e621820	fdiv d0, d1, d2
+1e628820	fnmul d0, d1, d2
+1e625820	fmin d0, d1, d2
+1e224820	fmax s0, s1, s2
+1e627820	fminnm d0, d1, d2
+1e626820	fmaxnm d0, d1, d2
+1f420c20	fmadd d0, d1, d2, d3
+1f028c20	fmsub s0, s1, s2, s3
+1f620c20	fnmadd d0, d1, d2, d3
+1f628c20	fnmsub d0, d1, d2, d3
+1e214020	fneg s0, s1
+1e614020	fneg d0, d1
+1e20c020	fabs s0, s1
+1e60c020	fabs d0, d1
+1e21c020	fsqrt s0, s1
+1e61c020	fsqrt d0, d1
+1e65c020	frintz d0, d1
+1e254020	frintm s0, s1
+1e64c020	frintp d0, d1
+1e644020	frintn d0, d1
+1e264020	frinta s0, s1
+1e674020	frintx d0, d1
+1e67c020	frinti d0, d1
+1e212000	fcmp s0, s1
+1e612000	fcmp d0, d1
+1e202008	fcmp s0, #0.0
+1e602008	fcmp d0, #0.0
+1e212010	fcmpe s0, s1
+1e612010	fcmpe d0, d1
+1e602018	fcmpe d0, #0.0
+1e610400	fccmp d0, d1, #0, eq
+1e220c20	fcsel s0, s1, s2, eq
+1e62bc20	fcsel d0, d1, d2, lt
+1e204020	fmov s0, s1
+1e604020	fmov d0, d1
+1e270020	fmov s0, w1
+1e260020	fmov w0, s1
+9e670020	fmov d0, x1
+9e660020	fmov x0, d1
+1e2e1000	fmov s0, #1.0
+1e6e1000	fmov d0, #1.0
+1e701000	fmov d0, #-2.0
+1e6c1000	fmov d0, #0.5
+1e27f000	fmov s0, #31.0
+1e681000	fmov d0, #0.125
+1e7ff000	fmov d0, #-1.9375
+9e6703e0	fmov d0, xzr
+1e2703e0	fmov s0, wzr
+1e22c020	fcvt d0, s1
+1e624020	fcvt s0, d1
+1e23c020	fcvt h0, s1
+1ee24020	fcvt s0, h1
+1e63c020	fcvt h0, d1
+1ee2c020	fcvt d0, h1
+1e220020	scvtf s0, w1
+9e220020	scvtf s0, x1
+1e620020	scvtf d0, w1
+9e620020	scvtf d0, x1
+1e230020	ucvtf s0, w1
+9e630020	ucvtf d0, x1
+1e380020	fcvtzs w0, s1
+9e380020	fcvtzs x0, s1
+1e780020	fcvtzs w0, d1
+9e780020	fcvtzs x0, d1
+1e390020	fcvtzu w0, s1
+9e790020	fcvtzu x0, d1
+9e640020	fcvtas x0, d1
+1e300020	fcvtms w0, s1
+9e680020	fcvtps x0, d1
+9e600020	fcvtns x0, d1
+4ea11c20	mov v0.16b, v1.16b
+6f00e400	movi v0.2d, #0
+2f00e400	movi d0, #0
+1e601000	fmov d0, #2.0
+14000000	b sym	R_AARCH64_JUMP26
+94000000	bl sym	R_AARCH64_CALL26
+54000000	b.eq sym	R_AARCH64_CONDBR19
+54000001	b.ne sym	R_AARCH64_CONDBR19
+54000002	b.hs sym	R_AARCH64_CONDBR19
+54000003	b.lo sym	R_AARCH64_CONDBR19
+54000004	b.mi sym	R_AARCH64_CONDBR19
+54000005	b.pl sym	R_AARCH64_CONDBR19
+54000006	b.vs sym	R_AARCH64_CONDBR19
+54000007	b.vc sym	R_AARCH64_CONDBR19
+54000008	b.hi sym	R_AARCH64_CONDBR19
+54000009	b.ls sym	R_AARCH64_CONDBR19
+5400000a	b.ge sym	R_AARCH64_CONDBR19
+5400000b	b.lt sym	R_AARCH64_CONDBR19
+5400000c	b.gt sym	R_AARCH64_CONDBR19
+5400000d	b.le sym	R_AARCH64_CONDBR19
+5400000e	b.al sym	R_AARCH64_CONDBR19
+b4000000	cbz x0, sym	R_AARCH64_CONDBR19
+34000000	cbz w0, sym	R_AARCH64_CONDBR19
+b5000000	cbnz x0, sym	R_AARCH64_CONDBR19
+35000000	cbnz w0, sym	R_AARCH64_CONDBR19
+b6f80000	tbz x0, #63, sym	R_AARCH64_TSTBR14
+36000000	tbz w0, #0, sym	R_AARCH64_TSTBR14
+b7000000	tbnz x0, #32, sym	R_AARCH64_TSTBR14
+37f80000	tbnz w0, #31, sym	R_AARCH64_TSTBR14
+10000000	adr x0, sym	R_AARCH64_ADR_PREL_LO21
+90000000	adrp x0, sym	R_AARCH64_ADR_PREL_PG_HI21
+91000000	add x0, x0, :lo12:sym	R_AARCH64_ADD_ABS_LO12_NC
+f9400000	ldr x0, [x0, :lo12:sym]	R_AARCH64_LDST64_ABS_LO12_NC
+b9400000	ldr w0, [x0, :lo12:sym]	R_AARCH64_LDST32_ABS_LO12_NC
+79400000	ldrh w0, [x0, :lo12:sym]	R_AARCH64_LDST16_ABS_LO12_NC
+39400000	ldrb w0, [x0, :lo12:sym]	R_AARCH64_LDST8_ABS_LO12_NC
+b9800000	ldrsw x0, [x0, :lo12:sym]	R_AARCH64_LDST32_ABS_LO12_NC
+fd400000	ldr d0, [x0, :lo12:sym]	R_AARCH64_LDST64_ABS_LO12_NC
+bd400000	ldr s0, [x0, :lo12:sym]	R_AARCH64_LDST32_ABS_LO12_NC
+3dc00000	ldr q0, [x0, :lo12:sym]	R_AARCH64_LDST128_ABS_LO12_NC
+f9000001	str x1, [x0, :lo12:sym]	R_AARCH64_LDST64_ABS_LO12_NC
+39000001	strb w1, [x0, :lo12:sym]	R_AARCH64_LDST8_ABS_LO12_NC
+90000000	adrp x0, :got:sym	R_AARCH64_ADR_GOT_PAGE
+f9400000	ldr x0, [x0, :got_lo12:sym]	R_AARCH64_LD64_GOT_LO12_NC
+91400000	add x0, x0, :tprel_hi12:sym, lsl #12	R_AARCH64_TLSLE_ADD_TPREL_HI12
+91000000	add x0, x0, :tprel_lo12_nc:sym	R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
+58000000	ldr x0, sym	R_AARCH64_LD_PREL_LO19
+18000000	ldr w0, sym	R_AARCH64_LD_PREL_LO19
+5c000000	ldr d0, sym	R_AARCH64_LD_PREL_LO19
+98000000	ldrsw x0, sym	R_AARCH64_LD_PREL_LO19
+d2800000	mov x0, #0
+d2800020	mov x0, #1
+d2a00020	mov x0, #0x10000
+d2bfffe0	mov x0, #0xffff0000
+92800000	mov x0, #-1
+92800020	mov x0, #-2
+929db960	mov x0, #0xffffffffffff1234
+12800000	mov w0, #-1
+52bfffe0	mov w0, #0xffff0000
+52a24680	mov w0, #0x12340000
+b2089fe0	mov x0, #0xff00ff00ff00ff00
+3200cfe0	mov w0, #0x0f0f0f0f
+92f00000	mov x0, #0x7fffffffffffffff
+12b00000	mov w0, #0x7fffffff
+d1001020	add x0, x1, #-4
+91001020	sub x0, x1, #-4
+b100041f	cmp x0, #-1
+71001c1f	cmn w0, #-7
+9278dc20	bic x0, x1, #0xff
+0ea11c20	mov v0.8b, v1.8b
+93407c00	sxtw x0, w0
+2a0103e0	uxtw x0, w1
