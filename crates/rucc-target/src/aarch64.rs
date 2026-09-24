@@ -17,17 +17,25 @@
 //! vector registers are `v0` to `v31` for the same reason, and `d0`, `s0` and `q0` are what an
 //! instruction that reads eight, four or sixteen bytes of one writes.
 //!
-//! # What is not here yet
+//! # Instructions
 //!
-//! Everything about instructions. The encoder, the assembly text and the table of what each
-//! instruction does with its operands arrive with the lowering that selects them, and so does the
-//! frame's list of what a prologue is made of. This is the half a calling convention needs, which
-//! is also the half the ABI tests and the debugging information need, and it is written down first
-//! so the rest has something to be checked against.
+//! [`encode`] writes one instruction as its word, and [`read`] reads one written the way GNU as
+//! takes it, which together are enough to check every word against the ones GNU as writes. The
+//! table of what each instruction does with its operands arrives with the lowering that selects
+//! them, and so does the frame's list of what a prologue is made of.
 //!
 //! The flags register, for the reason x86-64 leaves it out: a comparison and whatever reads it are
 //! one rule. And the scalable vector and predicate registers, which arrive with the target features
 //! that have them.
+
+mod encode;
+mod read;
+
+pub use crate::aarch64::encode::{
+    Addr, Arrangement, Cond, Encoded, Error, Extend, Fixup, Mode, Offset, Operator, Scalar, Shift,
+    Value, Width, encode,
+};
+pub use crate::aarch64::read::{Error as ReadError, Line, read};
 
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
 
