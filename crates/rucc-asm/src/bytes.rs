@@ -38,11 +38,12 @@ use rucc_base::Interner;
 use rucc_diag::Span;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
 use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
-use rucc_target::{PhysReg, TargetInfo};
+use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
 use rucc_object::{
-    Binding, Chunk, Extent, FUNC_ALIGN, Held, Marker, Patch, Reference, Reloc, Text, Visibility,
+    Binding, Chunk, Extent, FUNC_ALIGN, Held, Marker, Patch, Reference, Reloc, Table, Text,
+    Visibility,
 };
 
 use crate::Error;
@@ -176,6 +177,7 @@ pub fn assemble(
             start,
             room: None,
             loops: Vec::new(),
+            apart: target.object_format == ObjectFormat::Elf,
         };
         assembler.func()?;
         let room = assembler.room;
@@ -317,6 +319,9 @@ struct Assembler<'a> {
     /// How long the loop each block is the head of is, indexed by the block's own number, and zero
     /// for a block that heads none. See [`loop_sizes`].
     loops: Vec<usize>,
+    /// Whether the jump tables go in `.rodata` rather than after the code, which they do on ELF.
+    /// See [`Self::tables`].
+    apart: bool,
 }
 
 /// How long each loop in the function is, from its head to the end of the last jump back to it,
@@ -351,6 +356,7 @@ pub(crate) fn loop_sizes(
         start: 0,
         room: None,
         loops: Vec::new(),
+        apart: false,
     };
     scratch.lay()?;
     for jump in &scratch.jumps {
@@ -454,18 +460,41 @@ impl Assembler<'_> {
         Ok(())
     }
 
-    /// The jump tables, after the last instruction, giving back where each one starts.
+    /// The jump tables, giving back where each one starts when it is in these bytes.
     ///
-    /// Inside the function rather than in a section of data, which is what gcc does on ELF as
-    /// well: every cell is a distance from the table to a block, both ends are in this section,
-    /// and so the whole table is filled in here and the linker is told nothing. It also keeps
-    /// the table inside the function's extent, which is what `-ffunction-sections` moves around
-    /// as one piece. The cells are four bytes each and start on a four byte boundary, reached by
-    /// the byte that does nothing, although nothing ever runs into it: the last instruction of a
-    /// function is a return or a jump.
+    /// On ELF each goes in `.rodata`, which is where gcc and clang put one: a table is read and
+    /// never run, and in the code it takes room in the lines the instruction fetcher reads and is
+    /// counted as code by anything that measures a section. What goes to the writer is which block
+    /// each cell names, counted from the front of the function, and the writer makes each cell a
+    /// relocation, since its two ends are no longer in one section. See [`Table`].
+    ///
+    /// On the other formats the table stays after the last instruction, where every cell is a
+    /// distance from the table to a block with both ends in this section, so the whole table is
+    /// filled in here and the linker is told nothing. The cells are four bytes each and start on a
+    /// four byte boundary, reached by the byte that does nothing, although nothing ever runs into
+    /// it: the last instruction of a function is a return or a jump.
     fn tables(&mut self) -> Result<Vec<usize>, Error> {
         let mut starts = Vec::with_capacity(self.func.tables.len());
         if self.func.tables.is_empty() {
+            return Ok(starts);
+        }
+        if self.apart {
+            for (index, table) in self.func.tables.iter().enumerate() {
+                let block =
+                    self.func.block_of(table.jump).expect("a table read by a jump in no block");
+                let succs = &self.func[block].succs;
+                let cells = table
+                    .cells
+                    .iter()
+                    .map(|&cell| {
+                        let to = self.blocks[succs[cell as usize].block.index()];
+                        debug_assert_ne!(to, usize::MAX, "a table naming a block never laid out");
+                        to - self.start
+                    })
+                    .collect();
+                let name = self.table(index);
+                self.text.tables.push(Table { name, func: self.text.funcs.len(), cells });
+            }
             return Ok(starts);
         }
         while self.text.bytes.len() % 4 != 0 {
@@ -487,6 +516,11 @@ impl Assembler<'_> {
             }
         }
         Ok(starts)
+    }
+
+    /// The name one jump table of this function goes by, which is the one the listing gives it.
+    fn table(&self, index: usize) -> String {
+        format!("{}{}_j{index}", self.directives.local(), self.name)
     }
 
     /// One instruction of the machine IR, as however many instructions of the machine it is.
@@ -614,7 +648,13 @@ impl Assembler<'_> {
                             labelled = Some((To::Block(block), i64::from(addr.disp)));
                         }
                         if let Some(table) = amode.and_then(|mem| mem.table) {
-                            labelled = Some((To::Table(table), i64::from(addr.disp)));
+                            // In another section, so the linker's to fill in like any symbol.
+                            if self.apart && addr.rip {
+                                let name = self.table(table as usize);
+                                wanted = Some((name, Reference::Data, i64::from(addr.disp)));
+                            } else {
+                                labelled = Some((To::Table(table), i64::from(addr.disp)));
+                            }
                         }
                         Value::Mem(addr)
                     }
@@ -914,9 +954,8 @@ mod tests {
         assert!(text.relocs.is_empty(), "a label of this function is not the linker's business");
     }
 
-    #[test]
-    fn a_jump_table_is_written_after_the_code_as_distances_from_itself() {
-        let mut names = Interner::new();
+    /// A function that jumps through a table of three cells to one of two returns.
+    fn switching(names: &mut Interner) -> Func {
         let mut func = Func::new(names.intern("f"));
         let head = func.create_block();
         let first = func.create_block();
@@ -933,8 +972,40 @@ mod tests {
         func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
         func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
         func.tables.push(Table { jump, cells: vec![0, 1, 0] });
+        func
+    }
 
+    #[test]
+    fn a_jump_table_on_elf_goes_to_the_writer_with_where_each_block_is() {
+        let mut names = Interner::new();
+        let func = switching(&mut names);
         let text = assemble(&[func], &names, &target(), true, false).expect("a table").text;
+        // Seven bytes of address, two of jump and two returns, and nothing after them: the table
+        // is not in the code. The address is the linker's to fill in, counted from the end of
+        // the instruction, which is four bytes past the hole.
+        assert_eq!(hex(&text.bytes), "48 8d 05 00 00 00 00 ff e0 c3 c3");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 3,
+                symbol: ".Lf_j0".to_owned(),
+                kind: Reference::Data,
+                addend: -4,
+                after: 0
+            }]
+        );
+        // The two returns are nine and ten bytes into the function.
+        let table =
+            rucc_object::Table { name: ".Lf_j0".to_owned(), func: 0, cells: vec![9, 10, 9] };
+        assert_eq!(text.tables, [table]);
+    }
+
+    #[test]
+    fn a_jump_table_on_windows_is_written_after_the_code_as_distances_from_itself() {
+        let mut names = Interner::new();
+        let func = switching(&mut names);
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Windows, Env::Gnu));
+        let text = assemble(&[func], &names, &target, true, false).expect("a table").text;
         // Seven bytes of address, two of jump and two returns end at eleven, one byte that does
         // nothing brings the table to twelve, and each cell is how far back its block is from
         // there. The address counts from the end of its own instruction, so it is five.
@@ -943,6 +1014,7 @@ mod tests {
             "48 8d 05 05 00 00 00 ff e0 c3 c3 90 fd ff ff ff fe ff ff ff fd ff ff ff"
         );
         assert!(text.relocs.is_empty(), "a table of this function is not the linker's business");
+        assert!(text.tables.is_empty(), "{:?}", text.tables);
     }
 
     #[test]

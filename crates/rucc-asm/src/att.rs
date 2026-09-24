@@ -660,17 +660,32 @@ impl Writer<'_> {
         Ok(out)
     }
 
-    /// The jump tables, after the last instruction and inside the function, the way the encoder
-    /// lays them out. Each cell is the distance from the table to a block, which the assembler
-    /// works out itself since both ends are in this section. See `bytes::Assembler::tables`.
+    /// The jump tables, where the encoder puts them. Each cell is the distance from the table to a
+    /// block. See `bytes::Assembler::tables`.
+    ///
+    /// On x86-64 ELF they go in `.rodata`, or `.rodata.` and the function's name under
+    /// `-fdata-sections`, which is what gcc writes, and the listing goes back to the function's
+    /// own section afterwards so that what follows is still inside it. The assembler turns each
+    /// cell into a relocation, since its two ends are in different sections. Everywhere else they
+    /// stay after the last instruction, where the assembler works each cell out itself.
     fn tables(&mut self, func: &Func, func_name: &str) {
         if func.tables.is_empty() {
             return;
         }
-        let _ = match self.fill() {
-            Some(byte) => writeln!(self.out, "\t.p2align\t2, {byte:#x}"),
-            None => writeln!(self.out, "\t.p2align\t2"),
-        };
+        let apart = self.arch == Arch::X86_64 && self.directives == Directives::Elf;
+        if apart {
+            let _ = if self.sections.data {
+                writeln!(self.out, "\t.section\t.rodata.{func_name},\"a\",@progbits")
+            } else {
+                writeln!(self.out, "\t.section\t.rodata")
+            };
+            let _ = writeln!(self.out, "\t.p2align\t2");
+        } else {
+            let _ = match self.fill() {
+                Some(byte) => writeln!(self.out, "\t.p2align\t2, {byte:#x}"),
+                None => writeln!(self.out, "\t.p2align\t2"),
+            };
+        }
         for (index, table) in func.tables.iter().enumerate() {
             let label = self.table(func_name, index);
             let _ = writeln!(self.out, "{label}:");
@@ -679,6 +694,13 @@ impl Writer<'_> {
             for &cell in &table.cells {
                 let to = self.label(func_name, succs[cell as usize].block);
                 let _ = writeln!(self.out, "\t.long\t{to}-{label}");
+            }
+        }
+        if apart {
+            if self.sections.functions {
+                let _ = writeln!(self.out, "\t.section\t.text.{func_name},\"ax\",@progbits");
+            } else {
+                let _ = writeln!(self.out, "{}", self.directives.text());
             }
         }
     }
@@ -985,33 +1007,78 @@ mod tests {
         assert_eq!(body(&text), ["leaq\t.Lf_1(%rip), %rax", "jmp\t*%rax", "ret"]);
     }
 
+    /// A function that jumps through a table of three cells to one of two returns, written out for
+    /// that object format with its sections split up or not.
+    fn switching(os: Os, sections: Sections) -> String {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let head = func.create_block();
+        let first = func.create_block();
+        let second = func.create_block();
+        let lea = Opcode::new(names.intern("x64.lea_64"));
+        let jmp = Opcode::new(names.intern("x64.jmp_reg"));
+        func.build(head, lea)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .mem(Mem::table(0))
+            .finish();
+        let jump = func.build(head, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        func.succs_mut(head).push(rucc_mir::BlockCall::to(first));
+        func.succs_mut(head).push(rucc_mir::BlockCall::to(second));
+        func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
+        func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
+        func.tables.push(rucc_mir::Table { jump, cells: vec![0, 1, 0] });
+        let output = Output { sections, ..Output::default() };
+        print(&[func], &Globals::default(), &[], &names, &target(os), true, output)
+            .expect("a function that was allocated")
+    }
+
+    /// The lines from the one in front of the table's label to the one after its last cell.
+    fn around_table(text: &str) -> Vec<&str> {
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines.iter().position(|line| *line == ".Lf_j0:").expect("a table");
+        lines[at - 2..at + 5].to_vec()
+    }
+
     #[test]
-    fn a_jump_table_is_a_label_and_the_distance_to_each_block_from_it() {
-        let text = write(|func, names| {
-            let head = func.create_block();
-            let first = func.create_block();
-            let second = func.create_block();
-            let lea = Opcode::new(names.intern("x64.lea_64"));
-            let jmp = Opcode::new(names.intern("x64.jmp_reg"));
-            func.build(head, lea)
-                .operand(Operand::write(Reg::physical(RAX), GPR))
-                .mem(Mem::table(0))
-                .finish();
-            let jump =
-                func.build(head, jmp).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
-            func.succs_mut(head).push(rucc_mir::BlockCall::to(first));
-            func.succs_mut(head).push(rucc_mir::BlockCall::to(second));
-            func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
-            func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
-            func.tables.push(rucc_mir::Table { jump, cells: vec![0, 1, 0] });
-        });
+    fn a_jump_table_is_a_label_and_the_distance_to_each_block_from_it_in_rodata() {
+        let text = switching(Os::Linux, Sections::default());
         assert_eq!(body(&text), ["leaq\t.Lf_j0(%rip), %rax", "jmp\t*%rax", "ret", "ret"]);
-        let table: Vec<&str> = text.lines().skip_while(|line| *line != ".Lf_j0:").take(4).collect();
         assert_eq!(
-            table,
-            [".Lf_j0:", "\t.long\t.Lf_1-.Lf_j0", "\t.long\t.Lf_2-.Lf_j0", "\t.long\t.Lf_1-.Lf_j0"],
+            around_table(&text),
+            [
+                "\t.section\t.rodata",
+                "\t.p2align\t2",
+                ".Lf_j0:",
+                "\t.long\t.Lf_1-.Lf_j0",
+                "\t.long\t.Lf_2-.Lf_j0",
+                "\t.long\t.Lf_1-.Lf_j0",
+                "\t.text",
+            ],
             "{text}"
         );
+        // Back in the code before the function is closed, so that its size is still counted there.
+        let closed = text.find("\t.size\tf").expect("a size");
+        assert!(text[..closed].ends_with("\t.text\n\t.cfi_endproc\n"), "{text}");
+    }
+
+    #[test]
+    fn a_jump_table_under_data_sections_goes_in_a_section_named_after_its_function() {
+        let text = switching(Os::Linux, Sections { functions: true, data: true });
+        assert_eq!(around_table(&text)[0], "\t.section\t.rodata.f,\"a\",@progbits", "{text}");
+        assert_eq!(around_table(&text)[6], "\t.section\t.text.f,\"ax\",@progbits", "{text}");
+        // Code sections alone leave the tables in the one `.rodata`, which is what gcc does.
+        let text = switching(Os::Linux, Sections { functions: true, data: false });
+        assert_eq!(around_table(&text)[0], "\t.section\t.rodata", "{text}");
+        assert_eq!(around_table(&text)[6], "\t.section\t.text.f,\"ax\",@progbits", "{text}");
+    }
+
+    #[test]
+    fn a_jump_table_on_windows_stays_after_the_code() {
+        let text = switching(Os::Windows, Sections::default());
+        assert!(!text.contains("rodata"), "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines.iter().position(|line| *line == ".Lf_j0:").expect("a table");
+        assert_eq!(lines[at - 2..=at], ["\tret", "\t.p2align\t2, 0x90", ".Lf_j0:"], "{text}");
     }
 
     #[test]
