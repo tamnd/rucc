@@ -64,9 +64,9 @@ use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
 use rucc_ir::{
-    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Def, Extra, Float, Func,
-    FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict, Signature,
-    SwitchInfo, Type, VaInfo, Value, ValueList,
+    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Def, Drains, Extra, Float,
+    Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
+    Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
 use rucc_tuple::{Arch, Os};
 
@@ -817,7 +817,7 @@ fn pass_on(
         if spills.contains(&index) {
             let (slot, size) = spill(func, entry, call, &plan.extras[at..end]);
             args.push(slot);
-            abis.push(Abi::ByVal { size, align: 8 });
+            abis.push(Abi::ByVal { size, align: 8, drains: Drains::Nothing });
             now.push(1);
         } else {
             args.extend_from_slice(&plan.extras[at..end]);

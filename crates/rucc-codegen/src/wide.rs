@@ -484,8 +484,10 @@ fn place(places: &mut Places<'_>, param: Param, conv: &CallRegs) -> Where {
     // A structure the classification put in the argument area, which is the one parameter whose
     // place is bytes rather than a register. Everything else is a value, the pointer an `sret`
     // hands over included, and a value takes the next register of its own kind.
-    if let Abi::ByVal { size, align } = param.abi {
-        places.object(u32::try_from(size).unwrap_or(u32::MAX), align)
+    if let Abi::ByVal { size, align, drains } = param.abi {
+        let at = places.object(u32::try_from(size).unwrap_or(u32::MAX), align);
+        crate::abi::drain(places, drains);
+        at
     } else if crate::abi::on_the_stack(param.ty) {
         let (size, align) = crate::abi::X87_AREA;
         places.on_stack(size, align)

@@ -21,7 +21,7 @@
 //! the classification is one pass over one call, the return value first, and everything that
 //! wants to know the outcome reads what that pass wrote down.
 
-use rucc_ir::{Abi, Float, Param, Signature, Type};
+use rucc_ir::{Abi, Drains, Float, Param, Signature, Type};
 use rucc_target::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot, TargetInfo};
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, float_format, layout};
 
@@ -104,6 +104,8 @@ pub(crate) struct Travel {
     /// body reads as an `unsigned char`. Keeping it here is what lets the entry block convert
     /// the one into the other.
     pub(crate) ty: TypeId,
+    /// The argument registers that going to memory left nothing in for the arguments after it.
+    pub(crate) drains: Drains,
 }
 
 impl Travel {
@@ -247,7 +249,10 @@ fn param(travel: &Travel, ty: Type) -> Param {
     match travel.pass {
         // The object's own bytes go in the argument area and the pointer is where they are read
         // from, which is what `byval` means and is why the size and the alignment are on it.
-        Pass::Memory => Param::with_abi(ty, Abi::ByVal { size: travel.size, align: travel.align }),
+        Pass::Memory => {
+            let Travel { size, align, drains, .. } = *travel;
+            Param::with_abi(ty, Abi::ByVal { size, align, drains })
+        }
         _ => Param::new(ty),
     }
 }
@@ -263,6 +268,7 @@ fn travel(
 ) -> Travel {
     let (size, mut align) = shaped.extent();
     let arg = shaped.arg();
+    let left = (call.integer_left(), call.float_left());
     let pass = match position {
         Position::Return => call.returns(&arg),
         Position::Fixed => call.argument(&arg),
@@ -285,7 +291,15 @@ fn travel(
         Pass::Pieces(slots) => slots.iter().map(|slot| slot_type(*slot)).collect(),
         Pass::Reference | Pass::Memory => vec![Type::PTR],
     };
-    Travel { pass, size, align, types, ty }
+    // An object that went to memory and took every register of a kind with it is AAPCS64's
+    // rule for one that found too few left, and the backend has to know so the next argument of
+    // that kind goes to memory too. Only a kind that had some left can have been drained.
+    let drains = match pass {
+        Pass::Memory if left.1 > 0 && call.float_left() == 0 => Drains::Floats,
+        Pass::Memory if left.0 > 0 && call.integer_left() == 0 => Drains::Integers,
+        _ => Drains::Nothing,
+    };
+    Travel { pass, size, align, types, ty, drains }
 }
 
 /// The IR type one register's worth of an object is read as.
@@ -571,6 +585,34 @@ mod tests {
     }
 
     #[test]
+    fn an_object_that_finds_too_few_registers_on_aarch64_leaves_none_of_that_kind_behind_it() {
+        let mut types = Types::new();
+        let target = target("aarch64-unknown-linux-gnu");
+        let (float, double) = (types.float(FloatKind::Float), types.float(FloatKind::Double));
+        let long = types.int(IntKind::Long);
+        let void = types.void();
+        let hfa = record(&mut types, &target, &[float, float, float]);
+        let pair = record(&mut types, &target, &[long, long]);
+        let bytes = |drains| Abi::ByVal { size: 12, align: 4, drains };
+        // Six doubles leave two vector registers, and three floats need three.
+        let mut params = vec![double; 6];
+        params.extend([hfa, float]);
+        let planned = plan(&types, &target, void, &params, &[], false).expect("a plan");
+        assert_eq!(planned.signature.params[6].abi, bytes(Drains::Floats));
+        // With none left to begin with there is nothing for the object to drain.
+        let mut params = vec![double; 8];
+        params.extend([hfa, float]);
+        let planned = plan(&types, &target, void, &params, &[], false).expect("a plan");
+        assert_eq!(planned.signature.params[8].abi, bytes(Drains::Nothing));
+        // Seven longs leave one general purpose register, and the pair needs two.
+        let mut params = vec![long; 7];
+        params.extend([pair, long]);
+        let planned = plan(&types, &target, void, &params, &[], false).expect("a plan");
+        let drained = Abi::ByVal { size: 16, align: 8, drains: Drains::Integers };
+        assert_eq!(planned.signature.params[7].abi, drained);
+    }
+
+    #[test]
     fn a_structure_passed_past_a_parameter_list_says_so_on_the_call_and_not_the_signature() {
         let mut types = Types::new();
         let target = target("x86_64-unknown-linux-gnu");
@@ -583,7 +625,10 @@ mod tests {
         let plan = plan(&types, &target, int, &[ptr], &[ptr, int, big], true).expect("a plan");
         assert_eq!(plan.signature.params.len(), 1);
         assert_eq!(plan.args[2].pass, Pass::Memory);
-        assert_eq!(plan.varargs, vec![Abi::Plain, Abi::ByVal { size: 24, align: 8 }]);
+        assert_eq!(
+            plan.varargs,
+            vec![Abi::Plain, Abi::ByVal { size: 24, align: 8, drains: Drains::Nothing }]
+        );
     }
 
     #[test]
@@ -644,7 +689,10 @@ mod tests {
         // The same record, one place further along a `...`, and the caller copies the bytes.
         let variadic = plan(&types, &target, int, &[int], &[int, pair], true).expect("a plan");
         assert_eq!(variadic.args[1].pass, Pass::Memory);
-        assert_eq!(variadic.varargs, vec![Abi::ByVal { size: 8, align: 4 }]);
+        assert_eq!(
+            variadic.varargs,
+            vec![Abi::ByVal { size: 8, align: 4, drains: Drains::Nothing }]
+        );
     }
 
     /// The three ABIs that are not Darwin arm64 answer the two questions the same way, and a
