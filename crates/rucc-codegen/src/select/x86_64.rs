@@ -17,6 +17,18 @@
 
 include!(concat!(env!("OUT_DIR"), "/x86-64.rs"));
 
+/// What the lowering asks of x86-64.
+pub static SELECTOR: super::Selector = super::Selector {
+    table: &TABLE,
+    shapes: &rucc_target::x86_64::MACHINE,
+    address: rucc_target::x86_64::address,
+    frame: &rucc_target::x86_64::FRAME,
+    branch: &rucc_target::x86_64::BRANCH,
+    gpr: rucc_target::x86_64::GPR,
+    fence: "mfence",
+    trap: "ud2",
+};
+
 #[cfg(test)]
 mod tests {
     use rucc_target::x86_64;

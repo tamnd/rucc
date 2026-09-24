@@ -32,6 +32,7 @@
 //! allocator never sees the condition state.
 
 use crate::aarch64::{FPR, GPR, v, x};
+use crate::machine::Address as Amode;
 use crate::operand::{Constraint, OperandDesc};
 
 use Form::{
@@ -588,6 +589,20 @@ pub static INSTS: &[(&str, Form)] = &[
 #[must_use]
 pub fn form(name: &str) -> Option<Form> {
     INSTS.iter().find(|(known, _)| *known == name).map(|&(_, form)| form)
+}
+
+/// Every address constructor the AArch64 rule set can write, and what its arguments are.
+///
+/// Two of the four the x86 rules have. A load or a store here takes a base and a small constant
+/// or a base and a register, and the second one is not written yet, so an index with a scale is
+/// something a rule computes into a register first.
+pub static ADDRESSES: &[(&str, Amode)] =
+    &[("amode_base", Amode::Base), ("amode_base_offset", Amode::BaseOffset)];
+
+/// The address constructor of that name, or `None` for a name that is not one.
+#[must_use]
+pub fn address(name: &str) -> Option<Amode> {
+    ADDRESSES.iter().find(|(known, _)| *known == name).map(|&(_, kind)| kind)
 }
 
 #[cfg(test)]

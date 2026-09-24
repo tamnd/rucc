@@ -50,6 +50,7 @@ use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
 use crate::pressure::{Cost, Pressure};
 use crate::schedule;
+use crate::select::{self, Selector};
 use crate::shorten;
 use crate::slots::{self, Slots};
 use crate::split;
@@ -84,6 +85,9 @@ pub struct Machine {
     pub timing: &'static TimingInsts,
     /// Which of the machine's instructions have a shorter spelling of the same answer.
     pub short: &'static ShortInsts,
+    /// What the selector asks of the machine, which is the rules and the instructions it writes
+    /// itself.
+    pub selector: &'static Selector,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
 }
@@ -155,6 +159,7 @@ impl Machine {
             shapes: &x86_64::MACHINE,
             timing: &x86_64::TIMING,
             short: &x86_64::SHORT,
+            selector: &select::x86_64::SELECTOR,
             env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
                 x86_64::XMM,
                 &sse_order,
@@ -187,6 +192,7 @@ impl Machine {
             shapes: &aarch64::MACHINE,
             timing: &aarch64::TIMING,
             short: &aarch64::SHORT,
+            selector: &select::aarch64::SELECTOR,
             env: Env::new().with(aarch64::GPR, &order, &AARCH64_SCRATCH).with(
                 aarch64::FPR,
                 &fp_order,
@@ -424,7 +430,7 @@ pub fn compile_recording(
     // the frame below rather than being one more thing in it. Read here rather than beside the rest
     // of the layout because the refusal a few lines down is the earliest thing that asks.
     let naked = source.attrs.set.contains(ir::AttrSet::NAKED);
-    let lowered = lower::func(source, names, machine.conv, elsewhere)?;
+    let lowered = lower::func(source, names, machine.selector, machine.conv, elsewhere)?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
     // Straight after selection, because this is the last moment the machine blocks and the IR
@@ -926,7 +932,7 @@ mod tests {
         let one = fired.count();
         assert!(one > 0, "an add and a return went through the table and nothing was recorded");
 
-        let listing = fired.listing(&crate::select::x86_64::TABLE);
+        let listing = fired.listing(&select::x86_64::TABLE);
         assert_eq!(listing.lines().filter(|line| line.starts_with("fired ")).count(), one);
         assert!(
             listing.contains(&format!("{one} of ")),

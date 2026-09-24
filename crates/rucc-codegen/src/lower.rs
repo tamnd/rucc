@@ -86,19 +86,15 @@ use rucc_ir::{
 };
 use rucc_mir as mir;
 use rucc_target::x86_64;
-use rucc_target::{CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, Segment};
+use rucc_target::{Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, Segment};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
 use crate::frame::{Layout, Local};
-use crate::select::{Match, Piece, Rule, Table};
+use crate::select::{Match, Piece, Rule, Selector};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 use crate::varargs;
-
-/// The prefix a rule file puts in front of a machine term, which says which target it belongs
-/// to and is not part of the opcode.
-pub(crate) const PREFIX: &str = "x64.";
 
 /// The instruction a global offset table slot is read with.
 ///
@@ -705,7 +701,7 @@ impl Stack {
     }
 }
 
-/// The x86-64 machine IR for that function.
+/// The machine IR for that function, for the machine the selector describes.
 ///
 /// # Errors
 ///
@@ -715,10 +711,11 @@ impl Stack {
 pub fn func(
     source: &Func,
     names: &mut Interner,
+    selector: &'static Selector,
     conv: &'static CallRegs,
     elsewhere: &Elsewhere,
 ) -> Result<Lowered, Unsupported> {
-    Lowering::new(source, names, conv, elsewhere).run()
+    Lowering::new(source, names, selector, conv, elsewhere).run()
 }
 
 /// What the matcher settled on for one block, indexed the way the block's instructions are.
@@ -758,6 +755,8 @@ struct Lowering<'a> {
     /// that computes an address anywhere but in this file. Which class a *value* is in is
     /// [`Lowering::class_of`], and it is a question, because a float is in the other one.
     gpr: RegClass,
+    /// The machine this selects for.
+    selector: &'static Selector,
     /// Where the convention this function is compiled for puts things, which is read for the
     /// arguments and for the calls.
     conv: &'static CallRegs,
@@ -874,6 +873,7 @@ impl<'a> Lowering<'a> {
     fn new(
         source: &'a Func,
         names: &'a mut Interner,
+        selector: &'static Selector,
         conv: &'static CallRegs,
         elsewhere: &'a Elsewhere,
     ) -> Self {
@@ -908,7 +908,8 @@ impl<'a> Lowering<'a> {
             blocks: vec![None; counts.blocks],
             uses,
             at: None,
-            gpr: x86_64::GPR,
+            gpr: selector.gpr,
+            selector,
             conv,
             elsewhere,
             stack: Stack::default(),
@@ -1294,6 +1295,12 @@ impl<'a> Lowering<'a> {
                 // below so that an `asm` holding a `long double` is refused as the `asm` it is
                 // rather than as an instruction nothing computes.
                 Opcode::InlineAsm => {
+                    // The template is read as x86 assembly, and that reader is the only one there
+                    // is. Another machine's `asm` is refused here rather than read as the wrong
+                    // language.
+                    if !std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
+                        return Err(self.unsupported(inst));
+                    }
                     self.assembly(inst)?;
                     continue;
                 }
@@ -1499,9 +1506,10 @@ impl<'a> Lowering<'a> {
             // The register is the target's answer and not one worked out here, the same as it is
             // for a return of one value, so that both halves of a pair and every rule that writes
             // half of one are reading the same table.
-            let opcode = name.strip_prefix(PREFIX).expect("a machine instruction of this target");
-            let form = x86_64::form(opcode).ok_or_else(|| self.unsupported(inst))?;
-            let [desc] = form.operands() else { return Err(self.unsupported(inst)) };
+            let opcode =
+                name.strip_prefix(self.selector.prefix()).ok_or_else(|| self.unsupported(inst))?;
+            let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
+            let [desc] = descs else { return Err(self.unsupported(inst)) };
             parts.push((self.names.intern(name), self.reg_of(value)?, *desc));
         }
 
@@ -1557,7 +1565,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
         let span = self.source.span(inst);
-        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
         let made =
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
@@ -1611,7 +1619,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let stack = mir::Reg::physical(self.conv.stack_pointer);
-        let grow = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.grow)));
+        let grow = self.named(self.selector.frame.grow);
         let took = self
             .out
             .build(block, grow)
@@ -1623,7 +1631,7 @@ impl<'a> Lowering<'a> {
         self.stack.grown.push(took);
 
         let reg = self.new_reg(result);
-        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(stack, self.gpr);
         let made =
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
@@ -1648,8 +1656,9 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let stack = mir::Reg::physical(self.conv.stack_pointer);
-        let mov = x86_64::FRAME.moves(self.gpr).expect("a class the target says how to move").mov;
-        let mov = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mov}")));
+        let mov =
+            self.selector.frame.moves(self.gpr).expect("a class the target says how to move").mov;
+        let mov = self.named(mov);
         let (write, read) = if into {
             let &saved = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
             (stack, self.reg_of(saved)?)
@@ -1837,7 +1846,7 @@ impl<'a> Lowering<'a> {
     /// register the allocator gets a say in.
     fn x87_at(&mut self, name: &str, span: Span, at: mir::Mem) {
         let block = self.at.expect("a block is being filled");
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let opcode = self.named(name);
         self.out.build(block, opcode).at(span).mem(at).finish();
     }
 
@@ -1849,7 +1858,7 @@ impl<'a> Lowering<'a> {
     /// own business the way a spill is. See [`Self::carried`].
     fn x87_touching(&mut self, name: &str, inst: Inst, at: mir::Mem) {
         let block = self.at.expect("a block is being filled");
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let opcode = self.named(name);
         let (span, flags) = (self.source.span(inst), self.carried(inst));
         self.out.build(block, opcode).at(span).flags(flags).mem(at).finish();
     }
@@ -1863,7 +1872,7 @@ impl<'a> Lowering<'a> {
     /// of the group and is why the group is written in one place.
     fn x87_only(&mut self, name: &str, span: Span) {
         let block = self.at.expect("a block is being filled");
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let opcode = self.named(name);
         self.out.build(block, opcode).at(span).finish();
     }
 
@@ -1924,7 +1933,7 @@ impl<'a> Lowering<'a> {
         let into = self.through(into);
 
         let block = self.at.expect("a block is being filled");
-        let store = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{put}")));
+        let store = self.named(put);
         self.out.build(block, store).at(span).uses(value, class).mem(across).finish();
         self.x87_at(get, span, across);
         self.x87_at("fstp_t", span, into);
@@ -1956,7 +1965,7 @@ impl<'a> Lowering<'a> {
         self.x87_at(put, span, across);
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
-        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{get}")));
+        let load = self.named(get);
         self.out.build(block, load).at(span).def(reg, class).mem(across).finish();
         Ok(())
     }
@@ -2031,10 +2040,10 @@ impl<'a> Lowering<'a> {
         self.x87_at("fnstcw", span, saved);
         let block = self.at.expect("a block is being filled");
         let was = self.out.new_vreg(gpr);
-        let read = mir::Opcode::new(self.names.intern("x64.mov_rm_16"));
+        let read = self.named("mov_rm_16");
         self.out.build(block, read).at(span).def(was, gpr).mem(saved).finish();
         let now = self.out.new_vreg(gpr);
-        let set = mir::Opcode::new(self.names.intern("x64.or_ri_16"));
+        let set = self.named("or_ri_16");
         // Two address, which is written out here rather than taken from the two shorthands
         // because the shorthands leave an operand unconstrained: this machine ORs into the
         // register it read, so the two have to be the same one and only the constraint says so.
@@ -2045,7 +2054,7 @@ impl<'a> Lowering<'a> {
             .operand(mir::Operand::read(was, gpr))
             .imm(X87_TRUNCATE)
             .finish();
-        let write = mir::Opcode::new(self.names.intern("x64.mov_mr_16"));
+        let write = self.named("mov_mr_16");
         self.out.build(block, write).at(span).uses(now, gpr).mem(cut).finish();
 
         // The conversion itself, under the changed word, and then the word the unit had put back
@@ -2057,7 +2066,7 @@ impl<'a> Lowering<'a> {
 
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
-        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{get}")));
+        let load = self.named(get);
         self.out.build(block, load).at(span).def(reg, gpr).mem(across).finish();
         Ok(())
     }
@@ -2091,9 +2100,9 @@ impl<'a> Lowering<'a> {
             [(bits as u64 as i64, low, "64"), (((bits >> 64) & 0xffff) as i64, high, "16")]
         {
             let held = self.out.new_vreg(gpr);
-            let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_{into}")));
+            let put = self.named(&format!("mov_ri_{into}"));
             self.out.build(block, put).at(span).def(held, gpr).imm(bytes).finish();
-            let store = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_mr_{into}")));
+            let store = self.named(&format!("mov_mr_{into}"));
             self.out.build(block, store).at(span).uses(held, gpr).mem(at).finish();
         }
         Ok(())
@@ -2221,7 +2230,7 @@ impl<'a> Lowering<'a> {
         // Taken before the instruction is started rather than inside it, since both come from the
         // same function being built and only one thing at a time may be adding to it.
         let spare = both.then(|| self.out.new_vreg(gpr));
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let opcode = self.named(name);
         let mut build = self.out.build(block, opcode).at(span).def(reg, gpr);
         if let Some(spare) = spare {
             build = build.def(spare, gpr);
@@ -2272,11 +2281,11 @@ impl<'a> Lowering<'a> {
             Varargs::Fields { save, incoming, integers, floats } => {
                 for (at, count) in [(varargs::GP_OFFSET, integers), (varargs::FP_OFFSET, floats)] {
                     let held = self.out.new_vreg(self.gpr);
-                    let load = mir::Opcode::new(self.names.intern("x64.mov_ri_32"));
+                    let load = self.named("mov_ri_32");
                     let build = self.out.build(block, load).at(span);
                     build.def(held, self.gpr).imm(i64::from(count)).finish();
 
-                    let store = mir::Opcode::new(self.names.intern("x64.mov_mr_32"));
+                    let store = self.named("mov_mr_32");
                     let mem = self.field(list, at);
                     self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
                 }
@@ -2288,7 +2297,7 @@ impl<'a> Lowering<'a> {
         // area as the ones it did name reached. Nothing here knows where that area is, so the
         // distance is recorded the way a parameter read out of it is and finished with it.
         let overflow = self.out.new_vreg(self.gpr);
-        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
         let made = self
             .out
@@ -2309,7 +2318,7 @@ impl<'a> Lowering<'a> {
             }
         };
         for (at, held) in fields {
-            let store = mir::Opcode::new(self.names.intern("x64.mov_mr_64"));
+            let store = self.named("mov_mr_64");
             let mem = self.field(list, at);
             self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
         }
@@ -2363,9 +2372,9 @@ impl<'a> Lowering<'a> {
         let (mnemonic, mem) = if self.elsewhere.holds(symbol) {
             (GOT_LOAD, mir::Mem::got(symbol))
         } else {
-            (x86_64::FRAME.lea, mir::Mem::of(symbol))
+            (self.selector.frame.lea, mir::Mem::of(symbol))
         };
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mnemonic}")));
+        let opcode = self.named(mnemonic);
         self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
         Ok(())
     }
@@ -2415,7 +2424,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let gpr = self.gpr;
-        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{GOT_LOAD}")));
+        let load = self.named(GOT_LOAD);
 
         let offset = self.out.new_vreg(gpr);
         self.out
@@ -2434,7 +2443,7 @@ impl<'a> Lowering<'a> {
         // Two address, spelled out for the reason `x87_to_int` gives: this machine adds into the
         // register it read, and only the constraint says the two are the same one.
         let reg = self.new_reg(result);
-        let add = mir::Opcode::new(self.names.intern(&format!("{PREFIX}add_rr_64")));
+        let add = self.named("add_rr_64");
         self.out
             .build(block, add)
             .at(span)
@@ -2467,7 +2476,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
         let span = self.source.span(inst);
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let opcode = self.named(self.selector.frame.lea);
         let mem = mir::Mem::block(self.out_block(call.block));
         self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
         Ok(())
@@ -2485,8 +2494,8 @@ impl<'a> Lowering<'a> {
         let reg = self.reg_of(address)?;
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let name = x86_64::BRANCH.indirect;
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let name = self.selector.branch.indirect;
+        let opcode = self.named(name);
         self.out.build(block, opcode).at(span).operand(mir::Operand::read(reg, self.gpr)).finish();
         Ok(())
     }
@@ -2535,7 +2544,7 @@ impl<'a> Lowering<'a> {
         let table = u32::try_from(self.out.tables.len()).expect("fewer tables than that");
 
         let base = self.out.new_vreg(gpr);
-        let lea = self.named(x86_64::FRAME.lea);
+        let lea = self.named(self.selector.frame.lea);
         self.out.build(block, lea).at(span).def(base, gpr).mem(mir::Mem::table(table)).finish();
         let offset = self.out.new_vreg(gpr);
         let cell =
@@ -2552,7 +2561,7 @@ impl<'a> Lowering<'a> {
             .operand(mir::Operand::read(offset, gpr))
             .operand(mir::Operand::read(base, gpr))
             .finish();
-        let jump = self.named(x86_64::BRANCH.indirect);
+        let jump = self.named(self.selector.branch.indirect);
         let jump =
             self.out.build(block, jump).at(span).operand(mir::Operand::read(to, gpr)).finish();
         self.out.tables.push(mir::Table { jump, cells });
@@ -2601,12 +2610,13 @@ impl<'a> Lowering<'a> {
         let buf = self.reg_of(buffer)?;
         let at = self.at.expect("a block is being filled");
         let gpr = self.gpr;
-        let moves = x86_64::FRAME.moves(gpr).expect("a class the target says how to move");
+        let moves = self.selector.frame.moves(gpr).expect("a class the target says how to move");
         let store = self.named(moves.store);
         let load = self.named(moves.load);
-        let lea = self.named(x86_64::FRAME.lea);
-        let put = self.named(x86_64::FRAME.imm);
-        let nothing = x86_64::FRAME.pad.expect("a target with an instruction that does nothing");
+        let lea = self.named(self.selector.frame.lea);
+        let put = self.named(self.selector.frame.imm);
+        let nothing =
+            self.selector.frame.pad.expect("a target with an instruction that does nothing");
         let nothing = self.named(nothing);
         self.stack.saves_place = true;
         let answer = self.answer_slot();
@@ -2674,12 +2684,12 @@ impl<'a> Lowering<'a> {
         let buf = self.reg_of(buffer)?;
         let at = self.at.expect("a block is being filled");
         let gpr = self.gpr;
-        let moves = x86_64::FRAME.moves(gpr).expect("a class the target says how to move");
+        let moves = self.selector.frame.moves(gpr).expect("a class the target says how to move");
         let load = self.named(moves.load);
         let store = self.named(moves.store);
         let mov = self.named(moves.mov);
-        let put = self.named(x86_64::FRAME.imm);
-        let jump = self.named(x86_64::BRANCH.indirect);
+        let put = self.named(self.selector.frame.imm);
+        let jump = self.named(self.selector.branch.indirect);
 
         let held = self.jump_regs();
         if held.len() < JUMP_REGS {
@@ -2832,7 +2842,7 @@ impl<'a> Lowering<'a> {
 
     /// A machine opcode of this target from the name the target gives it.
     fn named(&mut self, name: &str) -> mir::Opcode {
-        mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")))
+        mir::Opcode::new(self.names.intern(&format!("{}{name}", self.selector.prefix())))
     }
 
     /// `__builtin_frame_address` and `__builtin_return_address`, which are a walk up the chain of
@@ -2861,8 +2871,9 @@ impl<'a> Lowering<'a> {
         let returning = data.opcode == Opcode::ReturnAddress;
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let moves = x86_64::FRAME.moves(self.gpr).expect("a class the target says how to move");
-        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", moves.load)));
+        let moves =
+            self.selector.frame.moves(self.gpr).expect("a class the target says how to move");
+        let load = self.named(moves.load);
         self.stack.walks_frames = true;
 
         // Where the walk is up to. The frame pointer to begin with, and the register the last load
@@ -2887,7 +2898,7 @@ impl<'a> Lowering<'a> {
             // The one case with no load in it at all: the frame this function is running in is the
             // register itself, and a physical register is not one the allocator hands out, so the
             // answer is a copy of it.
-            let mov = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", moves.mov)));
+            let mov = self.named(moves.mov);
             self.out
                 .build(block, mov)
                 .at(span)
@@ -2910,7 +2921,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let reg = self.new_reg(result);
-        let load = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{GOT_LOAD}")));
+        let load = self.named(GOT_LOAD);
         let at = mir::Mem::in_segment(Segment::Fs, 0);
         self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
         Ok(())
@@ -2949,8 +2960,9 @@ impl<'a> Lowering<'a> {
         };
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let mov = x86_64::FRAME.moves(self.gpr).expect("a class the target says how to move").mov;
-        let mov = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{mov}")));
+        let mov =
+            self.selector.frame.moves(self.gpr).expect("a class the target says how to move").mov;
+        let mov = self.named(mov);
         let into = self.new_reg(result);
         self.out
             .build(block, mov)
@@ -3021,7 +3033,7 @@ impl<'a> Lowering<'a> {
         }
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let fence = mir::Opcode::new(self.names.intern("x64.mfence"));
+        let fence = self.named(self.selector.fence);
         self.out.build(block, fence).at(span).finish();
         Ok(())
     }
@@ -3040,7 +3052,7 @@ impl<'a> Lowering<'a> {
     fn trap(&mut self, inst: Inst) {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let stop = mir::Opcode::new(self.names.intern("x64.ud2"));
+        let stop = self.named(self.selector.trap);
         self.out.build(block, stop).at(span).finish();
     }
 
@@ -3082,7 +3094,7 @@ impl<'a> Lowering<'a> {
         };
         let base = self.reg_of(address)?;
         let block = self.at.expect("a block is being filled");
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let opcode = self.named(name);
         self.out
             .build(block, opcode)
             .at(self.source.span(inst))
@@ -3136,12 +3148,12 @@ impl<'a> Lowering<'a> {
         let flag = self.new_reg(exchanged);
 
         let name = format!("cmpxchg_{bits}");
-        let form = x86_64::form(&name).ok_or_else(|| self.unsupported(inst))?;
+        let descs = self.selector.operands(&name).ok_or_else(|| self.unsupported(inst))?;
         let block = self.at.expect("a block is being filled");
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let opcode = self.named(&name);
         let (span, flags) = (self.source.span(inst), self.carried(inst));
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
-        for (desc, reg) in form.operands().iter().zip([got, flag, want, put]) {
+        for (desc, reg) in descs.iter().zip([got, flag, want, put]) {
             let operand = mir::Operand {
                 reg,
                 class: desc.class,
@@ -3205,12 +3217,13 @@ impl<'a> Lowering<'a> {
         let span = self.source.span(inst);
         if op == RmwOp::Sub {
             let negated = self.out.new_vreg(self.gpr);
-            let negate =
-                mir::Opcode::new(self.names.intern(&format!("{PREFIX}neg_r_{}", ty.bits())));
-            let form = x86_64::form(&format!("neg_r_{}", ty.bits()))
+            let negate = self.named(&format!("neg_r_{}", ty.bits()));
+            let descs = self
+                .selector
+                .operands(&format!("neg_r_{}", ty.bits()))
                 .ok_or_else(|| self.unsupported(inst))?;
             let mut build = self.out.build(block, negate).at(span);
-            for (desc, reg) in form.operands().iter().zip([negated, put]) {
+            for (desc, reg) in descs.iter().zip([negated, put]) {
                 build = build.operand(mir::Operand {
                     reg,
                     class: desc.class,
@@ -3223,11 +3236,11 @@ impl<'a> Lowering<'a> {
         }
 
         let got = self.new_reg(old);
-        let form = x86_64::form(&name).ok_or_else(|| self.unsupported(inst))?;
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{name}")));
+        let descs = self.selector.operands(&name).ok_or_else(|| self.unsupported(inst))?;
+        let opcode = self.named(&name);
         let flags = self.carried(inst);
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
-        for (desc, reg) in form.operands().iter().zip([got, put]) {
+        for (desc, reg) in descs.iter().zip([got, put]) {
             build = build.operand(mir::Operand {
                 reg,
                 class: desc.class,
@@ -3693,7 +3706,7 @@ impl<'a> Lowering<'a> {
             None => None,
         };
         let symbol = self.names.intern(&text);
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::TEMPLATE)));
+        let opcode = self.named(x86_64::TEMPLATE);
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let mut build = self.out.build(block, opcode).at(span).symbol(symbol);
@@ -3755,7 +3768,7 @@ impl<'a> Lowering<'a> {
         }
         let block = self.at.expect("a block is being filled");
         let reg = self.out.new_vreg(class);
-        let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_64")));
+        let put = self.named("mov_ri_64");
         self.out.build(block, put).at(self.source.span(inst)).def(reg, class).imm(0).finish();
         Ok(reg)
     }
@@ -3864,7 +3877,7 @@ impl<'a> Lowering<'a> {
                     let (block, _) = Self::went(&labels, to).ok_or_else(refused)?;
                     let from = self.at.expect("a block is being filled");
                     let args = Self::held(places, &carried).ok_or_else(refused)?;
-                    let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{opcode}")));
+                    let opcode = self.named(opcode);
                     self.out.build(from, opcode).at(span).finish();
                     let next = self.out.create_block();
                     *self.out.succs_mut(from) =
@@ -3882,7 +3895,7 @@ impl<'a> Lowering<'a> {
                         return Err(Unsupported::Assembly { inst, refused: Written::Away });
                     }
                     let from = self.at.expect("a block is being filled");
-                    let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{AWAY}")));
+                    let opcode = self.named(AWAY);
                     let symbol = self.names.intern(symbol);
                     self.out.build(from, opcode).at(span).symbol(symbol).finish();
                     // Nowhere, which is what a jump out of the function leaves behind it and is
@@ -4157,7 +4170,7 @@ impl<'a> Lowering<'a> {
 
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let opcode = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", line.opcode)));
+        let opcode = self.named(line.opcode);
         let mut build = self.out.build(block, opcode).at(span);
         for operand in built {
             build = build.operand(operand);
@@ -4382,7 +4395,7 @@ impl<'a> Lowering<'a> {
         if !desc.role.is_def() {
             let block = self.at.expect("a block is being filled");
             let span = self.source.span(inst);
-            let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_64")));
+            let put = self.named("mov_ri_64");
             self.out.build(block, put).at(span).def(reg, desc.class).imm(0).finish();
         }
         Ok(mir::Operand { reg, class: desc.class, role: desc.role, constraint: desc.constraint })
@@ -4477,7 +4490,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let reg = self.new_reg(result);
-        let put = mir::Opcode::new(self.names.intern(&format!("{PREFIX}mov_ri_{bits}")));
+        let put = self.named(&format!("mov_ri_{bits}"));
         self.out.build(block, put).at(span).def(reg, self.gpr).imm(0).finish();
         Ok(())
     }
@@ -4617,7 +4630,7 @@ impl<'a> Lowering<'a> {
     fn save_area(&mut self, out: mir::Block, arrived: &abi::Arrived, area: varargs::Area) {
         if self.conv.shared_positions {
             self.varargs = Some(Varargs::Pointer { incoming: arrived.beyond });
-            let store = mir::Opcode::new(self.names.intern("x64.mov_mr_64"));
+            let store = self.named("mov_mr_64");
             for &(reg, class, at) in &arrived.spare {
                 let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
                 let made =
@@ -4639,8 +4652,7 @@ impl<'a> Lowering<'a> {
 
         let base = self.frame_address(out, save);
         for &(reg, class, at) in &arrived.spare {
-            let name = if class == self.gpr { "x64.mov_mr_64" } else { "x64.movaps_mr" };
-            let store = mir::Opcode::new(self.names.intern(name));
+            let store = self.named(if class == self.gpr { "mov_mr_64" } else { "movaps_mr" });
             let up = i32::try_from(at).expect("a register save area under two gigabytes");
             let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
             self.out.build(out, store).uses(reg, class).mem(mem).finish();
@@ -4653,7 +4665,7 @@ impl<'a> Lowering<'a> {
     /// until after allocation, and given to [`crate::finish`] to fill in the way an `alloca` is.
     fn frame_address(&mut self, out: mir::Block, local: usize) -> mir::Reg {
         let reg = self.out.new_vreg(self.gpr);
-        let lea = mir::Opcode::new(self.names.intern(&format!("{PREFIX}{}", x86_64::FRAME.lea)));
+        let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
         let made = self.out.build(out, lea).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, local));
@@ -4758,7 +4770,7 @@ impl<'a> Lowering<'a> {
     fn select(&self, inst: Inst, refused: &HashSet<Value>) -> Option<(Plan, Match<Term>)> {
         for plan in self.plans(inst, refused) {
             let terms = Terms::new(self.source, inst, plan);
-            if let Some(matched) = TABLE.find(&terms, Term::Root) {
+            if let Some(matched) = self.selector.table.find(&terms, Term::Root) {
                 return Some((plan, matched));
             }
         }
@@ -4863,13 +4875,14 @@ impl<'a> Lowering<'a> {
 
     /// Build the machine instruction a match calls for.
     fn emit(&mut self, inst: Inst, matched: &Match<Term>) -> Result<(), Unsupported> {
-        let rule: &Rule = TABLE.rule(matched);
+        let rule: &Rule = self.selector.table.rule(matched);
         let pieces = rule.replacement;
         let Some(Piece::App { head, arity }) = pieces.first() else {
             return Err(self.unsupported(inst));
         };
-        let opcode = head.strip_prefix(PREFIX).ok_or_else(|| self.unsupported(inst))?;
-        let form = x86_64::form(opcode).ok_or_else(|| self.unsupported(inst))?;
+        let opcode =
+            head.strip_prefix(self.selector.prefix()).ok_or_else(|| self.unsupported(inst))?;
+        let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
 
         let mut read = Read::default();
         let mut at = 1;
@@ -4877,7 +4890,6 @@ impl<'a> Lowering<'a> {
             at = self.read(inst, pieces, at, &matched.bindings, &mut read)?;
         }
 
-        let descs = form.operands();
         let writes = descs.iter().take_while(|desc| desc.role.is_def()).count();
         if descs.len() - writes != read.regs.len() {
             return Err(self.unsupported(inst));
@@ -4974,7 +4986,7 @@ impl<'a> Lowering<'a> {
                 Ok(at + 1)
             }
             Some(Piece::App { head, arity }) => {
-                let kind = x86_64::address(head).ok_or_else(|| self.unsupported(inst))?;
+                let kind = (self.selector.address)(head).ok_or_else(|| self.unsupported(inst))?;
                 let mut inner = Read::default();
                 let mut next = at + 1;
                 for _ in 0..*arity {
@@ -5095,15 +5107,15 @@ struct Read {
 /// One arm per constructor rather than a question asked of the kind, because what the arguments
 /// mean is the whole of what tells the four apart: the same register is a base in one and an
 /// index in another, and the same constant is a scale in one and a displacement in another.
-fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem> {
+fn address(kind: Address, read: &Read, gpr: RegClass) -> Option<mir::Mem> {
     let mut regs = read.regs.iter().copied().map(|reg| mir::Operand::read(reg, gpr));
     match kind {
-        x86_64::Address::BaseIndexScale => {
+        Address::BaseIndexScale => {
             let base = regs.next()?;
             let index = regs.next()?;
             Some(mir::Mem::at(base).indexed(index, u8::try_from(read.imm?).ok()?))
         }
-        x86_64::Address::IndexScale => Some(mir::Mem {
+        Address::IndexScale => Some(mir::Mem {
             base: None,
             index: Some(regs.next()?),
             scale: u8::try_from(read.imm?).ok()?,
@@ -5114,21 +5126,14 @@ fn address(kind: x86_64::Address, read: &Read, gpr: RegClass) -> Option<mir::Mem
             reach: mir::Reach::Itself,
             segment: None,
         }),
-        x86_64::Address::Base => Some(mir::Mem::at(regs.next()?)),
+        Address::Base => Some(mir::Mem::at(regs.next()?)),
         // The rule that writes this has a guard saying the constant fits, so a displacement that
         // does not is a rule and a target that disagree rather than a program this cannot compile.
-        x86_64::Address::BaseOffset => {
+        Address::BaseOffset => {
             Some(mir::Mem { disp: i32::try_from(read.imm?).ok()?, ..mir::Mem::at(regs.next()?) })
         }
     }
 }
-
-/// The table this selector matches with.
-///
-/// One target for now, because one target has a rule file. Which table to use becomes a question
-/// the moment a second one does, and the answer will be the target the session was given rather
-/// than a constant here.
-static TABLE: &Table = &crate::select::x86_64::TABLE;
 
 #[cfg(test)]
 mod tests {
@@ -5141,6 +5146,7 @@ mod tests {
     use super::*;
     use crate::finish::{Convention, finish};
     use crate::frame::{Frame, Incoming, Layout};
+    use crate::select::x86_64::SELECTOR;
 
     /// A function of as many 64 bit parameters as the test wants, and the block they are in.
     fn blank(params: &[Type]) -> (Interner, Func, Block, Vec<Value>) {
@@ -5177,7 +5183,7 @@ mod tests {
 
     /// The machine IR text a function lowers to.
     fn lower(names: &mut Interner, source: &Func) -> String {
-        let out = func(source, names, &SYSV, &Elsewhere::default())
+        let out = func(source, names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         mir::print_func(&out.func, names, &REGS)
     }
@@ -5412,7 +5418,7 @@ mod tests {
         // The width is the whole of what is wrong here, so the width is in the message: `load`
         // on its own is written about at every other width and would send a reader looking in
         // the wrong place.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("nothing loads 128 bits");
         assert_eq!(failed.to_string(), "no rule lowers a `load` producing a `i128`");
     }
@@ -5577,7 +5583,7 @@ mod tests {
         // a register for it is first wanted rather than where the IR put it. So the only place a
         // rule about one is ever selected is the materialization, and a mark made in the loop
         // alone would report every rule about a constant as a rule nothing reaches.
-        let out = super::func(&func, &mut names, &SYSV, &Elsewhere::default())
+        let out = super::func(&func, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         let rules = &crate::select::x86_64::TABLE.rules;
         let fired: Vec<&str> = rules
@@ -5608,7 +5614,7 @@ mod tests {
         let zero = build.iconst(Type::int(32), 0);
         build.ret(&[zero]);
 
-        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let mut out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule")
             .func;
         let env = env();
@@ -5645,7 +5651,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
         build.ret(&[sum]);
 
-        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let mut out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule")
             .func;
         let env = env();
@@ -5688,7 +5694,7 @@ mod tests {
         let mut build = Builder::new(&mut source, block);
         build.ret(&[args[6]]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("the seventh is read from memory");
 
         // SysV passes six integers in registers and the seventh in the caller's memory, so six of
@@ -5711,7 +5717,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, args[6], args[7], Flags::default());
         build.ret(&[sum]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("both are read from memory");
         let stack = lowered.stack;
         let mut out = lowered.func;
@@ -5741,7 +5747,7 @@ mod tests {
         build.store(args[6], wide, plain(), Flags::default());
         build.ret(&[args[6]]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         let stack = lowered.stack;
         let mut out = lowered.func;
@@ -5857,7 +5863,7 @@ mod tests {
         Builder::new(&mut source, then).jump(join, &[args[0]]);
         Builder::new(&mut source, join).ret(&[got]);
 
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule")
             .func;
         let entry = out.entry().expect("an entry block");
@@ -5942,7 +5948,7 @@ mod tests {
         // return is the block they meet at. No edge here is critical, because the two arms out of
         // the entry carry nothing and the two arms into the join each leave a block that goes
         // nowhere else, so each has its own end to put its move at.
-        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let mut out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule")
             .func;
         assert_eq!(crate::split::critical(&mut out), 0, "no edge here is critical");
@@ -5988,7 +5994,7 @@ mod tests {
         // two ways, and the arm carries a value. Without splitting it the allocator asserts,
         // because the move that gives the join its parameter would have to run at the end of a
         // block that also goes to the other arm.
-        let mut out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let mut out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule")
             .func;
         assert_eq!(crate::split::critical(&mut out), 1);
@@ -6043,7 +6049,7 @@ mod tests {
         let sig = sig(&mut source);
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         // Nothing on the stack, so nothing owed, but not a leaf either: a function that calls
@@ -6055,14 +6061,14 @@ mod tests {
 
         // The same call under the other convention owes thirty two bytes for the callee to spill
         // its register arguments into, which is a fact about the convention and not about the call.
-        let out = func(&source, &mut names, &x86_64::WIN64, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &x86_64::WIN64, &Elsewhere::default())
             .expect("every instruction has a rule");
         assert_eq!(out.stack.calls, Some(32));
 
         // And a function that calls nothing is a leaf, which is what says it may use the red zone.
         let (mut names, mut source, block, args) = blank(&[i32]);
         Builder::new(&mut source, block).ret(&[args[0]]);
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         assert_eq!(out.stack.calls, None);
         assert!(out.stack.layout(Layout::new(&SYSV, REGS)).leaf);
@@ -6085,7 +6091,7 @@ mod tests {
         build.inst(InstData { args, ..InstData::new(Opcode::VaStart) }, &[]);
         build.ret(&[]);
 
-        let out = func(&source, &mut names, &x86_64::WIN64, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &x86_64::WIN64, &Elsewhere::default())
             .expect("every instruction has a rule");
         let text = mir::print_func(&out.func, &names, &REGS);
 
@@ -6117,7 +6123,7 @@ mod tests {
 
         // `int f(int a) { return g(a) + a; }`, which is the smallest program that asks the
         // question: `a` is read after the call and `rdi` is a register the call destroys.
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         let layout = lowered.stack.layout(Layout::new(&SYSV, REGS));
         let mut out = lowered.func;
@@ -6151,7 +6157,7 @@ mod tests {
         let passed = vec![args[0]; 7];
         Builder::new(&mut source, block).call(callee, sig, &passed);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("the seventh goes to memory");
         // The bytes the call needs are on the layout the frame is worked out from, so that the
         // frame reserves as many as the widest call in the function asked for.
@@ -6167,7 +6173,7 @@ mod tests {
         let sig = source.add_signature(Signature::new().with_returns(&returns));
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[]);
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("a long double is on the x87");
         assert_eq!(failed.to_string(), "what this call gives back is on the x87 stack");
     }
@@ -6186,7 +6192,7 @@ mod tests {
         let callee = names.intern("g");
         Builder::new(&mut source, block).call(callee, sig, &[]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("the value comes back in st0");
         let text = mir::print_func(&lowered.func, &names, &REGS);
         let after: Vec<&str> =
@@ -6235,7 +6241,7 @@ mod tests {
         // yet: what it needs is a write over a range of the lifetime plane, and that is
         // `tamnd/rucc#856`. Nothing about it is a width or a register, so there is nothing for the
         // message to add beyond the name.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("no rule writes the beginning of a lifetime");
         assert_eq!(failed.to_string(), "no rule lowers a `meta_begin`");
 
@@ -6304,7 +6310,7 @@ mod tests {
         // Two integers come back in `rax` and `rdx` and a third has nowhere to go, which is not a
         // gap in the rules but the convention saying no. The front end classifies before it gets
         // here, so this is the shape that would mean the classification went wrong.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("only two come back");
         assert_eq!(
             failed.to_string(),
@@ -6345,7 +6351,7 @@ mod tests {
         let loaded = build.load(Type::int(32), slot, plain(), Flags::default());
         build.ret(&[loaded]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         // Four bytes on the list the frame is laid out from, and the one instruction that reads
@@ -6374,7 +6380,7 @@ mod tests {
         build.store(scratch, declared, MemInfo { size: 8, align: 8, ..plain() }, Flags::default());
         build.ret(&[]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         // Two locals and one declaration, held against the order the allocas were lowered in,
@@ -6398,7 +6404,7 @@ mod tests {
         build.func().declare_value(sum, 41);
         build.ret(&[sum]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         // One pair and not three. The constants are values the program never declared, and a
@@ -6436,7 +6442,7 @@ mod tests {
         Builder::new(&mut source, other).jump(join, &[seven]);
         Builder::new(&mut source, join).ret(&[got]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         let held = &lowered.func.named;
@@ -6458,7 +6464,7 @@ mod tests {
         build.func().declare_value(args[0], 41);
         build.ret(&[args[0]]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         let held = &lowered.func.named;
@@ -6475,7 +6481,7 @@ mod tests {
         let nine = build.iconst(Type::int(32), 9);
         build.ret(&[nine]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         assert!(lowered.func.named.is_empty(), "{:?}", lowered.func.named);
     }
@@ -6490,7 +6496,7 @@ mod tests {
         let loaded = build.load(Type::int(32), slot, plain(), Flags::default());
         build.ret(&[loaded]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         let stack = lowered.stack;
         let mut out = lowered.func;
@@ -6529,7 +6535,7 @@ mod tests {
         let slot = growing(&mut source, block, args[0], 16);
         Builder::new(&mut source, block).ret(&[slot]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
         // The bytes come off the stack pointer where the declaration stands and the address is
@@ -6554,7 +6560,7 @@ mod tests {
         // for means masking the stack pointer after moving it, and after that no constant reaches
         // the rest of the frame from the frame pointer either. A second pointer held for the
         // purpose is what fixes it and there is not one yet.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("nothing realigns a frame that grows");
         assert_eq!(
             failed.to_string(),
@@ -6573,7 +6579,7 @@ mod tests {
         let grown = growing(&mut source, block, args[0], 16);
         Builder::new(&mut source, block).ret(&[grown]);
 
-        let lowered = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         let stack = lowered.stack;
         let mut out = lowered.func;
@@ -6665,8 +6671,8 @@ mod tests {
         // computation, because the distance from here to a name a shared library may be the one
         // that defines is not a number any link can work out, and the slot the linker fills in is
         // in this program and so is a distance it has.
-        let out =
-            func(&source, &mut names, &SYSV, &elsewhere).expect("every instruction has a rule");
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &elsewhere)
+            .expect("every instruction has a rule");
         assert_eq!(
             mir::print_func(&out.func, &names, &REGS),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [got @away]\n    \
@@ -6685,8 +6691,8 @@ mod tests {
         // the two cases above are one, because there is no address to load or to work out: the
         // slot holds how far into a thread's block the variable sits, `%fs:0` is where this
         // thread's block starts, and the sum of the two is this thread's copy.
-        let out =
-            func(&source, &mut names, &SYSV, &elsewhere).expect("every instruction has a rule");
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &elsewhere)
+            .expect("every instruction has a rule");
         assert_eq!(
             mir::print_func(&out.func, &names, &REGS),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [thread @own]\n    \
@@ -6703,7 +6709,7 @@ mod tests {
             Builder::new(&mut source, block).value(InstData::new(Opcode::ThreadPointer), Type::PTR);
         Builder::new(&mut source, block).ret(&[here]);
 
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
         assert_eq!(
             mir::print_func(&out.func, &names, &REGS),
@@ -6829,7 +6835,7 @@ mod tests {
         clobbering(&mut source, block, &mut names, "pause", "", "zmm0", &[], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("there is no such register here");
         assert_eq!(
             failed.to_string(),
@@ -6952,7 +6958,7 @@ mod tests {
         assembly(&mut source, block, &mut names, "hcf %0", "r", &[args[0]], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("a register is not spelled into kept text");
         assert_eq!(
             failed.to_string(),
@@ -7040,7 +7046,7 @@ mod tests {
         );
         Builder::new(&mut source, block).ret(&[value]);
 
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("there is no such register");
         assert_eq!(
             failed.to_string(),
@@ -7057,7 +7063,7 @@ mod tests {
 
         // An output with no result to be, which is what the front end never writes and what a
         // hand written module can. Refused rather than placed by a guess.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("the list and the instruction disagree");
         assert_eq!(failed.to_string(), "this `asm` has an operand this cannot place");
     }
@@ -7115,7 +7121,8 @@ mod tests {
             let (mut names, mut source, block, _) = blank(&[]);
             source.linkage = linkage;
             Builder::new(&mut source, block).ret(&[]);
-            let out = func(&source, &mut names, &SYSV, &Elsewhere::default()).expect("a return");
+            let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
+                .expect("a return");
             // The narrowing is done here rather than where the object is written, because a
             // machine function is all the assembler and the writer are ever handed.
             assert_eq!(out.func.binding, wanted, "{linkage:?}");
@@ -7140,7 +7147,8 @@ mod tests {
             let (mut names, mut source, block, _) = blank(&[]);
             source.visibility = visibility;
             Builder::new(&mut source, block).ret(&[]);
-            let out = func(&source, &mut names, &SYSV, &Elsewhere::default()).expect("a return");
+            let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
+                .expect("a return");
             assert_eq!(out.func.visibility, wanted, "{visibility:?}");
         }
     }
@@ -7154,7 +7162,7 @@ mod tests {
         // The front end never writes one: it casts at the address width and truncates or extends
         // around it, so both of those are the rules they always were. IR from somewhere else that
         // does write one is refused rather than compiled to a move that keeps the high half.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("no rule narrows an address");
         assert_eq!(failed.to_string(), "no rule lowers a `ptrtoint` producing a `i32`");
     }
@@ -7206,7 +7214,7 @@ mod tests {
         let sum = build.binary(Opcode::FAdd, once, twice, Flags::default());
         build.ret(&[sum]);
 
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction is written");
 
         // Two slots and not four: sixteen bytes for the one eighty bit value, which is what the
@@ -7397,7 +7405,7 @@ mod tests {
         // operand the predicate is about has to go on last, which is the other way round from the
         // arithmetic above. The pop that clears the loser and the byte that reads the flags are
         // both inside the one opcode.
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction is written");
         let slots = pushed(&out);
         assert_eq!(slots, [2, 1], "the right operand goes on first and the left one on top");
@@ -7427,7 +7435,7 @@ mod tests {
         // Which slot each push names is the whole of the difference from the test above, and the
         // text does not show it, since an address in a frame is a `lea` with nothing in it until
         // `finish` has the numbers. So the slots are what is read here.
-        let out = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let out = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction is written");
         let slots = pushed(&out);
         assert_eq!(slots, [1, 2], "the left operand goes on first and the right one on top");
@@ -7468,7 +7476,7 @@ mod tests {
         // Always false is a constant and not a comparison, so there is no condition to pick and
         // nothing here folds it into one: an instruction that quietly agreed with it would hide
         // that the optimizer left a comparison in that it should have taken out.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("no condition is always false");
         assert_eq!(failed.to_string(), "no rule lowers a `fcmp` producing a `i1`");
     }
@@ -7552,7 +7560,7 @@ mod tests {
         // is written, which is what makes a block that swaps two of these right. Nine of them do
         // not fit on the stack, and copying the ninth before or after the rest is the order that
         // could be wrong, so it is refused instead.
-        let failed = func(&source, &mut names, &SYSV, &Elsewhere::default())
+        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect_err("nine do not fit on the stack");
         assert_eq!(
             failed.to_string(),
