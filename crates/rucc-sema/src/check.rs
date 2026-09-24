@@ -54,8 +54,8 @@ use rucc_ast::Ast;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Severity, Span};
 use rucc_session::Std;
-use rucc_target::TargetInfo;
-use rucc_types::{ArrayLen, IntKind, TypeId, TypeKind, Types, int_width};
+use rucc_target::{Lane, TargetInfo, TypeName};
+use rucc_types::{ArrayLen, FloatKind, IntKind, RecordKind, TypeId, TypeKind, Types, int_width};
 
 use crate::convert::Conv;
 use crate::decl::{
@@ -64,7 +64,7 @@ use crate::decl::{
 };
 use crate::eval::{Eval, NotConstant};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
-use crate::scope::Scopes;
+use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast};
 
 mod attr;
@@ -285,7 +285,7 @@ impl<'a> Checker<'a> {
     /// A checker over one untyped tree.
     #[must_use]
     pub fn new(ast: &'a Ast, cx: Context<'a>) -> Checker<'a> {
-        Checker {
+        let mut checker = Checker {
             ast,
             tast: Tast::new(),
             types: Types::new(),
@@ -298,6 +298,39 @@ impl<'a> Checker<'a> {
             declared_builtins: Vec::new(),
             refused_sizes: 0,
             calling: None,
+        };
+        checker.declare_type_names();
+        checker
+    }
+
+    /// Declares the names the target has as types before the file starts, which the parser
+    /// declared as well, so the two scope stacks agree about them.
+    fn declare_type_names(&mut self) {
+        for &(name, shape) in self.cx.target.type_names() {
+            let Some(name) = self.cx.names.find(name) else { continue };
+            let ty = match shape {
+                TypeName::Vector(lane, lanes) => {
+                    let elem = match lane {
+                        Lane::I8 => self.types.int(IntKind::SChar),
+                        Lane::U8 => self.types.int(IntKind::UChar),
+                        Lane::I16 => self.types.int(IntKind::Short),
+                        Lane::U16 => self.types.int(IntKind::UShort),
+                        Lane::I32 => self.types.int(IntKind::Int),
+                        Lane::U32 => self.types.int(IntKind::UInt),
+                        Lane::I64 => self.types.int(IntKind::Long),
+                        Lane::U64 => self.types.int(IntKind::ULong),
+                        Lane::F16 => self.types.float(FloatKind::Float16),
+                        Lane::F32 => self.types.float(FloatKind::Float),
+                        Lane::F64 => self.types.float(FloatKind::Double),
+                    };
+                    self.types.vector(elem, u32::from(lanes))
+                }
+                TypeName::Sizeless => {
+                    let id = self.types.declare_record(RecordKind::Struct, Some(name));
+                    self.types.record(id)
+                }
+            };
+            self.scopes.declare(name, Binding::Typedef(ty));
         }
     }
 
@@ -376,7 +409,7 @@ impl<'a> Checker<'a> {
     /// [`Checker::check_expr`] is for and what the tests here are built on.
     pub fn declare_object(&mut self, name: Symbol, ty: TypeId, span: Span) -> DeclId {
         let decl = self.object_decl(Some(name), ty, span);
-        self.scopes.declare(name, crate::scope::Binding::Decl(decl));
+        self.scopes.declare(name, Binding::Decl(decl));
         decl
     }
 

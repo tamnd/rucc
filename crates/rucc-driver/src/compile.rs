@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rucc_base::Interner;
+use rucc_base::{Interner, Symbol};
 use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::lowering::Lowerings;
@@ -255,6 +255,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let (tokens, complaints) = convert(&expanded, &cx);
     diagnostics.extend(complaints);
 
+    // Only the ones the file wrote, since a name nothing interned is one nothing can use.
+    let type_names: Vec<Symbol> =
+        sess.target.type_names().iter().filter_map(|&(name, _)| sess.interner.find(name)).collect();
     let parsed = rucc_parse::parse(
         &tokens,
         rucc_parse::Context {
@@ -263,6 +266,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             gnu: opts.gnu_extensions,
             pedantic: opts.pedantic,
             error_limit: opts.error_limit as usize,
+            type_names: &type_names,
         },
     );
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
@@ -3025,6 +3029,26 @@ decl #0 x : int object external static defined
             assert!(text.contains(line), "{line} is not in\n{text}");
         }
         assert!(!text.contains('%'), "{text}");
+    }
+
+    /// gcc's AArch64 vector type names are there before any header, which glibc's `<math.h>`
+    /// needs, a declaration can still hide one, and on x86-64 they are ordinary identifiers.
+    #[test]
+    fn the_aarch64_vector_type_names_are_declared_on_that_target_and_nowhere_else() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "typedef __Float32x4_t f4;\n__SVFloat32_t sv(__SVFloat32_t, __SVBool_t);\n\
+                      int n = sizeof(f4) + sizeof(__Int8x8_t);\n\
+                      int f(f4 v) { int __Uint8x16_t = 3; return v[1] + __Uint8x16_t; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        assert!(result.text().contains(".long\t24"), "{}", result.text());
+        opts.target = "x86_64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, "typedef __Float32x4_t f4;\n");
+        assert!(result.failed());
+        let result = run(&opts, "int __Float32x4_t = 1;\n");
+        assert!(!result.failed(), "{:?}", result.messages);
     }
 
     /// A structure too big for registers comes back through the address in x8, which AAPCS64 keeps

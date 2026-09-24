@@ -56,6 +56,7 @@ mod operand;
 mod regs;
 mod short;
 mod timing;
+mod typenames;
 pub mod x86_64;
 
 pub use crate::abi::{AbiDescription, Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot, Variadic};
@@ -70,6 +71,7 @@ pub use crate::regs::{
 };
 pub use crate::short::{Copied, Narrowed, ShortInsts, Stepped, Tested, Zeroed};
 pub use crate::timing::{Timing, TimingInsts, Unit};
+pub use crate::typenames::{Lane, TypeName};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -726,6 +728,15 @@ impl TargetInfo {
     #[must_use]
     pub fn new(triple: Triple) -> Self {
         Self::for_tuple(triple.tuple())
+    }
+
+    /// The type names this target's compiler has before any header is read, and what each is.
+    ///
+    /// Empty everywhere but AArch64, where gcc has the Advanced SIMD and SVE types and glibc's
+    /// `<math.h>` names them.
+    #[must_use]
+    pub fn type_names(&self) -> &'static [(&'static str, TypeName)] {
+        typenames::type_names(self.tuple.arch())
     }
 
     /// The description of `target`.
