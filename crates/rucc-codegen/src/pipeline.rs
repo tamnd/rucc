@@ -41,7 +41,7 @@ use crate::compare;
 use crate::copies;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
-use crate::finish::{Convention, Padding, Probing, Protect, Tracing, finish};
+use crate::finish::{Convention, Padding, Probing, Protect, Tracing, far, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
 use crate::kept;
@@ -699,6 +699,10 @@ pub fn compile_recording(
     // both went into. Before the layout, because the layout is where the instruction sequence
     // stops being something a pass may edit.
     copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, names);
+
+    // After the moves are cleaned up, since that pass follows what the scratch registers hold, and
+    // before the schedule, which should see the extra `add` as the instruction it is.
+    far(&mut func, machine.insts, machine.conv, scratch, names);
 
     // After the allocator's moves have been cleaned up, because a schedule chosen around a move
     // that is about to be taken out is a schedule built around an instruction that is not in the

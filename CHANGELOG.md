@@ -11,6 +11,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- AArch64 compares two `char` or two `short` values. The optimizer narrows such a comparison to the width of its operands and nothing lowered one at that width, so at -O1 and above a program comparing two of them failed to build. Each operand is now widened to thirty two bits first, with a sign extension for the signed predicates and a zero extension for the others.
+- AArch64 builds a function whose frame is larger than about four kilobytes. The prologue took the frame with one `sub`, which carries twelve bits, so a larger frame was refused by the encoder, and a local or a spill slot far from the stack pointer was out of reach of the load, store or `add` that named it. The frame is now taken and given back in steps the way gcc does, and an access out of reach adds most of the offset into x16 or x17 first.
 - A block comment that runs across lines inside a `#define` no longer ends the definition. The newline inside the comment was taken as the end of the line, so the rest of the body became stray text and the file failed to compile. A `#` after such a comment is now a directive only when the comment began its line, which is what GCC does (#1749).
 
 ## 0.11.5

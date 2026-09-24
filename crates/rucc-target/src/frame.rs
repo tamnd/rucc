@@ -90,7 +90,7 @@ pub struct Pair {
 }
 
 /// Every instruction a prologue, an epilogue, a spill or a reload is made of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct FrameInsts {
     /// What a rule file and the machine IR put in front of this target's opcodes, such as
     /// `x64.`, which says which target a term belongs to and is not part of the opcode.
@@ -196,9 +196,49 @@ pub struct FrameInsts {
     /// up to the length: a patcher writes over the room from its start and wants a whole number of
     /// places it could have started at.
     pub pad: Option<&'static str>,
+    /// How many bits of constant [`Self::add`] and [`Self::sub`] carry, when a frame can need
+    /// more, or `None` when they carry any size a frame can be.
+    ///
+    /// AArch64's carry twelve bits, or twelve bits shifted up by twelve, which is the machine's
+    /// whole answer and not a form the encoder has yet to learn. A frame of 4608 bytes is taken as
+    /// 4096 and then 512, which is what gcc writes, and [`Self::steps`] is the rule for that.
+    pub step_bits: Option<u32>,
+    /// Whether the instruction of that name can carry that displacement from the stack pointer or
+    /// the frame pointer, or `None` on a target where every offset a frame has fits.
+    ///
+    /// An AArch64 load reaches 4095 bytes, or that many of its own size, and `add` carries twelve
+    /// bits, so a local more than a few kilobytes into a large frame is out of reach of the one
+    /// instruction the lowering wrote for it. What reaches is the encoder's to say, since it is
+    /// the one that refuses, and the finish pass asks it and writes the address into a scratch
+    /// register first when the answer is no.
+    pub reaches: Option<fn(&str, i32) -> bool>,
 }
 
 impl FrameInsts {
+    /// The amounts one [`Self::add`] or [`Self::sub`] each moves the stack pointer by, which
+    /// together move it by `bytes`.
+    ///
+    /// One step on a machine whose instruction carries the whole of it. Otherwise the part above
+    /// the low bits goes first, in steps as large as the shifted form holds, and the low bits
+    /// last, so a frame under sixteen megabytes on AArch64 is at most two instructions.
+    #[must_use]
+    pub fn steps(&self, bytes: u32) -> Vec<u32> {
+        let Some(bits) = self.step_bits else { return vec![bytes] };
+        let low = bytes & ((1 << bits) - 1);
+        let most = ((1 << bits) - 1) << bits;
+        let mut high = bytes - low;
+        let mut steps = Vec::new();
+        while high > 0 {
+            let step = high.min(most);
+            steps.push(step);
+            high -= step;
+        }
+        if low > 0 || steps.is_empty() {
+            steps.push(low);
+        }
+        steps
+    }
+
     /// How a register of that class is moved, or `None` for a class nothing spills.
     #[must_use]
     pub fn moves(&self, class: RegClass) -> Option<ClassMoves> {

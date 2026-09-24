@@ -70,7 +70,7 @@ use std::collections::HashMap;
 
 use rucc_base::Interner;
 use rucc_diag::Span;
-use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg};
+use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
@@ -367,6 +367,82 @@ pub fn finish(
     moves
 }
 
+/// Points every access to the frame that its instruction cannot carry the offset of at a scratch
+/// register holding most of the address.
+///
+/// Nothing to do on x86, where every offset a frame has fits in the instruction. An AArch64 load
+/// reaches a few kilobytes up from the stack pointer and `add` reaches four, so a local deep in a
+/// large frame is written as `add x16, sp, #4096` and then the access four thousand and some bytes
+/// closer, which is what gcc writes. The part left in the instruction is the low bits when the
+/// instruction can carry those and nothing when it cannot, which is the unaligned offset a scaled
+/// load refuses.
+///
+/// After the allocator's moves have been cleaned up rather than here in [`finish`], because that
+/// pass reads what each scratch register holds between one move and the next and an address
+/// written into one in the middle is not a move it knows about. The scratch register is one the
+/// instruction does not read, and one of the two always is, since an access through the stack
+/// pointer has no base register of its own to have been reloaded into a scratch.
+pub fn far(
+    func: &mut Func,
+    insts: &FrameInsts,
+    conv: &CallRegs,
+    scratch: &[PhysReg],
+    names: &mut Interner,
+) {
+    let Some(reaches) = insts.reaches else { return };
+    let lea = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
+    let frame = [conv.stack_pointer, conv.frame_pointer];
+    let all: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in all {
+        let Some(mem) = func[inst].mem else { continue };
+        let amode = func[mem];
+        let plain = amode.index.is_none()
+            && amode.symbol.is_none()
+            && amode.block.is_none()
+            && amode.table.is_none()
+            && amode.segment.is_none();
+        let Some(at) = amode.base.filter(|_| plain) else { continue };
+        let operands = func[inst].operands;
+        let Some(from) = func[operands][usize::from(at)].reg.phys() else { continue };
+        let Some(name) = names.resolve(func[inst].opcode.name()).strip_prefix(insts.prefix) else {
+            continue;
+        };
+        if !frame.contains(&from) || reaches(name, amode.disp) {
+            continue;
+        }
+        let read = |reg: PhysReg| {
+            func[operands].iter().any(|op| op.role != Role::Def && op.reg.phys() == Some(reg))
+        };
+        let Some(&into) = scratch.iter().find(|&&reg| !read(reg)) else { continue };
+        let sign = amode.disp.signum();
+        let mut steps: Vec<i32> = insts
+            .steps(amode.disp.unsigned_abs())
+            .into_iter()
+            .map(|step| offset(step) * sign)
+            .collect();
+        let last = steps.last().copied().unwrap_or(0);
+        let keep = if steps.len() > 1 && reaches(name, last) {
+            steps.pop();
+            last
+        } else {
+            0
+        };
+        let class = conv.int_class;
+        let mut base = from;
+        for step in steps {
+            let address = func
+                .build_loose(lea)
+                .def(Reg::physical(into), class)
+                .mem(Mem::at(Operand::read(Reg::physical(base), class)).plus(step))
+                .finish();
+            func.insert_before(inst, address);
+            base = into;
+        }
+        func[operands][usize::from(at)].reg = Reg::physical(into);
+        func[mem].disp = keep;
+    }
+}
+
 /// How many pages a probing prologue touches one after another before it writes a loop instead.
 ///
 /// Three, which is what gcc unrolls to. The loop is four instructions however many pages it walks
@@ -639,11 +715,13 @@ impl Writer<'_> {
             return;
         }
         let Some(probing) = probe.filter(|probing| size > probing.probe.interval) else {
-            let inst = self.sub(size);
-            out.push(inst);
-            *below += offset(size);
-            if from_sp {
-                self.row(inst, CfiOp::DefCfaOffset(*below));
+            for step in self.insts.steps(size) {
+                let inst = self.sub(step);
+                out.push(inst);
+                *below += offset(step);
+                if from_sp {
+                    self.row(inst, CfiOp::DefCfaOffset(*below));
+                }
             }
             return;
         };
@@ -1050,10 +1128,12 @@ impl Writer<'_> {
             }
         } else if frame.size() > 0 {
             let add = self.opcode(self.insts.add);
-            let inst = self.arith(add, i64::from(frame.size()));
-            out.push(inst);
-            below -= offset(frame.size());
-            self.row(inst, CfiOp::DefCfaOffset(below));
+            for step in self.insts.steps(frame.size()) {
+                let inst = self.arith(add, i64::from(step));
+                out.push(inst);
+                below -= offset(step);
+                self.row(inst, CfiOp::DefCfaOffset(below));
+            }
         }
         for &reg in frame.saved_int().iter().rev() {
             let inst = self.pop(reg);

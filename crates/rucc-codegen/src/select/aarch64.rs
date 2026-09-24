@@ -241,6 +241,7 @@ mod tests {
     fn a_comparison_against_a_constant_is_written_for_every_one_against_a_register() {
         let mut against_register = Vec::new();
         let mut against_constant = Vec::new();
+        let mut narrow = 0;
         for rule in TABLE.rules {
             let Some(rest) = rule.pattern.strip_prefix("(icmp_") else { continue };
             let (condition, operands) = rest.split_once(".i1 ").expect("a comparison takes two");
@@ -249,6 +250,12 @@ mod tests {
                 .and_then(|rest| rest.split_once(' '))
                 .map(|(width, _)| width)
                 .expect("a comparison reads a value first");
+            // The narrow widths compare two registers, each widened first, and have no form
+            // against a constant.
+            if matches!(width, "i8" | "i16") {
+                narrow += 1;
+                continue;
+            }
             let named = format!("{condition}.{width}");
             if operands.contains("(iconst.") {
                 against_constant.push(named);
@@ -260,6 +267,7 @@ mod tests {
         against_constant.sort_unstable();
         assert_eq!(against_register, against_constant);
         assert_eq!(against_register.len(), 20, "ten conditions at two widths");
+        assert_eq!(narrow, 20, "ten conditions at the two narrow widths");
     }
 
     /// The value comes first in a store, which is where the IR keeps it.
