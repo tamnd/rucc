@@ -75,6 +75,13 @@ pub struct Shape {
     pub bits: bool,
     /// Which kind of table of function addresses this is, for the three ELF has a type for.
     pub array: Option<Array>,
+    /// `M`: how long each entry is in a section of constants the linker may keep one copy of
+    /// wherever two objects hold the same one, and zero for a section that is not one of those.
+    /// gcc puts a `double` it loads from memory in `.rodata.cst8`, which is one of these.
+    pub merge: u64,
+    /// `S`: the entries are strings ended by a zero rather than all of one length, which is where
+    /// gcc puts every string literal. Only means anything beside `merge`.
+    pub strings: bool,
 }
 
 impl Shape {
@@ -127,6 +134,12 @@ impl Shape {
         }
         if self.thread {
             flags |= elf::SHF_TLS.0;
+        }
+        if self.merge != 0 {
+            flags |= elf::SHF_MERGE.0;
+            if self.strings {
+                flags |= elf::SHF_STRINGS.0;
+            }
         }
         elf::SectionFlags(flags)
     }
@@ -281,10 +294,26 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
         made.push(id);
     }
 
+    // Which relocations point at the section a name is in rather than at the name, and which names
+    // are then asked for by nothing and left out, before either is written down.
+    let defined: std::collections::HashMap<&str, &Name> =
+        input.names.iter().map(|name| (name.name.as_str(), name)).collect();
+    let onto = |reloc: &Reloc| moved(flavour, input, &defined, reloc);
+    let wanted: std::collections::HashSet<&str> = input
+        .parts
+        .iter()
+        .flat_map(|part| &part.relocs)
+        .filter(|reloc| onto(reloc).is_none())
+        .map(|reloc| reloc.symbol.as_str())
+        .collect();
+
     // Then every name. A relocation names one, and the writer wants the symbol before the
     // relocation that points at it, so this whole pass is in front of the one below.
     let mut symbols = std::collections::BTreeMap::new();
     for name in &input.names {
+        if flavour == Flavour::Elf && unseen(name) && !wanted.contains(name.name.as_str()) {
+            continue;
+        }
         let (section, value, size) = match name.at {
             Held::In { part, offset } => {
                 let Some(id) = made.get(part) else {
@@ -328,24 +357,26 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
 
     for (part, id) in input.parts.iter().zip(&made) {
         for reloc in &part.relocs {
-            let Some(symbol) = symbols.get(&reloc.symbol) else {
-                let why =
-                    format!("'{}' is named by a relocation and by nothing else", reloc.symbol);
-                return Err(Error::Refused { why });
+            let (symbol, addend) = match onto(reloc) {
+                Some((part, offset)) => {
+                    (obj.section_symbol(made[part]), reloc.addend + offset as i64)
+                }
+                None => {
+                    let Some(&symbol) = symbols.get(&reloc.symbol) else {
+                        let why = format!(
+                            "'{}' is named by a relocation and by nothing else",
+                            reloc.symbol
+                        );
+                        return Err(Error::Refused { why });
+                    };
+                    (symbol, reloc.addend)
+                }
             };
             let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
                 why: format!("no relocation is {:?}", reloc.kind),
             })?;
-            obj.add_relocation(
-                *id,
-                Relocation {
-                    offset: reloc.at as u64,
-                    symbol: *symbol,
-                    addend: reloc.addend,
-                    flags,
-                },
-            )
-            .map_err(|why| Error::Refused { why: why.to_string() })?;
+            obj.add_relocation(*id, Relocation { offset: reloc.at as u64, symbol, addend, flags })
+                .map_err(|why| Error::Refused { why: why.to_string() })?;
         }
     }
 
@@ -357,7 +388,76 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
         flavour.marker(&mut obj);
     }
 
-    obj.write().map_err(|why| Error::Refused { why: why.to_string() })
+    let mut bytes = obj.write().map_err(|why| Error::Refused { why: why.to_string() })?;
+    if flavour == Flavour::Elf {
+        for part in input.parts.iter().filter(|part| part.shape.merge != 0) {
+            entry_size(&mut bytes, &part.name, part.shape.merge);
+        }
+    }
+    Ok(bytes)
+}
+
+/// Write how long an entry of a mergeable section is into its header, which the linker needs and
+/// the writer underneath has no field for. It writes one only for a section of strings it made
+/// itself. The file is a 64 bit little endian ELF one, since that is the only kind this writes, and
+/// the section is found by its name, which is unique because the assembler gave every name one
+/// section.
+fn entry_size(bytes: &mut [u8], name: &str, size: u64) {
+    let word = |bytes: &[u8], at: usize, width: usize| {
+        bytes[at..at + width].iter().rev().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte))
+    };
+    let table = word(bytes, 0x28, 8) as usize;
+    let each = word(bytes, 0x3a, 2) as usize;
+    let count = word(bytes, 0x3c, 2) as usize;
+    let names = table + each * word(bytes, 0x3e, 2) as usize;
+    let names = word(bytes, names + 0x18, 8) as usize;
+    for header in (0..count).map(|nth| table + nth * each) {
+        let at = names + word(bytes, header, 4) as usize;
+        if bytes[at..].starts_with(name.as_bytes()) && bytes.get(at + name.len()) == Some(&0) {
+            bytes[header + 0x38..header + 0x40].copy_from_slice(&size.to_le_bytes());
+        }
+    }
+}
+
+/// The section and the offset into it a relocation is written against in place of the name it
+/// gave, when gas would do the same.
+///
+/// A name only this file can see is a place in a section and nothing more, so gas writes the
+/// section's own symbol and how far into it the place is, and a `.L` label then has no reason to be
+/// in the table at all. It keeps the name where the linker has to see it: a call, which may go
+/// through a stub the linker makes for that name, a slot of the global offset table, and a place in
+/// a section the linker may merge, where the offset into the section is not an offset into the
+/// merged one. The last of those is only a problem for a distance, or for an address with
+/// something added to it, since the address of the start of a string is what the linker follows.
+fn moved(
+    flavour: Flavour,
+    input: &Assembled,
+    defined: &std::collections::HashMap<&str, &Name>,
+    reloc: &Reloc,
+) -> Option<(usize, u64)> {
+    use crate::section::Reference;
+    let name = defined.get(reloc.symbol.as_str())?;
+    let Held::In { part, offset } = name.at else { return None };
+    if flavour != Flavour::Elf || name.binding != Binding::Local {
+        return None;
+    }
+    let near = matches!(reloc.kind, Reference::Data | Reference::Away);
+    let fixed = match reloc.kind {
+        Reference::Call | Reference::Got | Reference::Thread => false,
+        _ if input.parts.get(part)?.shape.merge != 0 => !near && reloc.addend == 0,
+        _ => true,
+    };
+    fixed.then_some((part, offset))
+}
+
+/// Whether a name is one the assembler made up or a label only it sees, which gas leaves out of the
+/// table unless a relocation still names it. `.L` is the prefix for those that ELF assemblers agree
+/// on, and a name with a `\u{1}` in it is one this assembler made for a numbered label or a frame.
+fn unseen(name: &Name) -> bool {
+    name.binding == Binding::Local
+        && (name.name.starts_with(".L")
+            || name.name.starts_with("..")
+            || name.name.contains('\u{1}'))
 }
 
 /// Every name in it a linker can find, which is what an archive's symbol index is built from.
@@ -591,6 +691,88 @@ mod tests {
         assert_eq!(reloc.addend(), 0);
         let RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("an ELF file") };
         assert_eq!(r_type, elf::R_X86_64_64);
+    }
+
+    #[test]
+    fn a_place_only_this_file_sees_is_reached_through_its_section_as_gas_does() {
+        // The `.L` label goes, the static function stays in the table, and both relocations are
+        // against `.text` at their offsets. A call keeps its name, since the linker may give it a
+        // stub, and so does a name the linker is allowed to see.
+        let mut text = part(".text", vec![0; 32]);
+        for (at, symbol, kind) in [
+            (0, ".L3", Reference::Data),
+            (4, "helper", Reference::Data),
+            (8, "helper", Reference::Call),
+            (12, "shared", Reference::Data),
+        ] {
+            let symbol = symbol.to_owned();
+            text.relocs.push(Reloc { at, symbol, kind, addend: -4, after: 0 });
+        }
+        let input = Assembled {
+            parts: vec![text],
+            names: vec![
+                at(".L3", 20, Sort::Untyped, Binding::Local),
+                at("helper", 24, Sort::Func, Binding::Local),
+                at("shared", 28, Sort::Func, Binding::Global),
+            ],
+        };
+        let bytes = assembled(&input, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let names: Vec<_> = file.symbols().filter_map(|sym| sym.name().ok()).collect();
+        assert!(!names.contains(&".L3") && names.contains(&"helper"), "{names:?}");
+        let section = file.section_by_name(".text").expect("the section");
+        let reached: Vec<_> = section
+            .relocations()
+            .map(|(at, reloc)| {
+                let object::RelocationTarget::Symbol(index) = reloc.target() else {
+                    panic!("a symbol")
+                };
+                let symbol = file.symbol_by_index(index).expect("the symbol");
+                let name = if symbol.kind() == object::SymbolKind::Section {
+                    ".text"
+                } else {
+                    symbol.name().expect("a name")
+                };
+                (at, name, reloc.addend())
+            })
+            .collect();
+        assert_eq!(
+            reached,
+            [(0, ".text", 16), (4, ".text", 20), (8, "helper", -4), (12, "shared", -4)]
+        );
+    }
+
+    #[test]
+    fn a_section_of_constants_may_be_merged_and_a_distance_into_it_keeps_its_name() {
+        let mut text = part(".text", vec![0; 8]);
+        text.relocs.push(Reloc {
+            at: 0,
+            symbol: ".LC0".to_owned(),
+            kind: Reference::Data,
+            addend: -4,
+            after: 0,
+        });
+        let strings = Part {
+            shape: Shape { merge: 1, strings: true, ..Shape::of(".rodata") },
+            ..part(".rodata.str1.1", b"hi\0".to_vec())
+        };
+        let mut name = at(".LC0", 0, Sort::Untyped, Binding::Local);
+        name.at = Held::In { part: 1, offset: 0 };
+        let input = Assembled { parts: vec![text, strings], names: vec![name] };
+        let bytes = assembled(&input, &target()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".rodata.str1.1").expect("the section");
+        let SectionFlags::Elf { sh_flags, .. } = section.flags() else { panic!("an ELF file") };
+        assert_eq!(sh_flags.0, elf::SHF_ALLOC.0 | elf::SHF_MERGE.0 | elf::SHF_STRINGS.0);
+        let header = elf::FileHeader64::<Endianness>::parse(&bytes[..]).expect("a header");
+        let endian = header.endian().expect("an endianness");
+        let table = header.sections(endian, &bytes[..]).expect("the sections");
+        let (_, found) = table.section_by_name(endian, b".rodata.str1.1").expect("the section");
+        assert_eq!(found.sh_entsize.get(endian), 1);
+        let text = file.section_by_name(".text").expect("the section");
+        let (_, reloc) = text.relocations().next().expect("one relocation");
+        let object::RelocationTarget::Symbol(index) = reloc.target() else { panic!("a symbol") };
+        assert_eq!(file.symbol_by_index(index).and_then(|sym| sym.name()), Ok(".LC0"));
     }
 
     #[test]
