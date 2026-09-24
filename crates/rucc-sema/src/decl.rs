@@ -296,6 +296,14 @@ impl DeclFlags {
     /// [`Self::ALWAYS_INLINE`] is, since gcc marks the name once any declaration of it says it.
     pub const DECLARED_INLINE: Self = Self(1 << 9);
 
+    /// `__attribute__((no_instrument_function))` was written on a declaration of this name.
+    ///
+    /// It takes the function back out of `-finstrument-functions`, which is what the two hooks
+    /// themselves need: a hook that calls itself on the way in never gets as far as its own body.
+    /// Merged the way [`Self::ALWAYS_INLINE`] is, since the place it is usually written is a
+    /// prototype above a definition that says nothing.
+    pub const NO_INSTRUMENT: Self = Self(1 << 10);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

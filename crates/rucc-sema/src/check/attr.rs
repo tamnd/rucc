@@ -660,12 +660,13 @@ impl Checker<'_> {
         })
     }
 
-    /// What an attribute list says about inlining, as the two bits it can set.
+    /// What an attribute list says about inlining and about what is written around the body, as
+    /// the bits it can set.
     ///
-    /// `always_inline` and `noinline`, under the namespace test [`Self::never_returns`] is under and
-    /// through the same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are
-    /// both read. Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for
-    /// almost every declaration.
+    /// `always_inline`, `noinline` and `no_instrument_function`, under the namespace test
+    /// [`Self::never_returns`] is under and through the same unarmouring, so `__always_inline__` in
+    /// a header and `[[gnu::noinline]]` are both read. Nothing else in the list is looked at, so
+    /// the answer is [`DeclFlags::NONE`] for almost every declaration.
     pub(in crate::check) fn inlining(&mut self, attrs: AttrList) -> DeclFlags {
         let mut flags = DeclFlags::NONE;
         let ast = self.ast;
@@ -677,6 +678,7 @@ impl Checker<'_> {
             match name.as_str() {
                 "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
                 "noinline" => flags |= DeclFlags::NOINLINE,
+                "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "optimize"
                     if self.optimize_options(attr).iter().any(|option| {
                         option.trim_start_matches('-').trim_start_matches('f')

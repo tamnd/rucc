@@ -98,6 +98,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         grows: false,
         cleans: false,
         saves: false,
+        hooked: false,
         aligned: HashMap::new(),
         restrict: Scopes::default(),
         brace: brace(tast, root, span),
@@ -183,6 +184,20 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         body.measure(ty);
     }
 
+    // The call on the way in, after the parameters are where the body reads them, which is where
+    // gcc puts it too. What takes a function out is its own attribute and being naked, since a
+    // call is code in front of the body and a naked function is the body and nothing else. And an
+    // `extern inline` function that is always inlined, which gcc leaves out by name: that is the
+    // shape of every fortified wrapper in glibc, and there is no copy of one to name.
+    let flags = tast[decl].flags;
+    body.hooked = body.unit.instrument
+        && !flags.contains(DeclFlags::NO_INSTRUMENT)
+        && !flags.contains(DeclFlags::NAKED)
+        && !(flags.contains(DeclFlags::ALWAYS_INLINE) && !tast[decl].inline.emits());
+    if body.hooked {
+        body.hook(ENTER_HOOK, span);
+    }
+
     body.stmt(root);
     body.settle();
     body.finish(decl, span);
@@ -242,6 +257,11 @@ const BUFFER: u64 = 8;
 /// call anyway. The builtin says nothing about what the bytes are going to hold, so the only safe
 /// answer is one that suits anything, and sixteen suits every type this target has.
 const ALLOCA_ALIGN: u32 = 16;
+
+/// What `-finstrument-functions` calls on the way into a function, and on the way out of one.
+/// gcc's names, which are what a profiler linked with the program defines.
+const ENTER_HOOK: &str = "__cyg_profile_func_enter";
+const EXIT_HOOK: &str = "__cyg_profile_func_exit";
 
 /// The numbers `<stdatomic.h>` gives the orderings, which are the last argument of every routine
 /// in the runtime's table of locks. gcc's numbers, since the routines are libatomic's.
@@ -613,6 +633,9 @@ struct Body<'a, 'u> {
     /// Whether anything in the function is a `__builtin_setjmp`, which is what stops a local
     /// being kept in a value rather than in the frame. See [`Body::declare`].
     saves: bool,
+    /// Whether the function calls the profiling hooks, which puts one call in front of the first
+    /// statement and one in front of every return. See [`Body::hook`].
+    hooked: bool,
     /// What an address is known to be aligned to, for the addresses something worked it out for.
     ///
     /// An access ordinarily assumes the alignment of the type it goes through, because that is
@@ -2783,6 +2806,7 @@ impl<'u> Body<'_, 'u> {
                 self.func.signature().returns.iter().map(|slot| slot.ty).collect();
             let values: Vec<Value> = returns.into_iter().map(|ty| self.blank(ty, span)).collect();
             self.unwind_cleanups(0, span);
+            self.leave_hook(span);
             self.build(span).ret(&values);
             self.at = None;
             return;
@@ -2849,8 +2873,39 @@ impl<'u> Body<'_, 'u> {
         // Every block the function is inside is left at once, after the value has been taken out
         // of it: `return obj->field;` reads the object a handler is about to be given.
         self.unwind_cleanups(0, span);
+        self.leave_hook(span);
         self.build(span).ret(&values);
         self.at = None;
+    }
+
+    /// The call on the way out, if the function makes one.
+    ///
+    /// After the value has been worked out and after every handler has run, which is where gcc's
+    /// is too: it wraps the whole body in the call, so what the body does on its way out is inside
+    /// it.
+    fn leave_hook(&mut self, span: Span) {
+        if self.hooked {
+            self.hook(EXIT_HOOK, span);
+        }
+    }
+
+    /// One call to a profiling hook, which is given the function's own address and the address it
+    /// will return to.
+    ///
+    /// The address is the function's symbol rather than wherever its body ends up, so a copy of the
+    /// body inlined somewhere else still names the function it was written as. The signature is
+    /// the one every declaration of the two hooks has, two pointers in and nothing back.
+    fn hook(&mut self, name: &str, span: Span) {
+        let callee = self.unit.names.intern(name);
+        let own = self.func.name;
+        let this = self.global_addr(own, span);
+        let site = self.build(span).value(
+            InstData { extra: Extra::Depth(0), ..InstData::new(Opcode::ReturnAddress) },
+            Type::PTR,
+        );
+        let signature =
+            self.func.add_signature(Signature::new().with_params(&[Type::PTR, Type::PTR]));
+        self.build(span).call(callee, signature, &[this, site]);
     }
 
     /// A zero of one IR type, for a place that has to produce a value and has none to produce.
@@ -2875,6 +2930,7 @@ impl<'u> Body<'_, 'u> {
             return;
         }
         if self.func.signature().returns.is_empty() {
+            self.leave_hook(span);
             self.build(span).ret(&[]);
             self.at = None;
             return;
@@ -2885,6 +2941,7 @@ impl<'u> Body<'_, 'u> {
             // 5.1.2.2.3: reaching the closing brace of `main` returns zero.
             let ty = self.func.signature().returns[0].ty;
             let zero = self.build(span).iconst(ty, 0);
+            self.leave_hook(span);
             self.build(span).ret(&[zero]);
             self.at = None;
             return;

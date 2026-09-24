@@ -171,6 +171,13 @@ pub struct Context<'a> {
     /// about one function and this is a preference about all of them, so the function takes the
     /// larger of the two and everything below reads one number.
     pub align: Option<u32>,
+    /// Whether every function calls the two profiling hooks on the way in and on the way out,
+    /// which is `-finstrument-functions`.
+    ///
+    /// Done here rather than in a pass because gcc does it before it inlines anything, so a body
+    /// that is inlined takes its two calls with it and they still name the function they were
+    /// written for. A pass over the IR would see the body only after that had happened to it.
+    pub instrument: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -193,6 +200,7 @@ impl fmt::Debug for Context<'_> {
             .field("padding", &self.padding)
             .field("contract", &self.contract)
             .field("align", &self.align)
+            .field("instrument", &self.instrument)
             .finish_non_exhaustive()
     }
 }
@@ -257,6 +265,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         padding,
         contract,
         align,
+        instrument,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -275,6 +284,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         tree: aliasing::Tree::default(),
         contract,
         align,
+        instrument,
         read,
         module,
         diagnostics: Vec::new(),
@@ -320,6 +330,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) contract: FpContract,
     /// What every function is aligned to unless it asked for more. See [`Context::align`].
     align: Option<u32>,
+    /// Whether the profiling hooks are called. See [`Context::instrument`].
+    pub(crate) instrument: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
