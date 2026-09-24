@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn a_freestanding_target_needs_nothing_and_says_so_rather_than_saying_nobody_built_it() {
         assert_eq!(row("armv7m-none-eabi")[2], "included");
-        assert_eq!(row("x86_64-linux-gnu")[2], "unpublished");
+        assert_eq!(row("x86_64-linux-gnux32")[2], "unpublished");
     }
 
     /// What a row looks like once the producer has published something, written against a row of its
