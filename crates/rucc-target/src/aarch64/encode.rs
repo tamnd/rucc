@@ -908,7 +908,14 @@ impl At<'_> {
                         "fnmadd" => (1, 0),
                         _ => (1, 1),
                     };
-                    0x1f00_0000 | td << 22 | o1 << 21 | rmm << 16 | o0 << 15 | ra << 10 | rn << 5 | rd
+                    0x1f00_0000
+                        | td << 22
+                        | o1 << 21
+                        | rmm << 16
+                        | o0 << 15
+                        | ra << 10
+                        | rn << 5
+                        | rd
                 }
                 _ => return Err(self.unwritten()),
             },
@@ -937,7 +944,13 @@ impl At<'_> {
                     }
                     let nzcv = self.number(*nzcv, 16)?;
                     let signalling = if m == "fccmpe" { 0b1_0000 } else { 0 };
-                    0x1e20_0400 | tn << 22 | rmm << 16 | cond.bits() << 12 | rn << 5 | signalling | nzcv
+                    0x1e20_0400
+                        | tn << 22
+                        | rmm << 16
+                        | cond.bits() << 12
+                        | rn << 5
+                        | signalling
+                        | nzcv
                 }
                 _ => return Err(self.unwritten()),
             },
@@ -987,7 +1000,13 @@ impl At<'_> {
                         "as" => (0b00, 0b100),
                         _ => (0b00, 0b101),
                     };
-                    width.sf() << 31 | 0x1e20_0000 | tn << 22 | rmode << 19 | opcode << 16 | rn << 5 | rd
+                    width.sf() << 31
+                        | 0x1e20_0000
+                        | tn << 22
+                        | rmode << 19
+                        | opcode << 16
+                        | rn << 5
+                        | rd
                 }
                 _ => return Err(self.unwritten()),
             },
@@ -1063,7 +1082,8 @@ impl At<'_> {
                         _ => return Err(self.unwritten()),
                     };
                     // A thirty two bit instruction only has `w` registers to widen.
-                    let reads = if width == Width::W || extend.reads_w() { Width::W } else { Width::X };
+                    let reads =
+                        if width == Width::W || extend.reads_w() { Width::W } else { Width::X };
                     if wm != reads {
                         return Err(self.register());
                     }
@@ -1261,7 +1281,9 @@ impl At<'_> {
                 let bits = width.bits();
                 let amount = self.number(*amount, i64::from(bits))?;
                 Ok(match m {
-                    "lsl" => bitfield(0b10, width, rd, rn, (bits - amount) % bits, bits - 1 - amount),
+                    "lsl" => {
+                        bitfield(0b10, width, rd, rn, (bits - amount) % bits, bits - 1 - amount)
+                    }
                     "lsr" => bitfield(0b10, width, rd, rn, amount, bits - 1),
                     "asr" => bitfield(0b00, width, rd, rn, amount, bits - 1),
                     _ => extr(width, rd, rn, rn, amount),
@@ -1692,9 +1714,7 @@ fn mask(width: Width) -> u64 {
 fn narrow(imm: i64, width: Width) -> Option<u64> {
     match width {
         Width::X => Some(imm as u64),
-        Width::W => {
-            (-(1i64 << 31)..1i64 << 32).contains(&imm).then_some(imm as u64 & 0xffff_ffff)
-        }
+        Width::W => (-(1i64 << 31)..1i64 << 32).contains(&imm).then_some(imm as u64 & 0xffff_ffff),
     }
 }
 
@@ -1802,12 +1822,13 @@ mod tests {
             let (Some(word), Some(text)) = (fields.next(), fields.next()) else {
                 panic!("a line of golden.txt has no text: {line}");
             };
-            let want = u32::from_str_radix(word, 16).expect("golden.txt has a word that is not hex");
+            let want =
+                u32::from_str_radix(word, 16).expect("golden.txt has a word that is not hex");
             let fixup = fields.next();
             count += 1;
-            let got = read(text).map_err(|e| e.to_string()).and_then(|line| {
-                encode(&line.mnemonic, &line.values).map_err(|e| e.to_string())
-            });
+            let got = read(text)
+                .map_err(|e| e.to_string())
+                .and_then(|line| encode(&line.mnemonic, &line.values).map_err(|e| e.to_string()));
             match got {
                 Ok(got) if got.word == want && got.fixup.map(Fixup::name) == fixup => {}
                 Ok(got) => wrong.push(format!(

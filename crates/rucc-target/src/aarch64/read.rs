@@ -61,7 +61,8 @@ pub fn read(text: &str) -> Result<Line, Error> {
     if mnemonic.is_empty() {
         return Err(error(text));
     }
-    let mut line = Line { mnemonic: mnemonic.to_ascii_lowercase(), values: Vec::new(), symbol: None };
+    let mut line =
+        Line { mnemonic: mnemonic.to_ascii_lowercase(), values: Vec::new(), symbol: None };
     let pieces = split(rest);
     let mut at = 0;
     while at < pieces.len() {
