@@ -42,14 +42,18 @@
 //! an ordinary typedef binds its name to the very type the name stood for and interns nothing of
 //! its own. Every name the program wrote at file scope gets a `DW_TAG_typedef` saying what it
 //! stands for, which is what lets a debugger answer a question asked in the program's own words.
-//! What it does not do is make a declaration point at the name it was written with: `types.kind`
-//! for a parameter declared `size_type` answers `unsigned long` and always did, so the parameter's
-//! `DW_AT_type` is the underlying type and a debugger printing that parameter says `unsigned long`.
-//! Which of the names a declaration used is a fact about the declaration rather than about the
-//! type, and nothing between the checker and here carries it. That half is still open on
-//! tamnd/rucc#1640.
+//!
+//! A declaration points at the name it was written with. `types.kind` for a parameter declared
+//! `size_type` answers `unsigned long`, since the name is not in the type, so which name a
+//! declaration used is a fact about the declaration and the checker keeps it beside the tree. A
+//! parameter, a local or a file-scope object whose whole type was a file-scope typedef name gets
+//! that name's `DW_TAG_typedef` as its `DW_AT_type`, and a debugger printing it says `size_type`,
+//! the way it does for gcc. One written `const size_type` or `size_type *` still points at the
+//! type it has, because the name is only part of it and the entry for the qualified or pointer
+//! type is made from the type table, which does not have the name either. That half is open on
+//! tamnd/rucc#1817.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
@@ -193,8 +197,17 @@ pub(crate) fn collect(
     names: &Interner,
     sources: &SourceMap,
 ) -> Meaning {
-    let mut walk =
-        Walk { types, target, names, out: Vec::new(), memo: HashMap::new(), tags: HashMap::new() };
+    let mut walk = Walk {
+        types,
+        target,
+        names,
+        out: Vec::new(),
+        memo: HashMap::new(),
+        tags: HashMap::new(),
+        spellings: tast.spellings().iter().copied().collect(),
+        written: types.aliases().iter().map(|alias| (alias.name, alias.of)).collect(),
+        aliases: HashMap::new(),
+    };
     let mut funcs = HashMap::new();
     let mut objects = HashMap::new();
     for &id in tast.top_level() {
@@ -226,7 +239,7 @@ pub(crate) fn collect(
                 let held = Held {
                     file: at.name.to_owned(),
                     line: at.line,
-                    ty: walk.told(decl.ty),
+                    ty: walk.declared(id, decl.ty),
                     external,
                 };
                 objects.insert(symbol, held);
@@ -264,19 +277,16 @@ pub(crate) fn collect(
         }
         let Some(name) = decl.name else { continue };
         let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
-        let ty = walk.told(decl.ty);
+        let ty = walk.declared(id, decl.ty);
         let name = walk.spelled(name);
         let scope = nests.which.get(&raw).copied();
         locals.insert(raw, Named { name, file: at.name.to_owned(), line: at.line, ty, scope });
     }
-    // The typedef names last, so that nothing else waits behind a name that may turn out to stand
-    // for a type nothing else mentions. A name whose type cannot be described is left out rather
-    // than written with no `DW_AT_type`, since that is how DWARF spells a name for `void` and a
-    // program that wrote `typedef void none;` is entitled to have that one come out right.
+    // The rest of the typedef names last, which are the ones no declaration above was written
+    // with, so that nothing else waits behind a name that may turn out to stand for a type nothing
+    // else mentions.
     for &alias in types.aliases() {
-        let Some(of) = walk.told_or_void(alias.of) else { continue };
-        let name = walk.spelled(alias.name);
-        walk.out.push(Shape::Alias { name, of });
+        walk.alias(alias.name, alias.of);
     }
     Meaning { types: walk.out, funcs, objects, locals, scopes: nests.out }
 }
@@ -412,6 +422,13 @@ struct Walk<'a> {
     /// is a different type and the same record, and writing the members twice is what keying on
     /// the type alone would do.
     tags: HashMap<RecordId, usize>,
+    /// The typedef name each declaration named its type with, for the ones that did.
+    spellings: HashMap<DeclId, Symbol>,
+    /// Every typedef name written at file scope and the type it stands for, which are the only
+    /// names a declaration can point at, since those are the only ones that get an entry.
+    written: HashSet<(Symbol, TypeId)>,
+    /// Which entry each typedef name went in, once it has one.
+    aliases: HashMap<(Symbol, TypeId), Option<usize>>,
 }
 
 impl Walk<'_> {
@@ -435,7 +452,10 @@ impl Walk<'_> {
         let mut params = Vec::with_capacity(signature.params.len());
         let mut declared = Vec::with_capacity(signature.params.len());
         for (index, &ty) in signature.params.iter().enumerate() {
-            let ty = self.told(ty)?;
+            let ty = match written.get(index) {
+                Some(&param) if tast[param].ty == ty => self.declared(param, ty)?,
+                _ => self.told(ty)?,
+            };
             let name = written.get(index).and_then(|&param| tast[param].name);
             params.push(Param { name: name.map(|name| self.spelled(name)), ty, spot: None });
             declared.push(written.get(index).map(|param| param.raw()));
@@ -443,6 +463,38 @@ impl Walk<'_> {
         let sig =
             Sig { returns, params, variadic: signature.variadic, prototyped: signature.prototyped };
         Some((sig, declared))
+    }
+
+    /// Which entry a declaration's type is, going through the typedef name it was written with.
+    ///
+    /// The name is used only when the type it stands for is still the declaration's type. The
+    /// checker records the name before anything after it has had its say, and `name a[] = {...}`
+    /// with `name` an array of unknown length, or an attribute that changes the type, leaves a
+    /// declaration whose type the name no longer stands for. Pointing at the name there would
+    /// describe an object of the wrong size, so it falls back to the type itself.
+    fn declared(&mut self, id: DeclId, ty: TypeId) -> Option<usize> {
+        match self.spellings.get(&id) {
+            Some(&name) if self.written.contains(&(name, ty)) => self.alias(name, ty),
+            _ => self.told(ty),
+        }
+    }
+
+    /// Which entry a typedef name is, adding it the first time it is asked for.
+    ///
+    /// A name whose type cannot be described is left out rather than written with no
+    /// `DW_AT_type`, since that is how DWARF spells a name for `void`, and a declaration written
+    /// with it gets nothing, the same as one written with the type itself would.
+    fn alias(&mut self, name: Symbol, of: TypeId) -> Option<usize> {
+        if let Some(&at) = self.aliases.get(&(name, of)) {
+            return at;
+        }
+        let at = self.told_or_void(of).map(|of| {
+            let name = self.spelled(name);
+            self.out.push(Shape::Alias { name, of });
+            self.out.len() - 1
+        });
+        self.aliases.insert((name, of), at);
+        at
     }
 
     /// A type, where `void` is an answer rather than a failure.

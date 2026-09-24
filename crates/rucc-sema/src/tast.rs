@@ -158,6 +158,7 @@ pub struct Tast {
     labels: Vec<Label>,
     vlas: Vec<ExprId>,
     adjusted: Vec<(DeclId, TypeId)>,
+    spellings: Vec<(DeclId, Symbol)>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 
@@ -331,6 +332,26 @@ impl Tast {
     #[must_use]
     pub fn adjusted_from(&self, decl: DeclId) -> Option<TypeId> {
         self.adjusted.iter().find(|&&(at, _)| at == decl).map(|&(_, written)| written)
+    }
+
+    /// Records the typedef name a declaration named its type with.
+    ///
+    /// A typedef binds its name to the very type it stands for, so `size_type n;` declares an
+    /// object whose type is `unsigned long` and nothing in the type says which name it was reached
+    /// through. The debug information wants that name, because a debugger printing `n` in the
+    /// program's own words says `size_type`, and this is the one place it is kept. Only a
+    /// declaration whose whole type is the name gets an entry: `const size_type n;` and
+    /// `size_type *p;` are types built on top of the name, and the name is not what they have.
+    pub fn record_spelling(&mut self, decl: DeclId, name: Symbol) {
+        if self.spellings.iter().all(|&(at, _)| at != decl) {
+            self.spellings.push((decl, name));
+        }
+    }
+
+    /// Every declaration that named its type with a typedef, and the name it used.
+    #[must_use]
+    pub fn spellings(&self) -> &[(DeclId, Symbol)] {
+        &self.spellings
     }
 
     /// Records that a label names a statement, which is not known when the label is created

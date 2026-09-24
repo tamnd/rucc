@@ -582,6 +582,7 @@ impl Checker<'_> {
         // A deduced type is not known until its initializer is checked, and until then the
         // declaration is made with `int` so that everything else about it is still checked.
         let deduces = self.ast[specs].deduces();
+        let spelled = self.spelled_with(specs, item.declarator);
         let deducible = deduces.is_some_and(|which| self.deducible(which, item));
         let ty =
             if deduces.is_some() { self.int() } else { self.declared_type(specs, item.declarator) };
@@ -682,6 +683,10 @@ impl Checker<'_> {
             span,
         };
         let id = self.merge(declared);
+        // Kept for the debug information, which names the typedef where the program did.
+        if let Some(name) = spelled {
+            self.tast.record_spelling(id, name);
+        }
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
         let mut worked = true;
@@ -3082,6 +3087,38 @@ mod tests {
         c.check_decl(other);
 
         assert_eq!(message(&c), "conflicting types for 'T'; have 'char'");
+    }
+
+    #[test]
+    fn a_declaration_whose_whole_type_is_a_typedef_name_keeps_the_name_and_no_other_does() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        specs.storage = Some(StorageClass::Typedef);
+        let named = f.object(specs, "T");
+        let t = f.name("T");
+        let mut written = DeclSpecs::empty(Span::DUMMY);
+        written.ty = TypeSpec::Typedef(t);
+        let plain = f.object(written, "a");
+        let mut constant = written;
+        constant.quals = Quals::CONST;
+        let qualified = f.object(constant, "b");
+        let pointed = f.var(written, "c", &[pointer()], None);
+        let n = f.param(written, Some("n"), &[]);
+        let p = f.param(written, Some("p"), &[pointer()]);
+        let takes = f.takes(&[n, p]);
+        let returns = f.int_specs();
+        let function = f.var(returns, "g", &[takes], None);
+        let (a, n) = (f.name("a"), f.name("n"));
+
+        let mut c = f.checker();
+        for decl in [named, plain, qualified, pointed, function] {
+            c.check_decl(decl);
+        }
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        let kept: Vec<_> =
+            c.tast.spellings().iter().map(|&(decl, name)| (c.tast[decl].name, name)).collect();
+        assert_eq!(kept, [(Some(a), t), (Some(n), t)], "only `T a` and `T n` are the name alone");
     }
 
     #[test]
