@@ -168,6 +168,9 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
 
     let mut bytes = Vec::with_capacity(16);
     let holes = encode(&mnemonic, &values, &mut bytes).map_err(|why| why.to_string())?;
+    if holes.dest.is_none() {
+        shorter(&mut bytes, &operands);
+    }
 
     let mut wanted = Vec::new();
     if let Some(at) = holes.dest {
@@ -252,6 +255,51 @@ pub(crate) fn short(long: &Written) -> Option<Written> {
         _ => return None,
     };
     Some(Written { bytes: vec![code, 0], holes: vec![Hole { at: 1, width: 1, ..hole.clone() }] })
+}
+
+/// The shorter of two encodings gas would pick for the same instruction, where the table wrote the
+/// longer one.
+///
+/// Two of them, and both are choices gas makes on every line it reads, so a file assembled here has
+/// to make them too to come out the same size. A shift or rotate by a written `$1` is the opcode
+/// that shifts by one and has no count byte, `C1 /4 01` becoming `D1 /4`. And arithmetic or `test`
+/// with a four byte immediate into `%eax`, `%rax`, `%ax` or `%al` has a form with no addressing
+/// byte, `81 /7` with `%eax` becoming `3D`, which the table leaves out because it is a row for one
+/// register (see section 11.1 of the spec). An immediate that fits in a byte is already the shorter
+/// `83` form and is left as it is, since gas takes that one too.
+///
+/// Only the prefixes this machine puts in front of these, the operand size one and a REX byte, are
+/// stepped over, and a REX byte that moves the register past the first eight means it is not the
+/// accumulator. Anything else is left alone.
+fn shorter(bytes: &mut Vec<u8>, operands: &[Operand]) {
+    let mut at = 0;
+    let mut far = false;
+    while at < bytes.len() && (bytes[at] == 0x66 || (bytes[at] & 0xF0 == 0x40)) {
+        far |= bytes[at] & 0xF0 == 0x40 && bytes[at] & 1 != 0;
+        at += 1;
+    }
+    let (Some(&code), Some(&modrm)) = (bytes.get(at), bytes.get(at + 1)) else { return };
+    let digit = (modrm >> 3) & 7;
+    if matches!(code, 0xC0 | 0xC1)
+        && operands.first() == Some(&Operand::Imm(1))
+        && bytes.last() == Some(&1)
+    {
+        bytes[at] = code + 0x10;
+        bytes.pop();
+        return;
+    }
+    if far || modrm != 0xC0 | (digit << 3) {
+        return;
+    }
+    let short = match (code, digit) {
+        (0x80, _) => (digit << 3) | 0x04,
+        (0x81, _) => (digit << 3) | 0x05,
+        (0xF6, 0) => 0xA8,
+        (0xF7, 0) => 0xA9,
+        _ => return,
+    };
+    bytes[at] = short;
+    bytes.remove(at + 1);
 }
 
 /// A branch whose distance is counted from its own first byte, written with that distance in it.
@@ -884,6 +932,26 @@ mod tests {
         // `setc` is `setb` under its other name, which the conditions table already handled and
         // which the file this was all for uses on the line after the additions.
         assert_eq!(bytes("setc %al"), vec![0x0f, 0x92, 0xc0]);
+    }
+
+    #[test]
+    fn a_line_gas_writes_shorter_is_written_shorter_here_too() {
+        // Every byte here is what gas 2.42 writes for the same line.
+        assert_eq!(bytes("shl $1, %eax"), [0xd1, 0xe0]);
+        assert_eq!(bytes("sarq $1, %rdx"), [0x48, 0xd1, 0xfa]);
+        assert_eq!(bytes("shrb $1, %r9b"), [0x41, 0xd0, 0xe9]);
+        assert_eq!(bytes("shl $2, %eax"), [0xc1, 0xe0, 0x02]);
+        assert_eq!(bytes("cmp $1000000, %eax"), [0x3d, 0x40, 0x42, 0x0f, 0x00]);
+        assert_eq!(bytes("addq $4096, %rax"), [0x48, 0x05, 0x00, 0x10, 0x00, 0x00]);
+        assert_eq!(bytes("andw $4095, %ax"), [0x66, 0x25, 0xff, 0x0f]);
+        assert_eq!(bytes("xorb $15, %al"), [0x34, 0x0f]);
+        assert_eq!(bytes("test $256, %eax"), [0xa9, 0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(bytes("testb $1, %al"), [0xa8, 0x01]);
+        // A byte of immediate is shorter the ordinary way, and a register other than the first
+        // has no form of its own.
+        assert_eq!(bytes("cmp $1, %eax"), [0x83, 0xf8, 0x01]);
+        assert_eq!(bytes("cmp $1000000, %ecx"), [0x81, 0xf9, 0x40, 0x42, 0x0f, 0x00]);
+        assert_eq!(bytes("cmp $1000000, %r8d"), [0x41, 0x81, 0xf8, 0x40, 0x42, 0x0f, 0x00]);
     }
 
     #[test]

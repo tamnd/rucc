@@ -117,6 +117,19 @@ struct Fixup {
     line: usize,
 }
 
+/// An alignment, as this pass laid it out, for the next pass's branches to be judged across.
+#[derive(Debug, Clone, Copy)]
+struct Aligned {
+    part: usize,
+    /// Where the padding starts.
+    at: u64,
+    boundary: u64,
+    /// The most padding the file allowed, past which there is none.
+    most: Option<u64>,
+    /// How much padding there is.
+    need: u64,
+}
+
 /// One function's frame rules, as `.cfi_` directives said them.
 #[derive(Debug)]
 struct Frame {
@@ -182,6 +195,8 @@ struct Reader {
     long: std::collections::HashSet<usize>,
     /// How many branches with a two byte form have been read so far.
     branches: usize,
+    /// Every alignment in the file, in the order it was written.
+    aligns: Vec<Aligned>,
     line: usize,
 }
 
@@ -906,15 +921,19 @@ impl Reader {
             _ => None,
         };
         let at = self.at();
-        let over = at % boundary;
-        let need = if over == 0 { 0 } else { boundary - over };
         // The third operand is how much padding is worth it. More than that and the alignment is
         // skipped entirely, which is how a file asks for an alignment only where it is cheap.
-        if let Some(most) = args.get(2).filter(|arg| !arg.trim().is_empty()) {
-            let most = self.number(&most.clone())?;
-            if need > self.count(most)? {
-                return Ok(());
+        let most = match args.get(2).filter(|arg| !arg.trim().is_empty()) {
+            Some(most) => {
+                let most = self.number(&most.clone())?;
+                Some(self.count(most)?)
             }
+            None => None,
+        };
+        let need = padding(at, boundary, most);
+        self.aligns.push(Aligned { part: self.here, at, boundary, most, need });
+        if need == 0 && most.is_some_and(|most| padding(at, boundary, None) > most) {
+            return Ok(());
         }
         let part = &mut self.parts[self.here];
         part.align = part.align.max(boundary);
@@ -1331,11 +1350,26 @@ impl Reader {
     /// The places whose bytes name something.
     /// The branches written in two bytes that two bytes do not reach.
     ///
-    /// That is one whose distance is not a number in this section, or is a number past a signed
-    /// byte, or goes to a weak name, which another object may replace and so is a relocation
-    /// wherever it is defined.
+    /// That is one whose distance is not a number in this section, or goes to a weak name, which
+    /// another object may replace and so is a relocation wherever it is defined, or is a number past
+    /// a signed byte. The first two are long whatever the layout is, and when there are any they
+    /// are the only ones grown on this pass. gas makes them long before it lays anything out, and a
+    /// jump grown by three bytes moves the padding behind it, so judging the distances of the
+    /// others before that has happened would grow some that gas leaves short.
+    ///
+    /// The rest are judged the way gas judges them, which is not quite by the distances this pass
+    /// laid out. gas walks a section in order and keeps count of how far what it has grown so far
+    /// has pushed everything behind it, and an alignment takes some of that back by padding less.
+    /// A jump back is judged by where its target has already moved to. A jump forward to somewhere
+    /// past an alignment is judged as though the alignment will take up all the growth in front of
+    /// it, and one to somewhere before the next alignment as though the target moves with it. The
+    /// first of those is a guess, and it matters: guessing the other way grows jumps that gas
+    /// leaves short, and each one grown moves the padding behind it and the file comes out
+    /// different. Whatever is guessed wrong is put right on the next pass, as it is in gas.
     fn too_far(&self) -> Result<Vec<usize>, Trouble> {
-        let mut grow = Vec::new();
+        let mut away = Vec::new();
+        // Where each jump ends, how far it goes, and which it is.
+        let mut jumps: Vec<(usize, i64, i64, usize)> = Vec::new();
         for fixup in &self.fixups {
             let Some(nth) = fixup.branch else { continue };
             let residue =
@@ -1346,11 +1380,60 @@ impl Reader {
                 }
                 _ => false,
             });
-            if weak || !residue.left.is_empty() || i8::try_from(residue.constant).is_err() {
-                grow.push(nth);
+            if weak || !residue.left.is_empty() {
+                away.push(nth);
+            } else {
+                jumps.push((fixup.part, fixup.at as i64 + 1, residue.constant, nth));
             }
         }
-        Ok(grow)
+        if !away.is_empty() {
+            return Ok(away);
+        }
+        jumps.sort_unstable();
+        let mut far = Vec::new();
+        let mut jumps = jumps.into_iter().peekable();
+        while let Some(&(part, ..)) = jumps.peek() {
+            let aligns: Vec<Aligned> =
+                self.aligns.iter().filter(|align| align.part == part).copied().collect();
+            let mut aligns_left = aligns.iter().peekable();
+            let mut stretch = 0i64;
+            // How far everything from each place on has moved, in order, for a jump back to read.
+            let mut moved: Vec<(i64, i64)> = Vec::new();
+            while let Some(&(_, end, distance, nth)) = jumps.peek().filter(|jump| jump.0 == part) {
+                jumps.next();
+                while let Some(align) = aligns_left.next_if(|align| align.at as i64 <= end - 2) {
+                    let now =
+                        padding((align.at as i64 + stretch) as u64, align.boundary, align.most);
+                    stretch += now as i64 - align.need as i64;
+                    moved.push(((align.at + align.need) as i64, stretch));
+                }
+                let target = end + distance;
+                let judged = if distance < 0 {
+                    let there = moved.iter().rev().find(|(from, _)| *from <= target);
+                    distance + there.map_or(0, |(_, by)| *by) - stretch
+                } else if stretch > 0
+                    && aligns.iter().any(|align| {
+                        end <= align.at as i64 && (align.at + align.need) as i64 <= target
+                    })
+                {
+                    distance - stretch
+                } else {
+                    distance
+                };
+                // A target forward that the guess puts behind the jump is a guess gone wrong, and
+                // gas leaves the jump as it is for this pass rather than grow it on the strength
+                // of one.
+                if distance >= 0 && judged < -2 {
+                    continue;
+                }
+                if i8::try_from(judged).is_err() {
+                    far.push(nth);
+                    stretch += if self.parts[part].bytes[end as usize - 2] == 0xEB { 3 } else { 4 };
+                    moved.push((end, stretch));
+                }
+            }
+        }
+        Ok(far)
     }
 
     fn resolve_fixups(&mut self) -> Result<(), Trouble> {
@@ -2084,6 +2167,13 @@ fn carries_on(byte: u8) -> bool {
 /// to say which of them this is. The byte in the middle is one no name in a source file can hold, so
 /// nothing a file writes its own way can collide with one of these, and none of them reaches the
 /// symbol table at the end.
+/// How much padding an alignment takes at `at`, which is none when it would be more than `most`.
+fn padding(at: u64, boundary: u64, most: Option<u64>) -> u64 {
+    let over = at % boundary;
+    let need = if over == 0 { 0 } else { boundary - over };
+    if most.is_some_and(|most| need > most) { 0 } else { need }
+}
+
 fn counted(number: &str, nth: usize) -> String {
     format!("{number}\u{1}{nth}")
 }
@@ -2576,6 +2666,23 @@ mod tests {
         let text = bytes(&out, ".text");
         assert_eq!(text[..5], [0xe9, 130, 0, 0, 0]);
         assert_eq!(text[130..135], [0xe9, 128, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_jump_past_an_alignment_is_judged_the_way_gas_judges_it() {
+        // Laid out with every jump short, the third one is a hundred and thirty bytes from its
+        // label. The two in front of it are long, which is seven bytes, and the alignment gives
+        // those seven back, so where it ends up it is a hundred and twenty three and fits. gas
+        // counts it that way on its first pass and so does this, and the bytes are the ones gas
+        // writes. Judged by the first layout alone it would be long, and three bytes further on
+        // everything behind it would be too.
+        let out = assembled(
+            "\tjmp far1\n\tje far1\n\tje far2\n\t.zero 123\n\t.p2align 3\nfar2:\n\tret\n\t.zero \
+             200\nfar1:\n\tret\n",
+        );
+        let text = bytes(&out, ".text");
+        assert_eq!(text[..13], [0xe9, 0x4c, 1, 0, 0, 0x0f, 0x84, 0x46, 1, 0, 0, 0x74, 123]);
+        assert_eq!(text.len(), 0x152);
     }
 
     #[test]

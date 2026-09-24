@@ -23,6 +23,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A unit with an `asm` template kept as text now builds with `-g` when the template reaches nothing outside itself. The template is filled in and read by the assembler on its own, and its bytes go into the object with the rest, so the line table and frame rules are written as for any other function. A template that defines a label, switches section or aligns what follows still sends the unit through its listing, which still refuses `-g` (#1781).
 - A global register variable such as `register long gr asm ("r12");` at file scope is now refused as what it is, where the message used to say no register was named (#1673).
 - The assembler now writes a `jmp` or conditional jump in its two byte form when the target is close enough, the way gas does. Each jump starts short and the file is read again with the ones that do not reach made long, until nothing changes. A jump to another section or to a weak name stays long, since it is a relocation.
+- The assembler writes a shift or rotate by `$1` without the count byte, and `cmp`, `add`, `test` and the rest with a four byte immediate into `%eax` (or `%rax`, `%ax`, `%al`) in the form with no addressing byte. gas picks both, so a `.s` file now comes out the same size.
+- The assembler now picks the short and long forms of a jump exactly as gas does when an alignment sits between a jump and its target. On `gcc -S` output for lua, zlib, cJSON, lz4, tinf and xxHash at `-O0` to `-O3` and `-Os`, all 96 files that assemble give the same `.text` size as gas 2.42.
 
 ### Fixed
 
