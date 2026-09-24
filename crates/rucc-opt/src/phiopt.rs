@@ -1141,7 +1141,7 @@ pub(crate) fn length(func: &Func, block: Block) -> u32 {
 /// long either way and the question is a walk over the head for each of its instructions.
 fn work(func: &Func, head: Block, arm: Block) -> u32 {
     let whole = length(func, arm);
-    if whole > 4 * heuristics::PHIOPT_ARM_INSTRUCTIONS + 8 {
+    if whole > heuristics::PHIOPT_ARM_SCAN_INSTRUCTIONS {
         return whole;
     }
     let done: Vec<Value> = func
