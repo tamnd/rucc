@@ -1410,15 +1410,32 @@ fn spread(span: Span, ends: &[u64], rows: &[rucc_asm::Row]) -> Vec<rucc_debug::R
 /// One declaration's stretches with the disagreements taken out and the neighbours joined up.
 ///
 /// Two stretches of one declaration can cover the same address. That is what a program that assigns
-/// to a local from something already live looks like: both values are live across the assignment
-/// and nothing this far down knows which side of it an address is on, because what the back end was
-/// handed is which values a declaration is behind and not where it started being behind each of
-/// them. Where the two agree the answer is the same either way and they become one stretch, and
-/// where they disagree the address is left out, so a debugger says the variable is unavailable
-/// there rather than printing whichever register this walk reached first. A wrong answer is worse
-/// than none.
+/// to a local from something already live looks like: both values are live across the assignment,
+/// the old one because something else still reads it. A stretch never runs past the end of its
+/// block, so two that overlap are in one block, where the addresses go the way the instructions
+/// run, and one that starts inside the other starts where the declaration was given its value:
+/// where the value was computed, or where the assignment was for a value it took from another
+/// declaration. From there the declaration holds the new value and not the old one, so the one
+/// that started first ends there.
+///
+/// What is still left is two stretches that start at the same address, which is two values both
+/// live into a block with nothing here to say which of them the declaration holds. Where the two
+/// agree the answer is the same either way and they become one stretch, and where they disagree the
+/// address is left out, so a debugger says the variable is unavailable there rather than printing
+/// whichever register this walk reached first. A wrong answer is worse than none.
 fn settle(mut spans: Vec<rucc_debug::Span>) -> Vec<rucc_debug::Span> {
     spans.sort_by_key(|span| (span.from, span.len));
+    for which in 0..spans.len() {
+        let (from, end, held) =
+            (spans[which].from, spans[which].from + spans[which].len, spans[which].held);
+        let later = spans[which + 1..]
+            .iter()
+            .take_while(|later| later.from < end)
+            .find(|later| later.from > from && later.held != held);
+        if let Some(later) = later {
+            spans[which].len = later.from - from;
+        }
+    }
     // Every address a stretch begins or ends at, which cuts the function into pieces no stretch is
     // partly over: a piece is inside a stretch or outside it and never half of each.
     let mut edges: Vec<u64> =
@@ -8877,16 +8894,35 @@ away:
     }
 
     #[test]
-    fn two_stretches_that_disagree_leave_the_addresses_they_share_unanswered() {
+    fn a_stretch_another_starts_inside_and_disagrees_with_ends_where_the_other_starts() {
         let one = span(0, 8, rucc_debug::Held::Reg(3));
         let two = span(4, 8, rucc_debug::Held::Reg(4));
-        // The four bytes in the middle are the ones neither can speak for, and what is left is
-        // each stretch over the part of itself the other does not reach.
+        // The second starts where the declaration was given its value, so from there it is the
+        // second and not the first.
         let settled = settle(vec![one, two]);
         assert_eq!(
             settled,
-            vec![span(0, 4, rucc_debug::Held::Reg(3)), span(8, 4, rucc_debug::Held::Reg(4))]
+            vec![span(0, 4, rucc_debug::Held::Reg(3)), span(4, 8, rucc_debug::Held::Reg(4))]
         );
+    }
+
+    #[test]
+    fn a_stretch_cut_by_one_that_ends_first_does_not_come_back_after_it() {
+        // The old value is still live after the new one is done with, because something else
+        // reads it, but the declaration stopped holding it where the new one started.
+        let one = span(0, 16, rucc_debug::Held::Reg(3));
+        let two = span(4, 4, rucc_debug::Held::Reg(4));
+        assert_eq!(
+            settle(vec![one, two]),
+            vec![span(0, 4, rucc_debug::Held::Reg(3)), span(4, 4, rucc_debug::Held::Reg(4))]
+        );
+    }
+
+    #[test]
+    fn a_stretch_inside_another_that_agrees_with_it_cuts_nothing() {
+        let one = span(0, 16, rucc_debug::Held::Reg(3));
+        let two = span(4, 4, rucc_debug::Held::Reg(3));
+        assert_eq!(settle(vec![one, two]), vec![span(0, 16, rucc_debug::Held::Reg(3))]);
     }
 
     #[test]

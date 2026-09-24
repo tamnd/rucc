@@ -75,7 +75,7 @@
 //! before it is used, which is true of the IR this is given because every pass before it keeps
 //! definitions ahead of uses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use rucc_base::{Interner, Symbol};
@@ -732,6 +732,10 @@ struct Decided {
     folded: Vec<Inst>,
 }
 
+/// The instruction in front of an assignment that starts a declaration on a value, and the first
+/// machine instruction after it once the block is filled.
+type Mark = (Option<Inst>, Option<mir::Inst>);
+
 /// One function being lowered.
 struct Lowering<'a> {
     source: &'a Func,
@@ -801,6 +805,11 @@ struct Lowering<'a> {
     answer: Option<usize>,
     /// Which rules have fired so far.
     fired: Fired,
+    /// Where each assignment that starts a declaration on a value part of the way through is, by
+    /// the IR block it is in and the instruction in front of it, and which machine instruction
+    /// is the first one after it once the block has been filled. See
+    /// [`rucc_ir::Func::declare_value_from`].
+    marks: HashMap<Block, Vec<Mark>>,
 }
 
 /// What a `va_start` in a variadic function writes into the list it is given.
@@ -909,10 +918,19 @@ impl<'a> Lowering<'a> {
             control: None,
             answer: None,
             fired: Fired::new(),
+            marks: HashMap::new(),
         }
     }
 
     fn run(mut self) -> Result<Lowered, Unsupported> {
+        for value in self.source.values() {
+            for start in self.source.value_starts(value) {
+                let marks = self.marks.entry(start.block).or_default();
+                if !marks.iter().any(|&(after, _)| after == start.after) {
+                    marks.push((start.after, None));
+                }
+            }
+        }
         // Every block before any of them is filled, because a block that jumps forward has to
         // name the block it jumps to and a machine IR block is named by a handle rather than by
         // the IR block it came from.
@@ -953,10 +971,22 @@ impl<'a> Lowering<'a> {
         for value in self.source.values() {
             let Some(reg) = self.regs[value.index()] else { continue };
             named.extend(self.source.value_decls(value).map(|decl| (decl, reg)));
+            // A start in a block a pass took out was never reached above, and it says nothing
+            // rather than something about another place.
+            for start in self.source.value_starts(value) {
+                let first = self.marks.get(&start.block).and_then(|marks| {
+                    marks.iter().find(|&&(after, _)| after == start.after).and_then(|&(_, at)| at)
+                });
+                if let Some(first) = first {
+                    self.out.starts.push((start.decl, reg, first));
+                }
+            }
         }
         named.sort_unstable();
         named.dedup();
         self.out.named = named;
+        self.out.starts.sort_unstable();
+        self.out.starts.dedup();
     }
 
     /// The order the blocks are filled in, which is not the order they are written in.
@@ -1041,7 +1071,19 @@ impl<'a> Lowering<'a> {
         }
         let Decided { found, folded, .. } = decided;
 
-        for (&inst, matched) in insts.iter().zip(found) {
+        // Where each assignment in this block that starts a declaration on a value is, as the
+        // machine instruction in front of the place its IR instruction left off, or the block
+        // for one where nothing has been written yet. What comes after it is not known until the
+        // block is filled, so that is read below.
+        let wanted: HashSet<Option<Inst>> =
+            self.marks.get(&block).into_iter().flatten().map(|&(after, _)| after).collect();
+        let mut reached: Vec<(Option<Inst>, mir::Block, Option<mir::Inst>)> = Vec::new();
+        for (index, (&inst, matched)) in insts.iter().zip(found).enumerate() {
+            let before = index.checked_sub(1).map(|index| insts[index]);
+            if wanted.contains(&before) {
+                let at = self.at.unwrap_or(out);
+                reached.push((before, at, self.out.terminator(at)));
+            }
             if folded.contains(&inst) || self.writes_nothing(inst) {
                 continue;
             }
@@ -1267,7 +1309,22 @@ impl<'a> Lowering<'a> {
         // where they differ it is the last of them that the terminator and the arms belong to.
         // See [`Self::saves_place`].
         let last = self.at.expect("a block is being filled");
-        self.edges(block, last)
+        self.edges(block, last)?;
+        // Now that the block is filled, the instruction after each place an assignment was is the
+        // first one it holds its value at. One with nothing after it, which a block ending in the
+        // assignment would be, stays unanswered.
+        if let Some(marks) = self.marks.get_mut(&block) {
+            for &(before, at, last) in &reached {
+                let first = match last {
+                    Some(last) => self.out.next_inst(last),
+                    None => self.out.insts(at).next(),
+                };
+                for mark in marks.iter_mut().filter(|(after, _)| *after == before) {
+                    mark.1 = first;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// One call, which is built from the convention rather than matched against the table for the
