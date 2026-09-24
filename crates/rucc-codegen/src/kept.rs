@@ -51,6 +51,16 @@
 //! run. A block the other arm of a branch reaches as well is left out, since there the
 //! declaration may never have been given the value at all.
 //!
+//! # A declaration with two values live into a block
+//!
+//! A local written in a loop is the value from the last trip until the new one is computed, and
+//! the old one can still be read after that, so both are live into the blocks between the write and
+//! the back edge. Their stretches there start at the same address and say different things. Which
+//! one the local is follows from the order the assignments ran in, and [`Func::entries`] is that
+//! answer, worked out from the program before selection. A piece that comes into a block the entry
+//! names another register for gets no stretch there. A piece that starts inside the block starts at
+//! an assignment, and is kept either way.
+//!
 //! # What is left out
 //!
 //! A value the allocator spilled is in the frame over its stretch rather than in a register, which
@@ -102,10 +112,11 @@ pub fn of(
     for &(decl, reg) in &func.named {
         let Some(at) = place(func, allocation, frame, reg) else { continue };
         let Some(area) = allocation.live.area(reg) else { continue };
-        over(decl, at, area.pieces(), &line, &mut out);
+        let held = |run: &Run, piece: Range| !other(func, decl, reg, run, piece);
+        over(decl, at, area.pieces(), &line, held, &mut out);
     }
     for &(decl, at, area) in framed {
-        over(decl, Where::Frame(at), area.iter().copied(), &line, &mut out);
+        over(decl, Where::Frame(at), area.iter().copied(), &line, |_, _| true, &mut out);
     }
     // A declaration that took a value another one already held, from the instruction the
     // assignment became onward. An instruction something took out since is nowhere to start from.
@@ -119,7 +130,7 @@ pub fn of(
             for run in &line {
                 let stretch = if run.block == block {
                     run.stretch_from(piece, first)
-                } else if dominated[run.block.index()] {
+                } else if dominated[run.block.index()] && !other(func, decl, reg, run, piece) {
                     run.stretch(piece)
                 } else {
                     None
@@ -176,16 +187,38 @@ fn dominated(func: &Func, from: Block) -> Vec<bool> {
         .collect()
 }
 
-/// The stretches one declaration is in one place over, a piece of where it is wanted at a time.
+/// Whether a piece of a register's live range that comes into a run's block from the blocks before
+/// it is a value of the declaration other than the one [`Func::entries`] says it holds there.
+///
+/// Only the stretch of a piece live into the block is in question. One that starts inside it
+/// starts at an assignment in the block, which is later than whatever the declaration came in
+/// with, and a block with no entry has nothing to choose by.
+fn other(func: &Func, decl: u32, reg: Reg, run: &Run, piece: Range) -> bool {
+    let Some((start, _)) = run.bounds else { return false };
+    if piece.start > start {
+        return false;
+    }
+    let at = func.entries.partition_point(|&(have, block, _)| (have, block) < (decl, run.block));
+    func.entries
+        .get(at)
+        .is_some_and(|&(have, block, held)| have == decl && block == run.block && held != reg)
+}
+
+/// The stretches one declaration is in one place over, a piece of where it is wanted at a time,
+/// leaving out the ones `held` says it is not holding that piece over.
 fn over(
     decl: u32,
     at: Where,
     pieces: impl Iterator<Item = Range>,
     line: &[Run],
+    held: impl Fn(&Run, Range) -> bool,
     out: &mut Vec<Kept>,
 ) {
     for piece in pieces {
         for run in line {
+            if !held(run, piece) {
+                continue;
+            }
             if let Some((from, to)) = run.stretch(piece) {
                 out.push(Kept { decl, at, from, to });
             }
@@ -373,6 +406,40 @@ mod tests {
         assert_eq!(kept.len(), 2, "one stretch per block: {kept:?}");
         assert_eq!((kept[0].from, kept[0].to), (across, across), "the rest of the first block");
         assert_eq!((kept[1].from, kept[1].to), (read, read), "and into the second");
+    }
+
+    #[test]
+    fn a_block_two_values_of_one_local_come_into_gets_the_one_it_holds_there() {
+        // `i = i + 1;` with the old `i` still read after it: both values are live into the second
+        // block, and the entry says the local is the new one there.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let tail = func.create_block();
+        let old = func.new_vreg(GPR);
+        let new = func.new_vreg(GPR);
+        func.build(head, opcode).def(old, GPR).finish();
+        func.build(head, opcode).def(new, GPR).finish();
+        func.build(head, opcode).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(tail)];
+        let first = func.build(tail, opcode).uses(old, GPR).finish();
+        let second = func.build(tail, opcode).uses(new, GPR).finish();
+        func.named = vec![(41, old), (41, new)];
+        func.entries = vec![(41, tail, new)];
+        let line = before(&func);
+        let kept = about(&mut func, &line);
+
+        // Both in the first block, each from where it was written, and only the new one in the
+        // second, where without the entry the two would start at the same address.
+        let into: Vec<(Inst, Inst)> = kept
+            .iter()
+            .filter(|kept| func.block_of(kept.from) == Some(tail))
+            .map(|kept| (kept.from, kept.to))
+            .collect();
+        assert_eq!(into, [(first, second)], "{kept:?}");
+        let before_it = kept.iter().filter(|kept| func.block_of(kept.from) == Some(head)).count();
+        assert_eq!(before_it, 2, "{kept:?}");
     }
 
     #[test]

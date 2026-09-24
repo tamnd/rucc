@@ -925,9 +925,10 @@ impl<'a> Lowering<'a> {
     fn run(mut self) -> Result<Lowered, Unsupported> {
         for value in self.source.values() {
             for start in self.source.value_starts(value) {
-                let marks = self.marks.entry(start.block).or_default();
-                if !marks.iter().any(|&(after, _)| after == start.after) {
-                    marks.push((start.after, None));
+                let Some((block, after)) = self.source.start_place(start) else { continue };
+                let marks = self.marks.entry(block).or_default();
+                if !marks.iter().any(|&(have, _)| have == after) {
+                    marks.push((after, None));
                 }
             }
         }
@@ -974,8 +975,9 @@ impl<'a> Lowering<'a> {
             // A start in a block a pass took out was never reached above, and it says nothing
             // rather than something about another place.
             for start in self.source.value_starts(value) {
-                let first = self.marks.get(&start.block).and_then(|marks| {
-                    marks.iter().find(|&&(after, _)| after == start.after).and_then(|&(_, at)| at)
+                let Some((block, after)) = self.source.start_place(start) else { continue };
+                let first = self.marks.get(&block).and_then(|marks| {
+                    marks.iter().find(|&&(have, _)| have == after).and_then(|&(_, at)| at)
                 });
                 if let Some(first) = first {
                     self.out.starts.push((start.decl, reg, first));
@@ -987,6 +989,19 @@ impl<'a> Lowering<'a> {
         self.out.named = named;
         self.out.starts.sort_unstable();
         self.out.starts.dedup();
+        // Which of its values a declaration holds on the way into a block, for the blocks where
+        // two of them are live at once. A block a pass took out says nothing, and neither does a
+        // value the map above has lost the register of, since that is not the same as having none.
+        let mut entries = Vec::new();
+        for (decl, block, value) in crate::holding::on_entry(self.source) {
+            if let (Some(block), Some(reg)) = (self.blocks[block.index()], self.regs[value.index()])
+            {
+                entries.push((decl, block, reg));
+            }
+        }
+        entries.sort_unstable();
+        entries.dedup();
+        self.out.entries = entries;
     }
 
     /// The order the blocks are filled in, which is not the order they are written in.

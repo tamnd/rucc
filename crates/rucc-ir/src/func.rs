@@ -26,7 +26,7 @@
 //! the useful question is whether it still does when the pass that was building it says it has
 //! finished.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Index, IndexMut};
 
 use rucc_base::{Idx, Symbol};
@@ -115,9 +115,15 @@ pub struct Func {
     mem_decls: Vec<(Idx<MemInfo>, u32)>,
     value_decls: Vec<(Value, u32)>,
     value_starts: Vec<(Value, Start)>,
-    /// The instructions some start in [`Func::value_starts`] is after, so that taking one out
-    /// only has to look through the starts when it is one of them.
+    /// The instructions some start in [`Func::value_starts`] is after, so that taking one out only
+    /// has to remember where it was when it is one of them.
     anchors: HashSet<Inst>,
+    /// The starts [`Func::remove_inst`] made out of the names on an instruction's results, by the
+    /// instruction, so that putting the instruction back somewhere turns them back into names.
+    unplaced: HashMap<Inst, Vec<(Value, Start)>>,
+    /// Where each instruction some start is after was when a pass took it out, as the block and
+    /// the instruction in front of it. See [`Func::start_place`].
+    gone: HashMap<Inst, (Block, Option<Inst>)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -163,6 +169,8 @@ impl Func {
             value_decls: Vec::new(),
             value_starts: Vec::new(),
             anchors: HashSet::new(),
+            unplaced: HashMap::new(),
+            gone: HashMap::new(),
             first_block: None,
             last_block: None,
         }
@@ -296,7 +304,19 @@ impl Func {
     /// Panics if the block has four billion parameters, which no block does.
     pub fn retain_params(&mut self, block: Block, mut keep: impl FnMut(Value) -> bool) {
         let mut params = std::mem::take(&mut self.blocks[block.index()].params);
-        params.retain(|&value| keep(value));
+        let mut dropped = Vec::new();
+        params.retain(|&value| {
+            let kept = keep(value);
+            if !kept {
+                dropped.push(value);
+            }
+            kept
+        });
+        // The same as an instruction taken out: a declaration a dropped parameter was the value of
+        // was given it at the top of the block.
+        for value in dropped {
+            self.held_from(value, block, None);
+        }
         for (index, &value) in params.iter().enumerate() {
             let index = u32::try_from(index).expect("a block with four billion parameters");
             self.values[value.index()].def = Def::Param { block, index };
@@ -441,6 +461,7 @@ impl Func {
             None => self.blocks[block.index()].first = Some(inst),
         }
         self.blocks[block.index()].last = Some(inst);
+        self.placed(inst);
     }
 
     /// Puts an instruction immediately before another one, in the block that one is in.
@@ -459,6 +480,7 @@ impl Func {
             Some(prev) => self.inst_layout[prev.index()].next = Some(inst),
             None => self.blocks[block.index()].first = Some(inst),
         }
+        self.placed(inst);
     }
 
     /// Puts an instruction immediately after another one, in the block that one is in.
@@ -483,6 +505,7 @@ impl Func {
         if let Some(next) = at.next {
             self.inst_layout[next.index()].prev = Some(inst);
         }
+        self.placed(inst);
     }
 
     /// Takes an instruction out of its block, leaving it and its results in the tables.
@@ -506,20 +529,37 @@ impl Func {
             None => self.blocks[block.index()].last = at.prev,
         }
         self.inst_layout[inst.index()] = InstLayout::default();
-        // A start after this instruction is after the one in front of it now, which is the same
-        // place: nothing was between the two but this. A pass that replaces an instruction puts the
-        // new one in front of the old one before taking the old one out, so the start ends up after
-        // the replacement, and one that moves an instruction leaves the start where it was.
-        if self.anchors.remove(&inst) {
-            for (_, start) in &mut self.value_starts {
-                if start.after == Some(inst) {
-                    start.after = at.prev;
-                }
-            }
-            if let Some(prev) = at.prev {
-                self.anchors.insert(prev);
+        // A start after this instruction is after wherever a pass that is moving it puts it, and
+        // after the instruction that was in front of it for a pass that is deleting it, which is the
+        // same place: nothing was between the two but this. Which of the two it is is not known
+        // yet, so the second answer is kept and [`Func::start_place`] asks in that order.
+        if self.anchors.contains(&inst) {
+            self.gone.insert(inst, (block, at.prev));
+            self.anchors.extend(at.prev);
+        }
+        // A declaration that held a result of this instruction was given it here, and once the
+        // instruction is gone nothing else says where that was. So it becomes a start at the same
+        // place, which is where the value it is renamed to, if it is, is the declaration's from.
+        // A pass that is moving the instruction puts it back, and then the names go back as they
+        // were, since a value computed somewhere else is still the declaration's from where it is
+        // computed.
+        let mut made = Vec::new();
+        for value in self.insts[inst.index()].results() {
+            for decl in self.held_from(value, block, at.prev) {
+                made.push((value, Start { decl, block, after: at.prev }));
             }
         }
+        if !made.is_empty() {
+            self.unplaced.insert(inst, made);
+        }
+    }
+
+    /// Whether a block is still one of this function's, which a block [`Func::remove_block`] took
+    /// out is not.
+    #[must_use]
+    pub fn is_placed(&self, block: Block) -> bool {
+        let data = &self.blocks[block.index()];
+        self.first_block == Some(block) || data.prev.is_some()
     }
 
     /// The block an instruction is in, or `None` if it has been removed from one.
@@ -926,13 +966,34 @@ impl Func {
     /// What a pass that found two values equal does about the names. It points the readers of one
     /// at the other and the one it pointed away from is about to be nobody's, so the names go with
     /// the readers: the declaration still holds the value it held, and the value is now spelled the
-    /// other way. A pass that deletes a value without giving its readers somewhere else to look is
+    /// other way. Where the value going away is still defined, the declarations that held it are
+    /// turned into starts at that definition first, since the value left may have been computed
+    /// earlier and the declaration was not given it any sooner for that. A pass that deletes a
+    /// value without giving its readers somewhere else to look is
     /// a pass that deleted something nothing reads, and a declaration whose value went that way is
     /// one the back end will have nothing to say about over those addresses, which is the right
     /// answer rather than a lost one.
     pub fn rename_value(&mut self, from: Value, to: Value) {
         if from == to {
             return;
+        }
+        // The value left is usually one computed earlier, and a declaration that held the one going
+        // away was given it where that one was computed and not before. See [`Func::held_from`].
+        match self.values[from.index()].def {
+            Def::Result { inst, .. } => {
+                let at = self.inst_layout[inst.index()];
+                if let Some(block) = at.block {
+                    self.held_from(from, block, at.prev);
+                }
+            }
+            Def::Param { block, index } => {
+                let param = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| self.blocks[block.index()].params.get(index).copied());
+                if param == Some(from) {
+                    self.held_from(from, block, None);
+                }
+            }
         }
         let at = self.value_decls.partition_point(|&(held, _)| held.raw() < from.raw());
         let end = at + self.value_decls[at..].iter().take_while(|&&(held, _)| held == from).count();
@@ -957,9 +1018,10 @@ impl Func {
     /// wherever `a` was written. This says where the assignment was instead, as the instruction in
     /// front of it, or `None` for one at the top of the block.
     ///
-    /// A pass that takes that instruction out moves the start onto the one in front of it, which
-    /// is the same place. A block that is taken out or emptied into another takes its starts with
-    /// it, and the back end reads those as saying nothing rather than guess. See [`Start`].
+    /// A pass that moves that instruction moves the start with it, and one that deletes it leaves
+    /// the start after the one that was in front of it, which is the same place. A block that is
+    /// taken out takes its starts with it, and the back end reads those as saying nothing rather
+    /// than guess. See [`Func::start_place`].
     pub fn declare_value_from(&mut self, value: Value, start: Start) {
         let at = self.value_starts.partition_point(|&(held, _)| held.raw() <= value.raw());
         if !self.value_starts[..at]
@@ -983,6 +1045,90 @@ impl Func {
             .map(|&(_, start)| start)
     }
 
+    /// Turns every declaration that holds a value from where it was computed into one that holds it
+    /// from a place, for a value whose definition is about to stop saying where that was.
+    ///
+    /// A pass that takes out the instruction that computed a value, drops the block parameter it
+    /// arrived as, or points its readers at another value, leaves the declarations behind it with
+    /// nothing that says where they were given it. The place is the same place, the instruction in
+    /// front of the definition or the top of the block, so what the declaration holds and from
+    /// where is unchanged, and it now survives the value being renamed to one computed earlier.
+    fn held_from(&mut self, value: Value, block: Block, after: Option<Inst>) -> Vec<u32> {
+        let at = self.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
+        let end =
+            at + self.value_decls[at..].iter().take_while(|&&(held, _)| held == value).count();
+        let moving: Vec<u32> = self.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
+        for &decl in &moving {
+            self.declare_value_from(value, Start { decl, block, after });
+        }
+        moving
+    }
+
+    /// Turns the starts [`Func::remove_inst`] made for an instruction back into names, now that it
+    /// is in a block again.
+    fn placed(&mut self, inst: Inst) {
+        if self.unplaced.is_empty() {
+            return;
+        }
+        let Some(made) = self.unplaced.remove(&inst) else { return };
+        for (value, start) in made {
+            let at = self.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
+            let found = self.value_starts[at..]
+                .iter()
+                .take_while(|&&(held, _)| held == value)
+                .position(|&(_, have)| have == start);
+            // Gone when a pass renamed the value away before putting the instruction back, and
+            // then the name went with the readers and is not this value's to have back.
+            if let Some(found) = found {
+                self.value_starts.remove(at + found);
+                self.declare_value(value, start.decl);
+            }
+        }
+    }
+
+    /// Where a start is now, as the block and the instruction it is after, or `None` for one in a
+    /// block a pass took out.
+    ///
+    /// The instruction it is after says, where it is still in a block, since a pass that moves
+    /// that instruction moves the assignment with it. One a pass deleted is where it was, which
+    /// is after the instruction that was in front of it then, and so on back to one that is still
+    /// there or to the top of the block. A start at the top of a block is there for as long as
+    /// the block is in the function.
+    #[must_use]
+    pub fn start_place(&self, start: Start) -> Option<(Block, Option<Inst>)> {
+        let (mut block, mut after) = (start.block, start.after);
+        loop {
+            let Some(inst) = after else {
+                return self.is_placed(block).then_some((block, None));
+            };
+            if let Some(now) = self.block_of(inst) {
+                return Some((now, Some(inst)));
+            }
+            (block, after) = *self.gone.get(&inst)?;
+        }
+    }
+
+    /// Moves the starts at the top of one block to after an instruction in another, for a pass
+    /// that is emptying the first into the second and taking it out.
+    ///
+    /// The top of the block it empties is the place right after `after` once the instructions
+    /// have gone in behind it, or the top of `into` for `None`, and nothing else can say that,
+    /// because the block the start was in is about to stop being one.
+    pub fn carry_starts(&mut self, from: Block, into: Block, after: Option<Inst>) {
+        let unplaced = self.unplaced.values_mut().flatten().map(|(_, start)| start);
+        for start in self.value_starts.iter_mut().map(|(_, start)| start).chain(unplaced) {
+            if start.block == from && start.after.is_none() {
+                *start = Start { block: into, after, ..*start };
+            }
+        }
+        for place in self.gone.values_mut() {
+            if *place == (from, None) {
+                *place = (into, after);
+            }
+        }
+        self.anchors.extend(after);
+    }
+
     fn add_value(&mut self, data: ValueData) -> Value {
         self.values.push(data);
         Idx::from_usize(self.values.len() - 1)
@@ -993,8 +1139,8 @@ impl Func {
 ///
 /// The block and the instruction in front of the assignment, because an assignment that computes
 /// nothing is not an instruction and the one in front of it is the nearest thing that is. The block
-/// is carried as well because the start is a place in that block, and an instruction a pass moves
-/// out of it leaves the start behind on the one in front of it.
+/// is carried for a start at the top of one, and for the rest it is where the start was made, since
+/// a pass can move the instruction to another block. [`Func::start_place`] says where it is now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Start {
     /// The declaration, in whatever numbering the front end gave it.
@@ -1953,9 +2099,14 @@ mod tests {
         assert_eq!(func.value_decls(second).count(), 0);
 
         // A pass finds two values equal and points the readers of one at the other. The names go
-        // with the readers, and the value that is left is both of them.
+        // with the readers, and the value that is left is both of them, the one that went away's
+        // from where it was defined, which for a parameter is the top of its block.
         func.rename_value(third, first);
-        assert_eq!(func.value_decls(first).collect::<Vec<u32>>(), vec![2, 7]);
+        assert_eq!(func.value_decls(first).collect::<Vec<u32>>(), vec![2]);
+        assert_eq!(
+            func.value_starts(first).collect::<Vec<Start>>(),
+            vec![Start { decl: 7, block, after: None }]
+        );
         assert_eq!(func.value_decls(third).count(), 0);
 
         // And renaming a value nothing named moves nothing rather than inventing a pair.
@@ -1988,6 +2139,11 @@ mod tests {
         assert_eq!(func.value_starts(first).count(), 0);
     }
 
+    /// Where a start is, by where it resolves to rather than what it was made with.
+    fn places(func: &Func, value: Value) -> Vec<Option<(Block, Option<Inst>)>> {
+        func.value_starts(value).map(|start| func.start_place(start)).collect()
+    }
+
     /// Taking out the instruction a start is after leaves it after the one in front, which is the
     /// same place, and a replacement put in front of the old one is what it ends up after.
     #[test]
@@ -2002,20 +2158,101 @@ mod tests {
         func.declare_value_from(value, Start { decl: 4, block, after: Some(two) });
 
         func.remove_inst(two);
-        assert_eq!(
-            func.value_starts(value).map(|start| start.after).collect::<Vec<_>>(),
-            [Some(one)]
-        );
+        assert_eq!(places(&func, value), [Some((block, Some(one)))]);
         let data = func[one];
         let fresh = func.create_inst(data, &[Type::int(32)], Span::DUMMY);
         func.insert_before(fresh, one);
         func.remove_inst(one);
-        assert_eq!(
-            func.value_starts(value).map(|start| start.after).collect::<Vec<_>>(),
-            [Some(fresh)]
-        );
+        assert_eq!(places(&func, value), [Some((block, Some(fresh)))]);
         func.remove_inst(fresh);
-        assert_eq!(func.value_starts(value).map(|start| start.after).collect::<Vec<_>>(), [None]);
+        assert_eq!(places(&func, value), [Some((block, None))]);
+    }
+
+    /// A pass that moves the instruction a start is after to another block moves the assignment
+    /// with it, rather than leaving it after whatever was in front of the instruction before.
+    #[test]
+    fn a_start_after_an_instruction_a_pass_moves_goes_with_it() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let top = func.create_block();
+        let below = func.create_block();
+        let value = func.append_param(top, Type::int(32));
+        let mut build = Builder::new(&mut func, below);
+        build.iconst(Type::int(32), 1);
+        build.iconst(Type::int(32), 2);
+        let [one, two]: [Inst; 2] = func.insts(below).collect::<Vec<_>>().try_into().expect("two");
+        func.declare_value_from(value, Start { decl: 4, block: below, after: Some(two) });
+
+        // Emptied into the block above one at a time, which is what a merge does.
+        for inst in [one, two] {
+            func.remove_inst(inst);
+            func.append_inst(top, inst);
+        }
+        func.remove_block(below);
+        assert_eq!(places(&func, value), [Some((top, Some(two)))]);
+    }
+
+    /// A start at the top of a block a pass empties into the one above goes after what that block
+    /// ended with before, which is where the top of the block that went is now.
+    #[test]
+    fn a_start_at_the_top_of_a_block_that_is_merged_away_is_carried_over() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let top = func.create_block();
+        let below = func.create_block();
+        let value = func.append_param(top, Type::int(32));
+        Builder::new(&mut func, top).iconst(Type::int(32), 1);
+        Builder::new(&mut func, below).iconst(Type::int(32), 2);
+        let last = func.insts(top).next();
+        func.declare_value_from(value, Start { decl: 4, block: below, after: None });
+
+        for inst in func.insts(below).collect::<Vec<_>>() {
+            func.remove_inst(inst);
+            func.append_inst(top, inst);
+        }
+        func.carry_starts(below, top, last);
+        func.remove_block(below);
+        assert_eq!(places(&func, value), [Some((top, last))]);
+    }
+
+    /// A value whose instruction is taken out and not put back leaves its declaration starting
+    /// where it was, and one put back somewhere else leaves it the name it had.
+    #[test]
+    fn a_name_on_a_value_whose_instruction_goes_becomes_a_start_and_comes_back_if_it_returns() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let kept = build.iconst(Type::int(32), 1);
+        let moved = build.iconst(Type::int(32), 2);
+        let first = func.insts(block).next().expect("one");
+        let second = func.insts(block).nth(1).expect("two");
+        func.declare_value(kept, 4);
+        func.declare_value(moved, 5);
+
+        func.remove_inst(first);
+        assert_eq!(func.value_decls(kept).count(), 0);
+        assert_eq!(places(&func, kept), [Some((block, None))]);
+
+        func.remove_inst(second);
+        func.append_inst(block, second);
+        assert_eq!(func.value_decls(moved).collect::<Vec<_>>(), [5]);
+        assert_eq!(func.value_starts(moved).count(), 0);
+    }
+
+    /// Renaming a value into one computed earlier leaves the declaration starting where the one
+    /// that went away was computed, rather than holding the earlier one from where it was.
+    #[test]
+    fn a_rename_into_an_earlier_value_starts_the_declaration_where_the_later_one_was() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let early = build.iconst(Type::int(32), 1);
+        build.iconst(Type::int(32), 3);
+        let late = build.iconst(Type::int(32), 1);
+        let middle = func.insts(block).nth(1).expect("three");
+        func.declare_value(late, 4);
+
+        func.rename_value(late, early);
+        assert_eq!(func.value_decls(early).count(), 0);
+        assert_eq!(places(&func, early), [Some((block, Some(middle)))]);
     }
 
     #[test]

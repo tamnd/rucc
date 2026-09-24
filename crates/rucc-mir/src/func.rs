@@ -332,6 +332,15 @@ pub struct Func {
     /// and then the declaration says nothing about the register, which is what it said before
     /// there were starts at all.
     pub starts: Vec<(u32, Reg, Inst)>,
+    /// Which register a declaration with more than one value holds on the way into a block, as the
+    /// declaration, the block and the register.
+    ///
+    /// A local written in a loop has the value from the last trip and the one from this trip, and
+    /// both can be live into the same block. Their stretches then start at the same address and
+    /// disagree, and this is what says which of them the local is there, worked out from the order
+    /// the assignments ran in rather than from the registers. A block not here has no answer, and
+    /// then the stretches are left to disagree the way they did before.
+    pub entries: Vec<(u32, Block, Reg)>,
     /// Where each of those registers ended up, once the allocator has said, and over which of the
     /// function's instructions the answer holds.
     ///
@@ -388,6 +397,7 @@ impl Func {
             sharing: Vec::new(),
             named: Vec::new(),
             starts: Vec::new(),
+            entries: Vec::new(),
             kept: Vec::new(),
             tables: Vec::new(),
             insts: Vec::new(),

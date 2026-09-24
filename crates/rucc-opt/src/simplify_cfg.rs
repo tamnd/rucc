@@ -1004,10 +1004,14 @@ fn merge(func: &mut Func, head: Block, block: Block, forward: &mut HashMap<Value
         forward.insert(param, arg);
     }
     func.remove_inst(term);
+    // The top of the block going away is right after what the head ends with before the move, and a
+    // declaration that starts holding a value there has to be told, since nothing else will say.
+    let top = func.insts_backwards(head).next();
     for inst in func.insts(block).collect::<Vec<Inst>>() {
         func.remove_inst(inst);
         func.append_inst(head, inst);
     }
+    func.carry_starts(block, head, top);
     func.remove_block(block);
 }
 

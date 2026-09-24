@@ -168,6 +168,7 @@ pub mod finish;
 pub mod fold;
 pub mod frame;
 pub mod half;
+pub mod holding;
 pub mod kept;
 pub mod layout;
 pub mod lower;

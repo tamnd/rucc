@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - A tuple can carry a glibc version after the fused float suffix, the way zig writes it, so `--target=armv7-linux-gnueabihf.2.31` is read as the same target as `armv7-linux-gnu.2.31eabihf`, which stays the canonical spelling and the cache key. It used to be refused as an unknown environment.
+- A local with two values live into the same block, most often the one from the last trip round a loop and the one computed on this trip, now has a location there under `-g` instead of none. Before selection a walk over the IR works out which value each local holds on the way into each block from the order its assignments ran in, and the back end drops the stretch of the other one. For the walk to see every assignment, a local written a value it already holds records where, and a name on a value a pass removes or renames into another is kept as a start where that value was. A start point after an instruction a pass moves now moves with it, where before it stayed behind. Over the SQLite amalgamation at `-O2` the addresses left out drop from 39834 to 1273, and about 28000 more bytes of variables have a location. See tamnd/rucc#1801.
 
 ### Fixed
 
