@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- An index doubled by adding it to itself, which is what `i * 2` and `i << 1` both become before selection, now goes into the address as a scale of two, so `return p[i];` on a `short` is `movswq (%rdi,%rsi,2), %rax` as it is for gcc, where it was an `addq %rsi, %rsi` and then a load. Over SQLite at `-O2` that takes out 182 instructions.
 - A narrow load read only by a widening is now one widening load, so `return p[i];` on a `signed char` is `movsbl (%rdi,%rsi,1), %eax` rather than a byte move and a `movsbl`, the same as gcc. It covers every width the machine has a widening load for, with and without the sign. Over the SQLite amalgamation at `-O2` it applies 2515 times (#1776).
 - phiopt no longer counts an integer constant in an arm as work, since it is an immediate on the machine. A count written as `acc = c ? acc + 1 : acc` used to keep its branch whenever `acc` was not an `int`, because the front end writes the `1` as an `int` and converts it, and the leftover constant put the arm over the budget of two. It is now a select, and after tier six an add of the widened comparison, at every width.
 
