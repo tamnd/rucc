@@ -284,7 +284,8 @@ impl LinkLine {
         let mut libraries = vec![sysroot.stubs().join("libc.so")];
         if sysroot.target().env() == Env::Gnu {
             libraries.push(lib.join("libc_nonshared.a"));
-            if sysroot.target().env_version().is_some_and(|version| !version.at_least(STAT_IN_LIBC)) {
+            let version = sysroot.target().env_version();
+            if version.is_some_and(|version| !version.at_least(STAT_IN_LIBC)) {
                 libraries.push(lib.join("libc_nonshared_stat.a"));
             }
         }
