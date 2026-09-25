@@ -142,8 +142,21 @@ const STANDING: i64 = 0x1000_0000;
 /// A sentence saying what about the line could not be read, with no line number on it, since the
 /// caller is the one that knows which line this was.
 pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
-    let operands: Vec<Operand> =
+    let mut operands: Vec<Operand> =
         args.iter().map(|arg| operand(arg.trim())).collect::<Result<_, _>>()?;
+    let predicated = predicated(word);
+    let word = match &predicated {
+        Some((name, which)) => {
+            operands.insert(0, Operand::Imm(*which));
+            name.as_str()
+        }
+        None => word,
+    };
+    if !BRANCHES.iter().any(|branch| word.starts_with(branch)) {
+        for operand in &mut operands {
+            outright(operand);
+        }
+    }
     let mut values: Vec<Value> = operands.iter().map(|op| value(op, STANDING)).collect();
     let (mnemonic, row) = match spelled(word, &operands, &values) {
         Ok(found) => found,
@@ -322,6 +335,42 @@ fn counted(mut long: Vec<u8>, at: usize, from_start: i64) -> Result<Vec<u8>, Str
         .map_err(|_| format!("'.+{from_start}' is further than a branch reaches"))?;
     long[at..at + 4].copy_from_slice(&distance.to_le_bytes());
     Ok(long)
+}
+
+/// The eight comparisons a float comparison can be asked for, in the order of the immediate that
+/// asks for each.
+const PREDICATES: [&str; 8] = ["eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord"];
+
+/// A float comparison written with its predicate in the name, as the mnemonic that takes it as an
+/// immediate and the immediate.
+///
+/// gas takes `cmpnlesd %xmm0, %xmm2` for `cmpsd $6, %xmm0, %xmm2` and gcc writes only the first.
+/// `cmpsd` with no predicate is the string comparison, which is not this, so a name that has none
+/// of the eight in it is left alone.
+fn predicated(word: &str) -> Option<(String, i64)> {
+    let rest = word.strip_prefix("cmp")?;
+    let (predicate, format) = rest.split_at(rest.len().checked_sub(2)?);
+    if !matches!(format, "ss" | "sd" | "ps" | "pd") {
+        return None;
+    }
+    let which = PREDICATES.iter().position(|&known| known == predicate)?;
+    Some((format!("cmp{format}"), which as i64))
+}
+
+/// The mnemonics whose bare name operand is somewhere to go rather than an address.
+const BRANCHES: [&str; 4] = ["j", "call", "loop", "xbegin"];
+
+/// A bare number where an address goes, read as the address it is.
+///
+/// `movq %rax, 0` stores to address zero, which is what a program writes to crash on purpose, and
+/// gas takes it as an address with no base and no index. A bare number is read as somewhere to go
+/// because in front of a jump that is what it is, so anything that is not a jump reads it again.
+fn outright(operand: &mut Operand) {
+    let Operand::Dest(Named { name, addend: 0 }) = operand else { return };
+    let Some(disp) = number(name).ok().and_then(|value| i32::try_from(value).ok()) else {
+        return;
+    };
+    *operand = Operand::Mem(Addr { disp, scale: 1, ..Addr::default() }, None);
 }
 
 /// The mnemonic with the width letter on it that the encoder knows this instruction by.
@@ -962,6 +1011,37 @@ mod tests {
         assert_eq!(bytes("sal $11, %eax"), bytes("shl $11, %eax"));
         assert_eq!(bytes("salq $1, %rdx"), bytes("shlq $1, %rdx"));
         assert_eq!(bytes("sal %cl, %rax"), bytes("shl %cl, %rax"));
+    }
+
+    /// Lines from gcc's output that name memory where the compiler's own code names a register,
+    /// with the bytes gas writes for each.
+    #[test]
+    fn the_integer_forms_gcc_writes_with_memory_in_them() {
+        assert_eq!(bytes("sall -4(%rbp)"), [0xd1, 0x65, 0xfc]);
+        assert_eq!(bytes("shrl $1, -4(%rbp)"), [0xd1, 0x6d, 0xfc]);
+        assert_eq!(bytes("shrq %cl, -8(%rbp)"), [0x48, 0xd3, 0x6d, 0xf8]);
+        assert_eq!(bytes("shrw $8, 16(%rdi)"), [0x66, 0xc1, 0x6f, 0x10, 0x08]);
+        assert_eq!(bytes("roll $13, -4(%rbp)"), [0xc1, 0x45, 0xfc, 0x0d]);
+        assert_eq!(bytes("sete 78(%rsp)"), [0x0f, 0x94, 0x44, 0x24, 0x4e]);
+        assert_eq!(bytes("pushq $112"), [0x6a, 0x70]);
+        assert_eq!(bytes("pushq $1000"), [0x68, 0xe8, 0x03, 0, 0]);
+        assert_eq!(bytes("imull $-1640531535, (%rsi), %eax"), [0x69, 0x06, 0xb1, 0x79, 0x37, 0x9e]);
+        assert_eq!(bytes("imulq $40, 8(%rsp), %rax"), [0x48, 0x6b, 0x44, 0x24, 0x08, 0x28]);
+    }
+
+    /// A float comparison with its predicate in the name is the one with it as an immediate.
+    #[test]
+    fn a_comparison_named_for_its_predicate_is_the_one_with_an_immediate() {
+        assert_eq!(bytes("cmpnlesd %xmm0, %xmm2"), [0xf2, 0x0f, 0xc2, 0xd0, 0x06]);
+        assert_eq!(bytes("cmpltss (%rax), %xmm1"), [0xf3, 0x0f, 0xc2, 0x08, 0x01]);
+        assert_eq!(bytes("cmpnlesd %xmm0, %xmm2"), bytes("cmpsd $6, %xmm0, %xmm2"));
+    }
+
+    /// A bare number where an address goes is that address, with no base and no index.
+    #[test]
+    fn a_bare_number_is_an_address_outright() {
+        assert_eq!(bytes("movq %rax, 0"), [0x48, 0x89, 0x04, 0x25, 0, 0, 0, 0]);
+        assert_eq!(bytes("movl %eax, 8"), [0x89, 0x04, 0x25, 0x08, 0, 0, 0]);
     }
 
     #[test]

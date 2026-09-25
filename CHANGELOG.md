@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The assembler reads the integer instructions with a memory operand that gcc writes and the compiler does not: shifts and rotates of memory by a constant, by `%cl` or by one, `setcc` into memory, and `imul` of a constant by memory. It also reads `pushq $imm`, `rep bsf` (the same bytes as `tzcnt`), `cmpnlesd` and the other float comparisons with the predicate in the name, and a bare number such as `movq %rax, 0` as an absolute address. An immediate such as `andl $0xffffffff` now takes the short sign extended byte form, as gas writes it (#1863).
+
 ## 0.11.7
 
 ### Added
