@@ -318,8 +318,9 @@ fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
 /// mean something else on AArch64: `Q` is an address in one register there rather than one of four
 /// registers, and `a` to `d` name nothing. So an AArch64 statement is taken only with the letters
 /// the two agree on, which are a register, a constant, memory, the immediate ranges and a matching
-/// number, and anything else is refused rather than read as x86. `w` is the one exception: it is a
-/// register on both, and which file it is in is decided by the caller with [`vector_letter`]. A
+/// number, and anything else is refused rather than read as x86. `w` and `Q` are the exceptions.
+/// `w` is a register on both, and which file it is in is decided by the caller with
+/// [`vector_letter`]. `Q` is read as `m` by the caller before the list is read. A
 /// register the front end named in braces is read against AArch64's own names, so what is inside
 /// them is not a letter.
 fn shared_letters(constraint: &str) -> bool {
@@ -336,10 +337,28 @@ fn shared_letters(constraint: &str) -> bool {
         _ if inside => true,
         _ => matches!(
             c,
-            '=' | '+' | '&' | '%' | 'r' | 'w' | 'm' | 'o' | 'V' | 'g' | 'X' | 'i' | 'n' | 'p'
-                | 'I'..='N' | '0'..='9'
+            '=' | '+' | '&' | '%' | 'r' | 'w' | 'Q' | 'm' | 'o' | 'V' | 'g' | 'X' | 'i' | 'n'
+                | 'p' | 'I'..='N' | '0'..='9'
         ),
     })
+}
+
+/// A constraint list with every letter outside braces put through `swap`, and what is inside them,
+/// which is a register's name rather than letters, left alone.
+fn letters_outside(constraints: &str, swap: impl Fn(char) -> char) -> String {
+    let mut inside = false;
+    constraints
+        .chars()
+        .map(|c| {
+            match c {
+                '{' => inside = true,
+                '}' => inside = false,
+                _ if !inside => return swap(c),
+                _ => {}
+            }
+            c
+        })
+        .collect()
 }
 
 /// Whether an AArch64 constraint asks for a floating point or vector register, which is what `w`
@@ -4655,6 +4674,9 @@ impl<'a> Lowering<'a> {
         if !constraints.split(',').all(shared_letters) {
             return Err(refused());
         }
+        // `Q` is memory addressed by one register and nothing else, which is how every operand in
+        // memory is spelled here already, so it is read as `m`. See [`shared_letters`].
+        let constraints = letters_outside(&constraints, |c| if c == 'Q' { 'm' } else { c });
         let results: Vec<Value> = data.results().collect();
         let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
             .ok_or_else(refused)?;
@@ -5875,12 +5897,11 @@ mod tests {
     }
 
     /// A letter that means one thing on x86 and another on AArch64 is refused there rather than
-    /// read as x86. `Q` is an address in one register on AArch64, and the reader of the constraint
-    /// list does not know it as that.
+    /// read as x86. `a` to `d` and `S` name one register each on x86 and nothing on AArch64.
     #[test]
     fn a_constraint_letter_the_two_machines_disagree_about_is_refused_on_aarch64() {
         let i64 = Type::int(64);
-        for constraints in ["=r,Q", "=a,r", "=r,S"] {
+        for constraints in ["=a,r", "=r,S", "=r,c"] {
             let (mut names, mut source, block, args) = blank(&[i64]);
             let out = clobbering(
                 &mut source,
@@ -5897,6 +5918,20 @@ mod tests {
             let refused = lower_a64(&mut names, &source).expect_err(constraints);
             assert!(refused.contains("has an operand this cannot place"), "{refused}");
         }
+    }
+
+    /// `Q` on AArch64 is memory addressed by one register, which is `[x3]` and is how an operand in
+    /// memory is spelled there already.
+    #[test]
+    fn a_q_operand_on_aarch64_is_its_address_in_brackets() {
+        let (i64, ptr) = (Type::int(64), Type::PTR);
+        let (mut names, mut source, block, args) = blank(&[ptr]);
+        let out =
+            clobbering(&mut source, block, &mut names, "ldr %x0, %1", "=r,Q", "", &args, &[i64]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+        let text = lower_a64(&mut names, &source).expect("kept as text");
+        assert!(text.contains("@ldr \u{1}r0x\u{2}, [\u{1}r"), "{text}");
     }
 
     /// `w` on AArch64 is a vector register, named `v` with no modifier the way gcc names it and by
