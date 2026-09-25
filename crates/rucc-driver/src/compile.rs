@@ -983,11 +983,18 @@ fn generate(
             // assembled the way gcc assembles every unit: written out as a listing and read back.
             // The listing carries no line table yet, so a build that asked for one is refused
             // rather than handed an object without it.
-            if rucc_asm::kept(&funcs, names, target) {
+            //
+            // Every unit for AArch64 goes this way for now. The listing is already written from
+            // the encoder's own tables, so reading it back is the encoder run over the same values,
+            // and it is one path to get right rather than two.
+            let aarch64 = target.tuple.arch() == Arch::Aarch64;
+            if aarch64 || rucc_asm::kept(&funcs, names, target) {
                 if opts.debug_info {
-                    return Err(vec![unsupported(
-                        "debug information for a unit with an `asm` template kept as text",
-                    )]);
+                    return Err(vec![unsupported(if aarch64 {
+                        "debug information in an object for aarch64"
+                    } else {
+                        "debug information for a unit with an `asm` template kept as text"
+                    })]);
                 }
                 let listing = rucc_asm::print(
                     &funcs,
@@ -999,10 +1006,14 @@ fn generate(
                     output(opts, target),
                 )
                 .map_err(refused)?;
-                let read = rucc_asm::read(&listing).map_err(|trouble| {
+                let read = rucc_asm::read(&listing, target.tuple.arch()).map_err(|trouble| {
+                    let what = if aarch64 {
+                        "a unit for aarch64"
+                    } else {
+                        "an `asm` template kept as text"
+                    };
                     vec![unsupported(&format!(
-                        "an `asm` template kept as text, whose listing the assembler stopped at on \
-                         line {}: {}",
+                        "{what}, whose listing the assembler stopped at on line {}: {}",
                         trouble.line, trouble.why
                     ))]
                 })?;
@@ -3029,6 +3040,36 @@ decl #0 x : int object external static defined
             assert!(text.contains(line), "{line} is not in\n{text}");
         }
         assert!(!text.contains('%'), "{text}");
+    }
+
+    /// An object for AArch64, which is the listing read back by the assembler. The same object
+    /// with debug information is refused rather than written without its line table.
+    #[test]
+    fn an_aarch64_target_reaches_an_object_file() {
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = concat!(
+            "int g(int);\n",
+            "int table[4] = {1, 2, 3, 4};\n",
+            "int f(int a, int b) { return g(a) + table[b & 3]; }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let bytes = match result.artifact {
+            Artifact::Object { bytes, defines } => {
+                assert_eq!(defines, ["f", "table"]);
+                bytes
+            }
+            other => panic!("expected an object, got {other:?}"),
+        };
+        assert_eq!(&bytes[..4], b"\x7fELF");
+        assert_eq!(&bytes[18..20], &183u16.to_le_bytes(), "EM_AARCH64");
+
+        opts.debug_info = true;
+        let result = run(&opts, source);
+        assert!(result.failed());
+        assert!(result.messages.iter().any(|m| m.contains("aarch64")), "{:?}", result.messages);
     }
 
     /// gcc's AArch64 vector type names are there before any header, which glibc's `<math.h>`

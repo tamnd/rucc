@@ -53,7 +53,8 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         }
     };
 
-    let assembled = match rucc_asm::read(&text) {
+    let target = rucc_target::TargetInfo::new(opts.target);
+    let assembled = match rucc_asm::read(&text, target.tuple.arch()) {
         Ok(assembled) => assembled,
         Err(trouble) => {
             // The same shape every other diagnostic in this compiler has, so that a build log
@@ -64,7 +65,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         }
     };
     let defines = rucc_object::assembled_defines(&assembled);
-    match rucc_object::assembled(&assembled, &rucc_target::TargetInfo::new(opts.target)) {
+    match rucc_object::assembled(&assembled, &target) {
         Ok(bytes) => done(Artifact::Object { bytes, defines }, messages, 0, deps, temps),
         Err(e) => {
             messages.push(format!("rucc: error: {name}: {e}"));

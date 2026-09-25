@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The assembler reads the integer instructions with a memory operand that gcc writes and the compiler does not: shifts and rotates of memory by a constant, by `%cl` or by one, `setcc` into memory, and `imul` of a constant by memory. It also reads `pushq $imm`, `rep bsf` (the same bytes as `tzcnt`), `cmpnlesd` and the other float comparisons with the predicate in the name, and a bare number such as `movq %rax, 0` as an absolute address. An immediate such as `andl $0xffffffff` now takes the short sign extended byte form, as gas writes it (#1863).
 - AArch64 takes the `Q` constraint in an `asm` statement, which is memory addressed by one register and is spelled `[x0]`, so an atomic written as an `ldxr` and `stxr` loop compiles and gives the same answer as gcc under qemu.
+- `-c` works for AArch64 Linux. The assembler reads AArch64 files with the same line reader and encoder the listings are checked against, fills in a branch, `adr` or literal load to a label in the same section, and leaves the rest to the linker as AArch64 ELF relocations (`CALL26`, `ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`, the GOT and TLS ones, `ABS64` and `PREL32`). A unit is written as its listing and read back, the unwind table starts at `sp` with the return address in `x30`, and an `.s` file for the target is assembled the same way. The objects disassemble the same as GNU as output from the same listing. Debug information in such an object is refused for now.
 
 ### Changed
 

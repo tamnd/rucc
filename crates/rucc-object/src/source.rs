@@ -28,8 +28,9 @@
 //! calls the things in it.
 
 use object::write::{Object as Writer, Relocation, Symbol, SymbolSection};
-use object::{Architecture, Endianness, SectionKind, SymbolFlags, elf};
+use object::{Architecture, Endianness, RelocationFlags, SectionKind, SymbolFlags, elf};
 use rucc_target::TargetInfo;
+use rucc_target::aarch64::Fixup;
 use rucc_tuple::Arch;
 
 use crate::file::{Error, Flavour};
@@ -267,11 +268,20 @@ pub struct Assembled {
 /// [`Error::Format`] for a machine or a platform this does not write, and [`Error::Refused`] for a
 /// relocation against a name the list does not hold or one this format has no relocation for.
 pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Error> {
-    let flavour = match Flavour::of(target) {
-        Some(flavour) if target.tuple.arch() == Arch::X86_64 => flavour,
+    // AArch64 on ELF and x86-64 on both. What an AArch64 file for Windows would need is a table of
+    // its own relocations and an unwind table of its own shape, and neither is written yet.
+    let (flavour, machine) = match (Flavour::of(target), target.tuple.arch()) {
+        (Some(flavour), Arch::X86_64) => (flavour, Architecture::X86_64),
+        (Some(Flavour::Elf), Arch::Aarch64) => (Flavour::Elf, Architecture::Aarch64),
         _ => return Err(Error::Format { triple: target.tuple.to_string() }),
     };
-    let mut obj = Writer::new(flavour.binary(), Architecture::X86_64, Endianness::Little);
+    let flags_of = |kind, after| match machine {
+        Architecture::Aarch64 => {
+            crate::elf::r_type_aarch64(kind).map(|r_type| RelocationFlags::Elf { r_type })
+        }
+        _ => flavour.reloc(kind, after),
+    };
+    let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
 
     // Every section first, because a symbol says which one it is in and a relocation says which one
     // it is written into, so both need the whole list before either can be added.
@@ -372,7 +382,7 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
                     (symbol, reloc.addend)
                 }
             };
-            let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
+            let flags = flags_of(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
                 why: format!("no relocation is {:?}", reloc.kind),
             })?;
             obj.add_relocation(*id, Relocation { offset: reloc.at as u64, symbol, addend, flags })
@@ -448,6 +458,18 @@ fn moved(
         | Reference::GotBare
         | Reference::GotKept
         | Reference::Thread => false,
+        // The same for a field of an instruction that goes through a stub or a table slot, or that
+        // says where a thread-local variable is, which a linker checks against the name's type.
+        Reference::Field(
+            Fixup::Call26
+            | Fixup::Jump26
+            | Fixup::GotPage21
+            | Fixup::GotLo12
+            | Fixup::GotTprelPage21
+            | Fixup::GotTprelLo12Nc
+            | Fixup::TprelHi12
+            | Fixup::TprelLo12Nc,
+        ) => false,
         _ if input.parts.get(part)?.shape.merge != 0 => !near && reloc.addend == 0,
         _ => true,
     };
@@ -839,9 +861,71 @@ mod tests {
     #[test]
     fn a_machine_this_does_not_write_is_refused_rather_than_written_wrong() {
         let input = Assembled { parts: vec![part(".text", vec![0x90])], names: Vec::new() };
-        let elsewhere = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Linux, Env::Gnu));
+        let elsewhere = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Msvc));
         let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
         assert!(format!("{why}").contains("aarch64"), "{why}");
+    }
+
+    #[test]
+    fn a_file_of_assembly_for_aarch64_is_written_with_that_machine_s_relocations() {
+        // `adrp x0, table` and `add x0, x0, :lo12:table+8`, then `bl g`, then the address of
+        // `table` in a table of its own. A field is its fixup's relocation and an address is the
+        // AArch64 one of that width, and a label only this file sees is written against its
+        // section, the way gas writes it.
+        let mut text = part(".text", vec![0; 12]);
+        let field = |at, symbol: &str, fixup, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Field(fixup),
+            addend,
+            after: 0,
+        };
+        text.relocs = vec![
+            field(0, ".Ltable", Fixup::AdrPage21, 8),
+            field(4, ".Ltable", Fixup::AddLo12, 8),
+            field(8, "g", Fixup::Call26, 0),
+        ];
+        let mut data = part(".data", vec![0; 16]);
+        data.relocs = vec![Reloc {
+            at: 8,
+            symbol: ".Ltable".to_owned(),
+            kind: Reference::Address { bytes: 8 },
+            addend: 0,
+            after: 0,
+        }];
+        let mut table = at(".Ltable", 0, Sort::Object, Binding::Local);
+        table.at = Held::In { part: 1, offset: 0 };
+        let input = Assembled {
+            parts: vec![text, data],
+            names: vec![
+                table,
+                Name { at: Held::Undefined, ..at("g", 0, Sort::Untyped, Binding::Global) },
+            ],
+        };
+        let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Linux, Env::Gnu));
+        let bytes = assembled(&input, &target).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert_eq!(file.architecture(), Architecture::Aarch64);
+        let relocs = |name: &str| -> Vec<(u64, elf::RelocationType, i64)> {
+            let section = file.section_by_name(name).expect("the section");
+            section
+                .relocations()
+                .map(|(at, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("ELF") };
+                    (at, r_type, reloc.addend())
+                })
+                .collect()
+        };
+        assert_eq!(
+            relocs(".text"),
+            [
+                (0, elf::R_AARCH64_ADR_PREL_PG_HI21, 8),
+                (4, elf::R_AARCH64_ADD_ABS_LO12_NC, 8),
+                (8, elf::R_AARCH64_CALL26, 0)
+            ]
+        );
+        assert_eq!(relocs(".data"), [(8, elf::R_AARCH64_ABS64, 0)]);
+        assert!(file.symbols().all(|s| s.name() != Ok(".Ltable")), "a label only this file sees");
     }
 
     #[test]

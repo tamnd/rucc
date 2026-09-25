@@ -57,7 +57,7 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         // wants and is four more than the answer an image wants, and there is no addend field to
         // put the difference in because this format keeps the addend in the bytes themselves.
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
-        Reference::GotBare | Reference::GotKept => return None,
+        Reference::GotBare | Reference::GotKept | Reference::Field(_) => return None,
         Reference::Away => return None,
         Reference::Address { .. } => return None,
     })
