@@ -29,7 +29,9 @@
 //! a register, because both want a relocation this does not write yet and a wrong guess about
 //! either is silent.
 
-use rucc_target::x86_64::{Addr, Encoding, ImmSize, Value, Width, encode, encoding, gpr_named};
+use rucc_target::x86_64::{
+    Addr, Encoding, ImmSize, RAX, Value, Width, encode, encoding, gpr_named,
+};
 use rucc_target::{PhysReg, Segment};
 
 /// Four bytes of an instruction whose value is not known while the instruction is being written.
@@ -173,14 +175,30 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             _ => None,
         })
         .collect();
-    if !named.is_empty() && named != depths(&mnemonic) {
+    // The row has one depth in its opcode, and every other depth of the same place is the same
+    // opcode with the depth added to its last byte. The other place is always the top.
+    let row_depths = depths(&mnemonic);
+    let which = row_depths.iter().position(|&depth| depth != 0).unwrap_or(0);
+    let fits = named.len() == row_depths.len()
+        && named.iter().zip(row_depths).enumerate().all(|(at, (n, r))| at == which || n == r);
+    if !named.is_empty() && !fits {
         return Err(format!(
             "'{word}' at those depths of the x87 stack is not one this compiler has"
         ));
     }
+    if mnemonic == "fnstsw"
+        && operands.iter().any(|op| matches!(op, Operand::Reg(reg, _) if *reg != RAX))
+    {
+        return Err(format!("'{word}' only writes the status word into ax"));
+    }
 
     let mut bytes = Vec::with_capacity(16);
     let holes = encode(&mnemonic, &values, &mut bytes).map_err(|why| why.to_string())?;
+    if !named.is_empty() {
+        if let Some(last) = bytes.last_mut() {
+            *last = last.wrapping_add(named[which]).wrapping_sub(row_depths[which]);
+        }
+    }
     if holes.dest.is_none() {
         shorter(&mut bytes, &operands);
     }
@@ -849,8 +867,16 @@ mod tests {
         assert_eq!(bytes("fstp %st(0)"), [0xdd, 0xd8]);
         assert_eq!(bytes("fstp %st"), [0xdd, 0xd8]);
         assert_eq!(bytes("faddp %st(0), %st(1)"), [0xde, 0xc1]);
-        // Another depth is another opcode, which no row here has.
-        assert!(refused("fstp %st(1)").contains("depths"));
+        // Another depth is the same opcode with the depth added in, and the top has to stay the
+        // top.
+        assert_eq!(bytes("fstp %st(1)"), [0xdd, 0xd9]);
+        assert_eq!(bytes("faddp %st, %st(3)"), [0xde, 0xc3]);
+        assert_eq!(bytes("fucomip %st(2), %st"), [0xdf, 0xea]);
+        assert!(refused("faddp %st(1), %st(2)").contains("depths"));
+        // What gcc writes for `fmod`.
+        assert_eq!(bytes("fprem"), [0xd9, 0xf8]);
+        assert_eq!(bytes("fnstsw %ax"), [0xdf, 0xe0]);
+        assert!(refused("fnstsw %bx").contains("ax"));
     }
 
     #[test]

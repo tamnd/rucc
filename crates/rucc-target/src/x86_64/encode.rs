@@ -2105,10 +2105,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fchs", &NO_ARGS, Long, &[0xD9, 0xE0], NO_MODRM, NO_IMM),
     bytes("fabs", &NO_ARGS, Long, &[0xD9, 0xE1], NO_MODRM, NO_IMM),
     // The comparison, which writes the flags this machine's conditional jumps and byte sets read
-    // rather than the status word the x87 has of its own. That is what the `i` in the middle is
-    // and it is why there is no `fnstsw` here: the older way of reading an x87 comparison is to
-    // save the status word into `ax` and pick the bits out, and the way this uses has been in the
-    // machine since the Pentium Pro and is in the baseline.
+    // rather than the status word the x87 has of its own. That is what the `i` in the middle is,
+    // and it is why the compiler never writes `fnstsw`: the older way of reading an x87 comparison
+    // is to save the status word into `ax` and pick the bits out, and the way this uses has been in
+    // the machine since the Pentium Pro and is in the baseline.
     //
     // The `u` says a quiet NaN is an answer rather than an exception, which is the same choice
     // `ucomisd` is here for and no choice at all: the ordered comparison is a rule with an extra
@@ -2118,6 +2118,13 @@ static ENCODINGS: &[Encoding] = &[
     // off the stack. `0xDD 0xD8` is a store to the top itself, which is a store to where the value
     // already is, so the whole of what it does is the pop on the end of it.
     bytes("fstp", &S, Long, &[0xDD, 0xD8], NO_MODRM, NO_IMM),
+    // The partial remainder and the status word, which is what gcc writes for `fmod`: `fprem`
+    // takes the top down by the one under it a piece at a time and says in the status word
+    // whether it is done, so the loop around it reads the word into `ax` and tests a bit. The
+    // register form only ever names `ax`, so its operand picks the row and is not written out.
+    bytes("fprem", &NO_ARGS, Long, &[0xD9, 0xF8], NO_MODRM, NO_IMM),
+    bytes("fnstsw", &R, Long, &[0xDF, 0xE0], NO_MODRM, NO_IMM),
+    bytes("fnstsw", &M, Long, &[0xDD], ext(0, 7), NO_IMM),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -3105,6 +3112,8 @@ mod tests {
         // The comparison and the pop that gets the operand it did not take off the stack.
         assert_eq!(op("fucomip"), "df e9");
         assert_eq!(hex("fstp", &[Value::Stack]), "dd d8");
+        assert_eq!(hex("fprem", &[]), "d9 f8");
+        assert_eq!(hex("fnstsw", &[Value::Reg(RAX, Width::Word)]), "df e0");
     }
 
     #[test]

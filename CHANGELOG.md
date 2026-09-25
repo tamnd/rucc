@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The assembler reads `fprem` and `fnstsw`, which gcc writes when it inlines `fmod`, and an x87 instruction at any depth of the stack, such as `fstp %st(1)`, rather than only the depths the compiler writes (#1863).
+
 ## 0.11.8
 
 ### Added
