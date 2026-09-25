@@ -25,13 +25,13 @@
 //! hands out, and the encoder refuses the stack pointer where the machine has no way to say it.
 
 use crate::aarch64::encode::{
-    Addr, Arrangement, Cond, Mode, Offset, Operator, Scalar, Shift, Value, Width,
+    Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
 use crate::aarch64::read::system_field;
 
 use Arg::{
-    Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Page, Pop, Push,
-    Reg, Symbol, Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
+    At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Near, Page,
+    Pop, Push, Reg, Symbol, Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
 };
 use Scalar::{D, Q, S};
 use Width::{W, X};
@@ -51,6 +51,8 @@ pub enum Arg {
     Lit(i64),
     /// A shift that is part of the opcode.
     Shift(Shift, u8),
+    /// How the register before this one is widened, as part of the opcode.
+    Extend(Extend),
     /// A condition that is part of the opcode.
     Cond(Cond),
     /// A barrier option that is part of the opcode.
@@ -94,6 +96,13 @@ pub enum Arg {
     Label,
     /// The first register the instruction reads, which is what a call through a register reads.
     Through,
+    /// The address in the register the operand at that index was given, with nothing added, which
+    /// is the only address an acquiring or exclusive access takes.
+    At(u8),
+    /// The instruction that many places away in the same opcode, counted in instructions, which is
+    /// where a loop inside one opcode branches to. The listing writes it as a distance from `.`,
+    /// since an opcode has no label of its own to name.
+    Near(i8),
 }
 
 /// One machine instruction an opcode is written as.
@@ -742,6 +751,169 @@ static TEXT: &[(&str, &[Written])] = &[
     ("nop", &[spell("nop", &[])]),
     ("trap", &[spell("brk", &[Lit(1)])]),
     ("fence", &[spell("dmb", &[Barrier(0b1011)])]),
+    ("fence_acquire", &[spell("dmb", &[Barrier(0b1001)])]),
+    // The ordered accesses, and the read modify writes as loops of an exclusive load and an
+    // exclusive store that go round again when something else wrote the address in between. Both
+    // halves of every loop acquire and release, which is right at every ordering and is what gcc
+    // 16.2.0 writes for the strongest one. The narrow widths compare the expected value as the
+    // byte or the half the load zero extended, since what is above it in the register means
+    // nothing.
+    ("ldar_8", &[spell("ldarb", &[Reg(0, W), At(1)])]),
+    ("ldar_16", &[spell("ldarh", &[Reg(0, W), At(1)])]),
+    ("ldar_32", &[spell("ldar", &[Reg(0, W), At(1)])]),
+    ("ldar_64", &[spell("ldar", &[Reg(0, X), At(1)])]),
+    ("stlr_8", &[spell("stlrb", &[Reg(0, W), At(1)])]),
+    ("stlr_16", &[spell("stlrh", &[Reg(0, W), At(1)])]),
+    ("stlr_32", &[spell("stlr", &[Reg(0, W), At(1)])]),
+    ("stlr_64", &[spell("stlr", &[Reg(0, X), At(1)])]),
+    (
+        "xchg_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(2)]),
+            spell("stlxrb", &[Reg(1, W), Reg(3, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xchg_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(2)]),
+            spell("stlxrh", &[Reg(1, W), Reg(3, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xchg_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(2)]),
+            spell("stlxr", &[Reg(1, W), Reg(3, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xchg_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(2)]),
+            spell("stlxr", &[Reg(1, W), Reg(3, X), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-2)]),
+        ],
+    ),
+    (
+        "xadd_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(3)]),
+            spell("add", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrb", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xadd_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(3)]),
+            spell("add", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrh", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xadd_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(3)]),
+            spell("add", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xadd_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(3)]),
+            spell("add", &[Reg(1, X), Reg(0, X), Reg(4, X)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, X), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(3)]),
+            spell("sub", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrb", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(3)]),
+            spell("sub", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxrh", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(3)]),
+            spell("sub", &[Reg(1, W), Reg(0, W), Reg(4, W)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, W), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "xsub_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(3)]),
+            spell("sub", &[Reg(1, X), Reg(0, X), Reg(4, X)]),
+            spell("stlxr", &[Reg(2, W), Reg(1, X), At(3)]),
+            spell("cbnz", &[Reg(2, W), Near(-3)]),
+        ],
+    ),
+    (
+        "cmpxchg_8",
+        &[
+            spell("ldaxrb", &[Reg(0, W), At(2)]),
+            spell("cmp", &[Reg(0, W), Reg(3, W), Arg::Extend(Extend::Uxtb)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxrb", &[Reg(1, W), Reg(4, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    (
+        "cmpxchg_16",
+        &[
+            spell("ldaxrh", &[Reg(0, W), At(2)]),
+            spell("cmp", &[Reg(0, W), Reg(3, W), Arg::Extend(Extend::Uxth)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxrh", &[Reg(1, W), Reg(4, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    (
+        "cmpxchg_32",
+        &[
+            spell("ldaxr", &[Reg(0, W), At(2)]),
+            spell("cmp", &[Reg(0, W), Reg(3, W)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxr", &[Reg(1, W), Reg(4, W), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
+    (
+        "cmpxchg_64",
+        &[
+            spell("ldaxr", &[Reg(0, X), At(2)]),
+            spell("cmp", &[Reg(0, X), Reg(3, X)]),
+            spell("b.ne", &[Near(3)]),
+            spell("stlxr", &[Reg(1, W), Reg(4, X), At(2)]),
+            spell("cbnz", &[Reg(1, W), Near(-4)]),
+            spell("cset", &[Reg(1, W), Arg::Cond(Cond::Eq)]),
+        ],
+    ),
     // Nothing from the table. The text it carries is the program's and the writer puts it down.
     ("template", &[]),
 ];
@@ -772,7 +944,7 @@ pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
         for arg in inst.args {
             let bits = match *arg {
                 Reg(at, width) if at == operand => width.bits(),
-                GotSlot(at) | TlsSlot(at) if at == operand => 64,
+                GotSlot(at) | TlsSlot(at) | At(at) if at == operand => 64,
                 Fp(at, _) | Vector(at) if at == operand => return None,
                 _ => continue,
             };
@@ -829,6 +1001,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Imm => Value::Imm(with.imm),
         Lit(imm) => Value::Imm(imm),
         Arg::Shift(shift, amount) => Value::Shift(shift, amount),
+        Arg::Extend(extend) => Value::Extend(extend, None),
         Arg::Cond(cond) => Value::Cond(cond),
         Barrier(option) => Value::Barrier(option),
         Fixed(number, width) => Value::Gpr(width, number),
@@ -838,7 +1011,8 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
             Offset::Imm(imm) => Value::Imm(imm),
             _ => return Err(Missing::Mem),
         },
-        Page | Symbol | Label => Value::Symbol(Operator::Plain),
+        Page | Symbol | Label | Near(_) => Value::Symbol(Operator::Plain),
+        At(at) => Value::Mem(Addr { base: reg(at)?, offset: Offset::Imm(0), mode: Mode::Offset }),
         Low => Value::Symbol(Operator::Lo12),
         GotPage => Value::Symbol(Operator::Got),
         GotSlot(at) => Value::Mem(Addr {
@@ -888,7 +1062,7 @@ mod tests {
             for inst in written(name).unwrap() {
                 for arg in inst.args {
                     let (at, class) = match *arg {
-                        Reg(at, _) | GotSlot(at) | TlsSlot(at) => (at, GPR),
+                        Reg(at, _) | GotSlot(at) | TlsSlot(at) | At(at) => (at, GPR),
                         Fp(at, _) | Vector(at) => (at, FPR),
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
@@ -911,11 +1085,12 @@ mod tests {
     /// register a different one and none of them the stack pointer, and a constant and an address
     /// every instruction here can hold.
     ///
-    /// Four registers whatever the form says, because a call's operands are the arguments it
-    /// passes and those are the lowering's to add rather than the form's.
+    /// Five registers whatever the form says, because a call's operands are the arguments it
+    /// passes and those are the lowering's to add rather than the form's, and five is what the
+    /// longest of the atomic loops names.
     fn sample(form: Form, regs: &mut Vec<u8>) -> Operands<'_> {
         regs.clear();
-        regs.extend(1..=4);
+        regs.extend(1..=5);
         let reads = form.operands().iter().take_while(|op| op.role != Role::Use).count();
         let mem = Addr { base: 9, offset: Offset::Imm(16), mode: Mode::Offset };
         Operands { regs, reads, imm: 1, mem: Some(mem) }

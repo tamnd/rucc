@@ -783,6 +783,8 @@ const fn aapcs64(
         // stack pointer is aligned on entry, which is the thing x86-64's frame layout has to undo.
         return_address: 0,
         word: 8,
+        // A weakly ordered machine, so an acquire is `ldar` and a release is `stlr`.
+        total_store_order: false,
         push: 16,
         link: Some(LR),
         sret: Some(X8),

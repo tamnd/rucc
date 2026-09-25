@@ -204,13 +204,14 @@ pub static HAND: &[(Opcode, &str)] = &[
     // The barrier itself, which is one instruction or none and neither is a rewrite of anything.
     (
         Opcode::Fence,
-        "`crate::lower`, as an `mfence` at the strongest ordering and nothing below it",
+        "`crate::lower`, as an `mfence` at the strongest ordering on x86 and a `dmb` above relaxed on \
+         AArch64",
     ),
     // The compare and exchange, which is one instruction and produces two values, and a rule
     // replaces a term with an instruction producing one.
     (
         Opcode::Cmpxchg,
-        "`crate::lower`, as a locked compare and exchange and the byte that reads its answer",
+        "`crate::lower`, as a locked compare and exchange on x86 and an exclusive loop on AArch64",
     ),
     // The read modify write, which produces one value a rule could have named and whose operation
     // is carried beside it rather than in the head a rule matches on, so one pattern would be all
@@ -218,8 +219,8 @@ pub static HAND: &[(Opcode, &str)] = &[
     // names no opcode, because the half it does not do is lowered here.
     (
         Opcode::AtomicRmw,
-        "`crate::lower`, as an exchange or a locked add, and `crate::retry` for the eight with no \
-         instruction, with the two on floating values refused",
+        "`crate::lower`, as an exchange, a locked add or an exclusive loop, and `crate::retry` for the \
+         eight with no instruction, with the two on floating values refused",
     ),
     // The one of the five variable argument opcodes the group does not name, because what it writes
     // is the register save area and where that is comes out of the convention rather than the term.

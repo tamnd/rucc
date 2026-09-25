@@ -1022,22 +1022,29 @@ pub fn builtins_archive(target: Triple, prefixes: &[PathBuf]) -> Option<PathBuf>
     // The name from the crate that puts it on a line, rather than a second spelling of it here,
     // which is what that constant asks of anybody who needs the name.
     const NAME: &str = rucc_sysroot::link::BUILTINS;
-    let triple = target.to_string();
+    // The four field triple first and then the tuple the sysroots are named by, because `cargo
+    // xtask builtins --target=aarch64-linux-musl` names its directory after what it was given, and
+    // that shorter spelling is the one people type.
+    let spellings = [target.to_string(), target.tuple().to_string()];
     let mut places: Vec<PathBuf> = Vec::new();
     for prefix in prefixes {
-        places.push(prefix.join(&triple).join(NAME));
+        for triple in &spellings {
+            places.push(prefix.join(triple).join(NAME));
+        }
         places.push(prefix.join(NAME));
     }
     if let Some(dir) =
         std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf))
     {
-        // An install: the compiler in `bin` and its runtime in `lib/rucc/<triple>`.
         if let Some(up) = dir.parent() {
-            places.push(up.join("lib").join("rucc").join(&triple).join(NAME));
-            // A build tree: the compiler in `target/release` and the runtime, which is built for
-            // the target and not the host, in `target/<triple>/release`.
-            for profile in ["release", "debug"] {
-                places.push(up.join(&triple).join(profile).join(NAME));
+            for triple in &spellings {
+                // An install: the compiler in `bin` and its runtime in `lib/rucc/<triple>`.
+                places.push(up.join("lib").join("rucc").join(triple).join(NAME));
+                // A build tree: the compiler in `target/release` and the runtime, which is built
+                // for the target and not the host, in `target/<triple>/release`.
+                for profile in ["release", "debug"] {
+                    places.push(up.join(triple).join(profile).join(NAME));
+                }
             }
         }
         places.push(dir.join(NAME));
@@ -1502,6 +1509,21 @@ mod tests {
         fs::create_dir_all(&dir).expect("a temporary directory");
         fs::write(dir.join("librucc_builtins.a"), b"not really an archive").expect("a file in it");
         dir
+    }
+
+    /// An archive in a directory named by the short tuple is found, which is where `cargo xtask
+    /// builtins --target=aarch64-linux-musl` puts it.
+    #[test]
+    fn the_runtime_is_found_under_the_tuple_as_well_as_the_triple() {
+        let dir = std::env::temp_dir().join(format!("rucc-link-tuple-{}", std::process::id()));
+        let target: Triple = "aarch64-linux-musl".parse().expect("a triple");
+        let under = dir.join(target.tuple().to_string());
+        fs::create_dir_all(&under).expect("a temporary directory");
+        fs::write(under.join("librucc_builtins.a"), b"not really an archive")
+            .expect("a file in it");
+        let found = builtins_archive(target, std::slice::from_ref(&dir));
+        assert_eq!(found, Some(under.join("librucc_builtins.a")));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Where that cache would keep this target's sysroot.

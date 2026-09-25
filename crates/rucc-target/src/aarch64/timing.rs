@@ -111,6 +111,14 @@ fn plain(form: Form) -> Timing {
         RetVal | RetVal2 | RetValFp | RetVal2Fp | RetVal3Fp | RetVal4Fp | ArgVal | ArgValFp
         | BrCond => (0, Unit::Free),
         Barrier | Trap | Nop | Template => (1, Unit::Fixed),
+        // An acquiring load and a releasing store, which cost what the plain ones do when nothing
+        // is waiting on them.
+        Acquire => (LOAD, Unit::Load),
+        Release => (1, Unit::Store),
+        // A loop of an exclusive load and an exclusive store, which goes round once when nobody
+        // else wants the line. The load, then whatever is between, then a store nothing is let
+        // past, so these are fixed in place like a barrier.
+        Swap | FetchOp | CompareSwap => (LOAD + 1, Unit::Fixed),
     };
     Timing { latency, unit }
 }

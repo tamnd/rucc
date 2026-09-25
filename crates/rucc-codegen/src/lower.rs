@@ -1415,6 +1415,13 @@ impl<'a> Lowering<'a> {
                     self.barrier(inst)?;
                     continue;
                 }
+                // An ordered load or store that `crate::expand::orderings` left alone, which on a
+                // machine that is not total store order is every one stronger than relaxed. Written
+                // by name for the barrier's reason: what it adds to the plain access is an ordering.
+                Opcode::AtomicLoad | Opcode::AtomicStore if self.on_aarch64() => {
+                    self.ordered(inst)?;
+                    continue;
+                }
                 // A hint, written by name for the reason a barrier is and one step further: not
                 // only is there no equality for a proof to discharge, there is nothing about the
                 // program around it either. Which of the four instructions it is comes out of the
@@ -3360,12 +3367,19 @@ impl<'a> Lowering<'a> {
         let Extra::Order(order) = self.source[inst].extra else {
             return Err(self.unsupported(inst));
         };
-        if order != MemOrder::SeqCst {
-            return Ok(());
-        }
+        // AArch64 is not total store order, so every ordering above relaxed is an instruction
+        // there. An acquire fence only has to keep later accesses after earlier loads, which is
+        // `dmb ishld`, and everything stronger is the full `dmb ish` gcc writes for it.
+        let name = match order {
+            MemOrder::NotAtomic | MemOrder::Relaxed => return Ok(()),
+            MemOrder::Acquire if self.on_aarch64() => "fence_acquire",
+            _ if self.on_aarch64() => self.selector.fence,
+            MemOrder::SeqCst => self.selector.fence,
+            _ => return Ok(()),
+        };
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        let fence = self.named(self.selector.fence);
+        let fence = self.named(name);
         self.out.build(block, fence).at(span).finish();
         Ok(())
     }
@@ -3462,6 +3476,9 @@ impl<'a> Lowering<'a> {
         let results: Vec<Value> = self.source[inst].results().collect();
         let [addr, expected, desired] = args[..] else { return Err(self.unsupported(inst)) };
         let [old, exchanged] = results[..] else { return Err(self.unsupported(inst)) };
+        if self.on_aarch64() {
+            return self.exchange_a64(inst, [addr, expected, desired], [old, exchanged]);
+        }
 
         // A value the machine can compare in one instruction, which is an integer or an address at
         // one of the four widths it has a compare and exchange for. Anything else is a type this
@@ -3537,6 +3554,9 @@ impl<'a> Lowering<'a> {
         if !ty.is_int() || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
             return Err(self.unsupported(inst));
         }
+        if self.on_aarch64() {
+            return self.modify_a64(inst, op, [addr, operand], old);
+        }
         let name = match op {
             RmwOp::Xchg => format!("xchg_{}", ty.bits()),
             RmwOp::Add | RmwOp::Sub => format!("xadd_{}", ty.bits()),
@@ -3582,6 +3602,111 @@ impl<'a> Lowering<'a> {
         }
         build.mem(mir::Mem::at(mir::Operand::read(base, self.gpr))).finish();
         Ok(())
+    }
+
+    /// The width an AArch64 atomic works at, which is an integer or an address of one of the four
+    /// widths the exclusive loads and stores have. Anything else is refused.
+    fn atomic_bits(&self, inst: Inst, ty: Type) -> Result<u32, Unsupported> {
+        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        if (!ty.is_int() && !ty.is_ptr()) || !matches!(bits, 8 | 16 | 32 | 64) {
+            return Err(self.unsupported(inst));
+        }
+        Ok(bits)
+    }
+
+    /// One instruction by name, with its operands in the order the table lists them.
+    fn written_as(&mut self, inst: Inst, name: &str, regs: &[mir::Reg]) -> Result<(), Unsupported> {
+        let descs = self.selector.operands(name).ok_or_else(|| self.unsupported(inst))?;
+        if descs.len() != regs.len() {
+            return Err(self.unsupported(inst));
+        }
+        let block = self.at.expect("a block is being filled");
+        let opcode = self.named(name);
+        let (span, flags) = (self.source.span(inst), self.carried(inst));
+        let mut build = self.out.build(block, opcode).at(span).flags(flags);
+        for (desc, &reg) in descs.iter().zip(regs) {
+            build = build.operand(mir::Operand {
+                reg,
+                class: desc.class,
+                role: desc.role,
+                constraint: desc.constraint,
+            });
+        }
+        build.finish();
+        Ok(())
+    }
+
+    /// An acquiring load or a releasing store on AArch64, which is `ldar` or `stlr`.
+    ///
+    /// Only a relaxed access became the plain one above this, so what arrives is acquire or
+    /// stronger for a load and release or stronger for a store. `ldar` and `stlr` are also
+    /// sequentially consistent with each other, which is why the strongest ordering needs no fence
+    /// on either side, and is what gcc 16.2.0 writes for all of them.
+    fn ordered(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        if self.source[inst].opcode == Opcode::AtomicLoad {
+            let [addr] = args[..] else { return Err(self.unsupported(inst)) };
+            let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+            let bits = self.atomic_bits(inst, self.source[result].ty)?;
+            let base = self.reg_of(addr)?;
+            let got = self.new_reg(result);
+            return self.written_as(inst, &format!("ldar_{bits}"), &[got, base]);
+        }
+        let [value, addr] = args[..] else { return Err(self.unsupported(inst)) };
+        let bits = self.atomic_bits(inst, self.source[value].ty)?;
+        let put = self.reg_of(value)?;
+        let base = self.reg_of(addr)?;
+        self.written_as(inst, &format!("stlr_{bits}"), &[put, base])
+    }
+
+    /// A compare and exchange on AArch64, which is a loop of an exclusive load and store.
+    ///
+    /// The loop is one instruction as far as everything below is concerned, so that nothing can
+    /// be spilled or reloaded between the two exclusive accesses, which would lose the reservation
+    /// on some parts every time. Its definitions are all early, since they are written before the
+    /// last read. The acquiring and releasing forms are used whatever the ordering, which is what
+    /// gcc writes at the strongest one and is never wrong at a weaker one. The yes or no comes out
+    /// of the status register the store wrote, read as a flag after the loop.
+    fn exchange_a64(
+        &mut self,
+        inst: Inst,
+        [addr, expected, desired]: [Value; 3],
+        [old, exchanged]: [Value; 2],
+    ) -> Result<(), Unsupported> {
+        let bits = self.atomic_bits(inst, self.source[old].ty)?;
+        let base = self.reg_of(addr)?;
+        let want = self.reg_of(expected)?;
+        let put = self.reg_of(desired)?;
+        let got = self.new_reg(old);
+        let flag = self.new_reg(exchanged);
+        self.written_as(inst, &format!("cmpxchg_{bits}"), &[got, flag, base, want, put])
+    }
+
+    /// A read modify write on AArch64, for the three operations that reach here, each a loop of
+    /// an exclusive load and store for the reason the compare and exchange above is.
+    fn modify_a64(
+        &mut self,
+        inst: Inst,
+        op: RmwOp,
+        [addr, operand]: [Value; 2],
+        old: Value,
+    ) -> Result<(), Unsupported> {
+        let bits = self.atomic_bits(inst, self.source[old].ty)?;
+        let base = self.reg_of(addr)?;
+        let put = self.reg_of(operand)?;
+        let got = self.new_reg(old);
+        let status = self.out.new_vreg(self.gpr);
+        match op {
+            RmwOp::Xchg => {
+                self.written_as(inst, &format!("xchg_{bits}"), &[got, status, base, put])
+            }
+            RmwOp::Add | RmwOp::Sub => {
+                let name = if op == RmwOp::Add { "xadd" } else { "xsub" };
+                let new = self.out.new_vreg(self.gpr);
+                self.written_as(inst, &format!("{name}_{bits}"), &[got, new, status, base, put])
+            }
+            _ => Err(self.unsupported(inst)),
+        }
     }
 
     /// One `asm` statement.

@@ -80,20 +80,39 @@ use crate::capability;
 /// `word` is how many bytes the widest indivisible access carries, which is the same number the
 /// widest move carries and is read from the machine for the reason [`bulk`] reads it.
 ///
+/// # A machine that is not total store order
+///
+/// All of the above is x86-64, and `total_store_order` says whether it holds. AArch64 lets a plain
+/// load or store move past the accesses around it, so there only a relaxed access is the plain
+/// one. An acquire, a release and anything stronger are left as the ordered access they are, and
+/// [`crate::lower`] writes each as the `ldar` or `stlr` the machine has for it. A sequentially
+/// consistent store needs no fence behind it there either, because `stlr` already keeps it in
+/// order with a later `ldar`, which is the one pair a fence would be for.
+///
 /// This runs before every other pass here, so that what it produces is an ordinary load or store
 /// that the width legalisation and everything after it get to see. An ordered access at a width the
 /// machine has no register for would otherwise be a shape nothing later understands, since every
 /// pass after this one is written about `load` and `store` by name.
-pub fn orderings(func: &mut Func, word: u32) {
+pub fn orderings(func: &mut Func, word: u32, total_store_order: bool) {
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     for inst in found {
-        match func[inst].opcode {
-            Opcode::AtomicLoad => relaxed(func, inst, Opcode::Load, word),
-            Opcode::AtomicStore => relaxed(func, inst, Opcode::Store, word),
-            _ => {}
+        let plain = match func[inst].opcode {
+            Opcode::AtomicLoad => Opcode::Load,
+            Opcode::AtomicStore => Opcode::Store,
+            _ => continue,
+        };
+        if !total_store_order && !unordered(func, inst) {
+            continue;
         }
+        relaxed(func, inst, plain, word);
     }
+}
+
+/// Whether an ordered access asks for nothing beyond being done in one go.
+fn unordered(func: &Func, inst: Inst) -> bool {
+    let Extra::Mem(mem) = func[inst].extra else { return false };
+    matches!(func[mem].order, MemOrder::NotAtomic | MemOrder::Relaxed)
 }
 
 /// One ordered access as the plain one, with a barrier behind it when the ordering asked for more
@@ -2458,7 +2477,7 @@ mod tests {
     fn an_ordered_access_becomes_the_plain_one_this_machine_already_orders() {
         for order in [MemOrder::Relaxed, MemOrder::Acquire, MemOrder::SeqCst] {
             let (mut names, mut func) = reading(Type::int(32), 4, order);
-            orderings(&mut func, 8);
+            orderings(&mut func, 8, true);
             let text = printed(&func, &mut names);
             assert!(text.contains("load.i32"), "{order:?}: {text}");
             assert!(!text.contains("atomic_load"), "{order:?}: {text}");
@@ -2467,7 +2486,7 @@ mod tests {
 
         for order in [MemOrder::Relaxed, MemOrder::Release] {
             let (mut names, mut func) = writing(Type::int(32), 4, order);
-            orderings(&mut func, 8);
+            orderings(&mut func, 8, true);
             let text = printed(&func, &mut names);
             assert!(text.contains("store %1 -> %0"), "{order:?}: {text}");
             assert!(!text.contains("atomic_store"), "{order:?}: {text}");
@@ -2483,12 +2502,35 @@ mod tests {
     #[test]
     fn the_strongest_store_keeps_a_barrier_behind_it() {
         let (mut names, mut func) = writing(Type::int(32), 4, MemOrder::SeqCst);
-        orderings(&mut func, 8);
+        orderings(&mut func, 8, true);
         let text = printed(&func, &mut names);
         let (before, after) = text.split_once("fence seq_cst").expect("a barrier");
         assert!(before.contains("store %1 -> %0"), "the store comes first: {text}");
         assert!(!after.contains("store"), "and nothing is between them: {text}");
         assert!(!text.contains("atomic_store"), "{text}");
+    }
+
+    /// On a machine that is not total store order only the relaxed access is the plain one. The
+    /// rest stay ordered for `crate::lower` to write as the acquiring load and the releasing store,
+    /// and the strongest store gets no fence, since `stlr` is already enough.
+    #[test]
+    fn a_weakly_ordered_machine_keeps_every_ordering_above_relaxed() {
+        let (mut names, mut func) = reading(Type::int(32), 4, MemOrder::Relaxed);
+        orderings(&mut func, 8, false);
+        assert!(!printed(&func, &mut names).contains("atomic_load"), "relaxed is a plain load");
+
+        for order in [MemOrder::Acquire, MemOrder::SeqCst] {
+            let (mut names, mut func) = reading(Type::int(32), 4, order);
+            let before = printed(&func, &mut names);
+            orderings(&mut func, 8, false);
+            assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
+        for order in [MemOrder::Release, MemOrder::SeqCst] {
+            let (mut names, mut func) = writing(Type::int(32), 4, order);
+            let before = printed(&func, &mut names);
+            orderings(&mut func, 8, false);
+            assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
     }
 
     /// A barrier the program wrote is left for `crate::lower`, which is where a target says what
@@ -2501,7 +2543,7 @@ mod tests {
                 build.ret(&[]);
             });
             let before = printed(&func, &mut names);
-            orderings(&mut func, 8);
+            orderings(&mut func, 8, true);
             assert_eq!(printed(&func, &mut names), before, "{order:?}");
         }
     }
@@ -2515,7 +2557,7 @@ mod tests {
     fn an_access_this_machine_cannot_do_in_one_go_is_left_alone() {
         for (ty, align) in [(Type::int(128), 16), (Type::int(64), 4)] {
             let (mut names, mut func) = reading(ty, align, MemOrder::SeqCst);
-            orderings(&mut func, 8);
+            orderings(&mut func, 8, true);
             assert!(printed(&func, &mut names).contains("atomic_load"), "left as it was");
         }
     }
@@ -2531,7 +2573,7 @@ mod tests {
                 if !order.is_valid_for_load() && !order.is_valid_for_store() {
                     continue;
                 }
-                orderings(&mut func, 8);
+                orderings(&mut func, 8, true);
                 let module = Module::new(names.intern("a.c"), &target());
                 rucc_ir::verify_func(&module, &func, &names)
                     .unwrap_or_else(|e| panic!("{order:?}: {e:?}"));
@@ -2546,7 +2588,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        orderings(&mut func, 8);
+        orderings(&mut func, 8, true);
         assert_eq!(printed(&func, &mut names), before);
     }
 

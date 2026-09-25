@@ -398,3 +398,80 @@ f900093f	str xzr, [x9, #16]	probe_64
 d503201f	nop	nop
 d4200020	brk #1	trap
 d5033bbf	dmb ish	fence
+d50339bf	dmb ishld	fence_acquire
+08dffc41	ldarb w1, [x2]	ldar_8
+48dffc41	ldarh w1, [x2]	ldar_16
+88dffc41	ldar w1, [x2]	ldar_32
+c8dffc41	ldar x1, [x2]	ldar_64
+089ffc41	stlrb w1, [x2]	stlr_8
+489ffc41	stlrh w1, [x2]	stlr_16
+889ffc41	stlr w1, [x2]	stlr_32
+c89ffc41	stlr x1, [x2]	stlr_64
+085ffc61	ldaxrb w1, [x3]	xchg_8
+0802fc64	stlxrb w2, w4, [x3]	xchg_8
+35000002	cbnz w2, s	xchg_8
+485ffc61	ldaxrh w1, [x3]	xchg_16
+4802fc64	stlxrh w2, w4, [x3]	xchg_16
+35000002	cbnz w2, s	xchg_16
+885ffc61	ldaxr w1, [x3]	xchg_32
+8802fc64	stlxr w2, w4, [x3]	xchg_32
+35000002	cbnz w2, s	xchg_32
+c85ffc61	ldaxr x1, [x3]	xchg_64
+c802fc64	stlxr w2, x4, [x3]	xchg_64
+35000002	cbnz w2, s	xchg_64
+085ffc81	ldaxrb w1, [x4]	xadd_8
+0b050022	add w2, w1, w5	xadd_8
+0803fc82	stlxrb w3, w2, [x4]	xadd_8
+35000003	cbnz w3, s	xadd_8
+485ffc81	ldaxrh w1, [x4]	xadd_16
+0b050022	add w2, w1, w5	xadd_16
+4803fc82	stlxrh w3, w2, [x4]	xadd_16
+35000003	cbnz w3, s	xadd_16
+885ffc81	ldaxr w1, [x4]	xadd_32
+0b050022	add w2, w1, w5	xadd_32
+8803fc82	stlxr w3, w2, [x4]	xadd_32
+35000003	cbnz w3, s	xadd_32
+c85ffc81	ldaxr x1, [x4]	xadd_64
+8b050022	add x2, x1, x5	xadd_64
+c803fc82	stlxr w3, x2, [x4]	xadd_64
+35000003	cbnz w3, s	xadd_64
+085ffc81	ldaxrb w1, [x4]	xsub_8
+4b050022	sub w2, w1, w5	xsub_8
+0803fc82	stlxrb w3, w2, [x4]	xsub_8
+35000003	cbnz w3, s	xsub_8
+485ffc81	ldaxrh w1, [x4]	xsub_16
+4b050022	sub w2, w1, w5	xsub_16
+4803fc82	stlxrh w3, w2, [x4]	xsub_16
+35000003	cbnz w3, s	xsub_16
+885ffc81	ldaxr w1, [x4]	xsub_32
+4b050022	sub w2, w1, w5	xsub_32
+8803fc82	stlxr w3, w2, [x4]	xsub_32
+35000003	cbnz w3, s	xsub_32
+c85ffc81	ldaxr x1, [x4]	xsub_64
+cb050022	sub x2, x1, x5	xsub_64
+c803fc82	stlxr w3, x2, [x4]	xsub_64
+35000003	cbnz w3, s	xsub_64
+085ffc61	ldaxrb w1, [x3]	cmpxchg_8
+6b24003f	cmp w1, w4, uxtb	cmpxchg_8
+54000001	b.ne s	cmpxchg_8
+0802fc65	stlxrb w2, w5, [x3]	cmpxchg_8
+35000002	cbnz w2, s	cmpxchg_8
+1a9f17e2	cset w2, eq	cmpxchg_8
+485ffc61	ldaxrh w1, [x3]	cmpxchg_16
+6b24203f	cmp w1, w4, uxth	cmpxchg_16
+54000001	b.ne s	cmpxchg_16
+4802fc65	stlxrh w2, w5, [x3]	cmpxchg_16
+35000002	cbnz w2, s	cmpxchg_16
+1a9f17e2	cset w2, eq	cmpxchg_16
+885ffc61	ldaxr w1, [x3]	cmpxchg_32
+6b04003f	cmp w1, w4	cmpxchg_32
+54000001	b.ne s	cmpxchg_32
+8802fc65	stlxr w2, w5, [x3]	cmpxchg_32
+35000002	cbnz w2, s	cmpxchg_32
+1a9f17e2	cset w2, eq	cmpxchg_32
+c85ffc61	ldaxr x1, [x3]	cmpxchg_64
+eb04003f	cmp x1, x4	cmpxchg_64
+54000001	b.ne s	cmpxchg_64
+c802fc65	stlxr w2, x5, [x3]	cmpxchg_64
+35000002	cbnz w2, s	cmpxchg_64
+1a9f17e2	cset w2, eq	cmpxchg_64
