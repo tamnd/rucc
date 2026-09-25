@@ -3915,7 +3915,7 @@ impl<'a> Lowering<'a> {
         } else {
             Self::clobbered(inst, &clobbers)?.into_iter().map(|reg| (reg, self.gpr)).collect()
         };
-        for (reg, class) in named {
+        for &(reg, class) in &named {
             if !clobbered.iter().any(|&(had, of)| had == reg && of == class) {
                 clobbered.push((reg, class));
             }
@@ -3996,6 +3996,41 @@ impl<'a> Lowering<'a> {
                 });
             }
         }
+        // Every register a call may write is more than a template can give up when it has more
+        // operands in registers than the convention keeps across a call. `sodium_sub` in
+        // libsodium's `utils.c` is one: eight outputs written early and two inputs pinned, against
+        // the five registers SysV preserves, so an output has nowhere to go and nothing is left to
+        // carry one to its slot either. gcc gives that template ten registers, and a program that
+        // writes a register it did not name is only owed what gcc would have done, which here is
+        // one of the ten. So the registers taken as written without being named are handed back,
+        // from the end of the convention's order, until the operands fit in what is left. One the
+        // list names or an operand is pinned to stays where it is.
+        let fixed_to: Vec<PhysReg> = defs
+            .iter()
+            .chain(&uses)
+            .filter_map(|operand| match operand.constraint {
+                Constraint::Fixed(at) => Some(at),
+                _ => None,
+            })
+            .collect();
+        let wanted = defs.iter().chain(&uses).count() - fixed_to.len();
+        let int = self.conv.int_class;
+        let free = |clobbered: &[(PhysReg, RegClass)]| {
+            self.conv
+                .int_order
+                .iter()
+                .filter(|&&reg| !fixed_to.contains(&reg) && !clobbered.contains(&(reg, int)))
+                .count()
+        };
+        while free(&clobbered) < wanted {
+            let Some(at) = clobbered.iter().rposition(|&(reg, class)| {
+                class == int && !named.contains(&(reg, class)) && !fixed_to.contains(&reg)
+            }) else {
+                break;
+            };
+            clobbered.remove(at);
+        }
+
         // A register an output is pinned to is that output's definition and not a clobber as well.
         // One an input is pinned to is written as the instruction finishes, the way a call writes
         // the register its argument came in, and every other one is written early, since the text
@@ -7745,6 +7780,34 @@ mod tests {
         // spelled at the width of an `int`.
         assert!(line.contains("x64.template %0, @hcf \u{1}r25k\u{2}"), "{printed}");
         assert!(line.contains("early $rax"), "{printed}");
+    }
+
+    /// A template kept as text with more outputs than the convention keeps registers across a call
+    /// gets back as many of the registers a call may write as it needs, from the end of the order,
+    /// and keeps the rest. Six outputs against five preserved registers is one handed back, which is
+    /// `r11`. The shape is `sodium_sub` in libsodium, whose `sbbq` into memory the reader has no
+    /// form for, and before this the allocator ran out of registers on it.
+    #[test]
+    fn a_template_kept_as_text_with_more_outputs_than_are_kept_gets_registers_back() {
+        let i64 = Type::int(64);
+        let (mut names, mut source, block, _) = blank(&[]);
+        let outputs = [i64; 6];
+        let asm = assembly(
+            &mut source,
+            block,
+            &mut names,
+            "hcf %0, %1, %2, %3, %4, %5",
+            "=&r,=&r,=&r,=&r,=&r,=&r",
+            &[],
+            &outputs,
+        );
+        let produced: Vec<Value> = source[asm].results().collect();
+        Builder::new(&mut source, block).ret(&produced[..1]);
+
+        let printed = lower(&mut names, &source);
+        let line = printed.lines().find(|line| line.contains("x64.template")).unwrap_or_default();
+        assert!(line.contains("early $r10"), "{printed}");
+        assert!(!line.contains("early $r11"), "{printed}");
     }
 
     /// A register the template named is placed as itself, fixed to the register the program wrote
