@@ -2305,7 +2305,7 @@ pub(crate) fn split(text: &str, on: char) -> Vec<String> {
 /// so it reaches the encoder as the word it was and is refused there as a mnemonic nobody knows.
 ///
 /// `notrack` is read the same way, joined to the `jmp` or `call` behind it, since the encoder has
-/// rows for the pair and none for the prefix alone.
+/// rows for the pair and none for the prefix alone. So is `rep bsf`, which is `tzcnt`.
 fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
     let (next, after) = match rest.find(char::is_whitespace) {
         Some(cut) => (&rest[..cut], rest[cut..].trim()),
@@ -2317,6 +2317,15 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
             "call" | "callq" => Some(("notrack call".to_owned(), after)),
             _ => None,
         };
+    }
+    // `rep bsf` is how gcc writes `tzcnt` for a machine that may not have it: the bytes are the
+    // same, and a processor without the instruction ignores the prefix and runs the `bsf`.
+    if matches!(word, "rep" | "repe" | "repz") {
+        if let Some(width) = next.strip_prefix("bsf") {
+            if matches!(width, "" | "w" | "l" | "q") {
+                return Some((format!("tzcnt{width}"), after));
+            }
+        }
     }
     let unequal = match word {
         "rep" | "repe" | "repz" => false,
@@ -2386,6 +2395,15 @@ mod tests {
     fn notrack_is_read_with_the_jump_behind_it() {
         let assembled = assembled("\t.text\n\tnotrack jmp\t*%rax\n\tnotrack jmp *%r8\n\tleave\n");
         assert_eq!(bytes(&assembled, ".text"), [0x3E, 0xFF, 0xE0, 0x3E, 0x41, 0xFF, 0xE0, 0xC9]);
+    }
+
+    #[test]
+    fn rep_bsf_is_read_as_tzcnt() {
+        let assembled = assembled("\t.text\n\trep bsfq\t-8(%rbp), %rax\n\trep bsfl %edi, %eax\n");
+        assert_eq!(
+            bytes(&assembled, ".text"),
+            [0xF3, 0x48, 0x0F, 0xBC, 0x45, 0xF8, 0xF3, 0x0F, 0xBC, 0xC7]
+        );
     }
 
     /// A numbered local label, which is a place a file may write as often as it likes.
