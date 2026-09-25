@@ -5120,6 +5120,22 @@ impl<'u> Body<'_, 'u> {
             ExprKind::ThreadPointer => {
                 Some(self.build(span).value(InstData::new(Opcode::ThreadPointer), Type::PTR))
             }
+            // The same, for the block of arguments: what goes in it is written on the way into the
+            // function by the back end, and this is only where it is.
+            ExprKind::ApplyArgs => {
+                Some(self.build(span).value(InstData::new(Opcode::ApplyArgs), Type::PTR))
+            }
+            // A call the convention builds from a block rather than from values, so the function
+            // and the block are lowered for their values and the size goes in as a constant, which
+            // is the one place the back end reads it from.
+            ExprKind::Apply { function, args, size } => {
+                let function = self.value(function);
+                let block = self.value(args);
+                let size = self.build(span).iconst(Type::int(64), i128::from(size));
+                let args = self.func.push_values(&[function, block, size]);
+                let data = InstData { args, ..InstData::new(Opcode::Apply) };
+                Some(self.build(span).value(data, Type::PTR))
+            }
             // A hint, so the address under it is lowered for its value and nothing is read through
             // it. It produces nothing, which is why the whole of it answers `None`: a prefetch is
             // void and a program that used it for a value did not get past the checker.
@@ -8275,7 +8291,12 @@ impl Scan<'_> {
             | ExprKind::Unreachable
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
-            | ExprKind::ThreadPointer => {}
+            | ExprKind::ThreadPointer
+            | ExprKind::ApplyArgs => {}
+            ExprKind::Apply { function, args, .. } => {
+                self.expr(function);
+                self.expr(args);
+            }
             // The one node that moves the stack pointer without being a declaration, which is why
             // the question above about what the function declares does not find it.
             ExprKind::Alloca { size } => {

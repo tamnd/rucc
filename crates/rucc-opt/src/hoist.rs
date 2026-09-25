@@ -714,6 +714,7 @@ fn enclosing(
                 Opcode::Call
                     | Opcode::CallIndirect
                     | Opcode::TailCall
+                    | Opcode::Apply
                     | Opcode::InlineAsm
                     | Opcode::MetaEnd
                     | Opcode::MetaTransfer

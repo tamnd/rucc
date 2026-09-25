@@ -274,6 +274,13 @@ pub struct Arrived {
     /// because their slots are behind where `va_start` sets the two offsets and nothing ever reads
     /// them, so writing them would be fourteen stores where six are wanted.
     pub spare: Vec<(mir::Reg, RegClass, u32)>,
+    /// The parameters that arrived in an argument register, as the position of each and how far up
+    /// the save area the slot of its register is.
+    ///
+    /// Empty unless a save area was asked for, and read only by a function that saves every
+    /// argument register rather than the spare ones, which is one holding `__builtin_apply_args`.
+    /// Together with [`Arrived::spare`] it is every register an argument can arrive in.
+    pub named: Vec<(usize, u32)>,
 }
 
 /// Binds a function's parameters to where the convention says they arrive.
@@ -364,6 +371,9 @@ pub fn entry(
         let opcode = mir::Opcode::new(names.intern(head));
         let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
         out.build(block, opcode).operand(operand).finish();
+        if let Some(slot) = save.and_then(|area| slot_of(conv, area, arrived_in)) {
+            arrived.named.push((index, slot));
+        }
     }
     if let Some(area) = save {
         arrived.spare = spare(out, block, conv, insts, names, area, arrived.took);
@@ -392,6 +402,16 @@ pub fn entry(
         arrived.stack.push((made, up));
     }
     Ok(arrived)
+}
+
+/// How far up a save area the slot of an argument register is, or nothing for a register the area
+/// has no slot for, which is the one a convention passes the address of a result in.
+fn slot_of(conv: &CallRegs, area: Area, reg: PhysReg) -> Option<u32> {
+    let files = [(false, conv.int_args), (true, conv.sse_args)];
+    files.into_iter().find_map(|(float, file)| {
+        let at = u32::try_from(file.iter().position(|&it| it == reg)?).ok()?;
+        (at < area.holds(float)).then(|| area.starts_at(float) + at * area.stride(float))
+    })
 }
 
 /// Binds the argument registers no parameter the signature names took, which are the ones the

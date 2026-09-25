@@ -141,7 +141,7 @@ pub fn why_not(
             Some(summary) if summary.writes_nothing() => Some(INSIDE_THE_CALL),
             _ => Some(CALL),
         },
-        Opcode::CallIndirect | Opcode::TailCall => Some(CALL),
+        Opcode::CallIndirect | Opcode::TailCall | Opcode::Apply => Some(CALL),
         // Asking the planes how much room is left from a pointer reads no memory the program has
         // and dereferences nothing, so it cannot trap, cannot fault and cannot be observed, which
         // is the whole of the question this file asks. It is on [`Opcode::has_effects`] all the

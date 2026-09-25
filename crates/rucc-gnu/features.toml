@@ -2121,6 +2121,29 @@ signature = ""
 used_by = ["ffmpeg"]
 tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_shuffle_picks_each_lane_by_the_low_bits_of_the_mask"]
 
+# The pair that passes on the arguments a function was called with without knowing what they
+# are. No signature, because the first reads registers and the second is a call built from a
+# block, and neither is a function anything could call.
+[[feature]]
+name = "__builtin_apply_args"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = ""
+used_by = []
+tests = ["rucc-sema::both_names_are_rows_of_the_table_and_are_answered_not_called", "rucc-driver::the_arguments_a_function_was_called_with_are_saved_on_the_way_in"]
+notes = "The address of a block holding the address of the arguments that came in memory and then every argument register as it was on the way in, the six general purpose ones and the eight vector ones at sixteen bytes each. The back end writes it in the prologue, which is the one place those registers still hold what the caller put there, and only on x86-64 SysV. A function holding one is never inlined and its parameters are never taken apart or replaced by constants, since either would change what the registers hold."
+
+[[feature]]
+name = "__builtin_apply"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = ""
+used_by = []
+tests = ["rucc-sema::both_names_are_rows_of_the_table_and_are_answered_not_called", "rucc-driver::a_call_built_from_saved_arguments_loads_every_argument_register"]
+notes = "A call to the function in the first argument with every argument register loaded from the block __builtin_apply_args answered, and the number of bytes the third argument says copied from where the arguments in memory were to where the callee will look for them. The answer is the address of a block holding rax, rdx, xmm0 and xmm1 as the callee left them. The size has to be a constant, where gcc also takes one that is only known when the program runs, because the bytes go in the area at the bottom of the frame and how big that is has to be known when the frame is laid out. __builtin_return, which gives the block back as the answer of the function it is in, is not here yet."
+
 # The three that name a half of a complex value. These carry a signature because the call is
 # checked against it the way an ordinary call is, and then answered rather than left behind: the
 # operators they stand for are `~`, `__real__` and `__imag__`, which the language already had, and

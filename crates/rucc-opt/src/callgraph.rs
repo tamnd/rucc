@@ -427,7 +427,8 @@ impl CallGraph {
             }
             // The flag section 34.6 asks for. What is at the other end could be anything with a
             // body, including something this unit never saw.
-            Opcode::CallIndirect => self.entries[from.index()].unknown = true,
+            // A call built from a block of saved arguments is a call through an address as well.
+            Opcode::CallIndirect | Opcode::Apply => self.entries[from.index()].unknown = true,
             // A template the compiler does not read, and the open half of the intrinsic set, which
             // is named rather than enumerated so nothing here knows what one does. `crate::purity`
             // answers the same way about both for the same reason.

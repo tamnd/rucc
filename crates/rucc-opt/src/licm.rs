@@ -807,7 +807,7 @@ fn goes_on(
     at: Block,
 ) -> bool {
     match func[inst].opcode {
-        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => false,
+        Opcode::Call | Opcode::CallIndirect | Opcode::TailCall | Opcode::Apply => false,
         // A promise that control does not get here, so nothing after it runs either.
         Opcode::UnreachableHint => false,
         // Stopping, which is the same answer for a plainer reason: nothing after it runs because
@@ -837,7 +837,11 @@ fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
             !func[inst].flags.contains(Flags::NOFREE)
         }
-        Opcode::InlineAsm | Opcode::MetaBegin | Opcode::MetaEnd | Opcode::MetaTransfer => true,
+        Opcode::InlineAsm
+        | Opcode::Apply
+        | Opcode::MetaBegin
+        | Opcode::MetaEnd
+        | Opcode::MetaTransfer => true,
         _ => false,
     }
 }

@@ -594,6 +594,24 @@ pub enum Opcode {
     /// no frame to have kept: the machine holds the address in a place of its own, so this is one
     /// instruction on every target that has the builtin at all.
     ThreadPointer,
+    /// `__builtin_apply_args`, the address of a block holding every argument the function it is in
+    /// was called with.
+    ///
+    /// It takes nothing and answers a pointer. What is in the block is the argument registers as
+    /// they were on the way in and the address of the arguments that came in memory, and it is the
+    /// back end that writes it, in the prologue, because that is the one place every register an
+    /// argument can arrive in still holds what the caller put there. A function holding one reads
+    /// its arguments as registers rather than as parameters, so it is never inlined and its
+    /// parameters are never taken apart, since either would change what the registers hold.
+    ApplyArgs,
+    /// `__builtin_apply`, a call to the function in the first operand with the arguments in the
+    /// block in the second, and the address of a block holding what came back.
+    ///
+    /// Three operands: the function, the block an `apply_args` answered, and a constant, which is
+    /// how many bytes of the arguments that came in memory go with the call. It is a call to
+    /// something nothing here can see, so every pass that asks about a call through an address asks
+    /// the same about this and gets the same answer.
+    Apply,
     /// `__builtin_object_size` where the front end could not see the object, which is how many
     /// bytes there are from the address to the end of whatever it points into.
     ///
@@ -810,6 +828,8 @@ impl Opcode {
             Self::FrameAddress => "frame_address",
             Self::ReturnAddress => "return_address",
             Self::ThreadPointer => "thread_pointer",
+            Self::ApplyArgs => "apply_args",
+            Self::Apply => "apply",
             Self::ObjectSize => "object_size",
             Self::IsConstant => "is_constant",
             Self::VaArgPack => "va_arg_pack",
@@ -1528,6 +1548,8 @@ static ALL: &[Opcode] = &[
     Opcode::FrameAddress,
     Opcode::ReturnAddress,
     Opcode::ThreadPointer,
+    Opcode::ApplyArgs,
+    Opcode::Apply,
     Opcode::ObjectSize,
     Opcode::IsConstant,
     Opcode::VaArgPack,

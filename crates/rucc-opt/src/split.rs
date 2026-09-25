@@ -649,7 +649,7 @@ fn shaped(
                 }
                 // Assembly could do anything and the two meta instructions end a lifetime by
                 // definition, which is the same answer `crate::nofree` gives for all three.
-                Opcode::InlineAsm | Opcode::MetaEnd | Opcode::MetaTransfer => {
+                Opcode::InlineAsm | Opcode::Apply | Opcode::MetaEnd | Opcode::MetaTransfer => {
                     return Err(ENDS_A_LIFETIME);
                 }
                 _ => {}
