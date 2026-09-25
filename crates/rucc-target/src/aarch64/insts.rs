@@ -36,11 +36,11 @@ use crate::machine::Address as Amode;
 use crate::operand::{Constraint, OperandDesc};
 
 use Form::{
-    Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet, CmpSetI,
-    Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FpToInt, Insert, IntToFp, Jcc,
-    Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move, MulAdd, Nop, Pop, PopPair, Probe,
-    Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set,
-    Store, StoreFp, Template, Test, Trap, Unary,
+    Acquire, Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet,
+    CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FetchOp,
+    FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move,
+    MulAdd, Nop, Pop, PopPair, Probe, Push, PushPair, Release, Ret, RetVal, RetVal2, RetVal2Fp,
+    RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, Store, StoreFp, Swap, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -160,6 +160,32 @@ pub enum Form {
     Trap,
     /// A fence between the memory accesses before it and the ones after it.
     Barrier,
+    /// A destination and the register holding the address it is loaded from, which is `ldar`.
+    ///
+    /// The address is a register operand and not an addressing mode, because the acquiring and
+    /// exclusive accesses take a base register and nothing else, and an addressing mode is a place
+    /// a later pass could fold a constant into.
+    Acquire,
+    /// A source and the register holding the address it is stored to, which is `stlr`.
+    Release,
+    /// An exchange as a loop of an exclusive load and an exclusive store. What was there, the
+    /// status the store leaves, the address and the value put there.
+    ///
+    /// The two it writes are written early: the loop writes both before it reads the address and
+    /// the value for the last time, so neither may share a register with them.
+    Swap,
+    /// The same loop with one operation between the load and the store. What was there, what is
+    /// put there, the status, the address and the operand.
+    ///
+    /// Three written early rather than two, because the store may not put its status in the
+    /// register it stores from.
+    FetchOp,
+    /// A compare and exchange as the same kind of loop. What was there, whether the exchange
+    /// happened, the address, the value expected and the value put there.
+    ///
+    /// The byte that says whether it happened is the status register until the loop ends and the
+    /// answer after it, which is one register fewer than keeping them apart.
+    CompareSwap,
     /// An `asm` template kept as the text the program wrote, with its operands spelled into it once
     /// they have registers.
     ///
@@ -201,6 +227,27 @@ static RET_VAL_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::F
 static RET_VAL_2_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(1)))];
 static RET_VAL_3_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(2)))];
 static RET_VAL_4_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(v(3)))];
+static ACQUIRE: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(GPR)];
+static SWAP: [OperandDesc; 4] = [
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
+static FETCH_OP: [OperandDesc; 5] = [
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
+static COMPARE_SWAP: [OperandDesc; 5] = [
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
 static NONE: [OperandDesc; 0] = [];
 
 impl Form {
@@ -217,7 +264,11 @@ impl Form {
             AluI | Unary | Convert | Move | CmpSetI => &ONE_TO_ONE,
             Alu | CmpSet | Csel => &TWO_TO_ONE,
             MulAdd | Select => &THREE_TO_ONE,
-            Cmp | PushPair => &TWO_READ,
+            Cmp | PushPair | Release => &TWO_READ,
+            Acquire => &ACQUIRE,
+            Swap => &SWAP,
+            FetchOp => &FETCH_OP,
+            CompareSwap => &COMPARE_SWAP,
             CmpI | Test | Store | BrCond | JumpReg | Push => &ONE_READ,
             Pop => &ONE_WRITTEN,
             PopPair => &TWO_WRITTEN,
@@ -272,6 +323,11 @@ impl Form {
                 | Call
                 | Ret
                 | Barrier
+                | Acquire
+                | Release
+                | Swap
+                | FetchOp
+                | CompareSwap
                 | Template
         )
     }
@@ -668,6 +724,35 @@ pub static INSTS: &[(&str, Form)] = &[
     ("nop", Nop),
     ("trap", Trap),
     ("fence", Barrier),
+    ("fence_acquire", Barrier),
+    // The ordered accesses and the read modify writes. Each width has its own opcode since the
+    // exclusive accesses do, and the loops are one opcode each so that nothing is ever put between
+    // the exclusive load and the exclusive store: a spill there could clear the monitor on every
+    // pass round the loop, and then the loop never ends.
+    ("ldar_8", Acquire),
+    ("ldar_16", Acquire),
+    ("ldar_32", Acquire),
+    ("ldar_64", Acquire),
+    ("stlr_8", Release),
+    ("stlr_16", Release),
+    ("stlr_32", Release),
+    ("stlr_64", Release),
+    ("xchg_8", Swap),
+    ("xchg_16", Swap),
+    ("xchg_32", Swap),
+    ("xchg_64", Swap),
+    ("xadd_8", FetchOp),
+    ("xadd_16", FetchOp),
+    ("xadd_32", FetchOp),
+    ("xadd_64", FetchOp),
+    ("xsub_8", FetchOp),
+    ("xsub_16", FetchOp),
+    ("xsub_32", FetchOp),
+    ("xsub_64", FetchOp),
+    ("cmpxchg_8", CompareSwap),
+    ("cmpxchg_16", CompareSwap),
+    ("cmpxchg_32", CompareSwap),
+    ("cmpxchg_64", CompareSwap),
     // An `asm` statement's text, which is spelled into the listing rather than chosen by anything.
     ("template", Template),
 ];

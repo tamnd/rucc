@@ -8,10 +8,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `__builtin_apply_args` and `__builtin_apply` on x86-64 Linux. A function holding the first saves every argument register and where its arguments in memory start into a block of its frame in the prologue, and the second calls a function with every register loaded out of such a block and as many bytes of the arguments in memory copied as the program asked for, answering a block holding every register a value can come back in. Neither is inlined or given constants by the passes that look across calls, since what it saves is the call as it was made. The size given to `__builtin_apply` has to be a constant. `__builtin_return` is not here yet. It used to be an undeclared name.
 - The assembler reads `fprem` and `fnstsw`, which gcc writes when it inlines `fmod`, and an x87 instruction at any depth of the stack, such as `fstp %st(1)`, rather than only the depths the compiler writes (#1863).
+- AArch64 compiles the atomic builtins and `_Atomic` operations. An exchange, a fetch and add or subtract and a compare and exchange are each an `ldaxr` and `stlxr` loop, and the other read modify writes are loops around the compare and exchange, as on x86-64. `librucc_builtins.a` now builds for `aarch64-linux-musl`, and the rucc-cross corpus passes on that target under qemu.
 
 ### Changed
 
 - `-O2` and `-O3` run if-conversion a second time after the loop passes and the fold that follows them, so the diamonds those passes leave are turned into selects as well. On the corpus that is 561 diamonds converted against 546 (#1905).
+
+### Fixed
+
+- An acquire load and a release store on AArch64 were written as a plain `ldr` and `str`, and an acquire or release fence was written as nothing. They are now `ldar`, `stlr`, `dmb ishld` and `dmb ish`, which is what gcc writes.
+- The driver finds `librucc_builtins.a` when `cargo xtask builtins` was given the short tuple such as `aarch64-linux-musl`, not only the four field triple.
 
 ## 0.11.8
 

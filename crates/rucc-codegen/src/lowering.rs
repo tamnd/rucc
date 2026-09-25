@@ -265,7 +265,7 @@ impl Step {
         match self {
             Self::Switches => switch::switches(func, goal),
             Self::Retries => retry::loops(func),
-            Self::Orderings => expand::orderings(func, conv.word),
+            Self::Orderings => expand::orderings(func, conv.word, conv.total_store_order),
             Self::Overflows => expand::overflows(func),
             Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),

@@ -125,7 +125,14 @@ pub(crate) fn inst(
                 why: why.to_string(),
             });
         }
-        let line = aarch64::write(machine.mnemonic, &values, symbol.as_deref(), at.spelling);
+        // A branch inside the opcode goes to one of its own instructions, which has no label, so
+        // it is written as a distance from where it stands.
+        let near = machine.args.iter().find_map(|arg| match arg {
+            Arg::Near(count) => Some(format!(".{:+}", i32::from(*count) * 4)),
+            _ => None,
+        });
+        let symbol = near.as_deref().or(symbol.as_deref());
+        let line = aarch64::write(machine.mnemonic, &values, symbol, at.spelling);
         let _ = writeln!(out, "\t{line}");
     }
     Ok(())

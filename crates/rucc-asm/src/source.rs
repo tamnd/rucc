@@ -429,9 +429,16 @@ impl Reader {
         let (Some(field), Some(name)) = (encoded.fixup, line.symbol) else {
             return Ok(());
         };
-        let name = self.named(&name)?;
-        self.sym(&name);
-        let mut terms = vec![Term { coeff: 1, what: What::Symbol(name) }];
+        // `.` on its own is where this instruction starts, which is how a loop inside one opcode
+        // of the listing branches back to its own top.
+        let what = if name == "." {
+            What::Here { part, at: at as i64 }
+        } else {
+            let name = self.named(&name)?;
+            self.sym(&name);
+            What::Symbol(name)
+        };
+        let mut terms = vec![Term { coeff: 1, what }];
         if relative(field) {
             terms.push(Term { coeff: -1, what: What::Here { part, at: at as i64 } });
         }

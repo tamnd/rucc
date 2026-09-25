@@ -403,6 +403,14 @@ pub struct CallRegs {
     pub return_address: u32,
     /// How many bytes one general purpose register takes when it is saved on the stack.
     pub word: u32,
+    /// Whether every plain load already orders like an acquire and every plain store like a
+    /// release, which is what total store order means.
+    ///
+    /// True on x86-64, where an ordered access below sequential consistency is the same `mov` as
+    /// an unordered one. False on AArch64, where a plain `ldr` and `str` may be reordered with the
+    /// accesses around them and an acquire or a release has an instruction of its own. Here beside
+    /// the word because the same pass asks both questions about the same access.
+    pub total_store_order: bool,
     /// How far one push moves the stack pointer.
     ///
     /// The word on x86-64. Sixteen on AArch64, where the stack pointer has to stay a multiple of
@@ -799,6 +807,7 @@ mod tests {
             stack_align: 16,
             return_address: 8,
             word: 8,
+            total_store_order: true,
             push: 8,
             link: None,
             sret: None,
