@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The assembler reads the integer instructions with a memory operand that gcc writes and the compiler does not: shifts and rotates of memory by a constant, by `%cl` or by one, `setcc` into memory, and `imul` of a constant by memory. It also reads `pushq $imm`, `rep bsf` (the same bytes as `tzcnt`), `cmpnlesd` and the other float comparisons with the predicate in the name, and a bare number such as `movq %rax, 0` as an absolute address. An immediate such as `andl $0xffffffff` now takes the short sign extended byte form, as gas writes it (#1863).
+
 ## 0.11.7
 
 ### Added
@@ -12,7 +16,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - AArch64 compiles `asm` statements with operands. The template is kept as text and each operand is spelled into it once it has a register, as `w` or `x` at the width of its type or the one `%w0` or `%x0` asks for. A constant under `i` or `n` is written bare, the way gcc writes it there, and an operand under `m` is `[xN]`. Outputs tied to inputs by `+` or by a number, `&`, a clobber list naming general purpose or vector registers, and a local register variable such as `register long x asm ("x8")` all work. A constraint letter that means something else on AArch64 than on x86, such as `w`, `Q` or `S`, is refused rather than read the x86 way. A test program with eleven kinds of statement prints what gcc's build prints under qemu at O0, O1 and O2.
 - AArch64 takes the `w` constraint in an `asm` statement, which puts a `float` or `double` operand in a vector register spelled `v0`, or `b0`, `h0`, `s0`, `d0` and `q0` with a modifier, the way gcc spells it. A local `float` or `double` kept in a named vector register, `register double x asm ("d9");`, works too. An integer asked for in a vector register, or a float in a general purpose one, is still refused.
 - The assembler reads the SSE instructions gcc writes that the compiler itself does not: the scalar arithmetic, comparisons and conversions with the source in memory, `sqrtsd`, `minsd` and `maxsd`, `comisd`, `movups`, `movupd` and `movapd`, the float `and`, `andn`, `or` and `xor`, `movhps` and its relatives, `movd` to and from memory, the shuffles `pshufd`, `shufps` and the rest, the unpacks, `pcmpgtb` and friends, and `pmuludq` (#1863).
-- The assembler reads the integer instructions with a memory operand that gcc writes and the compiler does not: shifts and rotates of memory by a constant, by `%cl` or by one, `setcc` into memory, and `imul` of a constant by memory. It also reads `pushq $imm`, `rep bsf` (the same bytes as `tzcnt`), `cmpnlesd` and the other float comparisons with the predicate in the name, and a bare number such as `movq %rax, 0` as an absolute address. An immediate such as `andl $0xffffffff` now takes the short sign extended byte form, as gas writes it (#1863).
 
 ### Changed
 
