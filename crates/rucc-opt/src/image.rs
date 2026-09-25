@@ -183,6 +183,15 @@ impl Images {
         Self { objects, little_endian: module.datalayout.little_endian }
     }
 
+    /// Whether that name is read only data this module defines and nothing else can replace.
+    ///
+    /// Which is also a name whose distance from anything else in this file is a number once the
+    /// program is linked, and that is what `crate::switch_conv` asks this for.
+    #[must_use]
+    pub fn holds(&self, name: Symbol) -> bool {
+        self.objects.contains_key(&name)
+    }
+
     /// Whether there is anything here to answer a load with.
     #[must_use]
     pub fn is_empty(&self) -> bool {
