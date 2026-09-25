@@ -773,7 +773,10 @@ fn beyond(text: &Text, data: &Data, info: &Info) -> Result<(), Error> {
         return why("a record of where a patcher's room is has no section flags here".to_owned());
     }
     for reloc in text.relocs.iter().chain(data.objects.iter().flat_map(|object| &object.relocs)) {
-        if matches!(reloc.kind, Reference::Got | Reference::Thread) {
+        if matches!(
+            reloc.kind,
+            Reference::Got | Reference::GotBare | Reference::GotKept | Reference::Thread
+        ) {
             return why(format!("nothing reaches '{}' through a table here", reloc.symbol));
         }
     }
@@ -1334,6 +1337,8 @@ mod tests {
             (Reference::Call, elf::R_X86_64_PLT32),
             (Reference::Data, elf::R_X86_64_PC32),
             (Reference::Got, elf::R_X86_64_REX_GOTPCRELX),
+            (Reference::GotBare, elf::R_X86_64_GOTPCRELX),
+            (Reference::GotKept, elf::R_X86_64_GOTPCREL),
             (Reference::Thread, elf::R_X86_64_GOTTPOFF),
         ] {
             let mut text = calling("puts");

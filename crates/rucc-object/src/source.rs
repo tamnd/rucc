@@ -443,7 +443,11 @@ fn moved(
     }
     let near = matches!(reloc.kind, Reference::Data | Reference::Away);
     let fixed = match reloc.kind {
-        Reference::Call | Reference::Got | Reference::Thread => false,
+        Reference::Call
+        | Reference::Got
+        | Reference::GotBare
+        | Reference::GotKept
+        | Reference::Thread => false,
         _ if input.parts.get(part)?.shape.merge != 0 => !near && reloc.addend == 0,
         _ => true,
     };
