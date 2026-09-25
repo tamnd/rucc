@@ -187,8 +187,11 @@ inside them.
 
 At `-Os` and `-Oz`, threading is restricted to the case where the duplicated block is empty, which is
 pure edge redirection with no growth. That is a small subset and it is the only part that is free.
-In rucc that is the `thread` pass, and `-O1` and above run `thread-copy` in its place, which threads
-the same edges and copies the block for the rest.
+In rucc that is the `thread` pass. `-O1` and above run it too and then run `thread-copy` after
+`phiopt`, which threads the same edges and copies the block for the rest. The copy has to wait for
+if-conversion. A clamp followed by a test of the clamped value is a diamond `phiopt` turns into a
+`select` and then a conditional move, and a copy made first threads the test through both arms and
+leaves two branches where the moves would have been.
 
 ## 23.7 How this is wrong
 
