@@ -43,6 +43,15 @@ pub fn closed(module: &Module, graph: &CallGraph) -> Vec<FuncId> {
         if func[entry].params.len() != func.signature().params.len() {
             continue;
         }
+        // A body that saves the registers it was called with reads its arguments where the
+        // convention put them rather than as parameters, so a parameter taken out or a constant
+        // put in its place would leave it reading something the caller no longer passes.
+        let saves = func
+            .blocks()
+            .any(|block| func.insts(block).any(|inst| func[inst].opcode == Opcode::ApplyArgs));
+        if saves {
+            continue;
+        }
         closed.push(id);
     }
     // Module order, for the reason the return above gives.

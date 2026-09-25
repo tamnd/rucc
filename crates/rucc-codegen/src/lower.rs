@@ -173,6 +173,17 @@ const JUMP_WORD: u32 = 8;
 /// they are counted here rather than asked for one at a time. See [`Lowering::comes_back`].
 const JUMP_REGS: usize = 4;
 
+/// How many bytes the block `__builtin_apply_args` answers takes, which is a word for where the
+/// arguments in memory are, a word of nothing and then the register save area of a variadic
+/// function. See [`Lowering::save_arguments`].
+const APPLY_ARGS: u32 = 192;
+
+/// How far into that block the registers start, which is how far the save area has moved up.
+const APPLY_REGS: u32 = 16;
+
+/// How many bytes the block `__builtin_apply` answers takes, which is two words and two vectors.
+const APPLY_BACK: u32 = 48;
+
 /// How many bytes a value passes through on its way between a register and the x87 stack.
 ///
 /// Eight, because the widest thing that crosses is a `double` or a sixty four bit integer, and
@@ -913,6 +924,13 @@ struct Lowering<'a> {
     /// between those two. Two saves sharing it is two pairs each doing that, and neither can be
     /// inside the other.
     answer: Option<usize>,
+    /// The block `__builtin_apply_args` answers the address of, or nothing in a function that holds
+    /// none.
+    ///
+    /// Written once, in the prologue, because what it holds is every argument register as it was
+    /// on the way in, and by the time the walk reaches the call the registers hold whatever the
+    /// function has done since. Every `__builtin_apply_args` in the function answers the same one.
+    applied: Option<usize>,
     /// Which rules have fired so far.
     fired: Fired,
     /// Where each assignment that starts a declaration on a value part of the way through is, by
@@ -1046,6 +1064,7 @@ impl<'a> Lowering<'a> {
             crossing: None,
             control: None,
             answer: None,
+            applied: None,
             fired: Fired::new(),
             marks: HashMap::new(),
         }
@@ -1252,6 +1271,18 @@ impl<'a> Lowering<'a> {
                 // holding a variable length array. Built here for the reason an `alloca` is: the
                 // value is a register the rule language has no way to name, because what it holds
                 // is not a value the program computed but where the machine's stack had got to.
+                // The arguments the function was handed, saved in the prologue, and a call made
+                // out of them. Built here because neither is a value a rule could say anything
+                // about: the first is a place in the frame and the second is a call, whose
+                // arguments are a block of registers rather than values.
+                Opcode::ApplyArgs => {
+                    self.apply_args(inst)?;
+                    continue;
+                }
+                Opcode::Apply => {
+                    self.apply(inst)?;
+                    continue;
+                }
                 Opcode::StackSave => {
                     self.stack_pointer(inst, false)?;
                     continue;
@@ -5195,16 +5226,24 @@ impl<'a> Lowering<'a> {
         // Apple's AArch64 is neither. Every argument a signature does not name is in the caller's
         // memory, so there is nothing to save and the list starts at the first word past the named
         // ones.
+        //
+        // A function holding `__builtin_apply_args` asks for the same area whether it is variadic
+        // or not, because what it saves is every argument register, and the area is where the
+        // walk that binds them says where each one goes.
         let variadic = self.source.signature().variadic;
         let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory;
-        let area = (variadic && !in_memory).then(|| varargs::Area::of(self.conv));
+        let applies = self.saves_arguments();
+        let area = (variadic && !in_memory || applies).then(|| varargs::Area::of(self.conv));
         let arrived =
             abi::entry(&mut self.out, out, &types, self.conv, self.selector.abi, self.names, area)
                 .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
         for (&param, reg) in params.iter().zip(&arrived.regs) {
             self.regs[param.index()] = Some(*reg);
         }
-        if let Some(area) = area {
+        if applies {
+            self.save_arguments(out, &arrived);
+        }
+        if let (true, Some(area)) = (variadic && !in_memory, area) {
             self.save_area(out, &arrived, area);
         } else if variadic {
             let incoming = arrived.beyond.next_multiple_of(self.conv.word);
@@ -5294,6 +5333,165 @@ impl<'a> Lowering<'a> {
             let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
             self.out.build(out, store).uses(reg, class).mem(mem).finish();
         }
+    }
+
+    /// Whether the function holds a `__builtin_apply_args`, on a convention this can save the
+    /// arguments of.
+    ///
+    /// Only the one that keeps the two register files apart and saves them the way a SysV list
+    /// does, since the block is that layout with one word in front of it. On any other the call is
+    /// refused where it stands, which is [`Self::apply_args`] finding nothing saved.
+    fn saves_arguments(&self) -> bool {
+        if self.conv.list != VaList::SysV || self.conv.shared_positions {
+            return false;
+        }
+        let source = self.source;
+        source
+            .blocks()
+            .any(|block| source.insts(block).any(|inst| source[inst].opcode == Opcode::ApplyArgs))
+    }
+
+    /// The prologue of a function holding `__builtin_apply_args`, which is every argument register
+    /// it was handed and where the arguments in memory start, written into a block of its frame.
+    ///
+    /// The block is the one gcc lays out on this convention, so that a program reading it the way
+    /// gcc's manual says reads the same bytes:
+    ///
+    /// ```text
+    ///   0        where the arguments that came in memory are
+    ///   8        nothing, so that what follows is sixteen byte aligned
+    ///   16..64   the six general purpose argument registers, a word each
+    ///   64..192  the eight vector argument registers, sixteen bytes each
+    /// ```
+    ///
+    /// Which is the register save area of a variadic function with a word and a pad in front, so
+    /// the offsets are that area's plus sixteen. What is different is that every register is
+    /// written and not only the ones no parameter took: the one a parameter arrived in is written
+    /// from the register the parameter was bound to, which holds it untouched because nothing has
+    /// run yet, and the rest from the pseudos the walk made for them.
+    fn save_arguments(&mut self, out: mir::Block, arrived: &abi::Arrived) {
+        let applied = self.stack.locals.len();
+        self.stack.locals.push(Local { size: APPLY_ARGS, align: varargs::VECTOR_SLOT });
+        self.applied = Some(applied);
+        let base = self.frame_address(out, applied);
+        let overflow = self.overflow(out, 0, Span::DUMMY);
+        let head = (self.selector.abi.store)(Type::int(64)).expect("a store of an address");
+        let store = mir::Opcode::new(self.names.intern(head));
+        let mem = mir::Mem::at(mir::Operand::read(base, self.gpr));
+        self.out.build(out, store).uses(overflow, self.gpr).mem(mem).finish();
+
+        let named = arrived.named.iter().map(|&(index, at)| {
+            let reg = arrived.regs[index];
+            let class = self.out.class_of(reg).unwrap_or(self.gpr);
+            (reg, class, at)
+        });
+        let every: Vec<_> = named.chain(arrived.spare.iter().copied()).collect();
+        for (reg, class, at) in every {
+            let ty =
+                if class == self.gpr { Type::int(64) } else { Type::float(rucc_ir::Float::F128) };
+            let head = (self.selector.abi.store)(ty).expect("a store of a whole register");
+            let store = mir::Opcode::new(self.names.intern(head));
+            let up = i32::try_from(at + APPLY_REGS).expect("a block of under two gigabytes");
+            let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
+            self.out.build(out, store).uses(reg, class).mem(mem).finish();
+        }
+    }
+
+    /// One `__builtin_apply_args`, which is the address of the block the prologue wrote.
+    fn apply_args(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let Some(applied) = self.applied else { return Err(self.unsupported(inst)) };
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let block = self.at.expect("a block is being filled");
+        let reg = self.frame_address(block, applied);
+        self.regs[result.index()] = Some(reg);
+        Ok(())
+    }
+
+    /// One `__builtin_apply`, which is a call whose arguments are every register in a block
+    /// `__builtin_apply_args` answered and some bytes of the memory it says the arguments in
+    /// memory were in.
+    ///
+    /// Built as a call of fourteen arguments, six words and eight vectors, which puts each in the
+    /// register it came out of, and one object of the size the program gave, which is copied into
+    /// the bottom of the outgoing area the way a structure passed by value is. The call is made as
+    /// to a variadic function, so the count of vector registers is eight and a variadic callee
+    /// saves all of them.
+    ///
+    /// What comes back is every register a value can come back in, which is two of each file, and
+    /// they are written into a block of this function's frame whose address is the answer: the two
+    /// words at 0 and 8 and the two vectors at 16 and 32. An eighty bit value comes back on the x87
+    /// stack and is not in it, which is the one thing gcc's block holds that this one does not.
+    fn apply(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        if self.conv.list != VaList::SysV || self.conv.shared_positions {
+            return Err(self.unsupported(inst));
+        }
+        let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        let [function, saved, size] = values[..] else { return Err(self.unsupported(inst)) };
+        let size = self.number(size).ok_or_else(|| self.unsupported(inst))?;
+        let size = u32::try_from(size).map_err(|_| self.unsupported(inst))?;
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let function = self.reg_of(function)?;
+        let saved = self.reg_of(saved)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+
+        let word = Type::int(64);
+        let vector = Type::float(rucc_ir::Float::F128);
+        let area = varargs::Area::of(self.conv);
+        let load = |ty: Type| (self.selector.abi.load)(ty).expect("a load of a whole register");
+        let (load_word, load_vector) = (load(word), load(vector));
+        let mut read = |ty: Type, head: &str, class: RegClass, at: u32| {
+            let reg = self.out.new_vreg(class);
+            let opcode = mir::Opcode::new(self.names.intern(head));
+            let at = i32::try_from(at).expect("a block of under two gigabytes");
+            let mem = mir::Mem::at(mir::Operand::read(saved, self.gpr)).plus(at);
+            self.out.build(block, opcode).at(span).def(reg, class).mem(mem).finish();
+            abi::Passing { ty, reg, abi: Abi::Plain }
+        };
+        let sse = self.conv.sse_class;
+        let gpr = self.gpr;
+        let mut args = Vec::with_capacity(15);
+        for (float, ty, head, class) in
+            [(false, word, load_word, gpr), (true, vector, load_vector, sse)]
+        {
+            for index in 0..area.holds(float) {
+                let at = APPLY_REGS + area.starts_at(float) + index * area.stride(float);
+                args.push(read(ty, head, class, at));
+            }
+        }
+        if size > 0 {
+            let memory = read(word, load_word, gpr, 0);
+            let object =
+                Abi::ByVal { size: u64::from(size), align: 8, drains: rucc_ir::Drains::Nothing };
+            args.push(abi::Passing { abi: object, ..memory });
+        }
+        let returns = [word, word, vector, vector];
+        let what = abi::Calling {
+            callee: abi::Callee::Through(function),
+            args: &args,
+            returns: &returns,
+            variadic: true,
+            named: args.len(),
+            at: span,
+        };
+        let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
+            .map_err(|refused| Unsupported::Call { inst, refused })?;
+        let calls = &mut self.stack.calls;
+        *calls = Some(calls.unwrap_or(0).max(made.outgoing));
+
+        let back = self.stack.locals.len();
+        self.stack.locals.push(Local { size: APPLY_BACK, align: varargs::VECTOR_SLOT });
+        let base = self.frame_address(block, back);
+        for ((&reg, ty), at) in made.results.iter().zip(returns).zip([0, 8, 16, 32]) {
+            let class = if ty == word { gpr } else { sse };
+            let head = (self.selector.abi.store)(ty).expect("a store of a whole register");
+            let store = mir::Opcode::new(self.names.intern(head));
+            let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(at);
+            self.out.build(block, store).at(span).uses(reg, class).mem(mem).finish();
+        }
+        let answer = self.frame_address(block, back);
+        self.regs[result.index()] = Some(answer);
+        Ok(())
     }
 
     /// The address of one of the function's stack objects, in a fresh register.

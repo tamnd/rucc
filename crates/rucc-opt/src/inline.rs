@@ -105,6 +105,8 @@ pub enum InlineFailure {
     ComputedGoto,
     /// The body calls `setjmp`, whose frame would become the caller's.
     Setjmp,
+    /// The body saves the registers it was called with, which in the caller hold the caller's.
+    ApplyArgs,
     /// The IR has memory SSA in it, which this step runs before.
     MemorySsa,
     /// A `va_arg_pack` whose arguments cannot be forwarded to where it is.
@@ -127,6 +129,7 @@ impl InlineFailure {
             Self::VaStart => "always_inline call not inlined: callee uses va_start",
             Self::ComputedGoto => "always_inline call not inlined: callee has a computed goto",
             Self::Setjmp => "always_inline call not inlined: callee calls setjmp",
+            Self::ApplyArgs => "always_inline call not inlined: callee uses __builtin_apply_args",
             Self::MemorySsa => "always_inline call not inlined: memory SSA present",
             Self::Pack => "always_inline call not inlined: va_arg_pack cannot be forwarded",
             Self::Alloca => "always_inline call not inlined: callee calls alloca",
@@ -144,6 +147,7 @@ impl InlineFailure {
             Self::VaStart => "inline call not inlined: callee uses va_start",
             Self::ComputedGoto => "inline call not inlined: callee has a computed goto",
             Self::Setjmp => "inline call not inlined: callee calls setjmp",
+            Self::ApplyArgs => "inline call not inlined: callee uses __builtin_apply_args",
             Self::MemorySsa => "inline call not inlined: memory SSA present",
             Self::Pack => "inline call not inlined: va_arg_pack cannot be forwarded",
             Self::Alloca => "inline call not inlined: callee calls alloca",
@@ -362,6 +366,7 @@ fn check(
                     return Err(InlineFailure::Alloca);
                 }
                 Opcode::SetjmpMarker => return Err(InlineFailure::Setjmp),
+                Opcode::ApplyArgs => return Err(InlineFailure::ApplyArgs),
                 Opcode::MemEntry => return Err(InlineFailure::MemorySsa),
                 Opcode::VaArgPack => packs.extend(callee[inst].results()),
                 Opcode::VaArgPackLen => counted = true,

@@ -231,6 +231,8 @@ impl Callee {
                 _ => Some(Self::Asm),
             },
             Opcode::InlineAsm => Some(Self::Asm),
+            // A call through an address whose arguments are a block rather than operands.
+            Opcode::Apply => Some(Self::Indirect),
             _ => None,
         }
     }

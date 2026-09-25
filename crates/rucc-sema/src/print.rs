@@ -538,6 +538,8 @@ impl<'a> Printer<'a> {
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
+            ExprKind::ApplyArgs => "apply-args".to_owned(),
+            ExprKind::Apply { size, .. } => format!("apply {size}"),
             ExprKind::ObjectSize { kind, .. } => format!("object-size {kind}"),
             ExprKind::ConstantP { .. } => "constant-p".to_owned(),
             ExprKind::Alloca { .. } => "alloca".to_owned(),
@@ -559,7 +561,12 @@ impl<'a> Printer<'a> {
             | ExprKind::Unreachable
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
-            | ExprKind::ThreadPointer => {}
+            | ExprKind::ThreadPointer
+            | ExprKind::ApplyArgs => {}
+            ExprKind::Apply { function, args, .. } => {
+                self.expr(function);
+                self.expr(args);
+            }
             // A compound literal is a declaration of its own, printed where it is used, since
             // it has no other place in the tree to be printed from.
             ExprKind::CompoundLiteral(decl) => self.decl(decl),

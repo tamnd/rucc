@@ -564,7 +564,10 @@ fn reaches(func: &Func, from: &HashMap<Value, Params>, at: &HashMap<Symbol, Reac
                 }
                 // Nothing here knows what any of these reach, so every pointer they are handed is
                 // one that could go anywhere and the storage they end could be anybody's.
-                Opcode::CallIndirect | Opcode::InlineAsm | Opcode::TargetIntrinsic => {
+                Opcode::CallIndirect
+                | Opcode::Apply
+                | Opcode::InlineAsm
+                | Opcode::TargetIntrinsic => {
                     out.frees_other = true;
                     for &arg in args {
                         out.kept = out.kept.union(known(arg));

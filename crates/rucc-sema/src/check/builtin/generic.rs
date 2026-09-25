@@ -273,6 +273,11 @@ impl Checker<'_> {
         if let Some(answer) = self.shuffle_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // The pair that passes on the arguments a function was called with, which is the
+        // registers on the way in and a call built from them. In `check/builtin/apply.rs`.
+        if let Some(answer) = self.apply_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         let spelled = self.text(name);
         let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
         if generic.name == CONSTANT_P {
@@ -739,6 +744,7 @@ mod tests {
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
+                || crate::check::builtin::apply::is_family(feature.name)
                 || syntax.contains(&feature.name);
             assert!(known, "{} has neither a signature nor a rule", feature.name);
         }

@@ -1037,7 +1037,7 @@ impl<'a> Verifier<'a> {
                     self.error(format!("splat produces a vector and this one produces {}", res(0)));
                 }
             }
-            Opcode::GlobalAddr | Opcode::StackSave | Opcode::ThreadPointer => {
+            Opcode::GlobalAddr | Opcode::StackSave | Opcode::ThreadPointer | Opcode::ApplyArgs => {
                 if results == 1 && !res(0).is_ptr() {
                     self.error(format!(
                         "{} produces a pointer and this one produces {}",
@@ -1583,6 +1583,22 @@ impl<'a> Verifier<'a> {
                     if results == 1 {
                         self.produces(opcode, res(0), arg(0));
                     }
+                }
+            }
+
+            // A call built from a block of saved arguments: the function, the block and how many
+            // bytes of arguments in memory go with it, and the block of what came back.
+            Opcode::Apply => {
+                if self.takes(opcode, arity, 3) {
+                    self.pointer(opcode, arg(0), 0);
+                    self.pointer(opcode, arg(1), 1);
+                    self.integer(opcode, arg(2), 2);
+                }
+                if results == 1 && !res(0).is_ptr() {
+                    self.error(format!(
+                        "apply produces a pointer and this one produces {}",
+                        res(0)
+                    ));
                 }
             }
 

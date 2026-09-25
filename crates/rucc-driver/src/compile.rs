@@ -7107,6 +7107,59 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call"), "{text}");
     }
 
+    /// A function holding `__builtin_apply_args` writes every argument register into its frame
+    /// before anything else runs, the ones its parameters took as well as the ones they did not,
+    /// and the answer is the address of where it wrote them.
+    #[test]
+    fn the_arguments_a_function_was_called_with_are_saved_on_the_way_in() {
+        let text =
+            mir("void *f(int a, double b) { (void)a; (void)b; return __builtin_apply_args(); }\n");
+        // Six words and the address the arguments in memory start at, and eight vectors.
+        assert!(text.matches("x64.mov_mr_64").count() >= 7, "{text}");
+        assert!(text.matches("x64.movaps_mr").count() >= 8, "{text}");
+        for reg in ["$rdi", "$rsi", "$rdx", "$rcx", "$r8", "$r9", "$xmm0", "$xmm7"] {
+            assert!(text.contains(reg), "{reg} is not saved in\n{text}");
+        }
+
+        // And a function without one saves nothing.
+        let text = mir("int f(int a) { return a; }\n");
+        assert!(!text.contains("movaps_mr"), "{text}");
+    }
+
+    /// `__builtin_apply` loads every argument register out of the block it is given, copies the
+    /// bytes of arguments in memory it was told about, and calls through the address, with eight
+    /// in `%al` since every vector register may hold an argument.
+    #[test]
+    fn a_call_built_from_saved_arguments_loads_every_argument_register() {
+        let text = mir(concat!(
+            "void *g(void *args, void (*h)()) {\n",
+            "  return __builtin_apply(h, args, 64);\n",
+            "}\n",
+        ));
+        assert!(text.matches("x64.mov_rm_64").count() >= 7, "{text}");
+        assert!(text.matches("x64.movaps_rm").count() >= 8, "{text}");
+        assert!(text.contains("call"), "{text}");
+        // What came back is written out, two words and two vectors.
+        assert!(text.matches("x64.movaps_mr").count() >= 2, "{text}");
+
+        // The size is a number the frame can be laid out with, and nothing else is.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(
+            &opts,
+            "void *g(void *a, void (*h)(), int n) { return __builtin_apply(h, a, n); }\n",
+        );
+        assert!(result.failed(), "{:?}", result.messages);
+        assert!(
+            result
+                .messages
+                .iter()
+                .any(|m| m.contains("the size given to '__builtin_apply' is a constant")),
+            "{:?}",
+            result.messages
+        );
+    }
+
     /// A shuffle whose operands gcc would refuse is refused, in gcc's words.
     #[test]
     fn a_shuffle_refuses_what_gcc_refuses() {

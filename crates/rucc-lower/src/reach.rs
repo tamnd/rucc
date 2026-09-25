@@ -234,7 +234,12 @@ impl Reach<'_> {
             | ExprKind::Unreachable
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
-            | ExprKind::ThreadPointer => {}
+            | ExprKind::ThreadPointer
+            | ExprKind::ApplyArgs => {}
+            ExprKind::Apply { function, args, .. } => {
+                self.expr(function);
+                self.expr(args);
+            }
             // The one node that is a reference. Whether it is a call, an address or a read is
             // not asked, because a definition has to exist for all three.
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => self.mark(decl),

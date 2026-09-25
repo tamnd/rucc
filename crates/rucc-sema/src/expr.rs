@@ -477,6 +477,27 @@ pub enum ExprKind {
     /// about the machine the program is running on rather than anything computed from the program,
     /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
     ThreadPointer,
+    /// `__builtin_apply_args()`, the address of a block holding every argument this function was
+    /// called with, the ones in registers and where the ones in memory are.
+    ///
+    /// It has no operands for the reason the node above has none, and what is in the block is
+    /// written by the back end on the way into the function, before anything could have changed a
+    /// register the arguments came in. See `check/builtin/apply.rs`.
+    ApplyArgs,
+    /// `__builtin_apply(function, args, size)`, a call to the function with the arguments a
+    /// `__builtin_apply_args` saved, answering the address of a block holding what came back.
+    ///
+    /// The size is how many bytes of the caller's arguments in memory are passed on, and it is a
+    /// number here rather than an expression because it is the size of an area in the frame,
+    /// which has to be known when the frame is laid out. See `check/builtin/apply.rs`.
+    Apply {
+        /// The function to call.
+        function: ExprId,
+        /// The block `__builtin_apply_args` answered.
+        args: ExprId,
+        /// How many bytes of arguments in memory go with the call.
+        size: u32,
+    },
     /// `__builtin_object_size(p, kind)` where the address is not one whose object can be seen by
     /// looking at the expression, asked again of the IR.
     ///

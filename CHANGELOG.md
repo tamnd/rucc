@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__builtin_apply_args` and `__builtin_apply` on x86-64 Linux. A function holding the first saves every argument register and where its arguments in memory start into a block of its frame in the prologue, and the second calls a function with every register loaded out of such a block and as many bytes of the arguments in memory copied as the program asked for, answering a block holding every register a value can come back in. Neither is inlined or given constants by the passes that look across calls, since what it saves is the call as it was made. The size given to `__builtin_apply` has to be a constant. `__builtin_return` is not here yet. It used to be an undeclared name.
 - The assembler reads `fprem` and `fnstsw`, which gcc writes when it inlines `fmod`, and an x87 instruction at any depth of the stack, such as `fstp %st(1)`, rather than only the depths the compiler writes (#1863).
 
 ### Changed
