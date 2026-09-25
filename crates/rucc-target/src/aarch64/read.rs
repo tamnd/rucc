@@ -26,6 +26,8 @@ pub struct Line {
     /// The symbol it names, when it names one. [`Value::Symbol`] and [`Offset::Symbol`] say where
     /// and which part of its address, and this says which symbol.
     pub symbol: Option<String>,
+    /// What is added to the symbol's address, which is the `8` in `:lo12:table+8`.
+    pub addend: i64,
 }
 
 /// Why a line could not be read.
@@ -61,8 +63,13 @@ pub fn read(text: &str) -> Result<Line, Error> {
     if mnemonic.is_empty() {
         return Err(error(text));
     }
-    let mut line =
-        Line { mnemonic: mnemonic.to_ascii_lowercase(), values: Vec::new(), symbol: None };
+    let mut line = Line {
+        mnemonic: mnemonic.to_ascii_lowercase(),
+        values: Vec::new(),
+        symbol: None,
+        addend: 0,
+    };
+    let mut named = (None, 0);
     let pieces = split(rest);
     let mut at = 0;
     while at < pieces.len() {
@@ -70,7 +77,7 @@ pub fn read(text: &str) -> Result<Line, Error> {
         if piece.starts_with('[') {
             // A post-indexed address is written as two operands, the address and then the amount
             // it moves by, and it is one operand to the machine.
-            let mut addr = address(piece, &mut line.symbol)?;
+            let mut addr = address(piece, &mut named)?;
             if addr.mode == Mode::Offset && piece.ends_with(']') && at + 1 < pieces.len() {
                 if let (Offset::Imm(0), Some(imm)) =
                     (addr.offset, pieces[at + 1].strip_prefix('#').and_then(number))
@@ -82,12 +89,16 @@ pub fn read(text: &str) -> Result<Line, Error> {
             }
             line.values.push(Value::Mem(addr));
         } else {
-            line.values.push(operand(piece, &mut line.symbol)?);
+            line.values.push(operand(piece, &mut named)?);
         }
         at += 1;
     }
+    (line.symbol, line.addend) = named;
     Ok(line)
 }
+
+/// The symbol a line names so far, and what is added to it.
+type Named = (Option<String>, i64);
 
 /// The operands, split at the commas that are not inside an address.
 fn split(text: &str) -> Vec<&str> {
@@ -111,7 +122,7 @@ fn split(text: &str) -> Vec<&str> {
 }
 
 /// One operand that is not an address.
-fn operand(piece: &str, symbol: &mut Option<String>) -> Result<Value, Error> {
+fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
     let lower = piece.to_ascii_lowercase();
     if let Some(value) = register(&lower) {
         return Ok(value);
@@ -241,8 +252,12 @@ fn number(text: &str) -> Option<i64> {
     Some(if negative { value.wrapping_neg() } else { value })
 }
 
-/// A symbol with or without an operator in front of it, saving its name.
-fn reference(text: &str, symbol: &mut Option<String>) -> Result<Operator, Error> {
+/// A symbol with or without an operator in front of it, saving its name and what is added to it.
+///
+/// A name is what GNU as takes as one, or a numbered local label with the `b` or `f` that says
+/// which way to look for it. A number added or taken away after the name is the addend, which is
+/// how a compiler reaches a field of a variable without a second instruction.
+fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
     let (operator, name) = match text.strip_prefix(':') {
         Some(rest) => {
             let (operator, name) = rest.split_once(':').ok_or_else(|| error(text))?;
@@ -260,12 +275,25 @@ fn reference(text: &str, symbol: &mut Option<String>) -> Result<Operator, Error>
         }
         None => (Operator::Plain, text),
     };
-    let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || "_.$".contains(c))
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.$".contains(c));
-    if !valid {
+    let (name, addend) = match name.char_indices().skip(1).find(|&(_, c)| c == '+' || c == '-') {
+        Some((at, sign)) => {
+            let digits = name[at + 1..].trim();
+            let magnitude = number(digits).filter(|_| !digits.starts_with('-'));
+            let magnitude = magnitude.ok_or_else(|| error(text))?;
+            (name[..at].trim(), if sign == '-' { magnitude.wrapping_neg() } else { magnitude })
+        }
+        None => (name, 0),
+    };
+    let symbolic =
+        name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || "_.$".contains(c))
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.$".contains(c));
+    let numbered = name.len() > 1
+        && name.ends_with(['b', 'f'])
+        && name[..name.len() - 1].bytes().all(|b| b.is_ascii_digit());
+    if !symbolic && !numbered {
         return Err(error(text));
     }
-    *symbol = Some(name.to_owned());
+    *symbol = (Some(name.to_owned()), addend);
     Ok(operator)
 }
 
@@ -328,7 +356,7 @@ fn system(name: &str) -> Option<u16> {
 }
 
 /// An address, `[x0]`, `[x0, #8]`, `[x0, #8]!`, `[x0, x1, lsl #3]` or `[x0, :lo12:name]`.
-fn address(piece: &str, symbol: &mut Option<String>) -> Result<Addr, Error> {
+fn address(piece: &str, symbol: &mut Named) -> Result<Addr, Error> {
     let (inner, mode) = if let Some(inner) = piece.strip_suffix("]!") {
         (inner, Mode::Pre)
     } else {
@@ -407,6 +435,14 @@ mod tests {
         let line = read("bl printf").unwrap();
         assert_eq!(line.values, [Value::Symbol(Operator::Plain)]);
         assert_eq!(line.symbol.as_deref(), Some("printf"));
+        let line = read("add x0, x0, :lo12:table+24").unwrap();
+        assert_eq!((line.symbol.as_deref(), line.addend), (Some("table"), 24));
+        let line = read("adrp x1, names-8").unwrap();
+        assert_eq!((line.symbol.as_deref(), line.addend), (Some("names"), -8));
+        let line = read("cbnz w3, 1b").unwrap();
+        assert_eq!((line.symbol.as_deref(), line.addend), (Some("1b"), 0));
+        assert!(read("b 1x").is_err());
+        assert!(read("b table+").is_err());
     }
 
     #[test]

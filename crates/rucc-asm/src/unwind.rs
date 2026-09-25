@@ -227,17 +227,21 @@ impl Table {
             uleb(&mut self.out.bytes, 1);
             self.out.bytes.push(PCREL_SDATA4);
         }
-        // The state a call leaves behind, which is where every function on this machine starts: the
-        // frame ends one word above the stack pointer, because the call pushed a return address,
-        // and that return address is the word below the end.
+        // The state a call leaves behind, which is where every function on this machine starts. On
+        // x86-64 the frame ends one word above the stack pointer, because the call pushed a return
+        // address, and that return address is the word below the end. On AArch64 the call pushed
+        // nothing and left the return address in a register, so the frame ends at the stack
+        // pointer and there is no slot to say anything about.
         let sp = conv
             .dwarf(conv.int_class, conv.stack_pointer)
             .expect("the stack pointer has a number in the table beside the register file");
         self.out.bytes.push(DEF_CFA);
         uleb(&mut self.out.bytes, u64::from(sp));
         uleb(&mut self.out.bytes, u64::from(conv.return_address));
-        let below = -i32::try_from(conv.return_address).expect("a word");
-        self.saved(conv.dwarf_return_address, below);
+        if conv.return_address != 0 {
+            let below = -i32::try_from(conv.return_address).expect("a word");
+            self.saved(conv.dwarf_return_address, below);
+        }
         self.pad(start);
     }
 

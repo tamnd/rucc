@@ -761,7 +761,8 @@ fn look_up(
 fn far(builder: &mut Builder<'_>, plan: &Plan, name: Symbol, low: i128, index_bits: u32) -> Value {
     let (base, read) = look_up(builder, plan, name, low, Type::int(32), index_bits);
     let word = Type::int(index_bits);
-    let away = if index_bits > 32 { builder.unary(Opcode::SExt, read, word) } else { read };
+    let wider = index_bits > 32; // not a threshold: the cell is 32 bits
+    let away = if wider { builder.unary(Opcode::SExt, read, word) } else { read };
     let start = builder.unary(Opcode::PtrToInt, base, word);
     let at = builder.binary(Opcode::Add, start, away, Flags::NONE);
     builder.unary(Opcode::IntToPtr, at, Type::PTR)

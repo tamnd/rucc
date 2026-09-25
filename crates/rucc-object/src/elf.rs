@@ -46,7 +46,24 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
-        Reference::Address { .. } | Reference::Image => return None,
+        Reference::Address { .. } | Reference::Image | Reference::Field(_) => return None,
+    })
+}
+
+/// The same for AArch64.
+///
+/// A field of an instruction is the relocation its fixup names. What a table of data holds is the
+/// same question it is on the other machine with different numbers: an address at eight bytes or
+/// at four, and a distance from the four bytes themselves, which is what an unwind record says
+/// about its function. Nothing for the kinds that are about an x86-64 instruction, since an
+/// instruction here asks through a field.
+pub(crate) fn r_type_aarch64(reference: Reference) -> Option<elf::RelocationType> {
+    Some(match reference {
+        Reference::Field(fixup) => elf::RelocationType(fixup.elf()),
+        Reference::Address { bytes: 8 } => elf::R_AARCH64_ABS64,
+        Reference::Address { bytes: 4 } => elf::R_AARCH64_ABS32,
+        Reference::Data | Reference::Away => elf::R_AARCH64_PREL32,
+        _ => return None,
     })
 }
 

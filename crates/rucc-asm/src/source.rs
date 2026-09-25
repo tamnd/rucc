@@ -34,8 +34,10 @@ use rucc_mir::CfiOp;
 use rucc_object::{
     Array, Assembled, Binding, Extent, Held, Name, Part, Reference, Reloc, Shape, Sort, Visibility,
 };
-use rucc_target::ObjectFormat;
+use rucc_target::aarch64::{self, AAPCS64};
 use rucc_target::x86_64::{SYSV, gpr_named, nops};
+use rucc_target::{CallRegs, ObjectFormat};
+use rucc_tuple::Arch;
 
 /// What an instruction says about the place in it that names something, under a name that does not
 /// collide with the [`Sort`] an ELF symbol has.
@@ -59,21 +61,28 @@ impl std::fmt::Display for Trouble {
 
 impl std::error::Error for Trouble {}
 
-/// What a file of assembly says, as the sections and names an object file is written from.
+/// What a file of assembly for this machine says, as the sections and names an object file is
+/// written from.
+///
+/// The machine is x86-64 or AArch64. The directives are the same on both, apart from a few that
+/// gas spells differently on each, and so are the labels and the expressions. What differs is the
+/// instructions, which on AArch64 are read by `rucc_target::aarch64::read` and encoded by the same
+/// encoder the code generator's listings are checked against.
 ///
 /// # Errors
 ///
 /// [`Trouble`] for a directive this does not know, an instruction it has no bytes for, an operand
 /// it cannot read, an expression that does not reduce to something a relocation can say, or a file
 /// that is malformed. Every one of them carries the line it was on.
-pub fn read(text: &str) -> Result<Assembled, Trouble> {
+pub fn read(text: &str, arch: Arch) -> Result<Assembled, Trouble> {
     // Every branch starts out in its two byte form and the file is read again with the ones that
     // did not reach written long, until none is left over. A branch made long never goes back, so
     // each pass has more long ones than the last and there are only so many branches, which is how
     // gas does it and why the two come out the same size.
     let mut long = std::collections::HashSet::new();
     loop {
-        let mut reader = Reader { long: long.clone(), ..Reader::default() };
+        let aarch64 = arch == Arch::Aarch64;
+        let mut reader = Reader { long: long.clone(), aarch64, ..Reader::default() };
         reader.run(text)?;
         match reader.finish()? {
             Ok(done) => return Ok(done),
@@ -120,6 +129,9 @@ struct Fixup {
     /// Whether this is a jump at all, short or long, which gas works out to a global name where it
     /// leaves a call to one for the linker.
     jump: bool,
+    /// Which field of an AArch64 instruction these bytes are, where the answer goes into some bits
+    /// of the word rather than into bytes of its own.
+    field: Option<aarch64::Fixup>,
     line: usize,
 }
 
@@ -207,6 +219,8 @@ struct Reader {
     branches: usize,
     /// Every alignment in the file, in the order it was written.
     aligns: Vec<Aligned>,
+    /// Whether the file is for AArch64 rather than x86-64.
+    aarch64: bool,
     line: usize,
 }
 
@@ -280,7 +294,10 @@ impl Reader {
                 i += 2;
                 continue;
             }
-            if rest.starts_with("//") || ch == '#' {
+            // On AArch64 a `#` in front of a number is part of the number, so only one that starts
+            // the line is a comment, which is still enough for the line markers.
+            let marker = ch == '#' && (!self.aarch64 || out.trim().is_empty());
+            if rest.starts_with("//") || marker {
                 return Ok(out);
             }
             out.push(ch);
@@ -313,6 +330,9 @@ impl Reader {
         }
         if let Some(directive) = word.strip_prefix('.') {
             return self.directive(directive, rest);
+        }
+        if self.aarch64 {
+            return self.a64(text);
         }
         if let Some((word, rest)) = repeated(word, rest) {
             return self.instruction(&word, rest);
@@ -386,9 +406,51 @@ impl Reader {
                 slot,
                 branch,
                 jump,
+                field: None,
                 line: self.line,
             });
         }
+        Ok(())
+    }
+
+    /// One AArch64 instruction, as the four bytes of it.
+    ///
+    /// The same division as for x86-64: the word comes back with zeros where a name goes, and the
+    /// name is left as a fixup for the end of the file. What is different is what the fixup is
+    /// counted from. A branch, `adr` and a literal load count from where the instruction starts,
+    /// so the sum is the name minus that and one in this section is worked out here. The rest name
+    /// a page or the low bits of an address, which only the linker knows, so the sum is the name.
+    fn a64(&mut self, text: &str) -> Result<(), Trouble> {
+        let line = aarch64::read(text).map_err(|why| self.bad(&why.to_string()))?;
+        let encoded = aarch64::encode(&line.mnemonic, &line.values)
+            .map_err(|why| self.bad(&why.to_string()))?;
+        let (part, at) = (self.here, self.at());
+        self.put(&encoded.word.to_le_bytes())?;
+        let (Some(field), Some(name)) = (encoded.fixup, line.symbol) else {
+            return Ok(());
+        };
+        let name = self.named(&name)?;
+        self.sym(&name);
+        let mut terms = vec![Term { coeff: 1, what: What::Symbol(name) }];
+        if relative(field) {
+            terms.push(Term { coeff: -1, what: What::Here { part, at: at as i64 } });
+        }
+        let jump = matches!(
+            field,
+            aarch64::Fixup::Jump26 | aarch64::Fixup::CondBr19 | aarch64::Fixup::TestBr14
+        );
+        self.fixups.push(Fixup {
+            part,
+            at,
+            width: 4,
+            sum: Sum { constant: line.addend, terms },
+            reach: Reach::Near,
+            slot: Reference::Data,
+            branch: None,
+            jump,
+            field: Some(field),
+            line: self.line,
+        });
         Ok(())
     }
 
@@ -500,7 +562,7 @@ impl Reader {
                     len: 0,
                     sym,
                     rows: Vec::new(),
-                    cfa: 8,
+                    cfa: if self.aarch64 { 0 } else { 8 },
                     remembered: Vec::new(),
                 };
                 self.frame = Some(frame);
@@ -598,6 +660,11 @@ impl Reader {
         if let Ok(number) = text.parse::<u16>() {
             return Ok(number);
         }
+        if self.aarch64 {
+            return aarch64_dwarf(text).ok_or_else(|| {
+                self.bad(&format!("'{text}' is not a register a frame rule can name"))
+            });
+        }
         let name = text.strip_prefix('%').unwrap_or(text);
         if name == "rip" {
             return Ok(SYSV.dwarf_return_address);
@@ -634,9 +701,11 @@ impl Reader {
             }
 
             "byte" => self.data(&args, 1)?,
+            // `.word` is two bytes on x86-64 and four on AArch64, where a word is an instruction.
+            "word" if self.aarch64 => self.data(&args, 4)?,
             "short" | "word" | "hword" | "value" | "2byte" => self.data(&args, 2)?,
             "long" | "int" | "4byte" => self.data(&args, 4)?,
-            "quad" | "8byte" => self.data(&args, 8)?,
+            "quad" | "8byte" | "xword" | "dword" => self.data(&args, 8)?,
 
             "ascii" => self.text_bytes(&args, false)?,
             "asciz" | "string" => self.text_bytes(&args, true)?,
@@ -902,6 +971,7 @@ impl Reader {
                 slot: Reference::Got,
                 branch: None,
                 jump: false,
+                field: None,
                 line: self.line,
             });
         }
@@ -972,6 +1042,15 @@ impl Reader {
             Some(fill) => self.pad(need, fill),
             // Not one byte at a time, which is what gas does as well: the padding in front of a
             // loop is fallen into, and a few long nops are fewer instructions than many short ones.
+            // On AArch64 the no-op is a word, and padding that is not a whole number of words is
+            // zeros up to the next one, which nothing can be walking through.
+            None if exec && self.aarch64 => {
+                let mut bytes = vec![0u8; (need % 4) as usize];
+                for _ in 0..need / 4 {
+                    bytes.extend_from_slice(&A64_NOP.to_le_bytes());
+                }
+                self.put(&bytes)
+            }
             None if exec => {
                 let mut bytes = Vec::new();
                 nops(usize::try_from(need).unwrap_or(usize::MAX), &mut bytes);
@@ -1299,7 +1378,8 @@ impl Reader {
             })
             .collect();
         let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
-        let Ok(table) = crate::unwind::table(&funcs, &rows, &SYSV, ObjectFormat::Elf) else {
+        let conv: &CallRegs = if self.aarch64 { &AAPCS64 } else { &SYSV };
+        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, ObjectFormat::Elf) else {
             return;
         };
         for frame in &self.frames {
@@ -1468,6 +1548,10 @@ impl Reader {
 
     fn resolve_fixups(&mut self) -> Result<(), Trouble> {
         for fixup in std::mem::take(&mut self.fixups) {
+            if let Some(field) = fixup.field {
+                self.field(&fixup, field)?;
+                continue;
+            }
             let line = fixup.line;
             let bad = |why: String| Trouble { line, why };
             // A name reached through the global offset table, or through the one entry of it a
@@ -1633,6 +1717,70 @@ impl Reader {
                 after,
             });
         }
+        Ok(())
+    }
+
+    /// A field of an AArch64 instruction, filled in here when it is a distance within the section
+    /// and left to the linker otherwise.
+    ///
+    /// Only a distance is filled in. The page `adrp` names and the low bits an `add` or a load
+    /// carries are parts of an address, and nothing has an address until the linker has placed
+    /// it, so those are a relocation even against a label in the same section, which is what gas
+    /// writes for them too. The addend is the constant the instruction was written with, since a
+    /// relocation on this machine counts from where the instruction starts, which is where the
+    /// hole is.
+    fn field(&mut self, fixup: &Fixup, field: aarch64::Fixup) -> Result<(), Trouble> {
+        let line = fixup.line;
+        let bad = |why: String| Trouble { line, why };
+        let residue = self.reduce_kept(&fixup.sum, fixup.jump).map_err(bad)?;
+        let (name, addend) = match residue.left.as_slice() {
+            [] if relative(field) => {
+                let at = fixup.at as usize;
+                let bytes = &mut self.parts[fixup.part].bytes[at..at + 4];
+                let word = u32::from_le_bytes(bytes.try_into().expect("four bytes"));
+                let word = field.apply(word, residue.constant).ok_or_else(|| {
+                    bad(format!("{} is out of the reach of {}", residue.constant, field.name()))
+                })?;
+                bytes.copy_from_slice(&word.to_le_bytes());
+                return Ok(());
+            }
+            [Left { coeff: 1, what: What::Symbol(name), .. }] if !relative(field) => {
+                (name.clone(), residue.constant)
+            }
+            [
+                Left { coeff: 1, what: What::Symbol(name), .. },
+                Left { coeff: -1, at: Some((part, offset)), .. },
+            ]
+            | [
+                Left { coeff: -1, at: Some((part, offset)), .. },
+                Left { coeff: 1, what: What::Symbol(name), .. },
+            ] if relative(field) && *part == fixup.part => {
+                (name.clone(), residue.constant + fixup.at as i64 - offset)
+            }
+            _ => {
+                return Err(bad(format!(
+                    "an expression that {} cannot say, which is a name and a number added to it",
+                    field.name()
+                )));
+            }
+        };
+        if let Some(&sym) = self.known.get(&name) {
+            if self.syms[sym].numbered && self.syms[sym].at != Held::Undefined {
+                self.relocated.insert(sym);
+            } else if self.syms[sym].numbered {
+                let number = name.split('\u{1}').next().unwrap_or(&name);
+                return Err(bad(format!(
+                    "'{number}f' goes on to a '{number}:' and there is none below it"
+                )));
+            }
+        }
+        self.parts[fixup.part].relocs.push(Reloc {
+            at: fixup.at as usize,
+            symbol: name,
+            kind: Reference::Field(field),
+            addend,
+            after: 0,
+        });
         Ok(())
     }
 
@@ -2128,6 +2276,46 @@ impl Reader {
 }
 
 /// How far to shift by, which has to be a count and not a number that happens to be negative.
+/// `nop` on AArch64, which is what the padding in front of an instruction is made of there.
+const A64_NOP: u32 = 0xd503_201f;
+
+/// Whether an AArch64 field is a distance from the instruction it is in, which is the one kind a
+/// file can work out on its own.
+fn relative(field: aarch64::Fixup) -> bool {
+    use aarch64::Fixup;
+    matches!(
+        field,
+        Fixup::Jump26
+            | Fixup::Call26
+            | Fixup::CondBr19
+            | Fixup::TestBr14
+            | Fixup::Literal19
+            | Fixup::AdrLo21
+    )
+}
+
+/// The number DWARF gives an AArch64 register, which a frame rule may name either way: `x19` is
+/// nineteen, the stack pointer is thirty one and the vector registers start at sixty four.
+fn aarch64_dwarf(text: &str) -> Option<u16> {
+    if let Ok(number) = text.parse::<u16>() {
+        return Some(number);
+    }
+    let lower = text.to_ascii_lowercase();
+    match lower.as_str() {
+        "sp" => return Some(31),
+        "fp" => return Some(29),
+        "lr" => return Some(30),
+        _ => {}
+    }
+    let (first, number) = lower.split_at(1);
+    let number = number.parse::<u16>().ok().filter(|&number| number < 32)?;
+    match first {
+        "x" | "w" if number < 31 => Some(number),
+        "v" | "q" | "d" | "s" => Some(64 + number),
+        _ => None,
+    }
+}
+
 fn shift(by: i64) -> Result<u32, String> {
     u32::try_from(by).map_err(|_| "a shift by a negative amount".to_owned())
 }
@@ -2356,7 +2544,7 @@ mod tests {
 
     /// The file, read, with a failure reported as a panic naming the line it was on.
     fn assembled(text: &str) -> Assembled {
-        match read(text) {
+        match read(text, Arch::X86_64) {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
@@ -2383,7 +2571,80 @@ mod tests {
 
     /// What a file this could not read said about it.
     fn refused(text: &str) -> Trouble {
-        read(text).err().unwrap_or_else(|| panic!("this was read and should not have been"))
+        read(text, Arch::X86_64)
+            .err()
+            .unwrap_or_else(|| panic!("this was read and should not have been"))
+    }
+
+    /// A file for AArch64, read.
+    fn aarch64(text: &str) -> Assembled {
+        match read(text, Arch::Aarch64) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        }
+    }
+
+    /// The words of a section.
+    fn words(assembled: &Assembled, name: &str) -> Vec<u32> {
+        let bytes = bytes(assembled, name);
+        bytes.chunks(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect()
+    }
+
+    #[test]
+    fn an_aarch64_branch_in_the_file_is_filled_in_and_a_name_is_left_to_the_linker() {
+        let read = aarch64(concat!(
+            "# 1 \"f.s\"\n",
+            "f:\tcbz x0, 1f // to the return\n",
+            "\tbl g\n",
+            "\tadrp x1, table+8\n",
+            "\tadd x1, x1, :lo12:table+8\n",
+            "1:\tret\n",
+            "\t.p2align 3\n",
+            "\t.word 5\n",
+        ));
+        // `cbz` reaches four words on, the padding is one `nop`, and `.word` is four bytes here.
+        assert_eq!(
+            words(&read, ".text"),
+            [0xb400_0080, 0x9400_0000, 0x9000_0001, 0x9100_0021, 0xd65f_03c0, 0xd503_201f, 5]
+        );
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (4, "g", Reference::Field(aarch64::Fixup::Call26), 0),
+                (8, "table", Reference::Field(aarch64::Fixup::AdrPage21), 8),
+                (12, "table", Reference::Field(aarch64::Fixup::AddLo12), 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_aarch64_frame_starts_at_the_stack_pointer_with_the_return_address_in_x30() {
+        let read = aarch64(concat!(
+            "f:\n\t.cfi_startproc\n\tstr x19, [sp, #-16]!\n\t.cfi_def_cfa_offset 16\n",
+            "\t.cfi_offset x19, -16\n\tldr x19, [sp], #16\n\t.cfi_restore 19\n",
+            "\t.cfi_def_cfa_offset 0\n\tret\n\t.cfi_endproc\n",
+        ));
+        let frame = bytes(&read, ".eh_frame");
+        // The two alignments, the return address column, the augmentation, and then the header's
+        // rules: the frame is at the stack pointer, 31, plus nothing, and there is no rule for x30
+        // because the call left it in the register rather than on the stack.
+        assert_eq!(&frame[12..20], &[1, 0x78, 30, 1, 0x1b, 0x0c, 31, 0]);
+        assert_eq!(&frame[20..24], &[0; 4]);
+        // x19 saved two slots below the end of the frame, after the first instruction.
+        assert!(frame.windows(5).any(|w| w == [0x44, 0x0e, 16, 0x93, 2]), "{frame:x?}");
+    }
+
+    #[test]
+    fn an_aarch64_line_that_is_not_an_instruction_is_refused_with_its_line() {
+        let trouble = read("f:\n\tadd x0, x1, #zz\n", Arch::Aarch64).unwrap_err();
+        assert_eq!(trouble.line, 2);
+        let trouble = read("\tb 1f\n", Arch::Aarch64).unwrap_err();
+        assert!(trouble.why.contains("'1f'"), "{trouble}");
+        let trouble = read("\tcbz x0, far\n\t.skip 2000000\nfar:\tret\n", Arch::Aarch64);
+        assert!(trouble.unwrap_err().why.contains("R_AARCH64_CONDBR19"));
     }
 
     #[test]

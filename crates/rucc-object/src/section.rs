@@ -685,4 +685,11 @@ pub enum Reference {
     /// records are found by walking rather than by binary search, and what they hold is the ordinary
     /// distance from the record to the function.
     Image,
+    /// Some bits of an AArch64 instruction, which the fixup says which and how to fill in.
+    ///
+    /// Its own kind rather than one of the above, because on this machine a reference is not four
+    /// bytes of distance: it is a field of a word, and a name takes two instructions to reach,
+    /// `adrp` for its page and an `add` or a load for the low twelve bits of it. Each of those is
+    /// its own relocation, and the fixup is already the name of one.
+    Field(rucc_target::aarch64::Fixup),
 }

@@ -245,7 +245,7 @@ pub(crate) fn template(
     }
     let text = crate::att::template(func, block, inst, names, directives)
         .map_err(|trouble| trouble.to_string())?;
-    let read = crate::source::read(&format!("{}\n{text}", directives.text()))
+    let read = crate::source::read(&format!("{}\n{text}", directives.text()), Arch::X86_64)
         .map_err(|trouble| trouble.why)?;
     for name in &read.names {
         let outside = name.at == Held::Undefined
@@ -700,8 +700,12 @@ impl Assembler<'_> {
                     // An address written into an image rather than reached by an instruction, and
                     // how far something is from the front of one, which is what a table of data
                     // holds. Nothing above produces either, because every reference an instruction
-                    // makes is a distance from where the instruction ends.
-                    Reference::Address { .. } | Reference::Image | Reference::Away => {
+                    // makes is a distance from where the instruction ends. The field of an AArch64
+                    // instruction is not something this machine has.
+                    Reference::Address { .. }
+                    | Reference::Image
+                    | Reference::Away
+                    | Reference::Field(_) => {
                         unreachable!("an instruction wanting an address")
                     }
                 };
