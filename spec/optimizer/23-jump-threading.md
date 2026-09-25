@@ -45,8 +45,26 @@ precisely because phi arguments are indexed by predecessor and every CFG change 
 
 **The values must still dominate.** B' is placed where B was, so anything B used still dominates it.
 But the values B' *defines* now reach C along a new edge, and C's other predecessors do not see
-them. That is handled by C's block parameters, which is to say, by the fact that any value crossing
-a join in rucc's IR is already an explicit argument. The verifier's dominance check is the backstop.
+them. The values that cross into C as arguments are handled by C's block parameters, which is to
+say, by the fact that any value crossing a join in rucc's IR is already an explicit argument. The
+verifier's dominance check is the backstop.
+
+That covers the values B passes on, and it does not cover the values B defines that a block below C
+reads with nothing carrying them there. Block parameters make that legal, since B dominated the
+reader, and after the thread B no longer does. The corpus found this the hard way: `raw < 15 ? 15 :
+raw` puts `raw` in a parameter of the join and the arm that keeps it reads the parameter directly,
+and threading past the join compiled to a program that printed the wrong number. Of the 623 edges
+the corpus has that decide the branch they arrive at, 619 are in this position.
+
+**What `crates/rucc-opt/src/thread.rs` does.** B' takes no parameters. Along the one edge being
+threaded they are the arguments A passes, so those are put into the copied instructions directly and
+A's edge is pointed at B' carrying nothing. Each value of B that is read outside B then has two
+definitions, B's and B''s, and every read gets the one that reaches it by SSA construction for one
+variable: a block parameter goes on each block of the iterated dominance frontier of B and B' where
+the value is still live, the edges into it carry whichever definition reached the end of the block
+they leave, and each read takes the nearest definition up the dominator tree. Only blocks with no
+effect in them are copied, so what the copy repeats is arithmetic and not stores, and each copied
+instruction has to pass the same check loop header copying uses (tamnd/rucc#557).
 
 ## 23.2 Forward threading and the DOM pass
 
@@ -120,6 +138,12 @@ within straight-line code, because it interacts with loop structure.
 bound; these give a local one, and the local one is what stops a single pathological function from
 consuming the whole budget.
 
+They are in `crates/rucc-cost/src/heuristics.rs` as `JUMP_THREAD_DUPLICATION_INSNS`,
+`JUMP_THREAD_PATHS`, `JUMP_THREAD_PATH_INSNS` and `JUMP_THREAD_BACK_EDGE_SCALE`. One is read
+differently. There is no backward search here, so 64 bounds the copies one run makes in one function
+rather than the paths a search looks at. The path limit adds up the copies along one chain, where a
+copy whose edge came out of an earlier copy is the next block of the same path.
+
 ## 23.5 The loop problem, which is the reason this pass runs where it does
 
 Threading a path that enters a loop other than through its header **creates an irreducible loop**.
@@ -163,6 +187,8 @@ inside them.
 
 At `-Os` and `-Oz`, threading is restricted to the case where the duplicated block is empty, which is
 pure edge redirection with no growth. That is a small subset and it is the only part that is free.
+In rucc that is the `thread` pass, and `-O1` and above run `thread-copy` in its place, which threads
+the same edges and copies the block for the rest.
 
 ## 23.7 How this is wrong
 

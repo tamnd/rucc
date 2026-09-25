@@ -217,6 +217,34 @@ pub const LOOP_HEADER_INSNS_FOR_SPEED: u32 = 20;
 /// little else, and not at one that writes twenty instructions out twice.
 pub const LOOP_HEADER_INSNS_FOR_SIZE: u32 = 5;
 
+/// How many instructions a block may hold and still be copied onto an edge threaded past it, per
+/// section 23.4.
+///
+/// GCC's `max-jump-thread-duplication-stmts`, `Init(15)` at `gcc/params.opt:677`. The copy is the
+/// price of skipping the branch at the bottom of the block, and fifteen is where GCC stops paying it.
+pub const JUMP_THREAD_DUPLICATION_INSNS: u32 = 15;
+
+/// How many threads that need a copy one run of the pass makes in one function, per section 23.4.
+///
+/// GCC's `max-jump-thread-paths`, `Init(64)` at `gcc/params.opt:681`. GCC spends it on the paths
+/// its backward search looks at, and there is no backward search here, so it bounds the paths that
+/// are actually copied instead. Threading enables threading, and this is what stops one function
+/// with a long chain of decided branches from copying its way through all of them.
+pub const JUMP_THREAD_PATHS: u32 = 64;
+
+/// How many instructions a chain of copies may add up to, per section 23.4.
+///
+/// GCC's `max-fsm-thread-path-insns`, `Init(100)` at `gcc/params.opt:601`. A copy whose edge came
+/// out of an earlier copy is the next block of one path, and the path is what is limited.
+pub const JUMP_THREAD_PATH_INSNS: u32 = 100;
+
+/// How much more an instruction costs when the thread it is copied for crosses a back edge, per
+/// section 23.4.
+///
+/// GCC's `fsm-scale-path-stmts`, `Init(2)` at `gcc/params.opt:161`. A thread that goes round a
+/// loop is the one that changes the loop's shape, so it gets half the budget.
+pub const JUMP_THREAD_BACK_EDGE_SCALE: u32 = 2;
+
 /// How wide a reassociation tree is on a target nobody has tuned, per section 40.8.
 ///
 /// One, which means no reassociation. A chain of adds becomes a tree only to use execution units
@@ -681,6 +709,38 @@ pub const ALL: &[Constant] = &[
         document: "26.6",
         gcc: "",
         provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "JUMP_THREAD_DUPLICATION_INSNS",
+        value: 15,
+        unit: "instructions",
+        document: "23.4",
+        gcc: "max-jump-thread-duplication-stmts",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_THREAD_PATHS",
+        value: 64,
+        unit: "copied paths per function",
+        document: "23.4",
+        gcc: "max-jump-thread-paths",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_THREAD_PATH_INSNS",
+        value: 100,
+        unit: "instructions",
+        document: "23.4",
+        gcc: "max-fsm-thread-path-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "JUMP_THREAD_BACK_EDGE_SCALE",
+        value: 2,
+        unit: "times",
+        document: "23.4",
+        gcc: "fsm-scale-path-stmts",
+        provenance: Provenance::Gcc,
     },
     Constant {
         name: "REASSOC_WIDTH_UNTUNED",

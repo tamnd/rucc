@@ -310,7 +310,7 @@ impl HeaderCopy {
 /// and is not something to assume about a table nobody has checked. So the copy is restricted to
 /// the payloads it has been thought about, and an instruction with any other is declined the same
 /// way one with an effect is.
-fn repeatable(func: &Func, inst: Inst) -> bool {
+pub(crate) fn repeatable(func: &Func, inst: Inst) -> bool {
     let data = func[inst];
     if data.opcode.has_effects() || func.carries_mem(inst) {
         return false;
@@ -524,7 +524,12 @@ fn edge_args(func: &Func, term: Inst, to: Block) -> Vec<Value> {
 }
 
 /// Copies one instruction to the end of a block, under the substitution, and records its results.
-fn clone_into(func: &mut Func, into: Block, inst: Inst, map: &mut HashMap<Value, Value>) {
+pub(crate) fn clone_into(
+    func: &mut Func,
+    into: Block,
+    inst: Inst,
+    map: &mut HashMap<Value, Value>,
+) {
     let data = func[inst];
     let args: Vec<Value> =
         func[data.args].iter().map(|value| map.get(value).copied().unwrap_or(*value)).collect();
