@@ -151,6 +151,13 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// leaves if-conversion the diamonds whose value is used rather than tested, which are the ones it
 /// is for.
 ///
+/// That is only true of the threads that copy nothing, so at `-O1` and above threading is split
+/// around `phiopt`. `thread` goes first and takes the free ones. `thread-copy` goes after, and
+/// finds the same edges again plus the ones that need the block copied. The other way round, a
+/// copy takes apart a diamond `phiopt` would have made a `select`: `raw < 15 ? 15 : raw` followed
+/// by a test of the result is two conditional moves when `phiopt` sees it first, and two branches
+/// and three more saved registers when the copy does. The corpus `clamp` shapes found that.
+///
 /// `prune` is between `phiopt` and `simplify-cfg` and both sides of that are load bearing. It reads
 /// document 10's ranges off the graph to find a branch that can only go one way and a switch case
 /// nothing can reach, so it has to run after the two passes that change the graph most. What it
@@ -267,6 +274,7 @@ const O1: &[&str] = &[
     "short-circuit-free",
     "thread",
     "phiopt",
+    "thread-copy",
     "prune",
     "canon",
     "header-copy",
@@ -344,6 +352,7 @@ const O2: &[&str] = &[
     "short-circuit",
     "thread",
     "phiopt",
+    "thread-copy",
     "prune",
     "canon",
     "header-copy",
@@ -386,6 +395,7 @@ const O3: &[&str] = &[
     "short-circuit",
     "thread",
     "phiopt",
+    "thread-copy",
     "prune",
     "canon",
     "header-copy",

@@ -1,4 +1,4 @@
-//! Jump threading, the part of it that does not copy anything.
+//! Jump threading, with and without a copy of the block threaded past.
 //!
 //! Design: `spec/optimizer/23-jump-threading.md`. If, on the path through block A into block B, the
 //! condition B tests is already decided, then A should branch straight to the arm B was going to
@@ -9,7 +9,8 @@
 //! copy grows the function, and the growth compounds because each thread makes new paths on which
 //! further threading is possible. Section 23.4 is four separate limits on that growth and section
 //! 23.6 names the subset where there is none: the case where the block being threaded past does not
-//! have to be copied at all, which is pure edge redirection. That subset is what is here.
+//! have to be copied at all, which is pure edge redirection. That subset is [`FREE`], and [`COPY`]
+//! is that plus section 23.1's copy, under the limits of section 23.4.
 //!
 //! # What decides a branch here, and what does not
 //!
@@ -63,6 +64,44 @@
 //! and it is the same argument `spec/optimizer/21-cfg-simplification.md` section 21.4 needs for
 //! forwarder removal.
 //!
+//! # The copy, and what it owes the values
+//!
+//! On the corpus the free subset threads one edge out of the 623 that decide the branch they arrive
+//! at, and 619 of the rest are refused because a block below reads a value the block defines. So
+//! the copy is there to make values, not to repeat effects, and [`COPY`] only copies a block the
+//! free subset would already walk past: nothing in it has an effect, and nothing in it carries a
+//! side table entry [`crate::header_copy`] has not been checked against. What changes is that its
+//! values may be read below and carried on the arm.
+//!
+//! The copy is made on the one edge being threaded. It has no parameters, since along that edge
+//! they are the arguments the edge carries, it holds the block's instructions with those arguments
+//! put in, and it ends in a jump to the arm the edge decides. The edge is pointed at it. The arm's
+//! arguments come from the copy, so a value the block worked out is the copy's version of it.
+//!
+//! What that leaves is every read of the block's values from somewhere else. The block no longer
+//! dominates them, since the copy reaches some of them as well, so each value now has two
+//! definitions and a read below needs whichever one reached it. That is SSA construction for one
+//! variable with two definitions, and it is done the classical way: a block parameter goes on each
+//! block in the iterated dominance frontier of the block and its copy where the value is still
+//! wanted, the edges into it carry what reached the end of the block they leave, and every read is
+//! of what reached the start of the block it is in. What reached a block is the nearest of the
+//! block, the copy and the new parameters up the dominator tree, which is why the parameters go
+//! where the frontier says: those are exactly the places where the nearest one up the tree is not
+//! the only one that can arrive. Liveness is what keeps the parameters to the ones something reads,
+//! and is also what makes it safe to skip the parameters of every other block in the frontier.
+//!
+//! # The limits
+//!
+//! Section 23.4 adopts GCC's four and they are all here, in `rucc_cost::heuristics`. A block of
+//! more than fifteen instructions is not copied. A thread whose arm goes back to the header of a
+//! loop the block is in counts each instruction twice. A copy whose edge came out of an earlier
+//! copy is the next block of one path, and a path may not copy more than a hundred instructions in
+//! all. And one run makes at most sixty four copies in one function, which is GCC's bound on paths
+//! turned from the paths a backward search looks at into the paths that are actually copied, since
+//! there is no backward search here. The last two are what stop threading from feeding on itself,
+//! since every copy is a new edge into the arm and the arm may be the next block this walk threads
+//! past.
+//!
 //! # The loop rules, which are refusals and not scores
 //!
 //! Section 23.5. Threading a path into a loop somewhere other than its header makes an irreducible
@@ -74,17 +113,19 @@
 //! forest has given up on it and the two checks above would be reading an answer nobody stands
 //! behind.
 //!
-//! Because nothing is copied, no new cycle can appear. The new edge from A goes where the edge out
-//! of B went, so a path along it is a path that was already there with B taken out of the middle.
-//! Loops can therefore only be destroyed, and the loop forest is rebuilt after each thread anyway,
-//! which is what keeps the next decision honest.
+//! Without a copy no new cycle can appear. The new edge from A goes where the edge out of B went, so
+//! a path along it is a path that was already there with B taken out of the middle. With one the
+//! same is true of the path through the copy, which is B's path with B's test taken out, so loops
+//! can still only be destroyed. The loop forest is rebuilt after each thread anyway, which is what
+//! keeps the next decision honest.
 //!
 //! # Which level this runs at
 //!
-//! Every level that optimizes, including `-Os` and `-Oz`. Section 23.6 restricts threading at those
-//! two to the case where the block is empty, on the ground that it is the only part that is free,
-//! and this pass is that part generalized: a block whose instructions all have no effects and whose
-//! outgoing arguments do not come from it costs the same as an empty one, which is nothing.
+//! [`FREE`] runs at `-Os` and `-Oz`. Section 23.6 restricts threading at those two to the case where
+//! the block is empty, on the ground that it is the only part that is free, and [`FREE`] is that
+//! part generalized: a block whose instructions all have no effects and whose outgoing arguments do
+//! not come from it costs the same as an empty one, which is nothing. [`COPY`] runs at `-O1` and
+//! above, as GCC's `-fthread-jumps` does.
 //!
 //! Once, and not to a fixed point. Threading enables threading, and section 23.7 says the answer to
 //! that is a fixed number of instances rather than a loop, because threading is the pass where
@@ -95,34 +136,28 @@
 //! # What it counts
 //!
 //! Every refusal is recorded, and they are the measurement section 23.8 asks this document for.
-//! Three of them count edges that decide a branch this pass cannot thread without the copy, split by
+//! Three of them count edges that decide a branch [`FREE`] cannot thread without the copy, split by
 //! which part of the copy is in the way: something in the block that has to happen, a value the arm
 //! carries that the block worked out, and a value the block defines that a block below it reads.
-//! Together they are the size of the prize for building section 23.1's surgery, and separately they
-//! say what the surgery has to do first. The fourth counts edges refused on loop structure, which is
-//! the price of document 06.4's position on irreducible regions stated as a number rather than as an
-//! argument.
+//! [`COPY`] threads the last two and records a limit instead where one stops it. One more counts
+//! edges refused on loop structure, which is the price of document 06.4's position on irreducible
+//! regions stated as a number rather than as an argument.
 //!
 //! On the 1461 programs of the corpus at `-O2`, 623 edges decide the branch they arrive at and one
-//! of them is threadable without a copy. So the subset that is free is close to worthless on real C,
-//! and this pass earns its place by measuring that rather than by what it removes. The 623 is the
-//! number that justifies the rest of document 23.
-//!
-//! The split says where the rest of the work is. 619 of the 623 are blocked on a value the block
-//! defines being read below it, 4 on the arm carrying one, and none at all on the block doing
-//! something that has to happen. That is one conclusion rather than three: the block being threaded
-//! past is almost never doing work that matters, it is holding a value that matters, so section
-//! 23.1's copy is there to reconstruct values and not to repeat effects. A cheaper thing than a full
-//! block copy might do it, and that is worth knowing before the surgery is written rather than
-//! after.
+//! of them is threadable without a copy. 619 are blocked on a value the block defines being read
+//! below it, 4 on the arm carrying one, and none at all on the block doing something that has to
+//! happen. That split is why the copy here is the copy of a block with no effects in it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rucc_base::Idx;
-use rucc_ir::{Block, BlockCall, Def, Func, Inst, Opcode, Value};
+use rucc_cost::heuristics;
+use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Start, Value, ValueList};
 
+use crate::frontier::Frontiers;
+use crate::header_copy::{clone_into, repeatable};
 use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
-use crate::{Analyses, Fuel, Loops, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Preserved, Stats, uses};
 
 /// Recorded once for each edge that was pointed past a branch it decides.
 const THREADED: &str =
@@ -147,18 +182,55 @@ const WOULD_COPY_CARRIED: &str =
 const WOULD_BREAK_A_LOOP: &str =
     "edge decides the branch it arrives at, but threading it would give a loop a second way in";
 
-/// The pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Thread;
+/// Recorded once for each edge pointed at a copy of the block it arrived at.
+const COPIED: &str =
+    "edge pointed at a copy of the block it arrives at that goes straight to the arm it decides";
+
+/// Recorded for an edge whose block has something in it this pass does not copy.
+const ODD: &str =
+    "edge decides the branch it arrives at, but the block has something in it that is not copied";
+
+/// Recorded for an edge whose block is larger than section 23.4 lets a thread copy.
+const TOO_BIG: &str =
+    "edge decides the branch it arrives at, but the block is larger than a thread may copy";
+
+/// Recorded for an edge whose copy would make the path of copies it is on too long.
+const TOO_LONG: &str =
+    "edge decides the branch it arrives at, but the path of copies it is on would be too long";
+
+/// Recorded for an edge left once the function has had as many copies as one run makes.
+const TOO_MANY: &str =
+    "edge decides the branch it arrives at, but this function has had its 64 copies";
+
+/// The pass, with how many instructions it may copy a block of.
+#[derive(Debug)]
+pub struct Thread {
+    /// What a `-f` flag spells.
+    name: &'static str,
+    /// The most instructions a block threaded past may hold, and zero for a pass that copies none.
+    budget: u32,
+}
+
+/// The instance `-Os` and `-Oz` run, which threads an edge only where nothing has to be copied.
+pub static FREE: Thread = Thread { name: "thread", budget: 0 };
+
+/// The instance `-O1` and above run, which copies a block of up to section 23.4's fifteen.
+pub static COPY: Thread =
+    Thread { name: "thread-copy", budget: heuristics::JUMP_THREAD_DUPLICATION_INSNS };
 
 impl Pass for Thread {
     fn name(&self) -> &'static str {
-        "thread"
+        self.name
     }
 
     fn describe(&self) -> &'static str {
-        "an edge that already decides the branch it arrives at is pointed at the arm that branch \
-         would have taken"
+        if self.budget == 0 {
+            "an edge that already decides the branch it arrives at is pointed at the arm that \
+             branch would have taken"
+        } else {
+            "an edge that already decides the branch it arrives at is pointed at the arm that \
+             branch would have taken, through a copy of the block if the block's values are read"
+        }
     }
 
     fn preserves(&self) -> Preserved {
@@ -175,9 +247,13 @@ impl Pass for Thread {
         // A block call rather than a predecessor, since redirecting an edge wants the slot in the
         // pool and there is no finding it again from the block the edge used to arrive at.
         let mut edges: Edges = incoming(func);
-        let leaky = leaky(func);
+        let mut leaks = leaky(func);
         let unbound = Bindings::new();
         let mut threaded = false;
+        // What each copy made in this run has cost the path it is on, which is what the path limit
+        // of section 23.4 adds up, and how many copies there have been.
+        let mut paths: HashMap<Block, u32> = HashMap::new();
+        let mut copies = 0;
         'blocks: for block in func.blocks().collect::<Vec<Block>>() {
             if block == entry || func[block].params.is_empty() {
                 continue;
@@ -192,15 +268,9 @@ impl Pass for Thread {
             if taken(func, term, &unbound).is_some() {
                 continue;
             }
-            // Two of the three reasons section 23.1 copies B are about the block rather than about
-            // one edge into it, so they are settled once here and not once per edge below.
-            let copied = if !skippable(func, block) {
-                Some(WOULD_COPY_EFFECT)
-            } else if leaky.contains(&block) {
-                Some(WOULD_COPY_READ_BELOW)
-            } else {
-                None
-            };
+            // Something that has to happen stops every edge into the block, since nothing here
+            // copies an effect, so it is settled once here and not once per edge below.
+            let effect = !skippable(func, block);
             for (from, at) in edges.get(&block).cloned().unwrap_or_default() {
                 // A block that branches to itself, where the branch resolves, is a loop that does
                 // not end, and redirecting its own edge is not a description of anything a person
@@ -213,13 +283,27 @@ impl Pass for Thread {
                 if call.block == block {
                     continue;
                 }
-                if let Some(reason) = copied {
-                    stats.missed(reason);
+                if effect {
+                    stats.missed(WOULD_COPY_EFFECT);
                     continue;
                 }
-                let Some(args) = carried(func, block, call, &subst) else {
-                    stats.missed(WOULD_COPY_CARRIED);
-                    continue;
+                // The block's own values read below are what the leaky set is about, and the ones
+                // the arm carries are what `carried` is about. Either needs the copy.
+                let (free, why) = if leaks.contains(&block) {
+                    (None, WOULD_COPY_READ_BELOW)
+                } else {
+                    (carried(func, block, call, &subst), WOULD_COPY_CARRIED)
+                };
+                let path = if free.is_some() {
+                    0
+                } else {
+                    match self.path(func, an.loops(func), block, from, call.block, &paths, copies) {
+                        Ok(path) => path,
+                        Err(reason) => {
+                            stats.missed(reason.unwrap_or(why));
+                            continue;
+                        }
+                    }
                 };
                 if !allowed(an.loops(func), from, call.block) {
                     stats.missed(WOULD_BREAK_A_LOOP);
@@ -232,19 +316,31 @@ impl Pass for Thread {
                     stats.missed(NO_FUEL);
                     break 'blocks;
                 }
-                let args = func.push_values(&args);
-                func.set_block_call(at, BlockCall { args, ..call });
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.
                 if let Some(list) = edges.get_mut(&block) {
                     list.retain(|&(_, slot)| slot != at);
                 }
-                edges.entry(call.block).or_default().push((from, at));
+                if let Some(args) = free {
+                    let args = func.push_values(&args);
+                    func.set_block_call(at, BlockCall { args, ..call });
+                    edges.entry(call.block).or_default().push((from, at));
+                    stats.optimized(THREADED);
+                } else {
+                    let (copy, out) = copy(func, block, at, call, &subst);
+                    edges.entry(call.block).or_default().push((copy, out));
+                    paths.insert(copy, path);
+                    copies += 1;
+                    // The merges put parameters on blocks further down, and a parameter something
+                    // reads from below is exactly what the leaky set is about. It went stale in the
+                    // safe direction before there were copies. It does not now.
+                    leaks = leaky(func);
+                    stats.optimized(COPIED);
+                }
                 // The loop forest was about the function as it was a moment ago, and the manager
                 // clears the cache after the pass returns, which is too late for the next edge.
                 an.clear();
-                stats.optimized(THREADED);
                 threaded = true;
             }
         }
@@ -256,6 +352,300 @@ impl Pass for Thread {
             sweep(func, an, &mut stats);
         }
         stats
+    }
+}
+
+impl Thread {
+    /// What copying `block` onto the edge from `from` costs the path it is on, or why it may not.
+    ///
+    /// `None` for the reason is the instance that copies nothing, which leaves the caller to say
+    /// which part of the copy was wanted. The limits are section 23.4's, in the order a block
+    /// fails them: what is in it, how big it is, how long the path of copies it is on has become,
+    /// and how many copies this run has already made.
+    #[allow(clippy::too_many_arguments)]
+    fn path(
+        &self,
+        func: &Func,
+        loops: &Loops,
+        block: Block,
+        from: Block,
+        into: Block,
+        paths: &HashMap<Block, u32>,
+        copies: u32,
+    ) -> Result<u32, Option<&'static str>> {
+        if self.budget == 0 {
+            return Err(None);
+        }
+        let body: Vec<Inst> = func.insts(block).filter(|&inst| !func.is_terminator(inst)).collect();
+        if !body.iter().all(|&inst| repeatable(func, inst)) {
+            return Err(Some(ODD));
+        }
+        let mut cost = u32::try_from(body.len()).unwrap_or(u32::MAX);
+        if back_edge(loops, block, into) {
+            cost = cost.saturating_mul(heuristics::JUMP_THREAD_BACK_EDGE_SCALE);
+        }
+        if cost > self.budget {
+            return Err(Some(TOO_BIG));
+        }
+        let path = paths.get(&from).copied().unwrap_or(0).saturating_add(cost);
+        if path > heuristics::JUMP_THREAD_PATH_INSNS {
+            return Err(Some(TOO_LONG));
+        }
+        if copies >= heuristics::JUMP_THREAD_PATHS {
+            return Err(Some(TOO_MANY));
+        }
+        Ok(path)
+    }
+}
+
+/// Whether the edge from `from` to `into` goes back to the header of a loop `from` is in.
+fn back_edge(loops: &Loops, from: Block, into: Block) -> bool {
+    let mut id = loops.innermost(from);
+    while let Some(loop_id) = id {
+        if loops.header(loop_id) == into {
+            return true;
+        }
+        id = loops.parent(loop_id);
+    }
+    false
+}
+
+/// Section 23.1's surgery on one edge: a copy of `block` that goes straight to `call`, the edge at
+/// `at` pointed at it, and every read of `block`'s values from below given the one that reaches it.
+///
+/// Returns the copy and the slot of the edge out of it, which the caller's record of edges needs.
+fn copy(
+    func: &mut Func,
+    block: Block,
+    at: Idx<BlockCall>,
+    call: BlockCall,
+    subst: &Bindings,
+) -> (Block, Idx<BlockCall>) {
+    let term = func.terminator(block).expect("the block was chosen for its terminator");
+    let mut map = subst.clone();
+    let copy = func.create_block();
+    let insts: Vec<Inst> = func.insts(block).filter(|&inst| inst != term).collect();
+    for inst in insts {
+        clone_into(func, copy, inst, &mut map);
+    }
+    let args: Vec<Value> =
+        func[call.args].iter().map(|value| map.get(value).copied().unwrap_or(*value)).collect();
+    let jump = Builder::new(func, copy).jump(call.block, &args);
+    let out = func.target_list(jump).iter().next().expect("a jump has one edge");
+    let edge = func[at];
+    func.set_block_call(at, BlockCall { block: copy, args: ValueList::EMPTY, ..edge });
+    repair(func, block, copy, &map);
+    (copy, out)
+}
+
+/// Gives every read of a value `block` defines, from anywhere but `block`, the definition that
+/// reaches it now that `copy` defines the value as well.
+///
+/// The frontier and the dominator tree are of the graph with the edge already moved, and they are
+/// shared by every value, since the merges only add parameters and a parameter moves no edge.
+fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
+    let values = read_outside(func, block, copy);
+    if values.is_empty() {
+        return;
+    }
+    let cfg = Cfg::new(func);
+    let dom = Dominators::new(&cfg);
+    let frontiers = Frontiers::new(&cfg, &dom);
+    let mut joins: HashSet<Block> = HashSet::new();
+    let mut work = vec![block, copy];
+    while let Some(at) = work.pop() {
+        for &join in frontiers.of(at) {
+            if joins.insert(join) {
+                work.push(join);
+            }
+        }
+    }
+    for value in values {
+        let copied = map.get(&value).copied().expect("the copy defines every value the block does");
+        let mut reaching = Reaching {
+            dom: &dom,
+            block,
+            copy,
+            value,
+            copied,
+            params: HashMap::new(),
+            memo: HashMap::new(),
+        };
+        merge(func, &cfg, &joins, &mut reaching);
+    }
+}
+
+/// The values `block` defines that something outside it and outside its copy reads.
+fn read_outside(func: &Func, block: Block, copy: Block) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for other in func.blocks() {
+        if other == block || other == copy {
+            continue;
+        }
+        for inst in func.insts(other) {
+            uses::operands(func, inst, |value| {
+                if defined_in(func, value) == Some(block) && seen.insert(value) {
+                    out.push(value);
+                }
+            });
+        }
+    }
+    out
+}
+
+/// Which definition of one value reaches each block, once the merges are in.
+struct Reaching<'a> {
+    /// The tree the answer is read off.
+    dom: &'a Dominators,
+    /// The block the value was defined in first.
+    block: Block,
+    /// The copy of it, which defines the value as well.
+    copy: Block,
+    /// The value as `block` defines it.
+    value: Value,
+    /// The value as `copy` defines it.
+    copied: Value,
+    /// The parameter each merge block was given for the value.
+    params: HashMap<Block, Value>,
+    /// What reached the start of each block already asked about.
+    memo: HashMap<Block, Value>,
+}
+
+impl Reaching<'_> {
+    /// What reaches the start of a block that is neither the block nor its copy.
+    ///
+    /// The nearest definition up the dominator tree, where a merge block's parameter is a
+    /// definition. The frontier put a parameter everywhere two could meet, so nothing between here
+    /// and the nearest one can have had another arrive. A block the tree does not reach is one the
+    /// program does not reach either, and it keeps the value it had.
+    fn start(&mut self, of: Block) -> Value {
+        let mut chain = Vec::new();
+        let mut at = of;
+        let found = loop {
+            if let Some(&param) = self.params.get(&at) {
+                break param;
+            }
+            if let Some(&known) = self.memo.get(&at) {
+                break known;
+            }
+            chain.push(at);
+            match self.dom.immediate_dominator(at) {
+                Some(up) if up == self.block => break self.value,
+                Some(up) if up == self.copy => break self.copied,
+                Some(up) => at = up,
+                None => break self.value,
+            }
+        };
+        for at in chain {
+            self.memo.insert(at, found);
+        }
+        found
+    }
+
+    /// What reaches the end of a block, which is what an edge out of it carries.
+    fn end(&mut self, of: Block) -> Value {
+        if of == self.block {
+            self.value
+        } else if of == self.copy {
+            self.copied
+        } else {
+            self.start(of)
+        }
+    }
+}
+
+/// Puts the parameters one value needs where its two definitions meet, and points every read of it
+/// at the definition that reaches the read.
+fn merge(func: &mut Func, cfg: &Cfg, joins: &HashSet<Block>, reaching: &mut Reaching<'_>) {
+    let (block, copy, value) = (reaching.block, reaching.copy, reaching.value);
+    // Where the value is still wanted at the start of a block. A read is where it starts, and it
+    // goes up through predecessors until it meets one of the two definitions.
+    let mut readers = Vec::new();
+    for other in func.blocks() {
+        if other == block || other == copy {
+            continue;
+        }
+        let mut reads = false;
+        for inst in func.insts(other) {
+            uses::operands(func, inst, |used| reads |= used == value);
+        }
+        if reads {
+            readers.push(other);
+        }
+    }
+    let mut live: HashSet<Block> = readers.iter().copied().collect();
+    let mut work = readers.clone();
+    while let Some(at) = work.pop() {
+        for &pred in cfg.predecessors(at) {
+            if pred != block && pred != copy && live.insert(pred) {
+                work.push(pred);
+            }
+        }
+    }
+    let mut places: Vec<Block> = joins
+        .iter()
+        .copied()
+        .filter(|&join| join != block && join != copy && live.contains(&join))
+        .collect();
+    places.sort_by_key(|join| join.index());
+    let ty = func[value].ty;
+    let decls: Vec<u32> = func.value_decls(value).collect();
+    for &place in &places {
+        let param = func.append_param(place, ty);
+        for &decl in &decls {
+            func.declare_value(param, decl);
+        }
+        reaching.params.insert(place, param);
+    }
+    for &reader in &readers {
+        let now = reaching.start(reader);
+        if now == value {
+            continue;
+        }
+        let swap = |had: Value| if had == value { now } else { had };
+        for inst in func.insts(reader).collect::<Vec<Inst>>() {
+            func.rewrite(func[inst].args, swap);
+            for at in func.target_list(inst).iter() {
+                func.rewrite(func[at].args, swap);
+            }
+        }
+    }
+    // The edges into a merge carry what reached the end of the block they leave. This comes after
+    // the reads are rewritten so that what it appends is not rewritten a second time.
+    for other in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(other) else { continue };
+        for at in func.target_list(term).iter() {
+            let call = func[at];
+            if !reaching.params.contains_key(&call.block) {
+                continue;
+            }
+            let carry = reaching.end(other);
+            let args = func.append_arg(call.args, carry);
+            func.set_block_call(at, BlockCall { args, ..call });
+        }
+    }
+    // A debugger asking for the variable at a start somewhere below is asking for whichever
+    // definition reached there, so a start moves to it the same way a read does.
+    let starts: Vec<(Start, Value)> = func
+        .value_starts(value)
+        .filter_map(|start| {
+            let at = func.start_place(start).map_or(start.block, |(at, _)| at);
+            if at == block || at == copy {
+                return None;
+            }
+            let now = reaching.start(at);
+            (now != value).then_some((start, now))
+        })
+        .collect();
+    let mut targets: Vec<Value> = starts.iter().map(|&(_, now)| now).collect();
+    targets.dedup();
+    for target in targets {
+        let which: Vec<Start> =
+            starts.iter().filter(|&&(_, now)| now == target).map(|&(start, _)| start).collect();
+        if !which.is_empty() {
+            func.move_starts(value, target, &which);
+        }
     }
 }
 
@@ -315,11 +705,11 @@ fn skippable(func: &Func, block: Block) -> bool {
 /// because dominance is the only permission a use needs in this IR. Point an edge past the candidate
 /// and that dominance is gone, so the read below is of a value nothing on the new path computed.
 ///
-/// One walk for the whole function rather than one per candidate block, and it is computed once and
-/// never refreshed. It only goes stale in the safe direction. Threading never adds a read of a value
-/// defined in the block it went past, since [`carried`] refuses the edge when an arm carries one and
-/// everything else it passes on was defined further up, so a block in here can only ever have
-/// belonged in here less than it did.
+/// One walk for the whole function rather than one per candidate block. A thread with no copy only
+/// makes it stale in the safe direction, since it never adds a read of a value defined in the block
+/// it went past: [`carried`] refuses the edge when an arm carries one, and everything else it passes
+/// on was defined further up. A copy does add reads, of the parameters its merges put further down,
+/// so the pass walks again after each one.
 fn leaky(func: &Func) -> HashSet<Block> {
     let mut out = HashSet::new();
     for block in func.blocks().collect::<Vec<Block>>() {
@@ -376,13 +766,35 @@ mod tests {
         Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Restrict, Signature, Type, Value,
     };
 
-    use super::Thread;
+    use std::collections::HashMap;
+
+    use rucc_ir::{Module, verify_func};
+    use rucc_target::{TargetInfo, Triple};
+
+    use super::{COPY, FREE, Thread};
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
 
-    /// Runs the pass with as much fuel as it wants.
+    /// Runs the instance that copies nothing, with as much fuel as it wants.
     fn thread(func: &mut Func) -> Stats {
-        Thread.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+        FREE.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// Runs the instance that copies, and checks what it left is still a function.
+    fn copying(func: &mut Func) -> Stats {
+        copying_with(&COPY, func)
+    }
+
+    fn copying_with(pass: &Thread, func: &mut Func) -> Stats {
+        let stats =
+            pass.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited());
+        let mut names = Interner::new();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let module = Module::new(names.intern("t.c"), &target);
+        if let Err(errors) = verify_func(&module, func, &names) {
+            panic!("{errors:#?}");
+        }
+        stats
     }
 
     /// The blocks the function still has, by number.
@@ -577,10 +989,15 @@ mod tests {
     /// parameter to the arm that did not change it. The arm reads it with nothing carrying it there,
     /// because the join dominates the arm, and an edge threaded past the join is a path on which the
     /// read has no value behind it. It compiled to a program that printed the wrong number.
-    #[test]
-    fn a_value_the_block_defines_and_something_below_it_reads_needs_the_copy() {
+    fn clamp() -> Func {
+        clamp_with(|_, _| {})
+    }
+
+    /// The clamp with more in the join ahead of its test, put there by `extra` from the parameter.
+    fn clamp_with(extra: impl FnOnce(&mut Builder<'_>, Value)) -> Func {
         let mut names = Interner::new();
-        let mut func = Func::new(names.intern("f"), Signature::new());
+        let signature = Signature::new().with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
         let entry = func.create_block();
         let arms = [func.create_block(), func.create_block()];
         let join = func.create_block();
@@ -597,21 +1014,212 @@ mod tests {
             build.jump(join, &[it]);
         }
         let mut build = Builder::new(&mut func, join);
+        extra(&mut build, param);
         let one = build.iconst(Type::int(32), 1);
         let test = build.icmp(IntPred::Eq, param, one);
         build.br_if(test, yes, &[], no, &[]);
         let mut build = Builder::new(&mut func, yes);
-        build.ret(&[]);
+        let floor = build.iconst(Type::int(32), 15);
+        build.ret(&[floor]);
         // The read from below. Nothing on the edge carries the parameter here, and nothing has to,
         // since every path to this block goes through the block that defines it.
         let mut build = Builder::new(&mut func, no);
         build.ret(&[param]);
+        func
+    }
 
+    #[test]
+    fn a_value_the_block_defines_and_something_below_it_reads_needs_the_copy() {
+        let mut func = clamp();
         let stats = thread(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 0);
         assert_eq!(stats.count(Kind::Missed, super::WOULD_COPY_READ_BELOW), 2);
         assert_eq!(goes_to(&func, 1), vec![3]);
         assert_eq!(goes_to(&func, 2), vec![3]);
+    }
+
+    /// What the copy is for: both edges of the clamp are threaded, and the read below gets the
+    /// value that reached it along whichever one it came in by.
+    #[test]
+    fn a_copy_threads_the_clamp_and_the_read_below_gets_a_merge() {
+        let mut func = clamp();
+        let stats = copying(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 2, "{stats:?}");
+        assert_eq!(stats.count(Kind::Missed, super::WOULD_COPY_READ_BELOW), 0);
+        // The join is gone, since both edges into it went to copies, and each arm goes to a copy
+        // that goes straight to the arm the value it carries decides.
+        assert!(!blocks(&func).contains(&3), "{:?}", blocks(&func));
+        let first = goes_to(&func, 1)[0];
+        let second = goes_to(&func, 2)[0];
+        assert_eq!(goes_to(&func, first), vec![4]);
+        assert_eq!(goes_to(&func, second), vec![5]);
+        // What the false arm returns is what the arm that took it carried, which is 2. The merge
+        // gave the false arm a parameter while the join still had an edge to it, and once the
+        // join was gone the parameter had one edge left and was swept down to the constant.
+        let returned = Block::from_usize(5);
+        let term = func.terminator(returned).expect("a return");
+        let read = func[func[term].args][0];
+        assert_eq!(super::defined_in(&func, read), Some(Block::from_usize(2)));
+    }
+
+    #[test]
+    fn a_copy_is_not_made_of_a_block_with_something_that_happens_in_it() {
+        let mut func = clamp_with(|build, _| {
+            let what = build.iconst(Type::int(32), 7);
+            let address = build.iconst(Type::int(64), 16);
+            let address = build.unary(rucc_ir::Opcode::IntToPtr, address, Type::PTR);
+            let info = MemInfo {
+                size: 4,
+                align: 4,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            build.store(what, address, info, Flags::NONE);
+        });
+        let stats = copying(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::WOULD_COPY_EFFECT), 2);
+    }
+
+    /// A block of more than fifteen instructions is not copied, and the same block with its sum a
+    /// little shorter is.
+    #[test]
+    fn a_block_larger_than_the_budget_is_not_copied() {
+        for (adds, copied) in [(13, 2), (14, 0)] {
+            let mut func = clamp_with(|build, param| {
+                let mut sum = param;
+                for _ in 0..adds {
+                    sum = build.binary(rucc_ir::Opcode::Add, sum, param, Flags::NONE);
+                }
+            });
+            // The one, the test and the adds, which is fifteen and then sixteen.
+            let stats = copying(&mut func);
+            assert_eq!(stats.count(Kind::Optimized, super::COPIED), copied, "{adds}: {stats:?}");
+            if copied == 0 {
+                assert_eq!(stats.count(Kind::Missed, super::TOO_BIG), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_of_copies_may_not_grow_past_its_limit() {
+        let func = clamp();
+        let an = crate::machine::fixtures::analyses();
+        let join = Block::from_usize(3);
+        let from = Block::from_usize(1);
+        let into = Block::from_usize(5);
+        let loops = an.loops(&func);
+        let mut paths = HashMap::new();
+        assert_eq!(COPY.path(&func, loops, join, from, into, &paths, 0), Ok(2));
+        paths.insert(from, 99);
+        assert_eq!(
+            COPY.path(&func, loops, join, from, into, &paths, 0),
+            Err(Some(super::TOO_LONG))
+        );
+        paths.insert(from, 98);
+        assert_eq!(COPY.path(&func, loops, join, from, into, &paths, 0), Ok(100));
+        assert_eq!(
+            COPY.path(&func, loops, join, from, into, &paths, 64),
+            Err(Some(super::TOO_MANY))
+        );
+        assert_eq!(FREE.path(&func, loops, join, from, into, &paths, 0), Err(None));
+    }
+
+    /// Sixty four copies and no more, however many edges are left that want one.
+    #[test]
+    fn one_run_makes_at_most_sixty_four_copies() {
+        let mut names = Interner::new();
+        let signature =
+            Signature::new().with_params(&[Type::int(32)]).with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let pick = func.append_param(entry, Type::int(32));
+        let arms: Vec<Block> = (0..70).map(|_| func.create_block()).collect();
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        let yes = func.create_block();
+        let no = func.create_block();
+        let cases: Vec<(i128, Block)> = (0..).zip(arms.iter().copied()).collect();
+        let (&default, _) = arms.split_last().expect("arms");
+        Builder::new(&mut func, entry).switch(pick, default, &cases[..69]);
+        for (&arm, value) in arms.iter().zip(0..) {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.iconst(Type::int(32), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let one = build.iconst(Type::int(32), 1);
+        let test = build.icmp(IntPred::Eq, param, one);
+        // A sum the false arm reads, so that every edge still wants a copy after the first ones:
+        // the merge they leave behind is carried a value the join works out.
+        let sum = build.binary(rucc_ir::Opcode::Add, param, one, Flags::NONE);
+        build.br_if(test, yes, &[], no, &[]);
+        let mut build = Builder::new(&mut func, yes);
+        let zero = build.iconst(Type::int(32), 0);
+        build.ret(&[zero]);
+        let mut build = Builder::new(&mut func, no);
+        build.ret(&[sum]);
+
+        let stats = copying(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 64, "{stats:?}");
+        // The edge carrying 1 decides the true arm, which reads nothing of the join's. Once the
+        // first copy put a merge on the false arm, nothing below read the join's values at all,
+        // so that edge was threaded with no copy. The other five were left where they were.
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1, "{stats:?}");
+        assert_eq!(stats.count(Kind::Missed, super::TOO_MANY), 5, "{stats:?}");
+    }
+
+    #[test]
+    fn a_thread_back_to_a_loop_header_counts_each_instruction_twice() {
+        let func = loop_with_a_parameter(2);
+        let an = crate::machine::fixtures::analyses();
+        let loops = an.loops(&func);
+        let header = Block::from_usize(1);
+        let body = Block::from_usize(2);
+        assert!(super::back_edge(loops, body, header));
+        assert!(!super::back_edge(loops, header, Block::from_usize(3)));
+    }
+
+    #[test]
+    fn an_arm_carrying_a_value_the_block_worked_out_is_threaded_through_a_copy() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        let yes = func.create_block();
+        let got = func.append_param(yes, Type::int(32));
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([1, 2]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(32), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let one = build.iconst(Type::int(32), 1);
+        let test = build.icmp(IntPred::Eq, param, one);
+        let sum = build.binary(rucc_ir::Opcode::Add, param, one, Flags::NONE);
+        build.br_if(test, yes, &[sum], no, &[]);
+        let mut build = Builder::new(&mut func, yes);
+        build.ret(&[got]);
+        let mut build = Builder::new(&mut func, no);
+        let zero = build.iconst(Type::int(32), 0);
+        build.ret(&[zero]);
+
+        let stats = copying(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 1);
+        let copy = goes_to(&func, 1)[0];
+        assert_eq!(goes_to(&func, copy), vec![4]);
+        assert_eq!(carries(&func, copy).len(), 1);
     }
 
     #[test]
@@ -824,7 +1432,7 @@ mod tests {
     fn fuel_stops_the_threading_where_it_stands() {
         let (mut func, _) = diamond(1, 2);
         let mut fuel = Fuel::of(1);
-        let stats = Thread.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
+        let stats = FREE.run(&mut func, &mut crate::machine::fixtures::analyses(), &mut fuel);
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
         assert_eq!(goes_to(&func, 2), vec![3], "the second edge is where it was");
