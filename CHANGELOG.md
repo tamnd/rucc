@@ -9,6 +9,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The assembler reads the integer instructions with a memory operand that gcc writes and the compiler does not: shifts and rotates of memory by a constant, by `%cl` or by one, `setcc` into memory, and `imul` of a constant by memory. It also reads `pushq $imm`, `rep bsf` (the same bytes as `tzcnt`), `cmpnlesd` and the other float comparisons with the predicate in the name, and a bare number such as `movq %rax, 0` as an absolute address. An immediate such as `andl $0xffffffff` now takes the short sign extended byte form, as gas writes it (#1863).
 - AArch64 takes the `Q` constraint in an `asm` statement, which is memory addressed by one register and is spelled `[x0]`, so an atomic written as an `ldxr` and `stxr` loop compiles and gives the same answer as gcc under qemu.
 
+### Changed
+
+- A load through the global offset table on x86-64 ELF asks for the relocation gas asks for. `R_X86_64_REX_GOTPCRELX` is kept for the instructions a linker knows how to rewrite, `R_X86_64_GOTPCRELX` is used when there is no REX prefix (`call *f@GOTPCREL(%rip)`), and a plain `R_X86_64_GOTPCREL` covers anything else, such as a load into `%xmm0`. Before, every one asked for `R_X86_64_REX_GOTPCRELX`, which told the linker it could rewrite an instruction it could not (#1863).
+
 ## 0.11.7
 
 ### Added

@@ -672,6 +672,7 @@ impl Assembler<'_> {
                 });
             }
 
+            let start = self.text.bytes.len();
             let holes =
                 x86_64::encode(machine.mnemonic, &values, &mut self.text.bytes).map_err(|why| {
                     Error::Encode {
@@ -685,9 +686,17 @@ impl Assembler<'_> {
             // A hole is either something outside the file, which is a relocation, or a block of
             // this function, which is patched once every block has a place.
             if let Some((symbol, kind, disp)) = wanted {
+                let kind = match kind {
+                    Reference::Got => slot(&self.text.bytes[start..end]),
+                    kind => kind,
+                };
                 let at = match kind {
                     Reference::Call => holes.dest,
-                    Reference::Data | Reference::Got | Reference::Thread => holes.rip,
+                    Reference::Data
+                    | Reference::Got
+                    | Reference::GotBare
+                    | Reference::GotKept
+                    | Reference::Thread => holes.rip,
                     // An address written into an image rather than reached by an instruction, and
                     // how far something is from the front of one, which is what a table of data
                     // holds. Nothing above produces either, because every reference an instruction
@@ -768,6 +777,41 @@ impl Assembler<'_> {
             .reg
             .phys()
             .ok_or_else(|| Error::Virtual { func: self.name.to_owned(), opcode: opcode.to_owned() })
+    }
+}
+
+/// Which relocation a read of a slot of the global offset table asks for, from the bytes of the
+/// instruction it is in.
+///
+/// The linker can turn a slot back into the address itself in only a few instructions: a `mov`
+/// from memory, `test`, the eight that do arithmetic from memory into a register, and a `call` or
+/// `jmp` through memory, none of them behind a `0x66`. gas asks for the relocation that allows it
+/// in those and the plain one everywhere else, and says whether there is a REX prefix, which is
+/// what the linker needs to know to rewrite the instruction in place.
+pub(crate) fn slot(bytes: &[u8]) -> Reference {
+    let mut rest = bytes;
+    let mut rex = false;
+    while let [first, tail @ ..] = rest {
+        match first {
+            0x66 => return Reference::GotKept,
+            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3 => rest = tail,
+            0x40..=0x4F => {
+                rex = true;
+                rest = tail;
+            }
+            _ => break,
+        }
+    }
+    let rewritten = match rest {
+        [0x8B | 0x85, ..] => true,
+        [0xFF, modrm, ..] => matches!((modrm >> 3) & 7, 2 | 4),
+        [op, ..] => *op & !0x38 == 0x03,
+        [] => false,
+    };
+    match (rewritten, rex) {
+        (false, _) => Reference::GotKept,
+        (true, true) => Reference::Got,
+        (true, false) => Reference::GotBare,
     }
 }
 

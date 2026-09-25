@@ -634,6 +634,13 @@ pub enum Reference {
     /// which says the instruction is a `mov` with a REX prefix and lets the linker turn it back
     /// into the `lea` it would have been if the symbol had been here all along.
     Got,
+    /// A slot of the global offset table read by an instruction the linker may rewrite that has
+    /// no REX prefix, `call *f@GOTPCREL(%rip)` or a 32 bit `mov`. `R_X86_64_GOTPCRELX` on ELF.
+    GotBare,
+    /// A slot of the global offset table read by an instruction the linker has to leave as it is,
+    /// because it is not one of the few it knows how to rewrite: a store into the slot, or a load
+    /// into a vector register. `R_X86_64_GOTPCREL` on ELF.
+    GotKept,
     /// A slot of the global offset table, reached from the instruction pointer, holding how far
     /// into a thread's own block of storage a thread-local variable sits.
     ///

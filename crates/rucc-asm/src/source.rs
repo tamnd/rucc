@@ -111,6 +111,9 @@ struct Fixup {
     /// load of a datum is not, and a name reached through a table is a relocation however near it
     /// turns out to be. A directive writes [`Reach::Near`], which is the plain one.
     reach: Reach,
+    /// Which relocation a reach through the global offset table asks for, which is decided by the
+    /// instruction the hole is in and so is worked out while its bytes are still at hand.
+    slot: Reference,
     /// Which branch of the file this is, counting every one that has a two byte form, when it was
     /// written in that form and so may turn out not to reach.
     branch: Option<usize>,
@@ -348,6 +351,7 @@ impl Reader {
         let at = self.at();
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
+        let slot = crate::bytes::slot(&written.bytes);
         for hole in written.holes {
             // `.` in an instruction is where the instruction starts, which is what gas means by it
             // and what `mov .-4(%rip), %eax` counts back from.
@@ -379,6 +383,7 @@ impl Reader {
                 width: hole.width,
                 sum,
                 reach: hole.sort,
+                slot,
                 branch,
                 jump,
                 line: self.line,
@@ -894,6 +899,7 @@ impl Reader {
                 width,
                 sum,
                 reach: Reach::Near,
+                slot: Reference::Got,
                 branch: None,
                 jump: false,
                 line: self.line,
@@ -1483,8 +1489,7 @@ impl Reader {
                             .to_owned(),
                     ));
                 };
-                let kind =
-                    if fixup.reach == Reach::Table { Reference::Got } else { Reference::Thread };
+                let kind = if fixup.reach == Reach::Table { fixup.slot } else { Reference::Thread };
                 self.parts[fixup.part].relocs.push(Reloc {
                     at: fixup.at as usize,
                     symbol: name.clone(),
@@ -2467,6 +2472,28 @@ mod tests {
         assert_eq!(relocs[0].addend, -4);
         let out = assembled("\t.text\n\tmovq counter@GOTTPOFF(%rip), %rax\n");
         assert_eq!(out.parts[0].relocs[0].kind, Reference::Thread);
+    }
+
+    /// Which of the three table relocations an instruction asks for, as gas picks them: the one
+    /// the linker may rewrite for the few instructions it knows, split by whether there is a REX
+    /// prefix, and the plain one for everything else. cJSON reads `malloc` into `%xmm0` this way.
+    #[test]
+    fn only_an_instruction_the_linker_can_rewrite_asks_it_to() {
+        for (line, kind) in [
+            ("movq f@GOTPCREL(%rip), %rax", Reference::Got),
+            ("cmpq f@GOTPCREL(%rip), %rdx", Reference::Got),
+            ("addq f@GOTPCREL(%rip), %rdx", Reference::Got),
+            ("movl f@GOTPCREL(%rip), %eax", Reference::GotBare),
+            ("call *f@GOTPCREL(%rip)", Reference::GotBare),
+            ("jmp *f@GOTPCREL(%rip)", Reference::GotBare),
+            ("movq f@GOTPCREL(%rip), %xmm0", Reference::GotKept),
+            ("movhps f@GOTPCREL(%rip), %xmm0", Reference::GotKept),
+            ("movq %rax, f@GOTPCREL(%rip)", Reference::GotKept),
+            ("movw f@GOTPCREL(%rip), %ax", Reference::GotKept),
+        ] {
+            let out = assembled(&format!("\t.text\n\t{line}\n"));
+            assert_eq!(out.parts[0].relocs[0].kind, kind, "{line}");
+        }
     }
 
     /// A name reached with something added to it, which is a table indexed by a value that does not

@@ -27,9 +27,11 @@ use crate::section::{Array, Binding, Property, Reference, Visibility};
 /// library work at all. A load may not, because there is nowhere to put a stub that a load would
 /// read, so a load of something another object may define reads a table slot the linker fills in
 /// instead, and the relaxing form of the relocation lets the linker undo that when it turns out
-/// nobody else defines it. The fourth is a table slot as well and holds an offset into a thread's
-/// own block rather than an address, because a thread-local variable has a copy per thread and no
-/// address at all. The fifth is the address itself, at the two widths this machine writes one at.
+/// nobody else defines it. The linker only knows how to undo it in a few instructions and has to
+/// know whether there is a REX prefix, so the load comes in three kinds that say which. After them
+/// is a table slot as well, which holds an offset into a thread's own block rather than an
+/// address, because a thread-local variable has a copy per thread and no address at all. Last is
+/// the address itself, at the two widths this machine writes one at.
 ///
 /// Nothing for how far something is from the front of the image. This format has no relocation of
 /// that kind because nothing it writes wants one, and a file asking for one here is a file whose
@@ -39,6 +41,8 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Call => elf::R_X86_64_PLT32,
         Reference::Data | Reference::Away => elf::R_X86_64_PC32,
         Reference::Got => elf::R_X86_64_REX_GOTPCRELX,
+        Reference::GotBare => elf::R_X86_64_GOTPCRELX,
+        Reference::GotKept => elf::R_X86_64_GOTPCREL,
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
