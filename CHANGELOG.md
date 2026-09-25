@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.7
+
 ### Added
 
 - `__builtin_shuffle`, in both its two and three operand forms. Each lane of the answer is the lane of the sources the mask names, keeping only as many bits of the index as it takes to name one, the way gcc does. A call whose operands gcc refuses is refused with gcc's words. It used to be an undeclared name.

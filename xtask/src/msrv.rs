@@ -87,13 +87,13 @@ mod tests {
 
     #[test]
     fn the_floor_is_read_off_the_rust_version_line() {
-        let manifest = "[workspace.package]\nversion = \"0.11.6\"\nrust-version = \"1.85.0\"\n";
+        let manifest = "[workspace.package]\nversion = \"0.11.7\"\nrust-version = \"1.85.0\"\n";
         assert_eq!(version_in(manifest).as_deref(), Some("1.85.0"));
     }
 
     #[test]
     fn a_manifest_with_no_floor_has_none() {
-        assert_eq!(version_in("[workspace.package]\nversion = \"0.11.6\"\n"), None);
+        assert_eq!(version_in("[workspace.package]\nversion = \"0.11.7\"\n"), None);
     }
 
     #[test]
