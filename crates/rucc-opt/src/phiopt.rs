@@ -302,10 +302,13 @@
 //!
 //! Every level that optimizes, which is section 22.2's `-O1` and above.
 //!
-//! Once. Section 22.7 asks for two instances at `-O2`, one before the loop pipeline and one after,
-//! because the loop passes make diamonds. There is no loop pipeline yet, so the second instance
-//! would be a second walk over every function to find the shapes the first one already took, and
-//! it belongs in the change that adds the passes it exists to clean up after.
+//! Once at `-O1`, and twice at `-O2` and `-O3`. Section 22.7 asks for a second instance after the
+//! loop pipeline, because the loop passes make diamonds. The second instance waits for the `fold`
+//! and `simplify` after `unroll`, because a body `unroll` copied has a branch in each copy whose
+//! condition is a constant that has not been folded yet. Converted, each of those is a conditional
+//! move on a constant nothing later folds. Folded first, it is a branch this pass leaves to
+//! `simplify-cfg`. On the corpus at `-O2` the two instances convert 561 diamonds where the first
+//! converts 546. It is not at `-O1` because `unroll` is not.
 //!
 //! Section 22.2 also wants a peephole run after this one, so that the rule set can answer what the
 //! `select` becomes. Those rules are tier six of `spec/optimizer/13-rewrite-rules.md`, in

@@ -230,6 +230,13 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// `addq $0`. Over the corpus at `-O2` the run is worth 3000 bytes across 1830 programs, 224 of
 /// them smaller and 4 larger, with every result unchanged.
 ///
+/// `phiopt` runs a second time after that `simplify` at the two speed levels, for the diamonds the
+/// loop passes leave that the first run never saw. It has to come after `fold` rather than straight
+/// after `unroll`. Each copy of a loop body with a branch in it tests the copy's own counter, which
+/// is a constant only once `fold` has been. Before that the branch looks like any other diamond and
+/// becomes a conditional move on a constant, and the corpus loop with a branch in its body grew by
+/// sixty bytes where `-O2` had folded the whole loop to one number.
+///
 /// A second `simplify-cfg` runs after that `simplify` at `-O1`, `-Os` and `-Oz`, and the two speed
 /// levels already had one further down for what `ivopts` and the second `licm` leave behind. What
 /// it is for is the branch nobody has to take any more. Forwarding a load turns a comparison of
@@ -366,6 +373,7 @@ const O2: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "phiopt",
     "hoist",
     "plane-sink",
     "split",
@@ -409,6 +417,7 @@ const O3: &[&str] = &[
     "constant-p",
     "fold",
     "simplify",
+    "phiopt",
     "hoist",
     "plane-sink",
     "split",

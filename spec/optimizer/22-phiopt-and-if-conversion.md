@@ -221,6 +221,12 @@ passes see straight-line bodies; and again after, because the loop passes create
 instances at `-O2`, which is a refinement to document 03.4's list, and the second one is cheap
 because the first has already handled most shapes.
 
+In rucc the second instance runs at `-O2` and `-O3` after the `fold` and `simplify` that follow
+`unroll`, not straight after `unroll`. An unrolled body with a branch in it has one branch per copy
+whose condition only becomes a constant when it is folded, and converted before that it is a select
+on a constant that stays in the code. On the corpus at `-O2` the first instance converts 546
+diamonds and the two together convert 561.
+
 The measurement in document 42: how many diamonds are converted, and separately, the run-time
 difference on the corpus with the pass on and off at `-O2`. That second number is the one that
 matters and it is the only number in the entire optimizer that this author expects to come out
