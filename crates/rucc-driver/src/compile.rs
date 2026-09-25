@@ -7016,6 +7016,68 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("bitcast.i64 %1"), "{text}");
     }
 
+    /// A shuffle reads each lane of the answer out of a copy of its sources, at the index the mask
+    /// lane gives with only its low bits kept, and is not a call.
+    ///
+    /// The copy is what makes `*v = __builtin_shuffle(*v, m)` right, since the answer is written
+    /// over the vector it reads, and the mask is what `pr85331.c` checks: gcc keeps as many bits
+    /// of an index as it takes to name a lane, so `10000000001` picks lane one of two.
+    #[test]
+    fn a_shuffle_picks_each_lane_by_the_low_bits_of_the_mask() {
+        let text = body(concat!(
+            "typedef int v2 __attribute__((vector_size(8)));\n",
+            "void f(v2 *v, v2 m) { *v = __builtin_shuffle(*v, m); }\n",
+        ));
+        assert!(text.contains("memcpy"), "{text}");
+        assert_eq!(text.matches("iconst.i32 1\n").count(), 2, "{text}");
+        assert_eq!(text.matches(" = and ").count(), 2, "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // Two sources of four lanes are eight to pick from, so three bits of each index are
+        // kept, and a mask of bytes is widened to a word before it is masked.
+        let text = body(concat!(
+            "typedef char v4 __attribute__((vector_size(4)));\n",
+            "v4 f(v4 a, v4 b, v4 m) { return __builtin_shuffle(a, b, m); }\n",
+        ));
+        assert_eq!(text.matches("iconst.i32 7\n").count(), 4, "{text}");
+        assert!(text.contains("zext.i32"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
+    /// A shuffle whose operands gcc would refuse is refused, in gcc's words.
+    #[test]
+    fn a_shuffle_refuses_what_gcc_refuses() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let source = concat!(
+            "typedef int v4 __attribute__((vector_size(16)));\n",
+            "typedef float f4 __attribute__((vector_size(16)));\n",
+            "typedef short s8 __attribute__((vector_size(16)));\n",
+            "typedef long long l4 __attribute__((vector_size(32)));\n",
+            "void a(v4 x, f4 m) { __builtin_shuffle(x, m); }\n",
+            "void b(int x, v4 m) { __builtin_shuffle(x, m); }\n",
+            "void c(v4 x, f4 y, v4 m) { __builtin_shuffle(x, y, m); }\n",
+            "void d(v4 x, s8 m) { __builtin_shuffle(x, m); }\n",
+            "void e(f4 x, l4 m) { __builtin_shuffle(x, m); }\n",
+            "void g(v4 x) { __builtin_shuffle(x); }\n",
+        );
+        let messages = run(&opts, source).messages;
+        let wanted = [
+            "last argument must be an integer vector [E0715]",
+            "arguments must be vectors [E0715]",
+            "argument vectors must be of the same type [E0715]",
+            "number of elements of the argument vector(s) and the mask vector should be the same \
+             [E0715]",
+            "argument vector(s) inner type must have the same size as inner type of the mask \
+             [E0715]",
+            "too few arguments to function '__builtin_shuffle' [E0511]",
+        ];
+        assert_eq!(messages.len(), wanted.len(), "{messages:?}");
+        for (message, wanted) in messages.iter().zip(wanted) {
+            assert!(message.ends_with(wanted), "{message}");
+        }
+    }
+
     /// The plain math library names are the same mask, which is what makes a program link.
     ///
     /// `math.h` declares `fabs` and never spells `__builtin_fabs`, so the plain name is the one

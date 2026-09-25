@@ -513,6 +513,7 @@ impl<'a> Printer<'a> {
             ExprKind::FpClassify { .. } => "fpclassify".to_owned(),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
             ExprKind::Abs { .. } => "abs".to_owned(),
+            ExprKind::Shuffle { .. } => "shuffle".to_owned(),
             ExprKind::ByteSwap { .. } => "bswap".to_owned(),
             ExprKind::BitCount { count, .. } => format!("count {}", count.as_str()),
             ExprKind::Overflow { op, at, stores, .. } => {
@@ -610,6 +611,13 @@ impl<'a> Printer<'a> {
                 if let Some(rhs) = rhs {
                     self.expr(rhs);
                 }
+            }
+            ExprKind::Shuffle { lhs, rhs, mask } => {
+                self.expr(lhs);
+                if let Some(rhs) = rhs {
+                    self.expr(rhs);
+                }
+                self.expr(mask);
             }
             // The value first, the way the node holds it, and the five answers after it in the
             // order the call writes them rather than the order the call is written in.

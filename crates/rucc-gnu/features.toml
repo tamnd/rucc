@@ -2110,6 +2110,17 @@ signature = ""
 used_by = ["sqlite", "ffmpeg", "glibc"]
 tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
 
+# A vector made of the lanes of one or two others, picked by a mask. No signature, for the
+# same reason as the sign family: there is no function to call and the answer is expanded.
+[[feature]]
+name = "__builtin_shuffle"
+kind = "builtin"
+gcc_version = "4.7"
+status = "implemented"
+signature = ""
+used_by = ["ffmpeg"]
+tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_shuffle_picks_each_lane_by_the_low_bits_of_the_mask"]
+
 # The three that name a half of a complex value. These carry a signature because the call is
 # checked against it the way an ordinary call is, and then answered rather than left behind: the
 # operators they stand for are `~`, `__real__` and `__imag__`, which the language already had, and
