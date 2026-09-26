@@ -317,7 +317,9 @@ impl Triple {
     ///
     /// The environment of the answer is the narrowed one, so the triple this gives back is the
     /// canonical spelling of that machine: `Env::None` on Darwin and on a freestanding target,
-    /// never the `Env::Gnu` that a parser will accept from a string somebody typed.
+    /// never the `Env::Gnu` that a parser will accept from a string somebody typed. A deployment
+    /// target or a glibc release does not change which triple a tuple narrows to, so
+    /// `aarch64-macos.13` is the Darwin triple rather than a miss.
     #[must_use]
     pub fn from_tuple(target: TargetTuple) -> Option<Triple> {
         // Four triples narrow onto `x86_64-linux-gnu`, because a Darwin triple claiming glibc is
@@ -329,7 +331,7 @@ impl Triple {
             for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
                 for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
                     let candidate = Triple::new(arch, os, env);
-                    if candidate.tuple() != target {
+                    if candidate.tuple() != target.without_versions() {
                         continue;
                     }
                     // By name rather than by a match on the pair, so that an environment added to
@@ -1155,6 +1157,11 @@ mod tests {
         assert_eq!(mingw.env, Env::Gnu);
         let msvc = Triple::from_tuple("x86_64-windows-msvc".parse().unwrap()).unwrap();
         assert_eq!(msvc.env, Env::Msvc);
+        // A version on either side narrows to the same triple as the tuple without it.
+        let pinned = Triple::from_tuple("aarch64-macos.13".parse().unwrap()).unwrap();
+        assert_eq!(pinned, macos);
+        let old = Triple::from_tuple("x86_64-linux-gnu.2.28".parse().unwrap()).unwrap();
+        assert_eq!(old, gnu);
     }
 
     #[test]
