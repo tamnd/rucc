@@ -7,7 +7,7 @@
 | component | budget | note |
 |---|---|---|
 | `rucc` itself, all targets | **≤ 25 MB** | the compiler; every backend; the target table |
-| compiler headers | ~200 KB | 9 headers plus intrinsics |
+| compiler headers | ~1 MB | 9 headers plus intrinsics, and `arm_neon.h` is 400 KB of it |
 | libc descriptions (glibc abilist blob, musl, mingw defs) | ~1 MB | compressed, all architectures, all versions |
 | `librucc_builtins.a`, all tier-1/2 targets | ~10 MB | |
 | **base distribution** | **≤ 40 MB uncompressed, ≤ 15 MB compressed** | |
@@ -18,6 +18,8 @@
 | mingw-w64 sysroot, one windows-gnu target (on demand) | 128.5 MB | measured on x86_64: 1,702 headers at 80.5 MB plus 938 runtime and import library files at 48 MB, 15.2 MiB gzipped; §13.2 rather than the base, and the paragraph below says why |
 | linker (on demand) | 15 to 40 MB | document 11.2: separate, not in the binary |
 | Darwin SDK, MSVC SDK | **not distributed** | §13.4 |
+
+**The compiler headers row, which moved once.** It was 200 KB while the intrinsic headers were the x86 ones, and `arm_neon.h` took it to 579 KB on its own, because it declares the 2,218 NEON intrinsics a program may call and each is an inline function with a body. That is small next to what the other compilers ship for the same header: gcc 13's is 874 KB and clang 18's is 2.6 MB. So the row is 1 MB rather than a header cut down to fit, since a missing intrinsic is a program that does not build, and the release check that measures it is what caught the overrun, when `cargo xtask size` failed every build of 0.11.10.
 
 **Where the total came from, and why it moved four times.** The kernel header row was missing from the first version of this table, and adding it showed that the rows already summed to 62 MB against a stated base of 60, so the total was restated rather than nudged. Then the two header rows stopped being estimates. Both trees are produced by `tamnd/rucc-cross`, `bin/kernel-headers` and `bin/glibc-headers`, so the numbers in them are what our own output weighs rather than what zig's copy of it does, and that moved the kernel row up from 10.5 MB to 11.4 MB and the glibc row down from 8 MB to 5.3 MB. Then the mingw row stopped being an estimate too, and it left the base. Then the Linux rows left it as well, which is the paragraph on the Linux rows below, and the rows above the line now come to 36.2 MB, so the base is 40 rather than 75. A budget left at 75 with 36 in it would be a budget nobody is held to.
 
