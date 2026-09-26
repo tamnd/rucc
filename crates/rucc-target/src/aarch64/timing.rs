@@ -88,6 +88,8 @@ fn plain(form: Form) -> Timing {
         MulAdd => (2, Unit::Mul),
         Load => (LOAD, Unit::Load),
         Store | Probe => (1, Unit::Store),
+        // A hint goes to the load pipeline like the load it is ahead of, and nothing waits on it.
+        Prefetch => (1, Unit::Load),
         Push | PushPair => (1, Unit::Store),
         Pop | PopPair => (LOAD, Unit::Load),
         LoadFp => (LOAD + 1, Unit::Load),

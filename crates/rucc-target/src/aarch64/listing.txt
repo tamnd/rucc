@@ -405,6 +405,14 @@ a8c10be1	ldp x1, x2, [sp], #16	pop_pair_64
 aa0203f0	mov x16, x2	align_sp_64
 92400201	and x1, x16, #1	align_sp_64
 f900093f	str xzr, [x9, #16]	probe_64
+f9800921	prfm pldl1strm, [x9, #16]	prefetch_nta
+f9800924	prfm pldl3keep, [x9, #16]	prefetch_t2
+f9800922	prfm pldl2keep, [x9, #16]	prefetch_t1
+f9800920	prfm pldl1keep, [x9, #16]	prefetch_t0
+f9800931	prfm pstl1strm, [x9, #16]	prefetch_w_nta
+f9800934	prfm pstl3keep, [x9, #16]	prefetch_w_t2
+f9800932	prfm pstl2keep, [x9, #16]	prefetch_w_t1
+f9800930	prfm pstl1keep, [x9, #16]	prefetch_w_t0
 d503201f	nop	nop
 d4200020	brk #1	trap
 d5033bbf	dmb ish	fence

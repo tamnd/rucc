@@ -3411,11 +3411,12 @@ impl<'a> Lowering<'a> {
     /// between those. Measured against gcc 16.2.0 on x86-64 rather than read off the manual: zero
     /// gives `prefetchnta`, one `prefetcht2`, two `prefetcht1` and three `prefetcht0`.
     ///
-    /// Whether the access will write is not read here, and that is this machine rather than an
+    /// Whether the access will write is not read on x86-64, and that is the machine rather than an
     /// omission. The write hint is `prefetchw`, which is not in the base instruction set, and gcc
     /// writes it only when the command line said the part has it. So a prefetch for a write is the
     /// same instruction as a prefetch for a read, which is what gcc 16.2.0 writes without
-    /// `-mprfchw`, and the difference is carried in the IR for a target that can use it.
+    /// `-mprfchw`. AArch64 has it in the base set, so there a write picks the four `pst` forms of
+    /// `prfm` in place of the `pld` ones, at the same levels.
     ///
     /// The address goes in the addressing mode rather than in an operand, the way a store's does.
     /// It is built here as the plainest one there is, a register and nothing else, because what
@@ -3428,11 +3429,17 @@ impl<'a> Lowering<'a> {
         };
         let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
         let [address] = args[..] else { return Err(self.unsupported(inst)) };
-        let name = match hint.locality {
-            0 => "prefetch_nta",
-            1 => "prefetch_t2",
-            2 => "prefetch_t1",
-            PrefetchHint::MOST => "prefetch_t0",
+        // AArch64 has the write hint in the base instruction set, and gcc 16.2.0 writes it there.
+        let write = hint.write && self.on_aarch64();
+        let name = match (hint.locality, write) {
+            (0, false) => "prefetch_nta",
+            (1, false) => "prefetch_t2",
+            (2, false) => "prefetch_t1",
+            (PrefetchHint::MOST, false) => "prefetch_t0",
+            (0, true) => "prefetch_w_nta",
+            (1, true) => "prefetch_w_t2",
+            (2, true) => "prefetch_w_t1",
+            (PrefetchHint::MOST, true) => "prefetch_w_t0",
             // Nothing else exists. The checker reads a locality outside the range as zero and the
             // verifier refuses one that got here another way, so this is a hint that was built
             // rather than checked, and the safe answer for a hint is to write no instruction.

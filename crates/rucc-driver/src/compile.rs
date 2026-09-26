@@ -2001,6 +2001,39 @@ mod tests {
         assert!(text.contains("twice"), "{text}");
     }
 
+    /// The AArch64 intrinsics, as xxhash uses them in `XXH3_accumulate_512_neon`: a load, a
+    /// reinterpretation, the halves of a vector and a widening multiply added into a sum.
+    #[test]
+    fn the_shipped_arm_neon_has_what_xxhash_asks_it_for() {
+        let mut opts = freestanding();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = concat!(
+            "#include <arm_neon.h>\n",
+            "uint64x2_t acc(uint64x2_t sum, const void *in, const void *key) {\n",
+            "  uint8x16_t data = vld1q_u8((const uint8_t *)in);\n",
+            "  uint8x16_t k = vld1q_u8((const uint8_t *)key);\n",
+            "  uint64x2_t mixed = vreinterpretq_u64_u8(veorq_u8(data, k));\n",
+            "  uint32x2_t lo = vmovn_u64(mixed);\n",
+            "  uint32x2_t hi = vshrn_n_u64(mixed, 32);\n",
+            "  return vmlal_u32(sum, lo, hi);\n",
+            "}\n",
+            "uint32x4x2_t pair(uint32x4_t a, uint32x4_t b) { return vzipq_u32(a, b); }\n",
+            "uint32_t total(uint32x4_t a) { return vaddvq_u32(a); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        assert!(result.text().contains("pair"), "{}", result.text());
+        assert!(result.text().contains("total"), "{}", result.text());
+    }
+
+    /// Off AArch64 the header says so, rather than failing on a type the target does not have.
+    #[test]
+    fn the_shipped_arm_neon_refuses_another_target() {
+        let result = run(&freestanding(), "#include <arm_neon.h>\n");
+        let said = result.messages.join("\n");
+        assert!(said.contains("arm_neon.h is for AArch64"), "{said}");
+    }
+
     /// The float header omits four square roots and SSE2 omits the matching two, for the reason
     /// both headers write down. A later change that quietly defines one as an approximation
     /// would be a wrong answer nobody sees, so the absence is held in place here.
@@ -2038,12 +2071,29 @@ mod tests {
     /// an assertion about how much `<mmintrin.h>` defines, which is not what is being asked.
     #[test]
     fn every_shipped_header_can_be_included_twice() {
+        // This is x86-64, and `<arm_neon.h>` is for AArch64 only, so it is held to the same
+        // thing by the AArch64 test below.
         let once: String = rucc_session::runtime::names()
             .iter()
+            .filter(|name| **name != "arm_neon.h")
             .map(|name| format!("#include <{name}>\n"))
             .collect();
         let twice = once.repeat(2);
         assert_eq!(shipped(&format!("{once}int x;\n")), shipped(&format!("{twice}int x;\n")));
+
+        let mut opts = freestanding();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let tree = |source: &str| {
+            let result = run(&opts, source);
+            assert_eq!(
+                result.messages,
+                Vec::<String>::new(),
+                "expected this to compile:\n{source}"
+            );
+            result.text().to_owned()
+        };
+        let neon = "#include <arm_neon.h>\n";
+        assert_eq!(tree(&format!("{neon}int x;\n")), tree(&format!("{neon}{neon}int x;\n")));
     }
 
     #[test]
@@ -4309,6 +4359,27 @@ decl #0 x : int object external static defined
         let text = asm("void warm(void *p) { __builtin_prefetch(p, 1); }\n");
         assert!(text.contains("\tprefetcht0\t"), "{text}");
         assert!(!text.contains("prefetchw"), "{text}");
+    }
+
+    /// The same eight programs on AArch64, where the write hint is in the base instruction set and
+    /// so is a different instruction, which is what gcc 16.2.0 writes for them.
+    #[test]
+    fn an_aarch64_prefetch_is_a_prfm_that_says_the_locality_and_whether_it_writes() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        for (write, kind) in [(0, "pld"), (1, "pst")] {
+            for (locality, wanted) in [(0, "l1strm"), (1, "l3keep"), (2, "l2keep"), (3, "l1keep")] {
+                let source = format!(
+                    "void warm(void *p) {{ __builtin_prefetch(p, {write}, {locality}); }}\n"
+                );
+                let result = run(&opts, &source);
+                assert_eq!(result.messages, Vec::<String>::new(), "{source}");
+                let text = result.text();
+                assert!(text.contains("prfm"), "{source}{text}");
+                assert!(text.contains(&format!("{kind}{wanted}, [x0]")), "{source}{text}");
+            }
+        }
     }
 
     /// The stop, which is the one instruction the machine is promised never to have a meaning for.

@@ -341,6 +341,8 @@ pub enum Value {
     Barrier(u8),
     /// A system register, as the fifteen bits `mrs` and `msr` carry for it.
     System(u16),
+    /// What a `prfm` is asked to do, as the five bits the encoding gives it. `pldl1keep` is zero.
+    Prefetch(u8),
 }
 
 /// How the zeros an instruction was written with are to be filled in.
@@ -1494,13 +1496,18 @@ impl At<'_> {
             [t, place] => (t, place),
             _ => return Err(self.unwritten()),
         };
-        let access = self.access(t)?;
-        let rt = match *t {
-            Value::Gpr(_, number) => u32::from(number),
-            Value::Fp(_, number) => u32::from(number),
+        // A prefetch is a load of eight bytes as far as the encoding goes, with the one opc a load
+        // of that size does not use, and what it is asked to do where the register would be.
+        let prefetch = m == "prfm" || m == "prfum";
+        let (access, rt) = match *t {
+            Value::Prefetch(operation) if prefetch && operation < 32 => {
+                (Access { size: 3, v: 0, opc: 0b10, scale: 3 }, u32::from(operation))
+            }
+            Value::Gpr(_, number) if !prefetch => (self.access(t)?, u32::from(number)),
+            Value::Fp(_, number) if !prefetch => (self.access(t)?, u32::from(number)),
             _ => return Err(self.unwritten()),
         };
-        let unscaled_only = m.starts_with("ldur") || m.starts_with("stur");
+        let unscaled_only = m.starts_with("ldur") || m.starts_with("stur") || m == "prfum";
         let front = access.size << 30 | 0b111 << 27 | access.v << 26 | access.opc << 22 | rt;
         let addr = match place {
             Value::Mem(addr) => *addr,
@@ -1532,7 +1539,7 @@ impl At<'_> {
                     front | imm9 << 12 | rn << 5
                 }
             }
-            (Offset::Imm(imm), mode) if !unscaled_only => {
+            (Offset::Imm(imm), mode) if !unscaled_only && !prefetch => {
                 let imm9 = signed(imm, 9).ok_or_else(|| self.immediate(imm))?;
                 let index = if mode == Mode::Pre { 0b11 } else { 0b01 };
                 front | imm9 << 12 | index << 10 | rn << 5

@@ -315,6 +315,13 @@ d4400000	hlt #0
 d5033bbf	dmb ish
 d50339bf	dmb ishld
 d5033abf	dmb ishst
+f9800000	prfm pldl1keep, [x0]
+f9bffc73	prfm pstl2strm, [x3, #32760]
+f98007ec	prfm plil3keep, [sp, #8]
+f89f8000	prfm pldl1keep, [x0, #-8]
+f8803010	prfum pstl1keep, [x0, #3]
+f8a17800	prfm pldl1keep, [x0, x1, lsl #3]
+f8a1c802	prfm pldl2keep, [x0, w1, sxtw]
 d5033fbf	dmb sy
 d5033b9f	dsb ish
 d5033f9f	dsb sy

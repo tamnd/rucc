@@ -57,6 +57,8 @@ pub enum Arg {
     Cond(Cond),
     /// A barrier option that is part of the opcode.
     Barrier(u8),
+    /// What a `prfm` is asked to do, as the five bits the encoding gives it.
+    Prefetch(u8),
     /// A general register that is part of the opcode rather than one the allocator chose, where
     /// thirty one is the zero register.
     Fixed(u8, Width),
@@ -767,6 +769,17 @@ static TEXT: &[(&str, &[Written])] = &[
         &[spell("mov", &[Fixed(16, X), Reg(1, X)]), spell("and", &[Reg(0, X), Fixed(16, X), Imm])],
     ),
     ("probe_64", &[spell("str", &[Fixed(31, X), Mem])]),
+    // The locality gcc 16.2.0 picks for each: nothing kept is a streaming load into the nearest
+    // cache, and one, two and three are loads kept in the third, second and first. A write is the
+    // same with `pst` for `pld`.
+    ("prefetch_nta", &[spell("prfm", &[Arg::Prefetch(0b00001), Mem])]),
+    ("prefetch_t2", &[spell("prfm", &[Arg::Prefetch(0b00100), Mem])]),
+    ("prefetch_t1", &[spell("prfm", &[Arg::Prefetch(0b00010), Mem])]),
+    ("prefetch_t0", &[spell("prfm", &[Arg::Prefetch(0b00000), Mem])]),
+    ("prefetch_w_nta", &[spell("prfm", &[Arg::Prefetch(0b10001), Mem])]),
+    ("prefetch_w_t2", &[spell("prfm", &[Arg::Prefetch(0b10100), Mem])]),
+    ("prefetch_w_t1", &[spell("prfm", &[Arg::Prefetch(0b10010), Mem])]),
+    ("prefetch_w_t0", &[spell("prfm", &[Arg::Prefetch(0b10000), Mem])]),
     // Everything else.
     ("nop", &[spell("nop", &[])]),
     ("trap", &[spell("brk", &[Lit(1)])]),
@@ -1024,6 +1037,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Arg::Extend(extend) => Value::Extend(extend, None),
         Arg::Cond(cond) => Value::Cond(cond),
         Barrier(option) => Value::Barrier(option),
+        Arg::Prefetch(operation) => Value::Prefetch(operation),
         Fixed(number, width) => Value::Gpr(width, number),
         Mem => Value::Mem(with.mem.ok_or(Missing::Mem)?),
         Base => gpr(X, with.mem.ok_or(Missing::Mem)?.base),
