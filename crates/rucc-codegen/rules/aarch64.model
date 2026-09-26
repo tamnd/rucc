@@ -159,6 +159,7 @@
 ;; Reading memory, on the IR side. A load and a store are about which end of a value sits at the
 ;; lowest address, which is a fact about the target, so they are given a meaning here. AArch64 is
 ;; little endian as Linux, the BSDs, macOS and Windows run it, so these are the x86-64 entries.
+(semantics (load.i1 a) (extract 0 0 (select (mem) a)))
 (semantics (load.i8 a)
            (select (mem) a))
 (semantics (load.i16 a)
@@ -191,6 +192,7 @@
 
 ;; Writing memory, on the IR side. A `store` puts one byte into a memory and gives back the memory it
 ;; made, so these nest and the innermost runs first.
+(semantics (store.i1 v a) (store (mem) a (zero_extend 1 8 v)))
 (semantics (store.i8 v a)
            (store (mem) a v))
 (semantics (store.i16 v a)
@@ -252,6 +254,7 @@
 ;; that the two halves of a rule are two statements.
 (semantics (a64.ldr_8 a)
            (select (mem) a))
+(semantics (a64.ldr_bit a) (extract 0 0 (select (mem) a)))
 (semantics (a64.ldr_16 a)
            (concat (select (mem) (bvadd a 1)) (select (mem) a)))
 (semantics (a64.ldr_32 a)
@@ -281,6 +284,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a))))
 (semantics (a64.str_8 a v)
            (store (mem) a v))
+(semantics (a64.str_bit a v) (store (mem) a (zero_extend 1 8 v)))
 (semantics (a64.str_16 a v)
            (store (store (mem)
                        a (extract 7 0 v))

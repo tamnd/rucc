@@ -811,6 +811,28 @@
 ;; held to the nine signed bits every load can take, which is the unscaled form; a larger one that
 ;; the scaled form could take is left to the plain rule for now.
 
+;; A `_Bool` object is one byte holding a zero or a one, and a truth value in a register is the
+;; same zero or one, so reading one is the byte load and writing one is the byte store. Nothing
+;; above bit zero is ever anything but zero on either side, which is the invariant x86-64 keeps.
+
+(rule (lower (load.i1 (value.i64 a)))
+      (a64.ldr_bit (amode_base a))
+      (spec (= (extract 0 0 (select (mem) a)) (result))))
+
+(rule (lower (load.i1 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -256) (< k 256)))
+      (a64.ldr_bit (amode_base_offset a k))
+      (spec (= (extract 0 0 (select (mem) (bvadd a k))) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (value.i64 a)))
+      (a64.str_bit (amode_base a) v)
+      (spec (= (store (mem) a (zero_extend 1 8 v)) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -256) (< k 256)))
+      (a64.str_bit (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 v)) (result))))
+
 (rule (lower (load.i8 (value.i64 a)))
       (a64.ldr_8 (amode_base a))
       (spec (= (select (mem) a) (result))))

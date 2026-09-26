@@ -88,6 +88,11 @@ pub fn read(text: &str) -> Result<Line, Error> {
                 }
             }
             line.values.push(Value::Mem(addr));
+        } else if at + 1 == pieces.len() && takes_label(&line.mnemonic) && !piece.starts_with('#') {
+            // Where the instruction wants a label a bare word is a symbol, whatever else it could
+            // spell. A C global called `le` or `eq` is written `adrp x0, le`, and reading that as
+            // the condition would leave the line with no encoding. GNU as reads it the same way.
+            line.values.push(reference(piece, &mut named).map(Value::Symbol)?);
         } else {
             line.values.push(operand(piece, &mut named)?);
         }
@@ -99,6 +104,15 @@ pub fn read(text: &str) -> Result<Line, Error> {
 
 /// The symbol a line names so far, and what is added to it.
 type Named = (Option<String>, i64);
+
+/// Whether the last operand of the instruction is a label, which is every branch to one, the two
+/// address forming instructions and the literal loads.
+fn takes_label(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "b" | "bl" | "cbz" | "cbnz" | "tbz" | "tbnz" | "adr" | "adrp" | "ldr" | "ldrsw" | "prfm"
+    ) || mnemonic.starts_with("b.")
+}
 
 /// The operands, split at the commas that are not inside an address.
 fn split(text: &str) -> Vec<&str> {
@@ -443,6 +457,20 @@ mod tests {
         assert_eq!((line.symbol.as_deref(), line.addend), (Some("1b"), 0));
         assert!(read("b 1x").is_err());
         assert!(read("b table+").is_err());
+    }
+
+    /// A global may be called what a condition, a barrier or a register is called, and where the
+    /// instruction wants a label it is still the global. c4 has one called `le`.
+    #[test]
+    fn a_label_is_a_symbol_whatever_it_spells() {
+        for text in ["adrp x0, le", "b eq", "bl ish", "b.ne sy", "cbz w1, x2", "adr x3, sp"] {
+            let line = read(text).unwrap();
+            assert_eq!(line.values.last(), Some(&Value::Symbol(Operator::Plain)), "{text}");
+            let name = text.rsplit(' ').next();
+            assert_eq!(line.symbol.as_deref(), name, "{text}");
+        }
+        let line = read("csel x0, x1, x2, le").unwrap();
+        assert_eq!(line.values[3], Value::Cond(Cond::Le));
     }
 
     #[test]
