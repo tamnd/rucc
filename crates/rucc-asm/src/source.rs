@@ -888,6 +888,11 @@ impl Reader {
                     }
                 }
             }
+            let implied = Shape::implied(&name);
+            shape.alloc |= implied.alloc;
+            shape.write |= implied.write;
+            shape.exec |= implied.exec;
+            shape.thread |= implied.thread;
         }
         if let Some(kind) = args.get(2) {
             let kind = kind.trim().trim_start_matches(['@', '%']);
@@ -2880,6 +2885,19 @@ mod tests {
         let part = out.parts.iter().find(|part| part.name == ".init.text").expect("the section");
         assert!(part.shape.alloc && part.shape.exec && part.shape.bits);
         assert!(!part.shape.write, "nothing said it was writable");
+    }
+
+    #[test]
+    fn a_section_gas_knows_by_name_keeps_the_flags_the_name_gives_it() {
+        let out = assembled(
+            "\t.section .data.rel.ro.local,\"a\",@progbits\n\t.quad 0\n\
+             \t.section .text.hot,\"a\",@progbits\n\t.byte 0x90\n\
+             \t.section .init.data,\"aw\",@progbits\n\t.byte 1\n",
+        );
+        let shape = |name: &str| out.parts.iter().find(|part| part.name == name).unwrap().shape;
+        assert!(shape(".data.rel.ro.local").write, "a jump table the linker cannot fix up");
+        assert!(shape(".text.hot").exec);
+        assert!(!shape(".init.data").exec, "only `.init` itself is code");
     }
 
     #[test]
