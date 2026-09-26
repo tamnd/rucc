@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.11
+
 ### Added
 
 - `-ffast-math`, `-Ofast` and the family `-ffast-math` names: `-f[no-]math-errno`, `-f[no-]finite-math-only`, `-f[no-]signed-zeros`, `-f[no-]reciprocal-math`, `-f[no-]associative-math` and `-f[no-]unsafe-math-optimizations`, with the last word on each member winning. Each defines the macros gcc 16 defines for it, so `__FAST_MATH__`, `__FINITE_MATH_ONLY__` as one and `__GCC_IEC_559` as zero under `-ffast-math`, and a link under `-ffast-math`, `-Ofast` or `-funsafe-math-optimizations` takes gcc's `crtfastmath.o`, which sets flush to zero before `main`. `-mdaz-ftz` and `-mno-daz-ftz` decide that file outright. No floating point arithmetic is folded or regrouped under any of them yet. `-ffast-math` and `-Ofast` used to be refused (#1051).
