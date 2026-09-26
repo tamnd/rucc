@@ -1365,7 +1365,13 @@ fn produced(func: &Func, inst: Inst) -> Type {
 }
 
 /// Puts an instruction over these operands in front of another one, and gives back its value.
-fn ahead(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value], ty: Type) -> Value {
+pub(crate) fn ahead(
+    func: &mut Func,
+    inst: Inst,
+    opcode: Opcode,
+    args: &[Value],
+    ty: Type,
+) -> Value {
     let args = func.push_values(args);
     written(func, inst, InstData { args, ..InstData::new(opcode) }, ty)
 }
@@ -1377,7 +1383,7 @@ fn ahead_cmp(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra, args: &[
 }
 
 /// The same for a constant, which carries an immediate rather than operands.
-fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
+pub(crate) fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
     let extra = Extra::Imm(func.add_imm(imm));
     written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, ty)
 }
@@ -1402,7 +1408,7 @@ fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
 /// of the function reads is the value it already read and nothing has to be substituted anywhere.
 /// The type of that value does not change either, because every rewrite here ends at the type it
 /// started at.
-fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
+pub(crate) fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
     let args = func.push_values(args);
     let data = &mut func[inst];
     data.opcode = opcode;

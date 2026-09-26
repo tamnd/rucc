@@ -162,6 +162,7 @@ pub mod combine;
 pub mod compare;
 pub mod copies;
 pub mod coverage;
+pub mod divide;
 pub mod elsewhere;
 pub mod expand;
 pub mod finish;

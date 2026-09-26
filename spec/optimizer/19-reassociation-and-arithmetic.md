@@ -179,6 +179,25 @@ why: integer division truncates, so `(a/d)` and `a * (1/d)` are not related by a
 There is no integer reciprocal trick for a runtime divisor. The only integer win is when the divisor
 is constant.
 
+**What was built.** The division by a constant is `crates/rucc-codegen/src/divide.rs`, a step of the
+lowering group that runs after the widths and before the bytes, at every level but `-Os`, where gcc
+keeps the `div` too. It takes a signed or unsigned division or remainder whose divisor is a constant
+and writes the multiply, the shifts and the add that `choose_multiplier` asks for. A signed power of
+two is the biased shift above, and a division the front end marks exact, which is what a pointer
+subtraction is, is a shift and a multiply by the inverse of the odd part. A remainder is the dividend
+less the quotient times the divisor, and an unsigned remainder by a power of two is a mask.
+
+The IR has no high multiply yet (#309), so the product is taken in 64 bits. That covers every
+division of 32 bits or fewer, and a 64 bit division whose dividend came from a zero or sign extension
+of 32 bits or fewer, which is what C's promotions make of most of them. A 64 bit division of a value
+that could be anything keeps its `div` unless the divisor is a power of two or the division is exact.
+
+The tests prove it rather than sample it. Both the rewritten quotient and C's are monotone on each
+half of the dividends, so checking the multiples of the divisor, one either side of each, and the ends
+checks every dividend. They do that for every 16 bit divisor and run every 8 bit division outright.
+`cargo xtask divide` then compiles `tests/divide/constants.c` with rucc at three levels and with gcc,
+runs all four and compares the answers.
+
 **Widening multiply and multiply-accumulate recognition.** Recognising that a 32-by-32 multiply
 whose result is used at 64 bits is a widening multiply, and that `a*b+c` is one instruction. Both
 are target-dependent pattern matches over the IR and both belong to document 37.

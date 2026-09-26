@@ -64,7 +64,7 @@ use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
 use crate::switch::{Force, Lowered};
-use crate::{expand, half, quad, retry, switch, varargs, wide, widths};
+use crate::{divide, expand, half, quad, retry, switch, varargs, wide, widths};
 
 /// One member of the group.
 ///
@@ -116,6 +116,11 @@ pub enum Step {
     /// Before everything after it, because every pass after it is written about widths the machine
     /// has and an integer of forty bits is not one of them.
     Widths,
+    /// A division or remainder by a constant, as a multiply by its reciprocal and a shift.
+    ///
+    /// Below the widths, so every division it sees is at a width the machine has, and a widening
+    /// the step above wrote in front of one is a range it can read like any other.
+    Divisions,
     /// A byte reversal, as the halving run of swaps it is.
     Bytes,
     /// A leading zero, trailing zero or set bit count, as the arithmetic that answers it.
@@ -151,6 +156,7 @@ impl Step {
         Self::HalfFloats,
         Self::Halves,
         Self::Widths,
+        Self::Divisions,
         Self::Bytes,
         Self::Counts,
         Self::Quads,
@@ -171,6 +177,7 @@ impl Step {
             Self::HalfFloats => "half-floats",
             Self::Halves => "halves",
             Self::Widths => "widths",
+            Self::Divisions => "divisions",
             Self::Bytes => "bytes",
             Self::Counts => "counts",
             Self::Quads => "quads",
@@ -192,6 +199,7 @@ impl Step {
             Self::HalfFloats => "the half float format",
             Self::Halves => "an integer wider than a register",
             Self::Widths => "an integer at a width the machine does not have",
+            Self::Divisions => "a division by a constant",
             Self::Bytes => "a byte reversal",
             Self::Counts => "a bit count",
             Self::Quads => "the quad float format",
@@ -229,6 +237,7 @@ impl Step {
                 Opcode::SMulOverflow,
             ],
             Self::HalfFloats | Self::Halves | Self::Widths | Self::Rounds => &[],
+            Self::Divisions => &[Opcode::SDiv, Opcode::UDiv, Opcode::SRem, Opcode::URem],
             Self::Bytes => &[Opcode::Bswap],
             Self::Counts => &[Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop],
             Self::Quads => &[],
@@ -284,6 +293,7 @@ impl Step {
             Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func),
+            Self::Divisions => divide::divisions(func, goal),
             Self::Bytes => expand::bytes(func),
             Self::Counts => expand::counts(func),
             Self::Quads => quad::calls(func, names, conv.abi),
@@ -568,6 +578,7 @@ mod tests {
                 "half-floats",
                 "halves",
                 "widths",
+                "divisions",
                 "bytes",
                 "counts",
                 "quads",
@@ -708,6 +719,12 @@ mod tests {
             Step::Counts => one(&[i32], &[i32], |build, args| {
                 let ones = build.unary(Opcode::Ctlz, args[0], i32);
                 build.ret(&[ones]);
+            }),
+            // `unsigned d(unsigned x) { return x % 100; }`.
+            Step::Divisions => one(&[i32], &[i32], |build, args| {
+                let hundred = build.iconst(i32, 100);
+                let left = build.binary(Opcode::URem, args[0], hundred, Flags::NONE);
+                build.ret(&[left]);
             }),
             Step::Floats => one(&[], &[f64], |build, _| {
                 let k = build.fconst(f64, 0x3ff8_0000_0000_0000);

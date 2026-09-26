@@ -23,6 +23,7 @@ mod cost;
 mod debugger;
 mod differential;
 mod disasm;
+mod divide;
 mod dso;
 mod fuzz;
 mod gate;
@@ -83,6 +84,7 @@ tasks:
                     against theirs, function by function
   wide              compile 128-bit arithmetic with both compilers, run both, compare
   quad              compile binary128 arithmetic with both compilers, run both, compare
+  divide            compile divisions by constants with both compilers, run both, compare
   repeatable        compile tests/repeatable several times over and compare the runs
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
@@ -141,6 +143,7 @@ fn main() -> ExitCode {
         Some("lines") => lines::lines(),
         Some("wide") => wide::wide(),
         Some("quad") => quad::quad(),
+        Some("divide") => divide::divide(),
         Some("repeatable") => repeatable::repeatable(),
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),
