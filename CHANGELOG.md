@@ -4,8 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- aarch64 predefines the rest of what gcc says for a plain Armv8-A: `__ARM_ARCH_8A`, `__ARM_ARCH_ISA_A64`, `__ARM_FEATURE_CLZ`, `__ARM_FEATURE_FMA`, `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_NUMERIC_MAXMIN`, the `__ARM_SIZEOF_*` and `__ARM_ALIGN_MAX_STACK_PWR` values, `__AARCH64_CMODEL_SMALL__` and the `__FP_FAST_FMA` family.
+
 ### Fixed
 
+- `int_fast16_t` and `int_fast32_t` are `long` on every sixty four bit glibc target rather than only on x86-64, which is what glibc's `stdint.h` and gcc for aarch64, riscv64, powerpc64le and s390x say, and `int_fast16_t` is `short` on Apple targets as Apple's `stdint.h` has it. Before this `stdatomic.h`'s atomic fast types were the wrong width on aarch64 Linux.
+- `__GCC_DESTRUCTIVE_SIZE` is 256 on aarch64, as gcc and clang give it.
 - A function written `extern inline` under GNU's reading of `inline` is never emitted, even when a call to it is left standing. The external definition is in another object, which is what gcc assumes too. With `_FORTIFY_SOURCE` from `-O1` up, glibc writes `memcpy` that way, and the copy rucc put out of line was a `memcpy` that called itself, so every libsodium test crashed.
 
 ## 0.11.12

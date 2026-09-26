@@ -517,6 +517,26 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__ARM_NEON", "1");
             d.set("__ARM_FEATURE_UNALIGNED", "1");
             d.set("__ARM_PCS_AAPCS64", "1");
+            // The rest of what gcc says for a plain Armv8-A. Every one is an instruction the
+            // base architecture has, so none of them depends on a `-march` this compiler does
+            // not take yet, and a program that tests one to choose `__builtin_clz` or a
+            // hardware divide over a portable loop takes the same branch it takes under gcc.
+            d.set("__ARM_ARCH_8A", "1");
+            d.set("__ARM_ARCH_ISA_A64", "1");
+            d.set("__ARM_FEATURE_CLZ", "1");
+            d.set("__ARM_FEATURE_FMA", "1");
+            d.set("__ARM_FEATURE_IDIV", "1");
+            d.set("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
+            d.set("__ARM_ALIGN_MAX_STACK_PWR", "16");
+            d.set("__ARM_SIZEOF_MINIMAL_ENUM", "4");
+            d.set("__ARM_SIZEOF_WCHAR_T", "4");
+            d.set("__AARCH64_CMODEL_SMALL__", "1");
+            // A fused multiply add is one instruction here, and glibc's `math.h` turns these
+            // into `FP_FAST_FMA` and `FP_FAST_FMAF`, which a program reads to decide whether
+            // calling `fma` is cheaper than writing the product and the sum apart.
+            for name in ["", "F", "F32", "F64", "F32x"] {
+                d.set(&format!("__FP_FAST_FMA{name}"), "1");
+            }
         }
         Arch::Riscv64 => {
             d.flag("__riscv");
@@ -712,10 +732,12 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     let pointer = target.pointer_width / 8;
     // The two hardware interference sizes, which say how far apart two objects have to be for
     // a write to one not to invalidate the other's cache line, and how close together two have
-    // to be to share one. A cache line is sixty four bytes on every target here, so the two
-    // answers are the same number and gcc gives the same number as well.
+    // to be to share one. A cache line is sixty four bytes on every target here, and x86-64
+    // gives that for both. Arm cores have been built with lines up to 256 bytes, so gcc and
+    // clang both give 256 for the distance that has to be safe on any of them.
+    let destructive = if target.tuple.arch() == tuple::Arch::Aarch64 { "256" } else { "64" };
     d.set("__GCC_CONSTRUCTIVE_SIZE", "64");
-    d.set("__GCC_DESTRUCTIVE_SIZE", "64");
+    d.set("__GCC_DESTRUCTIVE_SIZE", destructive);
     let long = target.long_width / 8;
     let long_double = target.long_double_width / 8;
     d.set("__CHAR_BIT__", "8");
@@ -881,9 +903,10 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     exact(d, 32, "int", "unsigned int", "0x7fffffff", "0xffffffffU", "");
     exact(d, 64, wide, wide_unsigned, &wide_max, &wide_umax, wide_suffix);
 
-    // The fast types. GCC makes the 16 and 32 bit ones `long` on x86-64 glibc and `int`
-    // everywhere else, and a header that computes a printf format from the type name notices
-    // the difference.
+    // The fast types. GCC makes the 16 and 32 bit ones `long` on sixty four bit glibc, which
+    // is what glibc's `stdint.h` says under `__WORDSIZE == 64` whatever the processor, and
+    // `int` everywhere else. A header that computes a printf format from the type name notices
+    // the difference. gcc for aarch64, riscv64, powerpc64le and s390x all say `long int`.
     //
     // musl is the reason this is not simply a question of the architecture. musl defines
     // `int_fast16_t` and `int_fast32_t` as `int32_t` on every target it supports, GCC built
@@ -891,17 +914,18 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // not. The place it shows is `stdatomic.h`, which GCC ships and writes directly out of
     // these macros: `typedef _Atomic __INT_FAST16_TYPE__ atomic_int_fast16_t;`. Get this wrong
     // and every atomic fast type in the program is the wrong width.
-    let fast_is_wide = target.tuple.arch() == tuple::Arch::X86_64
-        && lp64
-        && target.tuple.env() != tuple::Env::Musl;
+    let fast_is_wide =
+        target.tuple.os() == tuple::Os::Linux && lp64 && target.tuple.env() != tuple::Env::Musl;
     let fast_middle = if fast_is_wide { wide } else { "int" };
     // Windows is the exception in the other direction, and it is only the 16 bit one. mingw's
     // `stdint.h` makes `int_fast16_t` a `short` and gcc for that target says the same, while
     // `int_fast32_t` there is the `int` it is nearly everywhere, so the two cannot share an
     // answer on this platform the way they do on the others. The measurement is the mingw tree,
     // which is the only Windows header tree this compiler fetches, and the msvc environment is
-    // given the same answer because nothing compiles against a tree of Microsoft's yet.
-    let fast16_is_short = target.tuple.os() == tuple::Os::Windows;
+    // given the same answer because nothing compiles against a tree of Microsoft's yet. Apple's
+    // `stdint.h` is the same shape, `int16_t` for the 16 bit one and `int32_t` for the other.
+    let fast16_is_short =
+        matches!(target.tuple.os(), tuple::Os::Windows | tuple::Os::MacOs | tuple::Os::IOs);
     d.set("__INT_FAST8_TYPE__", "signed char");
     d.set("__UINT_FAST8_TYPE__", "unsigned char");
     d.set("__INT_FAST8_MAX__", "0x7f");
@@ -1929,6 +1953,42 @@ mod tests {
     }
 
     #[test]
+    fn sixty_four_bit_glibc_makes_the_fast_types_long_on_every_processor() {
+        // glibc's `stdint.h` picks `long` under `__WORDSIZE == 64` and never asks which
+        // processor it is on, and gcc for aarch64, riscv64 and powerpc64le all agree.
+        for triple in ["aarch64-unknown-linux-gnu", "riscv64-unknown-linux-gnu"] {
+            let set = set_for(triple);
+            assert!(has(&set, "#define __INT_FAST16_TYPE__ long int"), "{triple}");
+            assert!(has(&set, "#define __UINT_FAST32_TYPE__ long unsigned int"), "{triple}");
+            assert!(has(&set, "#define __INT_FAST32_WIDTH__ 64"), "{triple}");
+        }
+        assert!(has(&set_for("aarch64-unknown-linux-musl"), "#define __INT_FAST16_TYPE__ int"));
+        // Apple's `stdint.h` makes the 16 bit one `int16_t` and the 32 bit one `int32_t`.
+        let darwin = set_for("aarch64-apple-darwin");
+        assert!(has(&darwin, "#define __INT_FAST16_TYPE__ short int"));
+        assert!(has(&darwin, "#define __INT_FAST32_TYPE__ int"));
+    }
+
+    #[test]
+    fn armv8_a_says_what_the_base_architecture_has() {
+        let arm = set_for("aarch64-unknown-linux-gnu");
+        for line in [
+            "#define __ARM_ARCH_ISA_A64 1",
+            "#define __ARM_FEATURE_CLZ 1",
+            "#define __ARM_FEATURE_IDIV 1",
+            "#define __ARM_FEATURE_FMA 1",
+            "#define __FP_FAST_FMA 1",
+            "#define __GCC_DESTRUCTIVE_SIZE 256",
+        ] {
+            assert!(has(&arm, line), "{line}");
+        }
+        let x86 = set_for("x86_64-unknown-linux-gnu");
+        assert!(!x86.contains("__ARM_FEATURE_CLZ"));
+        assert!(!x86.contains("__FP_FAST_FMA"));
+        assert!(has(&x86, "#define __GCC_DESTRUCTIVE_SIZE 64"));
+    }
+
+    #[test]
     fn musl_and_glibc_disagree_about_the_fast_types_on_the_same_processor() {
         // The same x86-64 machine, two libcs, two answers. GCC built for glibc says `long int`
         // and GCC built for musl says `int`, because musl defines `int_fast16_t` as `int32_t`
@@ -1966,16 +2026,6 @@ mod tests {
             assert!(has(&gnu, line), "glibc lost {line}");
             assert!(has(&musl, line), "musl lost {line}");
         }
-    }
-
-    #[test]
-    fn a_non_x86_target_has_int_sized_fast_types_whatever_the_libc() {
-        // The `long` answer was always specific to x86-64. aarch64 glibc says `int` too, so
-        // adding the libc axis must not have turned into a second way to say x86-64.
-        let arm_gnu = set_for("aarch64-unknown-linux-gnu");
-        let arm_musl = set_for("aarch64-unknown-linux-musl");
-        assert!(has(&arm_gnu, "#define __INT_FAST16_TYPE__ int"));
-        assert!(has(&arm_musl, "#define __INT_FAST16_TYPE__ int"));
     }
 
     #[test]
