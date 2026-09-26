@@ -167,6 +167,9 @@ pub struct FrameInsts {
     /// the address space is one where a signed comparison of two stack pointers says the wrong
     /// thing, and nothing about a guard page cares which half of the space it is in.
     pub above: &'static str,
+    /// Jumps to the name it is given, which is how a tail call ends, or `None` on a target where
+    /// nothing writes one yet and every call in tail position stays a call.
+    pub away: Option<&'static str>,
     /// Calls the name it is given and reads no register.
     ///
     /// Here for the same reason, and used for the one call an epilogue can make, which is the one

@@ -101,9 +101,9 @@ use crate::varargs;
 
 /// The instruction a template's `jmp` to a name outside it becomes.
 ///
-/// Not in [`x86_64::FRAME`] with the other opcodes this file names, because a frame never writes
-/// one: the only function it appears in has no prologue and no epilogue for the frame to write
-/// anything into.
+/// The same instruction [`x86_64::FRAME`] names for the end of a tail call, named here as well
+/// because what reaches this one is a template in a function with no prologue and no epilogue,
+/// which is nothing to do with the frame.
 /// See [`x86_64::Step::Away`].
 const AWAY: &str = "jmp_away";
 
@@ -797,6 +797,9 @@ pub struct Stack {
     /// stack pointer, and a frame that did not keep the first of them has nothing in it saying
     /// where the caller's frame is for the epilogue to find after control has come back.
     pub saves_place: bool,
+    /// The calls a `tail_call` became that [`crate::tail::jumps`] may turn into a jump, which is
+    /// the ones that passed everything in registers.
+    pub tails: Vec<crate::tail::Tail>,
 }
 
 impl Stack {
@@ -1259,6 +1262,13 @@ impl<'a> Lowering<'a> {
                     self.called(inst)?;
                     continue;
                 }
+                // A call and the return behind it, which is what `crate::tail::mark` made it out
+                // of, and both are built the way they would have been. What makes it a jump is
+                // written at the very end, once the epilogue is there to jump from.
+                Opcode::TailCall => {
+                    self.tail_called(inst)?;
+                    continue;
+                }
                 // Built from the frame rather than matched, for the same shape of reason a call
                 // is built from the convention: what a rule replaces a term with is instructions,
                 // and what an `alloca` needs first is bytes, which the rule language has no way
@@ -1398,7 +1408,8 @@ impl<'a> Lowering<'a> {
                         || self.sret().is_some()
                         || self.gives_back_x87(inst) =>
                 {
-                    self.returned(inst)?;
+                    let values = self.source[self.source[inst].args].to_vec();
+                    self.returned(inst, values)?;
                     continue;
                 }
                 // A cast between a pointer and an integer of the same width, which on this
@@ -1531,7 +1542,7 @@ impl<'a> Lowering<'a> {
     /// behind it, and everything after that is the same: where each argument goes, where the value
     /// comes back and which registers are gone across it are the convention's answers and the
     /// convention does not ask what is being called.
-    fn called(&mut self, inst: Inst) -> Result<(), Unsupported> {
+    fn called(&mut self, inst: Inst) -> Result<u32, Unsupported> {
         let data = &self.source[inst];
         let Extra::Call(info) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[info];
@@ -1599,10 +1610,31 @@ impl<'a> Lowering<'a> {
                 let into = self.through(into);
                 self.x87_at("fstp_t", span, into);
             }
-            return Ok(());
+            return Ok(made.outgoing);
         }
         for (result, &reg) in results.into_iter().zip(&made.results) {
             self.regs[result.index()] = Some(reg);
+        }
+        Ok(made.outgoing)
+    }
+
+    /// One `tail_call`, as the call and a return of what it gave back.
+    ///
+    /// The call is written down for [`crate::tail::jumps`] when it can be made after the frame is
+    /// gone. That is when it put nothing in the argument area, which is the bottom of this frame,
+    /// and when the answer comes back in registers, since one on the x87 stack is taken off and put
+    /// back by instructions after the call. A call that is not written down stays a call and a
+    /// return, which is what the IR said before `crate::tail::mark` read it.
+    fn tail_called(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let outgoing = self.called(inst)?;
+        let block = self.at.expect("a block is being filled");
+        let call = self.out.insts(block).last().expect("the call just built");
+        let values: Vec<Value> = self.source[inst].results().collect();
+        let x87 = self.x87_values(&values);
+        self.returned(inst, values)?;
+        if outgoing == 0 && !x87 && self.sret().is_none() {
+            let returns = self.out.insts(block).skip_while(|&at| at != call).skip(1).collect();
+            self.stack.tails.push(crate::tail::Tail { call, returns });
         }
         Ok(())
     }
@@ -1643,13 +1675,16 @@ impl<'a> Lowering<'a> {
     /// make leaves no half of one behind.
     /// Whether what a `return` gives back goes back on the x87 stack, per [`abi::back_on_x87`].
     fn gives_back_x87(&self, inst: Inst) -> bool {
-        let values = &self.source[self.source[inst].args];
+        self.x87_values(&self.source[self.source[inst].args])
+    }
+
+    /// Whether those values go back on the x87 stack, per [`abi::back_on_x87`].
+    fn x87_values(&self, values: &[Value]) -> bool {
         let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
         abi::back_on_x87(&types)
     }
 
-    fn returned(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
+    fn returned(&mut self, inst: Inst, values: Vec<Value>) -> Result<(), Unsupported> {
         let (mut ints, mut floats) = (0usize, 0usize);
         let mut parts = Vec::with_capacity(values.len() + 1);
         // An eighty bit value goes back on the x87 stack, which is where the convention says it is
@@ -1659,7 +1694,7 @@ impl<'a> Lowering<'a> {
         // for. What comes after is the epilogue, which gives the frame back and touches nothing in
         // the unit. A complex one loads its imaginary half first so that the real half ends up on
         // top of it, in `st(0)`, with the imaginary half under it in `st(1)`.
-        if self.gives_back_x87(inst) && self.sret().is_none() {
+        if self.x87_values(&values) && self.sret().is_none() {
             let span = self.source.span(inst);
             for &value in values.iter().rev() {
                 let from = self.x87_slot(value);

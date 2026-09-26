@@ -876,6 +876,8 @@ fn generate(
         goal: Goal::for_size(opts.opt_level.is_size()),
         // Only when somebody is measuring, and checked when the arguments were parsed.
         switch: opts.switch_shape.as_deref().and_then(rucc_codegen::switch::Force::named),
+        // On from `-O2` and at `-Os`, which is where gcc turns `-foptimize-sibling-calls` on.
+        sibling: opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls()),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

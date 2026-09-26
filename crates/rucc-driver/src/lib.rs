@@ -689,6 +689,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // a flag that says a pass ran when none did.
             "-fschedule-insns2" => opts.schedule_insns = Some(true),
             "-fno-schedule-insns2" => opts.schedule_insns = Some(false),
+            // A call in tail position as a jump: see `sibling_calls` in `rucc_session`.
+            "-foptimize-sibling-calls" => opts.sibling_calls = Some(true),
+            "-fno-optimize-sibling-calls" => opts.sibling_calls = Some(false),
             "-mno-red-zone" => opts.red_zone = false,
             "-mred-zone" => opts.red_zone = true,
             // Four flags rather than one with an argument, which is how gcc spells them and how
@@ -3495,6 +3498,23 @@ mod tests {
 
         let (none, _) = compile(&["-c", "a.c"]);
         assert!(!none.opt_level.schedules(), "at no optimization it says no");
+    }
+
+    /// Tail calls, which gcc spells as sibling calls and turns on at `-O2` and `-Os`.
+    #[test]
+    fn sibling_calls_can_be_turned_on_and_off_and_left_to_the_optimization_level() {
+        let (on, _) = compile(&["-c", "-O1", "-foptimize-sibling-calls", "a.c"]);
+        assert_eq!(on.sibling_calls, Some(true));
+
+        let (off, _) = compile(&["-c", "-O2", "-fno-optimize-sibling-calls", "a.c"]);
+        assert_eq!(off.sibling_calls, Some(false));
+
+        let (quiet, _) = compile(&["-c", "-Os", "a.c"]);
+        assert_eq!(quiet.sibling_calls, None, "nothing said, so the level decides");
+        assert!(quiet.opt_level.sibling_calls(), "and at this level the level says yes");
+
+        let (one, _) = compile(&["-c", "-O1", "a.c"]);
+        assert!(!one.opt_level.sibling_calls(), "gcc leaves them off at -O1");
     }
 
     /// Whether the timing model is worth holding an instruction back over, which is a `-Z` because

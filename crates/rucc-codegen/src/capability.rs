@@ -160,6 +160,9 @@ pub static HAND: &[(Opcode, &str)] = &[
     // part of building them.
     (Opcode::FrameAddress, "`crate::lower`, as the walk up the saved frame pointers"),
     (Opcode::ReturnAddress, "`crate::lower`, as the same walk with one load at the end of it"),
+    // A call that ends the function, built here because a call is, and turned into a jump by
+    // `crate::tail` once the epilogue is in front of it, which no rule could see.
+    (Opcode::TailCall, "`crate::lower`, as a call and a return that `crate::tail` makes a jump"),
     // The pair that saves a place in a function and comes back to it, built here because what the
     // first of them writes down is where control comes back to, which is a place in this function
     // and not a value a pattern can bind. Each is a group of instructions rather than one, and the

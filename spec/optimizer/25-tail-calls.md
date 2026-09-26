@@ -87,6 +87,27 @@ the whitelist rule from 08.6 stated at its strongest: a tail call is performed o
 whose address was taken is provably not reachable from any argument, and "provably" means the
 analysis said no, not that it failed to say yes.
 
+**What was built.** The sibling call is `crates/rucc-codegen/src/tail.rs`, in three places. Just
+before selection, `tail::mark` turns a direct call whose results are exactly what the block returns
+next, under the same return types as the caller's, into a `tail_call` that ends the block. The
+lowering builds that as the call and the return it stands for, and writes the call down when the
+convention put every argument in a register, since the argument area is the bottom of the frame that
+is about to go. At the very end, after the epilogue is written and the blocks are laid out,
+`tail::jumps` takes each call written down whose block goes straight from it to the `ret`, with
+nothing in between touching a register the call names, removes the call and turns the `ret` into a
+`jmp` to the callee. The `ret` is changed in place rather than replaced so the unwind rows the
+epilogue hung on it stay right. It runs at `-O2`, `-O3`, `-Os` and `-Oz`, which is where gcc turns
+`-foptimize-sibling-calls` on, and only on x86-64 for now.
+
+The escape rule is stricter than the paragraph above asks for, because document 08.4's analysis is
+not there to ask. The only addresses into a frame the IR has are the ones an `alloca` makes, so a
+function with any `alloca` makes no tail call at all, and the same goes for one that reads its own
+variable arguments, is naked, gives its answer back through memory it was handed, or calls one of
+the functions gcc's `special_function_p` says come back twice. `tail::refusal` gives the reason as
+words rather than a no, which is what `musttail` in 25.3 will need. The check that the code is right
+is `cargo xtask tail`, which runs `tests/tail/calls.c` against gcc at every level and a chain of ten
+million calls in a one megabyte stack at `-O2`.
+
 ## 25.3 `musttail`
 
 GCC 15 added `[[gnu::musttail]]` and `__attribute__((musttail))` on a return statement

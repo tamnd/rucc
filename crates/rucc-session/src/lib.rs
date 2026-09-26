@@ -89,6 +89,15 @@ impl OptLevel {
     pub const fn schedules(self) -> bool {
         !matches!(self, OptLevel::O0 | OptLevel::O1)
     }
+
+    /// Whether a call in tail position becomes a jump.
+    ///
+    /// `-O2` and above and the two size levels, which is where gcc turns
+    /// `-foptimize-sibling-calls` on. Not at `-O1`, where gcc leaves it off so that a backtrace
+    /// still shows every function the program went through.
+    pub const fn sibling_calls(self) -> bool {
+        !matches!(self, OptLevel::O0 | OptLevel::O1)
+    }
 }
 
 impl fmt::Display for OptLevel {
@@ -1888,6 +1897,13 @@ pub struct Options {
     /// `spec/optimizer/38-scheduling-and-layout.md` section 38.6 decides on one scheduler and puts
     /// it after allocation, and section 38.8 owes the measurement that would justify a second.
     pub schedule_insns: Option<bool>,
+    /// Whether a call in tail position becomes a jump, from `-foptimize-sibling-calls` and
+    /// `-fno-optimize-sibling-calls`.
+    ///
+    /// `None` is a command line that said neither, and then the level decides: on from `-O2` and at
+    /// `-Os`, which is where gcc turns it on. Three way rather than a `bool` for the reason
+    /// `reorder_blocks` above is.
+    pub sibling_calls: Option<bool>,
     /// Whether a hot loop that fits in a 64 byte line is padded so that it does not cross one,
     /// when that costs at most 31 bytes, from `-falign-loops` and `-fno-align-loops`.
     ///
@@ -2314,6 +2330,7 @@ impl Options {
             red_zone: true,
             reorder_blocks: None,
             schedule_insns: None,
+            sibling_calls: None,
             align_loops: None,
             cycle_accurate_model: None,
             stack_reuse: None,

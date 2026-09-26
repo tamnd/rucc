@@ -184,6 +184,7 @@ pub mod shorten;
 pub mod slots;
 pub mod split;
 pub mod switch;
+pub mod tail;
 pub mod varargs;
 pub mod weights;
 pub mod wide;
