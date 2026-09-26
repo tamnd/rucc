@@ -91,6 +91,53 @@ pub fn print(
     unwind: bool,
     output: Output,
 ) -> Result<String, Error> {
+    listing(funcs, globals, aliases, names, target, unwind, output, false)
+}
+
+/// The same listing as [`print()`], with a label in front of every instruction named by [`mark`].
+///
+/// For an object built from a listing that asked for debug information. The listing has no line
+/// table of its own, so the reader is left to place a label in front of each instruction the way
+/// it places any other, and where those land is where the line table's rows go. The labels are
+/// local ones, so the reader keeps them out of the symbol table like every other.
+///
+/// # Errors
+///
+/// As for [`print()`].
+pub fn print_marked(
+    funcs: &[Func],
+    globals: &Globals,
+    aliases: &[Alias],
+    names: &Interner,
+    target: &TargetInfo,
+    unwind: bool,
+    output: Output,
+) -> Result<String, Error> {
+    listing(funcs, globals, aliases, names, target, unwind, output, true)
+}
+
+/// The label [`print_marked`] writes in front of an instruction, given which function of the list
+/// it is in and the instruction.
+#[must_use]
+pub fn mark(target: &TargetInfo, func: usize, inst: Inst) -> String {
+    spell_mark(Directives::of(target.object_format), func, inst)
+}
+
+fn spell_mark(directives: Directives, func: usize, inst: Inst) -> String {
+    format!("{}rucc_row{func}_{}", directives.local(), inst.index())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn listing(
+    funcs: &[Func],
+    globals: &Globals,
+    aliases: &[Alias],
+    names: &Interner,
+    target: &TargetInfo,
+    unwind: bool,
+    output: Output,
+    marks: bool,
+) -> Result<String, Error> {
     let Output { sections, property } = output;
     let arch = target.tuple.arch();
     if !matches!(arch, Arch::X86_64 | Arch::Aarch64) {
@@ -107,6 +154,7 @@ pub fn print(
         out: String::new(),
         labels: Vec::new(),
         sections,
+        marks: marks.then_some(0),
     };
     writer.out.push_str(writer.directives.text());
     writer.out.push('\n');
@@ -149,6 +197,7 @@ pub(crate) fn template(
         out: String::new(),
         labels: Vec::new(),
         sections: Sections::default(),
+        marks: None,
     };
     writer.inst(func, block, inst, names.resolve(func.name))?;
     Ok(writer.out)
@@ -169,6 +218,9 @@ struct Writer<'a> {
     labels: Vec<u32>,
     /// Whether each function and each variable is given a section of its own.
     sections: Sections,
+    /// Which function of the list is being written, in a listing that puts a label in front of
+    /// every instruction, and `None` in one that does not. See [`print_marked`].
+    marks: Option<usize>,
 }
 
 impl Writer<'_> {
@@ -233,6 +285,9 @@ impl Writer<'_> {
                         let _ = writeln!(self.out, "{label}:");
                     }
                 }
+                if let Some(which) = self.marks {
+                    let _ = writeln!(self.out, "{}:", spell_mark(self.directives, which, inst));
+                }
                 self.inst(func, block, inst, &name)?;
                 if unwind && Some(inst) != end {
                     for op in func.cfi_after(inst) {
@@ -246,6 +301,9 @@ impl Writer<'_> {
             let _ = writeln!(self.out, "\t.cfi_endproc");
         }
         self.directives.close(&mut self.out, &name);
+        if let Some(which) = &mut self.marks {
+            *which += 1;
+        }
         Ok(())
     }
 
@@ -1136,6 +1194,42 @@ mod tests {
         .expect("a function of two blocks");
         assert!(text.contains("\tjmp\t.Lf_1\n"), "{text}");
         assert!(text.contains("\n.Lf_1:\n"), "{text}");
+    }
+
+    #[test]
+    fn a_marked_listing_has_a_label_in_front_of_every_instruction_and_numbers_the_functions() {
+        let mut names = Interner::new();
+        let jmp = Opcode::new(names.intern("x64.jmp"));
+        let mut funcs = Vec::new();
+        for name in ["f", "g"] {
+            let mut func = Func::new(names.intern(name));
+            let first = func.create_block();
+            let second = func.create_block();
+            func.build(first, jmp).finish();
+            func.succs_mut(first).push(rucc_mir::BlockCall::to(second));
+            funcs.push(func);
+        }
+        let target = target(Os::Linux);
+        let text = print_marked(
+            &funcs,
+            &Globals::default(),
+            &[],
+            &names,
+            &target,
+            true,
+            Output::default(),
+        )
+        .expect("two functions");
+        let inst = funcs[1].insts(funcs[1].blocks().next().unwrap()).next().unwrap();
+        let label = mark(&target, 1, inst);
+        assert!(label.starts_with(".L"), "{label}");
+        assert!(text.contains(&format!("\n{label}:\n\tjmp\t.Lg_1\n")), "{text}");
+        assert!(text.contains(&format!("\n{}:\n", mark(&target, 0, inst))), "{text}");
+        // And none at all in the listing `-S` writes.
+        let plain =
+            print(&funcs, &Globals::default(), &[], &names, &target, true, Output::default())
+                .expect("two functions");
+        assert!(!plain.contains("rucc_row"), "{plain}");
     }
 
     #[test]

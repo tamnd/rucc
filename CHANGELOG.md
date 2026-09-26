@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-g` on AArch64 Linux and for a unit with an `asm` template kept as text, which were both refused before. Both go through a listing, which now gets a label in front of every instruction when debug information is wanted, and where the reader places those labels gives the same rows the x86-64 encoder records. The line table, the functions, their parameters and locals are then written as on x86-64, and gdb under qemu stops at the right lines and prints the right values.
+
 ### Fixed
 
 - The AArch64 assembler reads the last operand of a branch, `adr`, `adrp` or a literal load as a symbol whatever it spells, so a global called `le` or `x0` is no longer read as a condition or a register. GNU as reads it the same way.

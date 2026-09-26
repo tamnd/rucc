@@ -52,7 +52,7 @@ mod instruction;
 mod source;
 mod unwind;
 
-pub use crate::att::print;
+pub use crate::att::{mark, print, print_marked};
 pub use crate::bytes::{Assembled, Row, assemble};
 pub use crate::data::{Globals, Piece, Variable, aliases, globals};
 pub use crate::format::Directives;

@@ -984,31 +984,18 @@ fn generate(
             // their own where they are, but one may jump to a label another statement's text
             // defines or switch section halfway through, and a unit with one of those in it is
             // assembled the way gcc assembles every unit: written out as a listing and read back.
-            // The listing carries no line table yet, so a build that asked for one is refused
-            // rather than handed an object without it.
+            // A build that asked for debug information gets a label in front of every instruction,
+            // and where the reader placed those is the row the encoder would have recorded.
             //
             // Every unit for AArch64 goes this way for now. The listing is already written from
             // the encoder's own tables, so reading it back is the encoder run over the same values,
             // and it is one path to get right rather than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
             if aarch64 || rucc_asm::kept(&funcs, names, target) {
-                if opts.debug_info {
-                    return Err(vec![unsupported(if aarch64 {
-                        "debug information in an object for aarch64"
-                    } else {
-                        "debug information for a unit with an `asm` template kept as text"
-                    })]);
-                }
-                let listing = rucc_asm::print(
-                    &funcs,
-                    &globals,
-                    &aliases,
-                    names,
-                    target,
-                    unwind,
-                    output(opts, target),
-                )
-                .map_err(refused)?;
+                let print = if opts.debug_info { rucc_asm::print_marked } else { rucc_asm::print };
+                let listing =
+                    print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
+                        .map_err(refused)?;
                 let read = rucc_asm::read(&listing, target.tuple.arch()).map_err(|trouble| {
                     let what = if aarch64 {
                         "a unit for aarch64"
@@ -1020,9 +1007,18 @@ fn generate(
                         trouble.line, trouble.why
                     ))]
                 })?;
+                let info = if opts.debug_info {
+                    let assembled =
+                        placed(&read, &funcs, names, target).map_err(|why| vec![internal(&why)])?;
+                    describe(&assembled, &globals.image(), &funcs, origin, opts, target)
+                        .map_err(|why| vec![internal(&why)])?
+                } else {
+                    rucc_object::Info::default()
+                };
                 let defines = rucc_object::assembled_defines(&read);
                 let bytes =
-                    rucc_object::assembled(&read, &TargetInfo::new(opts.target)).map_err(wrote)?;
+                    rucc_object::assembled_described(&read, &TargetInfo::new(opts.target), &info)
+                        .map_err(wrote)?;
                 return Ok(Artifact::Object { bytes, defines });
             }
             let assembled = rucc_asm::assemble(&funcs, names, target, unwind, opts.debug_info)
@@ -1052,6 +1048,68 @@ fn generate(
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
     }
+}
+
+/// The rows a listing marked by [`rucc_asm::print_marked`] would have had from the encoder, read
+/// off where the reader placed each label.
+///
+/// Each function is where its own symbol is and as long as its `.size` says, and each row is its
+/// label's distance from the symbol. The row for the front of the function is the one the encoder
+/// writes from `Func::declared`, and it is written here the same way.
+///
+/// # Errors
+///
+/// A function or a label the reader did not place, which is a listing this compiler wrote and got
+/// wrong.
+fn placed(
+    read: &rucc_object::Assembled,
+    funcs: &[rucc_mir::Func],
+    names: &Interner,
+    target: &TargetInfo,
+) -> Result<rucc_asm::Assembled, String> {
+    let at: HashMap<&str, &rucc_object::Name> =
+        read.names.iter().map(|name| (name.name.as_str(), name)).collect();
+    let offset = |name: &str| match at.get(name).map(|name| name.at) {
+        Some(rucc_object::Held::In { part, offset }) => Some((part, offset)),
+        _ => None,
+    };
+    let mut text = rucc_object::Text::default();
+    let mut lines = Vec::with_capacity(funcs.len());
+    for (which, func) in funcs.iter().enumerate() {
+        let name = names.resolve(func.name);
+        let Some((part, start)) = offset(name) else {
+            return Err(format!("the listing has no label for the function '{name}'"));
+        };
+        let mut rows = Vec::with_capacity(func.inst_count() + 1);
+        if !func.declared.is_dummy() {
+            rows.push(rucc_asm::Row { at: 0, span: func.declared, inst: None });
+        }
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let label = rucc_asm::mark(target, which, inst);
+                let Some((held, here)) = offset(&label) else {
+                    return Err(format!("the listing has no label '{label}'"));
+                };
+                if held != part || here < start {
+                    return Err(format!("the label '{label}' is not inside '{name}'"));
+                }
+                let at = usize::try_from(here - start).map_err(|why| why.to_string())?;
+                rows.push(rucc_asm::Row { at, span: func.span(inst), inst: Some(inst) });
+            }
+        }
+        let len = at.get(name).map_or(0, |name| name.size);
+        text.funcs.push(rucc_object::Extent {
+            name: name.to_owned(),
+            start: usize::try_from(start).map_err(|why| why.to_string())?,
+            len: usize::try_from(len).map_err(|why| why.to_string())?,
+            align: func.align.unwrap_or(rucc_object::FUNC_ALIGN),
+            binding: rucc_object::Binding::Global,
+            visibility: rucc_object::Visibility::Default,
+            patch: None,
+        });
+        lines.push(rows);
+    }
+    Ok(rucc_asm::Assembled { text, lines, frames: None })
 }
 
 /// The debug sections for what was just assembled, as bytes and relocations.
@@ -3069,10 +3127,18 @@ decl #0 x : int object external static defined
         assert_eq!(&bytes[..4], b"\x7fELF");
         assert_eq!(&bytes[18..20], &183u16.to_le_bytes(), "EM_AARCH64");
 
+        // And with debug information, which the listing path builds from a label in front of
+        // every instruction rather than refusing.
         opts.debug_info = true;
         let result = run(&opts, source);
-        assert!(result.failed());
-        assert!(result.messages.iter().any(|m| m.contains("aarch64")), "{:?}", result.messages);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let bytes = match result.artifact {
+            Artifact::Object { bytes, .. } => bytes,
+            other => panic!("expected an object, got {other:?}"),
+        };
+        let has = |name: &[u8]| bytes.windows(name.len()).any(|at| at == name);
+        assert!(has(b".debug_line\0") && has(b".debug_info\0"));
+        assert!(!has(b"rucc_row"), "a row label reached the symbol table");
     }
 
     /// gcc's AArch64 vector type names are there before any header, which glibc's `<math.h>`
