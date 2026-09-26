@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - Complete unrolling works out what it asks of the whole function once a round rather than once a loop, and unrolls every loop that shares no block with another in the same round. A function made of many small loops, which is what code using `arm_neon.h` becomes once the intrinsics are inlined, took minutes at `-O2` before, and BLAKE2's NEON `blake2s.c` now takes ten seconds instead of more than five minutes.
+- An `asm` whose template is a label no jump in it goes to, such as `__asm__("7:")` after an earlier `__asm__("jmp 7f")`, is kept as text on x86-64 so the assembler sees the label. It was read into a block of its own, the name was dropped and the file did not assemble.
 
 ## 0.11.10
 

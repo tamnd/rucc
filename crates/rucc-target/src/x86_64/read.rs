@@ -445,7 +445,7 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
 
 /// Whether the labels and the jumps in that template go together.
 ///
-/// Three ways they may not. A name written on two labels is a template with two places of the same
+/// Four ways they may not. A name written on two labels is a template with two places of the same
 /// name in it, which an assembler refuses and which nothing below could tell apart. A conditional
 /// jump to a name no label in the template carries is a jump out of the statement, which is a real
 /// thing a program asks for and is asked for with the target list `asm goto` has rather than with
@@ -455,6 +455,11 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
 /// is not. One in the middle leaves the steps behind it reachable by nothing, and one to a label in
 /// the same template does the same thing from the other side, so both of those are still refused.
 /// See the module documentation.
+///
+/// Last, a label no jump in the template goes to is a place for something outside it, which is
+/// another statement's `jmp 7f` or a name the linker is meant to see. The name is dropped once a
+/// label is a block, so the other statement would jump to nothing. The template is kept as text
+/// instead, where the assembler sees the label and settles the jump the way it does for gcc.
 fn settled(steps: &[Step]) -> bool {
     let names: Vec<&str> = steps
         .iter()
@@ -464,6 +469,12 @@ fn settled(steps: &[Step]) -> bool {
         })
         .collect();
     if names.iter().enumerate().any(|(at, name)| names[..at].contains(name)) {
+        return false;
+    }
+    let reached = |name: &&str| {
+        steps.iter().any(|step| matches!(step, Step::Jump { to, .. } if to.as_str() == *name))
+    };
+    if !names.iter().all(reached) {
         return false;
     }
     steps.iter().enumerate().all(|(at, step)| match step {
@@ -1716,6 +1727,17 @@ mod tests {
         assert_eq!(read("jmp away\nnop", &[]), None, "a jump with a step behind it");
         assert_eq!(read("top:\nnop\njmp top", &[]), None, "a jump to a label in the template");
         assert_eq!(read("nop\njmp 1f\nnop\n1:\nnop", &[]), None, "a jump to a local label");
+    }
+
+    /// A label nothing in the template jumps to is somewhere another statement jumps, which is
+    /// `__asm__("jmp 7f")` in one statement and `__asm__("7:")` in a later one, and read as a block
+    /// the name would be gone.
+    #[test]
+    fn a_label_no_jump_in_the_template_goes_to_is_left_as_text() {
+        assert_eq!(read("7:", &[]), None, "a template that is only a label");
+        assert_eq!(read("nop\nhere:\nnop", &[]), None, "a named label between two steps");
+        assert_eq!(read("1:\nnop\njne 2f\n2:", &[]), None, "one label reached and one not");
+        assert!(read("1:\nnop\njne 1b", &[]).is_some(), "a label its own jump goes back to");
     }
 
     /// An empty template is no instructions rather than one that could not be read, which is the
