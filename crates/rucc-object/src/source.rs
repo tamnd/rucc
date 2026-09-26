@@ -34,7 +34,7 @@ use rucc_target::aarch64::Fixup;
 use rucc_tuple::Arch;
 
 use crate::file::{Error, Flavour};
-use crate::section::{Array, Binding, Reloc, Visibility};
+use crate::section::{Array, Binding, Info, Reloc, Visibility};
 
 /// One section, as a file of assembly describes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +268,26 @@ pub struct Assembled {
 /// [`Error::Format`] for a machine or a platform this does not write, and [`Error::Refused`] for a
 /// relocation against a name the list does not hold or one this format has no relocation for.
 pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Error> {
+    assembled_described(input, target, &Info::default())
+}
+
+/// The same object as [`assembled`], with the debug sections in `info` added to it.
+///
+/// For a compilation that went through a listing and asked for debug information, where the line
+/// table and the entries are built from the compilation rather than read from the file. A
+/// relocation in a chunk names another chunk or a name the file defines, and the second is written
+/// against the section the name is in, for the reason [`crate::write`] gives: a distance to a
+/// global name is not one a linker can work out.
+///
+/// # Errors
+///
+/// As for [`assembled`], and [`Error::Refused`] for a chunk that names something the file does
+/// not define.
+pub fn assembled_described(
+    input: &Assembled,
+    target: &TargetInfo,
+    info: &Info,
+) -> Result<Vec<u8>, Error> {
     // AArch64 on ELF and x86-64 on both. What an AArch64 file for Windows would need is a table of
     // its own relocations and an unwind table of its own shape, and neither is written yet.
     let (flavour, machine) = match (Flavour::of(target), target.tuple.arch()) {
@@ -386,6 +406,44 @@ pub fn assembled(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Erro
                 why: format!("no relocation is {:?}", reloc.kind),
             })?;
             obj.add_relocation(*id, Relocation { offset: reloc.at as u64, symbol, addend, flags })
+                .map_err(|why| Error::Refused { why: why.to_string() })?;
+        }
+    }
+
+    // The debug information, every section before any relocation because a relocation in one of
+    // them names another as often as it names a function.
+    let mut named = std::collections::HashMap::new();
+    for chunk in &info.chunks {
+        let id = obj.add_section(Vec::new(), chunk.name.clone().into_bytes(), SectionKind::Debug);
+        obj.append_section_data(id, &chunk.bytes, 1);
+        named.insert(chunk.name.as_str(), id);
+    }
+    for chunk in &info.chunks {
+        let section = named[chunk.name.as_str()];
+        for reloc in &chunk.relocs {
+            let (symbol, addend) = match named.get(reloc.symbol.as_str()) {
+                Some(&id) => (obj.section_symbol(id), reloc.addend),
+                None => match defined.get(reloc.symbol.as_str()).map(|name| name.at) {
+                    Some(Held::In { part, offset }) => {
+                        (obj.section_symbol(made[part]), reloc.addend + offset as i64)
+                    }
+                    _ => match symbols.get(&reloc.symbol) {
+                        Some(&symbol) => (symbol, reloc.addend),
+                        None => {
+                            let why = format!(
+                                "'{}' is named by the debug information and is not defined here",
+                                reloc.symbol
+                            );
+                            return Err(Error::Refused { why });
+                        }
+                    },
+                },
+            };
+            let flags = flags_of(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
+                why: format!("no relocation is {:?}", reloc.kind),
+            })?;
+            let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
+            obj.add_relocation(section, record)
                 .map_err(|why| Error::Refused { why: why.to_string() })?;
         }
     }

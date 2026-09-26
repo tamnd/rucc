@@ -862,11 +862,12 @@ fn a_template_kept_as_text_that_reaches_nothing_past_itself_builds_with_debug_in
 }
 
 #[test]
-fn a_unit_with_a_template_kept_as_text_asked_for_debug_information_says_so() {
-    // The listing has no line table in it yet, and an object without one is not what `-g` asked
-    // for, so it is refused rather than written.
+fn a_unit_with_a_template_kept_as_text_builds_with_debug_information() {
+    // The whole unit goes through a listing, which gets a label in front of every instruction when
+    // `-g` is given, and the line table is built from where those labels land.
     let source = "void f(void) { asm volatile (\"jmp .Lgone\\n.Lgone:\"); }\n";
-    let (ok, _, said) = object("kept-debug", source, &["-g"]);
-    assert!(!ok, "an object without the line table -g asked for was written");
-    assert!(said.contains("debug information"), "{said}");
+    let (ok, bytes, said) = object("kept-debug", source, &["-g"]);
+    assert!(ok, "{said}");
+    assert!(bytes.windows(11).any(|at| at == b".debug_line"), "no line table in the object");
+    assert!(!bytes.windows(8).any(|at| at == b"rucc_row"), "a row label reached the object");
 }
