@@ -282,6 +282,20 @@ jobs:
       - name: run the same arithmetic both ways
         run: cargo xtask wide
 
+  # A division by a constant becomes a multiply by a magic number and some shifts, and a wrong shift
+  # is a wrong answer for some dividends and not others. The pass's own tests prove the plan it makes
+  # over every eight bit dividend and every sixteen bit divisor. This runs the code that came out, at
+  # every width, against gcc.
+  divide:
+    name: divisions by a constant held against gcc
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: run the same divisions both ways
+        run: cargo xtask divide
+
   # spec/cross-compile/09-libc-stubs.md section 9.8 wants the stub writer's output checked by
   # something that does not share its beliefs. The round trip test in the crate does not qualify,
   # because whoever wrote the writer wrote the reader: both thought a .hash entry was four bytes on
