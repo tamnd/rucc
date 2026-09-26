@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A store only one arm of an `if` made, turned into a store on both paths by if-conversion, gave the read that stands in for the other path the padding the store owns, so a structure copy under a condition failed the verifier after the pass at `-O1` and above. The read owns no padding now, and `20021010-2.c` builds and runs at every level.
 - An acquire load and a release store on AArch64 were written as a plain `ldr` and `str`, and an acquire or release fence was written as nothing. They are now `ldar`, `stlr`, `dmb ishld` and `dmb ish`, which is what gcc writes.
 - The driver finds `librucc_builtins.a` when `cargo xtask builtins` was given the short tuple such as `aarch64-linux-musl`, not only the four field triple.
 
