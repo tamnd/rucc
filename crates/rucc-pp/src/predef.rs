@@ -20,7 +20,7 @@
 //! is the list of promises the claim makes.
 
 use rucc_base::float::Format;
-use rucc_session::{GnucVersion, OptLevel, Options, Pic, Std};
+use rucc_session::{GnucVersion, Math, OptLevel, Options, Pic, Std};
 use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
@@ -126,6 +126,11 @@ pub struct Predef {
     /// own patched `features.h` has it, and a version the compiler supplied and a version the
     /// header supplied would be two answers to one question.
     pub glibc_minor: Option<u32>,
+    /// Whether an operation may raise an exception the program looks at, from `-ftrapping-math`.
+    pub trapping_math: bool,
+    /// The rest of the `-ffast-math` family. Each licence has a macro of its own and the family
+    /// together decides `__FAST_MATH__` and whether the arithmetic is still IEC 60559's.
+    pub math: Math,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines.
@@ -145,6 +150,8 @@ impl Predef {
             pic: Pic::Executable,
             timestamp: Timestamp::now(),
             glibc_minor: None,
+            trapping_math: true,
+            math: Math::default(),
             defines: Vec::new(),
             undefines: Vec::new(),
         }
@@ -168,6 +175,8 @@ impl Predef {
             pic: opts.pic,
             timestamp: Timestamp::now(),
             glibc_minor: opts.glibc_minor,
+            trapping_math: opts.trapping_math,
+            math: opts.math,
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
         }
@@ -231,7 +240,7 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     platform(&mut d, target, opts);
     sizes(&mut d, target);
     integers(&mut d, target);
-    floats(&mut d, target);
+    floats(&mut d, target, opts);
     atomics(&mut d, target);
     d.text
 }
@@ -330,8 +339,13 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     d.flag_if(!opts.gnu_extensions, "__STRICT_ANSI__");
     d.flag("__STDC_UTF_16__");
     d.flag("__STDC_UTF_32__");
-    d.flag("__STDC_IEC_559__");
-    d.flag("__STDC_IEC_559_COMPLEX__");
+    // Only while the arithmetic is IEC 60559's, which a fast math licence ends. glibc's
+    // `<stdc-predef.h>` writes the same four from `__GCC_IEC_559` and writes none of them when that
+    // is zero, so saying them here under `-ffast-math` would be the redefinition described below
+    // with the opposite sign.
+    let iec = opts.math.iec_559(opts.trapping_math);
+    d.flag_if(iec, "__STDC_IEC_559__");
+    d.flag_if(iec, "__STDC_IEC_559_COMPLEX__");
     // TS 18661-1's date, in every dialect, which is gcc 16's answer rather than the standard's.
     // C23 folded that document into Annex F and gave the macro a date of its own, so 202311L is
     // the value C23 asks for, and writing it is what a reading of the standard alone produces.
@@ -342,7 +356,7 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     // not only noise: sqlite's configure runs its feature tests through autosetup's `cctest
     // -nooutput 1`, which reads any output at all as a failed test, and the readline completion
     // test failed for no other reason than this warning.
-    d.set("__STDC_IEC_60559_BFP__", "201404L");
+    d.set_if(iec, "__STDC_IEC_60559_BFP__", "201404L");
     // The same date for the complex half, which is the other name `<stdc-predef.h>` writes and
     // which was missing here. Withholding it looked like the careful answer and was not one, for
     // two reasons. `__STDC_NO_COMPLEX__` is defined, so there is no complex arithmetic for the
@@ -351,7 +365,7 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     // by a compiler that says nothing about its intent, and it presumes an older compiler that
     // meant yes. Saying nothing therefore does not withhold anything, it only makes the value
     // arrive from somewhere else.
-    d.set("__STDC_IEC_60559_COMPLEX__", "201404L");
+    d.set_if(iec, "__STDC_IEC_60559_COMPLEX__", "201404L");
     d.set("__STDC_ISO_10646__", "201706L");
     // The type behind `char8_t`, which C23 added and no dialect before it has. It sits here
     // rather than next to `__CHAR16_TYPE__` and `__CHAR32_TYPE__` because those two are the
@@ -439,12 +453,24 @@ fn optimization(d: &mut Defs, opts: &Predef) {
     // glibc's headers test this before deciding whether to define a function as an inline
     // wrapper, so getting it wrong changes what a program links against.
     d.flag_if(!opts.opt_level.runs_optimizer(), "__NO_INLINE__");
-    // Zero, and zero until there is a `-ffast-math` to make it one. glibc's `math.h` reads it
-    // to decide whether to declare the `__*_finite` aliases, so it has to be defined rather
-    // than merely not claimed: a header testing `#if __FINITE_MATH_ONLY__ > 0` on a compiler
-    // that leaves it undefined takes the same branch, but one writing `#if
+    // Zero, and one under `-ffinite-math-only`, which `-ffast-math` implies. glibc's `math.h`
+    // reads it to decide whether to declare the `__*_finite` aliases, so it has to be defined
+    // rather than merely not claimed: a header testing `#if __FINITE_MATH_ONLY__ > 0` on a
+    // compiler that leaves it undefined takes the same branch, but one writing `#if
     // !__FINITE_MATH_ONLY__` is a different question and gcc gives it an answer.
-    d.set("__FINITE_MATH_ONLY__", "0");
+    let math = &opts.math;
+    let trapping = opts.trapping_math;
+    d.set("__FINITE_MATH_ONLY__", if math.finite_only { "1" } else { "0" });
+    // One macro per licence, each defined only when it was given, which is how gcc 16 spells
+    // them. `__FAST_MATH__` is all of them at once and is worked out rather than remembered from
+    // the flag, so `-ffast-math -ftrapping-math` does not claim it, and regrouping is the one gcc
+    // drops unless nothing could tell it happened.
+    d.flag_if(math.fast(trapping), "__FAST_MATH__");
+    d.flag_if(!math.errno, "__NO_MATH_ERRNO__");
+    d.flag_if(!trapping, "__NO_TRAPPING_MATH__");
+    d.flag_if(!math.signed_zeros, "__NO_SIGNED_ZEROS__");
+    d.flag_if(math.reciprocal, "__RECIPROCAL_MATH__");
+    d.flag_if(math.associative(trapping), "__ASSOCIATIVE_MATH__");
 }
 
 /// The architecture, the operating system and the object format.
@@ -1175,7 +1201,7 @@ const fn characteristics(format: Format) -> &'static Characteristics {
 ///
 /// `__FLT128X_*__` is deliberately missing. `_Float128x` is a type no target gcc supports has,
 /// so gcc defines nothing for it and neither does this.
-fn floats(d: &mut Defs, target: &TargetInfo) {
+fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__FLT_RADIX__", "2");
     // Real arithmetic follows IEC 60559 in every format on every target here, which is what the
     // value two says. The complex one beside it says the same about complex arithmetic, and gcc
@@ -1183,9 +1209,11 @@ fn floats(d: &mut Defs, target: &TargetInfo) {
     // tested: glibc's `<stdc-predef.h>` asks what the compiler intended and writes the
     // `__STDC_IEC_559` family from the answer, and a compiler that says nothing is presumed to
     // have meant yes. So the choice is not between claiming and not claiming, it is between
-    // saying so and having it said for us.
-    d.set("__GCC_IEC_559", "2");
-    d.set("__GCC_IEC_559_COMPLEX", "2");
+    // saying so and having it said for us. Zero for both once a fast math licence is given,
+    // which is gcc's answer and what keeps glibc from claiming the family on our behalf.
+    let iec = if opts.math.iec_559(opts.trapping_math) { "2" } else { "0" };
+    d.set("__GCC_IEC_559", iec);
+    d.set("__GCC_IEC_559_COMPLEX", iec);
     // Every operation is done in the type of its operands, which is what SSE2 and the AArch64
     // and RISC-V floating units all do. The other two names are the same answer asked under the
     // rules of C99 and of TS 18661-3, which are the same rules for a target with no excess
@@ -1496,6 +1524,50 @@ mod tests {
         }
         // Mach-O keeps the underscore that ELF dropped.
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __USER_LABEL_PREFIX__ _"));
+    }
+
+    /// `-ffast-math` as gcc 16 spells it on x86-64 Linux: one macro per licence, the finite promise
+    /// as a one, and the IEC 60559 family gone from both the compiler's lines and the ones glibc
+    /// would write from `__GCC_IEC_559`.
+    #[test]
+    fn fast_math_defines_what_gcc_16_defines_for_it() {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().expect("a triple"));
+        let mut opts = Predef::new();
+        opts.trapping_math = opts.math.set_fast(true);
+        let fast = built_in(&target, &opts);
+        for line in [
+            "#define __FAST_MATH__ 1",
+            "#define __FINITE_MATH_ONLY__ 1",
+            "#define __NO_MATH_ERRNO__ 1",
+            "#define __NO_TRAPPING_MATH__ 1",
+            "#define __NO_SIGNED_ZEROS__ 1",
+            "#define __RECIPROCAL_MATH__ 1",
+            "#define __ASSOCIATIVE_MATH__ 1",
+            "#define __GCC_IEC_559 0",
+            "#define __GCC_IEC_559_COMPLEX 0",
+        ] {
+            assert!(has(&fast, line), "{line}");
+        }
+        for name in ["__STDC_IEC_559__", "__STDC_IEC_559_COMPLEX__", "__STDC_IEC_60559_BFP__"] {
+            assert!(!fast.contains(&format!("#define {name} ")), "{name}");
+        }
+
+        // `-ffast-math -ftrapping-math` keeps the members that do not need trapping off and
+        // loses the name for the whole, and regrouping with it, which is gcc's answer.
+        opts.trapping_math = true;
+        let trapping = built_in(&target, &opts);
+        assert!(has(&trapping, "#define __NO_MATH_ERRNO__ 1"));
+        assert!(has(&trapping, "#define __GCC_IEC_559 0"));
+        for name in ["__FAST_MATH__", "__NO_TRAPPING_MATH__", "__ASSOCIATIVE_MATH__"] {
+            assert!(!trapping.contains(&format!("#define {name} ")), "{name}");
+        }
+
+        // And none of it by default.
+        let plain = built_in(&target, &Predef::new());
+        for name in ["__FAST_MATH__", "__NO_MATH_ERRNO__", "__NO_TRAPPING_MATH__"] {
+            assert!(!plain.contains(&format!("#define {name} ")), "{name}");
+        }
+        assert!(has(&plain, "#define __STDC_IEC_559__ 1"));
     }
 
     /// The set gcc defines that headers read and that are true here. Written out one line at a

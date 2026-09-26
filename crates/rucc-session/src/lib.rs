@@ -1696,6 +1696,99 @@ impl FromStr for SaveTemps {
     }
 }
 
+/// The members of `-ffast-math` that are licences about what an arithmetic may answer, one field
+/// each, so that a build writing `-ffast-math -fno-finite-math-only` gets what gcc gives it.
+///
+/// Nothing here folds floating point arithmetic in a function body at any level, so none of these
+/// changes the code this compiler writes. What each one does change is the predefined set: gcc
+/// names each licence it was given with a macro of its own, `<math.h>` and a numerics library read
+/// those, and a header that configured itself for a licence the other objects were built without is
+/// a program answering two ways. `-ftrapping-math` is the sixth member and lives in
+/// [`Options::trapping_math`], because it was taken before the rest and it is the one that does
+/// change an answer here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Math {
+    /// Whether a function in the maths library is taken to set `errno`, from `-fmath-errno`. On,
+    /// which is gcc's default on a target whose library does it.
+    pub errno: bool,
+    /// Whether the program promises there are no NaNs and no infinities, from
+    /// `-ffinite-math-only`.
+    pub finite_only: bool,
+    /// Whether the sign of a zero is kept, from `-fsigned-zeros`. On by default.
+    pub signed_zeros: bool,
+    /// Whether a division may become a multiplication by the reciprocal, from
+    /// `-freciprocal-math`.
+    pub reciprocal: bool,
+    /// Whether an addition may be regrouped, from `-fassociative-math`. gcc drops this with a
+    /// warning unless signed zeros and trapping are both off, so what counts is
+    /// [`Math::associative`] rather than the field.
+    pub associative: bool,
+    /// `-funsafe-math-optimizations`, which is its own flag as well as the three it turns on.
+    pub unsafe_math: bool,
+}
+
+impl Default for Math {
+    fn default() -> Math {
+        Math {
+            errno: true,
+            finite_only: false,
+            signed_zeros: true,
+            reciprocal: false,
+            associative: false,
+            unsafe_math: false,
+        }
+    }
+}
+
+impl Math {
+    /// `-funsafe-math-optimizations` and its negative, which set or clear the members gcc's
+    /// `set_unsafe_math_optimizations_flags` does. Trapping is one of them, so it is handed back
+    /// for the caller to store where it lives.
+    pub fn set_unsafe(&mut self, on: bool) -> bool {
+        self.unsafe_math = on;
+        self.associative = on;
+        self.reciprocal = on;
+        self.signed_zeros = !on;
+        !on
+    }
+
+    /// `-ffast-math` and `-fno-fast-math`, which are `set_fast_math_flags` in gcc: the unsafe
+    /// group, the maths library's `errno` and the promise about NaNs. The value handed back is
+    /// trapping, as above.
+    pub fn set_fast(&mut self, on: bool) -> bool {
+        self.errno = !on;
+        self.finite_only = on;
+        self.set_unsafe(on)
+    }
+
+    /// Whether regrouping survives, which it does only where nothing could tell: a regrouped sum
+    /// can move a zero's sign and can raise an exception the original order did not.
+    #[must_use]
+    pub fn associative(&self, trapping: bool) -> bool {
+        self.associative && !self.signed_zeros && !trapping
+    }
+
+    /// Whether every member is in the permissive position, which is what `__FAST_MATH__` says.
+    /// Written out rather than remembered from the flag, because `-ffast-math -ftrapping-math` is
+    /// not fast math and gcc does not define the macro for it.
+    #[must_use]
+    pub fn fast(&self, trapping: bool) -> bool {
+        !trapping && self.unsafe_math && self.finite_only && !self.signed_zeros && !self.errno
+    }
+
+    /// Whether the arithmetic is still IEC 60559's, which is what `__GCC_IEC_559` answers and what
+    /// glibc writes `__STDC_IEC_559__` from. Any of these licences is an answer the standard does
+    /// not give.
+    #[must_use]
+    pub fn iec_559(&self, trapping: bool) -> bool {
+        !(self.unsafe_math
+            || self.associative(trapping)
+            || self.reciprocal
+            || self.finite_only
+            || !self.signed_zeros)
+    }
+}
+
 /// Everything a compilation was asked to do.
 ///
 /// Options are a plain value with no interior mutability, so a caller can build one, clone
@@ -1931,6 +2024,9 @@ pub struct Options {
     /// behaviour rather than a value, so neither answer is wrong and the one a program was written
     /// against is gcc's.
     pub trapping_math: bool,
+    /// The rest of the `-ffast-math` family, from the flag itself and from each member spelled on
+    /// its own. See [`Math`].
+    pub math: Math,
     /// What a path is rewritten by before it is written into the output, from the
     /// `-f*-prefix-map=` family.
     ///
@@ -2230,6 +2326,7 @@ impl Options {
             strict_aliasing: true,
             fp_contract: Contract::Off,
             trapping_math: true,
+            math: Math::default(),
             prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
             warnings: true,

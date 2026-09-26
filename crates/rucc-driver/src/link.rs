@@ -133,9 +133,24 @@ pub struct LinkOptions {
     /// with the flag and links without it produces a program that calls the hook on every function
     /// and never writes a profile.
     pub profile: bool,
+    /// Whether `-Ofast`, `-ffast-math` or `-funsafe-math-optimizations` was in force at the end
+    /// of the command line, which links `crtfastmath.o` into anything that is not a shared object.
+    ///
+    /// That file is a constructor which sets flush to zero and denormals are zero before `main`,
+    /// so the mode is the process's rather than the unit's, and it is the half of fast math the
+    /// compiler cannot give from inside a function.
+    pub fast_math: bool,
+    /// `-mdaz-ftz` or `-mno-daz-ftz`, which decides the same file outright and for a shared
+    /// object as well.
+    pub daz_ftz: Option<bool>,
 }
 
 impl LinkOptions {
+    /// Whether gcc's `crtfastmath.o` goes on the line, which is its end file spec on x86-64.
+    fn wants_fastmath(&self) -> bool {
+        self.daz_ftz.unwrap_or(self.fast_math && !self.shared)
+    }
+
     /// Whether the startup files go on the line.
     fn wants_startfiles(&self) -> bool {
         !self.no_stdlib && !self.no_startfiles
@@ -863,6 +878,13 @@ pub fn line(
     if opts.wants_startfiles() {
         // The other end of `crtbegin`, and it goes before `crtn.o` for the same reason `crti.o`
         // goes before `crtbegin`: the four are two nested pairs and not four separate files.
+        // The fast math constructor, ahead of `crtend` where gcc puts it. Skipped when there is
+        // no gcc to take it from, as `crtbegin` is.
+        if opts.wants_fastmath() {
+            if let Some(path) = find_file(&runtime, "crtfastmath.o") {
+                args.push(path.display().to_string());
+            }
+        }
         let end = if opts.shared || pie { "crtendS.o" } else { "crtend.o" };
         if let Some(path) = find_file(&runtime, end).or_else(|| find_file(&runtime, "crtend.o")) {
             args.push(path.display().to_string());
@@ -1491,6 +1513,19 @@ mod tests {
     /// And a `-B` prefix with our runtime in it, because a cross link refuses without one and
     /// every machine that does this for real has the archive `cargo xtask builtins` wrote. What
     /// happens when it is missing is its own test below.
+    /// The fast math startup file follows gcc's end file spec: the family puts it in anything
+    /// that is not a shared object, and `-mdaz-ftz` decides it outright either way.
+    #[test]
+    fn the_fast_math_startup_file_is_wanted_where_gccs_spec_wants_it() {
+        let fast = LinkOptions { fast_math: true, ..LinkOptions::default() };
+        assert!(!LinkOptions::default().wants_fastmath());
+        assert!(fast.wants_fastmath());
+        assert!(!LinkOptions { shared: true, ..fast.clone() }.wants_fastmath());
+        assert!(!LinkOptions { daz_ftz: Some(false), ..fast.clone() }.wants_fastmath());
+        let forced = LinkOptions { shared: true, daz_ftz: Some(true), ..LinkOptions::default() };
+        assert!(forced.wants_fastmath());
+    }
+
     fn cached() -> LinkOptions {
         LinkOptions {
             cache: Some(PathBuf::from("/cache")),

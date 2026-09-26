@@ -53,7 +53,7 @@ use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Compress, Control, Dumps, EmitKind, Hook, Options, Pic, PrefixMap, Preinclude, Protector,
+    Compress, Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
     SaveTemps, Session, Std, Wrapping, runtime,
 };
 use rucc_sysroot::{Manifest, Sysroot};
@@ -242,7 +242,7 @@ options:
   -std=<dialect>         c89 through c2y, and the gnu spellings
   -fgnuc-version=<v>     the GCC release to claim, default 16.0.0
   -x <lang>              treat later inputs as <lang>, or none to stop
-  -O<level>              optimize: 0, 1, 2, 3, s, z
+  -O<level>              optimize: 0, 1, 2, 3, s, z, fast
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
   -f[no-]sanitize=<what>   the negative is taken, the positive is refused by name
   -f[no-]safety-subobject   a write has to stay inside the member it names
@@ -270,7 +270,7 @@ options:
   -ftrapv                signed overflow stops the program instead
   -f[no-]signed-char, -f[no-]unsigned-char, -f[no-]short-enums   change the ABI
   -ffp-contract=<how>    fuse a multiply and an addition: fast, on or off
-  -fexcess-precision=<how>, -f[no-]rounding-math, -f[no-]trapping-math   what may be folded
+  -f[no-]fast-math and each of its members, -f[no-]rounding-math, -fexcess-precision=<how>
   -ffile-prefix-map=<old>=<new>   rewrite that front of every path we put in the output
   -fmacro-prefix-map= -fdebug-prefix-map= -fprofile-prefix-map=   the same, one output each
   -pthread               build for more than one thread, and link the library for it
@@ -442,6 +442,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // build that asks for a check and then takes it back has asked for nothing. What happens to a
     // set that is not empty is decided after the loop.
     let mut sanitizers: Vec<&str> = Vec::new();
+    // The `-ffast-math` family in the order it was written, replayed after the loop on top of
+    // what `-Ofast` implies. gcc applies a level's defaults before any flag and the flags in order
+    // after that, so `-fno-fast-math -Ofast` is not fast math, and only a replay can say so.
+    let mut math_flags: Vec<&str> = Vec::new();
+    let mut ofast = false;
+    // `-mdaz-ftz` and `-mno-daz-ftz`, which decide the startup file directly and outrank the
+    // family on that one question.
+    let mut daz_ftz: Option<bool> = None;
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
     let mut forced: Option<InputKind> = None;
@@ -1021,8 +1029,34 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // default and gcc folds it under this flag, so a program built with it and compiled
             // without it gets a different number rather than a slower one. `-ftrapping-math` is
             // gcc's default, so a build spelling it out is asking for what it already has.
-            "-ftrapping-math" => opts.trapping_math = true,
-            "-fno-trapping-math" => opts.trapping_math = false,
+            //
+            // The rest of the family goes with it, `-ffast-math` included, and all of them are
+            // taken now. Each is a licence rather than a request and nothing here folds floating
+            // point arithmetic, so the code does not change. What does change is the macros gcc
+            // defines for each licence, which a header reads, and the startup file `-ffast-math`
+            // links, which puts the hardware in flush to zero mode. Both are done after the loop,
+            // because the family is a set of switches over the same fields and the last word on
+            // each of them is the end of the command line.
+            "-ftrapping-math"
+            | "-fno-trapping-math"
+            | "-ffast-math"
+            | "-fno-fast-math"
+            | "-funsafe-math-optimizations"
+            | "-fno-unsafe-math-optimizations"
+            | "-fmath-errno"
+            | "-fno-math-errno"
+            | "-ffinite-math-only"
+            | "-fno-finite-math-only"
+            | "-fsigned-zeros"
+            | "-fno-signed-zeros"
+            | "-freciprocal-math"
+            | "-fno-reciprocal-math"
+            | "-fassociative-math"
+            | "-fno-associative-math" => math_flags.push(arg),
+            // Whether the startup file that sets flush to zero is linked, asked directly. gcc
+            // links it for a shared object too when this is written, which the family does not.
+            "-mdaz-ftz" => daz_ftz = Some(true),
+            "-mno-daz-ftz" => daz_ftz = Some(false),
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
@@ -1104,19 +1138,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // it is `-O1` with the transformations that move code around left out; this compiler
             // has no such level yet, so it is the nearest one and `--print-pipeline` says what
             // that came to rather than the flag pretending otherwise.
-            "-O" | "-Og" => opts.opt_level = rucc_session::OptLevel::O1,
-            // The union of `-O3` and `-ffast-math`, and the second half of that changes what
-            // floating point arithmetic means. Refused rather than taken as `-O3`, because a
-            // build that asks for fast math and is quietly given ordinary arithmetic gets a
-            // slower program than it asked for and a build that is given fast math it did not
-            // ask for gets a wrong one.
+            "-O" | "-Og" => {
+                opts.opt_level = rucc_session::OptLevel::O1;
+                ofast = false;
+            }
+            // The union of `-O3` and `-ffast-math`. The second half is a default rather than a
+            // flag, which is why it is remembered here and applied after the loop: a later level
+            // takes it back, and so does a `-fno-fast-math` written on either side of it.
             "-Ofast" => {
-                return Err(err(
-                    "-Ofast is -O3 with fast math, and fast math is not implemented, see \
-                     spec/04-driver-and-cli.md section 4.6",
-                ));
+                opts.opt_level = rucc_session::OptLevel::O3;
+                ofast = true;
             }
             _ if arg.starts_with("-O") => {
+                ofast = false;
                 opts.opt_level = arg[2..]
                     .parse()
                     .map_err(|()| err(format!("unknown optimization level `{arg}`")))?;
@@ -1688,21 +1722,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     )));
                 }
             }
-            // The three that come in on the same `dg-options` lines and are the other half of
-            // section 4.1's rule, because each of them changes what the program does and not how
-            // fast it does it. The negative form of each is what this compiler does anyway, so it
-            // is taken and dropped, which is the shape `-fnested-functions` has above.
-            "-ffast-math" => {
-                return Err(err(
-                    "-ffast-math is a licence to answer a floating point arithmetic differently \
-                     from the way the source wrote it, and it is not one flag: it defines \
-                     __FAST_MATH__, which a library header reads, and gcc links a startup file \
-                     that puts the hardware in flush to zero mode for the whole process. Taking it \
-                     and dropping it would change what other objects in the same program answer. \
-                     -ffp-contract= and -fexcess-precision= are the parts of it this compiler has",
-                ));
-            }
-            "-fno-fast-math" => {}
+            // The one that came in on the same `dg-options` lines as `-ffast-math` and is the other
+            // half of section 4.1's rule, because it changes what the program does and not how
+            // fast it does it. The negative form is what this compiler does anyway, so it is taken
+            // and dropped, which is the shape `-fnested-functions` has above.
             "-fnon-call-exceptions" => {
                 return Err(err(
                     "-fnon-call-exceptions is a promise that an instruction which is not a call \
@@ -1915,6 +1938,42 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
              compiler does have"
         )));
     }
+    // The fast math family, replayed in order on top of what `-Ofast` implies. The startup file is
+    // gcc's spec rather than the fields: it is linked when `-Ofast`, `-ffast-math` or
+    // `-funsafe-math-optimizations` is still in force at the end of the line, whatever a later
+    // member took back, and `-mdaz-ftz` decides it outright.
+    let mut math = Math::default();
+    let mut trapping = if ofast { math.set_fast(true) } else { true };
+    for flag in &math_flags {
+        match *flag {
+            "-ftrapping-math" => trapping = true,
+            "-fno-trapping-math" => trapping = false,
+            "-ffast-math" => trapping = math.set_fast(true),
+            "-fno-fast-math" => trapping = math.set_fast(false),
+            "-funsafe-math-optimizations" => trapping = math.set_unsafe(true),
+            "-fno-unsafe-math-optimizations" => trapping = math.set_unsafe(false),
+            "-fmath-errno" => math.errno = true,
+            "-fno-math-errno" => math.errno = false,
+            "-ffinite-math-only" => math.finite_only = true,
+            "-fno-finite-math-only" => math.finite_only = false,
+            "-fsigned-zeros" => math.signed_zeros = true,
+            "-fno-signed-zeros" => math.signed_zeros = false,
+            "-freciprocal-math" => math.reciprocal = true,
+            "-fno-reciprocal-math" => math.reciprocal = false,
+            "-fassociative-math" => math.associative = true,
+            "-fno-associative-math" => math.associative = false,
+            _ => unreachable!("{flag} is not in the family"),
+        }
+    }
+    opts.trapping_math = trapping;
+    opts.math = math;
+    let last = |on: &str, off: &str| {
+        math_flags.iter().rev().find(|f| **f == on || **f == off).is_some_and(|f| *f == on)
+    };
+    link.fast_math = ofast
+        || last("-ffast-math", "-fno-fast-math")
+        || last("-funsafe-math-optimizations", "-fno-unsafe-math-optimizations");
+    link.daz_ftz = daz_ftz;
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -3938,26 +3997,92 @@ mod tests {
         assert!(e.message.contains("UTF-8"), "what is read is worth saying: {}", e.message);
     }
 
-    /// The other half of the same rule. Each of these changes what the program does rather than
-    /// how fast it does it, so each is refused with the reason, and the negative of each is what
-    /// happens anyway and is taken.
+    /// The other half of the same rule. This one changes what the program does rather than how
+    /// fast it does it, so it is refused with the reason, and its negative is what happens anyway
+    /// and is taken.
     #[test]
-    fn the_two_that_change_the_answer_are_refused_and_their_negatives_are_taken() {
-        for (flag, word) in
-            [("-ffast-math", "__FAST_MATH__"), ("-fnon-call-exceptions", "landing pad")]
-        {
-            let e = parse_args(&args(&["-c", flag, "a.c"])).unwrap_err();
-            assert!(e.message.contains(word), "{flag}: {}", e.message);
-            assert!(!e.message.contains("unknown option"), "{flag} deserves a reason");
+    fn the_one_that_changes_the_answer_is_refused_and_its_negative_is_taken() {
+        let e = parse_args(&args(&["-c", "-fnon-call-exceptions", "a.c"])).unwrap_err();
+        assert!(e.message.contains("landing pad"), "{}", e.message);
+        assert!(!e.message.contains("unknown option"), "it deserves a reason");
 
-            let off = format!("-fno-{}", flag.trim_start_matches("-f"));
-            let (opts, _) = compile(&["-c", &off, "a.c"]);
-            assert_eq!(opts.emit, EmitKind::Object, "{off}");
-        }
+        let (opts, _) = compile(&["-c", "-fno-non-call-exceptions", "a.c"]);
+        assert_eq!(opts.emit, EmitKind::Object);
     }
 
-    /// `-finstrument-functions` used to be the third of those, and it is taken now that the hooks
-    /// are called. The last of it and its negative is the one that counts, as with any pair.
+    /// `-ffast-math` used to be refused beside it and is the family it names now, with each
+    /// member settable on its own and the last word on each winning, which is gcc's reading.
+    #[test]
+    fn fast_math_is_the_family_it_names_and_the_last_word_on_each_member_wins() {
+        let both = |line: &[&str]| {
+            let (opts, _) = compile(&[&["-c"], line, &["a.c"]].concat());
+            let (link, _) = linking(&[line, &["a.c"]].concat());
+            (opts, link)
+        };
+        let (opts, link) = both(&[]);
+        assert_eq!(opts.math, Math::default());
+        assert!(opts.trapping_math);
+        assert!(!link.fast_math);
+
+        let (opts, link) = both(&["-ffast-math"]);
+        assert!(opts.math.fast(opts.trapping_math), "{:?}", opts.math);
+        assert!(!opts.trapping_math, "fast math turns trapping off");
+        assert!(link.fast_math, "and it links the startup file");
+
+        // Taking one member back leaves the rest, and the whole is not fast math any more.
+        let (opts, link) = both(&["-ffast-math", "-fno-finite-math-only"]);
+        assert!(!opts.math.finite_only);
+        assert!(!opts.math.errno && !opts.math.signed_zeros && opts.math.reciprocal);
+        assert!(!opts.math.fast(opts.trapping_math));
+        assert!(link.fast_math, "gcc's spec reads the flag and not the fields");
+
+        let (opts, _) = both(&["-ffast-math", "-ftrapping-math"]);
+        assert!(opts.trapping_math);
+        assert!(!opts.math.fast(opts.trapping_math));
+        assert!(!opts.math.associative(opts.trapping_math));
+
+        let (opts, link) = both(&["-ffast-math", "-fno-fast-math"]);
+        assert_eq!(opts.math, Math::default());
+        assert!(opts.trapping_math);
+        assert!(!link.fast_math);
+
+        // A member written alone is only that member.
+        let (opts, link) = both(&["-fno-math-errno"]);
+        assert_eq!(opts.math, Math { errno: false, ..Math::default() });
+        assert!(opts.math.iec_559(opts.trapping_math), "errno is not an IEC 60559 question");
+        assert!(!link.fast_math);
+
+        let (opts, link) = both(&["-funsafe-math-optimizations"]);
+        assert!(opts.math.unsafe_math && opts.math.associative(opts.trapping_math));
+        assert!(opts.math.errno && !opts.math.finite_only);
+        assert!(link.fast_math);
+    }
+
+    /// `-Ofast` is `-O3` with fast math as a default, which a later level and a
+    /// `-fno-fast-math` on either side of it both take back.
+    #[test]
+    fn ofast_is_o3_with_fast_math_as_a_default_a_flag_can_take_back() {
+        let both = |line: &[&str]| {
+            let (opts, _) = compile(&[&["-c"], line, &["a.c"]].concat());
+            let (link, _) = linking(&[line, &["a.c"]].concat());
+            (opts, link)
+        };
+        let (opts, link) = both(&["-Ofast"]);
+        assert_eq!(opts.opt_level, OptLevel::O3);
+        assert!(opts.math.fast(opts.trapping_math));
+        assert!(link.fast_math);
+
+        for line in [&["-Ofast", "-O2"][..], &["-fno-fast-math", "-Ofast"]] {
+            let (opts, _) = both(line);
+            assert!(!opts.math.fast(opts.trapping_math), "{line:?}");
+        }
+
+        let (_, link) = both(&["-Ofast", "-mno-daz-ftz"]);
+        assert_eq!(link.daz_ftz, Some(false));
+    }
+
+    /// `-finstrument-functions` used to be refused beside those two, and it is taken now that the
+    /// hooks are called. The last of it and its negative is the one that counts, as with any pair.
     #[test]
     fn instrument_functions_is_taken_and_the_last_of_the_pair_wins() {
         let (opts, _) = compile(&["-c", "-finstrument-functions", "a.c"]);
@@ -5340,7 +5465,6 @@ mod tests {
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
         assert!(refused(&["-mcmodel=kernel", "-c", "a.c"]).contains("small code model"));
         assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
-        assert!(refused(&["-Ofast", "-c", "a.c"]).contains("fast math"));
         // The word size the target does not have, which is a target this compiler was not asked
         // for rather than a flag it does not know.
         let no32 = refused(&["--target=x86_64-unknown-linux-gnu", "-m32", "-c", "a.c"]);
