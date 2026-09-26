@@ -43,7 +43,10 @@
 //! What is left is the out of line copy of a function that still holds either of them, which is a
 //! function nothing can emit. It becomes a declaration, which is gcc's answer too: gcc emits nothing
 //! for an inline definition, so a call the inliner left goes to whatever the rest of the program
-//! defines under the name, which for a glibc wrapper is the library function.
+//! defines under the name, which for a glibc wrapper is the library function. A function marked
+//! `inline_only` goes the same way whatever it holds, because its body was only ever here to be
+//! inlined: it is an `extern inline` under GNU's reading, and its external definition is somewhere
+//! else in the program.
 //!
 //! From `-O1` up the same splice takes a call to a function declared `inline` whose body, once its
 //! own calls are settled, is no larger than `max-inline-insns-single`, the limit gcc gives such a
@@ -914,22 +917,26 @@ fn targets(
     func.push_block_calls(&calls)
 }
 
-/// Turns every function that still holds a `va_arg_pack` or a `va_arg_pack_len` into a
-/// declaration of the same name.
+/// Turns every function that still holds a `va_arg_pack` or a `va_arg_pack_len`, and every one
+/// marked `inline_only`, into a declaration of the same name.
 fn withdraw(module: &mut Module) {
     for id in module.funcs().collect::<Vec<FuncId>>() {
         let func = &module[id];
+        if func.is_declaration() {
+            continue;
+        }
         let holds = func
             .blocks()
             .flat_map(|block| func.insts(block))
             .any(|inst| matches!(func[inst].opcode, Opcode::VaArgPack | Opcode::VaArgPackLen));
-        if !holds {
+        if !holds && !func.attrs.set.contains(AttrSet::INLINE_ONLY) {
             continue;
         }
         let mut declared = Func::new(func.name, func.signature().clone());
         declared.spelled = func.spelled;
         declared.visibility = func.visibility;
         declared.attrs = func.attrs;
+        declared.attrs.set = declared.attrs.set.without(AttrSet::INLINE_ONLY);
         declared.declared = func.declared;
         declared.linkage = Linkage::External;
         module[id] = declared;

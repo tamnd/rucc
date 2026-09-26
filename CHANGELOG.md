@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A function written `extern inline` under GNU's reading of `inline` is never emitted, even when a call to it is left standing. The external definition is in another object, which is what gcc assumes too. With `_FORTIFY_SOURCE` from `-O1` up, glibc writes `memcpy` that way, and the copy rucc put out of line was a `memcpy` that called itself, so every libsodium test crashed.
+
 ## 0.11.12
 
 ### Fixed
