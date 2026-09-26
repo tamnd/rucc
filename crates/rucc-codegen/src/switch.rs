@@ -139,7 +139,7 @@ use rucc_ir::{
 /// that nothing dense is left in it.
 /// The second is knowing which case is hot, because a walk that tests the common case first is
 /// cheaper than any search. A hint on one case is used, by testing that case first, and see
-/// [`hottest`] for when.
+/// `hottest` for when.
 ///
 /// gcc has the same knob under the name `case-values-threshold` and a small number in it, which is
 /// the right number for gcc because gcc reaches for a jump table first and the tree is what it falls

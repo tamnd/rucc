@@ -93,7 +93,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_cost::heuristics;
-use rucc_ir::{Block, BlockCall, Builder, Func, Opcode, Value};
+use rucc_ir::{Block, BlockCall, Builder, Def, Func, Opcode, Value};
 
 use crate::cfg::Cfg;
 use crate::copy;
@@ -142,15 +142,21 @@ impl Pass for Unroll {
         }
         let mut done: HashSet<Block> = HashSet::new();
         let mut say = true;
-        while let Some(job) = plan(func, an, &done, &mut stats, say) {
-            say = false;
-            if !fuel.take() {
-                stats.missed(NO_FUEL);
+        'rounds: loop {
+            let jobs = plan(func, an, &done, &mut stats, say);
+            if jobs.is_empty() {
                 break;
             }
-            done.insert(job.header);
-            apply(func, &job);
-            stats.optimized(UNROLLED);
+            say = false;
+            for job in &jobs {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    break 'rounds;
+                }
+                done.insert(job.header);
+                apply(func, job);
+                stats.optimized(UNROLLED);
+            }
             an.clear();
             // The last copy's test was settled the way that leaves, so anything that only ran on
             // the other side of it is stranded. Section 6.5 puts taking it out on whichever pass
@@ -183,38 +189,58 @@ struct Job {
     depth: u32,
 }
 
-/// The innermost loop worth unrolling, and what it would take.
+/// The loops worth unrolling this round, innermost first, and what each would take.
 ///
-/// One at a time, because unrolling one loop invalidates the forest the next answer would be read
-/// out of. `say` is false on every call after the first so that a loop this declines is declined
-/// once rather than once per round.
+/// Unrolling a loop invalidates the forest the next answer would be read out of, but only for the
+/// loops that share a block with it. A loop is taken when none of its blocks is in one taken
+/// already, so an outer loop waits for the round after its inner loops are gone and loops side by
+/// side all go in one round. A function made of many small loops, which is what inlining a vector
+/// intrinsic per lane leaves, took a round and a fresh forest per loop the other way. `say` is
+/// false on every call after the first so that a loop this declines is declined once rather than
+/// once per round.
 fn plan(
     func: &Func,
     an: &mut Analyses,
     done: &HashSet<Block>,
     stats: &mut Stats,
     say: bool,
-) -> Option<Job> {
+) -> Vec<Job> {
     let cfg = an.cfg(func);
     let doms = an.dominators(func);
     let loops = an.loops(func);
     let mut scev = Scev::new(func, cfg, loops);
-    let mut found: Option<Job> = None;
+    // Both walk the whole function, so they are worked out once a round rather than once a loop.
+    let round = Round { addressed: copy::addressed(func), readers: readers(func) };
+    let mut found: Vec<Job> = Vec::new();
     for id in loops.all() {
         if done.contains(&loops.header(id)) {
             continue;
         }
-        match consider(func, cfg, doms, loops, &mut scev, id) {
-            Ok(job) => {
-                if found.as_ref().is_none_or(|had| job.depth > had.depth) {
-                    found = Some(job);
-                }
-            }
+        match consider(func, cfg, doms, loops, &mut scev, &round, id) {
+            Ok(job) => found.push(job),
             Err(why) if say => stats.missed(why),
             Err(_) => (),
         }
     }
+    found.sort_by_key(|job| std::cmp::Reverse(job.depth));
+    let mut taken: HashSet<Block> = HashSet::new();
+    found.retain(|job| {
+        let free = job.blocks.iter().all(|block| !taken.contains(block));
+        if free {
+            taken.extend(job.blocks.iter().copied());
+        }
+        free
+    });
     found
+}
+
+/// What every loop of a round asks about the function as a whole.
+#[derive(Debug)]
+struct Round {
+    /// The blocks whose address is taken, which a copy cannot stand in for.
+    addressed: HashSet<Block>,
+    /// The blocks that read each block's values, from [`readers`].
+    readers: HashMap<Block, HashSet<Block>>,
 }
 
 /// Whether this loop can be unrolled away, and why not when it cannot.
@@ -224,6 +250,7 @@ fn consider(
     doms: &Dominators,
     loops: &Loops,
     scev: &mut Scev<'_>,
+    round: &Round,
     id: LoopId,
 ) -> Result<Job, &'static str> {
     let header = loops.header(id);
@@ -278,9 +305,8 @@ fn consider(
 
     let blocks = loops.blocks(id).to_vec();
     let inside: HashSet<Block> = blocks.iter().copied().collect();
-    let addressed = copy::addressed(func);
     for &block in &blocks {
-        if addressed.contains(&block) {
+        if round.addressed.contains(&block) {
             return Err(ADDRESSED);
         }
         // The copy reaches every block of the loop from the copied header, so a block reached from
@@ -295,7 +321,7 @@ fn consider(
             }
         }
     }
-    if escapes(func, &blocks, &inside) {
+    if escapes(&round.readers, &blocks, &inside) {
         return Err(ESCAPES);
     }
     let size = size_after(func, scev, id, &blocks, times).ok_or(TOO_BIG)?;
@@ -324,30 +350,34 @@ fn consider(
 /// one of them through a parameter of the block the loop leaves to. Where there is one, the copies
 /// would leave it reading the first iteration's value instead of the last, so this is refused
 /// rather than repaired.
-pub(crate) fn escapes(func: &Func, blocks: &[Block], inside: &HashSet<Block>) -> bool {
-    let mut defined: HashSet<Value> = HashSet::new();
-    for &block in blocks {
-        defined.extend(func[block].params.iter().copied());
-        for inst in func.insts(block) {
-            defined.extend(func[inst].results());
-        }
-    }
+pub(crate) fn escapes(
+    readers: &HashMap<Block, HashSet<Block>>,
+    blocks: &[Block],
+    inside: &HashSet<Block>,
+) -> bool {
+    blocks.iter().filter_map(|block| readers.get(block)).flatten().any(|at| !inside.contains(at))
+}
+
+/// For each block, the other blocks that read a value it defines, as an operand or as an argument
+/// to a block, which is what [`escapes`] asks about a loop's blocks.
+fn readers(func: &Func) -> HashMap<Block, HashSet<Block>> {
+    let mut readers: HashMap<Block, HashSet<Block>> = HashMap::new();
     for block in func.blocks() {
-        if inside.contains(&block) {
-            continue;
-        }
         for inst in func.insts(block) {
-            if func[func[inst].args].iter().any(|value| defined.contains(value)) {
-                return true;
-            }
-            for call in func.successors(inst) {
-                if func[call.args].iter().any(|value| defined.contains(value)) {
-                    return true;
+            let args = func[func[inst].args].iter();
+            let calls = func.successors(inst).flat_map(|call| func[call.args].iter());
+            for &value in args.chain(calls) {
+                let from = match func[value].def {
+                    Def::Result { inst, .. } => func.block_of(inst),
+                    Def::Param { block, .. } => Some(block),
+                };
+                if let Some(from) = from.filter(|&from| from != block) {
+                    readers.entry(from).or_default().insert(block);
                 }
             }
         }
     }
-    false
+    readers
 }
 
 /// How many instructions the copies come to once the folding the unroll enables has happened.
@@ -849,6 +879,58 @@ mod tests {
         // One multiply per copy of the outer body, and the four inner loops still go round.
         assert_eq!(tally(&func, Opcode::Mul), 4);
         assert_eq!(tally(&func, Opcode::BrIf), 4);
+        sound(&func, &mut names);
+    }
+
+    /// Two loops one after the other share no block, so they go in the same round, and the second
+    /// starts from what the first left, so the edge between them is the one to get wrong.
+    #[test]
+    fn two_loops_one_after_the_other_are_both_unrolled() {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_returns(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let first = func.create_block();
+        let between = func.create_block();
+        let second = func.create_block();
+        let done = func.create_block();
+        let i = func.append_param(first, Type::int(32));
+        let sum = func.append_param(first, Type::int(32));
+        let so_far = func.append_param(between, Type::int(32));
+        let j = func.append_param(second, Type::int(32));
+        let acc = func.append_param(second, Type::int(32));
+        let answer = func.append_param(done, Type::int(32));
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(first, &[zero, zero]);
+
+        let mut build = Builder::new(&mut func, first);
+        let total = build.binary(Opcode::Add, sum, i, Flags::NSW);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, i, one, Flags::NSW);
+        let three = build.iconst(Type::int(32), 3);
+        let test = build.icmp(IntPred::Slt, next, three);
+        build.br_if(test, first, &[next, total], between, &[total]);
+
+        let mut build = Builder::new(&mut func, between);
+        let start = build.iconst(Type::int(32), 0);
+        build.jump(second, &[start, so_far]);
+
+        let mut build = Builder::new(&mut func, second);
+        let doubled = build.binary(Opcode::Mul, acc, j, Flags::NSW);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, j, one, Flags::NSW);
+        let two = build.iconst(Type::int(32), 2);
+        let test = build.icmp(IntPred::Slt, next, two);
+        build.br_if(test, second, &[next, doubled], done, &[doubled]);
+        Builder::new(&mut func, done).ret(&[answer]);
+
+        let stats = unroll(&mut func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, UNROLLED), 2);
+        assert_eq!(tally(&func, Opcode::Add), 8, "two per copy of the first and one of the second");
+        assert_eq!(tally(&func, Opcode::Mul), 2);
+        assert_eq!(tally(&func, Opcode::BrIf), 0);
         sound(&func, &mut names);
     }
 
