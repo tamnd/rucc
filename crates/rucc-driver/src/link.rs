@@ -98,6 +98,14 @@ pub struct LinkOptions {
     /// It is a field rather than a call inside this module because a link line that read the
     /// environment could only be tested on a machine whose environment said the right thing.
     pub cache: Option<PathBuf>,
+    /// Where a distribution's cross packages put the tree for another architecture, which is
+    /// `/usr` on a real command line.
+    ///
+    /// Debian and Ubuntu install `libc6-dev-arm64-cross` and its friends as `/usr/<multiarch>/include`
+    /// and `/usr/<multiarch>/lib`, and gcc's own files for that target under
+    /// `/usr/lib/gcc-cross/<multiarch>`. [`distro_cross`] reads it. A field for the reason
+    /// [`LinkOptions::cache`] is one, and [`None`] in a test is a machine with no such packages.
+    pub usr: Option<PathBuf>,
     /// `-static`.
     pub is_static: bool,
     /// `-shared`.
@@ -340,7 +348,7 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         // A name rather than a path, so `-fuse-ld=mold` finds a `mold` that is not `ld.mold`.
         return vec![format!("ld.{named}"), named.clone()];
     }
-    if cross_sysroot(target, opts).is_some() {
+    if cross_sysroot(target, opts).is_some() || distro_cross(target, opts).is_some() {
         return cross_order(target);
     }
     match target.os {
@@ -420,8 +428,74 @@ fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option
     if host == Some(target) && tuple.env_version().is_none() {
         return None;
     }
+    if distro_for(target, opts, host).is_some() {
+        return None;
+    }
     let cache = opts.cache.as_deref()?;
     Some(Sysroot::in_cache(cache, tuple))
+}
+
+/// A tree a distribution's cross packages installed for a Linux target that is not this machine.
+///
+/// What `apt install gcc-aarch64-linux-gnu` leaves behind: the C library's headers and files under
+/// `/usr/aarch64-linux-gnu`, and gcc's `crtbegin.o` and `libgcc.a` for that target under
+/// `/usr/lib/gcc-cross/aarch64-linux-gnu/<version>`. The library's `libc.so` script names its files
+/// by their full path, so the tree is linked where it is and not under a `--sysroot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Distro {
+    /// `/usr/<multiarch>`, which has `include` and `lib` under it.
+    pub root: PathBuf,
+    /// gcc's directories for the target, newest version first, and empty when only the library
+    /// was installed.
+    pub gcc: Vec<PathBuf>,
+}
+
+impl Distro {
+    /// The C library's headers, and the kernel's, which the same packages put in the same place.
+    #[must_use]
+    pub fn include(&self) -> PathBuf {
+        self.root.join("include")
+    }
+
+    /// The C library's startup files and libraries.
+    #[must_use]
+    pub fn lib(&self) -> PathBuf {
+        self.root.join("lib")
+    }
+}
+
+/// The distribution's tree for this target, when a cross compile should use it.
+///
+/// Only when nothing better was asked for or is there. A `--sysroot` is a tree somebody named, a
+/// pinned release is a request for our tree cut at that release, and a sysroot already fetched into
+/// the cache is the one this release pins, so each of those wins. What is left is a machine that
+/// has the distribution's cross packages and nothing of ours, and there the packages are what a
+/// prefixed gcc on the same machine would use, so they are what this uses too.
+#[must_use]
+pub fn distro_cross(target: Triple, opts: &LinkOptions) -> Option<Distro> {
+    distro_for(target, opts, Triple::host())
+}
+
+/// The same answer with the host as a parameter, for the same reason as [`cross_for`].
+fn distro_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Distro> {
+    if opts.sysroot.is_some() || target.os != Os::Linux || host == Some(target) {
+        return None;
+    }
+    let tuple = target_tuple(target, opts);
+    if tuple.env_version().is_some() {
+        return None;
+    }
+    if opts.cache.as_deref().is_some_and(|cache| Sysroot::in_cache(cache, tuple).lib().is_dir()) {
+        return None;
+    }
+    let usr = opts.usr.as_deref()?;
+    let name = multiarch(target);
+    let root = usr.join(&name);
+    if !root.join("include").is_dir() || !root.join("lib").is_dir() {
+        return None;
+    }
+    let gcc = newest_first(&usr.join("lib/gcc-cross").join(&name));
+    Some(Distro { root, gcc })
 }
 
 /// The target as the model that has room for a release, which is what names the cache directory.
@@ -785,10 +859,19 @@ pub fn line(
     }
     let machine = emulation(target);
     let root = opts.sysroot.as_deref();
-    let dirs = library_dirs(target, root);
+    // A distribution's cross tree is linked by the same line, with its two directories in place of
+    // this machine's, because it is laid out the way this machine's own library is.
+    let distro = distro_cross(target, opts);
+    let dirs = match &distro {
+        Some(distro) => vec![distro.lib()],
+        None => library_dirs(target, root),
+    };
     // Where a gcc on this machine keeps its own runtime, which is a different place from where
     // the C library keeps its own, and where our runtime is if it was built for this target.
-    let runtime = runtime_dirs(target, root);
+    let runtime = match distro {
+        Some(distro) => distro.gcc,
+        None => runtime_dirs(target, root),
+    };
     let ours = if opts.no_builtins_lib { None } else { builtins_archive(target, &opts.prefixes) };
     let mut args = vec![
         "-o".to_owned(),
@@ -1007,22 +1090,26 @@ pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for base in ["/usr/lib/gcc", "/usr/lib64/gcc", "/usr/local/lib/gcc"] {
         for name in &names {
-            let dir = under(sysroot, &format!("{base}/{name}"));
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
-            let mut versions: Vec<(Vec<u64>, PathBuf)> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .map(|p| (version_key(&p), p))
-                .collect();
-            // Descending, so the highest version is the first place `find_file` looks. Ties keep
-            // the order the directory gave, which is arbitrary and does not matter because two
-            // directories that sort the same hold the same version.
-            versions.sort_by(|a, b| b.0.cmp(&a.0));
-            found.extend(versions.into_iter().map(|(_, path)| path));
+            found.extend(newest_first(&under(sysroot, &format!("{base}/{name}"))));
         }
     }
     found
+}
+
+/// The version directories under one of gcc's, highest version first.
+fn newest_first(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let mut versions: Vec<(Vec<u64>, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .map(|p| (version_key(&p), p))
+        .collect();
+    // Descending, so the highest version is the first place `find_file` looks. Ties keep the order
+    // the directory gave, which is arbitrary and does not matter because two directories that sort
+    // the same hold the same version.
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions.into_iter().map(|(_, path)| path).collect()
 }
 
 /// A directory name read as a version, so that `13` sorts above `9` and `10.2` above `10`.
@@ -1154,6 +1241,10 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
         if rucc_sysroot::link::libc(sysroot.target()) == rucc_sysroot::link::Libc::Stub {
             dirs.push(sysroot.stubs().to_path_buf());
         }
+        return dirs;
+    }
+    if let Some(distro) = distro_cross(target, link) {
+        dirs.push(distro.lib());
         return dirs;
     }
     dirs.extend(candidates(target, link.sysroot.as_deref()));
@@ -1769,6 +1860,48 @@ mod tests {
             .expect_err("there is no gcrt1.o in a generated sysroot");
         let Error::Cross { why } = &error else { panic!("{error:?}") };
         assert!(why.contains("gcrt1.o"), "{why}");
+    }
+
+    #[test]
+    fn a_distributions_cross_tree_is_used_when_there_is_no_sysroot_of_ours() {
+        let usr = std::env::temp_dir().join(format!("rucc-link-usr-{}", std::process::id()));
+        let root = usr.join("aarch64-linux-gnu");
+        for dir in ["include", "lib"] {
+            fs::create_dir_all(root.join(dir)).expect("a scratch tree");
+        }
+        for version in ["9", "13"] {
+            fs::create_dir_all(usr.join("lib/gcc-cross/aarch64-linux-gnu").join(version))
+                .expect("a scratch gcc");
+        }
+        let host = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        let arm = Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu);
+        let opts = LinkOptions { usr: Some(usr.clone()), ..cached() };
+        let distro = distro_for(arm, &opts, Some(host)).expect("the packages are there");
+        assert_eq!(distro.include(), root.join("include"));
+        assert_eq!(distro.lib(), root.join("lib"));
+        assert_eq!(
+            distro.gcc,
+            [13, 9].map(|v| usr.join("lib/gcc-cross/aarch64-linux-gnu").join(v.to_string()))
+        );
+        // And then it is not a link against a sysroot of ours, which is what decides the line.
+        assert!(cross_for(arm, &opts, Some(host)).is_none());
+        // The host itself, a target with no tree, a named tree and a pinned release all leave it.
+        assert!(distro_for(host, &opts, Some(host)).is_none());
+        let riscv = Triple::new(Arch::Riscv64, Os::Linux, Env::Gnu);
+        assert!(distro_for(riscv, &opts, Some(host)).is_none());
+        let named = LinkOptions { sysroot: Some(PathBuf::from("/opt/root")), ..opts.clone() };
+        assert!(distro_for(arm, &named, Some(host)).is_none());
+        let pinned = LinkOptions {
+            pinned: Some("aarch64-linux-gnu.2.28".parse::<TargetTuple>().expect("a release")),
+            ..opts.clone()
+        };
+        assert!(distro_for(arm, &pinned, Some(host)).is_none());
+        // A sysroot of ours in the cache wins over the packages, because it is the one pinned.
+        let cache = usr.join("cache");
+        fs::create_dir_all(Sysroot::in_cache(&cache, arm.tuple()).lib()).expect("a sysroot");
+        let fetched = LinkOptions { cache: Some(cache), ..opts };
+        assert!(distro_for(arm, &fetched, Some(host)).is_none());
+        let _ = fs::remove_dir_all(&usr);
     }
 
     #[test]

@@ -29,6 +29,8 @@ use std::sync::OnceLock;
 use rucc_sysroot::{Kernel, Options, Sysroot, Wall, include_paths};
 use rucc_target::{Env, Os, Triple};
 
+use crate::link::Distro;
+
 /// What the machine says about itself, and what the command line said over the top of it.
 ///
 /// Separated from the lookup so that the lookup is a function of its arguments and can be
@@ -338,12 +340,17 @@ pub fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 /// `asm-generic/`, they are not under any sysroot because every target sharing an architecture reads
 /// the same files, and they come last for the reason section 8.5 gives: both trees have a `sys/` and
 /// the libc's is the one a program means.
+///
+/// `distro` is [`crate::link::distro_cross`], a tree the distribution's cross packages installed,
+/// and it stands in for a named sysroot. Its `include` holds the kernel's headers as well as the
+/// libc's, so nothing is added after it.
 #[must_use]
 pub fn header_dirs(
     target: Triple,
     sysroot: Option<&Path>,
     bundled: Option<&Sysroot>,
     kernel: Option<&Kernel>,
+    distro: Option<&Distro>,
 ) -> Vec<PathBuf> {
     // Once, because asking can mean running `xcrun` or the Visual Studio installer. The answer goes
     // to whichever of the three fields it belongs in, and which one that is decides how step 3 treats
@@ -359,10 +366,13 @@ pub fn header_dirs(
     // headers are found as an SDK are exactly the targets whose headers are not ours to ship, and a
     // copy of that rule here is a copy that can disagree with the one the diagnostic reads.
     let walled = Wall::of(target.tuple()).is_some();
-    let (named, sdk, host) = match (sysroot.is_some(), walled) {
-        (true, _) => (dirs, Vec::new(), Vec::new()),
-        (false, true) => (Vec::new(), dirs, Vec::new()),
-        (false, false) => (Vec::new(), Vec::new(), dirs),
+    let (named, sdk, host) = match (distro, sysroot.is_some(), walled) {
+        // A distribution's cross tree takes the place a named one would, because it is one: a
+        // directory somebody installed that holds the target's headers and nothing else.
+        (Some(distro), _, _) => (vec![distro.include()], Vec::new(), Vec::new()),
+        (None, true, _) => (dirs, Vec::new(), Vec::new()),
+        (None, false, true) => (Vec::new(), dirs, Vec::new()),
+        (None, false, false) => (Vec::new(), Vec::new(), dirs),
     };
     let options = Options {
         sysroot: &named,

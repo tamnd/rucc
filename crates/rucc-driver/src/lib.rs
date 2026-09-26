@@ -1987,6 +1987,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // machine whose environment said the right thing, and the link line is the last thing that
     // touches a binary. `spec/cross-compile/13-distribution.md` section 13.2 owns the answer.
     link.cache = Some(cache::dir());
+    // And where a distribution's cross packages would have put a tree for the target, which is only
+    // read when the target is not this machine and there is no sysroot of ours for it.
+    link.usr = Some(PathBuf::from("/usr"));
     // And the ten field spelling of the target, because the release on it decides two things the
     // three field one cannot say: whether a target that is this architecture is still a cross
     // compile, and which directory under the cache it is against. After the loop because the last
@@ -2022,6 +2025,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         // sysroot for it rather than the ones next door.
         let cross = link::cross_sysroot(opts.target, &link);
         let kernel = link::cross_kernel(opts.target, &link);
+        let distro = link::distro_cross(opts.target, &link);
         // And the version of those headers, which only the bundled tree has an answer for. A host
         // glibc and a tree the user named both define `__GLIBC_MINOR__` in their own `features.h`,
         // and a second definition with a different value is a warning on every file, so the
@@ -2035,8 +2039,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 ))
             })?;
         }
-        let system =
-            library::header_dirs(opts.target, sysroot.as_deref(), cross.as_ref(), kernel.as_ref());
+        let system = library::header_dirs(
+            opts.target,
+            sysroot.as_deref(),
+            cross.as_ref(),
+            kernel.as_ref(),
+            distro.as_ref(),
+        );
         // The two licence walls of `spec/cross-compile/13-distribution.md` section 13.4, which are
         // the only way step 3 comes back with nothing on a hosted target. Section 8.6 asks for the
         // answer to name the licence and the lawful ways to get what is behind it, rather than
@@ -4624,9 +4633,15 @@ mod tests {
         // bundled tree is only in effect for a target that is not this machine. The first version of
         // this test said x86_64-linux-gnu, which is a cross compile on a mac and this machine on a
         // Linux runner, so it passed here and failed there.
+        //
+        // Unless this machine has the distribution's cross packages for it and nothing fetched, and
+        // then those are the headers and their own `features.h` says the release, as it does for a
+        // tree somebody named.
         let gnu = format!("--target={}-linux-gnu", cross_arch());
         let (bundled, _) = compile(&[&gnu, "-c", "a.c"]);
-        assert_eq!(bundled.glibc_minor, Some(44));
+        let (link, _) = linking(&[&gnu, "-c", "a.c"]);
+        let distro = link::distro_cross(bundled.target, &link).is_some();
+        assert_eq!(bundled.glibc_minor, if distro { None } else { Some(44) });
         let pin = format!("{gnu}.2.28");
         let (pinned, _) = compile(&[&pin, "-c", "a.c"]);
         assert_eq!(pinned.glibc_minor, Some(28));
