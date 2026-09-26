@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- If-conversion drops the select when the tested constant makes an operation give the other arm's value, as in `x == 0 ? y : y + x` and `x != 0 ? y * x : 0`, which are now `y + x` and `y * x`. It covers add, subtract, and, or, xor, the shifts and multiply, a widened tested value, and the operation on either arm (#1903).
 - If-conversion keeps a branch only when its probability is past 97% either way, where it used to keep one past 75%. Timing a diamond at known rates found the branch still losing to a select at 90% and 95%, so a diamond under a plain `__builtin_expect` is now converted, as gcc converts it. The same margin decides when a `&&` or `||` is folded into one branch (#1902).
 - `-O2` and `-O3` run if-conversion a second time after the loop passes and the fold that follows them, so the diamonds those passes leave are turned into selects as well. On the corpus that is 561 diamonds converted against 546 (#1905).
 
