@@ -235,6 +235,8 @@ f9400921	ldr x1, [x9, #16]	ldr_64
 79c02121	ldrsh w1, [x9, #16]	ldrs_16_32
 79802121	ldrsh x1, [x9, #16]	ldrs_16_64
 b9801121	ldrsw x1, [x9, #16]	ldrs_32_64
+39404121	ldrb w1, [x9, #16]	ldr_bit
+39004121	strb w1, [x9, #16]	str_bit
 39004121	strb w1, [x9, #16]	str_8
 79002121	strh w1, [x9, #16]	str_16
 b9001121	str w1, [x9, #16]	str_32

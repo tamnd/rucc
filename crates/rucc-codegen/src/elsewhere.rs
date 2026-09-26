@@ -75,15 +75,21 @@ pub struct Elsewhere {
 
 impl Elsewhere {
     /// The names that link cannot reach from the instruction pointer.
+    ///
+    /// `copies` is whether the linker answers a reference from the instruction pointer to a
+    /// variable another object defines by copying the variable into the executable. x86-64 does,
+    /// even in a position independent executable. AArch64 and RISC-V do not: GNU ld refuses an
+    /// `adrp` against such a variable when it makes a PIE, which is the default link on every
+    /// distribution, and gcc reads the address out of the table there instead.
     #[must_use]
-    pub fn of(module: &Module, pic: Pic, format: ObjectFormat) -> Self {
+    pub fn of(module: &Module, pic: Pic, format: ObjectFormat, copies: bool) -> Self {
         let threads = module
             .globals()
             .filter(|&id| module[id].tls.is_some())
             .map(|id| module[id].name)
             .collect();
         let described = format == ObjectFormat::MachO;
-        Self { threads, described, ..Self::table(module, pic, format) }
+        Self { threads, described, ..Self::table(module, pic, format, copies) }
     }
 
     /// The half of the above that is about the global offset table, which is the older one.
@@ -98,7 +104,7 @@ impl Elsewhere {
     /// `x86_64-w64-mingw32`, which writes `leaq other(%rip), %rax` for the address of a function it
     /// has only seen declared. Asking for a table there instead reached the object writer as a
     /// relocation it has no way to write, which is what tamnd/rucc#1443 was.
-    fn table(module: &Module, pic: Pic, format: ObjectFormat) -> Self {
+    fn table(module: &Module, pic: Pic, format: ObjectFormat, copies: bool) -> Self {
         if format == ObjectFormat::Coff {
             return Self::default();
         }
@@ -115,7 +121,7 @@ impl Elsewhere {
         // defines stays in the library and the only way to it is the slot. That is every variable
         // this file only declares, unless it is hidden and so promised to be in the same image,
         // and it is what clang writes: `_ext@GOTPAGE` on arm64 and `_ext@GOTPCREL` on x86-64.
-        let uncopied = format == ObjectFormat::MachO;
+        let uncopied = format == ObjectFormat::MachO || !copies;
         let globals = module
             .globals()
             .filter(|&id| {
@@ -241,7 +247,7 @@ mod tests {
     fn a_variable_every_thread_has_its_own_copy_of_is_one() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(elsewhere.thread(names.intern("own")));
     }
 
@@ -251,7 +257,7 @@ mod tests {
     fn an_ordinary_variable_is_not() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         for name in ["kept", "away", "quiet", "shy", "here"] {
             assert!(!elsewhere.thread(names.intern(name)), "{name} was called thread-local");
         }
@@ -261,7 +267,7 @@ mod tests {
     fn a_function_this_file_only_declares_is_reached_through_the_table() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(elsewhere.holds(names.intern("exit")));
     }
 
@@ -269,7 +275,7 @@ mod tests {
     fn a_function_this_file_defines_is_not() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(!elsewhere.holds(names.intern("here")));
     }
 
@@ -277,7 +283,7 @@ mod tests {
     fn a_name_the_module_does_not_carry_at_all_is_not() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(!elsewhere.holds(names.intern("nowhere")));
     }
 
@@ -288,7 +294,7 @@ mod tests {
     fn an_executable_pays_for_the_functions_and_for_nothing_else() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         for name in ["kept", "away", "quiet", "shy", "second"] {
             assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
@@ -302,7 +308,7 @@ mod tests {
         let mut maybe = Global::new(names.intern("maybe"), 4, 4);
         maybe.linkage = Linkage::Weak;
         module.add_global(maybe);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(elsewhere.holds(names.intern("maybe")));
     }
 
@@ -316,11 +322,26 @@ mod tests {
         let mut near = Global::new(names.intern("near"), 4, 4);
         near.visibility = Visibility::Hidden;
         module.add_global(near);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::MachO);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::MachO, true);
         assert!(elsewhere.holds(names.intern("away")));
         for name in ["kept", "quiet", "shy", "near"] {
             assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
+    }
+
+    /// An AArch64 executable pays for a variable it only declares, because the linker there makes
+    /// no copy for an `adrp` and refuses one in a PIE. bzip2 reading `stderr` is what found it.
+    #[test]
+    fn an_executable_that_gets_no_copies_pays_for_the_variables_it_does_not_define() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, false);
+        assert!(elsewhere.holds(names.intern("away")));
+        for name in ["kept", "quiet", "shy"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
+        }
+        let copied = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
+        assert!(!copied.holds(names.intern("away")));
     }
 
     /// A library pays for every name it exports, defined here or not, because the definition the
@@ -329,7 +350,7 @@ mod tests {
     fn a_library_pays_for_every_name_something_else_may_define() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf, true);
         for name in ["here", "exit", "kept", "away", "second"] {
             assert!(elsewhere.holds(names.intern(name)), "{name} was not in the table");
         }
@@ -344,7 +365,7 @@ mod tests {
     fn a_format_with_no_table_puts_nothing_in_one() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff, true);
         for name in ["here", "exit", "kept", "away", "quiet", "shy", "second"] {
             assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
@@ -356,7 +377,7 @@ mod tests {
     fn a_format_with_no_table_does_not_grow_one_under_the_library_flag() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Coff);
+        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Coff, true);
         for name in ["here", "exit", "kept", "away", "second"] {
             assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
@@ -369,7 +390,7 @@ mod tests {
     fn a_format_with_no_table_still_says_which_variable_every_thread_has_a_copy_of() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff, true);
         assert!(elsewhere.thread(names.intern("own")));
     }
 
@@ -379,7 +400,7 @@ mod tests {
     fn a_library_pays_nothing_for_a_name_nothing_outside_it_can_see() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf);
+        let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf, true);
         assert!(!elsewhere.holds(names.intern("quiet")));
         assert!(!elsewhere.holds(names.intern("shy")));
     }

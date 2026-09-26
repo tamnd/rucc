@@ -909,7 +909,10 @@ fn generate(
     // that is said, which is why the flag reaches this far down. See #756. The format decides the
     // other half, since a table only exists on a format that has one to reach through.
     //
-    let elsewhere = Elsewhere::of(module, replaceable(target, opts), target.object_format);
+    // Only x86-64 copies a variable into the executable for a reference from the instruction
+    // pointer, so on the other machines a variable this file only declares is read from the table.
+    let copies = target.tuple.arch() == Arch::X86_64;
+    let elsewhere = Elsewhere::of(module, replaceable(target, opts), target.object_format, copies);
 
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();

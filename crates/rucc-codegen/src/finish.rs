@@ -413,13 +413,38 @@ pub fn far(
         let read = |reg: PhysReg| {
             func[operands].iter().any(|op| op.role != Role::Def && op.reg.phys() == Some(reg))
         };
-        let Some(&into) = scratch.iter().find(|&&reg| !read(reg)) else { continue };
-        let sign = amode.disp.signum();
-        let mut steps: Vec<i32> = insts
-            .steps(amode.disp.unsigned_abs())
-            .into_iter()
-            .map(|step| offset(step) * sign)
-            .collect();
+        let written = |reg: PhysReg| {
+            func[operands].iter().any(|op| op.role == Role::Def && op.reg.phys() == Some(reg))
+        };
+        // A scratch register the instruction writes is free for the address, and so is one
+        // nothing reads again. The cleanup keeps a value in scratch from one instruction to the
+        // next, so a register this instruction does not read can still be holding one. Taking
+        // that register put the frame address in `x16` just before a store read the value it had.
+        let free = |reg: PhysReg| !read(reg) && (written(reg) || !live_after(func, inst, reg));
+        let loaded = || {
+            func[operands]
+                .iter()
+                .filter(|op| op.role == Role::Def && op.class == conv.int_class)
+                .filter_map(|op| op.reg.phys())
+                .find(|&reg| !read(reg) && !frame.contains(&reg))
+        };
+        // With neither free, one the instruction does not read is pushed around it and popped
+        // back after, which moves the stack pointer and so every offset counted from it. That is
+        // a store of one scratch register while the other is still wanted, which is rare. The
+        // unwind table is not told, so a backtrace taken on one of those few instructions in a
+        // function with no frame pointer is sixteen bytes off.
+        let (into, saved) = match scratch.iter().copied().find(|&reg| free(reg)).or_else(loaded) {
+            Some(reg) => (reg, false),
+            None => match scratch.iter().copied().find(|&reg| !read(reg)) {
+                Some(reg) => (reg, true),
+                None => continue,
+            },
+        };
+        let moved = if saved && from == conv.stack_pointer { offset(conv.push) } else { 0 };
+        let disp = amode.disp + moved;
+        let sign = disp.signum();
+        let mut steps: Vec<i32> =
+            insts.steps(disp.unsigned_abs()).into_iter().map(|step| offset(step) * sign).collect();
         let last = steps.last().copied().unwrap_or(0);
         let keep = if steps.len() > 1 && reaches(name, last) {
             steps.pop();
@@ -428,6 +453,14 @@ pub fn far(
             0
         };
         let class = conv.int_class;
+        if saved {
+            let push = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.push)));
+            let pop = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.pop)));
+            let push = func.build_loose(push).uses(Reg::physical(into), class).finish();
+            func.insert_before(inst, push);
+            let pop = func.build_loose(pop).def(Reg::physical(into), class).finish();
+            func.insert_after(inst, pop);
+        }
         let mut base = from;
         for step in steps {
             let address = func
@@ -441,6 +474,28 @@ pub fn far(
         func[operands][usize::from(at)].reg = Reg::physical(into);
         func[mem].disp = keep;
     }
+}
+
+/// Whether something after that instruction in its block reads the register before anything
+/// writes it again.
+///
+/// Only the block, because a scratch register is not live into another one. The cleanup follows
+/// what one holds from a move to its reader and starts again at the top of every block.
+fn live_after(func: &Func, inst: Inst, reg: PhysReg) -> bool {
+    let Some(block) = func.block_of(inst) else { return true };
+    for next in func.insts(block).skip_while(|&at| at != inst).skip(1) {
+        let operands = func[next].operands;
+        let holds = |def: bool| {
+            func[operands].iter().any(|op| op.role.is_def() == def && op.reg.phys() == Some(reg))
+        };
+        if holds(false) {
+            return true;
+        }
+        if holds(true) {
+            return false;
+        }
+    }
+    false
 }
 
 /// How many pages a probing prologue touches one after another before it writes a loop instead.
@@ -2048,5 +2103,66 @@ mod tests {
                 "x64.ret",
             ]
         );
+    }
+
+    /// A reload from deep in the frame takes the scratch register it loads into for the address,
+    /// and not the other one, which the store after it reads. This is the pair the cleanup leaves
+    /// when it keeps a value in `x16`, and taking `x16` stored the frame address in its place.
+    #[test]
+    fn a_far_access_leaves_alone_the_scratch_register_read_after_it() {
+        use rucc_target::aarch64::{self, AAPCS64, X16, X17};
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let gpr = aarch64::GPR;
+        let sp = Mem::at(Operand::read(Reg::physical(AAPCS64.stack_pointer), gpr)).plus(40_000);
+        let load = Opcode::new(names.intern("a64.ldr_64"));
+        let store = Opcode::new(names.intern("a64.str_64"));
+        let reload = func.build(block, load).def(Reg::physical(X17), gpr).mem(sp).finish();
+        let into = Mem::at(Operand::read(Reg::physical(X17), gpr));
+        func.build(block, store).uses(Reg::physical(X16), gpr).mem(into).finish();
+
+        far(&mut func, &aarch64::FRAME, &AAPCS64, &[X16, X17], &mut names);
+        let insts: Vec<Inst> = func.insts(block).collect();
+        assert!(insts.len() > 2, "the offset is out of reach and wants an address");
+        for &inst in &insts[..insts.iter().position(|&at| at == reload).expect("still there")] {
+            let written = func[func[inst].operands].iter().filter(|op| op.role.is_def());
+            assert!(written.map(|op| op.reg.phys()).all(|reg| reg == Some(X17)));
+        }
+    }
+
+    /// A store of one scratch register deep in the frame while the other is still wanted after it
+    /// has neither to build the address in, so the other goes on the stack for the length of the
+    /// store, and the offset grows by the sixteen bytes the push moved the stack pointer.
+    #[test]
+    fn a_far_store_with_no_free_scratch_register_saves_one_around_itself() {
+        use rucc_target::aarch64::{self, AAPCS64, X16, X17};
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let gpr = aarch64::GPR;
+        let sp = Mem::at(Operand::read(Reg::physical(AAPCS64.stack_pointer), gpr)).plus(40_000);
+        let store = Opcode::new(names.intern("a64.str_64"));
+        let spill = func.build(block, store).uses(Reg::physical(X16), gpr).mem(sp).finish();
+        let into = Mem::at(Operand::read(Reg::physical(AAPCS64.stack_pointer), gpr));
+        func.build(block, store).uses(Reg::physical(X17), gpr).mem(into).finish();
+
+        far(&mut func, &aarch64::FRAME, &AAPCS64, &[X16, X17], &mut names);
+        let text = print_func(&func, &names, &aarch64::REGS);
+        let lines: Vec<&str> =
+            text.lines().map(str::trim).filter(|line| line.contains("a64.")).collect();
+        assert!(lines[0].starts_with("a64.push_64 $x17"), "{text}");
+        assert!(lines.last().unwrap().starts_with("a64.str_64 $x17"), "{text}");
+        assert!(lines[lines.len() - 2].contains("a64.pop_64"), "{text}");
+        let spilled = func.insts(block).position(|at| at == spill).expect("still there");
+        let base = func[func[spill].mem.expect("an address")].base.expect("a base");
+        assert_eq!(func[func[spill].operands][usize::from(base)].reg, Reg::physical(X17), "{text}");
+        let whole: i32 = func
+            .insts(block)
+            .take(spilled)
+            .filter_map(|at| func[at].mem.map(|mem| func[mem].disp))
+            .sum::<i32>()
+            + func[func[spill].mem.expect("an address")].disp;
+        assert_eq!(whole, 40_016, "{text}");
     }
 }

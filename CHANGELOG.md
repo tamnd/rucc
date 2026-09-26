@@ -4,6 +4,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The AArch64 assembler reads the last operand of a branch, `adr`, `adrp` or a literal load as a symbol whatever it spells, so a global called `le` or `x0` is no longer read as a condition or a register. GNU as reads it the same way.
+- An AArch64 position independent executable reads a variable another file defines through the GOT. It used to be reached with `adrp` as if the link would copy it in, which is x86-64 behaviour, and the link failed with `R_AARCH64_ADR_PREL_PG_HI21 against stderr`.
+- AArch64 loads and stores a `_Bool` in memory as a byte. Before, a function that did so failed with no rule lowering `store.i1`.
+- A spilled value held in `x16` or `x17` on AArch64 was overwritten when the next instruction reached a slot more than 32 KiB into the frame, because the address was built in the scratch register that value was in. The address now goes in a scratch register nothing reads afterwards. This made the jtckdint suite fail at `-O2`.
+
 ## 0.11.9
 
 ### Added

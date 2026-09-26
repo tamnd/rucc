@@ -548,6 +548,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ldrs_16_32", Load),
     ("ldrs_16_64", Load),
     ("ldrs_32_64", Load),
+    // Reading and writing a truth value, which is a byte in memory and a zero or a one in a
+    // register. The byte forms again, under names of their own for the reason x86-64 has them.
+    ("ldr_bit", Load),
+    ("str_bit", Store),
     // Stores.
     ("str_8", Store),
     ("str_16", Store),

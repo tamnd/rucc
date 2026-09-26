@@ -474,6 +474,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ldrs_16_32", &[spell("ldrsh", &[Reg(0, W), Mem])]),
     ("ldrs_16_64", &[spell("ldrsh", &[Reg(0, X), Mem])]),
     ("ldrs_32_64", &[spell("ldrsw", &[Reg(0, X), Mem])]),
+    ("ldr_bit", &[spell("ldrb", &[Reg(0, W), Mem])]),
+    ("str_bit", &[spell("strb", &[Reg(0, W), Mem])]),
     // Stores.
     ("str_8", &[spell("strb", &[Reg(0, W), Mem])]),
     ("str_16", &[spell("strh", &[Reg(0, W), Mem])]),
