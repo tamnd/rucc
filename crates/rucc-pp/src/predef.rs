@@ -734,11 +734,11 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 /// SDK tests to decide which declarations exist and which are marked unavailable. Without it
 /// every one of those tests sees no version at all.
 ///
-/// The version comes from the tuple, as in `aarch64-macos.13`. With none given this is 11.0 on
-/// macOS, the first release that ran on Apple silicon, and 14.0 on iOS, the oldest a current
-/// SDK builds for. The oldest answer is the one that cannot hand a program a declaration the
-/// machine it runs on does not have. The encoding is two digits each for the major, minor and
-/// patch numbers, so 13.4 is 130400.
+/// The version comes from the tuple, as in `aarch64-macos.13`, where `-mmacosx-version-min=`
+/// also puts it. With none given this is 11.0 on macOS, the first release that ran on Apple
+/// silicon, and 14.0 on iOS, the oldest a current SDK builds for. The oldest answer is the one
+/// that cannot hand a program a declaration the machine it runs on does not have. The encoding
+/// is two digits each for the major, minor and patch numbers, so 13.4 is 130400.
 fn deployment_target(d: &mut Defs, target: &TargetInfo) {
     let (platform, default) = match target.tuple.os() {
         tuple::Os::MacOs => ("MAC_OS_X", tuple::Version::new(11, 0)),

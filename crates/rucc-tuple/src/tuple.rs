@@ -244,6 +244,14 @@ impl TargetTuple {
         self.os_version
     }
 
+    /// The same target with `version` as its OS version. A deployment target given apart from
+    /// the tuple, the way `-mmacosx-version-min=` gives one, joins it here.
+    #[must_use]
+    pub const fn with_os_version(mut self, version: Version) -> Self {
+        self.os_version = Some(version);
+        self
+    }
+
     /// The same target with no OS or environment version, which is the machine and the ABI
     /// without the release of either that the program is promised to run on.
     #[must_use]

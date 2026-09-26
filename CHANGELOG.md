@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `--target=aarch64-macos.13` and the rest of the versioned Apple spellings are accepted, and so are `-mmacosx-version-min=` and `-mmacos-version-min=`, which win over a version in the tuple. The deployment target reaches the preprocessor's `__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__`. A target that is not Apple ignores the flag, as clang does.
 - Apple targets predefine the deployment target the way `Availability.h` reads it, `__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__` and `__ENVIRONMENT_OS_VERSION_MIN_REQUIRED__`, from the tuple's OS version or 11.0 on macOS when there is none. Apple arm64 also gets `__ARM64_ARCH_8__`, `__ARM_NEON__` and `__AARCH64_SIMD__`, and every Apple target gets `__LITTLE_ENDIAN__`, all of which the SDK reads.
 - aarch64 predefines the rest of what gcc says for a plain Armv8-A: `__ARM_ARCH_8A`, `__ARM_ARCH_ISA_A64`, `__ARM_FEATURE_CLZ`, `__ARM_FEATURE_FMA`, `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_NUMERIC_MAXMIN`, the `__ARM_SIZEOF_*` and `__ARM_ALIGN_MAX_STACK_PWR` values, `__AARCH64_CMODEL_SMALL__` and the `__FP_FAST_FMA` family.
 

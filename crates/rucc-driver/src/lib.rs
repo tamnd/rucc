@@ -425,6 +425,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // libc version and `Triple` has nowhere to put it. It decides `__GLIBC_MINOR__` and nothing
     // else today, and `None` is a command line that named no target, which is this machine.
     let mut pinned: Option<TargetTuple> = None;
+    let mut min_version: Option<rucc_tuple::Version> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
@@ -1120,12 +1121,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
-                opts.target = t.parse().map_err(|e| err(format!("{e}")))?;
                 // The same string again, as the model that has room for a libc version. A spelling
                 // the three field parser took and this one does not is not an error, because the
                 // one that decides what is compiled has already accepted it and the only thing
                 // lost is a version nobody asked for.
                 pinned = t.parse().ok();
+                // The other way round is a deployment target the three field parser has no room
+                // for, `aarch64-macos.13`, and the triple is the one the tuple narrows to.
+                opts.target = match t.parse() {
+                    Ok(triple) => triple,
+                    Err(e) => {
+                        pinned.and_then(Triple::from_tuple).ok_or_else(|| err(format!("{e}")))?
+                    }
+                };
             }
             _ if arg.starts_with("--emit=") => {
                 let k = &arg["--emit=".len()..];
@@ -1833,6 +1841,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // it is every hosted program's default; the kernel model is a different one and a
             // build that asks for it and does not get it links and then does not run.
             "-mcmodel=small" => {}
+            // clang's spellings of the deployment target, which it takes over a version in the
+            // tuple. gcc on a Mac takes the first. A target that is not Apple ignores it, as
+            // clang does, so a makefile that always passes it still builds for Linux.
+            _ if arg.starts_with("-mmacosx-version-min=")
+                || arg.starts_with("-mmacos-version-min=") =>
+            {
+                let text = &arg[arg.find('=').map_or(arg.len(), |i| i + 1)..];
+                let version = rucc_tuple::Version::parse(text)
+                    .ok_or_else(|| err(format!("`{text}` in `{arg}` is not a version")))?;
+                min_version = Some(version);
+            }
             _ if arg.starts_with("-mcmodel=") => {
                 return Err(err(format!(
                     "{arg}: this compiler emits the small code model and no other, see \
@@ -1995,6 +2014,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // compile, and which directory under the cache it is against. After the loop because the last
     // `--target=` on the command line is the one that counts.
     link.pinned = pinned;
+    // The deployment target, from the flag if there was one and from the tuple otherwise. Only an
+    // Apple platform has one: anywhere else a version on the tuple is a libc or a preview number.
+    if opts.target.os == rucc_target::Os::Darwin {
+        opts.os_version = min_version.or_else(|| pinned.and_then(TargetTuple::os_version));
+    }
     // After the loop rather than where `-pthread` was read, so that it lands after the objects
     // that refer to it. A static link takes the definitions it needs from a library when it
     // reaches it and not afterwards, so a library before the objects is a library that answers
@@ -3778,6 +3802,29 @@ mod tests {
         assert_eq!(opts.target, plain.target);
         assert_eq!(plan.jobs.len(), without.jobs.len());
         assert_eq!(plan.jobs[0].output, without.jobs[0].output);
+    }
+
+    #[test]
+    fn a_deployment_target_comes_from_the_tuple_or_from_the_flag() {
+        let version = |v: &str| rucc_tuple::Version::parse(v);
+        let (opts, _) = compile(&["--target=aarch64-macos.13", "-c", "a.c"]);
+        assert_eq!(opts.target, "aarch64-apple-darwin".parse().unwrap());
+        assert_eq!(opts.os_version, version("13"));
+        // The flag wins over the tuple, as it does under clang, and either spelling of it works.
+        let (opts, _) =
+            compile(&["--target=aarch64-macos.13", "-mmacosx-version-min=14.2", "-c", "a.c"]);
+        assert_eq!(opts.os_version, version("14.2"));
+        let (opts, _) = compile(&["--target=x86_64-macos", "-mmacos-version-min=12", "-c", "a.c"]);
+        assert_eq!(opts.os_version, version("12"));
+        // Nothing said leaves the platform's default to the target description.
+        let (opts, _) = compile(&["--target=aarch64-macos", "-c", "a.c"]);
+        assert_eq!(opts.os_version, None);
+        // A Linux build that always passes the flag is not an Apple build because of it.
+        let (opts, _) =
+            compile(&["--target=aarch64-linux-gnu", "-mmacosx-version-min=13", "-c", "a.c"]);
+        assert_eq!(opts.os_version, None);
+        let e = parse_args(&args(&["-mmacosx-version-min=thirteen", "a.c"])).unwrap_err();
+        assert!(e.message.contains("is not a version"), "{}", e.message);
     }
 
     #[test]
