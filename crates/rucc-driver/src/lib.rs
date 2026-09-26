@@ -1760,6 +1760,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     }
                 };
             }
+            _ if arg.starts_with("-Zswitch=") => {
+                let shape = &arg["-Zswitch=".len()..];
+                if rucc_codegen::switch::Force::named(shape).is_none() {
+                    return Err(err("-Zswitch= takes table, tree or walk"));
+                }
+                opts.switch_shape = Some(shape.to_owned());
+            }
             _ if arg.starts_with("-Zlowering=") => {
                 let file = &arg["-Zlowering=".len()..];
                 if file.is_empty() {
@@ -3411,6 +3418,15 @@ mod tests {
     }
 
     /// The third one, which says what the pre-selection lowering group did.
+    #[test]
+    fn a_switch_shape_is_forced_by_name_and_only_by_one_it_has() {
+        let (opts, _) = compile(&["-c", "-O2", "-Zswitch=walk", "a.c"]);
+        assert_eq!(opts.switch_shape.as_deref(), Some("walk"));
+        let (plain, _) = compile(&["-c", "-O2", "a.c"]);
+        assert_eq!(plain.switch_shape, None, "nothing is forced unless it was asked for");
+        assert!(parse_args(&args(&["-Zswitch=bit-test", "a.c"])).is_err(), "not a shape it forces");
+    }
+
     #[test]
     fn where_the_lowering_dump_goes_is_asked_for_the_same_way() {
         let (opts, _) = compile(&["-c", "-O2", "-Zlowering=/tmp/lowering.txt", "a.c"]);

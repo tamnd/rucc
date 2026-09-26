@@ -322,6 +322,9 @@ pub struct Flags {
     /// shorter list of middle end passes and nothing else. [`crate::shorten`] is the first pass
     /// below selection to read it.
     pub goal: Goal,
+    /// The shape `-Zswitch=` forces on every `switch`, which is `None` unless somebody is
+    /// measuring what each shape costs. See [`crate::switch::Force`].
+    pub switch: Option<crate::switch::Force>,
 }
 
 impl Default for Flags {
@@ -345,6 +348,7 @@ impl Default for Flags {
             accurate: None,
             verify: false,
             goal: Goal::Speed,
+            switch: None,
         }
     }
 }
@@ -427,7 +431,11 @@ pub fn compile_recording(
     // than as a dozen lines here. What is in the group and what the order between its members is
     // for are both in `crate::lowering`, which is where a new lowering is added.
     let counting = recording.lowerings.wanted();
-    let ran = lowering::group(source, names, machine.conv, flags.goal, counting);
+    let ran = lowering::group(source, names, machine.conv, flags.goal, flags.switch, counting);
+    if !ran.switches.is_empty() {
+        let called = names.resolve(source.name).to_owned();
+        recording.lowerings.switched(&called, &ran.switches);
+    }
     if counting {
         let called = names.resolve(source.name).to_owned();
         recording.lowerings.record(&called, ran);

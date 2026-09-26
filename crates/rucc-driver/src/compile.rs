@@ -465,6 +465,16 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         }
         diagnostics.extend(checked.diagnostics);
     }
+    // The back end's remarks after the optimizer's, which is the order the work happened in. Only
+    // the `switch` lowering says anything yet, and what it says is a rewrite.
+    let mut wants = rucc_opt::Wants::none();
+    for spec in &opts.opt_info {
+        // Checked when the arguments were parsed, and again by the optimizer.
+        let _ = wants.add(spec);
+    }
+    if wants.wants(rucc_opt::stats::Kind::Optimized) {
+        remarks.push_str(&lowerings.remarks(name));
+    }
 
     let mut messages = Vec::with_capacity(diagnostics.len());
     let mut errors = 0;
@@ -864,6 +874,8 @@ fn generate(
         // result exactly as `-O2` would have. The level is asked whether it optimizes for size
         // rather than matched against, so a level added later answers this without editing it.
         goal: Goal::for_size(opts.opt_level.is_size()),
+        // Only when somebody is measuring, and checked when the arguments were parsed.
+        switch: opts.switch_shape.as_deref().and_then(rucc_codegen::switch::Force::named),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one
@@ -3719,6 +3731,36 @@ decl #0 x : int object external static defined
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
+    }
+
+    /// What each `switch` became is an `-fopt-info` remark, and `-Zswitch=` changes what it says.
+    #[test]
+    fn opt_info_says_what_each_switch_became_and_a_forced_shape_is_what_it_says() {
+        let arms: String = (0..40)
+            .map(|k| format!("case {}: return g({k});", k * 17))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!("int g(int);\nint f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n");
+        let said = |shape: Option<&str>| {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = rucc_session::OptLevel::O2;
+            opts.opt_info = vec![String::new()];
+            opts.switch_shape = shape.map(str::to_owned);
+            let result = run(&opts, &source);
+            assert_eq!(result.messages, Vec::<String>::new());
+            let lines: Vec<String> = result
+                .remarks
+                .lines()
+                .filter(|line| line.contains("[switch-lowering]"))
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(lines.len(), 1, "{}", result.remarks);
+            lines[0].clone()
+        };
+        assert!(said(None).contains(": f: optimized: switch of 40 cases lowered as a tree;"));
+        assert!(said(Some("table")).contains("lowered as a table;"));
+        assert!(said(Some("walk")).contains("lowered as a walk;"));
     }
 
     /// A dense `switch` whose arms are a function of the label, which is arithmetic.

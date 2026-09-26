@@ -247,3 +247,28 @@ The measurement in document 42: on the corpus, compare the shape chosen per swit
 and `gcc -Os`, and separately measure the run-time effect of forcing each shape on a benchmark with a
 hot switch. An interpreter loop is the right benchmark and it is the one where the indirect branch
 cost from 24.3 dominates everything else.
+
+Both are in place (#1907). `-fopt-info` writes one `[switch-lowering]` line per switch saying what it became, a table, a bit test, a tree or a walk, with its clusters, tables and bit tests, and whether a hot case was tested first. A switch that switch conversion turned into a lookup or into arithmetic has a `[switch-conv]` line of its own. `-Zswitch=table`, `-Zswitch=tree` and `-Zswitch=walk` force one shape on every switch. A forced table covers the whole span of the cases when that is under 4096 entries and the operand fits a word, and otherwise the switch keeps the shape it had. rucc-corpus compiles every case with a switch once more with `-S`. It reads rucc's shapes off those remarks, reads gcc's off its assembly (jump table entries, a `bt`, a `CSWTCH` table), and compares the two per case over tables, bit tests and lookups, since the two compilers do not inline the same functions.
+
+On the corpus against gcc 16, 65 of the 73 cases with a switch come out the same at O2 and 66 of 73 at Os. Where they differ at O2:
+
+| rucc | gcc 16 | cases |
+|---|---|---|
+| compares | table | 4 |
+| table | lookup | 2 |
+| compares | lookup | 1 |
+| table | compares | 1 |
+
+The four where gcc builds a table are the interpreter and the three programs that map a value to a letter or a name. The three where gcc has a lookup are `switch-runs` shapes with several runs of cases, which gcc turns into one table of answers and rucc lowers as a table of jumps or as compares. At Os the interpreter agrees and those three become compares against a lookup.
+
+Each shape forced on the switch-dispatch programs, best of 21 runs on an x86-64 server, in milliseconds:
+
+| program | level | gcc 16 | rucc | table | tree | walk |
+|---|---|---|---|---|---|---|
+| interpreter | O2 | 103 (table) | 92 (walk) | 114 | 99 | 89 |
+| interpreter | Os | 102 (table) | 110 (table) | 110 | 102 | 90 |
+| into-letters | O2 | 98 (table) | 36 (walk) | 47 | 35 | 34 |
+| names | O2 | 98 (table) | 33 (walk) | 37 | 33 | 36 |
+| shared-default | O2 | 13 (compares) | 106 (table) | 106 | 118 | 119 |
+
+Runs of the same code differ by about 3ms, which is the gap between rucc's default and a forced walk at O2. On an operand that changes unpredictably the walk beats the table on every one of these, including the interpreter, where the indirect branch costs more than the compares it replaces. Wherever rucc chose compares, a forced table was slower, on every switch-dispatch program at both levels. Two things come out of it. At Os the interpreter gets a table, since a table is smaller, and is 20ms slower for it, which is the size tradeoff working as meant. And `shared-default`, where every case returns the label plus one and case 15 shares the default's arm, is 8 times slower than gcc whatever the shape. gcc inlines the function and works the answer out as arithmetic behind a range check. rucc keeps it as a call, and switch conversion leaves it alone because each arm returns on its own rather than handing a value on to one join. That is the next thing to fix, and it is in the inliner and switch conversion rather than here.

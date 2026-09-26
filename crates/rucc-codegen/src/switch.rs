@@ -90,6 +90,16 @@
 //!
 //! One case and not an ordering of all of them. A hint says which value is likely and nothing about
 //! the others, and the others share what is left evenly, so there is nothing to order them by.
+//!
+//! # What it says it did
+//!
+//! Section 24.7 asks for every `switch` in the corpus to be compared with what gcc made of it, so
+//! each one lowered here comes back as a [`Lowered`], and `-fopt-info` prints it as one line: how
+//! many cases, which shape, and what the partition was. The same section asks what each shape
+//! would have cost on a hot `switch`, and [`Force`] is how that is measured. `-Zswitch=` forces one
+//! shape on every `switch` in the file, and nothing else reaches for it.
+
+use std::fmt::Write as _;
 
 use rucc_cost::Goal;
 use rucc_cost::heuristics::{
@@ -145,32 +155,144 @@ pub const LINEAR: usize = 32;
 /// `goal` is whether the level asked for small code, which decides how dense a stretch has to be
 /// and how many clusters it needs before it is a table. See `JUMP_TABLE_GROWTH_FOR_SIZE`.
 pub fn switches(func: &mut Func, goal: Goal) {
+    let _ = lowered(func, goal, None);
+}
+
+/// The same, with a shape forced on every `switch` when `force` names one, answering what each
+/// `switch` became in the order they were found.
+#[must_use]
+pub fn lowered(func: &mut Func, goal: Goal, force: Option<Force>) -> Vec<Lowered> {
     let found: Vec<Inst> = func
         .blocks()
         .filter_map(|block| func.terminator(block))
         .filter(|&inst| func[inst].opcode == Opcode::Switch)
         .collect();
-    for inst in found {
-        lower(func, inst, goal);
+    found.into_iter().filter_map(|inst| lower(func, inst, goal, force)).collect()
+}
+
+/// A shape forced on every `switch`, which is what `-Zswitch=` asks for.
+///
+/// For measuring and for nothing else. Section 24.7 asks what each shape costs on a hot `switch`,
+/// and the only way to know what a table would have cost where a tree was chosen is to build the
+/// table. A bit test is not one of these, since it holds three destinations inside one word and a
+/// `switch` hot enough to be worth measuring is neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Force {
+    /// One jump table over every case, when their span is at most [`FORCED_CELLS`].
+    Table,
+    /// A binary search all the way down to single clusters, with no table and no bit test.
+    Tree,
+    /// Every cluster tested one after another, with no table and no bit test.
+    Walk,
+}
+
+impl Force {
+    /// The shape a `-Zswitch=` argument names, which is `table`, `tree` or `walk`.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "table" => Some(Self::Table),
+            "tree" => Some(Self::Tree),
+            "walk" => Some(Self::Walk),
+            _ => None,
+        }
+    }
+}
+
+/// The most cells a forced table may have. A `switch` spread wider than this keeps the shape it
+/// would have had, since a table of a million cells measures the cache and not the dispatch.
+pub const FORCED_CELLS: i128 = 4096;
+
+/// What one `switch` became, which is what `-fopt-info` says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lowered {
+    /// How many case labels it had, not counting the default.
+    pub cases: usize,
+    /// How many clusters those fell into, with a table or a bit test counting as one.
+    pub clusters: usize,
+    /// How many of the clusters are jump tables.
+    pub tables: usize,
+    /// How many are bit tests.
+    pub bits: usize,
+    /// Whether the clusters are searched rather than tested one after another.
+    pub searched: bool,
+    /// Whether a hot case was tested on its own ahead of the rest.
+    pub peeled: bool,
+}
+
+impl Lowered {
+    /// One word for the shape, in gcc's terms: a table when any part of it is one, then a bit
+    /// test, then a tree or a walk.
+    ///
+    /// A `switch` is a partition and can be several of these at once. The word names the part that
+    /// decides what it costs, which is what a comparison with gcc's choice wants, and the counts
+    /// in [`Lowered::describe`] say the rest.
+    #[must_use]
+    pub fn shape(&self) -> &'static str {
+        if self.tables > 0 {
+            "table"
+        } else if self.bits > 0 {
+            "bit-test"
+        } else if self.searched {
+            "tree"
+        } else {
+            "walk"
+        }
+    }
+
+    /// The remark, as `-fopt-info` prints it after the function's name.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut out = format!(
+            "switch of {} cases lowered as a {}; clusters {}, tables {}, bit tests {}",
+            self.cases,
+            self.shape(),
+            self.clusters,
+            self.tables,
+            self.bits
+        );
+        if self.peeled {
+            let _ = write!(out, ", hot case first");
+        }
+        out
     }
 }
 
 /// One `switch`, as the clusters its cases fall into and a decision tree over them.
-fn lower(func: &mut Func, inst: Inst, goal: Goal) {
+fn lower(func: &mut Func, inst: Inst, goal: Goal, force: Option<Force>) -> Option<Lowered> {
     let block = func.block_of(inst).expect("a terminator is in a block");
     let span = func.span(inst);
-    let Extra::Switch(info) = func[inst].extra else { return };
+    let Extra::Switch(info) = func[inst].extra else { return None };
     let info = func[info];
-    let Some(&value) = func[func[inst].args].first() else { return };
+    let &value = func[func[inst].args].first()?;
     // The lane, because a `switch` on a vector is not a thing C can write and the immediates are
     // an integer's either way.
     let ty = func[value].ty.lane();
     let calls: Vec<BlockCall> = func[info.targets].to_vec();
     let mut cases: Vec<Imm> = func[info.cases].to_vec();
-    let Some((&default, arms)) = calls.split_first() else { return };
+    let count = cases.len();
+    let (&default, arms) = calls.split_first()?;
     let mut arms = arms.to_vec();
     let hot = hottest(&arms).map(|at| (cases.remove(at).signed(ty), arms.remove(at)));
-    let clusters = group(func, tables(func, clusters(func, &cases, &arms, ty), ty, goal));
+    let found = clusters(func, &cases, &arms, ty);
+    let clusters = match force {
+        None => group(func, tables(func, found, ty, goal)),
+        Some(Force::Table) => forced(found, ty),
+        Some(Force::Tree | Force::Walk) => found,
+    };
+    let leaf = match force {
+        Some(Force::Tree) => 1,
+        Some(Force::Walk) => usize::MAX,
+        Some(Force::Table) | None => LINEAR,
+    };
+    let lowered = Lowered {
+        cases: count,
+        clusters: clusters.len(),
+        tables: clusters.iter().filter(|one| matches!(one, Cluster::Table { .. })).count(),
+        bits: clusters.iter().filter(|one| matches!(one, Cluster::Bits { .. })).count(),
+        searched: clusters.len() > leaf,
+        peeled: hot.is_some(),
+    };
 
     // Before anything is written, because the builder appends and the `switch` is where the
     // appending has to happen.
@@ -180,7 +302,18 @@ fn lower(func: &mut Func, inst: Inst, goal: Goal) {
         Some((case, call)) => peel(func, &of, block, case, call),
         None => block,
     };
-    tree(func, &of, rest, &clusters);
+    tree(func, &of, rest, &clusters, leaf);
+    Some(lowered)
+}
+
+/// Every cluster as one table, which is what `-Zswitch=table` asks for, or the clusters as they
+/// were when their span is wider than [`FORCED_CELLS`] or the operand wider than a word.
+fn forced(clusters: Vec<Cluster>, ty: Type) -> Vec<Cluster> {
+    let (Some(first), Some(last)) = (clusters.first(), clusters.last()) else { return clusters };
+    if ty.bits() == 0 || ty.bits() > u64::BITS || last.high() - first.low() >= FORCED_CELLS {
+        return clusters;
+    }
+    vec![table(&clusters)]
 }
 
 /// The case a hint says is taken often enough to be tested on its own ahead of the rest, if one is.
@@ -587,7 +720,8 @@ fn bits(func: &Func, group: &[Cluster]) -> Option<Cluster> {
     Some(Cluster::Bits { low, high: group.last()?.high(), arms })
 }
 
-/// A binary search over the clusters, ending in a chain of tests at each leaf.
+/// A binary search over the clusters, ending in a chain of tests at each leaf of `leaf` clusters or
+/// fewer, which is [`LINEAR`] unless a shape was forced.
 ///
 /// The split is at the middle of the list and the test is whether the operand is below the lowest
 /// value of the upper half. Everything the lower half holds is below that value because the list is
@@ -595,8 +729,8 @@ fn bits(func: &Func, group: &[Cluster]) -> Option<Cluster> {
 /// matches something in the lower half, and one that is not is either in the upper half or in
 /// neither. Either way it reaches a leaf that tests what is left, and the leaf sends it to the
 /// default when none of that matches.
-fn tree(func: &mut Func, of: &Lowering, at: Block, clusters: &[Cluster]) {
-    if clusters.len() <= LINEAR {
+fn tree(func: &mut Func, of: &Lowering, at: Block, clusters: &[Cluster], leaf: usize) {
+    if clusters.len() <= leaf {
         chain(func, of, at, clusters);
         return;
     }
@@ -610,8 +744,8 @@ fn tree(func: &mut Func, of: &Lowering, at: Block, clusters: &[Cluster]) {
     let under = build.icmp(IntPred::Slt, of.value, want);
     build.br_if(under, left, &[], right, &[]);
 
-    tree(func, of, left, below);
-    tree(func, of, right, above);
+    tree(func, of, left, below, leaf);
+    tree(func, of, right, above, leaf);
 }
 
 /// The clusters tested one after another, each falling to the next and the last to the default.
@@ -858,7 +992,7 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{Goal, LINEAR, SWITCH_PEEL_PERCENT, blocks_for, switches};
+    use super::{Force, Goal, LINEAR, Lowered, SWITCH_PEEL_PERCENT, blocks_for, lowered, switches};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -1023,6 +1157,11 @@ mod tests {
     /// Every probe arrives where the case list says it should, whatever shape the lowering picked.
     fn routes(built: &mut Built, cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) {
         switches(&mut built.func, Goal::Speed);
+        lands(built, cases, arms, probes, ty);
+    }
+
+    /// The same check on a function whose `switch` is already lowered, whichever way that was.
+    fn lands(built: &mut Built, cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) {
         verified(built);
         for &x in probes {
             let wanted = cases
@@ -1032,6 +1171,50 @@ mod tests {
             let got = arrives(&built.func, built.operand, x, ty);
             assert_eq!(got, wanted, "the operand {x} went to the wrong block");
         }
+    }
+
+    /// What a `switch` over these cases becomes with this shape forced on it, checked for every
+    /// probe arriving where it should.
+    fn forcing(cases: &[i128], force: Force) -> Lowered {
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(cases);
+        let said = lowered(&mut built.func, Goal::Speed, Some(force));
+        lands(&mut built, cases, &arms, &around(cases, Type::int(32)), Type::int(32));
+        assert_eq!(said.len(), 1);
+        said[0]
+    }
+
+    #[test]
+    fn each_forced_shape_is_the_shape_it_says_and_still_routes_every_value() {
+        let sparse: Vec<i128> = (0..40).map(|at| at * 17).collect();
+        let table = forcing(&sparse, Force::Table);
+        assert_eq!((table.shape(), table.tables, table.clusters), ("table", 1, 1));
+        let tree = forcing(&sparse, Force::Tree);
+        assert_eq!((tree.shape(), tree.clusters), ("tree", 40));
+        let dense: Vec<i128> = (0..40).collect();
+        let walk = forcing(&dense, Force::Walk);
+        assert_eq!((walk.shape(), walk.tables, walk.clusters), ("walk", 0, 40));
+    }
+
+    #[test]
+    fn a_forced_table_too_wide_to_be_worth_it_keeps_the_shape_it_had() {
+        let wide: Vec<i128> = (0..40).map(|at| at * 1000).collect();
+        assert_eq!(forcing(&wide, Force::Table).shape(), "tree");
+    }
+
+    #[test]
+    fn what_a_switch_became_is_said_in_one_line() {
+        let dense: Vec<i128> = (0..40).collect();
+        let mut built = built(&dense);
+        let said = lowered(&mut built.func, Goal::Speed, None);
+        assert_eq!(
+            said.iter().map(Lowered::describe).collect::<Vec<_>>(),
+            ["switch of 40 cases lowered as a table; clusters 1, tables 1, bit tests 0"]
+        );
+        let three = forcing(&[1, 5, 9], Force::Walk);
+        assert_eq!(three.shape(), "walk");
+        assert_eq!(Force::named("tree"), Some(Force::Tree));
+        assert_eq!(Force::named("bit-test"), None);
     }
 
     /// Every case value, both sides of every one of them, and the ends of the type.
