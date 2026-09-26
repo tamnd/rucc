@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.10
+
 ### Added
 
 - `-g` on AArch64 Linux and for a unit with an `asm` template kept as text, which were both refused before. Both go through a listing, which now gets a label in front of every instruction when debug information is wanted, and where the reader places those labels gives the same rows the x86-64 encoder records. The line table, the functions, their parameters and locals are then written as on x86-64, and gdb under qemu stops at the right lines and prints the right values.
