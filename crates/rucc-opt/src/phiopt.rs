@@ -445,7 +445,8 @@ impl Pass for PhiOpt {
             // whichever way the branch would have gone, so nothing about memory is being speculated.
             // A store only one arm made stays on it, since the other path now makes it too.
             let paired = store.as_ref().is_some_and(|one| one.insts.len() == 2);
-            let replaced = plan.iter().flatten().count() + usize::from(paired);
+            let levels: usize = plan.iter().flatten().map(|one| one.levels().count()).sum();
+            let replaced = levels + usize::from(paired);
             let saved = u32::try_from(replaced).unwrap_or(u32::MAX);
             let work = shape
                 .arms
@@ -482,7 +483,7 @@ impl Pass for PhiOpt {
             // The graph was about the function as it was a moment ago, and the manager clears the
             // cache after the pass returns, which is too late for the next block.
             an.clear();
-            for _ in plan.iter().flatten() {
+            for _ in plan.iter().flatten().flat_map(Factored::levels) {
                 stats.optimized(FACTORED);
             }
             for _ in implied.iter().flatten() {
@@ -1120,10 +1121,25 @@ struct Factored {
     /// `None` when they agree in every position, which is both arms computing the same thing from
     /// the same operands. Then one copy serves both and there is no select at all.
     differ: Option<(usize, [Value; 2])>,
+    /// The same again one level down, when the two values the sides differ in were themselves
+    /// worked out the same way in each arm.
+    ///
+    /// Then what goes in the differing position is that operation written once, and the select
+    /// moves down to where the chain stops agreeing. `(long long)(i * 2)` against
+    /// `(long long)(i + 1)` under an add both arms share is an add of a widening of a select,
+    /// rather than an add of a select of two widenings that each arm would still be paying for.
+    below: Option<Box<Factored>>,
     /// The instruction to write once, whose operand list is replaced by the one above.
     data: InstData,
     /// What it produces.
     ty: Type,
+}
+
+impl Factored {
+    /// This level and every level under it, from the one the join reads down.
+    fn levels(&self) -> impl Iterator<Item = &Factored> {
+        std::iter::successors(Some(self), |one| one.below.as_deref())
+    }
 }
 
 /// What can be factored out of each of the join's parameters, in the order the join takes them.
@@ -1150,7 +1166,16 @@ fn factoring(func: &Func, shape: &Diamond, implied: &[Option<usize>]) -> Vec<Opt
 
 /// Whether this join argument is the same operation on both sides, and what to write instead.
 fn factored(func: &Func, shape: &Diamond, arms: [Block; 2], index: usize) -> Option<Factored> {
-    let sides = [shape.args[0][index], shape.args[1][index]];
+    factored_at(func, arms, [shape.args[0][index], shape.args[1][index]], 0)
+}
+
+/// Whether these two values are the same operation, one in each arm, and what to write instead.
+///
+/// `depth` is how many levels above this one were already factored, which is what keeps a long
+/// chain from being walked all the way down. gcc's `factor_out_conditional_operation` at
+/// `gcc/tree-ssa-phiopt.cc:310` runs to a fixed point instead, and the bound is here for the same
+/// reason the arm scan has one.
+fn factored_at(func: &Func, arms: [Block; 2], sides: [Value; 2], depth: u32) -> Option<Factored> {
     // Two sides that agree need no operation written at all, and the caller passes the value on.
     if agree(func, sides[0], sides[1]) {
         return None;
@@ -1172,14 +1197,35 @@ fn factored(func: &Func, shape: &Diamond, arms: [Block; 2], index: usize) -> Opt
     if operands[0].len() != operands[1].len() {
         return None;
     }
+    // Below the first level only an operation of one operand, which is a conversion or something
+    // like it, and what gcc's loop takes too. One of two operands trades a select of the two
+    // answers for a select of two operands and the operation, and when those operands are what
+    // unrolling makes into constants the select of the answers was a select of two constants.
+    if depth > 0 && operands[0].len() != 1 {
+        return None;
+    }
+    // A conversion of a constant in each arm is two constants once it folds, and a select of two
+    // constants is what the level above already writes. Factoring it would put the conversion
+    // after the select, which is one more instruction for nothing.
+    if depth > 0 && operands.iter().all(|side| constant(func, side[0]).is_some()) {
+        return None;
+    }
     let mut apart =
         operands[0].iter().zip(&operands[1]).enumerate().filter(|(_, (one, two))| one != two);
+    let mut below = None;
     let differ = match (apart.next(), apart.next()) {
         // Two positions apart would need two selects, and two selects and one operation is what
         // one select and two operations already cost. There is nothing to win, so it is left.
         (_, Some(_)) => return None,
         (Some((at, (&one, &two))), None) => {
-            if func[one].ty != func[two].ty || !selectable(func[one].ty) {
+            if func[one].ty != func[two].ty {
+                return None;
+            }
+            // A level that factors below needs no select at this one, so the width a select can
+            // choose at is asked about only where the chain stops.
+            let deeper = depth + 1 < heuristics::PHIOPT_FACTOR_DEPTH;
+            below = deeper.then(|| factored_at(func, arms, [one, two], depth + 1)).flatten();
+            if below.is_none() && !selectable(func[one].ty) {
                 return None;
             }
             Some((at, [one, two]))
@@ -1187,7 +1233,8 @@ fn factored(func: &Func, shape: &Diamond, arms: [Block; 2], index: usize) -> Opt
         (None, None) => None,
     };
     let ty = func[sides[0]].ty;
-    Some(Factored { insts, operands: operands[0].clone(), differ, data: data[0], ty })
+    let below = below.map(Box::new);
+    Some(Factored { insts, operands: operands[0].clone(), differ, below, data: data[0], ty })
 }
 
 /// The instruction in this arm that works out this value, if the arm is where it comes from and the
@@ -1290,7 +1337,8 @@ fn convert(
     let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
     let span = func.span(term);
     func.remove_inst(term);
-    let mut dropped: Vec<Inst> = plan.iter().flatten().flat_map(|one| one.insts).collect();
+    let mut dropped: Vec<Inst> =
+        plan.iter().flatten().flat_map(Factored::levels).flat_map(|one| one.insts).collect();
     dropped.extend(store.iter().flat_map(|one| one.insts.iter().copied()));
     for &arm in shape.arms.iter().flatten() {
         for inst in func.insts(arm).collect::<Vec<Inst>>() {
@@ -1315,12 +1363,7 @@ fn convert(
             continue;
         }
         if let Some(one) = &plan[index] {
-            let mut operands = one.operands.clone();
-            if let Some((at, sides)) = one.differ {
-                operands[at] = build.select(shape.cond, sides[0], sides[1]);
-            }
-            let list = build.func().push_values(&operands);
-            args.push(build.value(InstData { args: list, ..one.data }, one.ty));
+            args.push(write_factored(&mut build, shape.cond, one));
             continue;
         }
         // The condition holds on the first side, which is the side `select` takes when the bit is
@@ -1357,6 +1400,20 @@ fn convert(
     for &arm in shape.arms.iter().flatten() {
         func.remove_block(arm);
     }
+}
+
+/// Writes one copy of a factored chain, from the select at the bottom up to the level the join
+/// reads, and answers what that level produces.
+fn write_factored(build: &mut Builder<'_>, cond: Value, one: &Factored) -> Value {
+    let mut operands = one.operands.clone();
+    if let Some((at, sides)) = one.differ {
+        operands[at] = match &one.below {
+            Some(below) => write_factored(build, cond, below),
+            None => build.select(cond, sides[0], sides[1]),
+        };
+    }
+    let list = build.func().push_values(&operands);
+    build.value(InstData { args: list, ..one.data }, one.ty)
 }
 
 #[cfg(test)]
@@ -2705,6 +2762,232 @@ mod tests {
             vec![Opcode::IConst, Opcode::ICmp, Opcode::Add, Opcode::Jump],
             "one add and nothing to choose between"
         );
+    }
+
+    /// `x < y ? g(f(a)) : g(f(b))` and so on down, as a diamond whose arms each run their own list
+    /// of operations over their own operand, every step taking the value the step before it made.
+    ///
+    /// Block 0 is the head, blocks 1 and 2 the arms, and block 3 the join, with one parameter.
+    fn chain(steps: [&[Opcode]; 2]) -> Func {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int, int, int, int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operands = [func.append_param(head, int), func.append_param(head, int)];
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, int);
+
+        let mut build = Builder::new(&mut func, head);
+        let shared = build.iconst(int, 3);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for ((&arm, operand), steps) in arms.iter().zip(operands).zip(steps) {
+            let mut build = Builder::new(&mut func, arm);
+            let mut value = operand;
+            for &opcode in steps {
+                value = build.binary(opcode, value, shared, Flags::default());
+            }
+            build.jump(join, &[value]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        func
+    }
+
+    /// How many times each of these opcodes is in the head after the pass.
+    fn counted(func: &Func, wanted: &[Opcode]) -> Vec<usize> {
+        let written = opcodes(func, 0);
+        wanted.iter().map(|&op| written.iter().filter(|&&one| one == op).count()).collect()
+    }
+
+    /// `x < y ? total + g(f(a)) : total + g(f(b))`, where every step under the add is a conversion
+    /// to the width it names, with each arm running its own list over its own operand.
+    ///
+    /// Block 0 is the head, taking the two values it compares, the two 32 bit operands and a 64 bit
+    /// total, blocks 1 and 2 are the arms, and block 3 is the join, with one 64 bit parameter.
+    fn converted(steps: [&[(Opcode, u32)]; 2]) -> Func {
+        let mut names = Interner::new();
+        let (int, wide) = (Type::int(32), Type::int(64));
+        let signature = Signature::new().with_params(&[int, int, int, int, wide]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, int);
+        let right = func.append_param(head, int);
+        let operands = [func.append_param(head, int), func.append_param(head, int)];
+        let total = func.append_param(head, wide);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, wide);
+
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for ((&arm, operand), steps) in arms.iter().zip(operands).zip(steps) {
+            let mut build = Builder::new(&mut func, arm);
+            let mut value = operand;
+            for &(opcode, bits) in steps {
+                value = build.unary(opcode, value, Type::int(bits));
+            }
+            let sum = build.binary(Opcode::Add, total, value, Flags::default());
+            build.jump(join, &[sum]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        func
+    }
+
+    /// The type of the one select the pass wrote into the head.
+    fn selected(func: &Func) -> Type {
+        let select = func
+            .insts(Block::from_usize(0))
+            .find(|&inst| func[inst].opcode == Opcode::Select)
+            .expect("the select the pass just built");
+        func[func[select].first_result.expect("a select has a result")].ty
+    }
+
+    /// An add over a widening over a narrowing, all three shared, is all three written once, with
+    /// the select under the lowest of them choosing between the two operands.
+    #[test]
+    fn a_chain_of_conversions_is_factored_all_the_way_down() {
+        let steps: &[(Opcode, u32)] = &[(Opcode::Trunc, 16), (Opcode::SExt, 64)];
+        let mut func = converted([steps, steps]);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 3);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head = [Opcode::Select, Opcode::Trunc, Opcode::SExt, Opcode::Add];
+        assert_eq!(counted(&func, &head), vec![1, 1, 1, 1]);
+        assert_eq!(selected(&func), Type::int(32), "the select is under the whole chain");
+        assert_eq!(blocks(&func), vec![0, 3]);
+    }
+
+    /// Where the two arms stop doing the same thing is where the select goes, choosing between
+    /// the two different answers, with the level above them still written once.
+    #[test]
+    fn a_chain_that_differs_at_the_second_level_is_factored_one_deep() {
+        let mut func = converted([&[(Opcode::SExt, 64)], &[(Opcode::ZExt, 64)]]);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head = [Opcode::Select, Opcode::SExt, Opcode::ZExt, Opcode::Add];
+        assert_eq!(counted(&func, &head), vec![1, 1, 1, 1]);
+        assert_eq!(selected(&func), Type::int(64));
+    }
+
+    /// Below the operation the join reads, only an operation of one operand is factored, the way
+    /// gcc's loop over `factor_out_conditional_operation` only takes those. `total + (i + i)`
+    /// against `total + (i + 1)` would otherwise be `total + (i + select(i, 1))`, which once the
+    /// loop is unrolled is an add of a select where there had been a select of two constants.
+    #[test]
+    fn an_operation_of_two_operands_below_the_first_level_is_not_factored() {
+        let steps: &[Opcode] = &[Opcode::Add, Opcode::Mul];
+        let mut func = chain([steps, steps]);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head = [Opcode::Select, Opcode::Add, Opcode::Mul];
+        assert_eq!(counted(&func, &head), vec![1, 2, 1]);
+    }
+
+    /// A chain longer than the bound is factored as deep as the bound, and the rest stays in the
+    /// arms as work the cost rule is asked about.
+    #[test]
+    fn a_chain_is_factored_only_as_deep_as_the_bound() {
+        let bound = rucc_cost::heuristics::PHIOPT_FACTOR_DEPTH;
+        let depth = usize::try_from(bound).unwrap();
+        let steps: Vec<(Opcode, u32)> = (0..=depth)
+            .map(|at| if at % 2 == 0 { (Opcode::SExt, 64) } else { (Opcode::Trunc, 32) })
+            .collect();
+        let steps = &steps[..depth + usize::from(depth % 2 == 0)];
+        let mut func = converted([steps, steps]);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), bound);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+    }
+
+    /// The shape the issue came from. `total + (long)(x * 2)` against `total + (long)(x + 1)`
+    /// factors the add and the widening under it, and the select is between the two 32 bit
+    /// answers, so neither widening is left in an arm.
+    /// `flag ? total + (long long)0 : total + (long long)1`, which is what a loop over
+    /// `total += (long long)(i * 2)` against `total += (long long)(i + 1)` is once it is unrolled.
+    /// The widenings fold into their constants, so only the add is factored and the select is
+    /// between the two wide constants, rather than a narrow select widened after it.
+    #[test]
+    fn a_widening_of_a_constant_in_each_arm_is_left_to_fold() {
+        let mut names = Interner::new();
+        let (narrow, wide) = (Type::int(32), Type::int(64));
+        let signature = Signature::new().with_params(&[narrow, narrow, wide]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, narrow);
+        let right = func.append_param(head, narrow);
+        let total = func.append_param(head, wide);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, wide);
+
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (&arm, value) in arms.iter().zip([0, 1]) {
+            let mut build = Builder::new(&mut func, arm);
+            let value = build.iconst(narrow, value);
+            let widened = build.unary(Opcode::SExt, value, wide);
+            let sum = build.binary(Opcode::Add, total, widened, Flags::default());
+            build.jump(join, &[sum]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(selected(&func), wide, "the select is between the two widened constants");
+    }
+
+    #[test]
+    fn a_widening_both_arms_share_under_an_operation_is_factored_too() {
+        let mut names = Interner::new();
+        let (narrow, wide) = (Type::int(32), Type::int(64));
+        let signature = Signature::new().with_params(&[narrow, narrow, narrow, wide]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, narrow);
+        let right = func.append_param(head, narrow);
+        let x = func.append_param(head, narrow);
+        let total = func.append_param(head, wide);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, wide);
+
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (&arm, (opcode, by)) in arms.iter().zip([(Opcode::Mul, 2), (Opcode::Add, 1)]) {
+            let mut build = Builder::new(&mut func, arm);
+            let by = build.iconst(narrow, by);
+            let step = build.binary(opcode, x, by, Flags::default());
+            let widened = build.unary(Opcode::SExt, step, wide);
+            let sum = build.binary(Opcode::Add, total, widened, Flags::default());
+            build.jump(join, &[sum]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FACTORED), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head = [Opcode::Select, Opcode::SExt, Opcode::Add, Opcode::Mul];
+        assert_eq!(counted(&func, &head), vec![1, 1, 2, 1]);
+        let select = func
+            .insts(Block::from_usize(0))
+            .find(|&inst| func[inst].opcode == Opcode::Select)
+            .unwrap();
+        let chosen = func[select].first_result.unwrap();
+        assert_eq!(func[chosen].ty, narrow, "the select is under the widening");
     }
 
     /// Two different operations are two operations, and the pass falls back to hoisting both and
