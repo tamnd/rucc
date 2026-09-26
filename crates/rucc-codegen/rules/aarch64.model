@@ -65,6 +65,12 @@
 (semantics (a64.lsr_ri_64 l r) (bvlshr l r))
 (semantics (a64.asr_ri_32 l r) (bvashr l r))
 (semantics (a64.asr_ri_64 l r) (bvashr l r))
+;; A byte or a half shifted right, which is widened in the register first and so is the shift at
+;; its own width.
+(semantics (a64.lsr_ri_8 l r) (bvlshr l r))
+(semantics (a64.lsr_ri_16 l r) (bvlshr l r))
+(semantics (a64.asr_ri_8 l r) (bvashr l r))
+(semantics (a64.asr_ri_16 l r) (bvashr l r))
 (semantics (a64.lsl_rr_32 l r) (bvshl l (bvand r 31)))
 (semantics (a64.lsl_rr_64 l r) (bvshl l (bvand r 63)))
 (semantics (a64.lsr_rr_32 l r) (bvlshr l (bvand r 31)))

@@ -394,6 +394,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("lsr_ri_64", AluI),
     ("asr_ri_32", AluI),
     ("asr_ri_64", AluI),
+    ("lsr_ri_8", AluI),
+    ("lsr_ri_16", AluI),
+    ("asr_ri_8", AluI),
+    ("asr_ri_16", AluI),
     ("ror_ri_32", AluI),
     ("ror_ri_64", AluI),
     // Multiply and add, and multiply and subtract, which is how a remainder is taken: the quotient

@@ -55,6 +55,14 @@ d37ff841	lsl x1, x2, #1	lsl_ri_64
 d341fc41	lsr x1, x2, #1	lsr_ri_64
 13017c41	asr w1, w2, #1	asr_ri_32
 9341fc41	asr x1, x2, #1	asr_ri_64
+53001c41	uxtb w1, w2	lsr_ri_8
+53017c21	lsr w1, w1, #1	lsr_ri_8
+53003c41	uxth w1, w2	lsr_ri_16
+53017c21	lsr w1, w1, #1	lsr_ri_16
+13001c41	sxtb w1, w2	asr_ri_8
+13017c21	asr w1, w1, #1	asr_ri_8
+13003c41	sxth w1, w2	asr_ri_16
+13017c21	asr w1, w1, #1	asr_ri_16
 13820441	ror w1, w2, #1	ror_ri_32
 93c20441	ror x1, x2, #1	ror_ri_64
 1b031041	madd w1, w2, w3, w4	madd_rrr_32

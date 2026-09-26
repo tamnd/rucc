@@ -179,6 +179,24 @@ static TEXT: &[(&str, &[Written])] = &[
     ("lsr_ri_64", &[spell("lsr", &[Reg(0, X), Reg(1, X), Imm])]),
     ("asr_ri_32", &[spell("asr", &[Reg(0, W), Reg(1, W), Imm])]),
     ("asr_ri_64", &[spell("asr", &[Reg(0, X), Reg(1, X), Imm])]),
+    // A right shift of a byte or a half, which widens it first because the bits above it in the
+    // register are not known.
+    (
+        "lsr_ri_8",
+        &[spell("uxtb", &[Reg(0, W), Reg(1, W)]), spell("lsr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    (
+        "lsr_ri_16",
+        &[spell("uxth", &[Reg(0, W), Reg(1, W)]), spell("lsr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    (
+        "asr_ri_8",
+        &[spell("sxtb", &[Reg(0, W), Reg(1, W)]), spell("asr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
+    (
+        "asr_ri_16",
+        &[spell("sxth", &[Reg(0, W), Reg(1, W)]), spell("asr", &[Reg(0, W), Reg(0, W), Imm])],
+    ),
     ("ror_ri_32", &[spell("ror", &[Reg(0, W), Reg(1, W), Imm])]),
     ("ror_ri_64", &[spell("ror", &[Reg(0, X), Reg(1, X), Imm])]),
     // Multiply and add, and multiply and subtract, which is how a remainder is taken: the quotient
