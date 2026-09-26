@@ -116,6 +116,28 @@ impl Shape {
         }
     }
 
+    /// The flags a section of this name has whatever letters the source gave it.
+    ///
+    /// gas adds these to the letters rather than taking the letters alone, so
+    /// `.section .data.rel.ro.local,"a"` is writable all the same. GMP names its jump tables that
+    /// way, and a linker making a position independent program refuses an address it would have to
+    /// fix up in a section it may not write. Only the names gas treats as a family are here, which
+    /// is fewer than [`Shape::of`] knows: `.init.data` is not executable just because `.init` is.
+    #[must_use]
+    pub fn implied(name: &str) -> Shape {
+        let base = Shape { alloc: true, ..Shape::default() };
+        let head = name.split_once('.').map_or(name, |(_, rest)| rest);
+        let head = head.split_once('.').map_or(head, |(first, _)| first);
+        match head {
+            "text" => Shape { exec: true, ..base },
+            "rodata" => base,
+            "data" | "bss" => Shape { write: true, ..base },
+            "tdata" | "tbss" => Shape { write: true, thread: true, ..base },
+            _ if Array::of(name).is_some() => Shape { write: true, ..base },
+            _ => Shape::default(),
+        }
+    }
+
     /// The flag word ELF holds these in.
     ///
     /// Not public, and neither are the two below it. The fields above are the whole of what a

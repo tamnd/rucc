@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A function written `extern inline` under GNU's reading of `inline` is never emitted, even when a call to it is left standing. The external definition is in another object, which is what gcc assumes too. With `_FORTIFY_SOURCE` from `-O1` up, glibc writes `memcpy` that way, and the copy rucc put out of line was a `memcpy` that called itself, so every libsodium test crashed.
+- A `.section` whose name gas knows gets the flags that name always has on top of the letters written, as gas does. GMP puts its jump tables in `.section .data.rel.ro.local,"a"`, which gas makes writable, and rucc left it read only, so linking any GMP test program as position independent failed in lld with `relocation R_X86_64_64 cannot be used against local symbol`.
 
 ## 0.11.12
 
