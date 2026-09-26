@@ -165,6 +165,9 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
     if let Some(field) = system(&lower) {
         return Ok(Value::System(field));
     }
+    if let Some(operation) = prefetch(&lower) {
+        return Ok(Value::Prefetch(operation));
+    }
     reference(piece, symbol).map(Value::Symbol)
 }
 
@@ -330,6 +333,28 @@ pub(super) static BARRIERS: [(&str, u8); 12] = [
 /// A barrier option, as the number the encoding gives it.
 fn barrier(name: &str) -> Option<u8> {
     BARRIERS.iter().find(|(known, _)| *known == name).map(|&(_, option)| option)
+}
+
+/// What a `prfm` is asked to do, from its name, which is the kind of access, the level of cache
+/// and whether to keep the line or stream through it, in that order: `pldl1keep` is a load into
+/// the first level that is kept, and is zero.
+pub(super) fn prefetch(name: &str) -> Option<u8> {
+    let rest = name.strip_prefix('p')?;
+    let (kind, rest) = rest.split_at_checked(2)?;
+    let kind = ["ld", "li", "st"].iter().position(|&known| known == kind)?;
+    let (level, policy) = rest.strip_prefix('l')?.split_at_checked(1)?;
+    let level = ["1", "2", "3"].iter().position(|&known| known == level)?;
+    let policy = ["keep", "strm"].iter().position(|&known| known == policy)?;
+    Some((kind << 3 | level << 1 | policy) as u8)
+}
+
+/// The name of what a `prfm` is asked to do, or nothing for the numbers that have none.
+pub(super) fn prefetch_name(operation: u8) -> Option<String> {
+    let (kind, level, policy) = (operation >> 3, operation >> 1 & 3, operation & 1);
+    let kind = ["ld", "li", "st"].get(usize::from(kind))?;
+    let level = ["1", "2", "3"].get(usize::from(level))?;
+    let policy = ["keep", "strm"][usize::from(policy)];
+    Some(format!("p{kind}l{level}{policy}"))
 }
 
 /// The system registers a compiler reads by name, as the op0, op1, CRn, CRm and op2 fields.

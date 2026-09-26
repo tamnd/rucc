@@ -39,8 +39,9 @@ use Form::{
     Acquire, Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet,
     CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FetchOp,
     FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move,
-    MulAdd, Nop, Pop, PopPair, Probe, Push, PushPair, Release, Ret, RetVal, RetVal2, RetVal2Fp,
-    RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, Store, StoreFp, Swap, Template, Test, Trap, Unary,
+    MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret, RetVal, RetVal2,
+    RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, Store, StoreFp, Swap, Template, Test,
+    Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -154,6 +155,13 @@ pub enum Form {
     /// A page of the stack written without anything being put there, which is an address and a
     /// constant the machine has no use for and the prologue hands over anyway.
     Probe,
+    /// A hint that an address is about to be used, which is an addressing mode and no operands.
+    ///
+    /// What `__builtin_prefetch` asks for, the same as `crate::x86_64::Form::Prefetch`. It reads
+    /// nothing a program can see and writes nothing, and a machine that ignores it runs the program
+    /// correctly, but it is kept in its place among the accesses around it so that the hint arrives
+    /// when the program asked for it.
+    Prefetch,
     /// Nothing.
     Nop,
     /// A stop the program cannot step past.
@@ -286,7 +294,8 @@ impl Form {
             RetVal2Fp => &RET_VAL_2_FP,
             RetVal3Fp => &RET_VAL_3_FP,
             RetVal4Fp => &RET_VAL_4_FP,
-            Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe | Template => &NONE,
+            Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe | Prefetch
+            | Template => &NONE,
         }
     }
 
@@ -299,7 +308,7 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store | LoadFp | StoreFp | Probe)
+        matches!(self, Lea | Load | Store | LoadFp | StoreFp | Probe | Prefetch)
     }
 
     /// Whether an instruction of this form reads or writes memory.
@@ -320,6 +329,7 @@ impl Form {
                 | PushPair
                 | PopPair
                 | Probe
+                | Prefetch
                 | Call
                 | Ret
                 | Barrier
@@ -728,6 +738,16 @@ pub static INSTS: &[(&str, Form)] = &[
     // read it, and a page is touched by storing the zero register to it.
     ("align_sp_64", AluI),
     ("probe_64", Probe),
+    // The ones `__builtin_prefetch` asks for by how much of the data will still be wanted, named as
+    // on x86-64 because the lowering that writes them is shared, and the same four for a write.
+    ("prefetch_nta", Prefetch),
+    ("prefetch_t2", Prefetch),
+    ("prefetch_t1", Prefetch),
+    ("prefetch_t0", Prefetch),
+    ("prefetch_w_nta", Prefetch),
+    ("prefetch_w_t2", Prefetch),
+    ("prefetch_w_t1", Prefetch),
+    ("prefetch_w_t0", Prefetch),
     // Everything else.
     ("nop", Nop),
     ("trap", Trap),
@@ -809,9 +829,10 @@ mod tests {
     #[test]
     fn a_form_that_carries_a_constant_or_an_address_has_a_register_to_go_with_it() {
         // Save the probe, which writes the page its address names and is handed a constant it has
-        // no use for, because the prologue writes every target's probe the same way.
+        // no use for, because the prologue writes every target's probe the same way, and the
+        // prefetch, whose answer is where the line ends up.
         for &(name, form) in INSTS {
-            if (form.takes_imm() || form.takes_mem()) && form != Probe {
+            if (form.takes_imm() || form.takes_mem()) && !matches!(form, Probe | Prefetch) {
                 assert!(!form.operands().is_empty(), "{name} has nothing to put its answer in");
             }
         }

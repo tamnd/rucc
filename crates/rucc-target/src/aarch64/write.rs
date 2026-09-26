@@ -18,7 +18,7 @@ use std::fmt::Write;
 use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
-use crate::aarch64::read::{BARRIERS, SYSTEM, system_field};
+use crate::aarch64::read::{BARRIERS, SYSTEM, prefetch_name, system_field};
 
 /// Which assembler a line is written for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +100,12 @@ fn operand(line: &mut String, value: &Value, named: Named<'_>) {
             Some((name, _)) => line.push_str(name),
             None => {
                 let _ = write!(line, "#{option}");
+            }
+        },
+        Value::Prefetch(operation) => match prefetch_name(operation) {
+            Some(name) => line.push_str(&name),
+            None => {
+                let _ = write!(line, "#{operation}");
             }
         },
         Value::System(field) => {

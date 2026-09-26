@@ -7,6 +7,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `-g` on AArch64 Linux and for a unit with an `asm` template kept as text, which were both refused before. Both go through a listing, which now gets a label in front of every instruction when debug information is wanted, and where the reader places those labels gives the same rows the x86-64 encoder records. The line table, the functions, their parameters and locals are then written as on x86-64, and gdb under qemu stops at the right lines and prints the right values.
+- A shipped `<arm_neon.h>` for AArch64. rucc defines `__ARM_NEON` as gcc does, so xxhash and others include it and failed to find it. It has 2218 of the ACLE intrinsics written as C over the lanes of the vector types gcc registers, from loads and stores to the permutes and reductions, and each one gives the same bytes as gcc's own header on a test that calls them all. It is written by `crates/rucc-session/runtime/arm_neon.py`.
+- `__builtin_prefetch` on AArch64, as `prfm` with the same `pld` and `pst` operations gcc picks for each locality and for a write. The encoder and the listing reader know `prfm` and `prfum` with every addressing mode a load has. xxhash stopped here after `<arm_neon.h>` was in.
 
 ### Fixed
 
