@@ -318,7 +318,8 @@
 
 use rucc_cost::heuristics;
 use rucc_ir::{
-    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemOrder, Opcode, Type, Value,
+    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode,
+    Type, Value,
 };
 
 use crate::alias::{self, Escapes, Origin};
@@ -1242,7 +1243,10 @@ fn convert(
         // had not yet done it.
         let old = one.values.contains(&None).then(|| {
             let Extra::Mem(mem) = one.data.extra else { unreachable!("a store says what it is") };
-            let info = build.func()[mem];
+            // Everything the store says about the access is true of the read too, except the
+            // padding it owns: only a store records any, and a read carrying the number is one the
+            // verifier refuses.
+            let info = MemInfo { owns: 0, ..build.func()[mem] };
             build.load(one.ty, one.addr, info, one.data.flags)
         });
         let [then, other] = one
@@ -1849,6 +1853,31 @@ mod tests {
         let ops = opcodes(&func, 0);
         assert_eq!(ops.iter().filter(|&&op| op == Opcode::Load).count(), 2);
         assert_eq!(ops[ops.len() - 3..], [Opcode::Select, Opcode::Store, Opcode::Jump]);
+    }
+
+    /// The read that stands in for the side that did not store is told everything the store was
+    /// told except the padding it owns, which is a thing only a store records. `20021010-2.c` is
+    /// a structure copy whose member store owns the padding after it, and the read made from it
+    /// failed the verifier.
+    #[test]
+    fn the_read_a_one_armed_store_is_given_owns_no_padding() {
+        let mut func = one_arm_stores(false, true);
+        let arm = Block::from_usize(1);
+        let store = func.insts(arm).find(|&inst| func[inst].opcode == Opcode::Store).unwrap();
+        let Extra::Mem(mem) = func[store].extra else { panic!("a store says what it is") };
+        let owning = func.add_mem(MemInfo { owns: 2, ..func[mem] });
+        func[store].extra = Extra::Mem(owning);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head = Block::from_usize(0);
+        let mut owns = Vec::new();
+        for inst in func.insts(head).collect::<Vec<_>>() {
+            if let Extra::Mem(mem) = func[inst].extra {
+                owns.push((func[inst].opcode, func[mem].owns));
+            }
+        }
+        assert!(owns.contains(&(Opcode::Store, 2)), "{owns:?}");
+        assert!(owns.iter().all(|&(op, owns)| op == Opcode::Store || owns == 0), "{owns:?}");
     }
 
     /// A local whose address has left the function is one another thread could be writing.
