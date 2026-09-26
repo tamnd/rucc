@@ -1028,6 +1028,9 @@ impl Reader {
             Some(arg) if !arg.trim().is_empty() => Some(self.byte(arg)?),
             _ => None,
         };
+        // A fill of `0x90` in code is asking for no-ops, and gas takes it as asking for the same
+        // long ones it writes when there is no fill at all. GMP aligns every loop this way.
+        let fill = fill.filter(|&fill| !(exec && !self.aarch64 && fill == 0x90));
         let at = self.at();
         // The third operand is how much padding is worth it. More than that and the alignment is
         // skipped entirely, which is how a file asks for an alignment only where it is cheap.
@@ -2842,6 +2845,23 @@ mod tests {
         assert_eq!(data[8], 2);
         assert_eq!(data[16], 3);
         assert_eq!(out.parts[0].align, 16, "the section has to start where the widest ask does");
+    }
+
+    #[test]
+    fn a_fill_of_the_nop_byte_in_code_is_long_nops_the_way_gas_writes_them() {
+        let asked = assembled("\t.text\n\tret\n\t.align 16, 0x90\n\tret\n");
+        let plain = assembled("\t.text\n\tret\n\t.align 16\n\tret\n");
+        assert_eq!(bytes(&asked, ".text"), bytes(&plain, ".text"));
+        assert_ne!(
+            bytes(&asked, ".text")[1],
+            0x90,
+            "fifteen bytes of padding are not one byte long"
+        );
+        // Any other fill, or the same one in data, is the byte it says.
+        let other = assembled("\t.text\n\tret\n\t.align 4, 0xcc\n\tret\n");
+        assert_eq!(bytes(&other, ".text"), vec![0xc3, 0xcc, 0xcc, 0xcc, 0xc3]);
+        let data = assembled("\t.data\n\t.byte 1\n\t.align 4, 0x90\n");
+        assert_eq!(bytes(&data, ".data"), vec![1, 0x90, 0x90, 0x90]);
     }
 
     #[test]
