@@ -238,6 +238,15 @@ fn arithmetic(
             let (rhs, _) = operand(*args.get(1)?)?;
             Some(Imm::int(i128::from(compare(pred, lhs, rhs, from)), ty))
         }
+        // A select between two constants that are the same number is that number whichever way
+        // the condition goes. Unrolling makes these, when both arms worked out something from a
+        // counter that is now a constant and came to the same answer, and each arm's answer is
+        // its own constant instruction, so nothing that compares values sees they are equal.
+        Opcode::Select => {
+            let (then, _) = operand(*args.get(1)?)?;
+            let (other, _) = operand(*args.get(2)?)?;
+            (then.signed(ty) == other.signed(ty)).then_some(then)
+        }
         _ => None,
     }
 }
@@ -722,6 +731,29 @@ mod tests {
             build.ret(&[out]);
             assert!(fold(&mut func), "{opcode:?}");
             assert_eq!(value_of(&func, out, Type::int(64)), Some(want), "{opcode:?}");
+        }
+    }
+
+    /// A select of two constants of the same number, under a condition nothing knows, is that
+    /// number, and one of two different numbers is left for the back end to choose between.
+    #[test]
+    fn a_select_between_two_equal_constants_is_that_constant() {
+        for (other, folds) in [(2_i128, true), (3, false)] {
+            let mut names = Interner::new();
+            let signature = Signature::new().with_params(&[Type::int(32)]);
+            let mut func = Func::new(names.intern("f"), signature.with_returns(&[Type::int(32)]));
+            let block = func.create_block();
+            let x = func.append_param(block, Type::int(32));
+            let mut build = Builder::new(&mut func, block);
+            let zero = build.iconst(Type::int(32), 0);
+            let test = build.icmp(IntPred::Slt, x, zero);
+            let then = build.iconst(Type::int(32), 2);
+            let other = build.iconst(Type::int(32), other);
+            let out = build.select(test, then, other);
+            build.ret(&[out]);
+            assert_eq!(fold(&mut func), folds);
+            let want = folds.then_some(2);
+            assert_eq!(value_of(&func, out, Type::int(32)), want);
         }
     }
 

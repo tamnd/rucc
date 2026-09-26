@@ -156,6 +156,15 @@ pub const IF_CONVERSION_BLOCK_LIMIT: u32 = 10;
 /// arm of two cheap operations is a value being worked out. An arm of ten is a program.
 pub const PHIOPT_ARM_INSTRUCTIONS: u32 = 2;
 
+/// How many levels deep phiopt factors a chain of operations both arms of a diamond share, per
+/// section 22.2.
+///
+/// Each level is one operation both arms did to values the level below worked out, and the walk
+/// stops at the first level where the two arms disagree. Four covers a conversion under an
+/// operation under another, which is the deepest the corpus writes, and keeps the walk down a long
+/// chain bounded the way [`PHIOPT_ARM_SCAN_INSTRUCTIONS`] bounds the one over an arm.
+pub const PHIOPT_FACTOR_DEPTH: u32 = 4;
+
 /// How long an arm may be before phiopt stops looking for the work in it that the head already
 /// does, per section 22.6.
 ///
