@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `-ffast-math`, `-Ofast` and the family `-ffast-math` names: `-f[no-]math-errno`, `-f[no-]finite-math-only`, `-f[no-]signed-zeros`, `-f[no-]reciprocal-math`, `-f[no-]associative-math` and `-f[no-]unsafe-math-optimizations`, with the last word on each member winning. Each defines the macros gcc 16 defines for it, so `__FAST_MATH__`, `__FINITE_MATH_ONLY__` as one and `__GCC_IEC_559` as zero under `-ffast-math`, and a link under `-ffast-math`, `-Ofast` or `-funsafe-math-optimizations` takes gcc's `crtfastmath.o`, which sets flush to zero before `main`. `-mdaz-ftz` and `-mno-daz-ftz` decide that file outright. No floating point arithmetic is folded or regrouped under any of them yet. `-ffast-math` and `-Ofast` used to be refused (#1051).
 - `__builtin_expect` on the operand of a `switch`. The arm the expected value goes to gets 90%, or the default when no case has that value, and the other arms share the rest evenly, as gcc does, and the block frequencies follow them. Lowering then tests a case whose hint is at least 66%, LLVM's switch peeling threshold, on its own ahead of the search, with the hint on that branch so the layout puts it next. A 40 label sparse switch that is one case 95 times in a hundred takes 74ms where it took 116ms, against 65ms for gcc 16, and naming the wrong case makes it 138ms. A dense one is a lookup table either way and does not change (#1906).
 
 ### Changed
