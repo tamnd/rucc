@@ -362,6 +362,9 @@ fn share(
     if succs.len() == 1 {
         return (vec![Probability::always()], Predictor::Nothing);
     }
+    if let Some(split) = hinted(func, succs, term) {
+        return (split, Predictor::Expect);
+    }
 
     let mut weight = vec![0u64; succs.len()];
     for call in func.successors(term) {
@@ -440,6 +443,25 @@ fn claimed(func: &Func, term: Inst) -> Option<Probability> {
     let at = func.target_list(term).iter().next()?;
     let parts = func[at].hint.taken()?;
     Some(Probability::new(parts, Quality::Guessed))
+}
+
+/// What the arms of a `switch` say about themselves, when every one of them says something and the
+/// hints add up to certainty.
+///
+/// Summed by where each arm goes, the way the even split weights a block two labels lead to. All of
+/// them or none, because a hint on some arms says nothing about how the others divide what is left,
+/// and that is a guess the even split already makes better.
+fn hinted(func: &Func, succs: &[Block], term: Inst) -> Option<Vec<Probability>> {
+    let mut parts = vec![0u32; succs.len()];
+    for call in func.successors(term) {
+        let taken = call.hint.taken()?;
+        let at = succs.iter().position(|&block| block == call.block)?;
+        parts[at] += taken;
+    }
+    if parts.iter().sum::<u32>() != Probability::SCALE {
+        return None;
+    }
+    Some(parts.into_iter().map(|parts| Probability::new(parts, Quality::Guessed)).collect())
 }
 
 /// The prediction a comparison of a pointer against null makes, if that is what the condition is.
@@ -954,6 +976,41 @@ mod tests {
             build.ret(&[zero]);
         }
         (func, at)
+    }
+
+    /// Writes these hints onto the arms of the switch in `switch_shape`, the default first.
+    fn hint_switch(func: &mut Func, block: Block, parts: &[Option<u32>]) {
+        let term = func.terminator(block).expect("the switch");
+        for (at, &parts) in func.target_list(term).iter().zip(parts) {
+            let call = func[at];
+            let hint = parts.map_or(Hint::NONE, Hint::parts);
+            func.set_block_call(at, BlockCall { hint, ..call });
+        }
+    }
+
+    #[test]
+    fn a_switch_whose_arms_all_carry_a_hint_is_split_the_way_they_say() {
+        let (mut func, at) = switch_shape();
+        let parts = [Some(1_000), Some(1_000), Some(6_000), Some(1_000), Some(1_000)];
+        hint_switch(&mut func, at[0], &parts);
+        let (seen, cfg) = predict(&func);
+        let succs = cfg.successors(at[0]);
+        let edge = |block: Block| succs.iter().position(|&one| one == block).expect("an edge");
+
+        assert_eq!(seen.by(at[0]), Predictor::Expect);
+        assert_eq!(seen.taken(at[0], edge(at[3])).parts(), 6_000);
+        // Two cases lead to the same block, and it gets both their hints.
+        assert_eq!(seen.taken(at[0], edge(at[4])).parts(), 2_000);
+        // The arm that aborts gets what its hint says, as a branch the program hinted does.
+        assert_eq!(seen.taken(at[0], edge(at[2])).parts(), 1_000);
+    }
+
+    #[test]
+    fn a_switch_with_a_hint_on_only_some_arms_is_split_as_if_it_had_none() {
+        let (mut func, at) = switch_shape();
+        hint_switch(&mut func, at[0], &[None, None, Some(9_000), None, None]);
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::NeverReturns);
     }
 
     #[test]

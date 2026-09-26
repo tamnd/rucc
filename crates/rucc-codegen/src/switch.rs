@@ -79,19 +79,25 @@
 //! decision and cannot be dropped when the value looks like it has to be in range, and here it is
 //! written by the same code that writes the shift rather than added afterwards.
 //!
-//! # What it does not carry yet
+//! # A hot case
 //!
-//! Section 24.5 asks for document 11's `Frequency` on every cluster from the start, so that the
-//! tree can lean towards the hot cases rather than be balanced, and so that adding it later is not
-//! a change to every place a cluster is built. It is not here because there is nowhere to read it
-//! from. Block frequencies are worked out in `rucc-opt`, which is above this crate rather than
-//! below it, and what would carry the number down is the IR, which has nowhere to put it yet.
+//! Section 24.5 asks for the tree to lean towards the hot cases rather than be balanced. What says a
+//! case is hot is the hint on its arm, which `__builtin_expect` on the operand writes and a profile
+//! would write in the same place. A case whose hint is at least `SWITCH_PEEL_PERCENT` is taken out
+//! and tested on its own before anything else, which is what LLVM calls peeling, and the rest is
+//! lowered behind it as if the case had never been there. The branch in front carries the hint, so
+//! the layout puts the hot case next.
+//!
+//! One case and not an ordering of all of them. A hint says which value is likely and nothing about
+//! the others, and the others share what is left evenly, so there is nothing to order them by.
 
 use rucc_cost::Goal;
-use rucc_cost::heuristics::{JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE};
+use rucc_cost::heuristics::{
+    JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE, SWITCH_PEEL_PERCENT,
+};
 use rucc_diag::Span;
 use rucc_ir::{
-    Block, BlockCall, Builder, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value,
+    Block, BlockCall, Builder, Extra, Flags, Func, Hint, Imm, Inst, IntPred, Opcode, Type, Value,
 };
 
 /// The most clusters a leaf of the decision tree tests one at a time, which is also the count below
@@ -122,8 +128,8 @@ use rucc_ir::{
 /// table was written, on a sparse `switch`, and a sparser search may be worth starting sooner now
 /// that nothing dense is left in it.
 /// The second is knowing which case is hot, because a walk that tests the common case first is
-/// cheaper than any search and the tree cannot use that ordering. That is document 11's `Frequency`
-/// and it is not carried here yet.
+/// cheaper than any search. A hint on one case is used, by testing that case first, and see
+/// [`hottest`] for when.
 ///
 /// gcc has the same knob under the name `case-values-threshold` and a small number in it, which is
 /// the right number for gcc because gcc reaches for a jump table first and the tree is what it falls
@@ -160,14 +166,51 @@ fn lower(func: &mut Func, inst: Inst, goal: Goal) {
     // an integer's either way.
     let ty = func[value].ty.lane();
     let calls: Vec<BlockCall> = func[info.targets].to_vec();
-    let cases: Vec<Imm> = func[info.cases].to_vec();
+    let mut cases: Vec<Imm> = func[info.cases].to_vec();
     let Some((&default, arms)) = calls.split_first() else { return };
-    let clusters = group(func, tables(func, clusters(func, &cases, arms, ty), ty, goal));
+    let mut arms = arms.to_vec();
+    let hot = hottest(&arms).map(|at| (cases.remove(at).signed(ty), arms.remove(at)));
+    let clusters = group(func, tables(func, clusters(func, &cases, &arms, ty), ty, goal));
 
     // Before anything is written, because the builder appends and the `switch` is where the
     // appending has to happen.
     func.remove_inst(inst);
-    tree(func, &Lowering { value, ty, default, span }, block, &clusters);
+    let of = Lowering { value, ty, default, span };
+    let rest = match hot {
+        Some((case, call)) => peel(func, &of, block, case, call),
+        None => block,
+    };
+    tree(func, &of, rest, &clusters);
+}
+
+/// The case a hint says is taken often enough to be tested on its own ahead of the rest, if one is.
+///
+/// The default is never one. It is what is left when every case has been tested, so testing it
+/// first would be testing every case anyway.
+fn hottest(arms: &[BlockCall]) -> Option<usize> {
+    let (at, parts) = arms
+        .iter()
+        .enumerate()
+        .filter_map(|(at, call)| Some((at, call.hint.taken()?)))
+        .max_by_key(|&(_, parts)| parts)?;
+    (parts >= SWITCH_PEEL_PERCENT * Hint::SCALE / 100).then_some(at)
+}
+
+/// One case tested on its own, with the hint on its arm, and the block the rest of the `switch` is
+/// lowered into when the test fails.
+fn peel(func: &mut Func, of: &Lowering, at: Block, case: i128, call: BlockCall) -> Block {
+    let rest = func.create_block();
+    let taken: Vec<Value> = func[call.args].to_vec();
+    let mut build = Builder::new(func, at).at(of.span);
+    let want = build.iconst(of.ty, case);
+    let matched = build.icmp(IntPred::Eq, of.value, want);
+    build.br_if(matched, call.block, &taken, rest, &[]);
+    let term = func.terminator(at).expect("the branch just written");
+    for (slot, hint) in func.target_list(term).iter().zip([call.hint, call.hint.complement()]) {
+        let written = func[slot];
+        func.set_block_call(slot, BlockCall { hint, ..written });
+    }
+    rest
 }
 
 /// What every test written for one `switch` shares.
@@ -810,12 +853,12 @@ mod tests {
 
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, BlockCall, Builder, Extra, Func, Imm, InstData, IntPred, Module, Opcode, Signature,
-        SwitchInfo, Type, Value,
+        Block, BlockCall, Builder, Extra, Func, Hint, Imm, InstData, IntPred, Module, Opcode,
+        Signature, SwitchInfo, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{Goal, LINEAR, blocks_for, switches};
+    use super::{Goal, LINEAR, SWITCH_PEEL_PERCENT, blocks_for, switches};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -1104,6 +1147,74 @@ mod tests {
 
     /// The number the whole thing is for. Forty scattered cases used to be forty comparisons on the
     /// way to the last of them, and a binary search is the difference between that and seven.
+    /// Puts these hints on the arms of the built `switch`, the default first.
+    fn hint(built: &mut Built, parts: &[u32]) {
+        let func = &mut built.func;
+        let entry = func.blocks().next().expect("an entry");
+        let term = func.terminator(entry).expect("the switch");
+        for (at, &parts) in func.target_list(term).iter().zip(parts) {
+            let call = func[at];
+            func.set_block_call(at, BlockCall { hint: Hint::parts(parts), ..call });
+        }
+    }
+
+    /// Where the entry's branch goes when its test holds and what each of its two arms says, once
+    /// the `switch` is lowered.
+    fn first(func: &Func) -> (Block, [Option<u32>; 2]) {
+        let entry = func.blocks().next().expect("an entry");
+        let term = func.terminator(entry).expect("a branch");
+        assert_eq!(func[term].opcode, Opcode::BrIf);
+        let calls: Vec<BlockCall> = func.target_list(term).iter().map(|at| func[at]).collect();
+        (calls[0].block, [calls[0].hint.taken(), calls[1].hint.taken()])
+    }
+
+    /// Hints for a `switch` of `cases` cases, with `hot` the index of the case that gets `parts`
+    /// and every other arm, the default included, sharing the rest.
+    fn leaning(cases: usize, hot: usize, parts: u32) -> Vec<u32> {
+        let rest = (10_000 - parts) / u32::try_from(cases).expect("a small switch");
+        (0..=cases).map(|at| if at == hot + 1 { parts } else { rest }).collect()
+    }
+
+    #[test]
+    fn a_case_hinted_hot_is_tested_first_with_the_hint_on_its_branch() {
+        // Sparse and long, so without the hint the entry would test the middle of the tree.
+        let cases: Vec<i128> = (0..40).map(|at| at * SPARSE).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(&cases);
+        hint(&mut built, &leaning(cases.len(), 7, 9_000));
+        let hot = built.arms[7];
+        routes(&mut built, &cases, &arms, &around(&cases, Type::int(32)), Type::int(32));
+        assert_eq!(first(&built.func), (hot, [Some(9_000), Some(1_000)]));
+    }
+
+    #[test]
+    fn a_hot_case_in_a_dense_stretch_is_taken_out_of_the_table() {
+        let cases: Vec<i128> = (0..20).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(&cases);
+        hint(&mut built, &leaning(cases.len(), 5, 9_000));
+        let hot = built.arms[5];
+        routes(&mut built, &cases, &arms, &around(&cases, Type::int(32)), Type::int(32));
+        assert_eq!(first(&built.func).0, hot);
+    }
+
+    #[test]
+    fn a_hint_under_the_threshold_or_on_the_default_leaves_the_tree_as_it_was() {
+        let cases: Vec<i128> = (0..40).map(|at| at * SPARSE).collect();
+        let mut plain = built(&cases);
+        switches(&mut plain.func, Goal::Speed);
+        let want = printed(&plain.func, &mut plain.names);
+        let bar = SWITCH_PEEL_PERCENT * 100;
+        let mut on_the_default = leaning(cases.len(), 0, 1_000);
+        on_the_default[0] = 9_000;
+        for parts in [leaning(cases.len(), 7, bar - 1), on_the_default] {
+            let mut built = built(&cases);
+            hint(&mut built, &parts);
+            switches(&mut built.func, Goal::Speed);
+            assert_eq!(printed(&built.func, &mut built.names), want);
+        }
+    }
+
     #[test]
     fn a_long_sparse_switch_is_a_search_rather_than_a_walk() {
         // Four leaves' worth, so the tree is two splits deep and the bound below is a bound on

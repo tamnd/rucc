@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `__builtin_expect` on the operand of a `switch`. The arm the expected value goes to gets 90%, or the default when no case has that value, and the other arms share the rest evenly, as gcc does, and the block frequencies follow them. Lowering then tests a case whose hint is at least 66%, LLVM's switch peeling threshold, on its own ahead of the search, with the hint on that branch so the layout puts it next. A 40 label sparse switch that is one case 95 times in a hundred takes 74ms where it took 116ms, against 65ms for gcc 16, and naming the wrong case makes it 138ms. A dense one is a lookup table either way and does not change (#1906).
+
 ### Changed
 
 - phiopt factors the conversions both arms of a branch share under the operation it already factored, up to four levels, rather than only the operation the join reads. `total += (long long)(i * 2)` against `total += (long long)(i + 1)` now writes the add and the widening once and selects between the two 32 bit answers, where the two widenings used to stay in the arms and count against them. With a mask under the widening the arms used to be over the budget and kept a branch that missed half the time, and it is now a select, taking about 130ms where it took 215ms and gcc 16 takes 170ms. Below the first level only operations of one operand are factored, as gcc does, since factoring an add there turned a select of two constants in an unrolled loop into an add of a select. A conversion of a constant in each arm is left to fold for the same reason, and constant folding now turns a select between two constants of the same number into that number, which unrolling makes when both arms come to the same answer (#1904).
