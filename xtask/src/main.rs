@@ -41,6 +41,7 @@ mod safety;
 mod sides;
 mod size;
 mod stubs;
+mod tail;
 mod unwind;
 mod wide;
 
@@ -85,6 +86,8 @@ tasks:
   wide              compile 128-bit arithmetic with both compilers, run both, compare
   quad              compile binary128 arithmetic with both compilers, run both, compare
   divide            compile divisions by constants with both compilers, run both, compare
+  tail              compile calls in tail position with both compilers, run both, compare,
+                    and walk a deep chain of them at -O2 in a one megabyte stack
   repeatable        compile tests/repeatable several times over and compare the runs
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
@@ -144,6 +147,7 @@ fn main() -> ExitCode {
         Some("wide") => wide::wide(),
         Some("quad") => quad::quad(),
         Some("divide") => divide::divide(),
+        Some("tail") => tail::tail(),
         Some("repeatable") => repeatable::repeatable(),
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),

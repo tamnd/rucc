@@ -216,6 +216,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     ret: "ret",
     differ: "cmp_set_ne_64",
     above: "cmp_set_hi_64",
+    away: None,
     call: "bl",
     probe: Some(PROBE),
     landing: None,
