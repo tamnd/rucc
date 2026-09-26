@@ -275,9 +275,9 @@ int calls_both_names(int a) { return elsewhere_too(a) + also_named(a); }
 // inline` is the spelling that is not emitted, so the plain declaration above the definition
 // changes nothing. That order is the ordinary one rather than a corner: this is what every
 // header in the C library looks like, and it is why a file that includes one of them does not
-// end up defining half the library a second time. What is emitted here is `linkonce` rather than
-// nothing only because the file below calls it, which is the copy a compiler with no inliner has
-// to put somewhere, and a file that includes the header without calling the name emits nothing.
+// end up defining half the library a second time. The call below stays a call to a declaration
+// even though this file calls it, because the external definition is in some other object. A copy
+// of the body goes to the inliner and nowhere else.
 extern int held_back(int);
 
 extern __inline __attribute__((__gnu_inline__)) int held_back(int a) {
