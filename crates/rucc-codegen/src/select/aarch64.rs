@@ -163,6 +163,24 @@ mod tests {
         assert_eq!(selects(&terms, add), Some("a64.add_rr_64"));
     }
 
+    /// A narrow right shift by a constant is the instruction that widens first, since the bits
+    /// above a byte or a half in its register are not known.
+    #[test]
+    fn a_narrow_right_shift_by_a_constant_is_the_instruction_that_widens_first() {
+        let mut terms = Terms::default();
+        for (width, bits) in [("i8", 7), ("i16", 15)] {
+            let x = terms.value(width, "v0");
+            let k = terms.constant(&format!("iconst.{width}"), 3);
+            let right = terms.app(&format!("lshr.{width}"), &[x, k]);
+            assert_eq!(selects(&terms, right), Some(&*format!("a64.lsr_ri_{}", &width[1..])));
+            let right = terms.app(&format!("ashr.{width}"), &[x, k]);
+            assert_eq!(selects(&terms, right), Some(&*format!("a64.asr_ri_{}", &width[1..])));
+            let far = terms.constant(&format!("iconst.{width}"), bits + 1);
+            let right = terms.app(&format!("lshr.{width}"), &[x, far]);
+            assert_eq!(selects(&terms, right), None);
+        }
+    }
+
     /// A constant is one `mov` when it or its complement fits in sixteen bits, or when every
     /// sixteen bit piece but one is zero or every one but one is all ones. Anything else is built a
     /// piece at a time, and the outermost instruction says how many pieces: one `movk` under two

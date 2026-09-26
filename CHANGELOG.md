@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- AArch64 lowers a right shift of an 8 or 16 bit value by a constant, which is how a bitfield in a byte is read. It widens the value and then shifts the W register. rpmalloc failed with no rule lowering `lshr.i8`.
 - The AArch64 assembler reads the last operand of a branch, `adr`, `adrp` or a literal load as a symbol whatever it spells, so a global called `le` or `x0` is no longer read as a condition or a register. GNU as reads it the same way.
 - An AArch64 position independent executable reads a variable another file defines through the GOT. It used to be reached with `adrp` as if the link would copy it in, which is x86-64 behaviour, and the link failed with `R_AARCH64_ADR_PREL_PG_HI21 against stderr`.
 - AArch64 loads and stores a `_Bool` in memory as a byte. Before, a function that did so failed with no rule lowering `store.i1`.

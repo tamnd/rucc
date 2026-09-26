@@ -346,6 +346,30 @@
       (a64.lsl_ri_64 x k)
       (spec (= (bvshl x k) (result))))
 
+;; A right shift of a narrow value brings the bits above it down, and nothing says what those are,
+;; so the instruction widens the value before it shifts. This is what reading a bitfield out of a
+;; byte comes to.
+
+(rule (lower (lshr.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (a64.lsr_ri_8 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (lshr.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (a64.lsr_ri_16 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (ashr.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (a64.asr_ri_8 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (ashr.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (a64.asr_ri_16 x k)
+      (spec (= (bvashr x k) (result))))
+
 (rule (lower (lshr.i32 (value.i32 x) (iconst.i32 k)))
       (if (and (>= k 0) (< k 32)))
       (a64.lsr_ri_32 x k)
