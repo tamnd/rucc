@@ -46,6 +46,16 @@
 //! so a branch on `x < n` cannot answer whether two other values are equal and asking is a query
 //! with nothing at the end of it. GCC gates the same way, on `EQ_EXPR` and `NE_EXPR`.
 //!
+//! The oracle only knows what the edge said about the two values it compared, so the forms gcc
+//! calls the neutral and absorbing elements are answered here by looking at the instructions
+//! instead. `x == 0 ? y : y + x` is `y + x`, because on the edge where `x` is zero the add gives
+//! `y`, and `x != 0 ? y * x : 0` is `y * x`, because on the edge where it is zero the multiply
+//! gives zero. The operation still runs on both paths, so it is still arm work and the cost rule
+//! still asks about it, but the select is gone. Only operations that cannot trap are taken, and
+//! the tested value has to be one operand, possibly widened, with the constant it was tested
+//! against on the other side of the comparison. gcc's version of the same is in `value_replacement`
+//! at `gcc/tree-ssa-phiopt.cc:1345`, through `neutral_element_p` and `absorbing_element_p`.
+//!
 //! One thing this does that the select cannot is a value whose type has no `select` at all. A
 //! pointer is the case: `p == q ? q : p` used to keep its branch, because a `select` of two
 //! pointers is a term nothing lowers, and it is now one move, because nothing has to be chosen.
@@ -318,8 +328,8 @@
 
 use rucc_cost::heuristics;
 use rucc_ir::{
-    Block, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode,
-    Type, Value,
+    Block, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
+    Opcode, Type, Value,
 };
 
 use crate::alias::{self, Escapes, Origin};
@@ -742,7 +752,14 @@ fn implied(func: &Func, an: &mut Analyses, shape: &Diamond) -> Vec<Option<usize>
     if !equality(func, shape.cond) {
         return answers;
     }
-    let asking: Vec<usize> = (0..count).filter(|&index| worth_asking(func, shape, index)).collect();
+    let mut asking = Vec::new();
+    for index in (0..count).filter(|&index| worth_asking(func, shape, index)) {
+        let pair = [shape.args[0][index], shape.args[1][index]];
+        match element(func, shape.cond, pair) {
+            Some(side) => answers[index] = Some(side),
+            None => asking.push(index),
+        }
+    }
     if asking.is_empty() {
         return answers;
     }
@@ -772,6 +789,82 @@ fn equality(func: &Func, cond: Value) -> bool {
         return false;
     }
     matches!(func[inst].extra, Extra::IntPred(IntPred::Eq | IntPred::Ne))
+}
+
+/// Which side's value serves for both, when it is an operation that gives the other side's value
+/// once the tested value is the constant it was tested against.
+///
+/// These are gcc's neutral and absorbing elements. On the edge where `x == c` holds, `y + x` is
+/// `y` when `c` is zero, and `y * x` is zero when `c` is zero, whatever `y` is. So when the other
+/// side carries `y`, or zero, the side that works the operation out is right on both edges. The
+/// comparison
+/// has to be of a value against a constant, and the value has to be an operand of the operation,
+/// itself or widened. Every operation here is one that cannot trap, which a division by the tested
+/// value could, so running it on the other edge as well changes nothing but the time.
+fn element(func: &Func, cond: Value, pair: [Value; 2]) -> Option<usize> {
+    let Def::Result { inst, .. } = func[cond].def else { return None };
+    let equal = match func[inst].extra {
+        Extra::IntPred(IntPred::Eq) => 0,
+        Extra::IntPred(IntPred::Ne) => 1,
+        _ => return None,
+    };
+    let &[a, b] = &func[func[inst].args] else { return None };
+    let tested = match (constant(func, a), constant(func, b)) {
+        (None, Some(c)) => (a, c),
+        (Some(c), None) => (b, c),
+        _ => return None,
+    };
+    // Either side can be the one working the operation out. When it is the side the test does not
+    // hold on, its value is right on both edges. When it is the side the test holds on, the
+    // operation gives the other side's value there, so the other side's value is right on both.
+    // The side passed on is the one the test does not hold on either way.
+    let other = 1 - equal;
+    let settles = reduces(func, tested, pair[other], pair[equal])
+        || reduces(func, tested, pair[equal], pair[other]);
+    settles.then_some(other)
+}
+
+/// Whether `worked` is `kept` on the edge where `tested` is the constant it was compared with.
+fn reduces(func: &Func, tested: (Value, (Imm, Type)), worked: Value, kept: Value) -> bool {
+    let (tested, (imm, ty)) = tested;
+    let Def::Result { inst: op, .. } = func[worked].def else { return false };
+    let &[left, right] = &func[func[op].args] else { return false };
+    if !func[worked].ty.is_int() {
+        return false;
+    }
+    // What an operand is on that edge, if it is the tested value, itself or widened.
+    let at = |operand: Value| -> Option<i128> {
+        if operand == tested {
+            return Some(imm.signed(ty));
+        }
+        let Def::Result { inst, .. } = func[operand].def else { return None };
+        if func[func[inst].args].first() != Some(&tested) {
+            return None;
+        }
+        match func[inst].opcode {
+            Opcode::SExt => Some(imm.signed(ty)),
+            Opcode::ZExt => i128::try_from(imm.unsigned()).ok(),
+            _ => None,
+        }
+    };
+    // An element that leaves the other operand as it was, which has to be the value kept.
+    let neutral = |x: Value, element: i128, y: Value| at(x) == Some(element) && y == kept;
+    // An element that decides the answer alone, which has to be the number kept.
+    let absorbing = |x: Value, element: i128, gives: i128| {
+        at(x) == Some(element)
+            && constant(func, kept).is_some_and(|(number, ty)| number.signed(ty) == gives)
+    };
+    let either = |test: &dyn Fn(Value, Value) -> bool| test(left, right) || test(right, left);
+    match func[op].opcode {
+        Opcode::Add | Opcode::Xor => either(&|x, y| neutral(x, 0, y)),
+        Opcode::Or => either(&|x, y| neutral(x, 0, y) || absorbing(x, -1, -1)),
+        Opcode::Sub => neutral(right, 0, left),
+        Opcode::Mul => either(&|x, y| neutral(x, 1, y) || absorbing(x, 0, 0)),
+        Opcode::And => either(&|x, y| neutral(x, -1, y) || absorbing(x, 0, 0)),
+        Opcode::Shl | Opcode::LShr => neutral(right, 0, left) || absorbing(left, 0, 0),
+        Opcode::AShr => neutral(right, 0, left) || absorbing(left, 0, 0) || absorbing(left, -1, -1),
+        _ => false,
+    }
 }
 
 /// Whether this join parameter is one the oracle could have something to say about.
@@ -1621,6 +1714,160 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 0);
         assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
         assert!(opcodes(&func, 0).contains(&Opcode::Select));
+    }
+
+    /// How the operation in [`element_diamond`] is written.
+    #[derive(Clone, Copy)]
+    enum Order {
+        /// `y op x`, with the tested value on the right.
+        TestedRight,
+        /// `x op y`, with the tested value on the left.
+        TestedLeft,
+    }
+
+    /// What [`element_diamond`] varies besides the comparison and the operation.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Shape {
+        /// Everything 64 bits wide.
+        Plain,
+        /// `x` 32 bits wide and sign extended before the operation reads it.
+        Widened,
+        /// The operation on the side the test holds on, and the kept value on the other.
+        Swapped,
+    }
+
+    /// `x == c ? kept : y op x`, as the diamond it arrives here as, or `!=` with the arms swapped.
+    ///
+    /// Block 0 takes `x` and `y` and tests `x` against `c`. The side on which the test says `x` is
+    /// `c` carries `kept`, which is `y` when it is `None` and that number when it is not, and the
+    /// other side works out the operation and carries it, unless `shape` says otherwise.
+    fn element_diamond(
+        pred: IntPred,
+        c: i128,
+        opcode: Opcode,
+        order: Order,
+        kept: Option<i128>,
+        shape: Shape,
+    ) -> Func {
+        let narrow = if shape == Shape::Widened { Type::int(32) } else { Type::int(64) };
+        let ty = Type::int(64);
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[narrow, ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let x = func.append_param(head, narrow);
+        let y = func.append_param(head, ty);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, ty);
+
+        let mut build = Builder::new(&mut func, head);
+        let c = build.iconst(narrow, c);
+        let test = build.icmp(pred, x, c);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        let mut equal = usize::from(pred == IntPred::Ne);
+        if shape == Shape::Swapped {
+            equal = 1 - equal;
+        }
+        let mut build = Builder::new(&mut func, arms[equal]);
+        let kept = kept.map_or(y, |number| build.iconst(ty, number));
+        build.jump(join, &[kept]);
+        let mut build = Builder::new(&mut func, arms[1 - equal]);
+        let x = if shape == Shape::Widened { build.unary(Opcode::SExt, x, ty) } else { x };
+        let worked = match order {
+            Order::TestedRight => build.binary(opcode, y, x, Flags::NONE),
+            Order::TestedLeft => build.binary(opcode, x, y, Flags::NONE),
+        };
+        build.jump(join, &[worked]);
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+        func
+    }
+
+    /// Whether the diamond went without a select because the condition settled its value.
+    fn settled(pred: IntPred, c: i128, opcode: Opcode, order: Order, kept: Option<i128>) -> bool {
+        let mut func = element_diamond(pred, c, opcode, order, kept, Shape::Plain);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let implied = stats.count(Kind::Optimized, super::VALUE_IMPLIED) == 1;
+        assert_eq!(implied, !opcodes(&func, 0).contains(&Opcode::Select));
+        implied
+    }
+
+    /// `x == 0 ? y : y + x` is `y + x`, and the same for every operation zero leaves alone, with
+    /// the tested value on either side of the ones where the order does not matter.
+    #[test]
+    fn an_operation_the_tested_constant_leaves_alone_needs_no_select() {
+        use Order::{TestedLeft, TestedRight};
+        for opcode in [Opcode::Add, Opcode::Or, Opcode::Xor] {
+            assert!(settled(IntPred::Eq, 0, opcode, TestedRight, None), "{opcode:?}");
+            assert!(settled(IntPred::Eq, 0, opcode, TestedLeft, None), "{opcode:?}");
+        }
+        for opcode in [Opcode::Sub, Opcode::Shl, Opcode::LShr, Opcode::AShr] {
+            assert!(settled(IntPred::Eq, 0, opcode, TestedRight, None), "{opcode:?}");
+        }
+        assert!(settled(IntPred::Eq, 1, Opcode::Mul, TestedRight, None));
+        assert!(settled(IntPred::Eq, -1, Opcode::And, TestedLeft, None));
+        assert!(settled(IntPred::Ne, 0, Opcode::Add, TestedRight, None));
+    }
+
+    /// `x != 0 ? y * x : 0` is `y * x`, and the same for every operation the tested constant
+    /// swallows whole.
+    #[test]
+    fn an_operation_the_tested_constant_decides_needs_no_select() {
+        use Order::{TestedLeft, TestedRight};
+        assert!(settled(IntPred::Ne, 0, Opcode::Mul, TestedRight, Some(0)));
+        assert!(settled(IntPred::Eq, 0, Opcode::And, TestedLeft, Some(0)));
+        assert!(settled(IntPred::Eq, -1, Opcode::Or, TestedRight, Some(-1)));
+        assert!(settled(IntPred::Eq, 0, Opcode::Shl, TestedLeft, Some(0)));
+        assert!(settled(IntPred::Eq, -1, Opcode::AShr, TestedLeft, Some(-1)));
+    }
+
+    /// The ones that look the same and are not, each of which has to keep its select.
+    #[test]
+    fn an_operation_the_tested_constant_does_not_settle_keeps_its_select() {
+        use Order::{TestedLeft, TestedRight};
+        // `x - y` at zero is `-y`, and a shift of zero by `y` is zero rather than `y`.
+        assert!(!settled(IntPred::Eq, 0, Opcode::Sub, TestedLeft, None));
+        assert!(!settled(IntPred::Eq, 0, Opcode::Shl, TestedLeft, None));
+        // One is not what an add leaves alone, and zero is not what a multiply does.
+        assert!(!settled(IntPred::Eq, 1, Opcode::Add, TestedRight, None));
+        assert!(!settled(IntPred::Eq, 0, Opcode::Mul, TestedRight, None));
+        // The multiply at zero is zero, so the side that keeps a value has to keep zero.
+        assert!(!settled(IntPred::Eq, 0, Opcode::Mul, TestedRight, Some(1)));
+    }
+
+    /// `x == 0 ? y + x : y` is `y`, since the add on the side the test holds on gives `y` too, and
+    /// then nothing reads the add and `dce` takes it.
+    #[test]
+    fn an_operation_on_the_side_the_test_holds_on_gives_way_to_the_other_side() {
+        let mut func =
+            element_diamond(IntPred::Eq, 0, Opcode::Add, Order::TestedRight, None, Shape::Swapped);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 1);
+        let params = func[Block::from_usize(0)].params.to_vec();
+        assert_eq!(carries(&func, 0), vec![params[1]]);
+    }
+
+    /// A division by the tested value could trap on the path that did not divide, so it is not
+    /// taken, and the branch it is in is kept for the same reason.
+    #[test]
+    fn a_division_is_not_an_operation_the_constant_settles() {
+        let mut func =
+            element_diamond(IntPred::Eq, 1, Opcode::SDiv, Order::TestedRight, None, Shape::Plain);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 0);
+    }
+
+    /// `x == 0 ? y : y + (long)x`, which is how the front end hands over the add when `y` is the
+    /// wider of the two.
+    #[test]
+    fn a_widened_tested_value_is_still_the_tested_value() {
+        let mut func =
+            element_diamond(IntPred::Eq, 0, Opcode::Add, Order::TestedRight, None, Shape::Widened);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::VALUE_IMPLIED), 1);
+        assert!(!opcodes(&func, 0).contains(&Opcode::Select));
     }
 
     /// Two constants that are not the same number are not the same number on any edge.

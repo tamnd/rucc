@@ -30,6 +30,8 @@ implies the value: `if (x == 0) y = 0; else y = x;` is `y = x` unconditionally. 
 the branch just goes away. This one is unambiguously good, it needs no cost model, and it is
 surprisingly common in real code because programmers write the redundant test.
 
+gcc's version also takes an operation whose result at the tested constant is the other arm's value, through `neutral_element_p` and `absorbing_element_p`. `x == 0 ? y : y + x` is `y + x`, and `x != 0 ? y * x : 0` is `y * x`. rucc does these too, for add, subtract, the three bitwise operations, the shifts and multiply, with the tested value as the operand either as it is or widened, and with the operation on either side of the branch. They are found by looking at the operation rather than by asking the oracle, since the oracle knows only what the edge said about the two values it compared. The operation still runs on the path that did not run it before, so unlike the plain form it is arm work and the cost rule still asks about it. On the value-replacement facet in tamnd/rucc-corpus each of those shapes lost its select and ran 4.2M fewer instructions in a walk of a million steps (#1903).
+
 **`factor_out_conditional_operation`** (`gcc/tree-ssa-phiopt.cc:310`). Both arms apply the same
 operation to different operands, so the operation moves below the join and the phi merges the
 operands. `cond ? f(a) : f(b)` becomes `f(cond ? a : b)`. Halves the code and often exposes further
