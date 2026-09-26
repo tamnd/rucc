@@ -274,8 +274,8 @@
 //! nobody ends up doing.
 //!
 //! Arms with work left in them: up to [`heuristics::PHIOPT_ARM_INSTRUCTIONS`] instructions each,
-//! and only when the branch probability is within
-//! [`heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT`] of even by document 11's estimate. A branch
+//! and only when the branch probability is no nearer either end than
+//! [`heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT`] by document 11's estimate. A branch
 //! the estimate calls one sided keeps its branch, because if the estimate is right the branch is
 //! free and the arm is not.
 //!
@@ -291,12 +291,12 @@
 //! calls something cold, one arm leaves the loop, one arm returns a negative number. A diamond has
 //! neither of those, because both of its arms fall through to the same block, so the predictors
 //! that could refuse a conversion here are exactly the ones a diamond cannot trip. What is left is
-//! the branch condition itself, which is `__builtin_expect` at ninety percent and the pointer
-//! heuristic at seventy, and only the first of those is outside the margin. `__builtin_expect` is
-//! dropped in the front end today, so until it is wired the probability half of the rule refuses
-//! nothing at all. The check is here rather than deferred because leaving it out would mean the
-//! measurement never showed that, and because the day the hint is wired is the day it starts
-//! mattering.
+//! the branch condition itself, which is `__builtin_expect` and the pointer heuristic at seventy.
+//! The `expect` pass moves the hint onto the branch before this pass runs, so the hint is what the
+//! rule is really about. A plain `__builtin_expect` claims ninety, which is inside the margin, so it
+//! converts, and only `__builtin_expect_with_probability` at more than ninety seven keeps its
+//! branch. The margin was a quarter until #1902 timed a diamond at known rates and found the branch
+//! losing at ninety and ninety five and winning only at ninety nine.
 //!
 //! # Which level, and how many times
 //!
@@ -2211,21 +2211,71 @@ mod tests {
     }
 
     /// The margin, at the two ends of it and just outside.
-    ///
-    /// A pass level test of the refusal it guards is not written, and the module doc says why: a
-    /// diamond is the one shape none of document 11's one sided predictors can key on, so every
-    /// branch this pass matches comes back even until `__builtin_expect` is wired through the
-    /// front end. The arithmetic is what there is to check today.
     #[test]
-    fn the_margin_is_a_quarter_in_from_each_end() {
+    fn the_margin_is_three_in_from_each_end() {
         let guessed = |percent: u32| Probability::percent(percent, Quality::Guessed);
         assert!(super::unpredictable(Probability::even()));
-        assert!(super::unpredictable(guessed(25)));
-        assert!(super::unpredictable(guessed(75)));
-        assert!(!super::unpredictable(guessed(24)));
-        assert!(!super::unpredictable(guessed(76)));
+        assert!(super::unpredictable(guessed(3)));
+        assert!(super::unpredictable(guessed(97)));
+        assert!(!super::unpredictable(guessed(2)));
+        assert!(!super::unpredictable(guessed(98)));
         assert!(!super::unpredictable(Probability::always()));
         assert!(!super::unpredictable(Probability::never()));
+    }
+
+    /// A diamond with an add in one arm and a subtract in the other, with a hint on its branch the
+    /// way `crate::expect` writes one: `parts` of [`rucc_ir::Hint::SCALE`] on the first arm and the
+    /// rest on the second.
+    fn hinted_diamond(parts: u32) -> Stats {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let outside = func.append_param(head, Type::int(32));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+
+        let mut build = Builder::new(&mut func, head);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Slt, outside, zero);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (arm, opcode) in arms.into_iter().zip([Opcode::Add, Opcode::Sub]) {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.binary(opcode, outside, outside, Flags::NONE);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        build.ret(&[param]);
+
+        let term = func.terminator(head).expect("a branch");
+        let hint = rucc_ir::Hint::parts(parts);
+        for (at, hint) in func.target_list(term).iter().zip([hint, hint.complement()]) {
+            let call = func[at];
+            func.set_block_call(at, rucc_ir::BlockCall { hint, ..call });
+        }
+        phiopt(&mut func)
+    }
+
+    /// `__builtin_expect_with_probability` at 99%, either way round, keeps the branch.
+    #[test]
+    fn a_diamond_hinted_past_the_margin_keeps_its_branch() {
+        for parts in [9_900, 100] {
+            let stats = hinted_diamond(parts);
+            assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0, "{parts}");
+            assert_eq!(stats.count(Kind::Missed, super::BRANCH_IS_PREDICTED), 1, "{parts}");
+        }
+    }
+
+    /// A plain `__builtin_expect` claims 90%, which the corpus timed as a branch that still loses to
+    /// a select, and a hint at even says nothing at all. Both convert.
+    #[test]
+    fn a_diamond_hinted_inside_the_margin_converts() {
+        for parts in [9_000, 1_000, 5_000] {
+            let stats = hinted_diamond(parts);
+            assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1, "{parts}");
+            assert_eq!(stats.count(Kind::Missed, super::BRANCH_IS_PREDICTED), 0, "{parts}");
+        }
     }
 
     #[test]

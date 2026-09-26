@@ -87,11 +87,13 @@ Without profile data the static predictors give a guess and the guess is often w
 rucc's rule for M4, stated so it can be argued with: convert when both arms are empty of side
 effects and the resulting `select` costs no more than the branch, which for a `select` of two
 existing values means always; and additionally when the arms contain up to two cheap instructions
-each *and* the branch probability is between 25% and 75% by document 11's estimate. Above that, keep
+each *and* the branch probability is between 3% and 97% by document 11's estimate. Above that, keep
 the branch. GCC's analogous numbers at the RTL level are `max-rtl-if-conversion-insns` `Init(10)`,
 `max-rtl-if-conversion-predictable-cost` `Init(20)` and `max-rtl-if-conversion-unpredictable-cost`
 `Init(40)` (`gcc/params.opt:741` onwards), and the fact that GCC uses a cost limit twice as large
 for unpredictable branches is the same idea expressed in the other direction.
+
+The window was 25% to 75% until tamnd/rucc#1902 measured it. The if-conversion facet in tamnd/rucc-corpus has a diamond with a multiply in one arm and an add in the other, on a condition that holds 50, 75, 90, 95 or 99 times in a hundred and that nothing but the rate can predict, each written with no hint, the right hint and the wrong one. Over the whole program the select cost 375M cycles at every rate. The branch cost 609M at 50%, 487M at 75%, 412M at 90%, 388M at 95% and 367M at 99%, which is about 24 cycles a miss on top of a loop a little cheaper than the select's, so the two cross near 97%. That agrees with gcc to a point: `predictable-branch-outcome` is 2 in gcc 16, gcc makes a conditional move in all fifteen of those programs, and a plain `__builtin_expect` at 90% is converted by both compilers now. What a wrong hint costs is nothing extra, since it only changes which arm falls through and the predictor learns the rate either way.
 
 An integer constant in an arm is not one of the two. It becomes an immediate in the instruction that reads it, or a move nothing waits on, so the other path does not pay for it. The front end writes the `1` in `acc = c ? acc + 1 : acc` as an `int` and converts it when `acc` is wider or narrower, and counting both constants kept that branch at every type but `int`. tamnd/rucc-corpus#101 is where that was found.
 
