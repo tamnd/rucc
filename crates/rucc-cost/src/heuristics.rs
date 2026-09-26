@@ -169,13 +169,18 @@ pub const PHIOPT_ARM_SCAN_INSTRUCTIONS: u32 = 4 * PHIOPT_ARM_INSTRUCTIONS + 8;
 /// How near even a branch's probability has to be before if-conversion will speculate an arm into
 /// it, per section 22.2, as a percentage.
 ///
-/// Twenty five, so the window is a quarter to three quarters. It is the mirror of
-/// [`PREDICTABLE_BRANCH_PERCENT`] and deliberately not the same number, because the two questions
-/// are not the same question. That one asks whether a branch is so one sided that the machine will
-/// never miss it, and the answer has to be extreme before it is worth believing. This one asks
-/// whether there is enough doubt to pay for doing both arms, and paying for that on a branch the
-/// estimate already leans on is how if-conversion loses time.
-pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 25;
+/// Three, so the window is 3% to 97%. It was twenty five, which kept the branch on anything
+/// `__builtin_expect` had been written on, and that was measured and found wrong. The if-conversion
+/// facet in tamnd/rucc-corpus has a diamond with an add in one arm and a multiply in the other,
+/// taken at a rate a predictor can learn and nothing else about it. The conditional move costs the
+/// same at every rate, and the branch costs a little under it plus about 24 cycles a miss. At 90%
+/// the branch was 10% slower and at 95% it was 3% slower. It only won at 99%, and the two cross
+/// near 97%. gcc's `predictable-branch-outcome` is 2, which puts its line at 98%, and a plain
+/// `__builtin_expect` is if-converted there as it now is here (#1902).
+///
+/// It is still not [`PREDICTABLE_BRANCH_PERCENT`], because that one is asked of a measured
+/// probability only and this one takes a guess at its word.
+pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 3;
 
 /// How much work the right operand of a `&&` or a `||` may be and still be folded into one branch,
 /// per section 22.5.
@@ -664,11 +669,11 @@ pub const ALL: &[Constant] = &[
     },
     Constant {
         name: "PHIOPT_UNPREDICTABLE_MARGIN_PERCENT",
-        value: 25,
+        value: 3,
         unit: "percent",
         document: "22.2",
-        gcc: "",
-        provenance: Provenance::Chosen,
+        gcc: "predictable-branch-outcome",
+        provenance: Provenance::Measured,
     },
     Constant {
         name: "SHORT_CIRCUIT_INSTRUCTIONS",
