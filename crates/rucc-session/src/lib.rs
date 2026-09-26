@@ -2191,6 +2191,10 @@ pub struct Options {
     /// is read for after that is a construct the selector refused by name, since the block says
     /// whether the step that answers for that construct was offered it and walked away.
     pub lowering_dump: Option<String>,
+    /// The shape `-Zswitch=` forces on every `switch`, spelled as it was given: `table`, `tree` or
+    /// `walk`. A measurement, like the two above, but one that changes the code: section 24.7
+    /// asks what each shape costs on a hot `switch`, and building it that way is how to find out.
+    pub switch_shape: Option<String>,
 }
 
 impl Options {
@@ -2274,6 +2278,7 @@ impl Options {
             rule_coverage: None,
             register_pressure: None,
             lowering_dump: None,
+            switch_shape: None,
         }
     }
 

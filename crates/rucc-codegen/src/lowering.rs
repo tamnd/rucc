@@ -56,11 +56,14 @@
 //! put in front of the step that answers for it, which is the thing that stops being true when
 //! somebody adds a lowering to whichever line of the pipeline looked convenient.
 
+use std::fmt::Write as _;
+
 use rucc_base::Interner;
 use rucc_cost::Goal;
 use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
+use crate::switch::{Force, Lowered};
 use crate::{expand, half, quad, retry, switch, varargs, wide, widths};
 
 /// One member of the group.
@@ -261,9 +264,20 @@ impl Step {
     ///
     /// Only the two that [`Step::whole_function`] names ever answer `false`, because they are the
     /// only two that know. The rest work instruction by instruction and are not asked.
-    fn run(self, func: &mut Func, names: &mut Interner, conv: &CallRegs, goal: Goal) -> bool {
+    ///
+    /// `switching` is the level's goal and the shape `-Zswitch=` forced, and what the `switch`
+    /// lowering says it did goes into `switched`.
+    fn run(
+        self,
+        func: &mut Func,
+        names: &mut Interner,
+        conv: &CallRegs,
+        switching: (Goal, Option<Force>),
+        switched: &mut Vec<Lowered>,
+    ) -> bool {
+        let (goal, force) = switching;
         match self {
-            Self::Switches => switch::switches(func, goal),
+            Self::Switches => switched.extend(switch::lowered(func, goal, force)),
             Self::Retries => retry::loops(func),
             Self::Orderings => expand::orderings(func, conv.word, conv.total_store_order),
             Self::Overflows => expand::overflows(func),
@@ -308,6 +322,9 @@ pub struct Ran {
     /// Including them on purpose. A dump that lists only the steps that fired is a dump that cannot
     /// tell a step that found nothing from a step somebody forgot to add to the group.
     pub did: Vec<Did>,
+    /// What each `switch` became, which is filled in whether or not the steps are counted, since
+    /// `-fopt-info` reads it and costs nothing when there is no `switch`.
+    pub switches: Vec<Lowered>,
 }
 
 impl Ran {
@@ -329,8 +346,6 @@ impl Ran {
     /// for a debugging aid. `-Zlowering=` writes it.
     #[must_use]
     pub fn render(&self, func: &str) -> String {
-        use std::fmt::Write;
-
         let mut out = format!("lowering {func}\n");
         for did in &self.did {
             let _ = write!(
@@ -365,6 +380,9 @@ pub struct Lowerings {
     rows: Vec<(String, Ran)>,
     /// Whether anything is going to read this, which is whether `-Zlowering` was given.
     wanted: bool,
+    /// What each `switch` became, by function, which is recorded whether `-Zlowering` was given
+    /// or not because `-fopt-info` is what reads it.
+    switches: Vec<(String, Lowered)>,
 }
 
 impl Lowerings {
@@ -377,7 +395,7 @@ impl Lowerings {
     /// The same, told whether to count, which is what `-Zlowering=FILE` decides.
     #[must_use]
     pub fn asked(wanted: bool) -> Self {
-        Self { rows: Vec::new(), wanted }
+        Self { wanted, ..Self::default() }
     }
 
     /// Whether the counting is worth doing, which is what [`group`] is passed.
@@ -398,9 +416,27 @@ impl Lowerings {
         self.rows.push((name.to_owned(), ran));
     }
 
+    /// Writes down what the `switch` statements of one function became.
+    pub fn switched(&mut self, name: &str, lowered: &[Lowered]) {
+        self.switches.extend(lowered.iter().map(|one| (name.to_owned(), *one)));
+    }
+
     /// Takes in everything another one recorded, which is how one file's answer joins a run's.
     pub fn merge(&mut self, other: &Self) {
         self.rows.extend(other.rows.iter().cloned());
+        self.switches.extend(other.switches.iter().cloned());
+    }
+
+    /// The `-fopt-info` lines for what every `switch` became, in the optimizer's format, with
+    /// `file` the name the optimizer's lines use.
+    #[must_use]
+    pub fn remarks(&self, file: &str) -> String {
+        let mut out = String::new();
+        for (name, lowered) in &self.switches {
+            let said = lowered.describe();
+            let _ = writeln!(out, "{file}: {name}: optimized: {said} (1) [switch-lowering]");
+        }
+        out
     }
 
     /// How many functions went through the group.
@@ -437,22 +473,23 @@ impl Lowerings {
 /// the function comes out the same; what a `false` gives back is an empty [`Ran`].
 ///
 /// `goal` is whether the level asked for small code, which the `switch` lowering reads to decide
-/// when a table is worth writing.
+/// when a table is worth writing, and `force` is the shape `-Zswitch=` forced on it, if any.
 pub fn group(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
     goal: Goal,
+    force: Option<Force>,
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();
     for &step in Step::GROUP {
         if !counting {
-            step.run(func, names, conv, goal);
+            step.run(func, names, conv, (goal, force), &mut ran.switches);
             continue;
         }
         let (before, found) = tally(func, step);
-        let did = step.run(func, names, conv, goal);
+        let did = step.run(func, names, conv, (goal, force), &mut ran.switches);
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
@@ -507,7 +544,7 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, Goal::Speed, true)
+        group(func, names, &x86_64::SYSV, Goal::Speed, None, true)
     }
 
     fn i32() -> Type {
@@ -729,14 +766,14 @@ mod tests {
             build.ret(&[swapped]);
         };
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let quiet = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, false);
+        let quiet = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, None, false);
         assert!(quiet.did.is_empty(), "nothing was counted");
         assert_eq!(super::tally(&func, Step::Bytes), (super::tally(&func, Step::Bytes).0, 0));
 
         // The same function through the counting path comes out the same size, so what the flag
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let loud = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, true);
+        let loud = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, None, true);
         assert_eq!(loud.of(Step::Bytes).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,
