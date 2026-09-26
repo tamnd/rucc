@@ -244,6 +244,15 @@ impl TargetTuple {
         self.os_version
     }
 
+    /// The same target with no OS or environment version, which is the machine and the ABI
+    /// without the release of either that the program is promised to run on.
+    #[must_use]
+    pub const fn without_versions(mut self) -> Self {
+        self.os_version = None;
+        self.env_version = None;
+        self
+    }
+
     /// The environment, which is the C library on Linux and the ABI variant elsewhere.
     pub const fn env(self) -> Env {
         self.env

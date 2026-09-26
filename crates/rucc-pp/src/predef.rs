@@ -578,7 +578,20 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 // platform fails on the first include until these two are here.
                 d.flag("__arm64__");
                 d.flag("__arm64");
+                // Older Apple spellings that the SDK still reads. `arm/arch.h` sets its own
+                // `_ARM_ARCH_*` family from `__ARM64_ARCH_8__`, and a header that tests
+                // `__ARM_NEON__` rather than `__ARM_NEON` is taking the portable path without
+                // the Advanced SIMD one. clang defines all three for every Apple arm64 target.
+                d.flag("__ARM64_ARCH_8__");
+                d.flag("__ARM_NEON__");
+                d.flag("__AARCH64_SIMD__");
             }
+            // clang says this on every little endian target and gcc says it on none, which is
+            // why it is here rather than beside the byte order macros. Apple's headers were
+            // written for clang alone, and `CFByteOrder.h` and `architecture/byte_order.h` both
+            // choose their swaps from it.
+            d.flag("__LITTLE_ENDIAN__");
+            deployment_target(d, target);
             if opts.gnu_extensions {
                 d.flag("unix");
             }
@@ -715,6 +728,31 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 /// where every attribute nothing implements goes, which is left on the declaration. On i386 they
 /// differ over who pops the arguments and the choice is written into the symbol name, which is
 /// document 06.5 and is that target's work when there is one.
+/// The deployment target, which is the oldest release of the OS the program is promised to run
+/// on. `Availability.h` reads it through `__ENVIRONMENT_OS_VERSION_MIN_REQUIRED__` and the older
+/// per platform spelling, and turns it into `__MAC_OS_X_VERSION_MIN_REQUIRED`, which the whole
+/// SDK tests to decide which declarations exist and which are marked unavailable. Without it
+/// every one of those tests sees no version at all.
+///
+/// The version comes from the tuple, as in `aarch64-macos.13`. With none given this is 11.0 on
+/// macOS, the first release that ran on Apple silicon, and 14.0 on iOS, the oldest a current
+/// SDK builds for. The oldest answer is the one that cannot hand a program a declaration the
+/// machine it runs on does not have. The encoding is two digits each for the major, minor and
+/// patch numbers, so 13.4 is 130400.
+fn deployment_target(d: &mut Defs, target: &TargetInfo) {
+    let (platform, default) = match target.tuple.os() {
+        tuple::Os::MacOs => ("MAC_OS_X", tuple::Version::new(11, 0)),
+        tuple::Os::IOs => ("IPHONE_OS", tuple::Version::new(14, 0)),
+        _ => return,
+    };
+    let version = target.tuple.os_version().unwrap_or(default);
+    let encoded = version.major_part() * 10000
+        + version.minor_part().unwrap_or(0) * 100
+        + version.patch_part().unwrap_or(0);
+    d.set(&format!("__ENVIRONMENT_{platform}_VERSION_MIN_REQUIRED__"), &encoded.to_string());
+    d.set("__ENVIRONMENT_OS_VERSION_MIN_REQUIRED__", &encoded.to_string());
+}
+
 fn windows_spellings(d: &mut Defs, opts: &Predef) {
     for name in ["cdecl", "stdcall", "fastcall", "thiscall"] {
         d.set(&format!("__{name}"), &format!("__attribute__((__{name}__))"));
@@ -1950,6 +1988,36 @@ mod tests {
         opts.std = Std::C89;
         assert!(has(&built_in(&target, &opts), gnu));
         assert!(!has(&built_in(&target, &opts), stdc));
+    }
+
+    #[test]
+    fn a_darwin_target_says_its_deployment_target_as_the_sdk_reads_it() {
+        let default = set_for("aarch64-apple-darwin");
+        assert!(has(&default, "#define __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ 110000"));
+        assert!(has(&default, "#define __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ 110000"));
+        let pinned = set_for_tuple("aarch64-macos.13.4");
+        assert!(has(&pinned, "#define __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ 130400"));
+        assert!(has(&pinned, "#define __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ 130400"));
+        let linux = set_for("aarch64-unknown-linux-gnu");
+        assert!(!linux.contains("VERSION_MIN_REQUIRED"));
+    }
+
+    #[test]
+    fn apple_arm64_has_the_older_spellings_its_sdk_reads() {
+        let darwin = set_for("aarch64-apple-darwin");
+        for line in [
+            "#define __ARM64_ARCH_8__ 1",
+            "#define __ARM_NEON__ 1",
+            "#define __AARCH64_SIMD__ 1",
+            "#define __LITTLE_ENDIAN__ 1",
+        ] {
+            assert!(has(&darwin, line), "{line}");
+        }
+        // gcc defines none of them for Linux, and a header that tests `__LITTLE_ENDIAN__` there
+        // is one written for clang that gcc users already build without it.
+        let linux = set_for("aarch64-unknown-linux-gnu");
+        assert!(!linux.contains("__ARM_NEON__"));
+        assert!(!linux.contains("#define __LITTLE_ENDIAN__"));
     }
 
     #[test]
