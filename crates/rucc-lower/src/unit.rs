@@ -36,9 +36,9 @@ use rucc_ir::{
     Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
-    Address, Base, Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Definition, Effects, Eval,
-    ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration, StrId,
-    Tast, Visibility,
+    Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
+    Eval, ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration,
+    StrId, Tast, Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
@@ -740,7 +740,12 @@ impl Unit<'_> {
         }
         // An inline definition this unit calls, which this unit puts a copy of out of line for
         // every call the inliner leaves alone. See [`Self::out_of_line`].
-        let copied = body.is_some() && self.out_of_line(decl, node);
+        let copied = body.is_some() && self.out_of_line(decl, node.inline);
+        // Under GNU's reading the copy is for the inliner and nothing else. See
+        // [`Self::out_of_line`].
+        if copied && node.flags.contains(DeclFlags::GNU_INLINE) {
+            func.attrs.set |= AttrSet::INLINE_ONLY;
+        }
         func.linkage = if copied { IrLinkage::LinkOnce } else { self.told(decl, linkage) };
         // The same question as for an object, and the same answer, with one wrinkle: an inline
         // definition this unit neither emits nor calls is a declaration here, since C 6.7.4p7
@@ -1061,16 +1066,15 @@ impl Unit<'_> {
     /// keeps a file that includes `stdio.h` from carrying its own `vprintf`, `putchar`, `getchar`
     /// and the dozen more glibc writes beside them.
     ///
-    /// Never for a name under GNU's reading of `inline`. There `extern inline` is a promise that
-    /// the external definition is in some other object, and gcc never emits one of these bodies.
-    /// glibc's `_FORTIFY_SOURCE` wrappers are exactly that: `memcpy` is written `extern inline`
-    /// under `gnu_inline` with a body that calls `__builtin___memcpy_chk`, which becomes a call to
-    /// `memcpy` again. A copy of that body put out of line is a `memcpy` that calls itself, and it
-    /// wins over the C library's inside the shared object that holds it.
-    fn out_of_line(&self, decl: DeclId, node: &Decl) -> bool {
-        !node.inline.emits()
-            && !node.flags.contains(DeclFlags::GNU_INLINE)
-            && self.reachable.contains(&decl)
+    /// Under GNU's reading of `inline` the copy is marked `inline_only`, so the inliner still has
+    /// the body and nothing emits it. There `extern inline` promises that the external definition
+    /// is in some other object, and gcc never emits one of these bodies. glibc's `_FORTIFY_SOURCE`
+    /// wrappers are exactly that: `memcpy` is written `extern inline` under `gnu_inline` with a
+    /// body that calls `__builtin___memcpy_chk`, which becomes a call to `memcpy` again. That body
+    /// emitted is a `memcpy` that calls itself, and it wins over the C library's inside the shared
+    /// object that holds it.
+    fn out_of_line(&self, decl: DeclId, emission: Emission) -> bool {
+        !emission.emits() && self.reachable.contains(&decl)
     }
 
     /// The same for an object, where a global with no image is the declaration.

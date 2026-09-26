@@ -150,6 +150,10 @@ impl AttrSet {
     /// `__attribute__((no_stack_protector))`, which the kernel needs on the functions that run
     /// before the canary exists.
     pub const NO_STACK_PROTECTOR: Self = Self(1 << 16);
+    /// The body is here to be inlined and never to be emitted, so once the inliner is done the
+    /// function is a declaration. An `extern inline` definition under GNU's reading, whose
+    /// external definition is in some other object.
+    pub const INLINE_ONLY: Self = Self(1 << 17);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -236,6 +240,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::USED, "used"),
     (AttrSet::STACK_PROTECT, "stack_protect"),
     (AttrSet::NO_STACK_PROTECTOR, "no_stack_protector"),
+    (AttrSet::INLINE_ONLY, "inline_only"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
