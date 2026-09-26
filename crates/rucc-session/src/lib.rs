@@ -2188,6 +2188,10 @@ pub struct Options {
     /// own, so defining it as well would be two definitions with different values, which is a
     /// warning on every compilation of every file. A musl or mingw target has no such macro at all.
     pub glibc_minor: Option<u32>,
+    /// The deployment target on an Apple platform, the oldest release the program is promised
+    /// to run on. It comes from `-mmacosx-version-min=` or from the tuple, as in
+    /// `aarch64-macos.13`, and `None` leaves the platform's default in place.
+    pub os_version: Option<rucc_tuple::Version>,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines because `-U` wins.
@@ -2355,6 +2359,7 @@ impl Options {
             builtins: true,
             no_builtin: Vec::new(),
             glibc_minor: None,
+            os_version: None,
             defines: Vec::new(),
             undefines: Vec::new(),
             search: SearchPath::new(),
@@ -2425,6 +2430,9 @@ impl Session {
     /// answers to one question is how a front end ends up disagreeing with its own back end.
     pub fn new(opts: Options) -> Self {
         let mut target = TargetInfo::new(opts.target);
+        if let Some(version) = opts.os_version {
+            target.tuple = target.tuple.with_os_version(version);
+        }
         if let Some(signed) = opts.char_signed {
             target.char_is_signed = signed;
         }
