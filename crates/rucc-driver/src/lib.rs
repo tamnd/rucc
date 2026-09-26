@@ -285,7 +285,7 @@ options:
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
-  --target=<triple>      generate code for <triple>
+  --target=<triple>      generate code for <triple>, which a name like <triple>-rucc also does
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
                          safety-summary, type-granules
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
@@ -3226,6 +3226,36 @@ fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+/// The target a program name asks for, the way `aarch64-linux-gnu-gcc` is gcc for that target.
+///
+/// `program` is the path the compiler was started as. The name without its directory and without a
+/// trailing `.exe` has to end in `-rucc`, and what comes before that has to be a target this
+/// compiler knows, or there is no answer and the name means nothing. A link named `my-rucc` is
+/// therefore just rucc and not an error.
+pub fn target_from_program(program: &str) -> Option<String> {
+    let name = program.rsplit(['/', '\\']).next()?;
+    let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
+    let triple = name.strip_suffix("-rucc")?;
+    triple.parse::<Triple>().ok()?;
+    Some(triple.to_owned())
+}
+
+/// [`run`] for a compiler started as `program`, which is `argv[0]`.
+///
+/// A target taken from the name goes in front of `args`, so a `--target=` written on the command
+/// line comes later and wins, which is what gcc and clang do with a prefixed name.
+pub fn run_as(program: &str, args: &[String]) -> i32 {
+    match target_from_program(program) {
+        Some(triple) => {
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(format!("--target={triple}"));
+            all.extend_from_slice(args);
+            run(&all)
+        }
+        None => run(args),
+    }
+}
+
 /// Runs the driver and returns the process exit code.
 ///
 /// `args` excludes the program name. Output goes to `stdout` and errors to `stderr`, which
@@ -4126,6 +4156,19 @@ mod tests {
             // about linking and is taken.
             assert!(e.message.contains("-no-pie"), "{flag}: {}", e.message);
         }
+    }
+
+    #[test]
+    fn a_program_name_with_a_known_target_in_front_of_rucc_picks_that_target() {
+        let t = |p: &str| target_from_program(p);
+        assert_eq!(t("aarch64-linux-gnu-rucc").as_deref(), Some("aarch64-linux-gnu"));
+        assert_eq!(t("/usr/bin/riscv64-linux-musl-rucc").as_deref(), Some("riscv64-linux-musl"));
+        assert_eq!(t(r"C:\bin\x86_64-windows-gnu-rucc.exe").as_deref(), Some("x86_64-windows-gnu"));
+        assert_eq!(t("rucc"), None);
+        assert_eq!(t("/usr/local/bin/rucc"), None);
+        assert_eq!(t("my-rucc"), None);
+        assert_eq!(t("sparc64-linux-gnu-rucc"), None);
+        assert_eq!(t("aarch64-linux-gnu-gcc"), None);
     }
 
     #[test]

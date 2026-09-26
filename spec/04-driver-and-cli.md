@@ -63,6 +63,8 @@ x86_64-pc-windows-msvc        aarch64-pc-windows-msvc
 x86_64-unknown-none           aarch64-unknown-none     riscv64-unknown-none
 ```
 
+The program name can carry the triple too. Started as `aarch64-linux-gnu-rucc`, through a link or a copy, the compiler behaves as if `--target=aarch64-linux-gnu` came first on the command line, the way `aarch64-linux-gnu-gcc` is gcc for that target. The name is taken without its directory and without a trailing `.exe`, and what comes before `-rucc` has to parse as a triple, so `my-rucc` is plain rucc and not an error. Because the implied flag comes first, a `--target=` written on the command line is later and wins.
+
 The `-none` triples are the freestanding ones and are what the kernel build uses. They imply `-ffreestanding`, no default libraries, and no assumptions about libc.
 
 `TargetInfo` is a plain data structure, not a trait object, containing: pointer and integer widths, `char` signedness, `long double` representation, endianness, alignment rules, the object format, the ABI variant, the default `-fPIC` setting, the assembler dialect, the register file, and the predefined macro set. Adding a target means adding a `TargetInfo` and a lowering rule set, and nothing else. Document 10 and document 12 own the contents.
