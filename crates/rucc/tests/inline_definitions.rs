@@ -178,3 +178,39 @@ int main(void) {
     assert!(!text.contains("\nunused:\n"), "{text}");
     assert!(!text.contains("\nhelper:\n"), "{text}");
 }
+
+#[test]
+fn a_gnu_inline_definition_this_file_calls_is_never_copied_out_of_line() {
+    // What glibc's `_FORTIFY_SOURCE` headers write for `memcpy`. The builtin inside becomes a call
+    // to `memcpy` again, so a copy of this body out of line would be a `memcpy` that calls itself,
+    // and every test of libsodium from `-O1` up died in one.
+    let source = "\
+typedef unsigned long size_t;
+extern void *memcpy(void *, const void *, size_t);
+extern __inline __attribute__((__always_inline__, __gnu_inline__)) void *
+memcpy(void *d, const void *s, size_t n) {
+    return __builtin___memcpy_chk(d, s, n, __builtin_object_size(d, 0));
+}
+extern __inline __attribute__((__gnu_inline__)) int pick(int x) {
+    return x + 1;
+}
+
+void copy(char *d, const char *s, size_t n) {
+    memcpy(d, s, n);
+}
+
+int main(void) {
+    return pick(1);
+}
+";
+    for level in ["-O0", "-O1", "-O2"] {
+        let text = asm("gnu", level, source);
+        // The external definition of each is in some other object, which is what `extern inline`
+        // promises under this reading, so this file offers neither name.
+        for name in ["memcpy", "pick"] {
+            assert!(!text.contains(&format!("\n{name}:\n")), "{level}:\n{text}");
+            assert!(!text.contains(&format!("\t.weak\t{name}\n")), "{level}:\n{text}");
+            assert!(!text.contains(&format!("\t.globl\t{name}\n")), "{level}:\n{text}");
+        }
+    }
+}

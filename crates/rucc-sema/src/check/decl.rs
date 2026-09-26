@@ -1570,7 +1570,7 @@ impl Checker<'_> {
             flags: DeclFlags::NONE
                 .with(DeclFlags::CONSTANT, declared.constant)
                 .with(DeclFlags::RETAINED, declared.retained)
-                .with(DeclFlags::GNU_INLINE, declared.gnu_inline)
+                .with(DeclFlags::GNU_INLINE, declared.gnu_inline || self.cx.gnu_inline_by_default())
                 .with(DeclFlags::NORETURN, declared.noreturn)
                 .with(DeclFlags::NAKED, declared.naked)
                 .with(DeclFlags::WEAK, declared.weak.is_some())
