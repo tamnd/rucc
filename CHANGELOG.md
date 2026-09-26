@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.12
+
+### Fixed
+
+- The compiler headers budget in spec/cross-compile/13-distribution.md section 13.1 is 1 MB rather than 200 KB, since `arm_neon.h` alone is 400 KB. `cargo xtask size` failed on it in every release build, so 0.11.10 and 0.11.11 were tagged without binaries, and this release is the first with `arm_neon.h` that has them (#1941).
+
 ## 0.11.11
 
 ### Added
