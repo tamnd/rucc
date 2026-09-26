@@ -376,7 +376,7 @@ fn to_integer(value: Float, to: Type, signed: bool) -> Option<Imm> {
 }
 
 /// A widening or a narrowing of a constant.
-fn convert(opcode: Opcode, value: Imm, from: Type, to: Type) -> Imm {
+pub(crate) fn convert(opcode: Opcode, value: Imm, from: Type, to: Type) -> Imm {
     match opcode {
         // Truncation is the masking that `Imm::int` does anyway, and sign extension is reading
         // the value as signed at its own width and storing it at the wider one.

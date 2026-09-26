@@ -592,6 +592,14 @@ pub const SWITCH_CONVERSION_MAX_GROWTH: u32 = 8;
 /// percent slower at random than the walk. tamnd/rucc#1759 has the table of numbers.
 pub const JUMP_TABLE_MIN_TARGETS: u32 = 11;
 
+/// How often, in percent, a hint has to say one case of a `switch` is taken before that case is
+/// tested on its own ahead of the rest, per section 24.5.
+///
+/// LLVM's `switch-peel-threshold`, 66, which is two in three. Below that the one compare in front
+/// costs more often than it saves: the other cases go through it and then through the tree they
+/// would have gone through anyway. A plain `__builtin_expect` claims ninety, so it peels.
+pub const SWITCH_PEEL_PERCENT: u32 = 66;
+
 /// How many targets a switch needs before a jump table is smaller than a walk of compares, which
 /// is what [`JUMP_TABLE_MIN_TARGETS`] becomes when optimizing for size.
 ///

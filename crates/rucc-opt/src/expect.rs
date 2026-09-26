@@ -9,7 +9,8 @@
 //! The front end builds an `expect` instruction holding the value and what the program says it will
 //! be. The value is what the branch is on, and this pass is what turns the pair into a statement
 //! about the branch: the arm the hint names gets ninety parts in a hundred, the other gets ten, and
-//! the instruction comes out. Everything downstream reads the number off the arm rather than
+//! the instruction comes out. On a `switch` the arm the expected value goes to gets the ninety and
+//! the other arms share the ten. Everything downstream reads the number off the arm rather than
 //! chasing the condition back to a node, which is what makes a profile and a hint the same thing to
 //! everything that consumes either.
 //!
@@ -40,9 +41,9 @@
 use std::collections::HashMap;
 
 use rucc_cost::heuristics::PREDICT_EXPECT;
-use rucc_ir::{Block, Def, Extra, Func, Hint, Inst, IntPred, Opcode, Value};
+use rucc_ir::{Block, Def, Extra, Func, Hint, Imm, Inst, IntPred, Opcode, Type, Value};
 
-use crate::fold::constant;
+use crate::fold::{constant, convert};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, uses};
 
 /// A branch now says which way the program expects it to go.
@@ -100,17 +101,12 @@ impl Pass for Expect {
         let mut placed = 0;
         for block in func.blocks().collect::<Vec<Block>>() {
             let Some(term) = func.terminator(block) else { continue };
-            if func[term].opcode != Opcode::BrIf {
-                continue;
-            }
-            let Some(&cond) = func[func[term].args].first() else { continue };
-            let Some((inst, sense)) = through(func, cond) else { continue };
-            let Some(parts) = claim(func, inst, sense) else { continue };
+            let Some(hints) = claims(func, term) else { continue };
             if !fuel.take() {
                 stats.missed(NO_FUEL);
                 break;
             }
-            write(func, term, parts);
+            write(func, term, &hints);
             stats.optimized(PLACED);
             placed += 1;
         }
@@ -135,6 +131,82 @@ impl Pass for Expect {
             stats.note(NO_BRANCH);
         }
         stats
+    }
+}
+
+/// What the hint behind this terminator says about each of its arms, in the order the arms are in.
+fn claims(func: &Func, term: Inst) -> Option<Vec<Hint>> {
+    let &value = func[func[term].args].first()?;
+    match func[term].opcode {
+        Opcode::BrIf => {
+            let (inst, sense) = through(func, value)?;
+            let hint = Hint::parts(claim(func, inst, sense)?);
+            Some(vec![hint, hint.complement()])
+        }
+        Opcode::Switch => switched(func, term, value),
+        _ => None,
+    }
+}
+
+/// The hints for the arms of a `switch` on an expected value, the default first as the arms are.
+///
+/// The arm the expected value goes to gets what the program claimed, which is the case of that
+/// value or the default when no case has it, and the other arms share the rest evenly. That is what
+/// gcc does with `__builtin_expect` on a switch, and it is all the hint says: which value is likely,
+/// and nothing about the ones that are not. What evenly leaves over goes to the likely arm, so the
+/// arms add up to certainty.
+fn switched(func: &Func, term: Inst, value: Value) -> Option<Vec<Hint>> {
+    let Extra::Switch(info) = func[term].extra else { return None };
+    let info = func[info];
+    let cases = &func[info.cases];
+    let arms = u32::try_from(cases.len()).ok()?;
+    if arms == 0 {
+        return None;
+    }
+    let (inst, steps) = expected(func, value)?;
+    let args = &func[func[inst].args];
+    let ty = func[func[inst].first_result?].ty;
+    let mut wanted = Imm::int(literal(func, *args.get(1)?)?, ty);
+    for &(opcode, from, to) in steps.iter().rev() {
+        wanted = convert(opcode, wanted, from, to);
+    }
+    let ty = func[value].ty;
+    let hot =
+        cases.iter().position(|case| case.signed(ty) == wanted.signed(ty)).map_or(0, |at| at + 1);
+    let parts = probability(func, args.get(2))?;
+    let rest = (Hint::SCALE - parts) / arms;
+    let most = Hint::SCALE - rest * arms;
+    let hints = (0..=cases.len()).map(|at| Hint::parts(if at == hot { most } else { rest }));
+    Some(hints.collect())
+}
+
+/// A conversion between an `expect` and the `switch` on it: the opcode, and the types it goes from
+/// and to.
+type Step = (Opcode, Type, Type);
+
+/// The `expect` a `switch` operand comes from, and the conversions between the two, outermost
+/// first.
+///
+/// A `switch` on an `int` is on the `long` the prototype returned, narrowed back, so there is a
+/// truncation in between, and the argument's widening is under the `expect` rather than over it.
+/// A truncation is safe to walk through here, where it is not under a branch, because the question
+/// is which case the operand lands on rather than whether it is zero, and the expected value goes
+/// through the same conversions and lands on the case the operand would.
+fn expected(func: &Func, value: Value) -> Option<(Inst, Vec<Step>)> {
+    let mut value = value;
+    let mut steps = Vec::new();
+    loop {
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        let data = &func[inst];
+        match data.opcode {
+            Opcode::Expect => return Some((inst, steps)),
+            Opcode::Trunc | Opcode::ZExt | Opcode::SExt => {
+                let from = *func[data.args].first()?;
+                steps.push((data.opcode, func[from].ty, func[value].ty));
+                value = from;
+            }
+            _ => return None,
+        }
     }
 }
 
@@ -188,12 +260,18 @@ fn through(func: &Func, cond: Value) -> Option<(Inst, bool)> {
 fn claim(func: &Func, inst: Inst, sense: bool) -> Option<u32> {
     let args = &func[func[inst].args];
     let value = literal(func, *args.get(1)?)?;
-    let parts = match args.get(2) {
-        Some(&given) => u32::try_from(literal(func, given)?).ok()?.min(Hint::SCALE),
-        None => PREDICT_EXPECT * Hint::SCALE / 100,
-    };
+    let parts = probability(func, args.get(2))?;
     let met = (value != 0) == sense;
     Some(if met { parts } else { Hint::SCALE - parts })
+}
+
+/// How often the expected value is the one that turns up, in parts of [`Hint::SCALE`], given the
+/// third operand where `__builtin_expect_with_probability` wrote one.
+fn probability(func: &Func, given: Option<&Value>) -> Option<u32> {
+    Some(match given {
+        Some(&given) => u32::try_from(literal(func, given)?).ok()?.min(Hint::SCALE),
+        None => PREDICT_EXPECT * Hint::SCALE / 100,
+    })
 }
 
 /// The constant a value is, looking through the widenings a converted argument arrives behind.
@@ -221,10 +299,9 @@ fn literal(func: &Func, value: Value) -> Option<i128> {
     }
 }
 
-/// Writes the claim onto the two arms of a branch, so that the pair sums to certainty.
-fn write(func: &mut Func, term: Inst, parts: u32) {
-    let hint = Hint::parts(parts);
-    for (at, hint) in func.target_list(term).iter().zip([hint, hint.complement()]) {
+/// Writes the claim onto the arms of a branch or a `switch`, one hint per arm.
+fn write(func: &mut Func, term: Inst, hints: &[Hint]) {
+    for (at, &hint) in func.target_list(term).iter().zip(hints) {
         let call = func[at];
         func.set_block_call(at, rucc_ir::BlockCall { hint, ..call });
     }
@@ -282,6 +359,53 @@ mod tests {
     /// Runs the pass over a function, and says what it did.
     fn run(func: &mut Func) -> Stats {
         Expect.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// A function whose entry is `switch ((int)__builtin_expect(x, hint))` with cases 1, 3 and 5,
+    /// with `x` an `int` parameter, the default the first block after the entry and one block for
+    /// each case after that.
+    fn switched_on(hint: i128) -> (Interner, Func, Vec<Block>) {
+        let (names, mut func, at) = blank(5);
+        let (int, long) = (Type::int(32), Type::int(64));
+        let x = func.append_param(at[0], int);
+        let mut build = Builder::new(&mut func, at[0]);
+        let widened = build.unary(Opcode::SExt, x, long);
+        let hint = build.iconst(long, hint);
+        let args = build.func().push_values(&[widened, hint]);
+        let wrapped = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, long);
+        let narrowed = build.unary(Opcode::Trunc, wrapped, int);
+        build.switch(narrowed, at[1], &[(1, at[2]), (3, at[3]), (5, at[4])]);
+        for &block in &at[1..] {
+            let mut build = Builder::new(&mut func, block);
+            let answer = build.iconst(int, 0);
+            build.ret(&[answer]);
+        }
+        (names, func, at)
+    }
+
+    #[test]
+    fn the_case_a_switch_expects_gets_the_hint_and_the_other_arms_share_the_rest() {
+        let (_, mut func, at) = switched_on(3);
+        let stats = run(&mut func);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, PLACED), 1);
+        assert_eq!(arms(&func, at[0]), [Some(333), Some(333), Some(9_001), Some(333)]);
+        assert!(!func.blocks().any(|block| func.insts(block).any(|inst| is_expect(&func)(&inst))));
+    }
+
+    #[test]
+    fn an_expected_value_no_case_has_is_the_default() {
+        let (_, mut func, at) = switched_on(4);
+        run(&mut func);
+        assert_eq!(arms(&func, at[0]), [Some(9_001), Some(333), Some(333), Some(333)]);
+    }
+
+    /// The operand is the expected `long` narrowed to an `int`, so a value past the top of an `int`
+    /// lands on the case its low bits name, the way the operand would.
+    #[test]
+    fn an_expected_value_is_narrowed_the_way_the_operand_is() {
+        let (_, mut func, at) = switched_on((1 << 32) + 5);
+        run(&mut func);
+        assert_eq!(arms(&func, at[0]), [Some(333), Some(333), Some(333), Some(9_001)]);
     }
 
     #[test]

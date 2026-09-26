@@ -183,9 +183,9 @@ than one thing. The generalisation is mechanical and can wait.
 
 **Profile-driven case reordering.** With profile data, the hottest cases should be tested first in a
 decision tree, and the tree should be weighted rather than balanced. GCC's cluster structure carries
-`profile_probability` and `subtree_prob` for exactly this (`gcc/tree-switch-conversion.h:51`). rucc's
-`Cluster` should carry document 11's `Frequency` from the start even though M4 does not use it,
-because retrofitting it means touching every construction site.
+`profile_probability` and `subtree_prob` for exactly this (`gcc/tree-switch-conversion.h:51`).
+
+What is built is the one case a hint makes hot. The arms of a `switch` carry hints, which the expect pass writes for `__builtin_expect` on the operand: the case of the expected value gets 90%, or the default when no case has it, and the other arms share the rest evenly, as gcc does. The block frequencies read them. Lowering takes a case whose hint is at least `SWITCH_PEEL_PERCENT`, 66, out of the `switch` and tests it on its own first, with the hint on that branch, which is LLVM's switch peeling at LLVM's threshold. The rest is lowered behind it as before. A weighted tree over all the cases waits for a profile, since a hint says which value is likely and nothing about how the others divide what is left (#1906).
 
 ## 24.6 How this is wrong
 
