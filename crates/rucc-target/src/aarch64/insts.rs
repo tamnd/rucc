@@ -31,7 +31,6 @@
 //! are one opcode until the layout folds a branch into the comparison in front of it, and the
 //! allocator never sees the condition state.
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::aarch64::{FPR, GPR, v, x};
@@ -799,7 +798,7 @@ pub const TEMPLATE: &str = "template";
 /// `a64.add_rr_32`.
 #[must_use]
 pub fn form(name: &str) -> Option<Form> {
-    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(INSTS));
+    static AT: LazyLock<named::Names<usize>> = LazyLock::new(|| named::index(INSTS));
     AT.get(name).map(|&at| INSTS[at].1)
 }
 

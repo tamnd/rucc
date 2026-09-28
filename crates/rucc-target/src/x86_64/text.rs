@@ -39,7 +39,6 @@
 //! because the machine has no two-operand multiply narrower than that and the low eight bits of a
 //! product depend on nothing but the low eight bits of what went into it.
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::named;
@@ -1395,7 +1394,7 @@ static TEXT: &[(&str, &[Written])] = &[
 /// The name is written the way the machine IR holds it, so `add_rr_32` rather than `x64.add_rr_32`.
 #[must_use]
 pub fn written(name: &str) -> Option<&'static [Written]> {
-    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(TEXT));
+    static AT: LazyLock<named::Names<usize>> = LazyLock::new(|| named::index(TEXT));
     AT.get(name).map(|&at| TEXT[at].1)
 }
 
