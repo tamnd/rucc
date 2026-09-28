@@ -1523,7 +1523,94 @@ pub fn render(linker: &Linker, args: &[String]) -> String {
     out
 }
 
+/// How long a command line may be on Windows before the arguments go in a file instead.
+///
+/// `CreateProcess` takes 32767 characters, the program's own path and the quoting included, and
+/// what is left for the arguments is not worth computing to the character.
+const WINDOWS_LINE: usize = 30_000;
+
+/// The same for every other host, where the limit is a megabyte or more shared with the
+/// environment, and a link this long is Kbuild's `-r` of a whole subsystem.
+const UNIX_LINE: usize = 256 * 1024;
+
+/// Whether these arguments, joined with a space and a pair of quotes each, are over `limit`.
+fn too_long(args: &[String], limit: usize) -> bool {
+    args.iter().map(|arg| arg.len() + 3).sum::<usize>() > limit
+}
+
+/// The arguments that stay on the command line and the ones that go in the file.
+///
+/// `-m` and its value stay, because they are what makes `ld.lld` pick its MinGW driver over its
+/// ELF one, and it is better not to depend on that choice looking inside the file.
+fn split_for_file(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut front = Vec::new();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut words = args.iter();
+    while let Some(arg) = words.next() {
+        if arg == "-m"
+            && let Some(machine) = words.next()
+        {
+            front.push(arg.clone());
+            front.push(machine.clone());
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    (front, rest)
+}
+
+/// Whether this linker reads a response file with Windows quoting, where a backslash is an
+/// ordinary character unless it comes before a quote.
+///
+/// lld does on a Windows host, both its ELF driver and its MinGW one, and the MinGW one has no
+/// option to say otherwise. GNU ld reads the GNU way on every host, MSYS2's included.
+fn windows_quoting(linker: &Linker) -> bool {
+    let file = linker.path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    cfg!(windows) && (is_lld(&linker.name) || file.starts_with("ld.lld") || file.starts_with("lld"))
+}
+
+/// The words of a response file, one to a line, quoted so that the linker reads them back as
+/// they were.
+///
+/// The GNU way is a backslash before every quote and every backslash. The Windows way leaves a
+/// backslash alone unless a run of them ends at a quote, and then doubles the run and escapes the
+/// quote, which is the rule `CommandLineToArgvW` reads with and so the rule LLVM reads with too.
+fn response_text(args: &[String], windows: bool) -> String {
+    let mut text = String::new();
+    for arg in args {
+        text.push('"');
+        let mut slashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' if windows => slashes += 1,
+                '"' if windows => {
+                    text.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                    text.push('"');
+                    slashes = 0;
+                }
+                _ if windows => {
+                    text.extend(std::iter::repeat_n('\\', slashes));
+                    text.push(c);
+                    slashes = 0;
+                }
+                '"' | '\\' => {
+                    text.push('\\');
+                    text.push(c);
+                }
+                _ => text.push(c),
+            }
+        }
+        text.extend(std::iter::repeat_n('\\', slashes * 2));
+        text.push_str("\"\n");
+    }
+    text
+}
+
 /// Runs the linker and waits for it.
+///
+/// A line too long for the host goes to the linker as a response file, which is what a Windows
+/// build of a large program needs: a few hundred objects in a deep directory are past what
+/// `CreateProcess` takes.
 ///
 /// # Errors
 ///
@@ -1531,11 +1618,28 @@ pub fn render(linker: &Linker, args: &[String]) -> String {
 /// [`Error::Refused`] when it ran and said no, which is a program problem and one the linker has
 /// already explained on its own error output.
 pub fn run(linker: &Linker, args: &[String]) -> Result<(), Error> {
-    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    let status = Command::new(&linker.path).args(&args).status().map_err(|why| Error::Spawn {
+    let spawn = |why: std::io::Error| Error::Spawn {
         path: linker.path.display().to_string(),
         why: why.to_string(),
-    })?;
+    };
+    let mut command = Command::new(&linker.path);
+    let mut written = None;
+    if too_long(args, if cfg!(windows) { WINDOWS_LINE } else { UNIX_LINE }) {
+        let (front, rest) = split_for_file(args);
+        let path = std::env::temp_dir().join(format!("rucc-link-{}.rsp", std::process::id()));
+        fs::write(&path, response_text(&rest, windows_quoting(linker))).map_err(spawn)?;
+        let mut at = OsString::from("@");
+        at.push(&path);
+        command.args(front).arg(at);
+        written = Some(path);
+    } else {
+        command.args(args.iter().map(OsString::from));
+    }
+    let status = command.status();
+    if let Some(path) = written {
+        let _ = fs::remove_file(path);
+    }
+    let status = status.map_err(spawn)?;
     if status.success() {
         return Ok(());
     }
@@ -2093,6 +2197,28 @@ mod tests {
         let error = find(windows, &opts).expect_err("only 18 is here");
         assert!(matches!(error, Error::TooOld { found: 18, .. }), "{error:?}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_long_line_goes_in_a_response_file_that_reads_back_as_it_was() {
+        let args: Vec<String> =
+            ["-o", r"C:\Users\a b\out.exe", "-m", "i386pep", r#"say "hi""#, "", "plain.o"]
+                .map(str::to_owned)
+                .to_vec();
+        let (front, rest) = split_for_file(&args);
+        assert_eq!(front, ["-m", "i386pep"]);
+        assert_eq!(
+            crate::response_words(&response_text(&rest, false)),
+            [&args[..2], &args[4..]].concat()
+        );
+        // And the Windows way, which leaves the backslashes in a path alone.
+        assert_eq!(
+            response_text(&rest, true),
+            "\"-o\"\n\"C:\\Users\\a b\\out.exe\"\n\"say \\\"hi\\\"\"\n\"\"\n\"plain.o\"\n"
+        );
+        assert_eq!(response_text(&[r"C:\dir\".to_owned()], true), "\"C:\\dir\\\\\"\n");
+        assert!(!too_long(&args, 1000));
+        assert!(too_long(&vec!["x".repeat(100); 400], WINDOWS_LINE));
     }
 
     #[test]
