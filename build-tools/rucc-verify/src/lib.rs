@@ -82,7 +82,7 @@
 //! the rest of the register holds is then left to the rule's `spec` clause, which is the only
 //! place a target's sign extension rule is written down and so the only place it can be checked.
 
-#![doc(html_root_url = "https://docs.rs/rucc-verify/0.11.12")]
+#![doc(html_root_url = "https://docs.rs/rucc-verify/0.11.13")]
 
 mod model;
 mod report;
