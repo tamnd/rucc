@@ -35,7 +35,6 @@
 //! and the allocator never sees one. That is a deliberate constraint on the rule set rather
 //! than a simplification of the machine.
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 pub use crate::machine::Address;
@@ -2446,7 +2445,7 @@ pub static INSTS: &[(&str, Form)] = &[
 /// not part of the opcode.
 #[must_use]
 pub fn form(name: &str) -> Option<Form> {
-    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(INSTS));
+    static AT: LazyLock<named::Names<usize>> = LazyLock::new(|| named::index(INSTS));
     AT.get(name).map(|&at| INSTS[at].1)
 }
 

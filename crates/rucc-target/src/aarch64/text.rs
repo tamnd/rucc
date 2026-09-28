@@ -24,7 +24,6 @@
 //! reads an allocated 31 as the stack pointer, since the zero register is not one the allocator
 //! hands out, and the encoder refuses the stack pointer where the machine has no way to say it.
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::aarch64::encode::{
@@ -961,7 +960,7 @@ static TEXT: &[(&str, &[Written])] = &[
 /// not an instruction, which are two different answers.
 #[must_use]
 pub fn written(name: &str) -> Option<&'static [Written]> {
-    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(TEXT));
+    static AT: LazyLock<named::Names<usize>> = LazyLock::new(|| named::index(TEXT));
     AT.get(name).map(|&at| TEXT[at].1)
 }
 
