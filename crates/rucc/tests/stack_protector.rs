@@ -49,6 +49,9 @@ fn run(what: &str, target: &str, flags: &[&str], source: &str) -> std::process::
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={target}"))
         .args(["-S", "-o", "-"])
+        // The frames read here are the ones taken without a frame pointer, which `-O0` would
+        // otherwise keep as gcc does. A test that wants one says so after this and wins.
+        .arg("-fomit-frame-pointer")
         .args(flags)
         .arg(&path)
         .output()
