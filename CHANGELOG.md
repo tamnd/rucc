@@ -12,6 +12,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-mxsave` is taken for a whole unit and defines `__XSAVE__`, as with gcc 16, since `_xgetbv` now ships. `-march=x86-64-v3` defines it too. `xsaveopt`, `xsavec` and `xsaves` are still refused, since their intrinsics do not ship yet (#1988).
 
+### Fixed
+
+- `-E` output puts each pragma that `_Pragma` makes on a line of its own, and starts a new line for what follows it. A macro that expanded to two of them wrote `#pragma GCC diagnostic push#pragma GCC diagnostic ignored ...` on one line, which rucc read back but gcc 16 refused with 67 errors on Postgres's `gram.i`, so a preprocessed file from `rpg repro` could not be handed to gcc (#1988).
+
 ## 0.11.17
 
 ### Added

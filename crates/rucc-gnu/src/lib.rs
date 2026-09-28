@@ -318,8 +318,8 @@ mod tests {
     fn ignoring_an_attribute_silently_is_a_decision_the_table_records() {
         let packed = lookup(Kind::Attribute, "packed").expect("in the table");
         assert_eq!(packed.answer, Answer::Error, "ignoring it would produce wrong code");
-        let cold = lookup(Kind::Attribute, "cold").expect("in the table");
-        assert_eq!(cold.answer, Answer::Warn, "ignoring it would only produce slow code");
+        let flatten = lookup(Kind::Attribute, "flatten").expect("in the table");
+        assert_eq!(flatten.answer, Answer::Warn, "ignoring it would only produce slow code");
     }
 
     #[test]

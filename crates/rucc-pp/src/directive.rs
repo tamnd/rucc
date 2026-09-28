@@ -2963,9 +2963,9 @@ mod tests {
         // a path that then fails to compile, and a no for one it honours sends it down a worse
         // path than it had to take.
         assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_attribute(cold)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_attribute(flatten)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_attribute(no_such_attribute)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if !__has_attribute(cold)\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if !__has_attribute(flatten)\nno\n#endif\n"), "no");
     }
 
     #[test]
