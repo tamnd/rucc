@@ -4,6 +4,23 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.12.1
+
+### Added
+
+- `tests/exec/windows` holds seven programs that check what a Windows program needs from its compiler at run time: stack probes past the guard page, xmm6 to xmm15 kept across calls, `longjmp` through frames, unwind tables the system can find, struct layout, the command line split and wildcards, and the imports of the executable. `run.sh` builds each at `-O0` and `-O2` and runs them natively or through a runner such as `wine64`. The expected output is gcc's (#2067).
+
+### Changed
+
+- Under `-fexceptions` calls whose open scopes owe the same `cleanup` handlers share one landing pad, as gcc's do, where every call used to get a pad of its own. A function with ten calls across four sets of handlers has four pads now instead of ten (#1951).
+
+### Fixed
+
+- lld in `/usr/lib/llvm-<N>/bin` and the other places off PATH is found again on Linux and macOS. The search for `PATHEXT` looked there only for `ld.lld.exe`, so an Ubuntu machine with `lld-19` installed was told there was no linker. A CI job now cross compiles `tests/exec/windows` and runs it under Wine with lld 19 left off PATH, which is how this was found (#2067).
+- On Windows targets a zero width bit-field that follows a bit-field rounds up to its own type's alignment and raises the struct's alignment to it, as gcc with `-mms-bitfields` and MSVC do. `struct { char a:1; int :0; char b:1; }` was two bytes and is now eight, aligned to four (#2067).
+- A Windows executable reserves two megabytes of stack, as it does when gcc links it, where lld's default gave it one. A function with a one megabyte frame ran out of stack under rucc and not under gcc. `-Wl,--stack,N` still sets it (#2067).
+- Under `-fexceptions` a `cleanup` handler that unwinds, by calling `pthread_exit` or being cancelled, runs the handlers still owed further out, as gcc does. A handler called at the end of its scope, on a `return` or `break`, or from a landing pad used to leave them out. Checked against gcc 16 from `-O0` to `-O3` and `-Os` (#1951).
+
 ## 0.12.0
 
 ### Added
@@ -11,7 +28,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Every release archive carries `librucc_builtins.a` for each cross target whose runtime this compiler can build today, under `lib/rucc/<target>/` beside the binary, and the driver looks there. A user who unpacks a release on Linux or macOS and runs `rucc --fetch x86_64-windows-gnu` can now link a Windows program with nothing but `--target`, where the link used to stop and ask for a `cargo xtask builtins` from a source checkout. The release also gains a job that does exactly that with the Linux archive and checks the result is a PE32+ executable (#2066).
 - A link line too long for the host goes to the linker in a response file, with only `-m` and its value left on the command line. On Windows that is anything over about 30000 characters, which is a few hundred objects in a deep build directory, and elsewhere anything over 256 KiB. The file is quoted the way the linker will read it, which for lld on a Windows host is the Windows way and otherwise the GNU way (#2067).
 - `-mwindows`, `-mconsole` and `-municode` for Windows targets, as mingw gcc has them. `-mwindows` links a GUI program, with the `windows` subsystem and `gdi32` and `comdlg32` on the line, `-mconsole` puts it back, and `-municode` starts the program at `wmain` or `wWinMain` and defines `UNICODE`. `-mthreads` is accepted and does nothing, as it does with mingw-w64's gcc (#2067).
-- `tests/exec/windows` holds seven programs that check what a Windows program needs from its compiler at run time: stack probes past the guard page, xmm6 to xmm15 kept across calls, `longjmp` through frames, unwind tables the system can find, struct layout, the command line split and wildcards, and the imports of the executable. `run.sh` builds each at `-O0` and `-O2` and runs them natively or through a runner such as `wine64`. The expected output is gcc's (#2067).
 
 ### Changed
 
@@ -25,15 +41,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The register allocator's liveness lays its per block lists out end to end once the fixpoint is done, where it used to grow a list per block one value at a time. On a function of 22000 blocks with thousands of values live across most of it that takes 7 to 11% of the cycles off the whole `-O2` build, with the same output.
 - Under `-fexceptions` a call inside the scope of a `cleanup` handler can be inlined now, where the inliner used to leave it a call. Every call in the copied body gets the caller's landing pad, including the `_Unwind_Resume` at the end of the callee's own pads, so an unwind runs the callee's handlers and then the caller's. Handlers run by `pthread_exit` and `pthread_cancel` from inside a body inlined two levels deep print the same order as gcc 16 from `-O0` to `-O3` and `-Os` (#1951).
 - The register allocator is the backtracking one whenever the optimizer runs. It places the longest lived values first, lets a heavier value evict a lighter one, spills a value that has been evicted too often, and moves an answer next to the sources it is tied to once everything is placed. It also runs the single pass allocator and keeps whichever of the two answers costs less, so no function gets worse by the allocator's own count. On SQLite at `-O2` it writes 3.8% fewer instructions and 14.8% fewer reloads. `-O0` keeps the single pass allocator, and so does a function that calls `setjmp` or anything else that returns twice. `-Zregalloc=single` and `-Zregalloc=backtracking` pick either at any level.
-- Under `-fexceptions` calls whose open scopes owe the same `cleanup` handlers share one landing pad, as gcc's do, where every call used to get a pad of its own. A function with ten calls across four sets of handlers has four pads now instead of ten (#1951).
 
 ### Fixed
 
 - A `#if`, `#ifdef`, `#elif`, `#else` or `#endif` line inside the arguments of a function-like macro is taken and the arguments go on being collected after it, as with gcc, where it used to end the run and report "unterminated macro argument list". toybox writes each command's globals as `GLOBALS(...)` with conditionals inside and now builds.
-- lld in `/usr/lib/llvm-<N>/bin` and the other places off PATH is found again on Linux and macOS. The search for `PATHEXT` looked there only for `ld.lld.exe`, so an Ubuntu machine with `lld-19` installed was told there was no linker. A CI job now cross compiles `tests/exec/windows` and runs it under Wine with lld 19 left off PATH, which is how this was found (#2067).
-- On Windows targets a zero width bit-field that follows a bit-field rounds up to its own type's alignment and raises the struct's alignment to it, as gcc with `-mms-bitfields` and MSVC do. `struct { char a:1; int :0; char b:1; }` was two bytes and is now eight, aligned to four (#2067).
-- A Windows executable reserves two megabytes of stack, as it does when gcc links it, where lld's default gave it one. A function with a one megabyte frame ran out of stack under rucc and not under gcc. `-Wl,--stack,N` still sets it (#2067).
-- Under `-fexceptions` a `cleanup` handler that unwinds, by calling `pthread_exit` or being cancelled, runs the handlers still owed further out, as gcc does. A handler called at the end of its scope, on a `return` or `break`, or from a landing pad used to leave them out. Checked against gcc 16 from `-O0` to `-O3` and `-Os` (#1951).
 
 ## 0.11.19
 

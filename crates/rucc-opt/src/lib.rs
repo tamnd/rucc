@@ -98,7 +98,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-opt/0.12.0")]
+#![doc(html_root_url = "https://docs.rs/rucc-opt/0.12.1")]
 
 pub mod alias;
 pub mod analysis;
