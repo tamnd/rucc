@@ -154,6 +154,27 @@
 //! the condition is the one the comparison already had. What is left holding a register is the byte
 //! the comparison sets, and the block layout usually takes that too.
 //!
+//! # A widening
+//!
+//! A load that is read only to be widened is the same pair with one source, and this machine reads
+//! memory and widens it in one instruction. It is what a C program gets for `long x = a[i];` on an
+//! array of `int`, and for every `char` or `short` read into an `int`:
+//!
+//! ```text
+//!   movl (%rcx,%rax,4), %eax
+//!   movslq %eax, %rax      ->    movslq (%rcx,%rax,4), %rax
+//! ```
+//!
+//! [`WIDENINGS`] is the list: a sign and a zero widening from each width that has one, and the zero
+//! widening from thirty two bits to sixty four. That last one is a plain `movl` between registers,
+//! because writing the low half of a register clears the high half, and a `movl` from memory does
+//! the same, so what comes out of it is the load on its own writing the wider register.
+//!
+//! The rules are the ones above. The widening has to be the only reader of the load, and nothing
+//! between the two may touch memory. It is a table of its own rather than more rows of [`FOLDS`]
+//! because a widening reads one width and writes another, which is the one thing every row of that
+//! table is checked not to do.
+//!
 //! # What a `volatile` access gets
 //!
 //! Nothing. Both walks stop at one, so `volatile int *p; *p += x;` comes out as the load, the
@@ -654,6 +675,27 @@ pub static FOLDS: &[Fold] = &[
     Fold { from: "cmp_set_ae_ri_64", into: "cmp_set_ae_mi_64", load: "mov_rm_64", swapped: None },
 ];
 
+/// The widenings a load can move into on this machine, which is tamnd/rucc#1894.
+///
+/// Every sign and zero widening the target has, each with the load of the width it reads and the
+/// instruction that reads that width out of memory and widens it. None of them has a second source
+/// to swap with. The zero widening from thirty two bits comes out as the load itself, since a
+/// thirty two bit load already clears the upper half of the register it writes.
+pub static WIDENINGS: &[Fold] = &[
+    Fold { from: "movzx_8_16", into: "movzx_rm_8_16", load: "mov_rm_8", swapped: None },
+    Fold { from: "movzx_8_32", into: "movzx_rm_8_32", load: "mov_rm_8", swapped: None },
+    Fold { from: "movzx_8_64", into: "movzx_rm_8_64", load: "mov_rm_8", swapped: None },
+    Fold { from: "movzx_16_32", into: "movzx_rm_16_32", load: "mov_rm_16", swapped: None },
+    Fold { from: "movzx_16_64", into: "movzx_rm_16_64", load: "mov_rm_16", swapped: None },
+    Fold { from: "movsx_8_16", into: "movsx_rm_8_16", load: "mov_rm_8", swapped: None },
+    Fold { from: "movsx_8_32", into: "movsx_rm_8_32", load: "mov_rm_8", swapped: None },
+    Fold { from: "movsx_8_64", into: "movsx_rm_8_64", load: "mov_rm_8", swapped: None },
+    Fold { from: "movsx_16_32", into: "movsx_rm_16_32", load: "mov_rm_16", swapped: None },
+    Fold { from: "movsx_16_64", into: "movsx_rm_16_64", load: "mov_rm_16", swapped: None },
+    Fold { from: "movsxd_32_64", into: "movsxd_rm_32_64", load: "mov_rm_32", swapped: None },
+    Fold { from: "mov_32_to_64", into: "mov_rm_32", load: "mov_rm_32", swapped: None },
+];
+
 /// One arithmetic instruction that could work on memory rather than on a register, and the load
 /// and the store that would be the rest of the run.
 ///
@@ -957,7 +999,8 @@ pub fn loads(
             if insisted(func, inst) {
                 continue;
             }
-            if let Some(load) = FOLDS.iter().find(|fold| fold.load == bare).map(|fold| fold.load) {
+            let mut rows = FOLDS.iter().chain(WIDENINGS);
+            if let Some(load) = rows.find(|fold| fold.load == bare).map(|fold| fold.load) {
                 let operands = &func[func[inst].operands];
                 if let Some(first) = operands.first().filter(|operand| operand.role.is_def()) {
                     waiting = Some(Waiting { inst, reg: first.reg, load, at });
@@ -1370,7 +1413,7 @@ fn joined(
     inst: Inst,
     bare: &str,
 ) -> Option<Plan> {
-    let fold = FOLDS.iter().find(|fold| fold.from == bare)?;
+    let fold = FOLDS.iter().chain(WIDENINGS).find(|fold| fold.from == bare)?;
     if carried.load != fold.load || reads.count(carried.reg) != 1 {
         return None;
     }
@@ -2505,6 +2548,99 @@ mod tests {
         assert_eq!(func[func[inst].operands][1].reg, base, "the address it took on");
         let imm = func[inst].imm.expect("the constant is still on it");
         assert_eq!(func[imm].0, 7, "and is the one that was written");
+    }
+
+    /// A load that nothing but a widening reads becomes the load that widens, at every width the
+    /// machine has one for, and the address and the register written come with it.
+    #[test]
+    fn a_load_only_a_widening_reads_becomes_a_load_that_widens() {
+        for row in WIDENINGS {
+            let (mut names, mut func, block) = empty();
+            let base = func.new_vreg(GPR);
+            let narrow = func.new_vreg(GPR);
+            let wide = func.new_vreg(GPR);
+            let read = op(&mut names, row.load);
+            func.build(block, read)
+                .def(narrow, GPR)
+                .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+                .finish();
+            let widen = op(&mut names, row.from);
+            func.build(block, widen).def(wide, GPR).uses(narrow, GPR).finish();
+
+            assert_eq!(combine(&mut func, &mut names), 1, "{} took no load", row.from);
+            assert_eq!(shape(&func, &names, block), [format!("x64.{}", row.into)]);
+            let inst = func.insts(block).next().expect("the widening");
+            assert_eq!(func[func[inst].operands][0].reg, wide, "{} writes elsewhere", row.from);
+            assert_eq!(func[func[inst].operands][1].reg, base, "{} lost the address", row.from);
+            let mem = func[inst].mem.expect("it reads memory now");
+            assert_eq!(func[mem].disp, 16, "the load's displacement came with it");
+            assert_eq!(func[mem].base, Some(1), "and names the operand behind the answer");
+        }
+    }
+
+    /// A load that something besides the widening reads stays a load, since the value has to be
+    /// in a register for the other reader anyway.
+    #[test]
+    fn a_load_read_by_a_widening_and_something_else_stays_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let narrow = func.new_vreg(GPR);
+        let wide = func.new_vreg(GPR);
+        let read = op(&mut names, "mov_rm_32");
+        func.build(block, read)
+            .def(narrow, GPR)
+            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+        let widen = op(&mut names, "movsxd_32_64");
+        func.build(block, widen).def(wide, GPR).uses(narrow, GPR).finish();
+        alu(&mut func, &mut names, block, "add_rr_32", other, narrow);
+
+        assert_eq!(combine(&mut func, &mut names), 0);
+        assert_eq!(
+            shape(&func, &names, block),
+            ["x64.mov_rm_32", "x64.movsxd_32_64", "x64.add_rr_32"]
+        );
+    }
+
+    /// A load the program insisted on keeps its own instruction, the same as it does in front of
+    /// arithmetic.
+    #[test]
+    fn a_volatile_load_is_not_widened_on_the_way_in() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let narrow = func.new_vreg(GPR);
+        let wide = func.new_vreg(GPR);
+        let read = op(&mut names, "mov_rm_16");
+        func.build(block, read)
+            .def(narrow, GPR)
+            .mem(Mem { disp: 16, ..Mem::at(Operand::read(base, GPR)) })
+            .flags(Flags::VOLATILE)
+            .finish();
+        let widen = op(&mut names, "movsx_16_32");
+        func.build(block, widen).def(wide, GPR).uses(narrow, GPR).finish();
+
+        assert_eq!(combine(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["x64.mov_rm_16", "x64.movsx_16_32"]);
+    }
+
+    /// Every widening names instructions this target has, reads memory only once folded, and
+    /// takes a load of the width it widens from.
+    #[test]
+    fn every_widening_takes_a_load_of_the_width_it_widens_from() {
+        let from = |name: &str| {
+            name.split('_').find(|part| part.parse::<u32>().is_ok()).map(str::to_owned)
+        };
+        let width = |name: &str| name.rsplit_once('_').map(|(_, width)| width.to_owned());
+        for row in WIDENINGS {
+            assert!(MACHINE.has(row.from), "{} is not an instruction", row.from);
+            assert!(MACHINE.has(row.into), "{} is not an instruction", row.into);
+            assert!(MACHINE.has(row.load), "{} is not an instruction", row.load);
+            assert_eq!(from(row.from), width(row.load), "{} loads another width", row.from);
+            assert!((MACHINE.takes_mem)(row.into), "{} reads no memory", row.into);
+            assert!(!(MACHINE.takes_mem)(row.from), "{} already reads memory", row.from);
+            assert_eq!(row.swapped, None, "{} has nothing to swap", row.from);
+        }
     }
 
     /// Every row of the table names instructions this target has, and names a load and an
