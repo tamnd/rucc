@@ -181,6 +181,48 @@ impl Iterator for Bits {
     }
 }
 
+/// Which values fall in each of a few groups, as one bitmap per group laid out by word.
+///
+/// Counting a group in a live set is then a mask and a population count for each word the set has
+/// rather than a look at every value in it. The pressure model counts what is live at the edges of
+/// every block, and reading the type of each of those values one at a time was most of what it
+/// cost on a function with thousands of blocks.
+#[derive(Debug)]
+pub struct Groups<const N: usize> {
+    words: Vec<[u64; N]>,
+}
+
+impl<const N: usize> Groups<N> {
+    /// Puts each value of the function in the group `group` names, or in none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `group` names a group past the last of the `N`.
+    #[must_use]
+    pub fn of(func: &Func, group: impl Fn(Value) -> Option<usize>) -> Self {
+        let mut words = vec![[0; N]; func.values().count().div_ceil(64)];
+        for value in func.values() {
+            if let Some(group) = group(value) {
+                let at = value.index();
+                words[at / 64][group] |= 1 << (at % 64);
+            }
+        }
+        Self { words }
+    }
+
+    /// How many of the set fall in each group.
+    fn count(&self, set: &Set) -> [u32; N] {
+        let mut counts = [0; N];
+        for &(at, word) in &set.words {
+            let Some(masks) = self.words.get(at as usize) else { continue };
+            for (count, mask) in counts.iter_mut().zip(masks) {
+                *count += (word & mask).count_ones();
+            }
+        }
+        counts
+    }
+}
+
 /// What is live at the edges of every block.
 ///
 /// Per block rather than per instruction, because the sets inside a block are recoverable from the
@@ -270,6 +312,18 @@ impl Liveness {
         }
 
         Self { live_in, live_out }
+    }
+
+    /// How many of what is live when control arrives at the block fall in each group.
+    #[must_use]
+    pub fn grouped_in<const N: usize>(&self, block: Block, groups: &Groups<N>) -> [u32; N] {
+        groups.count(&self.live_in[block.index()])
+    }
+
+    /// How many of what is live when control leaves the block fall in each group.
+    #[must_use]
+    pub fn grouped_out<const N: usize>(&self, block: Block, groups: &Groups<N>) -> [u32; N] {
+        groups.count(&self.live_out[block.index()])
     }
 
     /// What is live when control arrives at the block, which excludes its own parameters.
@@ -417,7 +471,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Flags, Func, Opcode, Signature, Type, Value};
 
-    use super::{Liveness, Set};
+    use super::{Groups, Liveness, Set};
     use crate::cfg::Cfg;
 
     const I32: Type = Type::int(32);
@@ -496,6 +550,37 @@ mod tests {
         assert!(live.is_live_out(blocks[0], kept), "it is read after the branch");
         assert!(live.is_live_in(blocks[1], kept), "and it has to arrive there to be read");
         assert!(!live.is_live_in(blocks[0], kept), "it does not exist before it is made");
+    }
+
+    #[test]
+    fn a_group_counts_what_counting_one_value_at_a_time_counts() {
+        // Enough values that the live set runs over more than one word of the bitmap.
+        let (mut func, blocks) = blank(2);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let kept: Vec<Value> = (0..150).map(|number| build.iconst(I32, number)).collect();
+        build.jump(blocks[1], &[]);
+        let mut build = Builder::new(&mut func, blocks[1]);
+        build.ret(&kept[..]);
+
+        // Every third value is in no group, and the rest go by whether their number is even.
+        let group = |value: Value| (value.index() % 3 != 0).then_some(value.index() % 2);
+        let groups = Groups::<2>::of(&func, group);
+        let (_, live) = liveness(&func);
+        for &block in &blocks {
+            for (grouped, values) in [
+                (live.grouped_in(block, &groups), live.live_in(block).collect::<Vec<_>>()),
+                (live.grouped_out(block, &groups), live.live_out(block).collect()),
+            ] {
+                let mut counted = [0; 2];
+                for value in values {
+                    if let Some(group) = group(value) {
+                        counted[group] += 1;
+                    }
+                }
+                assert_eq!(grouped, counted);
+            }
+        }
+        assert_eq!(live.grouped_in(blocks[1], &groups), [50, 50]);
     }
 
     #[test]
