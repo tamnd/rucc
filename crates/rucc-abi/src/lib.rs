@@ -71,7 +71,8 @@ pub mod shape;
 
 pub use classify::Call;
 pub use describe::{
-    AbiDescription, Banks, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel, Variadic,
+    AbiDescription, Banks, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel,
+    Variadic,
 };
 pub use layout::{BitfieldOrder, DataLayout, FloatType};
 pub use shape::{Arg, Format, Kind, Pass, Piece, Scalar, Shape, Slot};

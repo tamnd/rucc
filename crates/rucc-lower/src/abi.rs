@@ -22,7 +22,7 @@
 //! wants to know the outcome reads what that pass wrote down.
 
 use rucc_ir::{Abi, Drains, Float, Param, Signature, Type};
-use rucc_target::{Arg, Call, Kind, Pass, Piece, Scalar, Shape, Slot, TargetInfo};
+use rucc_target::{Arg, Call, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, TargetInfo};
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, float_format, layout};
 
 use crate::repr;
@@ -191,6 +191,7 @@ pub(crate) fn plan(
     // reported per call rather than refused once at startup because that is where the compiler
     // already has a span to point at, and because everything short of a call still works there.
     let mut call = target.call().ok_or("calling a function on this target")?;
+    let narrow = call.abi().narrow;
     let shaped = shape(types, target, ret).ok_or("returning a value of this type")?;
     let ret = travel(types, target, &mut call, &shaped, Position::Return, ret);
 
@@ -200,7 +201,8 @@ pub(crate) fn plan(
         let (size, align) = (ret.size, ret.align);
         signature.params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align }));
     } else {
-        signature.returns.extend(ret.types.iter().map(|ty| Param::new(*ty)));
+        let returns = ret.types.iter().map(|ty| extended(types, target, narrow, &ret, *ty));
+        signature.returns.extend(returns);
     }
 
     let count = params.len().max(actual.len());
@@ -230,7 +232,9 @@ pub(crate) fn plan(
             travel.align = repr::align_of(types, target, ty);
         }
         if index < params.len() {
-            signature.params.extend(travel.types.iter().map(|ty| param(&travel, *ty)));
+            let params =
+                travel.types.iter().map(|ty| extended(types, target, narrow, &travel, *ty));
+            signature.params.extend(params);
         } else {
             // An argument past the parameter list travels the same way and has nowhere in the
             // signature to say so, which is what the call carries its own list for.
@@ -255,6 +259,32 @@ fn param(travel: &Travel, ty: Type) -> Param {
         }
         _ => Param::new(ty),
     }
+}
+
+/// [`param`], and on an ABI that extends an integer narrower than an `int` the side it is
+/// extended from.
+///
+/// Only a C integer, `bool` and enumeration included, and only one travelling as itself. A one
+/// byte structure travels in a register as well and nobody extends it, because it has no sign
+/// to extend by, and one past the `...` goes to the argument area on the only ABI that says this,
+/// which is why a variadic call's own list never needs it.
+fn extended(
+    types: &Types,
+    target: &TargetInfo,
+    narrow: Narrow,
+    travel: &Travel,
+    ty: Type,
+) -> Param {
+    let integer = matches!(
+        types.kind(types.canonical(travel.ty)),
+        TypeKind::Bool | TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_)
+    );
+    let direct = matches!(travel.pass, Pass::Direct) && ty.is_int() && !ty.is_vector();
+    if narrow != Narrow::ToInt || !integer || !direct || ty.bits() >= 32 {
+        return param(travel, ty);
+    }
+    let abi = if repr::is_signed(types, target, travel.ty) { Abi::Sext } else { Abi::Zext };
+    Param::with_abi(ty, abi)
 }
 
 /// Asks the target about one value and works out what the IR needs to say it.
@@ -675,6 +705,37 @@ mod tests {
     /// the argument area when they are variadic. A caller that asks the fixed question for a
     /// variadic argument writes registers the callee never reads, and `va_arg` then returns
     /// whatever was on the stack, which is why this is a test and not a comment.
+    /// Apple's arm64 extends a `char` or a `short` to 32 bits by its own sign on both sides of a
+    /// call, which clang relies on: its callee of `f(unsigned char c)` returning `c` is a bare
+    /// `ret`. AAPCS64 promises nothing about those bits and nothing is marked there.
+    #[test]
+    fn a_narrow_integer_travels_extended_on_darwin_arm64_and_as_itself_elsewhere() {
+        let mut types = Types::new();
+        let darwin = target("aarch64-apple-darwin");
+        let (schar, uchar) = (types.int(IntKind::SChar), types.int(IntKind::UChar));
+        let (short, ushort) = (types.int(IntKind::Short), types.int(IntKind::UShort));
+        let (char_ty, int, boolean) =
+            (types.int(IntKind::Char), types.int(IntKind::Int), types.boolean());
+        let params = [schar, uchar, short, ushort, char_ty, int, boolean];
+        let narrow = plan(&types, &darwin, uchar, &params, &[], false).expect("a plan");
+        let abis: Vec<Abi> = narrow.signature.params.iter().map(|param| param.abi).collect();
+        // A plain `char` is signed there, the same as on every other Apple target.
+        let (s, z, p) = (Abi::Sext, Abi::Zext, Abi::Plain);
+        assert_eq!(abis, vec![s, z, s, z, s, p, z]);
+        assert_eq!(narrow.signature.returns[0].abi, Abi::Zext);
+
+        // A one byte structure travels in a register too, and has no sign to extend by.
+        let small = record(&mut types, &darwin, &[uchar]);
+        let bytes = plan(&types, &darwin, small, &[small], &[], false).expect("a plan");
+        assert_eq!(bytes.signature.params[0].abi, Abi::Plain);
+        assert_eq!(bytes.signature.returns[0].abi, Abi::Plain);
+
+        let linux = target("aarch64-unknown-linux-gnu");
+        let elsewhere = plan(&types, &linux, uchar, &params, &[], false).expect("a plan");
+        assert!(elsewhere.signature.params.iter().all(|param| param.abi == Abi::Plain));
+        assert_eq!(elsewhere.signature.returns[0].abi, Abi::Plain);
+    }
+
     #[test]
     fn an_argument_past_the_dots_asks_a_different_question_on_darwin_arm64() {
         let mut types = Types::new();
