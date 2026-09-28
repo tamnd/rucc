@@ -2272,6 +2272,10 @@ pub struct Options {
     /// pass says which rewrite it is. Where both are given, a pass is stopped by whichever of
     /// the two is tighter.
     pub pass_fuel_global: Option<u32>,
+    /// Where `-frucc-trace=<file>` asked for one line of JSON per compiled file saying how long
+    /// each phase and each optimizer pass took. Appended to, never truncated, so that every
+    /// compiler in a parallel build can share one file.
+    pub trace: Option<String>,
     /// What `-fdisable-<pass>[=<range>]` and `-fenable-<pass>[=<range>]` said, in the order the
     /// command line said it, with `true` for the enabling half.
     ///
@@ -2417,6 +2421,7 @@ impl Options {
             passes: Vec::new(),
             pass_fuel: Vec::new(),
             pass_fuel_global: None,
+            trace: None,
             pass_gates: Vec::new(),
             dump_ir: Vec::new(),
             opt_info: Vec::new(),

@@ -97,5 +97,6 @@ fn done(
         remarks: String::new(),
         deps,
         temps,
+        timing: crate::trace::Timing::default(),
     }
 }
