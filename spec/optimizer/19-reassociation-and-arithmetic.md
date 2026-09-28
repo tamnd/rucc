@@ -187,10 +187,14 @@ two is the biased shift above, and a division the front end marks exact, which i
 subtraction is, is a shift and a multiply by the inverse of the odd part. A remainder is the dividend
 less the quotient times the divisor, and an unsigned remainder by a power of two is a mask.
 
-The IR has no high multiply yet (#309), so the product is taken in 64 bits. That covers every
-division of 32 bits or fewer, and a 64 bit division whose dividend came from a zero or sign extension
-of 32 bits or fewer, which is what C's promotions make of most of them. A 64 bit division of a value
-that could be anything keeps its `div` unless the divisor is a power of two or the division is exact.
+The product is taken in 64 bits for every division of 32 bits or fewer, and for a 64 bit division
+whose dividend came from a zero or sign extension of 32 bits or fewer, which is what C's promotions
+make of most of them. A 64 bit division of a value that could be anything takes the high half of a
+128 bit product with `umulh` or `smulh`, which is the one operand `mulq` or `imulq` gcc writes. An
+unsigned magic number that needs 65 bits either has the divisor's power of two shifted out of the
+dividend first, or goes in without its top bit and has the dividend added back to the high half,
+halving the difference so that nothing carries out. An unsigned divisor above 2^63 keeps its `div`,
+since the quotient is zero or one.
 
 The tests prove it rather than sample it. Both the rewritten quotient and C's are monotone on each
 half of the dividends, so checking the multiples of the divisor, one either side of each, and the ends

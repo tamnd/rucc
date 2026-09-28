@@ -155,7 +155,7 @@ fn plain(form: Form) -> Timing {
         // something waiting on the instruction waits for. A program that asks for both halves is
         // waiting on the later of them, which is what makes four the honest answer rather than the
         // pessimistic one.
-        MulWide => (4, Unit::Mul),
+        MulWide | MulHigh => (4, Unit::Mul),
         // A division. Overridden by width in `slow`, and this is what is left for a form that
         // reaches here without one, which nothing does.
         DivQuo | DivRem | DivWide => (26, Unit::Div),
@@ -247,7 +247,7 @@ fn slow(name: &str, form: Form) -> Option<Timing> {
         // Not the signed multiply that keeps both halves, which shares this stem and is a cycle
         // slower. Its number is on its form in `plain`, beside the unsigned one, so that the two
         // spellings of one instruction do not get two different answers.
-        "imul" if form != Form::MulWide => Some(Timing {
+        "imul" if !matches!(form, Form::MulWide | Form::MulHigh) => Some(Timing {
             latency: if form == Form::AluRm { 3 + LOAD } else { 3 },
             unit: Unit::Mul,
         }),

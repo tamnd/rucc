@@ -34,6 +34,8 @@
 (semantics (a64.eor_rr_64 l r) (bvxor l r))
 (semantics (a64.mul_rr_32 l r) (bvmul l r))
 (semantics (a64.mul_rr_64 l r) (bvmul l r))
+(semantics (a64.umulh_rr_64 l r) (extract 127 64 (bvmul (zero_extend 64 128 l) (zero_extend 64 128 r))))
+(semantics (a64.smulh_rr_64 l r) (extract 127 64 (bvmul (sign_extend 64 128 l) (sign_extend 64 128 r))))
 (semantics (a64.add_ri_32 l r) (bvadd l r))
 (semantics (a64.add_ri_64 l r) (bvadd l r))
 (semantics (a64.sub_ri_32 l r) (bvsub l r))

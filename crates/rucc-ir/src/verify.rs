@@ -1084,6 +1084,8 @@ impl<'a> Verifier<'a> {
             | Opcode::UDiv
             | Opcode::SRem
             | Opcode::URem
+            | Opcode::UMulHigh
+            | Opcode::SMulHigh
             | Opcode::And
             | Opcode::Or
             | Opcode::Xor

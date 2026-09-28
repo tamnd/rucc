@@ -59,6 +59,11 @@ pub enum Opcode {
     SRem,
     /// Unsigned remainder.
     URem,
+    /// The high half of the product of two unsigned integers, which is the half an ordinary
+    /// multiply throws away. Only the back end writes one, for a division by a constant.
+    UMulHigh,
+    /// The high half of the product of two signed integers.
+    SMulHigh,
     /// Bitwise and.
     And,
     /// Bitwise or.
@@ -738,6 +743,8 @@ impl Opcode {
             Self::UDiv => "udiv",
             Self::SRem => "srem",
             Self::URem => "urem",
+            Self::UMulHigh => "umulh",
+            Self::SMulHigh => "smulh",
             Self::And => "and",
             Self::Or => "or",
             Self::Xor => "xor",
@@ -912,6 +919,8 @@ impl Opcode {
             self,
             Self::Add
                 | Self::Mul
+                | Self::UMulHigh
+                | Self::SMulHigh
                 | Self::And
                 | Self::Or
                 | Self::Xor
@@ -946,6 +955,8 @@ impl Opcode {
                 | Self::UDiv
                 | Self::SRem
                 | Self::URem
+                | Self::UMulHigh
+                | Self::SMulHigh
                 | Self::And
                 | Self::Or
                 | Self::Xor
@@ -1464,6 +1475,8 @@ static ALL: &[Opcode] = &[
     Opcode::UDiv,
     Opcode::SRem,
     Opcode::URem,
+    Opcode::UMulHigh,
+    Opcode::SMulHigh,
     Opcode::And,
     Opcode::Or,
     Opcode::Xor,
