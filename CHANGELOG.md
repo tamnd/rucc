@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- `__has_attribute(nonnull)` answers 1. The attribute was already taken and ignored, since glibc writes it on its declarations regardless, and it is still ignored, but Postgres writes `pg_attribute_nonnull` only when the answer is yes, so its preprocessed code now matches gcc's (#1987).
 - An 8-bit or 16-bit `|` or `^` with a constant is one `or` or `xor` with an immediate on x86-64 again, and it folds into a memory destination the way the 32-bit and 64-bit forms do. Both rules are proved by `rucc-verify`. A narrow shift by a variable count stays as it is: the IR takes the count modulo the width and the machine masks it by 31, so no single instruction rule for it can be proved.
 
 ### Fixed

@@ -669,9 +669,10 @@ tests = []
 name = "nonnull"
 kind = "attribute"
 gcc_version = "3.3"
-status = "unimplemented"
-used_by = ["glibc", "systemd"]
-tests = []
+status = "implemented"
+used_by = ["glibc", "systemd", "postgres"]
+tests = ["rucc-driver::nonnull_is_answered_yes_and_taken_with_or_without_operands"]
+notes = "Taken with or without operands and nothing is assumed from it, which is always safe: a null check on a parameter it names stays where gcc would drop it, and `-Wnonnull` is not given for a null argument. glibc writes it on its declarations whatever `__has_attribute` says, and Postgres writes `pg_attribute_nonnull` only when it answers yes, so answering no made rucc's preprocessed Postgres differ from gcc's."
 
 [[feature]]
 name = "returns_nonnull"
