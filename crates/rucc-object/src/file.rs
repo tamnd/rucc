@@ -830,8 +830,11 @@ fn beyond(text: &Text, data: &Data, info: &Info) -> Result<(), Error> {
         }
     }
     for object in &data.objects {
-        if matches!(object.place, Place::Thread { .. }) {
-            return why(format!("'{}' is thread-local and this format is not", object.name));
+        if matches!(object.place, Place::Thread { zero: true }) {
+            return why(format!(
+                "'{}' is zeroed thread-local storage, which is not here",
+                object.name
+            ));
         }
         let Place::Named(name) = &object.place else { continue };
         if Array::of(name).is_some() {
@@ -2558,16 +2561,16 @@ mod tests {
     }
 
     /// Each of these is something this format has no way to write, and writing the nearest thing
-    /// would be worse than refusing: a thread-local variable written as an ordinary one is one copy
-    /// where the program asked for one per thread, and a constructor list under a name nothing
-    /// gathers is a program whose constructors never run.
+    /// would be worse than refusing: a zeroed thread-local variable written as ordinary zeroed
+    /// space is one copy where the program asked for one per thread, and a constructor list under
+    /// a name nothing gathers is a program whose constructors never run.
     #[test]
     fn what_this_format_cannot_say_is_refused_by_name() {
         let ordinary = Text::default();
         let empty = Data::default();
 
         let mut thread = Data::default();
-        thread.objects.push(variable("t", Place::Thread { zero: false }));
+        thread.objects.push(variable("t", Place::Thread { zero: true }));
 
         let mut gathered = Data::default();
         gathered.objects.push(variable("c", Place::Named(".init_array".to_owned())));
@@ -2589,6 +2592,19 @@ mod tests {
                 .expect_err("something this format cannot write");
             assert!(matches!(error, Error::Refused { .. }), "{what}: {error:?}");
         }
+    }
+
+    /// A thread-local variable with an image goes in `.tls$`, which is the section every thread
+    /// gets a copy of.
+    #[test]
+    fn a_thread_local_variable_goes_in_the_tls_section() {
+        let mut thread = Data::default();
+        thread.objects.push(variable("t", Place::Thread { zero: false }));
+        let bytes =
+            write(&Text::default(), &thread, &[], &windows(), Output::default(), &Info::default())
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.section_by_name(".tls$").is_some());
     }
 
     /// A visibility is not refused, because there is nothing to refuse: it is a fact about a dynamic

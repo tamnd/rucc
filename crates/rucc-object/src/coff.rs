@@ -39,7 +39,7 @@ use crate::section::Reference;
 /// the address itself at the two widths this machine writes one at.
 ///
 /// Nothing for the two table slots. A global offset table is not how this platform reaches a symbol
-/// it does not define, and a thread-local variable is reached through a different mechanism again,
+/// it does not define, and a thread-local variable is reached through its offset in `.tls` instead,
 /// so a file wanting either is a file this cannot write and says so.
 ///
 /// The last is the one relocation here that ELF has nothing to match: four bytes holding how far
@@ -52,6 +52,7 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         Reference::Address { bytes: 8 } => pe::IMAGE_REL_AMD64_ADDR64,
         Reference::Address { bytes: 4 } => pe::IMAGE_REL_AMD64_ADDR32,
         Reference::Image => pe::IMAGE_REL_AMD64_ADDR32NB,
+        Reference::Section => pe::IMAGE_REL_AMD64_SECREL,
         // Nothing for a distance written into an image. The relocation this format has for four
         // bytes of distance counts from the byte after them, which is the answer an instruction
         // wants and is four more than the answer an image wants, and there is no addend field to

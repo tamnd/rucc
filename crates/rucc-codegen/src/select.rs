@@ -91,6 +91,37 @@ pub struct Symbols {
     pub thread: Reach,
     /// The thread pointer itself.
     pub pointer: Pointer,
+    /// How a Windows thread finds its copy of a thread-local variable, where this machine has
+    /// been taught. See [`Indexed`].
+    pub indexed: Option<Indexed>,
+}
+
+/// The instructions a thread-local variable is reached with on Windows.
+///
+/// Every thread keeps an array of pointers, one for each image's copy of its `.tls` section. The
+/// thread block holds the array, the image's `_tls_index` says which slot is its own, and the
+/// variable is as far into the copy as it is into the section.
+///
+/// ```text
+/// movl  _tls_index(%rip), %idx
+/// movq  %gs:88, %arr
+/// movq  (%arr,%idx,8), %blk
+/// leaq  x@SECREL32(%blk), %x
+/// ```
+#[derive(Debug)]
+pub struct Indexed {
+    /// A 32-bit load, zero extended, which reads `_tls_index`.
+    pub index: &'static str,
+    /// A load of a whole word, which reads the array out of the thread block and the block out of
+    /// the array.
+    pub load: &'static str,
+    /// The segment the thread block is in, and how far into it the array is.
+    pub segment: Segment,
+    /// The same.
+    pub at: i32,
+    /// The instruction that adds an offset to a register, which takes the variable's offset in its
+    /// section as its displacement.
+    pub add: &'static str,
 }
 
 /// Where the thread pointer is read from.

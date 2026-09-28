@@ -2756,6 +2756,10 @@ pub struct Addr {
     pub rip: bool,
     /// Which storage the address is in, when it is not the flat one. See [`Segment`].
     pub segment: Option<Segment>,
+    /// Whether the displacement is a number the linker writes, which makes it four bytes however
+    /// small it is now. A section relative offset added to a register is the one case, since the
+    /// rip relative one is four bytes anyway.
+    pub linked: bool,
 }
 
 /// What one argument of an instruction turned out to be.
@@ -2822,7 +2826,7 @@ impl Value {
 
 /// Where in an instruction something the encoder could not know goes.
 ///
-/// Both are offsets into the buffer the instruction was written to rather than into the
+/// All three are offsets into the buffer the instruction was written to rather than into the
 /// instruction, since what the caller has to do with either is patch the buffer or record a
 /// relocation against it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2832,6 +2836,9 @@ pub struct Holes {
     /// Where the four bytes an address counted from the end of the instruction leaves for its
     /// displacement begin.
     pub rip: Option<usize>,
+    /// Where the four bytes of displacement of an address counted from a register begin, when
+    /// the linker is the one to fill them in. See [`Addr::linked`].
+    pub disp: Option<usize>,
 }
 
 /// Why an instruction could not be encoded.
@@ -3106,7 +3113,7 @@ impl Writer<'_> {
         // The offsets were taken against an empty buffer, so they move by however much is in
         // front of the addressing byte by the time it is really written.
         let at = out.len();
-        for hole in [&mut holes.dest, &mut holes.rip].into_iter().flatten() {
+        for hole in [&mut holes.dest, &mut holes.rip, &mut holes.disp].into_iter().flatten() {
             *hole += at;
         }
         out.extend_from_slice(&tail);
@@ -3379,7 +3386,9 @@ impl Writer<'_> {
         let mode = match base {
             None => 0,
             Some(base) => {
-                if addr.disp == 0 && base != 5 {
+                if addr.linked {
+                    2
+                } else if addr.disp == 0 && base != 5 {
                     0
                 } else if addr.disp % self.scale == 0
                     && i8::try_from(addr.disp / self.scale).is_ok()
@@ -3401,7 +3410,12 @@ impl Writer<'_> {
             0 => {}
             // Counted in accesses under EVEX, and `scale` is one otherwise.
             1 => out.push((addr.disp / self.scale) as u8),
-            _ => out.extend_from_slice(&addr.disp.to_le_bytes()),
+            _ => {
+                if addr.linked {
+                    holes.disp = Some(out.len());
+                }
+                out.extend_from_slice(&addr.disp.to_le_bytes());
+            }
         }
         Ok(())
     }

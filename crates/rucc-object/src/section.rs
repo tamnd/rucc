@@ -712,6 +712,14 @@ pub enum Reference {
     /// records are found by walking rather than by binary search, and what they hold is the ordinary
     /// distance from the record to the function.
     Image,
+    /// How far the thing is from the front of the section it is in, written into the four bytes
+    /// of displacement of an address that is counted from a register.
+    ///
+    /// What a Windows thread finds its copy of a thread-local variable with. Every thread has a
+    /// copy of the image's `.tls` section, the register holds where this thread's copy is, and the
+    /// variable is as far into the copy as it is into the section. `IMAGE_REL_AMD64_SECREL`, and
+    /// nothing on ELF or Mach-O, which reach thread-local storage through a table slot instead.
+    Section,
     /// Some bits of an AArch64 instruction, which the fixup says which and how to fill in.
     ///
     /// Its own kind rather than one of the above, because on this machine a reference is not four
