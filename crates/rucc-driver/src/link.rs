@@ -473,7 +473,10 @@ fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option
         return None;
     }
     let tuple = target_tuple(target, opts);
-    if host == Some(target) && tuple.env_version().is_none() {
+    // Windows is left out because a Windows machine has no C library of its own to compile
+    // against. On an x86-64 Windows box the default target is the host, and the only headers
+    // it can have are the mingw-w64 tree `--fetch` put in the cache.
+    if host == Some(target) && target.os != Os::Windows && tuple.env_version().is_none() {
         return None;
     }
     if distro_for(target, opts, host).is_some() {
@@ -2630,6 +2633,15 @@ mod tests {
         assert!(cross_for(other, &named, Some(host)).is_none());
         // A host this compiler cannot name is a host whose directories it should not be guessing at.
         assert!(cross_for(other, &cached(), None).is_some());
+    }
+
+    #[test]
+    fn a_windows_host_compiles_for_itself_against_the_fetched_tree() {
+        // There is no `/usr/include` on Windows, so the host line would find no `stdio.h` at all.
+        let host = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let at =
+            cross_for(host, &cached(), Some(host)).expect("the cache is the only tree there is");
+        assert!(at.root().ends_with("x86_64-windows-gnu"), "{:?}", at.root());
     }
 
     #[test]

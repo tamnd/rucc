@@ -497,7 +497,9 @@ fn read(at: &Path) -> Result<String, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{aliases, downloads, files, mb, put, stored_as};
+    #[cfg(unix)]
+    use super::aliases;
+    use super::{downloads, files, mb, put, stored_as};
     use rucc_sysroot::{Manifest, Provenance};
     use std::path::{Path, PathBuf};
 

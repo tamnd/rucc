@@ -12,6 +12,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `rucc hello.c` on a Windows machine compiles against the mingw-w64 sysroot that `rucc --fetch x86_64-windows-gnu` put in the cache. The default target there is the host, and rucc treated a compile for the host as a native one and looked for the system's own C headers, which Windows does not have, so every program failed with `stdio.h` not found.
+- The driver's tests build on Windows again. An import that only a Unix test uses was unused there, and `-D warnings` refused it.
 - The predefined macros for Apple targets match clang for Apple. `int64_t` and the least and fast sixty four bit types are `long long`, as the SDK's `<sys/_types/_int64_t.h>` writes them, so a freestanding `stdint.h` no longer declares an `int64_t` that the SDK then redefines as a different type, and `INT64_C` gets `LL`. `__unix__`, `__unix`, `unix` and `__STDC_ISO_10646__` are no longer defined. On arm64, `__BIGGEST_ALIGNMENT__` is 8 because `long double` is a `double` there, and `__GCC_DESTRUCTIVE_SIZE` is 128.
 
 ### Changed
