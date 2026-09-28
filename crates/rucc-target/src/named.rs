@@ -22,3 +22,16 @@ pub(crate) fn index<T>(table: &[(&'static str, T)]) -> HashMap<&'static str, usi
     }
     at
 }
+
+/// Every place each name is in that table, in the order they come in, for a table where one name
+/// has several rows and the caller picks between them.
+pub(crate) fn every<T>(
+    table: &[T],
+    name: impl Fn(&T) -> &'static str,
+) -> HashMap<&'static str, Vec<usize>> {
+    let mut at: HashMap<&'static str, Vec<usize>> = HashMap::new();
+    for (number, entry) in table.iter().enumerate() {
+        at.entry(name(entry)).or_default().push(number);
+    }
+    at
+}
