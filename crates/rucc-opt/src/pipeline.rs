@@ -827,8 +827,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // Before everything, at every level, because `always_inline` is a promise gcc keeps at `-O0`
     // and a fortified header relies on it: the wrapper's body has to be where the call was
     // before `objsize` below asks what the destination is. See [`inline`]. From `-O1` up the same
-    // step takes a small function declared `inline` too, unless `-fno-inline` said not to, with
-    // gcc's limit for the level.
+    // step takes a small function declared `inline` too, with gcc's limit for the level, and the
+    // one call to a `static` function called once, unless `-fno-inline` said not to.
     let limit = match opts.level {
         OptLevel::O0 => None,
         _ if !opts.wants(inline::NAME) => None,

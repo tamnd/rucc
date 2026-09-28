@@ -97,7 +97,8 @@ fn the_last_one_on_the_line_is_the_one_that_counts() {
 
 /// A name nothing outside the library can reach is not one anything can replace, so the promise is
 /// not needed for it. This is the same rule from both ends as the addresses in `pic.rs`, and it is
-/// the reason `-fPIC -fvisibility=hidden` is what a library that cares is built with.
+/// the reason `-fPIC -fvisibility=hidden` is what a library that cares is built with. The `static`
+/// helper is called twice, since one called once is inlined and leaves no call to look at.
 #[test]
 fn a_library_believes_a_body_nothing_outside_it_can_name() {
     let hidden = ir("hidden", &["-fPIC", "-fvisibility=hidden"], PAIR);
@@ -108,7 +109,7 @@ fn a_library_believes_a_body_nothing_outside_it_can_name() {
         &["-fPIC"],
         "\
 static int helper(int x) { return x + 1; }
-int caller(int x) { return helper(x) + 1; }
+int caller(int x) { return helper(x) + helper(x + 1); }
 ",
     );
     assert!(quiet.contains("call.nofree @helper"), "{quiet}");

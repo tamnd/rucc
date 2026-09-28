@@ -293,6 +293,14 @@ pub const INLINE_INSNS_SINGLE: u32 = 70;
 /// The same at `-O3`, per section 33.6, where GCC raises it to two hundred.
 pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
 
+/// The largest body a `static` function called from one place may have and still be inlined there,
+/// per section 33.1.
+///
+/// GCC's `max-inline-functions-called-once-insns`. The out of line copy goes away once the call
+/// is inlined, so what the program grows by is the call and nothing else, and the limit is only
+/// there so one very long function does not make its caller one that takes minutes to compile.
+pub const INLINE_CALLED_ONCE_INSNS: u32 = 4000;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -802,6 +810,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "33.6",
         gcc: "max-inline-insns-single at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_CALLED_ONCE_INSNS",
+        value: 4000,
+        unit: "instructions",
+        document: "33.1",
+        gcc: "max-inline-functions-called-once-insns",
         provenance: Provenance::Gcc,
     },
     Constant {

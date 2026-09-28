@@ -120,14 +120,18 @@ static inline int pick(int x) {
     return x + 1;
 }
 
+int (*const taken)(int) = pick;
+
 int main(void) {
     return pick(1);
 }
 ";
     let text = asm("static", "-O2", source);
     // 6.7.4p7 is about a name with external linkage, so a `static inline` was never an inline
-    // definition and is emitted the way any other `static` function this file calls is. Weakening
-    // one would be offering the linker a name the program said nothing outside may reach.
+    // definition and is emitted the way any other `static` function this file reaches is.
+    // Weakening one would be offering the linker a name the program said nothing outside may
+    // reach. The address is taken so that the body stays: a `static` function reached by one call
+    // and nothing else is inlined into it and not emitted, which is not what this is about.
     assert!(text.contains("\npick:\n"), "{text}");
     assert!(!text.contains("\t.weak\tpick\n"), "{text}");
     assert!(!text.contains("\t.globl\tpick\n"), "{text}");
@@ -141,7 +145,7 @@ static int helper(int x) {
 }
 
 inline int pick(int x) {
-    return helper(x);
+    return helper(x) + helper(x + 1);
 }
 
 int main(void) {
@@ -149,6 +153,8 @@ int main(void) {
 }
 ";
     let text = asm("reaches", "-O2", source);
+    // `helper` is called twice, since a `static` function called from one place is inlined there
+    // and not emitted at all.
     // The copy is a body like any other and the names in it are references like any other, so the
     // `static` function it calls has to be emitted too. Walking the file without reaching through
     // one of these would leave the copy calling a name this object does not define, which is the
