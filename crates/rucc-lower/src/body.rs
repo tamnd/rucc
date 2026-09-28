@@ -7057,6 +7057,23 @@ impl<'u> Body<'_, 'u> {
         // condition for a bit would build, since that walk goes under the node and would evaluate
         // what is under it a second time.
         let shared = self.common(cond, arms[0]);
+        // A condition that folds takes one arm and never builds the other, as gcc does even at
+        // `-O0`. busybox's `FETCH_LE32` is `sizeof(f) == 4 ? SWAP_LE32(f) : BUG_wrong_field_size()`,
+        // where the function exists nowhere so that a wrong size fails the link.
+        if shared.is_none() {
+            if let Some((effects, taken)) = self.decided_condition(cond) {
+                for effect in effects {
+                    self.discard(effect);
+                }
+                let value = of(self, arms[usize::from(!taken)]);
+                let at = self.at?;
+                let var = self.temp();
+                if let Some(value) = value {
+                    self.ssa.write(var, at, value);
+                }
+                return Some((var, at));
+            }
+        }
         let outer = self.shared;
         let value = match shared {
             Some(node) => {
