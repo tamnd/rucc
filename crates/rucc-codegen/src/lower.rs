@@ -1482,6 +1482,10 @@ impl<'a> Lowering<'a> {
                     if !std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
                         return Err(self.unsupported(inst));
                     }
+                    if self.touches_x87(inst) {
+                        self.x87_assembly(inst)?;
+                        continue;
+                    }
                     self.assembly(inst)?;
                     continue;
                 }
@@ -4886,6 +4890,145 @@ impl<'a> Lowering<'a> {
         }
         let name = operand.named?;
         aarch64::named(name.strip_prefix('%').unwrap_or(name))
+    }
+
+    /// An `asm` statement whose operands are `long double` values on the x87 stack.
+    ///
+    /// `t` is the top of the stack and `u` is the register under it, and those two letters, or a
+    /// number tying an input to an output in one of them, are the only places taken here. That is
+    /// what glibc's old `<bits/mathinline.h>` writes, `fpatan` with `=t`, `0` and `u` and `st(1)`
+    /// in the clobber list, and it is gcc-torture `execute/990413-2.c`.
+    ///
+    /// The group is the shape every other one in [`Self::x87`] has. The inputs are pushed from the
+    /// deepest up, so the `t` one is pushed last and ends up on top, then the template runs, then
+    /// the outputs are popped into their slots from the top down. That leaves the stack as empty
+    /// as it was found only when the template popped every input it was handed and pushed every
+    /// output it says it leaves, and gcc's rule for these statements says when that is: an input
+    /// tied to an output or named in the clobber list is one the template pops. So a statement
+    /// with an input it leaves behind is refused, as is one with an operand anywhere other than
+    /// `st(0)` and `st(1)`, since nothing here would know what to do with the stack after it.
+    fn x87_assembly(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[asm];
+        if !self.source[info.targets].is_empty() {
+            return Err(Unsupported::Assembly { inst, refused: Written::Goto });
+        }
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let constraints = self.names.resolve(info.constraints).to_string();
+        let results: Vec<Value> = data.results().collect();
+        let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
+            .ok_or_else(refused)?;
+        let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
+
+        // Where on the stack each operand is, as a depth from the top.
+        let letters: Vec<&str> = constraints.split(',').collect();
+        let mut depths = Vec::with_capacity(list.len());
+        for (operand, letter) in list.iter().zip(&letters) {
+            let value = operand.result.or(operand.value).ok_or_else(refused)?;
+            if operand.memory || !on_x87(self.source[value].ty) {
+                return Err(refused());
+            }
+            let depth = match operand.tied {
+                Some(output) => *depths.get(output).ok_or_else(refused)?,
+                None => match letter.trim_start_matches(['=', '+', '&']) {
+                    "t" => 0,
+                    "u" => 1,
+                    _ => return Err(refused()),
+                },
+            };
+            depths.push(depth);
+        }
+
+        // Which depths the clobber list says the template pops.
+        let clobbers = self.names.resolve(info.clobbers).to_string();
+        let mut popped = [false; 2];
+        for entry in clobbers.split(',') {
+            let entry = entry.trim().trim_matches('"');
+            let entry = entry.strip_prefix('%').unwrap_or(entry);
+            match entry {
+                "" | "memory" | "cc" | "flags" => {}
+                "st" | "st(0)" => popped[0] = true,
+                "st(1)" => popped[1] = true,
+                _ => return Err(Unsupported::Assembly { inst, refused: Written::Clobber }),
+            }
+        }
+
+        // The inputs, one per depth and from the top down with no gap, and each one popped.
+        let mut inputs: Vec<Option<Value>> = vec![None; 2];
+        let mut outputs: Vec<Option<Value>> = vec![None; 2];
+        for (index, operand) in list.iter().enumerate() {
+            let depth = depths[index];
+            if let Some(result) = operand.result {
+                if outputs[depth].replace(result).is_some() {
+                    return Err(refused());
+                }
+            }
+            let Some(value) = operand.value else { continue };
+            // An output written `+` is an input tied to itself.
+            let consumed = operand.result.is_some() || operand.tied.is_some() || popped[depth];
+            if !consumed {
+                return Err(refused());
+            }
+            if inputs[depth].replace(value).is_some() {
+                return Err(refused());
+            }
+        }
+        let gapless =
+            |held: &[Option<Value>]| held.iter().skip_while(|it| it.is_some()).all(Option::is_none);
+        if !gapless(&inputs) || !gapless(&outputs) {
+            return Err(refused());
+        }
+
+        // The text, with an operand spelled as the register it is in.
+        let template = self.names.resolve(info.template).to_string();
+        let mut text = String::with_capacity(template.len());
+        let mut chars = template.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                text.push(c);
+                continue;
+            }
+            match chars.peek().copied() {
+                Some('%') => {
+                    chars.next();
+                    text.push('%');
+                }
+                Some('=') => {
+                    chars.next();
+                    text.push_str(&inst.index().to_string());
+                }
+                Some(digit) if digit.is_ascii_digit() => {
+                    chars.next();
+                    if chars.peek().is_some_and(char::is_ascii_digit) {
+                        return Err(refused());
+                    }
+                    let index = digit.to_digit(10).map_or(usize::MAX, |it| it as usize);
+                    match depths.get(index).ok_or_else(refused)? {
+                        0 => text.push_str("%st"),
+                        depth => text.push_str(&format!("%st({depth})")),
+                    }
+                }
+                _ => return Err(refused()),
+            }
+        }
+
+        let span = self.source.span(inst);
+        for value in inputs.iter().rev().flatten() {
+            let from = self.x87_slot(*value);
+            let from = self.through(from);
+            self.x87_at("fld_t", span, from);
+        }
+        let symbol = self.names.intern(&text);
+        let opcode = self.named(x86_64::TEMPLATE);
+        let block = self.at.expect("a block is being filled");
+        self.out.build(block, opcode).at(span).symbol(symbol).finish();
+        for value in outputs.iter().flatten() {
+            let into = self.x87_slot(*value);
+            let into = self.through(into);
+            self.x87_at("fstp_t", span, into);
+        }
+        Ok(())
     }
 
     /// An `asm` statement on AArch64, which is kept as text whatever is in it.
