@@ -4,6 +4,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `<pmmintrin.h>` and `<tmmintrin.h>` ship with the SSE3 and SSSE3 intrinsics, and `<smmintrin.h>` and `<nmmintrin.h>` now have the rest of SSE4.1 and SSE4.2: the rounding, blend, dot product, insert and extract, min and max, widening and `ptest` functions, `_mm_cmpgt_epi64`, and the `_mm_cmpistr*` and `_mm_cmpestr*` string compares. `<immintrin.h>` brings them all in, as it does with gcc. Each is the instruction gcc writes and is built for its own extension, so a function with `__attribute__((target("ssse3")))` or a unit built with `-msse4.1` can call it and anything else is refused. Every function gives the same answer as gcc 16 at `-O0` to `-O3`. `_mm_monitor`, `_mm_mwait` and the denormals-zero macros are left out (#2045).
+- An `always_inline` call whose immediate operand is written as constant arithmetic, such as `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC`, is folded to the constant after inlining at `-O0` too, and a `static` `always_inline` function with every call inlined is no longer emitted out of line, as with gcc (#2045).
+
 ### Fixed
 
 - A parameter the optimizer drops because nothing uses it no longer leaves its `!aligned`, `!bounds` or `!init` fact behind. The IR printer wrote the stale fact as `%? = !aligned(4)`, and `--emit=ir` output from `-O2` could not be read back. Four Postgres translation units hit this in the IR round trip check (#2048).

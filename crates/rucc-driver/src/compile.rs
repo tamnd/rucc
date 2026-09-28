@@ -2281,6 +2281,90 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// Each of SSE3, SSSE3, SSE4.1 and SSE4.2 reached through `<immintrin.h>` from a function built
+    /// for it, which is how a program that picks its path at run time writes them. Each is the
+    /// instruction gcc writes, inlined, with its immediate a number in the text even when the
+    /// caller wrote the immediate as the two flags `_MM_FROUND_*` are meant to be combined with.
+    #[test]
+    fn the_sse3_to_sse4_2_intrinsics_are_the_instructions_under_the_attribute() {
+        let mut opts = freestanding();
+        opts.emit = EmitKind::Asm;
+        let source = concat!(
+            "#include <immintrin.h>\n",
+            "__attribute__((target(\"sse3\")))\n",
+            "__m128i a(const __m128i *p) { return _mm_lddqu_si128(p); }\n",
+            "__attribute__((target(\"sse3\")))\n",
+            "__m128 b(__m128 x, __m128 y) { return _mm_hadd_ps(x, y); }\n",
+            "__attribute__((target(\"ssse3\")))\n",
+            "__m128i c(__m128i x, __m128i y) { return _mm_shuffle_epi8(_mm_abs_epi32(x), y); }\n",
+            "__attribute__((target(\"ssse3\")))\n",
+            "__m128i d(__m128i x, __m128i y) { return _mm_alignr_epi8(x, y, 5); }\n",
+            "__attribute__((target(\"sse4.1\")))\n",
+            "int e(__m128i x, __m128i y) {\n",
+            "  return _mm_extract_epi32(_mm_min_epi32(_mm_mullo_epi32(x, y), y), 2);\n",
+            "}\n",
+            "__attribute__((target(\"sse4.1\")))\n",
+            "__m128 f(__m128 x) { return _mm_round_ps(x, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC); }\n",
+            "__attribute__((target(\"sse4.1\")))\n",
+            "__m128i g(__m128i x, __m128i y, __m128i m) { return _mm_blendv_epi8(x, y, m); }\n",
+            "__attribute__((target(\"sse4.1\")))\n",
+            "int h(__m128i x) { return _mm_testz_si128(x, x); }\n",
+            "__attribute__((target(\"sse4.2\")))\n",
+            "__m128i i(__m128i x, __m128i y) { return _mm_cmpgt_epi64(x, y); }\n",
+            "__attribute__((target(\"sse4.2\")))\n",
+            "int j(__m128i x, __m128i y) { return _mm_cmpistri(x, y, _SIDD_CMP_EQUAL_EACH); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        for insn in [
+            "lddqu",
+            "haddps",
+            "pabsd",
+            "pshufb",
+            "palignr $5,",
+            "pmulld",
+            "pminsd",
+            "pextrd $2,",
+            "roundps $8,",
+            "pblendvb",
+            "ptest",
+            "pcmpgtq",
+            "pcmpistri $8,",
+        ] {
+            assert!(text.contains(insn), "no {insn} in:\n{text}");
+        }
+        assert!(!text.contains("call"), "{text}");
+    }
+
+    /// The same refusal as the checksum's for a caller built for less than the intrinsic wants,
+    /// and `-mssse3` on the command line is enough for SSSE3 and SSE3 and not for SSE4.1.
+    #[test]
+    fn the_sse3_to_sse4_1_intrinsics_are_refused_a_caller_not_built_for_them() {
+        let source = concat!(
+            "#include <immintrin.h>\n",
+            "__m128i f(__m128i x, __m128i y) { return _mm_shuffle_epi8(x, y); }\n",
+        );
+        let said = run(&freestanding(), source).messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm_shuffle_epi8': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+
+        let mut opts = freestanding();
+        let mut choices = rucc_target::Choices::new();
+        choices.read("ssse3").expect("gcc knows ssse3");
+        opts.isa = choices.over(opts.isa);
+        let result =
+            run(&opts, &format!("{source}__m128 g(__m128 x) {{ return _mm_movehdup_ps(x); }}\n"));
+        assert_eq!(result.messages, Vec::<String>::new());
+        let result = run(
+            &opts,
+            "#include <immintrin.h>\n__m128i h(__m128i x) { return _mm_abs_epi8(_mm_cvtepi8_epi32(x)); }\n",
+        );
+        let said = result.messages.join("\n");
+        assert!(said.contains("'_mm_cvtepi8_epi32': target specific option mismatch"), "{said}");
+    }
+
     /// A string gcc does not know is refused in gcc's words, and AArch64's own strings are
     /// something x86-64 does not know either.
     #[test]

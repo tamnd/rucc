@@ -48,6 +48,12 @@
 //! inlined: it is an `extern inline` under GNU's reading, and its external definition is somewhere
 //! else in the program.
 //!
+//! A `static` function marked `always_inline` whose every call went in goes the same way, since
+//! nothing is left that could reach its body. gcc does not emit one either, and the intrinsic
+//! headers depend on that: an operand such as `pextrd`'s lane number is an `i` constraint over a
+//! parameter, which is a constant in every copy spliced into a caller and a register in the out of
+//! line one, and no instruction takes its lane number in a register.
+//!
 //! From `-O1` up the same splice takes a call to a function declared `inline` whose body, once its
 //! own calls are settled, is no larger than `max-inline-insns-single`, the limit gcc gives such a
 //! callee. It is the declared half of gcc's early inliner and not the rest of it: a function
@@ -283,14 +289,63 @@ pub fn run(module: &mut Module, limit: Option<u32>, once: bool, isa: Isa) -> Vec
         }
         let (calls, elsewhere) = references(module);
         for &(id, kind) in wanted.values() {
-            let name = module[id].name;
-            if kind == Kind::Once && !calls.contains_key(&name) && !elsewhere.contains(&name) {
+            let func = &module[id];
+            let name = func.name;
+            let gone = match kind {
+                Kind::Once => true,
+                Kind::Always => {
+                    func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
+                }
+                Kind::Hinted => false,
+            };
+            if gone && !calls.contains_key(&name) && !elsewhere.contains(&name) {
                 module[id] = declaration(&module[id]);
             }
+        }
+        for &(id, _) in &done {
+            settle_operands(&mut module[id]);
         }
     }
     withdraw(module);
     done
+}
+
+/// Every operand of an assembly statement in that function that is arithmetic over constants,
+/// written down as the constant.
+///
+/// Only an inlined call can leave one, since the front end folds a constant expression it hands
+/// to a statement itself. What it cannot fold is `_mm_round_ps (x, _MM_FROUND_TO_NEAREST_INT |
+/// _MM_FROUND_NO_EXC)`, where the expression is an argument and the statement is in the callee,
+/// and at `-O0` nothing after this folds it either, so an `i` operand would reach the back end
+/// as a register. gcc folds it at every level. The instruction that computes the operand becomes
+/// the constant where it stands, which is [`crate::fold`]'s rewrite, and so is right for every
+/// other use of it too.
+fn settle_operands(func: &mut Func) {
+    let mut found = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::InlineAsm {
+                continue;
+            }
+            for &arg in &func[func[inst].args] {
+                let Def::Result { inst: def, .. } = func[arg].def else { continue };
+                if matches!(func[def].opcode, Opcode::IConst | Opcode::FConst) {
+                    continue;
+                }
+                if let Some((imm, _)) = crate::fold::evaluated(func, arg, 8) {
+                    found.push((def, imm));
+                }
+            }
+        }
+    }
+    for (def, imm) in found {
+        let at = func.add_imm(imm);
+        let data = &mut func[def];
+        data.opcode = Opcode::IConst;
+        data.flags = rucc_ir::Flags::NONE;
+        data.args = ValueList::EMPTY;
+        data.extra = Extra::Imm(at);
+    }
 }
 
 /// The names the module reaches by exactly one direct call and in no other way.
@@ -1282,6 +1337,56 @@ block0(%0: i32):
         let g = &out[out.find("func @g").expect("g is there")..];
         assert!(!g.contains("call @twice"), "{out}");
         assert!(g.contains("alloca"), "{out}");
+    }
+
+    /// A `static` one that every call was inlined into goes, at every level, and one that a call
+    /// still reaches, or that `used` keeps, stays.
+    #[test]
+    fn a_static_always_inline_function_is_not_kept_once_every_call_is_inlined() {
+        let body = r#"
+func @twice(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = mul.i32 %0, %0
+    return %1
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @twice(%0) : (i32) -> i32
+    return %1
+}
+"#;
+        let out = inlined(body);
+        assert_eq!(out.matches("mul ").count(), 1, "{out}");
+        assert!(!out.contains("linkage(internal)"), "{out}");
+        let kept = inlined(&body.replace("attrs(always_inline)", "attrs(always_inline, used)"));
+        assert_eq!(kept.matches("mul ").count(), 2, "{kept}");
+    }
+
+    /// An `i` operand the caller passed as arithmetic over constants is the constant once the call
+    /// is inlined, at `-O0` too, the way `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC` has to be.
+    #[test]
+    fn an_asm_operand_passed_as_constant_arithmetic_is_the_constant_once_inlined() {
+        let out = inlined(
+            r#"
+func @round(i32), linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    inline_asm.volatile "roundps %0, %%xmm0, %%xmm0", "i", "xmm0"(%0)
+    return
+}
+
+func @g(), linkage(external) {
+block0:
+    %0 = iconst.i32 8
+    %1 = iconst.i32 1
+    %2 = or.i32 %0, %1
+    call @round(%2) : (i32)
+    return
+}
+"#,
+        );
+        assert!(out.contains("iconst.i32 9"), "{out}");
+        assert!(!out.contains("or."), "{out}");
     }
 
     /// The anonymous arguments of the outer call are what the pack stands for, and the out of line
