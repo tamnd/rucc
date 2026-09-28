@@ -301,6 +301,15 @@ pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
 /// there so one very long function does not make its caller one that takes minutes to compile.
 pub const INLINE_CALLED_ONCE_INSNS: u32 = 4000;
 
+/// How many loops deep the one call to a `static` function may be and still be inlined there, per
+/// section 33.1.
+///
+/// GCC's `max-inline-functions-called-once-loop-depth`, counting the way GCC counts, so a call in no
+/// loop is zero deep and a call in one loop is one deep. A body copied into the middle of a deep
+/// nest makes the innermost loop large for a call that may run rarely, and past this the call is
+/// left alone however small the body is.
+pub const INLINE_CALLED_ONCE_LOOP_DEPTH: u32 = 6;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -818,6 +827,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "33.1",
         gcc: "max-inline-functions-called-once-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_CALLED_ONCE_LOOP_DEPTH",
+        value: 6,
+        unit: "loops",
+        document: "33.1",
+        gcc: "max-inline-functions-called-once-loop-depth",
         provenance: Provenance::Gcc,
     },
     Constant {

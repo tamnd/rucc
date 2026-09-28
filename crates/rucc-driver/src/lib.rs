@@ -1683,12 +1683,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `always_inline` alone, which is what it does in gcc.
             "-finline" => opts.passes.push((rucc_opt::inline::NAME.to_owned(), true)),
             "-fno-inline" => opts.passes.push((rucc_opt::inline::NAME.to_owned(), false)),
+            // The called once half of the same step, on its own, which leaves the `inline` hint and
+            // `always_inline` as they are. tamnd/rucc#1966.
+            "-finline-functions-called-once" => {
+                opts.passes.push((rucc_opt::inline::ONCE.to_owned(), true));
+            }
+            "-fno-inline-functions-called-once" => {
+                opts.passes.push((rucc_opt::inline::ONCE.to_owned(), false));
+            }
             "-finline-functions"
             | "-fno-inline-functions"
             | "-finline-small-functions"
-            | "-fno-inline-small-functions"
-            | "-finline-functions-called-once"
-            | "-fno-inline-functions-called-once" => {}
+            | "-fno-inline-small-functions" => {}
             "-foptimize-strlen" | "-fno-optimize-strlen" => {}
             "-fira-share-spill-slots" | "-fno-ira-share-spill-slots" => {}
             // Where a function starts, which is a thing this compiler already decides and so is a
@@ -3973,6 +3979,16 @@ mod tests {
     fn no_inline_turns_off_the_inlining_of_a_function_declared_inline() {
         let (opts, _) = compile(&["-c", "-O2", "-fno-inline", "a.c"]);
         assert_eq!(opts.passes, [(rucc_opt::inline::NAME.to_owned(), false)]);
+    }
+
+    #[test]
+    fn inlining_a_function_called_once_is_turned_off_and_on_by_its_own_flag() {
+        for level in ["-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og"] {
+            let (opts, _) = compile(&["-c", level, "-fno-inline-functions-called-once", "a.c"]);
+            assert_eq!(opts.passes, [(rucc_opt::inline::ONCE.to_owned(), false)], "{level}");
+            let (opts, _) = compile(&["-c", level, "-finline-functions-called-once", "a.c"]);
+            assert_eq!(opts.passes, [(rucc_opt::inline::ONCE.to_owned(), true)], "{level}");
+        }
     }
 
     #[test]
