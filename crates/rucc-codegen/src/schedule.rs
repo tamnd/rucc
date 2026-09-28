@@ -223,6 +223,7 @@ pub struct Scheduled {
 ///
 /// `stack` is the stack pointer and the file it is in, since a write of it is ordered against
 /// memory like an access is.
+#[allow(clippy::too_many_arguments)]
 pub fn insts(
     func: &mut Func,
     stack: (PhysReg, RegClass),
@@ -881,7 +882,16 @@ mod tests {
 
         let (mut held, block) = build(&mut names);
         let second = held.insts(block).nth(1).expect("the second move");
-        insts(&mut held, &TIMING, &MACHINE, &FLAGS, &names, false, &HashSet::from([second]));
+        insts(
+            &mut held,
+            (RSP, GPR),
+            &TIMING,
+            &MACHINE,
+            &FLAGS,
+            &names,
+            false,
+            &HashSet::from([second]),
+        );
         assert_eq!(
             shape(&held, &names, block),
             ["mov_rr_64", "mov_rr_64", "imul_rr_64", "ret"],
@@ -1028,7 +1038,7 @@ mod tests {
 
         let mut names = Interner::new();
         let (mut loose, block) = build(&mut names);
-        insts(&mut loose, &TIMING, &MACHINE, &FLAGS, &names, false, &HashSet::new());
+        insts(&mut loose, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, &names, false, &HashSet::new());
         assert_eq!(
             shape(&loose, &names, block),
             ["addsd_rr", "addsd_rr", "addsd_rr", "mov_rr_64", "ret"],
@@ -1036,7 +1046,7 @@ mod tests {
         );
 
         let (mut tight, block) = build(&mut names);
-        insts(&mut tight, &TIMING, &MACHINE, &FLAGS, &names, true, &HashSet::new());
+        insts(&mut tight, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, &names, true, &HashSet::new());
         assert_eq!(
             shape(&tight, &names, block),
             ["addsd_rr", "addsd_rr", "mov_rr_64", "addsd_rr", "ret"],
