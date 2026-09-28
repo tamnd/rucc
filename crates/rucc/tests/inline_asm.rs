@@ -505,6 +505,29 @@ fn a_byte_directive_that_is_not_bytes_is_kept_as_the_text_it_was() {
 }
 
 #[test]
+fn a_long_double_operand_is_pushed_onto_the_x87_stack_and_popped_off_it() {
+    // The statement glibc's old `<bits/mathinline.h>` wrote for `sqrtl`. The input is tied to the
+    // output, so the template pops it and pushes the answer, and the answer is popped into its slot.
+    let source = "long double f(long double x) { long double r; \
+                  __asm__ (\"fsqrt\" : \"=t\" (r) : \"0\" (x)); return r; }\n";
+    let body = body(&asm("x87", source), "f");
+    let push = body.find("fldt").unwrap_or_else(|| panic!("nothing was pushed:\n{body}"));
+    let run = body.find("fsqrt").unwrap_or_else(|| panic!("the template is missing:\n{body}"));
+    let pop = body[run..].find("fstpt").unwrap_or_else(|| panic!("nothing was popped:\n{body}"));
+    assert!(push < run && pop > 0, "{body}");
+}
+
+#[test]
+fn an_x87_input_the_template_leaves_on_the_stack_is_refused() {
+    // Nothing ties the input to an output and the clobber list does not say it is popped, so the
+    // template leaves it behind, and nothing here pops what a template left.
+    let source = "void f(long double x) { __asm__ volatile (\"fld %%st\" : : \"t\" (x)); }\n";
+    let (ok, _, said) = run("x87-left", source);
+    assert!(!ok, "a statement that leaves the stack deeper than it found it was accepted");
+    assert!(said.contains("operand"), "{said}");
+}
+
+#[test]
 fn an_asm_goto_that_jumps_says_what_is_missing_too() {
     let source =
         "int f(int x) { asm goto (\"jmp %l0\" : : : : away); return x; away: return 0; }\n";

@@ -2123,6 +2123,33 @@ static ENCODINGS: &[Encoding] = &[
     // whether it is done, so the loop around it reads the word into `ax` and tests a bit. The
     // register form only ever names `ax`, so its operand picks the row and is not written out.
     bytes("fprem", &NO_ARGS, Long, &[0xD9, 0xF8], NO_MODRM, NO_IMM),
+    // The rest of the instructions that take no operand and work on the top of the stack, or on
+    // the top two, or push a constant. The compiler writes none of them. They are here because an
+    // `asm` statement over a `long double` names them, and glibc's old `<bits/mathinline.h>` is a
+    // file of exactly that: `fpatan` for `atan2l`, `fsqrt` for `sqrtl`, `fyl2x` for `logl`, and the
+    // constants loaded with the instruction that has each one inside it.
+    bytes("f2xm1", &NO_ARGS, Long, &[0xD9, 0xF0], NO_MODRM, NO_IMM),
+    bytes("fyl2x", &NO_ARGS, Long, &[0xD9, 0xF1], NO_MODRM, NO_IMM),
+    bytes("fptan", &NO_ARGS, Long, &[0xD9, 0xF2], NO_MODRM, NO_IMM),
+    bytes("fpatan", &NO_ARGS, Long, &[0xD9, 0xF3], NO_MODRM, NO_IMM),
+    bytes("fxtract", &NO_ARGS, Long, &[0xD9, 0xF4], NO_MODRM, NO_IMM),
+    bytes("fprem1", &NO_ARGS, Long, &[0xD9, 0xF5], NO_MODRM, NO_IMM),
+    bytes("fyl2xp1", &NO_ARGS, Long, &[0xD9, 0xF9], NO_MODRM, NO_IMM),
+    bytes("fsqrt", &NO_ARGS, Long, &[0xD9, 0xFA], NO_MODRM, NO_IMM),
+    bytes("fsincos", &NO_ARGS, Long, &[0xD9, 0xFB], NO_MODRM, NO_IMM),
+    bytes("frndint", &NO_ARGS, Long, &[0xD9, 0xFC], NO_MODRM, NO_IMM),
+    bytes("fscale", &NO_ARGS, Long, &[0xD9, 0xFD], NO_MODRM, NO_IMM),
+    bytes("fsin", &NO_ARGS, Long, &[0xD9, 0xFE], NO_MODRM, NO_IMM),
+    bytes("fcos", &NO_ARGS, Long, &[0xD9, 0xFF], NO_MODRM, NO_IMM),
+    bytes("ftst", &NO_ARGS, Long, &[0xD9, 0xE4], NO_MODRM, NO_IMM),
+    bytes("fxam", &NO_ARGS, Long, &[0xD9, 0xE5], NO_MODRM, NO_IMM),
+    bytes("fld1", &NO_ARGS, Long, &[0xD9, 0xE8], NO_MODRM, NO_IMM),
+    bytes("fldl2t", &NO_ARGS, Long, &[0xD9, 0xE9], NO_MODRM, NO_IMM),
+    bytes("fldl2e", &NO_ARGS, Long, &[0xD9, 0xEA], NO_MODRM, NO_IMM),
+    bytes("fldpi", &NO_ARGS, Long, &[0xD9, 0xEB], NO_MODRM, NO_IMM),
+    bytes("fldlg2", &NO_ARGS, Long, &[0xD9, 0xEC], NO_MODRM, NO_IMM),
+    bytes("fldln2", &NO_ARGS, Long, &[0xD9, 0xED], NO_MODRM, NO_IMM),
+    bytes("fldz", &NO_ARGS, Long, &[0xD9, 0xEE], NO_MODRM, NO_IMM),
     bytes("fnstsw", &R, Long, &[0xDF, 0xE0], NO_MODRM, NO_IMM),
     bytes("fnstsw", &M, Long, &[0xDD], ext(0, 7), NO_IMM),
 ];
@@ -3113,6 +3140,10 @@ mod tests {
         assert_eq!(op("fucomip"), "df e9");
         assert_eq!(hex("fstp", &[Value::Stack]), "dd d8");
         assert_eq!(hex("fprem", &[]), "d9 f8");
+        assert_eq!(hex("fpatan", &[]), "d9 f3");
+        assert_eq!(hex("fsqrt", &[]), "d9 fa");
+        assert_eq!(hex("fldpi", &[]), "d9 eb");
+        assert_eq!(hex("fldz", &[]), "d9 ee");
         assert_eq!(hex("fnstsw", &[Value::Reg(RAX, Width::Word)]), "df e0");
     }
 
