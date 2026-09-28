@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A build without `-g` no longer works out where each local is over which instructions, which only the debugging information reads. That was the back end's single largest cost on a big function: which value each local holds on the way into each block is a walk over every block for every local. On jtckdint's `test.c` at `-O2` the build runs 67.20G instructions instead of 72.39G and takes a third fewer page faults, and the assembly with and without `-g` is the same (#2090).
 - The pass that folds loads into the instructions that use them asks about each opcode once per function instead of once per instruction, where it used to walk fold tables of over a hundred rows comparing names. On jtckdint's `test.c` at `-O2` the build runs 72.38G instructions instead of 74.04G, with the same assembly (#2084).
 - The pass that drops redundant x86-64 compares asks the target's description about each opcode once per function instead of once per instruction. On jtckdint's `test.c` at `-O2` the build runs 74.04G instructions instead of 75.17G, with the same assembly (#2082).
 - The pass that picks shorter x86-64 instructions asks the target's tables about each opcode once per function instead of once per instruction. It used to walk five or six of those tables comparing names for every instruction, and nearly every answer was no. On jtckdint's `test.c` at `-O2` the build runs 75.18G instructions instead of 78.57G (#2078).
