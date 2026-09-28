@@ -9499,16 +9499,14 @@ block2:
     /// `an_asm_at_file_scope_with_an_instruction_in_it_is_assembled` covers.
     #[test]
     fn a_directive_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
-        for source in ["__asm__(\".data\\n.set alias, 4\\n\");\n"] {
-            let messages = errors(source);
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("not supported yet")
-                        && m.contains("in an `asm` at file scope")),
-                "{source}\n{messages:?}"
-            );
-        }
+        let source = "__asm__(\".data\\n.set alias, 4\\n\");\n";
+        let messages = errors(source);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("not supported yet") && m.contains("in an `asm` at file scope")),
+            "{source}\n{messages:?}"
+        );
     }
 
     /// micropython's `nlr_push`, which is the program that asks for all of this. The body is the
