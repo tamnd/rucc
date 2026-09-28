@@ -505,11 +505,21 @@ fn a_byte_directive_that_is_not_bytes_is_kept_as_the_text_it_was() {
 }
 
 #[test]
-fn an_asm_goto_says_what_is_missing_too() {
-    let source = "int f(int x) { asm goto (\"\" : : : : away); return x; away: return 0; }\n";
+fn an_asm_goto_that_jumps_says_what_is_missing_too() {
+    let source =
+        "int f(int x) { asm goto (\"jmp %l0\" : : : : away); return x; away: return 0; }\n";
     let (ok, _, said) = run("goto", source);
-    assert!(!ok, "an `asm goto` was accepted");
+    assert!(!ok, "an `asm goto` with a jump in it was accepted");
     assert!(said.contains("jumps to a label"), "{said}");
+}
+
+#[test]
+fn an_asm_goto_with_nothing_in_it_falls_through() {
+    // What the torture suite writes to tell the optimizer a label can be reached without saying
+    // how. There is no instruction in the template to jump with, so the function returns `x`.
+    let source = "int f(int x) { asm goto (\"\" : : : : away); return x; away: return 0; }\n";
+    let body = body(&asm("goto-empty", source), "f");
+    assert!(body.contains("ret"), "{body}");
 }
 
 #[test]
