@@ -150,12 +150,15 @@ fn nothing_is_said_after_the_last_instruction() {
     }
 }
 
-/// The other formats do not read these directives, and Mach-O has its own answer to the same
-/// question. Handing them ELF's would be a file their assembler refuses.
+/// COFF does not read these directives and has its own answer to the same question, so handing
+/// it ELF's would be a file its assembler refuses. Apple's assembler reads them the way gas does
+/// and builds the table ld64 wants out of them, so a Mac gets them.
 #[test]
 fn a_format_without_this_table_is_not_given_one() {
-    let text = asm("darwin", &["--target=x86_64-apple-darwin"], SHAPES);
+    let text = asm("windows", &["--target=x86_64-w64-mingw32"], SHAPES);
     assert!(!text.contains(".cfi"), "{text}");
+    let text = asm("darwin", &["--target=x86_64-apple-darwin"], SHAPES);
+    assert_eq!(text.matches(".cfi_startproc").count(), 3, "{text}");
 }
 
 /// A build can say nothing will ever walk it, which is what a kernel says, and then there is no

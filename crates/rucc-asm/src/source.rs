@@ -250,9 +250,6 @@ impl Reader {
         // Before anything else, so that a file which never names a section still has one and a
         // stray directive has somewhere to go. gas starts in `.text` and so does this.
         if self.macho {
-            // Nothing in this file writes the unwind table for Mach-O yet, and ld64 does without
-            // one for a function that has no entry, so the rules are read and then dropped.
-            self.no_unwind = true;
             self.apple_section("__TEXT", "__text", None, &[])?;
         } else {
             self.section(".text", Shape::of(".text"));
@@ -1562,19 +1559,33 @@ impl Reader {
             .collect();
         let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
         let conv: &CallRegs = if self.aarch64 { &AAPCS64 } else { &SYSV };
-        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, ObjectFormat::Elf) else {
+        let format = if self.macho { ObjectFormat::MachO } else { ObjectFormat::Elf };
+        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format) else {
             return;
         };
         for frame in &self.frames {
             self.relocated.insert(frame.sym);
         }
+        // Where clang puts it on a Mac, with the flags it gives it: records the linker may merge
+        // with another file's, and a section it keeps whenever it keeps the code the records
+        // point at, rather than one it drops because nothing names it.
+        let (name, shape) = if self.macho {
+            let attributes = ["no_toc", "strip_static_syms", "live_support"];
+            let Ok(shape) = Shape::mach("__TEXT", "__eh_frame", Some("coalesced"), &attributes)
+            else {
+                return;
+            };
+            ("__TEXT,__eh_frame", shape)
+        } else {
+            (".eh_frame", Shape { alloc: true, bits: true, ..Shape::default() })
+        };
         let size = table.bytes.len() as u64;
         self.parts.push(Part {
-            name: ".eh_frame".to_owned(),
+            name: name.to_owned(),
             bytes: table.bytes,
             size,
             align: 8,
-            shape: Shape { alloc: true, bits: true, ..Shape::default() },
+            shape,
             relocs: table.relocs,
         });
     }
@@ -2743,6 +2754,37 @@ mod tests {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
+    }
+
+    /// The frame rules of a Mac listing make the same table as on ELF, in the section and with the
+    /// flags clang gives it there, and each record names a place at the front of its function,
+    /// which the object writer turns into the function's own name.
+    #[test]
+    fn a_mac_listing_with_frame_rules_has_an_unwind_table() {
+        let text = "\t.section\t__TEXT,__text,regular,pure_instructions
+\t.globl\t_f
+_f:
+\t.cfi_startproc
+\tstp x29, x30, [sp, #-16]!
+\t.cfi_def_cfa_offset 16
+\tldp x29, x30, [sp], #16
+\tret
+\t.cfi_endproc
+\t.subsections_via_symbols
+";
+        let done = match read_as(text, Arch::Aarch64, ObjectFormat::MachO) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let table = done.parts.iter().find(|part| part.name == "__TEXT,__eh_frame").expect("one");
+        // `S_COALESCED` in the type byte and `S_ATTR_LIVE_SUPPORT` among the attributes.
+        assert_eq!(table.shape.mach & 0x0800_00ff, 0x0800_000b);
+        let rows = [0x44, 0x0e, 0x10];
+        assert!(table.bytes.windows(rows.len()).any(|at| at == rows), "{:x?}", table.bytes);
+        let [reloc] = table.relocs.as_slice() else { panic!("one record, one relocation") };
+        assert_eq!(reloc.kind, Reference::Data);
+        let at = |wanted: &str| done.names.iter().find(|name| name.name == wanted).unwrap().at;
+        assert_eq!(at(&reloc.symbol), at("_f"));
     }
 
     #[test]

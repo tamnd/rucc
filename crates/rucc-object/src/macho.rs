@@ -38,7 +38,8 @@ use object::macho;
 use object::write::SymbolSection;
 use object::write::{MachOBuildVersion, Mangling, Object as Writer, Relocation, Symbol};
 use object::{
-    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionFlags, SectionKind, SymbolFlags,
+    Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
+    SectionFlags, SectionKind, SymbolFlags,
 };
 use rucc_target::TargetInfo;
 use rucc_target::aarch64::Fixup;
@@ -189,6 +190,19 @@ const ADDEND: i64 = 1 << 23;
 /// literal load have no relocation on this format at all, and the assembler resolves every one of
 /// those that stays inside a section.
 pub(crate) fn reloc(reference: Reference, addend: i64) -> Result<RelocationFlags, String> {
+    // A four byte distance from where it is written, which is how an unwind record says where its
+    // function and its common record are. arm64 has no relocation for a distance in data, and the
+    // way the format says one is an `ARM64_RELOC_SUBTRACTOR` naming the place, followed by an
+    // `ARM64_RELOC_UNSIGNED` naming the target, with what is added kept in the bytes. The writer
+    // underneath makes that pair from a generic distance, against a name it puts at the front of
+    // the section the distance is written in, which is what clang's records do as well.
+    if reference == Reference::Data {
+        return Ok(RelocationFlags::Generic {
+            kind: RelocationKind::Relative,
+            encoding: RelocationEncoding::Generic,
+            size: 32,
+        });
+    }
     let (r_type, r_pcrel, r_length) = match reference {
         Reference::Field(Fixup::Call26 | Fixup::Jump26) => (macho::ARM64_RELOC_BRANCH26, true, 2),
         Reference::Field(Fixup::AdrPage21) => (macho::ARM64_RELOC_PAGE21, true, 2),
@@ -460,6 +474,39 @@ mod tests {
         let object::RelocationTarget::Symbol(index) = reloc.target() else { panic!() };
         assert_eq!(file.symbol_by_index(index).unwrap().name(), Ok("_s"));
         assert_eq!(data.data().unwrap()[8], 3);
+    }
+
+    /// A distance an unwind record holds, which arm64 says as the place taken from the target:
+    /// a `SUBTRACTOR` naming the front of the table, then an `UNSIGNED` naming the function, with
+    /// the place's own offset taken off what the bytes hold. That is the pair clang writes and the
+    /// only one ld64 reads a record's distances as.
+    #[test]
+    fn a_distance_in_data_is_a_subtractor_and_an_unsigned() {
+        use object::read::macho::MachOFile64;
+
+        let text = part("__TEXT", "__text", vec![0; 8], 8);
+        let attributes = ["no_toc", "strip_static_syms", "live_support"];
+        let shape = Shape::mach("__TEXT", "__eh_frame", Some("coalesced"), &attributes).unwrap();
+        let mut frames = Part { shape, ..part("__TEXT", "__eh_frame", vec![0; 32], 32) };
+        let kind = Reference::Data;
+        frames.relocs.push(Reloc { at: 8, symbol: "_f".into(), kind, addend: 0, after: 0 });
+        let mut f = name("_f", 0, 0, Binding::Global);
+        f.sort = Sort::Func;
+        let input = Assembled { parts: vec![text, frames], names: vec![f], subsections: true };
+        let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        let bytes = write(&input, &target).unwrap();
+        let file = MachOFile64::<Endianness>::parse(&bytes[..]).unwrap();
+        let section = file.section_by_name("__eh_frame").unwrap();
+        let pairs: Vec<_> = section
+            .macho_relocations()
+            .unwrap()
+            .iter()
+            .map(|reloc| reloc.info(Endianness::Little))
+            .map(|info| (info.r_address, info.r_type, info.r_extern, info.r_length))
+            .collect();
+        let subtractor = (8, macho::ARM64_RELOC_SUBTRACTOR, true, 2);
+        assert_eq!(pairs, [subtractor, (8, macho::ARM64_RELOC_UNSIGNED, true, 2)]);
+        assert_eq!(section.data().unwrap()[8..12], (-8i32).to_le_bytes());
     }
 
     #[test]

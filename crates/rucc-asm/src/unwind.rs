@@ -131,12 +131,29 @@ pub(crate) fn table(
     match format {
         ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv)),
         ObjectFormat::Coff => windows(funcs, rows, conv),
-        // Nothing, because the other two answer the question their own way and neither is written
-        // yet. Mach-O has a compact table of its own beside the DWARF one, and a WebAssembly module
-        // is not a stack a table would describe. A table under a name their linker does not know is
-        // a section nothing ever looks at, which is worse than none: it is the same bytes and the
-        // same failure to unwind, with the size of the object spent on it.
-        ObjectFormat::MachO | ObjectFormat::Wasm => Ok(Unwind::default()),
+        // The same DWARF records, in `__TEXT,__eh_frame`, which ld64 reads and turns into the
+        // compact table the unwinder searches, one entry per function that points back at its
+        // record. That compact table can also be written by the compiler, and a function whose
+        // prologue fits one of its shapes then needs no record at all, but that only makes the
+        // image smaller and is left for later. The record's pointers are the same distances they
+        // are on ELF, and the object writer says each as the pair of relocations Mach-O spells a
+        // distance with. See `rucc_object::macho::reloc`.
+        //
+        // Without a personality routine or a call site table for now: the routine's pointer is a
+        // slot gcc's runtime fills in on ELF and the table's section is ELF's, and Apple has its
+        // own spelling of both. So a function with a landing pad is unwound through and its
+        // cleanups are not run, which is the same as what a program built without `-fexceptions`
+        // does and better than an unwinder that stops at the first frame of ours it meets.
+        ObjectFormat::MachO => {
+            let bare: Vec<Extent> =
+                funcs.iter().map(|func| Extent { landings: Vec::new(), ..func.clone() }).collect();
+            Ok(dwarf(&bare, rows, conv))
+        }
+        // Nothing, because a WebAssembly module is not a stack a table would describe. A table
+        // under a name its linker does not know is a section nothing ever looks at, which is worse
+        // than none: it is the same bytes and the same failure to unwind, with the size of the
+        // object spent on it.
+        ObjectFormat::Wasm => Ok(Unwind::default()),
     }
 }
 
@@ -1101,13 +1118,27 @@ mod tests {
         assert!(refused(long).contains("longer than"), "a prologue no record can count in a byte");
     }
 
-    /// The other formats get nothing rather than a table under a name their linker has never heard
-    /// of, which would be the same bytes and the same failure to unwind with the size spent on it.
+    /// WebAssembly gets nothing rather than a table under a name its linker has never heard of,
+    /// which would be the same bytes and the same failure to unwind with the size spent on it.
     #[test]
     fn a_format_whose_table_is_not_written_yet_gets_no_section() {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
-        let mach = table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::MachO).expect("nothing");
-        assert_eq!(mach, Unwind::default());
+        let wasm = table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Wasm).expect("nothing");
+        assert_eq!(wasm, Unwind::default());
+    }
+
+    /// Mach-O gets ELF's records, and a function with a landing pad gets one without the routine
+    /// and the call site table, which are spelled in ELF's terms. See [`table`].
+    #[test]
+    fn a_mach_o_table_is_the_dwarf_one_without_a_personality() {
+        let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
+        let elf = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::Elf).unwrap();
+        let mach = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::MachO).unwrap();
+        assert_eq!(mach, elf);
+        let mut pad = func("f", 8);
+        pad.landings = vec![rucc_object::Site { start: 0, len: 4, pad: 6 }];
+        let mach = table(&[pad], &rows, &SYSV, ObjectFormat::MachO).unwrap();
+        assert_eq!(mach, elf);
     }
 
     /// The debugger's copy of a function that pushes its frame pointer: a header marked with all
