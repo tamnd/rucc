@@ -2368,6 +2368,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Apple platform has one: anywhere else a version on the tuple is a libc or a preview number.
     if opts.target.os == rucc_target::Os::Darwin {
         opts.os_version = min_version.or_else(|| pinned.and_then(TargetTuple::os_version));
+        link.os_version = opts.os_version;
     }
     // After the loop rather than where `-pthread` was read, so that it lands after the objects
     // that refer to it. A static link takes the definitions it needs from a library when it
