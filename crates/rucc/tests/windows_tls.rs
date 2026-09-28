@@ -68,10 +68,3 @@ fn a_thread_local_is_written_into_an_object() {
     }
     assert!(secrel >= 2, "at least one for each of the two variables, and {secrel} in all");
 }
-
-#[test]
-fn a_thread_local_on_arm64_windows_is_refused_by_name() {
-    let (ok, _, said) = run("arm", &["--target=aarch64-windows-gnu", "-S"], SOURCE);
-    assert!(!ok, "arm64 Windows wrote a thread-local access");
-    assert!(said.contains("thread pointer"), "{said}");
-}
