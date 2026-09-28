@@ -36,11 +36,9 @@
 //!
 //! # Status
 //!
-//! Two of the three flavours. The System V one, which every ELF target's `ar` writes and which
-//! mingw-w64 writes too, and the COFF one, which is Microsoft's and has two indexes. The BSD one,
-//! which is what Darwin wants, is not here: `rucc-object` does not write Mach-O objects yet, so
-//! there would be nothing to put in it, and a writer for a format with no members is a writer
-//! nobody has run.
+//! All three flavours. The System V one, which every ELF target's `ar` writes and which mingw-w64
+//! writes too, the COFF one, which is Microsoft's and has two indexes, and the BSD one, which is
+//! what Apple's `ld` reads and which is laid out the way `llvm-ar --format=darwin` lays it out.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -81,6 +79,14 @@ pub enum Flavour {
     /// read either, so writing one and not the other is a file that works until it meets the other
     /// linker.
     Coff,
+    /// One index, in a member called `__.SYMDEF`, with a string offset and a member offset per name,
+    /// little-endian.
+    ///
+    /// What Apple's `ar` and `libtool` write and the only index ld64 reads. Every member carries its
+    /// name after its header rather than in it, `#1/` and a length being what the header says, and
+    /// the name is padded with zero bytes so that the object after it starts on an eight byte
+    /// boundary. ld64 reads a 64 bit object in place and refuses one that is not aligned that way.
+    Bsd,
 }
 
 /// One member of an archive: what it is called, what is in it, and what it answers for.
@@ -164,6 +170,8 @@ pub fn write(flavour: Flavour, members: &[Member]) -> Result<Vec<u8>, Error> {
         Flavour::Coff => {
             vec![("/", Mode::Zero, first(&flat)), ("/", Mode::Zero, second(members.len(), &flat))]
         }
+        // The BSD index is laid out differently enough that it is written on its own.
+        Flavour::Bsd => return bsd(members),
     };
     if let Some(long) = long {
         special.push(("//", Mode::Blank, long));
@@ -233,7 +241,7 @@ fn headers(flavour: Flavour, members: &[Member]) -> (Vec<String>, Option<Vec<u8>
                     // slash a short name carries and a newline so the member reads as text, and COFF
                     // terminates with a zero byte.
                     Flavour::Gnu => table.extend_from_slice(b"/\n"),
-                    Flavour::Coff => table.push(0),
+                    Flavour::Coff | Flavour::Bsd => table.push(0),
                 }
                 placed.push((one.name.as_str(), at));
                 at
@@ -303,6 +311,85 @@ fn second(members: usize, flat: &[(&str, usize)]) -> Vec<u8> {
     out
 }
 
+/// The name of the BSD index, which is a member like any other as far as the container goes.
+const SYMDEF: &str = "__.SYMDEF";
+
+/// A whole BSD archive: the index, then every member with its name in front of its body.
+///
+/// Laid out in one pass, since the index is the only member whose contents depend on where the
+/// others land and its own length depends only on the names in it. So its length is worked out
+/// first, every offset follows from it, and the bytes go out in order.
+fn bsd(members: &[Member]) -> Result<Vec<u8>, Error> {
+    // The names in the index, each once per member that defines it, in member order. Unsorted, which
+    // is why the member is `__.SYMDEF` and not `__.SYMDEF SORTED`: ld64 reads both and builds its own
+    // table either way, and member order is what `llvm-ar` writes.
+    let mut strings = Vec::new();
+    let mut entries: Vec<(u32, usize)> = Vec::new();
+    for (at, one) in members.iter().enumerate() {
+        for define in &one.defines {
+            entries.push((strings.len() as u32, at));
+            strings.extend_from_slice(define.as_bytes());
+            strings.push(0);
+        }
+    }
+    // The string table is padded inside its own count so that the index as a whole is a multiple of
+    // eight, which keeps the first object aligned without the index needing a pad of its own.
+    while strings.len() % 8 != 0 {
+        strings.push(0);
+    }
+    let table = 4 + 8 * entries.len() + 4 + strings.len();
+
+    let mut at = MAGIC.len();
+    let index = at;
+    at += HEADER + bsd_name(index, SYMDEF).len() + table;
+    let mut offsets = Vec::with_capacity(members.len());
+    for one in members {
+        offsets.push(at);
+        at += HEADER + bsd_name(at, &one.name).len() + eight(one.body.len());
+    }
+    if at > u32::MAX as usize {
+        return Err(Error::TooBig { bytes: at });
+    }
+
+    let mut out = Vec::from(MAGIC);
+    let name = bsd_name(index, SYMDEF);
+    header(&mut out, &format!("#1/{}", name.len()), Mode::Zero, name.len() + table);
+    out.extend_from_slice(&name);
+    u32le(&mut out, (8 * entries.len()) as u32);
+    for (string, member) in &entries {
+        u32le(&mut out, *string);
+        u32le(&mut out, offsets[*member] as u32);
+    }
+    u32le(&mut out, strings.len() as u32);
+    out.extend_from_slice(&strings);
+    for (one, at) in members.iter().zip(&offsets) {
+        let name = bsd_name(*at, &one.name);
+        let body = eight(one.body.len());
+        header(&mut out, &format!("#1/{}", name.len()), Mode::Object, name.len() + body);
+        out.extend_from_slice(&name);
+        out.extend_from_slice(&one.body);
+        // Newlines, as `llvm-ar` writes. A Mach-O reader stops where the load commands say the file
+        // ends, so what is after that is never read.
+        out.resize(out.len() + body - one.body.len(), b'\n');
+    }
+    Ok(out)
+}
+
+/// A member name as a BSD archive stores it after the header, with the zero bytes that bring the
+/// member's body to an eight byte boundary when the header starts at `at`.
+fn bsd_name(at: usize, name: &str) -> Vec<u8> {
+    let mut out = name.as_bytes().to_vec();
+    while (at + HEADER + out.len()) % 8 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+/// A length rounded up to the eight byte boundary a BSD member keeps.
+fn eight(length: usize) -> usize {
+    length.next_multiple_of(8)
+}
+
 /// Fills in the offsets of the big-endian index, one per name, pointing at the member that defines it.
 fn resolve(body: &mut [u8], flat: &[(&str, usize)], offsets: &[usize]) {
     for (index, (_, member)) in flat.iter().enumerate() {
@@ -348,20 +435,25 @@ enum Mode {
 /// laziness: a real modification time or a real uid would put the machine that built the library
 /// into the library, and then two builds of the same thing would not be the same file.
 fn member(out: &mut Vec<u8>, name: &str, mode: Mode, body: &[u8]) {
-    let (time, owner, mode) = match mode {
-        Mode::Zero => ("0", "0", "0"),
-        Mode::Blank => ("", "", ""),
-        Mode::Object => ("0", "0", "644"),
-    };
-    let header =
-        format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", name, time, owner, owner, mode, body.len());
-    out.extend_from_slice(header.as_bytes());
+    header(out, name, mode, body.len());
     out.extend_from_slice(body);
     if body.len() % 2 == 1 {
         // A newline rather than a zero, which is what `ar` has always written and what keeps a text
         // member readable when somebody looks at the file with a pager.
         out.push(b'\n');
     }
+}
+
+/// One member header, saying the member is `size` bytes long.
+fn header(out: &mut Vec<u8>, name: &str, mode: Mode, size: usize) {
+    let (time, owner, mode) = match mode {
+        Mode::Zero => ("0", "0", "0"),
+        Mode::Blank => ("", "", ""),
+        Mode::Object => ("0", "0", "644"),
+    };
+    let header =
+        format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", name, time, owner, owner, mode, size);
+    out.extend_from_slice(header.as_bytes());
 }
 
 /// A length rounded up to the even boundary a member starts on.
@@ -489,9 +581,88 @@ mod tests {
 
     #[test]
     fn an_archive_with_no_members_is_the_magic_and_nothing_else() {
-        for flavour in [Flavour::Gnu, Flavour::Coff] {
+        for flavour in [Flavour::Gnu, Flavour::Coff, Flavour::Bsd] {
             assert_eq!(write(flavour, &[]).expect("eight bytes"), MAGIC);
         }
+    }
+
+    /// A BSD member split into the name stored after its header and the body after that, with the
+    /// place in the file the body starts.
+    fn bsd_member(at: usize, header: &str, body: &[u8]) -> (String, usize, Vec<u8>) {
+        let length: usize =
+            header.strip_prefix("#1/").expect("a name after the header").parse().expect("a length");
+        let name = body[..length].split(|byte| *byte == 0).next().expect("a name");
+        (
+            String::from_utf8(name.to_vec()).expect("a name"),
+            at + HEADER + length,
+            body[length..].to_vec(),
+        )
+    }
+
+    /// Apple's index: a string offset and a member offset per name, then the strings.
+    fn bsd_index(body: &[u8]) -> Vec<(String, usize)> {
+        let word = |at: usize| {
+            u32::from_le_bytes(body[at..at + 4].try_into().expect("four bytes")) as usize
+        };
+        let count = word(0) / 8;
+        let strings = &body[4 + 8 * count + 4..];
+        assert_eq!(word(4 + 8 * count), strings.len());
+        (0..count)
+            .map(|index| {
+                let from = word(4 + 8 * index);
+                let name = strings[from..].split(|byte| *byte == 0).next().expect("a name");
+                (String::from_utf8(name.to_vec()).expect("a name"), word(8 + 8 * index))
+            })
+            .collect()
+    }
+
+    /// ld64 reads the index from `__.SYMDEF` and each object in place, so every body has to start on
+    /// an eight byte boundary and every offset in the index has to be the header of the member that
+    /// defines the name.
+    #[test]
+    fn a_bsd_archive_indexes_each_name_and_aligns_each_object() {
+        let long = "a_member_name_longer_than_sixteen_bytes.o";
+        let archive = write(
+            Flavour::Bsd,
+            &[
+                one("f.o", b"odd", &["_f", "_g"]),
+                one(long, b"twelve bytes", &["_h"]),
+                one("empty.o", b"", &[]),
+            ],
+        )
+        .expect("an archive");
+        let found = members(&archive);
+        assert_eq!(found.len(), 4);
+        let parts: Vec<_> =
+            found.iter().map(|(at, header, body)| bsd_member(*at, header, body)).collect();
+        for (name, starts, _) in &parts {
+            assert_eq!(starts % 8, 0, "{name} starts at {starts}");
+        }
+        assert_eq!(parts[0].0, SYMDEF);
+        assert_eq!(parts[1].0, "f.o");
+        assert_eq!(&parts[1].2[..3], b"odd");
+        assert_eq!(parts[2].0, long);
+        assert_eq!(&parts[2].2[..12], b"twelve bytes");
+        assert_eq!(parts[3].0, "empty.o");
+        assert_eq!(
+            bsd_index(&parts[0].2),
+            [
+                ("_f".to_owned(), found[1].0),
+                ("_g".to_owned(), found[1].0),
+                ("_h".to_owned(), found[2].0)
+            ]
+        );
+        // The same members twice give the same bytes, which the index is where it would not.
+        let again = write(
+            Flavour::Bsd,
+            &[
+                one("f.o", b"odd", &["_f", "_g"]),
+                one(long, b"twelve bytes", &["_h"]),
+                one("empty.o", b"", &[]),
+            ],
+        )
+        .expect("an archive");
+        assert_eq!(archive, again);
     }
 
     #[test]
