@@ -94,6 +94,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         next_scope: 0,
         pinned: HashSet::new(),
         landings: HashMap::new(),
+        pads: HashMap::new(),
         jumps: Vec::new(),
         grows: false,
         cleans: false,
@@ -655,6 +656,11 @@ struct Body<'a, 'u> {
     /// stack back to. Only collected for a function that grows the stack, since nothing else
     /// asks.
     landings: HashMap<StmtId, Vec<Mark>>,
+    /// The landing pads built so far, by what each one does: the slot and the handler of every
+    /// call it makes, innermost first. A call whose open scopes owe exactly those calls goes to the
+    /// same pad rather than a copy of it, which is what gcc does. Keyed by the slots rather than
+    /// the declarations, so an object the walk gave a second slot gets a pad of its own.
+    pads: HashMap<Vec<(Value, DeclId)>, Block>,
     /// The jumps whose stack is not settled yet, which is all of them until the walk knows where
     /// every label is.
     jumps: Vec<Jump>,
@@ -1151,7 +1157,8 @@ impl<'u> Body<'_, 'u> {
     fn close(&mut self, span: Span) {
         let mark = self.marks.pop().expect("a scope is closed by whoever opened it");
         let owed = self.cleanups.pop().expect("a scope is closed by whoever opened it");
-        self.run_cleanups(&owed, span);
+        let outer = self.owed_now();
+        self.run_cleanups(&owed, &outer, span);
         let saved = self.released(&mark);
         self.restore(saved, span);
     }
@@ -1171,15 +1178,17 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// The handlers one scope owes, called in the reverse of the order the objects were declared.
-    fn run_cleanups(&mut self, owed: &[Cleanup], span: Span) {
+    ///
+    /// `outer` is what the scopes around it owe, innermost first, which together with the objects
+    /// of this scope not reached yet is what an unwind out of one of these calls still has to run.
+    fn run_cleanups(&mut self, owed: &[Cleanup], outer: &[Cleanup], span: Span) {
         if self.at.is_none() {
             return;
         }
-        for entry in owed.iter().rev() {
-            if let Some(inst) = self.cleanup_call(*entry, span) {
-                let block = self.block();
-                self.func.append_inst(block, inst);
-            }
+        for at in (0..owed.len()).rev() {
+            let after: Vec<Cleanup> =
+                owed[..at].iter().rev().chain(outer.iter()).copied().collect();
+            self.handler_call(owed[at], &after, span);
         }
     }
 
@@ -1218,9 +1227,11 @@ impl<'u> Body<'_, 'u> {
     /// This is what a `break`, a `continue` or a `return` leaving several blocks at once has to
     /// run, and the order is the order the blocks are left in.
     fn unwind_cleanups(&mut self, depth: usize, span: Span) {
-        let leaving: Vec<Vec<Cleanup>> = self.cleanups.get(depth..).unwrap_or_default().to_vec();
-        for owed in leaving.iter().rev() {
-            self.run_cleanups(owed, span);
+        let open = self.cleanups.clone();
+        for scope in (depth..open.len()).rev() {
+            let outer: Vec<Cleanup> =
+                open[..scope].iter().rev().flat_map(|owed| owed.iter().rev().copied()).collect();
+            self.run_cleanups(&open[scope], &outer, span);
         }
     }
 
@@ -7884,23 +7895,53 @@ impl<'u> Body<'_, 'u> {
         if !self.unit.exceptions || !self.owes_anything() || !self.has_landing_pads() {
             return;
         }
+        let owed = self.owed_now();
+        self.unwind_to(owed, span);
+    }
+
+    /// Every handler the open scopes owe, innermost first, which is the order an unwind runs them.
+    fn owed_now(&self) -> Vec<Cleanup> {
+        self.cleanups.iter().rev().flat_map(|scope| scope.iter().rev().copied()).collect()
+    }
+
+    /// The edge out of the call just built to the pad that runs `owed`, innermost first, and then
+    /// resumes the unwind, building the pad the first time those handlers are asked for.
+    ///
+    /// Calls that owe the same handlers share a pad, as gcc's do. What a pad does is the slot and
+    /// the handler of each call it makes, so that is what it is found by, and an object the walk
+    /// gave a second slot gets a pad of its own. A pad reads no variable, only those slots, so one
+    /// that is already sealed can take another edge without anything waiting on its predecessors.
+    ///
+    /// Each handler call in the pad but the last owes the handlers after it as well, since an
+    /// unwind out of one of them still leaves the objects further out behind, so each gets an edge
+    /// to the pad for what is left. That is gcc's chain of pads, one scope's handler running and
+    /// the next one out's pad taking over if it unwinds.
+    fn unwind_to(&mut self, owed: Vec<Cleanup>, span: Span) {
+        let key: Vec<(Value, DeclId)> = owed
+            .iter()
+            .filter_map(|entry| match self.vars.get(&entry.object) {
+                Some(&Local::Slot(slot)) => Some((slot, entry.handler)),
+                _ => None,
+            })
+            .collect();
         let unwound = self.build(span).value(InstData::new(Opcode::Unwound), Type::I1);
-        let pad = self.new_block();
         let next = self.new_block();
+        if let Some(&pad) = self.pads.get(&key) {
+            self.br_if(unwound, pad, next, span);
+            self.seal_once(next);
+            self.at = Some(next);
+            return;
+        }
+        let pad = self.new_block();
         self.br_if(unwound, pad, next, span);
         self.seal_once(pad);
         self.seal_once(next);
+        self.pads.insert(key, pad);
 
         self.at = Some(pad);
         let exception = self.build(span).value(InstData::new(Opcode::Landing), Type::PTR);
-        let owed: Vec<Vec<Cleanup>> = self.cleanups.clone();
-        for scope in owed.iter().rev() {
-            for entry in scope.iter().rev() {
-                if let Some(inst) = self.cleanup_call(*entry, span) {
-                    let block = self.block();
-                    self.func.append_inst(block, inst);
-                }
-            }
+        for (at, &entry) in owed.iter().enumerate() {
+            self.handler_call(entry, &owed[at + 1..], span);
         }
         self.unit.personality();
         let resume = self.unit.names.intern("_Unwind_Resume");
@@ -7908,6 +7949,18 @@ impl<'u> Body<'_, 'u> {
         self.build(span).call_varargs(resume, sig, &[exception], &[]);
         self.build(span).unreachable();
         self.at = Some(next);
+    }
+
+    /// One call to a handler where the walk is, followed by an edge to the pad for `after`, the
+    /// handlers still owed once it has run, innermost first. An unwind out of a handler leaves
+    /// those objects behind just as one out of any other call would, and gcc runs their handlers.
+    fn handler_call(&mut self, entry: Cleanup, after: &[Cleanup], span: Span) {
+        let Some(inst) = self.cleanup_call(entry, span) else { return };
+        let block = self.block();
+        self.func.append_inst(block, inst);
+        if self.unit.exceptions && !after.is_empty() && self.has_landing_pads() {
+            self.unwind_to(after.to_vec(), span);
+        }
     }
 
     /// A call, direct when the callee is a function and indirect when it is a pointer.

@@ -5358,6 +5358,34 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!result.text().contains("call @__cyg_profile"), "off unless asked for");
     }
 
+    /// Calls whose open scopes owe the same handlers share one landing pad, as gcc's do, and a call
+    /// after another object is declared, or once a scope has closed, gets the pad for what it owes
+    /// then. Here that is two pads for six calls. A handler is a call like any other, so one that
+    /// runs while an object further out still owes its own gets an edge to the pad for that.
+    #[test]
+    fn calls_that_owe_the_same_handlers_share_one_landing_pad() {
+        let source = concat!(
+            "void done(int *p);\n",
+            "void work(int);\n",
+            "void f(void) {\n",
+            "  int a __attribute__((cleanup(done))) = 1;\n",
+            "  work(1); work(2);\n",
+            "  { int b __attribute__((cleanup(done))) = 2; work(3); work(4); }\n",
+            "  work(5); work(6);\n",
+            "}\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.exceptions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        // Six for the calls to `work`, and one for the call to `done` that `b`'s scope makes on
+        // the way out, which still owes `a`'s. The one `b`'s pad makes goes to `a`'s pad too.
+        assert_eq!(text.matches("= unwound").count(), 8, "every call has its edge: {text}");
+        assert_eq!(text.matches("= landing").count(), 2, "one pad for a, one for b and a: {text}");
+    }
+
     /// Under `-fexceptions` a `cleanup` handler is owed a call on an unwind as well. On x86-64 ELF
     /// a call inside a handler's scope gets a landing pad that runs the handler and resumes the
     /// unwind, a handler with no call in its scope needs none, and without the flag the same source
