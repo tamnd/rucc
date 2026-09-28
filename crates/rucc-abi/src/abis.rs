@@ -51,7 +51,8 @@
 use rucc_tuple::{Arch, Os, TargetTuple};
 
 use crate::describe::{
-    AbiDescription, Banks, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel, Variadic,
+    AbiDescription, Banks, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel,
+    Variadic,
 };
 use crate::shape::Format;
 
@@ -91,6 +92,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
     return_pointer: ReturnPointer::FirstArgument,
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
 };
 
 /// The shared part of [`AAPCS64`] and [`DARWIN_ARM64`].
@@ -123,6 +125,7 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
     return_pointer: ReturnPointer::Dedicated,
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
 };
 
 /// AAPCS64: AArch64 everywhere but Darwin and Windows.
@@ -165,6 +168,7 @@ pub static DARWIN_ARM64: AbiDescription = AbiDescription {
     name: "Darwin arm64",
     variadic: Variadic::AlwaysMemory,
     stack_args: StackArgs::Packed,
+    narrow: Narrow::ToInt,
     ..AAPCS64_BASE
 };
 
@@ -218,6 +222,7 @@ pub static WIN64: AbiDescription = AbiDescription {
     // variadic argument as for a fixed one and the backend reads this field.
     variadic: Variadic::BothBanks,
     stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
 };
 
 /// The RISC-V LP64D psABI.
@@ -260,6 +265,7 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
     return_pointer: ReturnPointer::FirstArgument,
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
 };
 
 /// The i386 System V psABI: 32-bit x86 on Linux and the other ELF systems.
@@ -312,6 +318,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     // than by coincidence.
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
 };
 
 /// Every ABI described here, which is what the report and the tests iterate.

@@ -1433,10 +1433,14 @@ impl<'a> Lowering<'a> {
                 // write is an instruction leaving the value in a register, and this one is left on
                 // the x87 stack instead. A rule could not name that stack any more than any other
                 // rule about this type could.
+                //
+                // And a return the convention asks this side to extend, which a rule has no way to
+                // know about since the signature is what says so and not the value.
                 Opcode::Return
                     if self.source[self.source[inst].args].len() > 1
                         || self.sret().is_some()
-                        || self.gives_back_x87(inst) =>
+                        || self.gives_back_x87(inst)
+                        || self.widens_return() =>
                 {
                     let values = self.source[self.source[inst].args].to_vec();
                     self.returned(inst, values)?;
@@ -1714,6 +1718,13 @@ impl<'a> Lowering<'a> {
     ///
     /// Where everything goes is worked out before anything is written, so a return this cannot
     /// make leaves no half of one behind.
+    /// Whether a value this function gives back has to be extended first, which is Apple's arm64
+    /// asking the callee to fill the 32 bits above a `char` or a `short` by its sign.
+    fn widens_return(&self) -> bool {
+        let returns = &self.source.signature().returns;
+        returns.iter().any(|it| (self.selector.abi.extend)(it.ty, it.abi).is_some())
+    }
+
     /// Whether what a `return` gives back goes back on the x87 stack, per [`abi::back_on_x87`].
     fn gives_back_x87(&self, inst: Inst) -> bool {
         self.x87_values(&self.source[self.source[inst].args])
@@ -1744,7 +1755,12 @@ impl<'a> Lowering<'a> {
             }
             return Ok(());
         }
-        for value in self.sret().into_iter().chain(values) {
+        // What the signature says about the bits above a narrow one, which on an ABI that extends
+        // it is an obligation of this side: the caller reads the whole of the 32 bit register.
+        let asked: Vec<Abi> = self.source.signature().returns.iter().map(|it| it.abi).collect();
+        let asked = asked.into_iter().chain(std::iter::repeat(Abi::Plain));
+        let sret = self.sret().map(|value| (value, Abi::Plain));
+        for (value, abi) in sret.into_iter().chain(values.into_iter().zip(asked)) {
             let ty = self.source[value].ty;
             let at = if crate::term::in_vector_file(ty) { &mut floats } else { &mut ints };
             // Why it cannot come back, and not only that it cannot. A type that travels nowhere
@@ -1760,12 +1776,19 @@ impl<'a> Lowering<'a> {
                 name.strip_prefix(self.selector.prefix()).ok_or_else(|| self.unsupported(inst))?;
             let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
             let [desc] = descs else { return Err(self.unsupported(inst)) };
-            parts.push((self.names.intern(name), self.reg_of(value)?, *desc));
+            let widen = (self.selector.abi.extend)(ty, abi).map(|name| self.names.intern(name));
+            parts.push((self.names.intern(name), self.reg_of(value)?, *desc, widen));
         }
 
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        for (opcode, reg, desc) in parts {
+        for (opcode, mut reg, desc, widen) in parts {
+            if let Some(widen) = widen {
+                let wide = self.out.new_vreg(desc.class);
+                let build = self.out.build(block, mir::Opcode::new(widen)).at(span);
+                build.def(wide, desc.class).uses(reg, desc.class).finish();
+                reg = wide;
+            }
             let operand = mir::Operand {
                 reg,
                 class: desc.class,

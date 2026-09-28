@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- On Darwin arm64 a `char`, `short` or `bool` argument is extended to 32 bits by the caller and a return value of those types by the callee, as Apple's ABI requires. clang's code relies on this, so a clang caller used to read `256` back from a rucc function returning `(unsigned char)255`, and a clang callee saw `(char)200` as a positive number.
 - The `-S` output for a Darwin target assembles with Apple's assembler. A weak definition is `.globl` and `.weak_definition`, a weak reference is `.weak_reference`, and `.comm` gives its alignment as a power of two, where they were written the gas way and Apple's `as` either refused them or asked for the wrong boundary.
 
 ## 0.11.15

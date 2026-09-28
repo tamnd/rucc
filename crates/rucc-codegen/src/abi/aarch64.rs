@@ -7,7 +7,7 @@
 //! has no rule on this machine yet, so it has no name here either, and a function that passes one
 //! is refused at the argument rather than halfway through.
 
-use rucc_ir::Type;
+use rucc_ir::{Abi, Type};
 
 use super::{Insts, place};
 
@@ -21,7 +21,25 @@ pub static INSTS: Insts = Insts {
     call_reg: "a64.blr",
     lea: "a64.lea_64",
     small: "a64.mov_ri_32",
+    extend: extend_of,
 };
+
+/// What the instruction that extends a narrow integer to 32 bits is called, for a value the
+/// signature says travels extended.
+///
+/// Apple's arm64 is the one that says so, and it is the lowering's business to mark only what it
+/// asks for, so this answers for any mark it finds. A `bool` is one bit and is widened by keeping
+/// that bit, which is what the other side reads it as.
+fn extend_of(ty: Type, abi: Abi) -> Option<&'static str> {
+    match (abi, ty.bits()) {
+        (Abi::Zext, 1) => Some("a64.bit_to_32"),
+        (Abi::Sext, 8) => Some("a64.sxtb_32"),
+        (Abi::Sext, 16) => Some("a64.sxth_32"),
+        (Abi::Zext, 8) => Some("a64.uxtb_32"),
+        (Abi::Zext, 16) => Some("a64.uxth_32"),
+        _ => None,
+    }
+}
 
 /// What the pseudo for an argument of that type is called.
 fn head_of(ty: Type) -> Option<&'static str> {

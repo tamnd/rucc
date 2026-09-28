@@ -73,6 +73,8 @@ pub struct AbiDescription {
     /// half of it that happens to be classification, and because the backend that does read it
     /// should be reading it from the same place the tests are generated from.
     pub stack_args: StackArgs,
+    /// What an integer narrower than an `int` has above it in the register it travels in.
+    pub narrow: Narrow,
 }
 
 impl AbiDescription {
@@ -202,6 +204,21 @@ pub enum Variadic {
     ///
     /// Windows x64, because the callee of a variadic function does not know which bank to read.
     BothBanks,
+}
+
+/// What the bits above an integer narrower than an `int` are when it travels in a register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Narrow {
+    /// Anything. The side that receives the value reads only its own bits, which is every ELF ABI
+    /// here as their documents are written, whatever a particular compiler happens to leave.
+    Unspecified,
+    /// Extended to 32 bits by the type's own sign, by the caller for an argument and by the
+    /// callee for a return value.
+    ///
+    /// Darwin arm64, where clang's callee of `f(unsigned char)` returns its argument with a bare
+    /// `ret`, trusting the caller to have cleared bits 8 to 31, and its caller of a function
+    /// returning `unsigned char` compares all of `w0` without clearing them itself.
+    ToInt,
 }
 
 /// How arguments that did not get a register sit in the argument area.

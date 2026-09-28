@@ -655,9 +655,10 @@ pub enum Abi {
     Plain,
     /// An integer narrower than a register, with the bits above it its own sign.
     ///
-    /// Which of these an ABI asks for is not a property of the value: `unsigned char` is
-    /// [`Abi::Sext`] on the Darwin ABIs and [`Abi::Zext`] elsewhere, and on SysV neither the
-    /// caller nor the callee may assume anything about those bits at all.
+    /// Whether an ABI asks for either is not a property of the value: Darwin arm64 extends a
+    /// `char` or a `short` to 32 bits by its own sign on both sides of a call, so `signed char`
+    /// is [`Abi::Sext`] there and `unsigned char` is [`Abi::Zext`], and on SysV and AAPCS64
+    /// neither the caller nor the callee may assume anything about those bits at all.
     Sext,
     /// An integer narrower than a register, with zeroes above it.
     Zext,
