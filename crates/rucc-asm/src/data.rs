@@ -70,6 +70,22 @@ pub struct Globals {
     /// here that gcc does not put in. A linker has nothing to do about an undefined weak symbol
     /// nothing refers to, which is why that difference is a difference and not a bug.
     pub weak: Vec<String>,
+    /// The text of each `asm` at file scope with an instruction in it, in the order they were
+    /// written, which goes into the listing as it is. See `rucc_ir::Module::add_file_asm`.
+    ///
+    /// A unit with one is assembled from its listing, since only the assembler knows what the
+    /// template defines, which is why the driver asks [`Globals::kept`] beside
+    /// [`crate::kept`].
+    pub file_asm: Vec<String>,
+}
+
+impl Globals {
+    /// Whether anything here has to be read by the assembler, which today is an `asm` at file
+    /// scope with an instruction in it.
+    #[must_use]
+    pub fn kept(&self) -> bool {
+        !self.file_asm.is_empty()
+    }
 }
 
 /// One global variable, as the pieces of its image and what the linker is told about it.
@@ -263,6 +279,7 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
             out.weak.push(names.resolve(global.name).to_owned());
         }
     }
+    out.file_asm = module.file_asms().to_vec();
     Ok(out)
 }
 
@@ -673,7 +690,7 @@ mod tests {
             globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
         assert_eq!(vars[0].pieces, [Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 }]);
 
-        let data = Globals { vars, weak: Vec::new() }.image();
+        let data = Globals { vars, ..Globals::default() }.image();
         assert_eq!(data.objects[0].bytes, vec![0; 8]);
         assert_eq!(
             data.objects[0].relocs,
@@ -702,7 +719,7 @@ mod tests {
         assert_eq!(vars[0].pieces, [Piece::Away { symbol: "y".to_owned(), addend: 1 }]);
         assert_eq!(vars[0].place, Place::ReadOnly);
 
-        let data = Globals { vars, weak: Vec::new() }.image();
+        let data = Globals { vars, ..Globals::default() }.image();
         assert_eq!(data.objects[0].bytes, vec![0; 4]);
         assert_eq!(
             data.objects[0].relocs,

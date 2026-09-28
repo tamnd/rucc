@@ -238,6 +238,12 @@ impl<'a, 'n> Parser<'a, 'n> {
                 break;
             }
             match self.peek_word() {
+                "module" => {
+                    self.expect("module asm ")?;
+                    let text = self.quoted_str()?;
+                    self.end_of_line()?;
+                    module.add_file_asm(text);
+                }
                 "global" => self.global(&mut module)?,
                 "alias" | "ifunc" => self.alias(&mut module)?,
                 "func" => self.func(&mut module)?,
@@ -1922,6 +1928,18 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     #[test]
     fn one_of_almost_everything_comes_back_byte_for_byte() {
         assert_eq!(round_trip(ZOO), ZOO);
+    }
+
+    /// An `asm` at file scope kept as text, with a line break and a quote in it, which the
+    /// printer writes in hexadecimal and with a backslash, and which come back as they were.
+    #[test]
+    fn a_file_scope_asm_comes_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+module asm \"f: ret\\0a.ascii \\\"x\\\"\"
+"
+        );
+        assert_eq!(round_trip(&text), text);
     }
 
     #[test]
