@@ -282,6 +282,47 @@ struct Held<'a> {
     range: Range,
     area: Area<'a>,
     at: PhysReg,
+    /// How many values were given a register before this one, which is the order the values in
+    /// flight are looked at in when one register has to be taken back.
+    since: usize,
+}
+
+/// The values that have a register, kept by the register each is in.
+///
+/// Nearly every question asked of them is about one register: whether it is free for an interval,
+/// or whether a value is still in it. They used to be one list walked from the start for every
+/// register tried, and on a function with a thousand values in flight that walk was most of the
+/// time the allocator took. Keeping them by register means asking about one reads only the values
+/// that are in it. Registers are numbered within their class, so two classes can share a list and
+/// the class is still checked.
+#[derive(Default)]
+struct Active<'a> {
+    by: Vec<Vec<Held<'a>>>,
+    /// How many values have been given a register so far.
+    count: usize,
+}
+
+impl<'a> Active<'a> {
+    /// The values in one register, in the order they were given it.
+    fn at(&self, at: PhysReg) -> &[Held<'a>] {
+        self.by.get(usize::from(at.number())).map_or(&[], Vec::as_slice)
+    }
+
+    fn push(&mut self, reg: Reg, class: RegClass, range: Range, area: Area<'a>, at: PhysReg) {
+        let slot = usize::from(at.number());
+        if self.by.len() <= slot {
+            self.by.resize_with(slot + 1, Vec::new);
+        }
+        self.by[slot].push(Held { reg, class, range, area, at, since: self.count });
+        self.count += 1;
+    }
+
+    /// Lets go of every value whose interval ends before a point.
+    fn expire(&mut self, point: Point) {
+        for held in &mut self.by {
+            held.retain(|held| held.range.end >= point);
+        }
+    }
 }
 
 /// A register an instruction insists on, and where it insists on it.
@@ -342,9 +383,9 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
     intervals.sort_by_key(|interval| (interval.range.start, interval.reg));
 
     let mut assignment = Assignment::empty(func.vregs());
-    let mut active: Vec<Held<'_>> = Vec::new();
+    let mut active = Active::default();
     for interval in intervals {
-        active.retain(|held| held.range.end >= interval.range.start);
+        active.expire(interval.range.start);
         if forced.contains(&interval.reg) {
             assignment.spill(interval.reg, interval.class);
             continue;
@@ -408,13 +449,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
         match chosen {
             Some(at) => {
                 assignment.places[index(interval.reg)] = Some(Place::Reg(at));
-                active.push(Held {
-                    reg: interval.reg,
-                    class: interval.class,
-                    range: interval.range,
-                    area: interval.area,
-                    at,
-                });
+                active.push(interval.reg, interval.class, interval.range, interval.area, at);
             }
             None => spill_one(&mut assignment, &mut active, &blocked, interval),
         }
@@ -477,16 +512,15 @@ impl Blocks {
 /// areas still have to be compared: two values whose intervals cross can have holes that let them
 /// share a register anyway, which on a function with several loops in it is most of them.
 fn available(
-    active: &[Held<'_>],
+    active: &Active<'_>,
     blocked: &Blocks,
     interval: Interval<'_>,
     at: PhysReg,
     except: Option<Reg>,
     want: Want,
 ) -> bool {
-    let taken = active.iter().any(|held| {
-        held.at == at
-            && held.class == interval.class
+    let taken = active.at(at).iter().any(|held| {
+        held.class == interval.class
             && Some(held.reg) != except
             && held.area.overlaps(interval.area)
     });
@@ -500,14 +534,14 @@ fn available(
 /// same time as it and the register is otherwise free.
 fn coalesce(
     assignment: &Assignment,
-    active: &[Held<'_>],
+    active: &Active<'_>,
     blocked: &Blocks,
     live: &Live,
     interval: Interval<'_>,
     source: Reg,
 ) -> Option<PhysReg> {
     let Some(Place::Reg(at)) = assignment.place(source) else { return None };
-    active.iter().find(|held| held.reg == source)?;
+    active.at(at).iter().find(|held| held.reg == source)?;
     // The two have to be apart everywhere, asked of the areas liveness worked out and without the
     // point the reuse adds, since that point is the one they are allowed to share.
     //
@@ -544,54 +578,52 @@ pub(crate) fn apart(live: &Live, first: Reg, second: Reg) -> bool {
 /// the cheap ones are looked at first and the reach only settles ties.
 fn spill_one<'a>(
     assignment: &mut Assignment,
-    active: &mut Vec<Held<'a>>,
+    active: &mut Active<'a>,
     blocked: &Blocks,
     interval: Interval<'a>,
 ) {
     // What each register would cost: how many values would go, and the furthest any of them
     // reaches. The list is one entry per register of the class, so walking it for each value in
-    // flight is the same shape as everything else here.
-    let mut costs: Vec<(PhysReg, usize, Point)> = Vec::new();
-    for held in active.iter() {
+    // flight is the same shape as everything else here. The first number is when the earliest of
+    // them was given the register, and sorting by it puts the registers in the order the values
+    // were given them, which is what settles a tie.
+    let mut costs: Vec<(usize, PhysReg, usize, Point)> = Vec::new();
+    for held in active.by.iter().flatten() {
         if held.class != interval.class || !held.area.overlaps(interval.area) {
             continue;
         }
-        match costs.iter_mut().find(|(at, _, _)| *at == held.at) {
-            Some((_, count, reach)) => {
+        match costs.iter_mut().find(|(_, at, _, _)| *at == held.at) {
+            Some((first, _, count, reach)) => {
+                *first = (*first).min(held.since);
                 *count += 1;
                 *reach = (*reach).max(held.range.end);
             }
-            None => costs.push((held.at, 1, held.range.end)),
+            None => costs.push((held.since, held.at, 1, held.range.end)),
         }
     }
+    costs.sort_unstable_by_key(|&(first, _, _, _)| first);
     // A register the instructions in the way insist on for themselves is no use, because taking it
     // over would put this value in a register it may not have.
+    let none = Active::default();
     let chosen = costs
         .iter()
-        .filter(|&&(at, _, reach)| {
-            reach > interval.range.end && available(&[], blocked, interval, at, None, Want::Allowed)
+        .filter(|&&(_, at, _, reach)| {
+            reach > interval.range.end
+                && available(&none, blocked, interval, at, None, Want::Allowed)
         })
-        .min_by_key(|&&(_, count, reach)| (count, Reverse(reach)))
-        .map(|&(at, _, _)| at);
+        .min_by_key(|&&(_, _, count, reach)| (count, Reverse(reach)))
+        .map(|&(_, at, _, _)| at);
     match chosen {
         Some(at) => {
-            active.retain(|held| {
-                let goes = held.at == at
-                    && held.class == interval.class
-                    && held.area.overlaps(interval.area);
+            active.by[usize::from(at.number())].retain(|held| {
+                let goes = held.class == interval.class && held.area.overlaps(interval.area);
                 if goes {
                     assignment.spill(held.reg, held.class);
                 }
                 !goes
             });
             assignment.places[index(interval.reg)] = Some(Place::Reg(at));
-            active.push(Held {
-                reg: interval.reg,
-                class: interval.class,
-                range: interval.range,
-                area: interval.area,
-                at,
-            });
+            active.push(interval.reg, interval.class, interval.range, interval.area, at);
         }
         None => assignment.spill(interval.reg, interval.class),
     }

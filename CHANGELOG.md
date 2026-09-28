@@ -81,6 +81,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The register allocator keeps the values that have a register grouped by the register they are in, so asking whether one register is free for a value reads only the values already in it. It used to walk every value in flight for every register it tried, which on jtckdint's `test.c` was about 920 values a question and 2 billion in all. At `-O2` the build runs about 12% fewer instructions and 8% fewer cycles, and the code it emits is unchanged.
 - Induction variable optimization gathers what reads each value once per function and looks only at the readers of a loop's counter when deciding whether it can count down, instead of walking the whole function once for every loop. On jtckdint's `test.c` at `-O2` the build runs about 9% fewer instructions and 7% fewer cycles, and the code it emits is unchanged.
 - Instruction selection counts which values a block's instructions fold away in a map of that block's own, instead of zeroing a counter for every value in the function once per block. On jtckdint's `test.c` at `-O2` the build runs about 2% fewer instructions and cycles, and the code it emits is unchanged.
 - The x86-64 encoder finds the rows for a mnemonic by hashing it instead of walking all 1115 rows of the encoding table for every instruction it emits. On jtckdint's `test.c` at `-O2` the build runs about 6% fewer instructions.
