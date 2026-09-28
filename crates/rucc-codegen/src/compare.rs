@@ -120,44 +120,79 @@ pub fn redundant(
     let names = &*names;
     let mut counts = changes::Reads::of(func);
     let mut gone = 0;
+    let mut seen = HashMap::new();
     for block in func.blocks().collect::<Vec<_>>() {
         let sequence: Vec<mir::Inst> = func.insts(block).collect();
         let mut left: Option<Left> = None;
         for at in 0..sequence.len() {
             let inst = sequence[at];
-            let Some(name) = opcode(func, insts, names, inst) else {
-                left = None;
-                continue;
-            };
-            left = if let Some(entry) = insts.compare(name) {
-                let already = left
-                    .as_ref()
-                    .is_some_and(|had| had.answers(func, insts, names, &sequence, at, entry));
-                // What the earlier instruction left comes to this one's answer, and it is worked
-                // out here rather than after the rewrite because one of the answers to what is
-                // left of an instruction is that there is nothing left of it.
-                let after = stale(func, inst, left);
-                if already && took(func, &opcodes, &mut counts, machine, names, inst, entry) {
-                    gone += 1;
-                    after
-                } else {
-                    // Either the comparison is one nothing has made yet or it is one the target
-                    // would not have what is left of, and both of those are a comparison that runs
-                    // and leaves its own answer behind.
-                    stale(func, inst, Some(Left::made(func, entry, inst)))
+            let does = *seen
+                .entry(func[inst].opcode)
+                .or_insert_with(|| Does::of(insts, opcode(func, insts, names, inst)));
+            left = match does {
+                Does::Unknown => None,
+                Does::Compares(entry) => {
+                    let already = left
+                        .as_ref()
+                        .is_some_and(|had| had.answers(func, insts, names, &sequence, at, entry));
+                    // What the earlier instruction left comes to this one's answer, and it is
+                    // worked out here rather than after the rewrite because one of the answers to
+                    // what is left of an instruction is that there is nothing left of it.
+                    let after = stale(func, inst, left);
+                    if already && took(func, &opcodes, &mut counts, machine, names, inst, entry) {
+                        gone += 1;
+                        after
+                    } else {
+                        // Either the comparison is one nothing has made yet or it is one the
+                        // target would not have what is left of, and both of those are a
+                        // comparison that runs and leaves its own answer behind.
+                        stale(func, inst, Some(Left::made(func, entry, inst)))
+                    }
                 }
-            } else if let Some(zeroing) = insts.zeroed(name) {
-                // Before the general question of whether the name writes the condition state,
-                // because every one of these does and this is what it wrote there.
-                Left::zeroed(func, insts, name, zeroing, inst)
-            } else if (insts.writes)(name) {
-                None
-            } else {
-                stale(func, inst, left)
+                Does::Zeroes(name, zeroing) => Left::zeroed(func, insts, name, zeroing, inst),
+                Does::Writes => None,
+                Does::Neither => stale(func, inst, left),
             };
         }
     }
     gone
+}
+
+/// What the description says an opcode does to the condition state.
+///
+/// Asked once for each opcode a function has rather than once for each instruction, since each
+/// question is a walk down one of the target's tables comparing names and nearly every answer is
+/// no. A function has a few hundred opcodes at most, so the walk asks about each the first time it
+/// turns up and reads the answer back after that.
+#[derive(Debug, Clone, Copy)]
+enum Does<'a> {
+    /// The description does not cover it, so it may have done anything.
+    Unknown,
+    /// It makes a comparison.
+    Compares(&'static Compare),
+    /// It is arithmetic that leaves the comparison of what it wrote against zero. Asked before
+    /// whether it writes the condition state, because every one of these does and this is what it
+    /// wrote there.
+    Zeroes(&'a str, &'static Zeroing),
+    /// It writes the condition state with nothing this pass can use.
+    Writes,
+    /// It leaves the condition state alone.
+    Neither,
+}
+
+impl<'a> Does<'a> {
+    fn of(insts: &FlagInsts, name: Option<&'a str>) -> Self {
+        let Some(name) = name else { return Self::Unknown };
+        if let Some(entry) = insts.compare(name) {
+            Self::Compares(entry)
+        } else if let Some(zeroing) = insts.zeroed(name) {
+            Self::Zeroes(name, zeroing)
+        } else if (insts.writes)(name) {
+            Self::Writes
+        } else {
+            Self::Neither
+        }
+    }
 }
 
 /// What the condition state holds, and which registers it is a statement about.
