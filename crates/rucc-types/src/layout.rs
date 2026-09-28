@@ -341,7 +341,14 @@ fn float_layout(kind: FloatKind, target: &TargetInfo) -> Layout {
         // aligned to eight on s390x, all of them a `long double`.
         FloatKind::LongDouble => target.scalars.long_double.align,
         FloatKind::Float64x | FloatKind::Float128 => capped(size, target),
-        FloatKind::Float16 | FloatKind::Float | FloatKind::Float32 => size,
+        // Each decimal is aligned to its size on every target gcc has them for, the sixteen
+        // byte one included.
+        FloatKind::Float16
+        | FloatKind::Float
+        | FloatKind::Float32
+        | FloatKind::Decimal32
+        | FloatKind::Decimal64
+        | FloatKind::Decimal128 => size,
     };
     Layout::new(size, align)
 }
@@ -362,8 +369,9 @@ fn capped(size: u64, target: &TargetInfo) -> u64 {
 pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
     match kind {
         FloatKind::Float16 => 16,
-        FloatKind::Float | FloatKind::Float32 => 32,
-        FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 => 64,
+        FloatKind::Float | FloatKind::Float32 | FloatKind::Decimal32 => 32,
+        FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 | FloatKind::Decimal64 => 64,
+        FloatKind::Decimal128 => 128,
         FloatKind::LongDouble => target.long_double_width,
         // The same sixteen bytes whichever of the two formats it is, for the same reason
         // `long double` is sixteen on x86-64: the x87 eighty bits are stored padded.
@@ -389,6 +397,9 @@ pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
         // rather than a panic in a compiler.
         FloatKind::Float64x => target.float64x_format.unwrap_or(target.long_double_format),
         FloatKind::Float128 => Format::Quad,
+        FloatKind::Decimal32 => Format::Decimal32,
+        FloatKind::Decimal64 => Format::Decimal64,
+        FloatKind::Decimal128 => Format::Decimal128,
     }
 }
 

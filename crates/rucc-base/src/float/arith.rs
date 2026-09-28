@@ -77,6 +77,10 @@ impl Float {
     /// from, and there is only one thing in C that can spell one.
     #[must_use]
     pub const fn nan(format: Format) -> Float {
+        if format.decimal().is_some() {
+            let category = Category::Nan;
+            return Float { format, category, sign: false, exponent: 0, significand: 0 };
+        }
         Float {
             format,
             category: Category::Nan,
@@ -239,7 +243,9 @@ impl Float {
     /// If the two numbers are not in the same format.
     #[must_use]
     pub fn compare(self, other: Float) -> Option<Ordering> {
-        self.agreed_format(other);
+        if self.agreed_format(other).decimal().is_some() {
+            return self.decimal_compare(other);
+        }
         if self.is_nan() || other.is_nan() {
             return None;
         }
@@ -357,6 +363,9 @@ impl Float {
     /// reports what it had to do to make the number fit.
     #[must_use]
     pub fn to_format(self, format: Format) -> (Float, Status) {
+        if self.format.decimal().is_some() || format.decimal().is_some() {
+            return self.decimal_to_format(format);
+        }
         match self.category {
             Category::Nan => (Float { sign: self.sign, ..Float::nan(format) }, Status::NONE),
             Category::Infinite => (Float::infinity(format, self.sign), Status::NONE),
@@ -371,6 +380,9 @@ impl Float {
     /// The nearest number in `format` to a signed integer.
     #[must_use]
     pub fn from_signed(value: i128, format: Format) -> (Float, Status) {
+        if let Some(width) = format.decimal() {
+            return Float::decimal_from_integer(value < 0, value.unsigned_abs(), format, width);
+        }
         if value == 0 {
             return (Float::zero(format, false), Status::NONE);
         }
@@ -380,6 +392,9 @@ impl Float {
     /// The nearest number in `format` to an unsigned integer.
     #[must_use]
     pub fn from_unsigned(value: u128, format: Format) -> (Float, Status) {
+        if let Some(width) = format.decimal() {
+            return Float::decimal_from_integer(false, value, format, width);
+        }
         if value == 0 {
             return (Float::zero(format, false), Status::NONE);
         }
@@ -405,6 +420,9 @@ impl Float {
     pub fn to_integer(self, width: u32, signed: bool) -> (i128, Status) {
         assert!(width > 0 && width <= 128, "an integer type of {width} bits");
         let limit = self.limit(width, signed);
+        if self.format.decimal().is_some() {
+            return self.decimal_integer(limit);
+        }
         match self.category {
             Category::Nan => (0, Status::INVALID),
             Category::Infinite => (self.signed_value(limit), Status::INVALID),
@@ -444,13 +462,13 @@ impl Float {
     }
 
     /// A magnitude given this number's sign, as an integer constant is stored.
-    fn signed_value(self, magnitude: u128) -> i128 {
+    pub(super) fn signed_value(self, magnitude: u128) -> i128 {
         if self.sign { (magnitude as i128).wrapping_neg() } else { magnitude as i128 }
     }
 
     /// The significand and the power of two it is scaled by, so that the value of a finite number
     /// is the first of these shifted by the second.
-    fn parts(self) -> (u128, i32) {
+    pub(super) fn parts(self) -> (u128, i32) {
         (self.significand, self.exponent - self.format.precision() as i32 + 1)
     }
 

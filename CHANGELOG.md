@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `rucc_base::dfp` converts the text of a decimal floating constant to the bits of `_Decimal32`, `_Decimal64` or `_Decimal128` in the BID encoding gcc uses on x86-64 and AArch64, rounding to nearest with ties to even and keeping the exponent the text wrote, and reads the bits back. Nothing calls it yet. It is the first part of #207.
 - From `-O1` up the one call to a `static` function that nothing reaches any other way is inlined whatever the function's size up to 4000 instructions, and the function is then not emitted, which is gcc's `-finline-functions-called-once`. A helper written to name a step and called from the one loop that needs it now costs no call. A second call, a tail call, its address taken or written into data, an alias of it, or `used`, `noinline`, `optnone` or `naked` on it keeps it a call, and `-fopt-info-missed` says why when one is refused (#1932).
+- `_Decimal32`, `_Decimal64` and `_Decimal128` are types on x86-64 Linux, with the `df`, `dd` and `dl` constant suffixes and C23's `d32`, `d64` and `d128`. Arithmetic, comparison and every conversion to and from the integer and binary floating types is a call to the `__bid_` routine in libgcc that gcc calls, and the values travel in the registers gcc passes them in. `__DEC32_MANT_DIG__` and the rest of gcc's macros are predefined, `float.h` has the `DEC` block, and `__builtin_infd32`, `__builtin_nand64`, `__builtin_nansd128`, `__builtin_isinfd32`, `__builtin_signbitd64` and the rest of that family are there. Mixing a decimal operand with a binary floating one is an error, as in gcc. 101 of the run tests in gcc's `dfp` directories pass against gcc 16. Constant folding of decimal values, `_Decimal64x` and the decimal rounding modes are still to come (#207).
 
 ### Changed
 
@@ -15,6 +16,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A function with tens of thousands of blocks compiles about twice as fast from `-O1` up. The register allocator works out liveness one value at a time by walking back from where it is read, so the cost is the size of the answer and no longer whole rows merged over and over. The optimizer works out which stack slots escape once per function rather than once per loop in licm and once per candidate in phiopt. jtckdint's test.c went from 165s to 71s at `-O2` and from 130s to 56s at `-O1`, and its output still matches gcc's (#1045).
 - A `switch` with a case that goes where the default goes, which is a `case` written just above `default:` or a case edge straight to the default block, is converted to arithmetic or a table like any other. That case leaves the `switch` and goes down the default edge, and for a table it is a hole. One such case used to make the arms differ and keep the whole `switch` as a jump table (#1932).
 - The register allocator gives the answer of a two address instruction the register of the value it reads whenever the two are never live at the same time, rather than only when nothing laid out after the instruction wants that value. A sum a loop carries round is no longer moved into a register of its own and copied back at the bottom of every turn when a `switch` inlined into the loop has an arm laid out after the addition. The whole of rucc-corpus runs 6.9% fewer instructions at `-O2` (#1965).
+
+### Fixed
+
+- `__builtin_signbit` and `__builtin_isnormal` of a `__float128` compile rather than failing on a bitcast to a 128 bit integer that no rule lowers. The sign is read from the top two bytes of the value in memory, as it already was for `long double` on x86-64.
 
 ## 0.11.14
 

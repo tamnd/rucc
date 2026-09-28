@@ -1253,6 +1253,11 @@ const fn characteristics(format: Format) -> &'static Characteristics {
         Format::X87Extended => &X87,
         Format::Quad => &QUAD,
         Format::DoubleDouble => &DOUBLE_DOUBLE,
+        // No target has a decimal `long double` or `_Float64x`, which are the two rows a target
+        // chooses, and the decimal types have `__DEC*` macros of their own rather than a row here.
+        Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+            panic!("a binary type's format is never a decimal one")
+        }
     }
 }
 
@@ -1323,6 +1328,55 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // read: `-dM` prints what the macro is, and a program that undefines `__LDBL_DECIMAL_DIG__`
     // takes this one with it. gcc writes the number.
     d.set("__DECIMAL_DIG__", characteristics(target.long_double_format).decimal_dig);
+    if target.has_decimal_float {
+        decimals(d);
+    }
+}
+
+/// The limits of the three decimal types, on the one target that has them.
+///
+/// Written out rather than worked out, because each is a fact of the interchange format and the
+/// three rows are all there will ever be. The spellings are gcc's, down to the parentheses around a
+/// negative exponent and the suffix on every constant. `__DEC64X_*` is not here: `_Decimal64x` has
+/// a suffix of its own the lexer does not read yet, so the macros would be constants nothing can
+/// use. `__DEC_EVAL_METHOD__` is 2 because it is 2 in gcc, and a program that reads it is asking
+/// what gcc would do.
+fn decimals(d: &mut Defs) {
+    let rows = [
+        ("32", "DF", "7", "(-94)", "97", "1E-95", "9.999999E96", "1E-6", "0.000001E-95"),
+        (
+            "64",
+            "DD",
+            "16",
+            "(-382)",
+            "385",
+            "1E-383",
+            "9.999999999999999E384",
+            "1E-15",
+            "0.000000000000001E-383",
+        ),
+        (
+            "128",
+            "DL",
+            "34",
+            "(-6142)",
+            "6145",
+            "1E-6143",
+            "9.999999999999999999999999999999999E6144",
+            "1E-33",
+            "0.000000000000000000000000000000001E-6143",
+        ),
+    ];
+    for (bits, suffix, mant_dig, min_exp, max_exp, min, max, epsilon, subnormal_min) in rows {
+        d.set(&format!("__DEC{bits}_MANT_DIG__"), mant_dig);
+        d.set(&format!("__DEC{bits}_MIN_EXP__"), min_exp);
+        d.set(&format!("__DEC{bits}_MAX_EXP__"), max_exp);
+        d.set(&format!("__DEC{bits}_MIN__"), &format!("{min}{suffix}"));
+        d.set(&format!("__DEC{bits}_MAX__"), &format!("{max}{suffix}"));
+        d.set(&format!("__DEC{bits}_EPSILON__"), &format!("{epsilon}{suffix}"));
+        d.set(&format!("__DEC{bits}_SUBNORMAL_MIN__"), &format!("{subnormal_min}{suffix}"));
+    }
+    d.set("__DEC_EVAL_METHOD__", "2");
 }
 
 /// One family of `float.h` macros, named `__{prefix}_*__`.

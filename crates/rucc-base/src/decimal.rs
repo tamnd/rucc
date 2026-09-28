@@ -74,6 +74,25 @@ impl Decimal {
         self.point
     }
 
+    /// The value as text a number parser reads, `0.digits` scaled by a power of ten.
+    ///
+    /// A truncated value gets a one after its last digit, which says something nonzero was there
+    /// and is all a rounding at far fewer digits than the buffer holds needs to know.
+    pub(crate) fn spelled(&self) -> String {
+        let mut text = String::with_capacity(self.digits.len() + 16);
+        text.push_str("0.");
+        text.extend(self.digits.iter().map(|&digit| char::from(b'0' + digit)));
+        if self.truncated {
+            text.push('1');
+        }
+        if self.digits.is_empty() {
+            text.push('0');
+        }
+        text.push('e');
+        text.push_str(&self.point.to_string());
+        text
+    }
+
     /// The leading digit, which is never zero unless the value is.
     pub(crate) fn first_digit(&self) -> u8 {
         self.digits.first().copied().unwrap_or(0)

@@ -225,6 +225,12 @@ pub enum FloatConstantType {
     /// which is the reason it is not the same thing as [`FloatConstantType::LongDouble`], and
     /// GCC has it on x86 only.
     Float80,
+    /// `df` or `DF`, which is `_Decimal32`.
+    Decimal32,
+    /// `dd` or `DD`, which is `_Decimal64`.
+    Decimal64,
+    /// `dl` or `DL`, which is `_Decimal128`.
+    Decimal128,
 }
 
 impl FloatConstantType {
@@ -248,6 +254,9 @@ impl FloatConstantType {
             }
             FloatConstantType::Float64x => Format::Quad,
             FloatConstantType::Float80 => Format::X87Extended,
+            FloatConstantType::Decimal32 => Format::Decimal32,
+            FloatConstantType::Decimal64 => Format::Decimal64,
+            FloatConstantType::Decimal128 => Format::Decimal128,
         }
     }
 
@@ -268,6 +277,9 @@ impl FloatConstantType {
             FloatConstantType::Float32x => "_Float32x",
             FloatConstantType::Float64x => "_Float64x",
             FloatConstantType::Float80 => "__float80",
+            FloatConstantType::Decimal32 => "_Decimal32",
+            FloatConstantType::Decimal64 => "_Decimal64",
+            FloatConstantType::Decimal128 => "_Decimal128",
         }
     }
 
@@ -289,6 +301,9 @@ impl FloatConstantType {
             FloatConstantType::Float32x => "f32x",
             FloatConstantType::Float64x => "f64x",
             FloatConstantType::Float80 => "w",
+            FloatConstantType::Decimal32 => "df",
+            FloatConstantType::Decimal64 => "dd",
+            FloatConstantType::Decimal128 => "dl",
         }
     }
 }
@@ -313,9 +328,10 @@ pub enum FloatError {
     NoDigits,
     /// More than one point, which is a preprocessing number and not a constant.
     TooManyPoints,
-    /// A `df`, `dd` or `dl` suffix. The constant is well formed and this compiler has nowhere
-    /// to put a decimal floating value yet.
+    /// A `df`, `dd` or `dl` suffix on a target with no decimal floating types.
     DecimalFloat,
+    /// A decimal suffix on a hexadecimal constant, or together with an imaginary one.
+    DecimalInvalid,
     /// A suffix naming a type this target does not have, which is `w` anywhere but x86, `f128x`
     /// everywhere, and `f16`, `f128`, `q` and `f64x` on the machines that have no such type.
     UnsupportedType,
@@ -332,7 +348,8 @@ impl FloatError {
             FloatError::NoExponentDigits => "exponent has no digits",
             FloatError::NoDigits => "no digits in floating constant",
             FloatError::TooManyPoints => "too many decimal points in number",
-            FloatError::DecimalFloat => "decimal floating constants are not supported yet",
+            FloatError::DecimalFloat => "decimal floating-point not supported for this target",
+            FloatError::DecimalInvalid => "invalid suffix on decimal floating constant",
             // gcc's words, and it says them about the suffix rather than about the type. It is
             // the same sentence for `1.0w` on AArch64 and `1.0f128` on armv7 and `1.0f128x`
             // anywhere, which was measured rather than guessed.
@@ -680,6 +697,11 @@ pub fn floating(text: &str, std: Std, target: &TargetInfo) -> Result<FloatConsta
 
     let suffix = float_suffix(&bytes[index..], target)?;
     remarks = remarks.with(suffix.remarks);
+    // A decimal constant is written in decimal, which C23 says in so many words, and there is no
+    // imaginary decimal type for an `i` to make one of.
+    if suffix.ty.format(target).decimal().is_some() && (hex || suffix.imaginary) {
+        return Err(FloatError::DecimalInvalid);
+    }
     let (value, status) =
         Float::parse(&text[..index], suffix.ty.format(target)).map_err(|error| match error {
             // The scan above has already ruled all three of these out, and mapping them is
@@ -768,12 +790,36 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                 } else {
                     matches!(second, Some(b'F' | b'D' | b'L'))
                 };
-                if decimal {
-                    return Err(FloatError::DecimalFloat);
+                // C23's spelling, `d32`, `d64` and `d128` with the `d` in either case, which is
+                // the same three types as gcc's letters.
+                let digits = rest[1..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+                let named = match &rest[1..=digits] {
+                    b"32" => Some(FloatConstantType::Decimal32),
+                    b"64" => Some(FloatConstantType::Decimal64),
+                    b"128" => Some(FloatConstantType::Decimal128),
+                    _ => None,
+                };
+                if let Some(named) = named {
+                    if !target.has_decimal_float {
+                        return Err(FloatError::DecimalFloat);
+                    }
+                    ty = Some(named);
+                    1 + digits
+                } else if decimal {
+                    if !target.has_decimal_float {
+                        return Err(FloatError::DecimalFloat);
+                    }
+                    ty = Some(match second.map(|letter| letter | 32) {
+                        Some(b'f') => FloatConstantType::Decimal32,
+                        Some(b'd') => FloatConstantType::Decimal64,
+                        _ => FloatConstantType::Decimal128,
+                    });
+                    2
+                } else {
+                    ty = Some(FloatConstantType::Double);
+                    remarks = remarks.with(Remarks::DOUBLE_SUFFIX);
+                    1
                 }
-                ty = Some(FloatConstantType::Double);
-                remarks = remarks.with(Remarks::DOUBLE_SUFFIX);
-                1
             }
             _ => return Err(FloatError::InvalidSuffix),
         };
@@ -1152,11 +1198,34 @@ mod tests {
     }
 
     #[test]
-    fn a_decimal_floating_constant_is_recognised_and_refused() {
-        // The constant is well formed and there is nowhere in this compiler to put its value.
-        for text in ["1.0df", "1.0dd", "1.0dl", "1.0DF", "1.0DD", "1.0DL"] {
-            assert_eq!(float(text), Err(FloatError::DecimalFloat), "{text} is a decimal float");
+    fn a_decimal_floating_constant_has_its_type_and_its_encoding() {
+        // The bits are gcc 16's for the same constants on x86-64 Linux.
+        let rows = [
+            ("1.0df", FloatConstantType::Decimal32, 0x3200_000a),
+            ("1.0DF", FloatConstantType::Decimal32, 0x3200_000a),
+            ("1.20dd", FloatConstantType::Decimal64, 0x3180_0000_0000_0078),
+            ("0.DD", FloatConstantType::Decimal64, 0x31c0_0000_0000_0000),
+            ("1.dl", FloatConstantType::Decimal128, 0x3040_0000_0000_0000_0000_0000_0000_0001),
+        ];
+        for (text, ty, expected) in rows {
+            let constant = float(text).expect("a decimal constant");
+            assert_eq!(constant.ty, ty, "{text}");
+            assert_eq!(constant.value.to_bits(), expected, "{text}");
         }
+        // Where the target has no decimal types the suffix is refused in gcc's words for that.
+        let apple = "aarch64-apple-darwin".parse::<Triple>().expect("a known triple");
+        let apple = floating("1.0dd", Std::C23, &TargetInfo::new(apple));
+        assert_eq!(apple, Err(FloatError::DecimalFloat));
+        // A decimal constant is written in decimal and is never imaginary.
+        assert_eq!(float("0x1p0dd"), Err(FloatError::DecimalInvalid));
+        for (text, ty) in [
+            ("1.1D32", FloatConstantType::Decimal32),
+            ("2e1d64", FloatConstantType::Decimal64),
+            ("4.5e3d128", FloatConstantType::Decimal128),
+        ] {
+            assert_eq!(float(text).map(|parsed| parsed.ty), Ok(ty), "{text}");
+        }
+        assert_eq!(float("1.0ddi"), Err(FloatError::DecimalInvalid));
         // The letters have to agree about case, so these are not decimal floats and not
         // constants either.
         for text in ["1.0Df", "1.0dF", "1.0dD", "1.0Dl"] {

@@ -261,7 +261,7 @@ fn pair(
 }
 
 /// A truth value with the other answer, which is an exclusive or with one.
-fn flipped(func: &mut Func, inst: Inst, value: Value) -> Value {
+pub(crate) fn flipped(func: &mut Func, inst: Inst, value: Value) -> Value {
     let one = ahead_const(func, inst, Imm::int(1, Type::I1), Type::I1);
     let args = func.push_values(&[value, one]);
     written(func, inst, InstData { args, ..InstData::new(Opcode::Xor) }, Type::I1)
@@ -286,7 +286,9 @@ fn flipped(func: &mut Func, inst: Inst, value: Value) -> Value {
 fn constant(func: &mut Func, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Extra::Imm(imm) = func[inst].extra else { return };
-    if !quad(ty) {
+    // A `_Decimal128` constant is sixteen bytes with no instruction to hold it either, and its bits
+    // are already the encoding, so it goes through the frame the same way.
+    if !quad(ty) && !(ty.is_scalar() && ty.format() == Some(Float::D128)) {
         return;
     }
     let bits = func[imm].bits();
@@ -436,7 +438,7 @@ fn holder(bits: u32) -> Option<u32> {
 /// Where the convention brings the answer back through an address the instruction becomes the load
 /// of it instead, which is in place in the same sense: it is still one instruction producing the
 /// one value every reader already reads.
-fn into_call(
+pub(crate) fn into_call(
     func: &mut Func,
     names: &mut Interner,
     abi: &'static AbiDescription,
@@ -457,7 +459,7 @@ fn into_call(
 }
 
 /// A call to a runtime routine written in front of an instruction, and the value it answers.
-fn call(
+pub(crate) fn call(
     func: &mut Func,
     names: &mut Interner,
     abi: &'static AbiDescription,
@@ -582,7 +584,7 @@ fn whole() -> MemInfo {
 }
 
 /// A constant put in front of an instruction.
-fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
+pub(crate) fn ahead_const(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
     let extra = Extra::Imm(func.add_imm(imm));
     written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, ty)
 }
@@ -598,7 +600,7 @@ fn write(func: &mut Func, inst: Inst, value: Value, into: Value, info: MemInfo) 
 }
 
 /// Creates an instruction, puts it in front of another one, and reads its value back out.
-fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
+pub(crate) fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
     let span = func.span(inst);
     let made = func.create_inst(data, &[ty], span);
     func.insert_before(made, inst);
@@ -606,7 +608,7 @@ fn written(func: &mut Func, inst: Inst, data: InstData, ty: Type) -> Value {
 }
 
 /// Turns an instruction into a different one over different operands, in place.
-fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra, args: &[Value]) {
+pub(crate) fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra, args: &[Value]) {
     let args = func.push_values(args);
     let data = &mut func[inst];
     data.opcode = opcode;

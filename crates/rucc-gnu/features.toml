@@ -3312,3 +3312,159 @@ gcc_version = "7.0"
 status = "implemented"
 used_by = []
 tests = ["rucc-driver::an_overflow_predicate_writes_nothing_and_answers_the_bit_the_check_would"]
+
+[[feature]]
+name = "__builtin_infd32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal32(void)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_nand32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal32(const char *)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_nansd32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal32(const char *)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_infd64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal64(void)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_nand64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal64(const char *)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_nansd64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal64(const char *)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_infd128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal128(void)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_nand128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal128(const char *)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_nansd128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Decimal128(const char *)"
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_isnand32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_isnand64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_isnand128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_isinfd32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_isinfd64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_isinfd128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_finited32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_finited64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_finited128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_signbitd32"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_signbitd64"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_signbitd128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]

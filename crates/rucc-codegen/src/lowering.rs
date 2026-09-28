@@ -64,7 +64,7 @@ use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
 use crate::switch::{Force, Lowered};
-use crate::{divide, expand, half, quad, retry, switch, varargs, wide, widths};
+use crate::{decimal, divide, expand, half, quad, retry, switch, varargs, wide, widths};
 
 /// One member of the group.
 ///
@@ -95,6 +95,14 @@ pub enum Step {
     /// lost by running it this early: the widths it is written for are the widths the machine has,
     /// so a check at any other width is refused by name either way round.
     Overflows,
+    /// Anything on a decimal float, as a call to libgcc's routine for it.
+    ///
+    /// Above the half floats, because a conversion between a decimal and a `_Float16` is one routine
+    /// and the step below would otherwise take it for a half float's and widen it first, and above
+    /// the splitting, because a conversion against a `__int128` is a call whose operand that step
+    /// then splits the way it splits any other. Above the float rewriting for the reason the quads
+    /// are: every rewrite down there reads the bits as a binary float.
+    Decimals,
     /// Anything at all at the half float format, as the work at a wider one.
     ///
     /// Above the two that rewrite an integer and above the quad, because what it leaves behind is
@@ -153,6 +161,7 @@ impl Step {
         Self::Retries,
         Self::Orderings,
         Self::Overflows,
+        Self::Decimals,
         Self::HalfFloats,
         Self::Halves,
         Self::Widths,
@@ -174,6 +183,7 @@ impl Step {
             Self::Retries => "retries",
             Self::Orderings => "orderings",
             Self::Overflows => "overflows",
+            Self::Decimals => "decimals",
             Self::HalfFloats => "half-floats",
             Self::Halves => "halves",
             Self::Widths => "widths",
@@ -196,6 +206,7 @@ impl Step {
             Self::Retries => "a read modify write with no instruction behind it",
             Self::Orderings => "an ordered load or store",
             Self::Overflows => "arithmetic that reports whether it overflowed",
+            Self::Decimals => "a decimal float",
             Self::HalfFloats => "the half float format",
             Self::Halves => "an integer wider than a register",
             Self::Widths => "an integer at a width the machine does not have",
@@ -236,7 +247,7 @@ impl Step {
                 Opcode::UMulOverflow,
                 Opcode::SMulOverflow,
             ],
-            Self::HalfFloats | Self::Halves | Self::Widths | Self::Rounds => &[],
+            Self::Decimals | Self::HalfFloats | Self::Halves | Self::Widths | Self::Rounds => &[],
             Self::Divisions => &[Opcode::SDiv, Opcode::UDiv, Opcode::SRem, Opcode::URem],
             Self::Bytes => &[Opcode::Bswap],
             Self::Counts => &[Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop],
@@ -290,6 +301,7 @@ impl Step {
             Self::Retries => retry::loops(func),
             Self::Orderings => expand::orderings(func, conv.word, conv.total_store_order),
             Self::Overflows => expand::overflows(func),
+            Self::Decimals => decimal::calls(func, names, conv.abi),
             Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func),
@@ -573,6 +585,8 @@ mod tests {
                 "retries",
                 "orderings",
                 "overflows",
+                // Ahead of the half floats, which would otherwise widen a decimal's `_Float16`.
+                "decimals",
                 // Ahead of the integer splitting, because the calls it writes take and give back
                 // whole words that the splitting then has nothing left to say about.
                 "half-floats",

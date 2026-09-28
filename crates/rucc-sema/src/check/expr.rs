@@ -389,6 +389,9 @@ impl Checker<'_> {
                     FloatKind::Float64x
                 }
             }
+            FloatConstantType::Decimal32 => FloatKind::Decimal32,
+            FloatConstantType::Decimal64 => FloatKind::Decimal64,
+            FloatConstantType::Decimal128 => FloatKind::Decimal128,
         };
         let value = constant.value;
         // `2.0i` is an imaginary constant, which C calls `_Imaginary` and gcc has never had. In
@@ -1354,7 +1357,9 @@ impl Checker<'_> {
         if !ok(self, lhs) || !ok(self, rhs) {
             return self.invalid_operands(op, lhs, rhs, span);
         }
-        let (lhs, rhs) = self.conv().usual_arithmetic(lhs, rhs).expect("two arithmetic operands");
+        let Some((lhs, rhs)) = self.conv().usual_arithmetic(lhs, rhs) else {
+            return self.mixed_decimal(span);
+        };
         let ty = self.tast[lhs].ty;
         self.tast.expr(Expr::new(ExprKind::Binary { op, lhs, rhs }, ty, Category::Rvalue), span)
     }
@@ -1395,8 +1400,9 @@ impl Checker<'_> {
                 self.ptrdiff()
             }
             _ if is_arithmetic(&self.types, left) && is_arithmetic(&self.types, right) => {
-                let (lhs, rhs) =
-                    self.conv().usual_arithmetic(lhs, rhs).expect("two arithmetic operands");
+                let Some((lhs, rhs)) = self.conv().usual_arithmetic(lhs, rhs) else {
+                    return self.mixed_decimal(span);
+                };
                 let ty = self.tast[lhs].ty;
                 let node = ExprKind::Binary { op, lhs, rhs };
                 return self.tast.expr(Expr::new(node, ty, Category::Rvalue), span);
@@ -1450,8 +1456,9 @@ impl Checker<'_> {
             return self.lanewise_comparison(op, lhs, rhs, span);
         }
         if is_arithmetic(&self.types, left) && is_arithmetic(&self.types, right) {
-            let converted =
-                self.conv().usual_arithmetic(lhs, rhs).expect("two arithmetic operands");
+            let Some(converted) = self.conv().usual_arithmetic(lhs, rhs) else {
+                return self.mixed_decimal(span);
+            };
             (lhs, rhs) = converted;
         } else if is_pointer(&self.types, left) && is_pointer(&self.types, right) {
             let (a, b) = (
@@ -1634,9 +1641,12 @@ impl Checker<'_> {
                     self.invalid_computation(op, target, source, span);
                     return None;
                 }
-                let computation =
+                let Some(computation) =
                     rucc_types::usual_arithmetic(&mut self.types, target, source, self.cx.target)
-                        .expect("two arithmetic operands");
+                else {
+                    self.mixed_decimal(span);
+                    return None;
+                };
                 let rhs = self.conv().to_type(rhs, computation);
                 Some((computation, rhs))
             }
@@ -1672,8 +1682,9 @@ impl Checker<'_> {
         let (ty, then, otherwise) = if is_arithmetic(&self.types, left)
             && is_arithmetic(&self.types, right)
         {
-            let (then, otherwise) =
-                self.conv().usual_arithmetic(then, otherwise).expect("two arithmetic operands");
+            let Some((then, otherwise)) = self.conv().usual_arithmetic(then, otherwise) else {
+                return self.mixed_decimal(span);
+            };
             (self.tast[then].ty, then, otherwise)
         } else if is_void(&self.types, left) || is_void(&self.types, right) {
             // C says both arms have to be void or neither is, and gcc says the whole thing is
@@ -2201,6 +2212,22 @@ impl Checker<'_> {
                     "invalid operands to binary {} (have '{left}' and '{right}')",
                     op.spelling()
                 ),
+                span,
+            )
+            .with_code("E0508"),
+        );
+        self.poison(span)
+    }
+
+    /// The one pair of arithmetic operands with no common type, a decimal float and a binary one.
+    ///
+    /// C leaves the mix undefined and gcc refuses it with this message, rather than picking a side
+    /// the way it does for two binary formats, because neither format holds every value of the
+    /// other.
+    pub(crate) fn mixed_decimal(&mut self, span: Span) -> ExprId {
+        self.report(
+            Diagnostic::error(
+                "cannot mix operands of decimal floating and other floating types",
                 span,
             )
             .with_code("E0508"),

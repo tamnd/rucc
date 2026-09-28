@@ -312,6 +312,14 @@ impl Checker<'_> {
             "float" => return Some(self.types.float(FloatKind::Float)),
             "double" => return Some(self.types.float(FloatKind::Double)),
             "long double" => return Some(self.types.float(FloatKind::LongDouble)),
+            // Only where the target has them, so a decimal builtin elsewhere is a name nothing
+            // declared, which is how gcc treats it on the same target.
+            "_Decimal32" | "_Decimal64" | "_Decimal128" if !self.cx.target.has_decimal_float => {
+                return None;
+            }
+            "_Decimal32" => return Some(self.types.float(FloatKind::Decimal32)),
+            "_Decimal64" => return Some(self.types.float(FloatKind::Decimal64)),
+            "_Decimal128" => return Some(self.types.float(FloatKind::Decimal128)),
             // The complex types, which the conjugate family is written over and nothing else in
             // the table uses. The keyword comes first here because that is the order the table
             // writes it in, and a signature is not a declaration, so the order it would be
