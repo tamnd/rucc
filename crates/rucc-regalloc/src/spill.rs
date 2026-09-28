@@ -85,6 +85,12 @@ pub fn choose(func: &Func, live: &Live, pressure: &Pressure) -> Vec<Reg> {
                 open.push(next);
                 next += 1;
             }
+            // Values sent to memory earlier often bring a point back under, and then nothing here
+            // reads the list. Clearing out the values that have gone only when something will
+            // read it saves a walk over every open value at every one of those points.
+            if pressure.excess(class, point) == 0 {
+                continue;
+            }
             open.retain(|&one| candidates[one].area.hull().end >= point);
             while pressure.excess(class, point) > 0 {
                 let lightest = open
