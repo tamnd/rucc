@@ -117,6 +117,7 @@
 //! misses that pays for three. Only address uses group, because a constant offset is free inside
 //! an addressing mode and costs an add anywhere else.
 
+use std::cell::OnceCell;
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
@@ -224,7 +225,8 @@ impl Pass for Ivopts {
         {
             let mut scev = Scev::new(func, cfg, loops);
             let mut ranges = Ranges::new(func, cfg, doms);
-            let it = Loop { func, loops, doms, cfg, machine, table };
+            let readers = OnceCell::new();
+            let it = Loop { func, loops, doms, cfg, machine, table, readers };
             for id in loops.all() {
                 consider(&it, &mut scev, &mut ranges, id, &mut stats, &mut plans, &mut tallies);
             }
@@ -473,6 +475,8 @@ struct Loop<'a> {
     machine: Machine,
     /// Its prices, which section 28.2 says the answer is a fact about.
     table: &'a CostTable,
+    /// What reads each value, gathered the first time a loop asks.
+    readers: OnceCell<Readers>,
 }
 
 /// Everything about one loop, from collecting its uses to naming the set it should keep.
@@ -485,7 +489,7 @@ fn consider(
     plans: &mut Vec<Plan>,
     tallies: &mut Vec<Tally>,
 ) {
-    let Loop { func, loops, doms, cfg, machine, table } = *it;
+    let Loop { func, loops, doms, cfg, machine, table, .. } = *it;
     let wants = collect(func, loops, scev, id);
     if wants.is_empty() {
         return;
@@ -528,7 +532,10 @@ fn consider(
     // the exit test is all that reads the counter. `collect` looks at this loop's own blocks, so a
     // counter a loop inside this one reads, or one read after the loop, looks to the search like a
     // counter nothing else wants, and a countdown beside a counter that stays is one more.
-    if aimed.is_ok_and(|at| read_elsewhere(func, loops, id, at)) {
+    if aimed.is_ok_and(|at| {
+        let readers = it.readers.get_or_init(|| Readers::new(func));
+        read_elsewhere(func, loops, readers, id, at)
+    }) {
         cands.retain(|cand| cand.origin != Origin::Countdown);
     }
     prune(&mut cands, table, &groups, stats);
@@ -750,7 +757,7 @@ fn aim(
 /// take it round, and the block arguments that carry it from one of those to the next. Anything on that cycle read by anything off
 /// it is a reader, wherever in the function it is. A value this does not know how to follow is
 /// taken to be read, since the cost of being wrong that way is a countdown not written.
-fn read_elsewhere(func: &Func, loops: &Loops, id: LoopId, aim: Aim) -> bool {
+fn read_elsewhere(func: &Func, loops: &Loops, readers: &Readers, id: LoopId, aim: Aim) -> bool {
     // A constant is invariant wherever it was written, and one written inside the loop is not
     // outside it, so it is asked about first.
     let moving = |value: &Value| {
@@ -784,27 +791,69 @@ fn read_elsewhere(func: &Func, loops: &Loops, id: LoopId, aim: Aim) -> bool {
             _ => return true,
         }
     }
-    for block in func.blocks() {
-        for inst in func.insts(block) {
-            if inst == aim.at || steps.contains(&inst) {
-                continue;
-            }
-            if func[func[inst].args].iter().any(|arg| cycle.contains(arg)) {
-                return true;
-            }
-            for call in func.successors(inst) {
-                let params = &func[call.block].params;
-                let carried = func[call.args].iter().enumerate().any(|(index, arg)| {
-                    let onward = params.get(index).is_some_and(|param| cycle.contains(param));
-                    cycle.contains(arg) && !onward
-                });
-                if carried {
-                    return true;
+    for &value in &cycle {
+        for read in readers.of(value) {
+            match read {
+                Read::Arg(by) if by != aim.at && !steps.contains(&by) => return true,
+                Read::Carried { by, to, index } if by != aim.at && !steps.contains(&by) => {
+                    let onward =
+                        func[to].params.get(index).is_some_and(|param| cycle.contains(param));
+                    if !onward {
+                        return true;
+                    }
                 }
+                _ => {}
             }
         }
     }
     false
+}
+
+/// Everything that reads each value, gathered once per function for [`read_elsewhere`].
+///
+/// That question is asked once per loop about the few values on its counter's cycle. It used to be
+/// answered by walking the whole function and looking every operand up in two hash sets, once for
+/// every loop, and on a function of two thousand loops and a hundred and ninety thousand
+/// instructions that was about five percent of an optimized compile.
+struct Readers {
+    /// Sorted by the value read, and in the function's order after that.
+    all: Vec<(Value, Read)>,
+}
+
+/// One place a value is read.
+#[derive(Debug, Clone, Copy)]
+enum Read {
+    /// An operand of the instruction.
+    Arg(Inst),
+    /// An argument the instruction hands to a block, which arrives there as its parameter at
+    /// `index`.
+    Carried { by: Inst, to: Block, index: usize },
+}
+
+impl Readers {
+    fn new(func: &Func) -> Self {
+        let mut all = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                for &arg in &func[func[inst].args] {
+                    all.push((arg, Read::Arg(inst)));
+                }
+                for call in func.successors(inst) {
+                    for (index, &arg) in func[call.args].iter().enumerate() {
+                        all.push((arg, Read::Carried { by: inst, to: call.block, index }));
+                    }
+                }
+            }
+        }
+        all.sort_by_key(|&(value, _)| value.index());
+        Self { all }
+    }
+
+    /// Where that value is read.
+    fn of(&self, value: Value) -> impl Iterator<Item = Read> + '_ {
+        let first = self.all.partition_point(|&(read, _)| read.index() < value.index());
+        self.all[first..].iter().take_while(move |&&(read, _)| read == value).map(|&(_, read)| read)
+    }
 }
 
 /// Whether a count that is an expression is known not to be negative where the loop is entered.
