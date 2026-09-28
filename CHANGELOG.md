@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.19
+
 ### Added
 
 - `--emit=archive` for Apple targets writes the BSD archive Apple's `ld` reads, with its index in `__.SYMDEF` and every object aligned to eight bytes, where it used to refuse with "there is no archive format for macho objects".
