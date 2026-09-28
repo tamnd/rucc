@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Every release archive carries `librucc_builtins.a` for each cross target whose runtime this compiler can build today, under `lib/rucc/<target>/` beside the binary, and the driver looks there. A user who unpacks a release on Linux or macOS and runs `rucc --fetch x86_64-windows-gnu` can now link a Windows program with nothing but `--target`, where the link used to stop and ask for a `cargo xtask builtins` from a source checkout. The release also gains a job that does exactly that with the Linux archive and checks the result is a PE32+ executable (#2066).
 - A link line too long for the host goes to the linker in a response file, with only `-m` and its value left on the command line. On Windows that is anything over about 30000 characters, which is a few hundred objects in a deep build directory, and elsewhere anything over 256 KiB. The file is quoted the way the linker will read it, which for lld on a Windows host is the Windows way and otherwise the GNU way (#2067).
 - `-mwindows`, `-mconsole` and `-municode` for Windows targets, as mingw gcc has them. `-mwindows` links a GUI program, with the `windows` subsystem and `gdi32` and `comdlg32` on the line, `-mconsole` puts it back, and `-municode` starts the program at `wmain` or `wWinMain` and defines `UNICODE`. `-mthreads` is accepted and does nothing, as it does with mingw-w64's gcc (#2067).
+- `tests/exec/windows` holds seven programs that check what a Windows program needs from its compiler at run time: stack probes past the guard page, xmm6 to xmm15 kept across calls, `longjmp` through frames, unwind tables the system can find, struct layout, the command line split and wildcards, and the imports of the executable. `run.sh` builds each at `-O0` and `-O2` and runs them natively or through a runner such as `wine64`. The expected output is gcc's (#2067).
 
 ### Changed
 
@@ -28,6 +29,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A `#if`, `#ifdef`, `#elif`, `#else` or `#endif` line inside the arguments of a function-like macro is taken and the arguments go on being collected after it, as with gcc, where it used to end the run and report "unterminated macro argument list". toybox writes each command's globals as `GLOBALS(...)` with conditionals inside and now builds.
+- On Windows targets a zero width bit-field that follows a bit-field rounds up to its own type's alignment and raises the struct's alignment to it, as gcc with `-mms-bitfields` and MSVC do. `struct { char a:1; int :0; char b:1; }` was two bytes and is now eight, aligned to four (#2067).
+- A Windows executable reserves two megabytes of stack, as it does when gcc links it, where lld's default gave it one. A function with a one megabyte frame ran out of stack under rucc and not under gcc. `-Wl,--stack,N` still sets it (#2067).
 
 ## 0.11.19
 

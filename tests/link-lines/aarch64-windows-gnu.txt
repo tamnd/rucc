@@ -17,6 +17,8 @@ sysroot   <cache>/sysroots/aarch64-windows-gnu
   --nxcompat
   --high-entropy-va
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/aarch64-windows-gnu/lib
   main.o
@@ -43,6 +45,8 @@ sysroot   <cache>/sysroots/aarch64-windows-gnu
   --nxcompat
   --high-entropy-va
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/aarch64-windows-gnu/lib
   main.o
@@ -68,6 +72,8 @@ sysroot   <cache>/sysroots/aarch64-windows-gnu
   --nxcompat
   --high-entropy-va
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/aarch64-windows-gnu/lib
   main.o
@@ -93,6 +99,8 @@ sysroot   <cache>/sysroots/aarch64-windows-gnu
   --nxcompat
   --high-entropy-va
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/aarch64-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/aarch64-windows-gnu/lib
   main.o

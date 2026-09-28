@@ -328,6 +328,14 @@ fn coff(
         args.push("-static".to_owned());
     }
     args.extend(pe_hardening(target));
+    // GNU ld reserves two megabytes of stack for a PE program and lld's MinGW driver reserves one,
+    // so the same program built by gcc and by us had a stack half the size, and a frame of one
+    // megabyte ran out of it. Named here so both linkers agree with gcc. A `-Wl,--stack,N` of
+    // the user's own comes later on the line and wins.
+    if options.mode != LinkMode::Shared {
+        args.push("--stack".to_owned());
+        args.push("2097152".to_owned());
+    }
     // The PE counterpart of `--export-dynamic`, and a different word rather than a different
     // default: a Windows image exports what its own export table names, and `-rdynamic` asks for
     // every symbol to be in there so that a program can look itself up.

@@ -16,6 +16,8 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   --dynamicbase
   --nxcompat
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/i686-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/i686-windows-gnu/lib
   main.o
@@ -41,6 +43,8 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   --dynamicbase
   --nxcompat
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/i686-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/i686-windows-gnu/lib
   main.o
@@ -65,6 +69,8 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   --dynamicbase
   --nxcompat
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/i686-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/i686-windows-gnu/lib
   main.o
@@ -89,6 +95,8 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   --dynamicbase
   --nxcompat
   --no-insert-timestamp
+  --stack
+  2097152
   <cache>/sysroots/i686-windows-gnu/lib/crt2.o
   -L<cache>/sysroots/i686-windows-gnu/lib
   main.o
