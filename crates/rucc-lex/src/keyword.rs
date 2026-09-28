@@ -202,6 +202,14 @@ pub enum Keyword {
     /// `__uint128_t`, the unsigned one, which Apple's SDK headers use to declare the NEON
     /// register state and which nothing else can spell.
     UInt128T,
+    /// `__int8`, Microsoft's name for `char`, and a keyword only on Windows.
+    Int8,
+    /// `__int16`, Microsoft's name for `short`.
+    Int16,
+    /// `__int32`, Microsoft's name for `int`.
+    Int32,
+    /// `__int64`, Microsoft's name for `long long`.
+    Int64,
     /// `__label__`, which declares a local label in a statement expression.
     Label,
     /// `__builtin_offsetof`, which is syntax rather than a function because it takes a type.
@@ -281,6 +289,20 @@ impl Keywords {
         Keywords { base, active: active.into_boxed_slice() }
     }
 
+    /// The same table with the keywords a Windows target has as well, for a compile for one.
+    ///
+    /// A separate step rather than a third argument to [`Keywords::new`], because every caller
+    /// but the driver's is a test that does not care what the target is.
+    #[must_use]
+    pub fn windows(mut self) -> Keywords {
+        for (slot, entry) in self.active.iter_mut().zip(KEYWORDS) {
+            if entry.dialects & WINDOWS != 0 {
+                *slot = Some(entry.keyword);
+            }
+        }
+        self
+    }
+
     /// The keyword `symbol` is in this dialect, and [`None`] when it is an identifier.
     #[must_use]
     #[inline]
@@ -318,6 +340,8 @@ const C11: u8 = 1 << 2;
 const C17: u8 = 1 << 3;
 const C23: u8 = 1 << 4;
 const GNU: u8 = 1 << 5;
+/// Not a dialect but a target. See [`Keywords::windows`].
+const WINDOWS: u8 = 1 << 6;
 
 /// A spelling that is a keyword in every dialect, GNU or not.
 const ALWAYS: u8 = C89 | C99 | C11 | C17 | C23 | GNU;
@@ -454,6 +478,16 @@ static KEYWORDS: &[Entry] = &[
     e("__inline__", Keyword::Inline, ALWAYS),
     e("__int128", Keyword::Int128, ALWAYS),
     e("__int128_t", Keyword::Int128T, ALWAYS),
+    // Microsoft's fixed width names. mingw-w64's `_mingw.h` defines them as macros, so a
+    // program that includes a header never reaches these, but one written for MSVC first often
+    // uses `__int64` before its first include, and the SDK headers on an MSVC target use them
+    // and define nothing. clang has them on its MSVC targets and not its mingw ones, and gcc has
+    // them nowhere. They are on every Windows target here, since the names are reserved and a
+    // program that can tell is one that was going to fail anyway.
+    e("__int8", Keyword::Int8, WINDOWS),
+    e("__int16", Keyword::Int16, WINDOWS),
+    e("__int32", Keyword::Int32, WINDOWS),
+    e("__int64", Keyword::Int64, WINDOWS),
     e("__label__", Keyword::Label, ALWAYS),
     e("__real", Keyword::Real, ALWAYS),
     e("__real__", Keyword::Real, ALWAYS),
@@ -599,6 +633,18 @@ mod tests {
         // serve both.
         assert_eq!(lookup(Std::C17, false, "_Static_assert"), Some(Keyword::StaticAssert));
         assert_eq!(lookup(Std::C23, false, "_Static_assert"), Some(Keyword::StaticAssert));
+    }
+
+    #[test]
+    fn the_microsoft_integer_names_are_keywords_only_for_windows() {
+        let (keywords, mut interner) = build(Std::C17, false);
+        let int64 = interner.intern("__int64");
+        assert_eq!(keywords.get(int64), None);
+        let windows = keywords.windows();
+        assert_eq!(windows.get(int64), Some(Keyword::Int64));
+        assert_eq!(windows.get(interner.intern("__int8")), Some(Keyword::Int8));
+        // Turning them on turns nothing else on.
+        assert_eq!(windows.get(interner.intern("typeof")), None);
     }
 
     #[test]
