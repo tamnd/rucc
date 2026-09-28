@@ -9,7 +9,7 @@
 //! column limit is a number and not a range.
 
 use rucc_pp::Dependency;
-use rucc_session::Deps;
+use rucc_session::{Deps, runtime};
 
 /// Where a line is allowed to end, in columns.
 ///
@@ -126,11 +126,17 @@ fn base_name(name: &str) -> &str {
 /// `targets` is what goes to the left of the colon, already escaped by whichever of `-MT` and
 /// `-MQ` put it there. `source` and each path in `found` are escaped here, since nobody has had a
 /// chance to.
+///
+/// A header this compiler carries inside itself is left out whatever the flags said. Its path is
+/// under [`runtime::DIR`], which is not a directory, so `make` would stop on it as a prerequisite
+/// with no rule and kbuild's fixdep stops on it as a file it cannot open. gcc lists its own
+/// headers because they are files in its install tree, and ours change only when the compiler does.
 #[must_use]
 pub fn rule(opts: &Deps, targets: &[String], source: &str, found: &[Dependency]) -> String {
     let listed: Vec<String> = found
         .iter()
         .filter(|dep| opts.system_headers || !dep.is_system)
+        .filter(|dep| !dep.path.starts_with(runtime::DIR))
         .map(|dep| escaped(&dep.path.to_string_lossy()))
         .collect();
 
@@ -197,6 +203,16 @@ mod tests {
         assert_eq!(
             rule(&plain(), &["a.o".to_owned()], "a.c", &found),
             "a.o: a.c /usr/include/stdio.h sub/loc.h\n"
+        );
+    }
+
+    #[test]
+    fn a_header_inside_the_compiler_is_never_a_prerequisite() {
+        let found = [dep("<builtin>/limits.h", true), dep("/usr/include/stdio.h", true)];
+        let opts = Deps { phony: true, ..plain() };
+        assert_eq!(
+            rule(&opts, &["a.o".to_owned()], "a.c", &found),
+            "a.o: a.c /usr/include/stdio.h\n/usr/include/stdio.h:\n"
         );
     }
 

@@ -151,6 +151,12 @@ pub struct LinkOptions {
     /// `-mdaz-ftz` or `-mno-daz-ftz`, which decides the same file outright and for a shared
     /// object as well.
     pub daz_ftz: Option<bool>,
+    /// `-r`, which joins objects into one bigger object rather than into something that runs.
+    ///
+    /// Kbuild builds every directory into a `built-in.o` this way. The result is still an input to a
+    /// later link, so it takes no startup files, no libraries and nothing about how it will be
+    /// loaded, which is what gcc leaves off the line when it sees the flag.
+    pub relocatable: bool,
 }
 
 impl LinkOptions {
@@ -161,12 +167,12 @@ impl LinkOptions {
 
     /// Whether the startup files go on the line.
     fn wants_startfiles(&self) -> bool {
-        !self.no_stdlib && !self.no_startfiles
+        !self.no_stdlib && !self.no_startfiles && !self.relocatable
     }
 
     /// Whether the library the program was written against goes on the line.
     fn wants_defaultlibs(&self) -> bool {
-        !self.no_stdlib && !self.no_defaultlibs
+        !self.no_stdlib && !self.no_defaultlibs && !self.relocatable
     }
 
     /// Whether the compiler's own runtime goes on the line.
@@ -175,7 +181,7 @@ impl LinkOptions {
     /// runtime too, and a link that keeps `libgcc` while dropping `libc` is not a thing anyone
     /// asks for on purpose.
     fn wants_runtime(&self) -> bool {
-        !self.no_stdlib && !self.no_defaultlibs
+        !self.no_stdlib && !self.no_defaultlibs && !self.relocatable
     }
 }
 
@@ -636,6 +642,9 @@ fn cross_line(
 /// [`Error::Cross`] for a target or a mode that has no line, and [`Error::Sysroot`] when the sysroot
 /// it would be linked against is not there.
 pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    if opts.relocatable {
+        return relocatable_line(target, opts, &[], "a.out").map(drop);
+    }
     let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
     // Whether there is a line for this target and mode at all, asked with our own runtime left off
     // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
@@ -851,6 +860,9 @@ pub fn line(
     items: &[Item],
     output: &str,
 ) -> Result<Vec<String>, Error> {
+    if opts.relocatable {
+        return relocatable_line(target, opts, items, output);
+    }
     if let Some(sysroot) = cross_sysroot(target, opts) {
         return cross_line(target, opts, items, output, &sysroot);
     }
@@ -977,6 +989,43 @@ pub fn line(
         }
     }
 
+    Ok(args)
+}
+
+/// The line for `-r`, which is the objects and the machine and nothing else.
+///
+/// No sysroot is read, because a relocatable link takes nothing from the C library, so this is the
+/// same line for this machine and for any other Linux target. The `-L` directories the command
+/// line gave are kept for a `-l` written on it, which the linker still resolves against archives.
+fn relocatable_line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
+    if target.os != Os::Linux {
+        return Err(Error::Target { triple: target.to_string() });
+    }
+    let mut args = vec![
+        "-o".to_owned(),
+        output.to_owned(),
+        "-m".to_owned(),
+        emulation(target).to_owned(),
+        "-r".to_owned(),
+    ];
+    if opts.strip {
+        args.push("-s".to_owned());
+    }
+    for dir in &opts.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    for item in items {
+        match item {
+            Item::File(path) => args.push(path.clone()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
     Ok(args)
 }
 
@@ -1365,6 +1414,14 @@ mod tests {
         let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
         let at = args.iter().position(|a| a == "-dynamic-linker").expect("the flag");
         assert!(args[at + 1].ends_with("/lib64/ld-linux-x86-64.so.2"), "{args:?}");
+    }
+
+    /// Kbuild's `built-in.o`, which is objects joined into an object and is linked again later.
+    #[test]
+    fn a_relocatable_link_is_the_objects_and_nothing_a_program_needs() {
+        let opts = LinkOptions { relocatable: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args, ["-o", "built-in.o", "-m", "elf_x86_64", "-r", "a.o"]);
     }
 
     #[test]
