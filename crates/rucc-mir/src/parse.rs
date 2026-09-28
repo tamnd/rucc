@@ -265,7 +265,10 @@ impl<'a> Parser<'a, '_> {
         // Read here rather than in the list, because that is where the printer writes it and for
         // the reason the printer writes it there: a word in the list would be a word this has to
         // tell apart from the operands of an opcode it knows nothing about.
-        let flags = if self.eat_word("volatile") { Flags::VOLATILE } else { Flags::NONE };
+        let mut flags = if self.eat_word("volatile") { Flags::VOLATILE } else { Flags::NONE };
+        if self.eat_word("commutes") {
+            flags = flags.with(Flags::COMMUTES);
+        }
 
         let mut inst = PendingInst {
             opcode,
@@ -921,6 +924,21 @@ mfunc @tick {
 block0(%0:gpr):
     %1:gpr = x64.mov_rm volatile [%0]
     x64.mov_mr volatile %1, [%0]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_instruction_that_reads_its_sources_either_way_round_round_trips() {
+        // Set just before allocation, so it is only ever seen in a dump taken there, and in front
+        // of the list for the same reason the word above is.
+        round_trip(
+            "\
+mfunc @sum {
+block0(%0:gpr, %1:gpr):
+    %2:gpr = x64.add_rr_64 commutes %0, %1
     x64.ret
 }
 ",

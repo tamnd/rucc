@@ -94,6 +94,13 @@ pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str, verify: b
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
     let mut assignment = assign::assign(func, &order, &live, env);
+    // An answer that went over the second source of an instruction that reads its sources either
+    // way round. Swapping them makes it an ordinary reuse of the first, so the checker, the trace
+    // and the rewrite read it as one. Liveness does not care which way round two uses are.
+    for &inst in assignment.commuted() {
+        let list = func[inst].operands;
+        func[list].swap(1, 2);
+    }
     if checking {
         let problems = check::check(func, &order, &live, &assignment);
         assert!(problems.is_empty(), "in '{called}': {}", check::report(&problems));
