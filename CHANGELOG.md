@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.12.0
+
 ### Added
 
 - Every release archive carries `librucc_builtins.a` for each cross target whose runtime this compiler can build today, under `lib/rucc/<target>/` beside the binary, and the driver looks there. A user who unpacks a release on Linux or macOS and runs `rucc --fetch x86_64-windows-gnu` can now link a Windows program with nothing but `--target`, where the link used to stop and ask for a `cargo xtask builtins` from a source checkout. The release also gains a job that does exactly that with the Linux archive and checks the result is a PE32+ executable (#2066).
