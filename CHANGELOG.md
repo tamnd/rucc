@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A parameter the optimizer drops because nothing uses it no longer leaves its `!aligned`, `!bounds` or `!init` fact behind. The IR printer wrote the stale fact as `%? = !aligned(4)`, and `--emit=ir` output from `-O2` could not be read back. Four Postgres translation units hit this in the IR round trip check (#2048).
+
 ## 0.11.18
 
 ### Added

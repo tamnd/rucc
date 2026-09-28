@@ -331,9 +331,11 @@ impl Func {
             kept
         });
         // The same as an instruction taken out: a declaration a dropped parameter was the value of
-        // was given it at the top of the block.
+        // was given it at the top of the block. What was known about it goes too, since a fact
+        // about a value nothing defines has no number to be printed under and cannot be read back.
         for value in dropped {
             self.held_from(value, block, None);
+            self.set_facts(value, Facts::NONE);
         }
         for (index, &value) in params.iter().enumerate() {
             let index = u32::try_from(index).expect("a block with four billion parameters");
@@ -2085,6 +2087,23 @@ mod tests {
         let call = func.successors(br).nth(1).expect("the branch to the header");
         let grown = func.append_arg(call.args, extra);
         assert_eq!(func[grown].len(), 3);
+    }
+
+    #[test]
+    fn a_dropped_parameter_takes_what_was_known_about_it_along() {
+        // #2048: ipasra dropped a pointer parameter with `!aligned` on it, the fact stayed behind,
+        // and the printer wrote it under a value with no number.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let kept = func.append_param(block, Type::PTR);
+        let dropped = func.append_param(block, Type::PTR);
+        let aligned = Facts { align: Some(4), ..Facts::NONE };
+        func.set_facts(kept, aligned);
+        func.set_facts(dropped, aligned);
+
+        func.retain_params(block, |value| value == kept);
+        assert_eq!(func.facts(kept), aligned);
+        assert_eq!(func.facts(dropped), Facts::NONE);
     }
 
     #[test]
