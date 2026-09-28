@@ -297,6 +297,8 @@
 //! the longer of the two here is three. What makes a fourth worth having is a rule set that has
 //! something to say about four, and the rule set here grows one measured entry at a time.
 
+use std::collections::HashMap;
+
 use rucc_base::Interner;
 use rucc_mir::{Amode, Flags, Func, Inst, Opcode, Operand, Reg};
 use rucc_target::{FlagInsts, MachineInsts};
@@ -956,18 +958,20 @@ pub fn loads(
 ) -> usize {
     let mut reads = Reads::of(func);
     let mut done = 0;
+    let mut seen = HashMap::new();
     for block in func.blocks().collect::<Vec<_>>() {
         let mut waiting: Option<Waiting> = None;
         for (at, inst) in func.insts(block).collect::<Vec<_>>().into_iter().enumerate() {
-            let name = names.resolve(func[inst].opcode.name()).to_owned();
-            let bare = machine.bare(&name).to_owned();
             // Asked before the rewrite below rather than after it, because the rewrite turns an
             // instruction that touched no memory into one that does, and asking afterwards would
             // throw away the load that had just gone into it over the load that had just gone into
             // it. Nothing else about the answer moves: the other end of a row of the fold table is
             // arithmetic this target describes and is not a call.
-            let barrier = machine.calls(&name) || !machine.has(&name) || machine.touches_mem(&name);
+            let opcode = func[inst].opcode;
+            let Loads { barrier, load } =
+                *seen.entry(opcode).or_insert_with(|| Loads::of(machine, names, opcode));
             if let Some(carried) = waiting {
+                let bare = machine.bare(names.resolve(opcode.name())).to_owned();
                 if let Some(plan) = joined(func, &reads, carried, machine, names, inst, &bare) {
                     let mut set = Changes::new();
                     set.rewrite(inst, plan);
@@ -995,8 +999,7 @@ pub fn loads(
             if insisted(func, inst) {
                 continue;
             }
-            let mut rows = FOLDS.iter().chain(WIDENINGS);
-            if let Some(load) = rows.find(|fold| fold.load == bare).map(|fold| fold.load) {
+            if let Some(load) = load {
                 let operands = &func[func[inst].operands];
                 if let Some(first) = operands.first().filter(|operand| operand.role.is_def()) {
                     waiting = Some(Waiting { inst, reg: first.reg, load, at });
@@ -1005,6 +1008,33 @@ pub fn loads(
         }
     }
     done
+}
+
+/// What [`loads`] asks of an opcode, asked once for each opcode a function has rather than once for
+/// each instruction.
+///
+/// The fold tables are over a hundred rows and the question of which row a load is on was a walk down all
+/// of them comparing names, asked of every instruction, when most instructions are not loads at
+/// all. On jtckdint's `test.c` at `-O2` that was about one percent of the build.
+#[derive(Debug, Clone, Copy)]
+struct Loads {
+    /// Whether nothing may be carried past it: a call, a name the target does not have, or
+    /// something that reads or writes memory.
+    barrier: bool,
+    /// The name of the load, when it is one a row of the fold table folds.
+    load: Option<&'static str>,
+}
+
+impl Loads {
+    fn of(machine: &MachineInsts, names: &Interner, opcode: Opcode) -> Self {
+        let name = names.resolve(opcode.name());
+        let bare = machine.bare(name);
+        let mut rows = FOLDS.iter().chain(WIDENINGS);
+        Self {
+            barrier: machine.calls(name) || !machine.has(name) || machine.touches_mem(name),
+            load: rows.find(|fold| fold.load == bare).map(|fold| fold.load),
+        }
+    }
 }
 
 /// The three instructions that read a place, compute on what was there and write it back.
