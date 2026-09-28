@@ -229,6 +229,29 @@ impl SearchPath {
         self.dirs.insert(at, Dir { path, is_system });
     }
 
+    /// The search list in the shape `gcc -v` prints it to stderr.
+    ///
+    /// Build systems read this rather than asking, meson and cmake among them, to learn which
+    /// directories hold the system headers. The shape is GCC's to the character, a space in front
+    /// of each directory included, because what reads it is a parser written against GCC.
+    pub fn render_gcc(&self) -> String {
+        let mut out = String::from("#include \"...\" search starts here:\n");
+        let line = |out: &mut String, dir: &Dir| {
+            out.push(' ');
+            out.push_str(&dir.path.display().to_string());
+            out.push('\n');
+        };
+        for dir in &self.dirs[..self.quote_end] {
+            line(&mut out, dir);
+        }
+        out.push_str("#include <...> search starts here:\n");
+        for dir in &self.dirs[self.quote_end..] {
+            line(&mut out, dir);
+        }
+        out.push_str("End of search list.\n");
+        out
+    }
+
     /// Makes every directory added so far reachable only by a quoted include, which is `-I-`.
     ///
     /// The flag GCC deprecated in favour of `-iquote` and still supports, because a build system
@@ -464,6 +487,18 @@ fn is_absolute(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_search_list_is_printed_the_way_gcc_prints_it() {
+        let mut path = SearchPath::new();
+        path.push_quote("q");
+        path.push_bracket("i");
+        path.push_system("/usr/include");
+        assert_eq!(
+            path.render_gcc(),
+            "#include \"...\" search starts here:\n q\n#include <...> search starts here:\n i\n /usr/include\nEnd of search list.\n"
+        );
+    }
     use super::*;
 
     fn fs_with(files: &[&str]) -> MemoryFileSystem {
