@@ -89,6 +89,8 @@ struct Declared {
     noreturn: bool,
     /// Whether this declaration said the function is written without a prologue or an epilogue.
     naked: bool,
+    /// Whether this declaration said a call to it may come back more than once.
+    twice: bool,
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
     /// [`DeclFlags::NO_STRICT_ALIASING`] and [`DeclFlags::NO_INSTRUMENT`] and nothing else.
@@ -318,6 +320,8 @@ impl Checker<'_> {
             // usual place for it: a naked function is written where its body is, since the body is
             // the only part of it the compiler is being asked to keep.
             naked: self.is_naked(specs.attrs),
+            // The specifiers only, for the reason `noreturn` above reads them only.
+            twice: self.returns_twice(specs.attrs),
             // The specifiers only, for the reason `noreturn` above reads them only. glibc writes
             // `__fortify_function` in front of the definition, which is here.
             inlining: self
@@ -669,6 +673,9 @@ impl Checker<'_> {
             // a program usually writes this one, since the definition is, but a header that
             // declares an interrupt handler and defines it elsewhere writes it here.
             naked: self.is_naked(specs.attrs) || self.is_naked(item.attrs),
+            // Both places, for the reason `noreturn` above reads both. glibc writes it after the
+            // declarator, as `extern int setjmp (jmp_buf __env) __THROWNL __returns_twice;`.
+            twice: self.returns_twice(specs.attrs) || self.returns_twice(item.attrs),
             // Both places, for the reason `noreturn` above reads both.
             inlining: (self.inlining(specs.attrs) | self.inlining(item.attrs))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
@@ -1298,6 +1305,11 @@ impl Checker<'_> {
             flags |= DeclFlags::NAKED;
         }
         // One declaration saying it is enough, for the reason `noreturn` above is under that
+        // rule, and the header is the only place anybody writes this one.
+        if declared.twice {
+            flags |= DeclFlags::RETURNS_TWICE;
+        }
+        // One declaration saying it is enough, for the reason `noreturn` above is under that
         // rule: a prototype that says `always_inline` and a definition that does not is a
         // function gcc inlines.
         flags |= declared.inlining;
@@ -1573,6 +1585,7 @@ impl Checker<'_> {
                 .with(DeclFlags::GNU_INLINE, declared.gnu_inline || self.cx.gnu_inline_by_default())
                 .with(DeclFlags::NORETURN, declared.noreturn)
                 .with(DeclFlags::NAKED, declared.naked)
+                .with(DeclFlags::RETURNS_TWICE, declared.twice)
                 .with(DeclFlags::WEAK, declared.weak.is_some())
                 | declared.inlining,
             asm_label: declared.asm_label,
@@ -2640,6 +2653,25 @@ mod tests {
         let id = only(&c, list);
 
         assert_eq!(dump(&c, id), "decl #0 nlr_push : int(void) function external declared naked\n");
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn returns_twice_written_as_the_attribute_is_kept() {
+        let mut f = Fixture::new();
+        let mut specs = f.int_specs();
+        // Armoured, the way glibc's `__returns_twice` spells it.
+        specs.attrs = f.attribute("__returns_twice__");
+        let decl = f.var(specs, "setjmp", &[function()], None);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let id = only(&c, list);
+
+        assert_eq!(
+            dump(&c, id),
+            "decl #0 setjmp : int(void) function external declared returns-twice\n"
+        );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
     }
 

@@ -35,7 +35,7 @@
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
-use rucc_ir::{Linkage, Module, Pic, Visibility};
+use rucc_ir::{AttrSet, Linkage, Module, Pic, Visibility};
 use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
@@ -70,6 +70,7 @@ use rucc_target::ObjectFormat;
 pub struct Elsewhere {
     names: HashSet<Symbol>,
     threads: HashSet<Symbol>,
+    twice: HashSet<Symbol>,
     described: bool,
 }
 
@@ -88,8 +89,13 @@ impl Elsewhere {
             .filter(|&id| module[id].tls.is_some())
             .map(|id| module[id].name)
             .collect();
+        let twice = module
+            .funcs()
+            .filter(|&id| module[id].attrs.set.contains(AttrSet::RETURNS_TWICE))
+            .map(|id| module[id].name)
+            .collect();
         let described = format == ObjectFormat::MachO;
-        Self { threads, described, ..Self::table(module, pic, format, copies) }
+        Self { threads, twice, described, ..Self::table(module, pic, format, copies) }
     }
 
     /// The half of the above that is about the global offset table, which is the older one.
@@ -160,6 +166,18 @@ impl Elsewhere {
         self.threads.contains(&name)
     }
 
+    /// Whether a call to that name may come back more than once, because a declaration of it said
+    /// `returns_twice`.
+    ///
+    /// Not a question about addresses like the two above, but it is the same kind of fact: it is
+    /// about the module, the function it changes is a different one from the function it is
+    /// written on, and the code generator sees one function at a time. See
+    /// [`crate::tail::comes_back`] for what the caller does with it.
+    #[must_use]
+    pub fn twice(&self, name: Symbol) -> bool {
+        self.twice.contains(&name)
+    }
+
     /// Whether a thread-local variable is reached by calling through its descriptor, which is how
     /// Mach-O does it on both architectures.
     ///
@@ -180,7 +198,7 @@ impl Elsewhere {
 /// module for it to be outside of.
 impl FromIterator<Symbol> for Elsewhere {
     fn from_iter<T: IntoIterator<Item = Symbol>>(names: T) -> Self {
-        Self { names: names.into_iter().collect(), threads: HashSet::new(), described: false }
+        Self { names: names.into_iter().collect(), ..Self::default() }
     }
 }
 

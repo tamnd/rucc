@@ -304,6 +304,15 @@ impl DeclFlags {
     /// prototype above a definition that says nothing.
     pub const NO_INSTRUMENT: Self = Self(1 << 10);
 
+    /// A call to this function may come back more than once.
+    ///
+    /// `__attribute__((returns_twice))`, which glibc writes on `setjmp`, `sigsetjmp`, `vfork` and
+    /// the rest of that family. What a caller does with it is keep every value in a stack slot of
+    /// its own for the whole function, since the second return comes back to a frame whose
+    /// registers were put back from the jump buffer and whose slots were not. Merged the way
+    /// [`Self::NORETURN`] is, because it is written in the same place for the same reason.
+    pub const RETURNS_TWICE: Self = Self(1 << 11);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
