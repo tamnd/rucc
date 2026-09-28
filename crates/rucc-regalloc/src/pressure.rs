@@ -157,11 +157,13 @@ impl Pressure {
     /// Takes a value off every point it is live at, which is what sending it to memory does.
     pub(crate) fn lift(&mut self, class: RegClass, area: Area<'_>) {
         let Some(row) = self.wanted.get_mut(usize::from(class.number())) else { return };
+        // A slice per piece rather than a lookup per point, so the loop has no bounds to check and
+        // the compiler can take one off several counts at once.
         for piece in area.pieces() {
-            for point in piece.start..=piece.end {
-                if let Some(count) = row.get_mut(at(point)) {
-                    *count = count.saturating_sub(1);
-                }
+            let end = at(piece.end).saturating_add(1).min(row.len());
+            let start = at(piece.start).min(end);
+            for count in &mut row[start..end] {
+                *count = count.saturating_sub(1);
             }
         }
     }
