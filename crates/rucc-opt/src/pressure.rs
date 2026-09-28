@@ -49,7 +49,7 @@ use rucc_cost::heuristics::LOOP_RESERVED_REGS;
 use rucc_ir::{Block, Func, Type};
 
 use crate::cfg::Cfg;
-use crate::live::Liveness;
+use crate::live::{Groups, Liveness};
 use crate::loops::{LoopId, Loops};
 
 /// Which bank of registers a value needs, which is `rucc_cost::RegClass` under the name this
@@ -101,21 +101,14 @@ impl Pressure {
         let mut most_in = vec![[0; Class::COUNT]; blocks];
         let mut most = [0; Class::COUNT];
 
+        let classes: Groups<{ Class::COUNT }> =
+            Groups::of(func, |value| class_of(func[value].ty).map(Class::index));
         for block in cfg.reverse_postorder() {
             let at = block.index();
-            for value in live.live_in(block) {
-                if let Some(class) = class_of(func[value].ty) {
-                    arriving[at][class.index()] += 1;
-                }
-            }
+            arriving[at] = live.grouped_in(block, &classes);
             // The walk is backwards from the live-out, which is what gives the count just before
             // each instruction without keeping a set per instruction.
-            let mut here = [0; Class::COUNT];
-            for value in live.live_out(block) {
-                if let Some(class) = class_of(func[value].ty) {
-                    here[class.index()] += 1;
-                }
-            }
+            let here = live.grouped_out(block, &classes);
             most_in[at] = here;
             // The count is carried along rather than taken again at each instruction. What an
             // instruction changes is its results and its operands, and reading the whole set to
