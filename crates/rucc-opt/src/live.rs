@@ -22,6 +22,12 @@
 //! means a block is visited after the blocks it branches to wherever the graph allows, so the
 //! usual function settles in one round and a loop costs one more.
 //!
+//! What a block adds to the set passing through it and what it takes out are the same every round,
+//! so they are worked out once rather than by walking its instructions each time. A round only
+//! looks again at a block when the live-in of something it branches to changed in the round
+//! before, since otherwise it would get the same answer. A function of thirty thousand blocks and
+//! two thousand loops took seconds when every block was redone every round.
+//!
 //! A value passed as a branch argument is live at the branch and not on the edge, because what
 //! crosses the edge is the parameter it becomes. [`Liveness::through`] is where a caller sees it,
 //! and it is the walk the pressure model counts along, so the argument is counted where it is
@@ -93,6 +99,11 @@ impl Set {
         changed
     }
 
+    /// Takes everything out.
+    fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
     fn len(&self) -> usize {
         self.words.iter().map(|word| word.count_ones() as usize).sum()
     }
@@ -151,24 +162,72 @@ impl Liveness {
         let mut live_in = vec![empty.clone(); blocks];
         let mut live_out = vec![empty; blocks];
 
-        // Postorder, so a block is reached after the blocks it branches to wherever the graph
-        // allows one order to do that. A loop is what makes a second round necessary.
+        // What each block reads before it writes, and what it writes, parameters included. Live in
+        // is then live out with the second taken out and the first put in, which is what walking
+        // the block backwards gives without walking it.
         let order: Vec<Block> = cfg.postorder().to_vec();
+        let mut reads: Vec<Vec<Value>> = vec![Vec::new(); blocks];
+        let mut writes: Vec<Vec<Value>> = vec![Vec::new(); blocks];
+        let mut defined = Set::with_room_for(values);
+        let mut read = Set::with_room_for(values);
+        for &block in &order {
+            let at = block.index();
+            for &param in &func[block].params {
+                defined.insert(param);
+                writes[at].push(param);
+            }
+            for inst in func.insts(block) {
+                let data = &func[inst];
+                let branches = func.successors(inst).flat_map(|call| &func[call.args]);
+                for &arg in func[data.args].iter().chain(branches) {
+                    if !defined.contains(arg) && read.insert(arg) {
+                        reads[at].push(arg);
+                    }
+                }
+                for result in data.results() {
+                    defined.insert(result);
+                    writes[at].push(result);
+                }
+            }
+            for &value in &writes[at] {
+                defined.remove(value);
+            }
+            for &value in &reads[at] {
+                read.remove(value);
+            }
+        }
+
+        // Postorder, so a block is reached after the blocks it branches to wherever the graph
+        // allows one order to do that. A loop is what makes a second round necessary, and the
+        // second round is only the blocks something changed under.
+        let mut stale = vec![true; blocks];
+        let mut set = Set::with_room_for(values);
         let mut again = true;
         while again {
             again = false;
             for &block in &order {
-                let mut out = Set::with_room_for(values);
+                let at = block.index();
+                if !std::mem::take(&mut stale[at]) {
+                    continue;
+                }
+                set.clear();
                 for &successor in cfg.successors(block) {
-                    out.union_with(&live_in[successor.index()]);
+                    set.union_with(&live_in[successor.index()]);
                 }
-                let mut set = out.clone();
-                walk(func, block, &mut set, |_, _, _| {});
-                for &param in &func[block].params {
-                    set.remove(param);
+                live_out[at].clone_from(&set);
+                for &value in &writes[at] {
+                    set.remove(value);
                 }
-                again |= live_out[block.index()].union_with(&out);
-                again |= live_in[block.index()].union_with(&set);
+                for &value in &reads[at] {
+                    set.insert(value);
+                }
+                if live_in[at] != set {
+                    live_in[at].clone_from(&set);
+                    for &pred in cfg.predecessors(block) {
+                        stale[pred.index()] = true;
+                        again = true;
+                    }
+                }
             }
         }
 
