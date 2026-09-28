@@ -1675,7 +1675,12 @@ impl Checker<'_> {
     }
 
     /// `static_assert`, which is the one declaration whose whole purpose is to be checked.
-    fn static_assert(&mut self, cond: ast::ExprId, message: Option<ast::StrId>, span: Span) {
+    pub(in crate::check) fn static_assert(
+        &mut self,
+        cond: ast::ExprId,
+        message: Option<ast::StrId>,
+        span: Span,
+    ) {
         let cond = self.expr(cond);
         let cond = self.value(cond);
         if self.is_poisoned(cond) {

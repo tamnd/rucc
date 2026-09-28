@@ -163,8 +163,10 @@ impl Checker<'_> {
         for member in &ast[members] {
             let field = match *member {
                 Member::Field(field) => field,
-                Member::StaticAssert { span, .. } => {
-                    self.unsupported_type("a static assertion among the members", span);
+                // It adds no member and is checked where it stands, the way gnulib's `verify_expr`
+                // hides one inside a struct to test a constant in expression context.
+                Member::StaticAssert { cond, message, span } => {
+                    self.static_assert(cond, message, span);
                     continue;
                 }
             };
@@ -1029,6 +1031,24 @@ mod tests {
         let TypeKind::Record(id) = checker.types.kind(ty) else { panic!("a record type") };
         let member = checker.types.record_info(id).fields[0].ty;
         assert_eq!(spelled(&checker, member), "struct S *");
+    }
+
+    #[test]
+    fn a_static_assertion_among_the_members_is_checked_and_adds_no_member() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let x = fixture.declarator(Some("x"), &[]);
+        let one = fixture.int(1);
+        let zero = fixture.int(0);
+        let holds = Member::StaticAssert { cond: one, message: None, span: Span::DUMMY };
+        let fails = Member::StaticAssert { cond: zero, message: None, span: Span::DUMMY };
+        let specs = structure(&mut fixture, Some("S"), &[holds, member(int, x), fails]);
+        let hole = defined(&mut fixture, specs);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, hole);
+        assert_eq!(message(&checker), "static assertion failed");
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
     }
 
     #[test]
