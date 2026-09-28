@@ -1,0 +1,8 @@
+argc 1
+length 4
+0061
+d83d
+de00
+0062
+sizeof wchar_t 2
+argv[0] ends in exe 1

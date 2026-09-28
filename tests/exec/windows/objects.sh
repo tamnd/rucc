@@ -22,8 +22,10 @@ trap 'rm -rf "$work"' EXIT
 cd "$here"
 for src in *.c; do
     name=${src%.c}
+    flags=$(sed -n '1,3s|^/\* flags: \(.*\) \*/$|\1|p' "$src")
+    read -r -a flags <<<"$flags"
     for level in -O0 -O2; do
-        "${cc[@]}" "$level" -c "$src" -o "$work/$name.obj"
+        "${cc[@]}" "$level" ${flags[@]+"${flags[@]}"} -c "$src" -o "$work/$name.obj"
         hash=$(sha256sum "$work/$name.obj" | cut -d' ' -f1)
         echo "$hash $name $level"
     done
