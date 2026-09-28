@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-frucc-trace=<file>` appends one line of JSON per compiled file to the file, with the wall time of each phase from reading the source to generating code, the time each optimizer pass took across the module, and on Linux the peak memory of the process. A build can point every compiler at one file, since each line goes out in a single append. This is what the rucc-postgres harness reads to find which file and which pass a slow build spends its time in (#1987).
+
 ### Changed
 
 - Induction variable optimization gathers what reads each value once per function and looks only at the readers of a loop's counter when deciding whether it can count down, instead of walking the whole function once for every loop. On jtckdint's `test.c` at `-O2` the build runs about 9% fewer instructions and 7% fewer cycles, and the code it emits is unchanged.

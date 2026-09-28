@@ -43,6 +43,7 @@ pub mod phase;
 pub mod preprocess;
 pub mod schedule;
 mod shapes;
+pub mod trace;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -1647,6 +1648,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .map_err(|_| err(format!("`{count}` is not a number of transformations")))?;
                 opts.pass_fuel_global = Some(count);
             }
+            _ if arg.starts_with("-frucc-trace=") => {
+                let path = &arg["-frucc-trace=".len()..];
+                if path.is_empty() {
+                    return Err(err("-frucc-trace= needs a file to write to"));
+                }
+                opts.trace = Some(path.to_owned());
+            }
             // Everything from `-fopt-info` to the end of the argument, which is optional
             // keywords joined by hyphens and an optional `=<file>`. Checked here rather than
             // where the remarks are printed, because by then the compilation somebody wanted
@@ -2763,6 +2771,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         if opts.time {
             say_time(&job.input, started.elapsed(), &mut stderr);
         }
+        failed |= !write_trace(opts, job, started, &result, &mut stderr);
         fired.merge(&result.fired);
         pressure.merge(&result.pressure);
         lowerings.merge(&result.lowerings);
@@ -2921,6 +2930,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             if opts.time {
                 say_time(&job.input, started.elapsed(), &mut stderr);
             }
+            failed |= !write_trace(opts, job, started, &result, &mut stderr);
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
             lowerings.merge(&result.lowerings);
@@ -3084,6 +3094,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             if opts.time {
                 say_time(&plan_job.input, started.elapsed(), &mut stderr);
             }
+            failed |= !write_trace(opts, plan_job, started, &result, &mut stderr);
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
             lowerings.merge(&result.lowerings);
@@ -3316,6 +3327,39 @@ fn write_temps(job: &Job, temps: &Temps, stderr: &mut impl std::io::Write) -> bo
         }
     }
     ok
+}
+
+/// Appends the file's line to the `-frucc-trace` file, when there is one.
+///
+/// Returns whether that went well, and says why on standard error when it did not.
+fn write_trace(
+    opts: &Options,
+    job: &Job,
+    started: std::time::Instant,
+    result: &Compiled,
+    stderr: &mut impl std::io::Write,
+) -> bool {
+    let Some(path) = &opts.trace else {
+        return true;
+    };
+    let output = match &job.output {
+        Output::Stdout => "-",
+        Output::File(path) | Output::Temporary(path) => path,
+    };
+    let record = trace::Record {
+        input: &job.input,
+        output,
+        ok: !result.failed(),
+        total: started.elapsed(),
+        timing: &result.timing,
+    };
+    match trace::append(path, &record) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = writeln!(stderr, "rucc: error: {e}");
+            false
+        }
+    }
 }
 
 /// One line of `-time`, which is what a step was called and how long it took.
@@ -4655,6 +4699,16 @@ mod tests {
 
         let e = parse_args(&args(&["-fpass-fuel-global=lots", "a.c"])).unwrap_err();
         assert!(e.message.contains("not a number"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_trace_file_is_taken_from_the_flag_and_an_empty_one_is_refused() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.trace, None);
+        let (opts, _) = compile(&["-c", "-frucc-trace=/tmp/compile.jsonl", "a.c"]);
+        assert_eq!(opts.trace.as_deref(), Some("/tmp/compile.jsonl"));
+        let e = parse_args(&args(&["-frucc-trace=", "a.c"])).unwrap_err();
+        assert!(e.message.contains("needs a file"), "{}", e.message);
     }
 
     #[test]

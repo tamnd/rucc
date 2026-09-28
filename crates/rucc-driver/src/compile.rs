@@ -124,6 +124,8 @@ pub struct Compiled {
     /// be the file that was compiled, and two runs of anything with a `__TIME__` in it are not
     /// the same text.
     pub temps: Temps,
+    /// Where the time went, phase by phase and pass by pass, for `-frucc-trace`.
+    pub timing: crate::trace::Timing,
 }
 
 /// The intermediate text a compilation went through, kept when `-save-temps` asked for it.
@@ -174,6 +176,7 @@ impl Compiled {
 /// as undeclared. One mistake is worth one message.
 #[must_use]
 pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
+    let mut clock = crate::trace::Clock::start();
     let mut sess = Session::new(opts.clone());
     // Before anything else interns a name. The keyword symbols have to be one unbroken run for
     // a lookup to be a subtraction, and the preprocessor interns every identifier it reads, so
@@ -188,6 +191,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
     let mut remarks = String::new();
+    // How long each optimizer pass took, for `-frucc-trace`.
+    let mut passes = Vec::new();
     // Filled in as the compilation goes past each of them, and only under `-save-temps`.
     let mut temps = Temps::default();
 
@@ -198,6 +203,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let Ok(file) = sess.sources.add_shared(crate::phase::source_name(name), bytes, None) else {
         return failure(format!("{name}: the source map has no room left for this file"));
     };
+    clock.lap("read");
 
     // Phases 1 to 4. The expanded stream is turned into pp-tokens straight away, because the
     // include context borrows the source map that rendering a diagnostic reads and the borrow
@@ -241,6 +247,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Taken here rather than at the end, because the preprocessor is done with and everything
     // after this is about the tree it produced.
     let deps = pp.dependencies().to_vec();
+    clock.lap("preprocess");
 
     // Phase 7, which is where a spelling becomes a keyword and a preprocessing number becomes
     // a constant of a type.
@@ -254,6 +261,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     };
     let (tokens, complaints) = convert(&expanded, &cx);
     diagnostics.extend(complaints);
+    clock.lap("convert");
 
     // Only the ones the file wrote, since a name nothing interned is one nothing can use.
     let type_names: Vec<Symbol> =
@@ -269,6 +277,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             type_names: &type_names,
         },
     );
+    clock.lap("parse");
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
 
@@ -299,6 +308,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         );
         checker.check_unit();
         let checked = checker.finish();
+        clock.lap("check");
         if !checked.failed() {
             match opts.emit {
                 EmitKind::Tast => {
@@ -389,30 +399,40 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     // The walk reports what it cannot build, and what it did build is printed
                     // anyway: a file with one construct missing from it is more use to read
                     // than nothing at all, and the errors are what stop it being compiled.
+                    clock.lap("lower");
                     let failed = lowered.diagnostics.iter().any(|d| d.severity.is_fatal());
                     if !failed {
                         // The verifier runs on everything the walk builds, always. It is the
                         // one check that a bug in the walk cannot talk its way past, and a
                         // wrong instruction found here costs a message rather than an hour
                         // in front of a debugger over the assembly it turned into.
-                        if let Err(errors) = rucc_ir::verify(&lowered.module, &sess.interner) {
+                        if let Err(errors) = clock
+                            .time("verify", || rucc_ir::verify(&lowered.module, &sess.interner))
+                        {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
-                        } else if let Err(complaints) =
-                            instrument(&mut lowered.module, &mut sess.interner, opts)
-                                .map(|done| instrumented = done)
+                        } else if let Err(complaints) = clock
+                            .time("instrument", || {
+                                instrument(&mut lowered.module, &mut sess.interner, opts)
+                            })
+                            .map(|done| instrumented = done)
                         {
                             diagnostics.extend(complaints);
-                        } else if let Err(complaints) = optimize(
-                            &mut lowered.module,
-                            &mut sess.interner,
-                            &sess.target,
-                            opts,
-                            name,
-                            &mut dumps,
-                            &mut remarks,
-                        ) {
+                        } else if let Err(complaints) = clock
+                            .time("optimize", || {
+                                optimize(
+                                    &mut lowered.module,
+                                    &mut sess.interner,
+                                    &sess.target,
+                                    opts,
+                                    name,
+                                    &mut dumps,
+                                    &mut remarks,
+                                )
+                            })
+                            .map(|times| passes = times)
+                        {
                             diagnostics.extend(complaints);
                         } else if opts.emit == EmitKind::SafetySummary {
                             // After the optimizer, because the number that matters is how many
@@ -441,19 +461,22 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         } else {
                             // The back end, which is every pass after the IR and which is
                             // where a construct nothing has a rule for is finally noticed.
-                            match generate(
-                                &mut lowered.module,
-                                &mut sess.interner,
-                                &sess.target,
-                                opts,
-                                &mut Recording {
-                                    fired: &mut fired,
-                                    pressure: &mut pressure,
-                                    lowerings: &mut lowerings,
-                                },
-                                &mut temps.assembly,
-                                Origin { map: &sess.sources, name, meaning: &meaning },
-                            ) {
+                            let made = clock.time("generate", || {
+                                generate(
+                                    &mut lowered.module,
+                                    &mut sess.interner,
+                                    &sess.target,
+                                    opts,
+                                    &mut Recording {
+                                        fired: &mut fired,
+                                        pressure: &mut pressure,
+                                        lowerings: &mut lowerings,
+                                    },
+                                    &mut temps.assembly,
+                                    Origin { map: &sess.sources, name, meaning: &meaning },
+                                )
+                            });
+                            match made {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
                             }
@@ -501,7 +524,21 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired, pressure, lowerings, dumps, remarks, deps, temps }
+    clock.passes(passes);
+    let timing = clock.finish();
+    Compiled {
+        artifact,
+        messages,
+        errors,
+        fired,
+        pressure,
+        lowerings,
+        dumps,
+        remarks,
+        deps,
+        temps,
+        timing,
+    }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -565,6 +602,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         remarks: String::new(),
         deps: Vec::new(),
         temps: Temps::default(),
+        timing: crate::trace::Timing::default(),
     }
 }
 
@@ -645,6 +683,8 @@ struct Instrumented {
 /// this is a walk over an empty list rather than a branch on the level. See section 9.1 of
 /// `spec/09-optimizer.md` for why the pipelines are written out rather than assembled.
 ///
+/// Gives back how long each pass took, for `-frucc-trace`.
+///
 /// # Errors
 ///
 /// When a pass left the module in a state the verifier refuses, which is a bug in the pass and
@@ -658,7 +698,7 @@ fn optimize(
     file: &str,
     dumps: &mut Vec<rucc_opt::Dump>,
     remarks: &mut String,
-) -> Result<(), Vec<Diagnostic>> {
+) -> Result<Vec<(&'static str, std::time::Duration)>, Vec<Diagnostic>> {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     // What the analyses that read a body may believe about it. The same question the back end asks
     // about addresses, with one thing on top: `-fno-semantic-interposition` is the build promising
@@ -705,7 +745,7 @@ fn optimize(
     remarks.push_str(&rucc_opt::optinfo::render(file, &report, names, wants));
     dumps.extend(report.dumps);
     match report.broke.is_empty() {
-        true => Ok(()),
+        true => Ok(report.time),
         false => Err(report.broke.iter().map(|why| internal(why)).collect()),
     }
 }
@@ -1707,6 +1747,7 @@ fn failure(message: String) -> Compiled {
         remarks: String::new(),
         deps: Vec::new(),
         temps: Temps::default(),
+        timing: crate::trace::Timing::default(),
     }
 }
 
