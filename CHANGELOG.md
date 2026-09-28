@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.17
+
 ### Added
 
 - `__attribute__((cold))` and `__attribute__((hot))` are kept on functions and reach the IR as `attrs(cold)` and `attrs(hot)`, and `__has_attribute` now answers yes for both. A branch that leads to a call of a cold function is predicted not taken, so the error path of every Postgres `elog` and `ereport`, which calls `errstart_cold`, is laid out away from the code around it (#1988).
