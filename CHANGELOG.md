@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A function inlined under `-g` no longer names its own opening brace inside its caller's line table. The slots it declares and the stores of its parameters kept the line of the callee's brace, which is outside the caller, so a debugger stopped there was sent to the top of another function. The slots now say what the caller's own slots say and the stores say the call, as with gcc 16. `cargo xtask lines` had been failing on SQLite's `insertCell` and `insertCellFast` since #2013 made the address of such a slot an instruction of its own.
 - A parameter the optimizer drops because nothing uses it no longer leaves its `!aligned`, `!bounds` or `!init` fact behind. The IR printer wrote the stale fact as `%? = !aligned(4)`, and `--emit=ir` output from `-O2` could not be read back. Four Postgres translation units hit this in the IR round trip check (#2048).
 
 ## 0.11.18
