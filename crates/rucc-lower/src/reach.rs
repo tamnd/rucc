@@ -283,7 +283,17 @@ impl Reach<'_> {
                     self.expr(arg);
                 }
             }
+            // The same as an `if`, since lowering drops the arm that does not run in the same way.
+            // A label inside a statement expression cannot be jumped to from outside it, so there
+            // is nothing in the dead arm to keep.
             ExprKind::Cond { cond, then, otherwise } => {
+                if let Some((effects, taken)) = self.decide.condition(cond) {
+                    for effect in effects {
+                        self.expr(effect);
+                    }
+                    self.expr(if taken { then } else { otherwise });
+                    return;
+                }
                 self.expr(cond);
                 self.expr(then);
                 self.expr(otherwise);

@@ -30,7 +30,7 @@
 //! either is silent.
 
 use rucc_target::x86_64::{
-    Addr, Encoding, ImmSize, RAX, Value, Width, encode, encoding, gpr_named,
+    Addr, Encoding, ImmSize, RAX, Value, Width, encode, encoding, gpr_named, xmm,
 };
 use rucc_target::{PhysReg, Segment};
 
@@ -154,6 +154,14 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         }
         None => word,
     };
+    // gas lets `sha256rnds2` name the `xmm0` it reads without being told, and the row has no
+    // place for it.
+    if word == "sha256rnds2" && operands.len() == 3 {
+        if operands[0] != Operand::Xmm(xmm(0)) {
+            return Err("'sha256rnds2' reads its third operand from xmm0 and no other".to_owned());
+        }
+        operands.remove(0);
+    }
     if !BRANCHES.iter().any(|branch| word.starts_with(branch)) {
         for operand in &mut operands {
             outright(operand);
@@ -794,7 +802,9 @@ fn parted(text: &str) -> Result<(i64, Option<String>), String> {
     let mut sign: i64 = 1;
     let mut start = 0usize;
     let mut named: Option<String> = None;
-    let mut fold = |term: &str, sign: i64, named: &mut Option<String>| match number(term) {
+    // A term may be arithmetic of its own, as `K256+8*16` is.
+    let reckon = |term: &str| number(term).or_else(|why| crate::source::constant(term).ok_or(why));
+    let mut fold = |term: &str, sign: i64, named: &mut Option<String>| match reckon(term) {
         Ok(value) => {
             total = total.wrapping_add(sign.wrapping_mul(value));
             Ok(())
@@ -1150,6 +1160,31 @@ mod tests {
         assert_eq!(bytes("movq 1*8(%r12), %rax"), bytes("movq 8(%r12), %rax"));
         assert_eq!(bytes("movq -2*8(%rsp), %rax"), bytes("movq -16(%rsp), %rax"));
         assert_eq!(bytes("movq 1<<4(%rdi), %rax"), bytes("movq 16(%rdi), %rax"));
+        // And a name with a product added to it, which is how the same code finds its table.
+        let read = |arg: &str| one("leaq", &[arg.to_owned(), "%rax".to_owned()]).expect("read");
+        let product = read("K256+8*16(%rip)");
+        let sum = read("K256+128(%rip)");
+        assert_eq!(product.bytes, sum.bytes);
+        assert_eq!(product.holes[0].name, "K256");
+        assert_eq!(product.holes[0].addend, sum.holes[0].addend);
+    }
+
+    /// Bytes checked against GNU as.
+    #[test]
+    fn the_ssse3_sse41_and_sha_instructions_hand_written_code_uses_are_read() {
+        assert_eq!(bytes("pshufb %xmm7, %xmm0"), [0x66, 0x0f, 0x38, 0x00, 0xc7]);
+        assert_eq!(bytes("palignr $4, %xmm3, %xmm7"), [0x66, 0x0f, 0x3a, 0x0f, 0xfb, 0x04]);
+        assert_eq!(bytes("pinsrd $3, 80(%rdi), %xmm1"), [0x66, 0x0f, 0x3a, 0x22, 0x4f, 0x50, 0x03]);
+        assert_eq!(bytes("pextrd $3, %xmm1, 80(%rdi)"), [0x66, 0x0f, 0x3a, 0x16, 0x4f, 0x50, 0x03]);
+        assert_eq!(bytes("pextrd $1, %xmm2, %eax"), [0x66, 0x0f, 0x3a, 0x16, 0xd0, 0x01]);
+        assert_eq!(bytes("pinsrq $1, %rax, %xmm9"), [0x66, 0x4c, 0x0f, 0x3a, 0x22, 0xc8, 0x01]);
+        assert_eq!(bytes("sha1rnds4 $1, %xmm2, %xmm0"), [0x0f, 0x3a, 0xcc, 0xc2, 0x01]);
+        assert_eq!(bytes("sha1nexte %xmm3, %xmm1"), [0x0f, 0x38, 0xc8, 0xcb]);
+        assert_eq!(bytes("sha1msg2 %xmm6, %xmm3"), [0x0f, 0x38, 0xca, 0xde]);
+        assert_eq!(bytes("sha256msg1 %xmm4, %xmm3"), [0x0f, 0x38, 0xcc, 0xdc]);
+        assert_eq!(bytes("sha256rnds2 %xmm0, %xmm1, %xmm2"), [0x0f, 0x38, 0xcb, 0xd1]);
+        assert_eq!(bytes("sha256rnds2 %xmm1, %xmm2"), [0x0f, 0x38, 0xcb, 0xd1]);
+        assert!(one("sha256rnds2", &["%xmm3".into(), "%xmm1".into(), "%xmm2".into()]).is_err());
     }
 
     #[test]

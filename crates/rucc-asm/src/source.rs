@@ -760,6 +760,7 @@ impl Reader {
             "short" | "word" | "hword" | "value" | "2byte" => self.data(&args, 2)?,
             "long" | "int" | "4byte" => self.data(&args, 4)?,
             "quad" | "8byte" | "xword" | "dword" => self.data(&args, 8)?,
+            "octa" => self.octa(&args)?,
 
             "ascii" => self.text_bytes(&args, false)?,
             "asciz" | "string" => self.text_bytes(&args, true)?,
@@ -1137,6 +1138,24 @@ impl Reader {
                 field: None,
                 line: self.line,
             });
+        }
+        Ok(())
+    }
+
+    /// `.octa`, sixteen bytes of a number, which is how hand written vector code lays out a mask.
+    ///
+    /// Wider than any expression here, so a plain number is read at its own width and anything
+    /// else is an expression that has to fit in sixty four bits and is sign extended.
+    fn octa(&mut self, args: &[String]) -> Result<(), Trouble> {
+        if args.is_empty() {
+            return Err(self.bad("a data directive with nothing after it"));
+        }
+        for arg in args {
+            let bytes = match wide(arg) {
+                Some(value) => value.to_le_bytes(),
+                None => i128::from(self.number(arg)?).to_le_bytes(),
+            };
+            self.put(&bytes)?;
         }
         Ok(())
     }
@@ -2648,6 +2667,31 @@ fn unquoted(text: &str) -> String {
 
 /// Split on a separator that is outside every string and every bracket.
 ///
+/// A number of up to a hundred and twenty eight bits, in any base gas reads, with a minus sign
+/// taken as two's complement.
+fn wide(text: &str) -> Option<u128> {
+    let text = text.trim();
+    let (negative, text) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, text),
+    };
+    let lower = text.to_ascii_lowercase();
+    let (digits, radix) = if let Some(rest) = lower.strip_prefix("0x") {
+        (rest, 16)
+    } else if let Some(rest) = lower.strip_prefix("0b") {
+        (rest, 2)
+    } else if lower.len() > 1 && lower.starts_with('0') {
+        (&lower[1..], 8)
+    } else {
+        (lower.as_str(), 10)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let value = u128::from_str_radix(digits, radix).ok()?;
+    Some(if negative { value.wrapping_neg() } else { value })
+}
+
 /// The brackets matter as much as the quotes: `.long (1 + 2), 3` is two operands and splitting on
 /// every comma would be right here and wrong the moment one turns up inside brackets.
 pub(crate) fn split(text: &str, on: char) -> Vec<String> {
@@ -3083,6 +3127,18 @@ _tls$tlv$init:
         );
         let mut want = vec![1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0];
         want.extend_from_slice(&[0x7f, 0xff, b'a', b'\n']);
+        assert_eq!(bytes(&out, ".data"), want);
+    }
+
+    #[test]
+    fn octa_is_sixteen_bytes_of_a_number_as_wide_as_that() {
+        let out = assembled(
+            "\t.data\n\t.octa 0x000102030405060708090a0b0c0d0e0f\n\t.octa -1, 2\n\t.octa 1+2\n",
+        );
+        let mut want: Vec<u8> = (0..16).rev().collect();
+        want.extend_from_slice(&[0xff; 16]);
+        want.extend_from_slice(&2u128.to_le_bytes());
+        want.extend_from_slice(&3u128.to_le_bytes());
         assert_eq!(bytes(&out, ".data"), want);
     }
 

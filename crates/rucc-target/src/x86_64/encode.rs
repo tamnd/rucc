@@ -511,6 +511,8 @@ static IRV: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Vec];
 static IVR: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Reg];
 // A shuffle, whose immediate says which lane of the source goes where in the destination.
 static IVV: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Vec];
+// A lane of a vector register stored to memory, which is where `pextrd` may write.
+static IVM: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Mem];
 // The x87 stack positions, which are one argument or two and are never anything else. There is no
 // row here mixing one with a register or with an address, because no instruction on this machine
 // names a stack position and a register in the same breath.
@@ -2039,6 +2041,43 @@ static ENCODINGS: &[Encoding] = &[
     bytes("pshuflw", &IMV, Double, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
     bytes("pshufhw", &IVV, Single, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
     bytes("pshufhw", &IMV, Single, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    // Above the baseline and never written by the compiler, but hand written code that checks the
+    // processor first uses them, such as busybox's SHA routines. `pshufb` and `palignr` are SSSE3,
+    // behind the `0x38` and `0x3A` escapes.
+    bytes("pshufb", &VV, Word, &[0x0F, 0x38, 0x00], pair(0, 1), NO_IMM),
+    bytes("pshufb", &MV, Word, &[0x0F, 0x38, 0x00], pair(0, 1), NO_IMM),
+    bytes("palignr", &IVV, Word, &[0x0F, 0x3A, 0x0F], pair(1, 2), ImmSize::Ib),
+    bytes("palignr", &IMV, Word, &[0x0F, 0x3A, 0x0F], pair(1, 2), ImmSize::Ib),
+    // SSE4.1 lanes in and out. The general register or the address is always the one in the low
+    // bits of the addressing byte, so for an extract that is the destination.
+    bytes("pinsrb", &IRV, Word, &[0x0F, 0x3A, 0x20], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrb", &IMV, Word, &[0x0F, 0x3A, 0x20], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrd", &IRV, Word, &[0x0F, 0x3A, 0x22], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrd", &IMV, Word, &[0x0F, 0x3A, 0x22], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrq", &IRV, WordQuad, &[0x0F, 0x3A, 0x22], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrq", &IMV, WordQuad, &[0x0F, 0x3A, 0x22], pair(1, 2), ImmSize::Ib),
+    bytes("pextrb", &IVR, Word, &[0x0F, 0x3A, 0x14], pair(2, 1), ImmSize::Ib),
+    bytes("pextrb", &IVM, Word, &[0x0F, 0x3A, 0x14], pair(2, 1), ImmSize::Ib),
+    bytes("pextrd", &IVR, Word, &[0x0F, 0x3A, 0x16], pair(2, 1), ImmSize::Ib),
+    bytes("pextrd", &IVM, Word, &[0x0F, 0x3A, 0x16], pair(2, 1), ImmSize::Ib),
+    bytes("pextrq", &IVR, WordQuad, &[0x0F, 0x3A, 0x16], pair(2, 1), ImmSize::Ib),
+    bytes("pextrq", &IVM, WordQuad, &[0x0F, 0x3A, 0x16], pair(2, 1), ImmSize::Ib),
+    // The SHA extensions, with no prefix. `sha256rnds2` also reads `xmm0`, which is not encoded,
+    // so the reader drops it when a file names it.
+    bytes("sha1rnds4", &IVV, Long, &[0x0F, 0x3A, 0xCC], pair(1, 2), ImmSize::Ib),
+    bytes("sha1rnds4", &IMV, Long, &[0x0F, 0x3A, 0xCC], pair(1, 2), ImmSize::Ib),
+    bytes("sha1nexte", &VV, Long, &[0x0F, 0x38, 0xC8], pair(0, 1), NO_IMM),
+    bytes("sha1nexte", &MV, Long, &[0x0F, 0x38, 0xC8], pair(0, 1), NO_IMM),
+    bytes("sha1msg1", &VV, Long, &[0x0F, 0x38, 0xC9], pair(0, 1), NO_IMM),
+    bytes("sha1msg1", &MV, Long, &[0x0F, 0x38, 0xC9], pair(0, 1), NO_IMM),
+    bytes("sha1msg2", &VV, Long, &[0x0F, 0x38, 0xCA], pair(0, 1), NO_IMM),
+    bytes("sha1msg2", &MV, Long, &[0x0F, 0x38, 0xCA], pair(0, 1), NO_IMM),
+    bytes("sha256rnds2", &VV, Long, &[0x0F, 0x38, 0xCB], pair(0, 1), NO_IMM),
+    bytes("sha256rnds2", &MV, Long, &[0x0F, 0x38, 0xCB], pair(0, 1), NO_IMM),
+    bytes("sha256msg1", &VV, Long, &[0x0F, 0x38, 0xCC], pair(0, 1), NO_IMM),
+    bytes("sha256msg1", &MV, Long, &[0x0F, 0x38, 0xCC], pair(0, 1), NO_IMM),
+    bytes("sha256msg2", &VV, Long, &[0x0F, 0x38, 0xCD], pair(0, 1), NO_IMM),
+    bytes("sha256msg2", &MV, Long, &[0x0F, 0x38, 0xCD], pair(0, 1), NO_IMM),
     // Comparing two floats and writing all ones or all zeros for the answer, with the immediate
     // saying which of the eight comparisons it is. `cmpnlesd` and the other names are this with
     // the immediate in the name, and the reader turns them into this.

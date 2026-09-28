@@ -127,3 +127,25 @@ fn a_function_called_after_a_label_in_an_arm_never_taken_is_emitted() {
         );
     }
 }
+
+/// A conditional expression whose condition folds builds only the arm it takes, so a call in the
+/// other arm names nothing. busybox's `FETCH_LE32` puts a function nothing defines there so that a
+/// field of the wrong size fails the link, and the struct and `void` forms go the same way.
+#[test]
+fn a_conditional_whose_condition_folds_does_not_name_the_other_arm() {
+    let source = "extern unsigned never(void); extern void gone(void); extern int defined(void);\n\
+                  struct s { int a; }; extern struct s lost(void); extern struct s kept;\n\
+                  static unsigned only(void) { return never(); }\n\
+                  unsigned f(unsigned x) { return sizeof(x) == 4 ? x : never(); }\n\
+                  unsigned g(unsigned x) { return sizeof(x) != 4 ? only() : x + 1; }\n\
+                  void h(void) { (defined() && 0) ? gone() : (void)defined(); }\n\
+                  int k(void) { return (1 ? kept : lost()).a; }\n";
+    for level in LEVELS {
+        let asm = emit_of(level, "asm", "cond", source);
+        for name in ["never", "only", "gone", "lost"] {
+            assert!(!asm.contains(name), "'{name}' reached the assembler at {level}:\n{asm}");
+        }
+        assert!(asm.contains("defined"), "the call somebody makes went at {level}:\n{asm}");
+        assert!(asm.contains("kept"), "the arm that runs went at {level}:\n{asm}");
+    }
+}
