@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `-fexceptions`, `-fno-exceptions`, `-fnon-call-exceptions`, `-fno-non-call-exceptions` and both spellings of `-fdelete-dead-exceptions` are taken, and `-fnon-call-exceptions` turns exceptions on unless `-fno-exceptions` was written, as in gcc 16. `__EXCEPTIONS` is defined when they are on. There is no landing pad yet, so a call inside the scope of a `cleanup` handler under `-fexceptions` is refused where it is written rather than compiled to skip the handler on an unwind (#1052).
 - A call in tail position becomes the epilogue and a jump at `-O2`, `-O3`, `-Os` and `-Oz` on x86-64, as gcc does, and `-foptimize-sibling-calls` and `-fno-optimize-sibling-calls` turn it on and off at any level. A chain of calls like that now runs in the same stack however long it is, which is what a state machine written as functions calling each other needs. The call has to be direct, give back exactly what the caller gives back, and pass every argument in a register. The whole function is turned down when it has a local in its frame, reads its own variable arguments, or calls `setjmp`, `vfork` or anything else that comes back twice, so no pointer into the frame can be live when it is given back. `cargo xtask tail` runs every shape against gcc at every level and walks ten million calls between two functions in a one megabyte stack (#365).
 
 ### Changed

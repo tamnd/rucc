@@ -2043,6 +2043,20 @@ pub struct Options {
     /// The rest of the `-ffast-math` family, from the flag itself and from each member spelled on
     /// its own. See [`Math`].
     pub math: Math,
+    /// Whether an exception may unwind through the code this unit produces, from `-fexceptions`
+    /// and `-fno-exceptions`, and from `-fnon-call-exceptions` when neither of those was written.
+    ///
+    /// Off, which is gcc's default for C. What it changes in C is small: `__EXCEPTIONS` is defined,
+    /// which is what glibc's `pthread_cleanup_push` reads to choose a `cleanup` attribute over its
+    /// `setjmp` spelling, and a `cleanup` handler is owed a call when an unwind passes through its
+    /// scope as well as when the scope is left the ordinary way. The tables an unwinder reads to get
+    /// through a frame at all are [`Options::unwind_tables`] and are there either way.
+    pub exceptions: bool,
+    /// Whether an instruction that is not a call may raise an exception, from
+    /// `-fnon-call-exceptions`. It turns [`Options::exceptions`] on unless `-fno-exceptions` was
+    /// written, which is gcc's rule, and it is kept apart because it is a second promise about
+    /// which instructions a handler covers rather than a second way of saying the first one.
+    pub non_call_exceptions: bool,
     /// What a path is rewritten by before it is written into the output, from the
     /// `-f*-prefix-map=` family.
     ///
@@ -2352,6 +2366,8 @@ impl Options {
             fp_contract: Contract::Off,
             trapping_math: true,
             math: Math::default(),
+            exceptions: false,
+            non_call_exceptions: false,
             prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
             warnings: true,
