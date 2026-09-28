@@ -152,22 +152,36 @@ __attribute__((constructor)) void setup(void) {}
 }
 
 #[test]
-fn a_destructor_is_refused_on_the_two_formats_that_have_nowhere_to_put_one() {
+fn a_windows_destructor_is_handed_to_atexit_from_a_constructor() {
+    let text = asm(
+        "coff-dtor",
+        "x86_64-windows-gnu",
+        "\
+__attribute__((destructor(200))) void teardown(void) {}
+",
+    );
+    // COFF has no run-down list, so the destructor is registered from the run-up one at its own
+    // priority, and atexit running the last one it was given first is what puts them in order.
+    assert!(text.contains("\t.section\t.CRT$XCA00200,\"dw\"\n"), "{text}");
+    assert!(text.contains("\t.quad\t__rucc_atexit.teardown\n"), "{text}");
+    assert!(text.contains("atexit"), "{text}");
+}
+
+#[test]
+fn a_destructor_is_refused_on_darwin_which_has_nowhere_to_put_one() {
     // Refused rather than dropped. The whole point of the attribute is that something else calls
     // the function, and a program that quietly does not get its call has no way of noticing until
     // whatever the function was to undo is left undone.
-    for target in ["x86_64-pc-windows-msvc", "x86_64-apple-darwin"] {
-        let (ok, _, said) = compile(
-            "refused",
-            target,
-            "\
+    let (ok, _, said) = compile(
+        "refused",
+        "x86_64-apple-darwin",
+        "\
 __attribute__((destructor)) void teardown(void) {}
 ",
-        );
-        assert!(!ok, "{target} wrote a destructor entry");
-        assert!(said.contains("E0519"), "{said}");
-        assert!(said.contains("'destructor'"), "{said}");
-    }
+    );
+    assert!(!ok, "darwin wrote a destructor entry");
+    assert!(said.contains("E0519"), "{said}");
+    assert!(said.contains("'destructor'"), "{said}");
 }
 
 #[test]

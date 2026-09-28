@@ -32,9 +32,9 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, AliasKind, AttrSet, DataList, Datum, FpContract, Func, Global, Imm,
-    Linkage as IrLinkage, Meta, Module, Reloc, SymbolRef, TlsModel, Type,
-    Visibility as IrVisibility,
+    Alias, AliasKind, AttrSet, Builder, DataList, Datum, Extra, FpContract, Func, Global, Imm,
+    InstData, Linkage as IrLinkage, Meta, Module, Opcode, Reloc, Signature, SymbolRef, TlsModel,
+    Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
@@ -988,10 +988,45 @@ impl Unit<'_> {
     /// link time.
     fn startups(&mut self) {
         let mut starts = std::mem::take(&mut self.starts);
+        if self.target.object_format == ObjectFormat::Coff {
+            for start in &mut starts {
+                if !start.before {
+                    *start = self.registrar(start);
+                }
+            }
+        }
         starts.sort_by_key(Start::order);
         for start in starts {
             self.start_entry(&start);
         }
+    }
+
+    /// A constructor that hands a destructor to `atexit`, and the entry that runs it.
+    ///
+    /// COFF has a run-up list and no run-down one, so a destructor is registered from the run-up
+    /// instead, which is what mingw's own CRT does with the `.dtors` it collects. The registration
+    /// runs at the destructor's own priority, and `atexit` calls what it was given last first, so
+    /// the destructors come out in the reverse of the order their constructors went in, which is
+    /// the order gcc's come out in.
+    fn registrar(&mut self, start: &Start) -> Start {
+        let called = self.names.resolve(start.func).to_owned();
+        let name = self.names.intern(&format!("__rucc_atexit.{called}"));
+        let atexit = self.names.intern("atexit");
+        let mut func = Func::new(name, Signature::new());
+        func.linkage = IrLinkage::Internal;
+        let entry = func.create_block();
+        let sig = func.add_signature(
+            Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::int(32)]),
+        );
+        let mut build = Builder::new(&mut func, entry);
+        let what = build.value(
+            InstData { extra: Extra::Symbol(start.func), ..InstData::new(Opcode::GlobalAddr) },
+            Type::PTR,
+        );
+        build.call(atexit, sig, &[what]);
+        build.ret(&[]);
+        self.place_func(func);
+        Start { func: name, before: true, ..*start }
     }
 
     /// One entry, which is a pointer wide object in the section the format runs.
@@ -1083,11 +1118,10 @@ impl Unit<'_> {
     /// else calls the function and a program that quietly does not get its call has no way of
     /// noticing until whatever the function set up is missing.
     ///
-    /// The run-down is what is missing on the two formats that have a run-up. Mach-O used to have
-    /// a terminator list and dyld stopped running it, so clang registers the call with
-    /// `__cxa_atexit` from a constructor it writes for the purpose, and nothing in the CRT a COFF
-    /// target links against has been confirmed to walk one either. Doing the same here is a
-    /// feature rather than a section name, which is why this is a message and not a branch above.
+    /// The run-down is what is missing on Mach-O. It used to have a terminator list and dyld
+    /// stopped running it, so clang registers the call with `__cxa_atexit` from a constructor it
+    /// writes for the purpose. COFF gets the same thing from [`Self::registrar`] with `atexit`,
+    /// and doing it for Mach-O as well is what would take this message away.
     fn no_start(&mut self, start: &Start) {
         let which = if start.before { "constructor" } else { "destructor" };
         let format = self.target.object_format.as_str();
