@@ -412,18 +412,33 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
     let starts: Vec<u32> = blocks.iter().map(|&block| order.start(block)).collect();
     let holding = |point: u32| starts.partition_point(|&start| start <= point).saturating_sub(1);
 
-    // Which locals each block touches, as bits for the walk and as a range for the answer.
+    // Which locals each block touches, as bits for the walk and as a range for the answer. A touch
+    // that runs through whole blocks between the two it starts and stops in covers those blocks
+    // top to bottom whatever the walk says, so they are one piece of the answer straight away and
+    // only the two ends are left for the blocks to decide.
     let mut touched = vec![vec![0u64; words]; blocks.len()];
     let mut inside: Vec<Vec<(usize, Range)>> = vec![Vec::new(); blocks.len()];
+    let mut through: Vec<Vec<Range>> = vec![Vec::new(); count];
     for local in 0..count {
         let Some(spots) = reach.touches(local, live, order) else { continue };
         for spot in spots {
-            for at in holding(spot.start)..=holding(spot.end) {
+            let (first, last) = (holding(spot.start), holding(spot.end));
+            for row in &mut touched[first..=last] {
+                row[local / 64] |= 1 << (local % 64);
+            }
+            let mut clip = |at: usize| {
                 let block = blocks[at];
                 let start = spot.start.max(order.start(block));
                 let end = spot.end.min(order.end(block));
-                touched[at][local / 64] |= 1 << (local % 64);
                 inside[at].push((local, Range { start, end }));
+            };
+            clip(first);
+            if last != first {
+                clip(last);
+            }
+            if last > first + 1 {
+                let start = order.start(blocks[first + 1]);
+                through[local].push(Range { start, end: order.end(blocks[last - 1]) });
             }
         }
     }
@@ -466,7 +481,7 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
     let mut out = vec![None; count];
     for (local, pieces) in out.iter_mut().enumerate() {
         if reach.shares(local) {
-            *pieces = Some(Vec::new());
+            *pieces = Some(std::mem::take(&mut through[local]));
         }
     }
     for (at, &block) in blocks.iter().enumerate() {
@@ -477,7 +492,7 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
                 let local = word * 64 + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
                 if let Some(pieces) = out[local].as_mut() {
-                    pieces.push(whole);
+                    joined(pieces, whole);
                 }
             }
         }
@@ -489,7 +504,7 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
             let start = if held(&written) { whole.start } else { spot.start };
             let end = if held(&read) { whole.end } else { spot.end };
             if let Some(pieces) = out[local].as_mut() {
-                pieces.push(Range { start, end });
+                joined(pieces, Range { start, end });
             }
         }
     }
@@ -497,6 +512,23 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
         *pieces = merged(std::mem::take(pieces));
     }
     out
+}
+
+/// Adds a piece to a local's area, stretching the last one instead when the piece starts on the
+/// point right after it.
+///
+/// Blocks are taken in the line's order and a block starts one point after the one before it ends,
+/// so a local wanted all the way through a run of blocks is one piece for the run rather than one
+/// piece per block. On jtckdint the answer used to be a piece per block for each of the locals
+/// whose address stays live across its 16000 blocks, which with the one piece per block pushed for
+/// the touches above was 3% of the instructions of an optimized build. The join only ever happens
+/// where one block ends and the next starts, so no point is added or lost, and a stretch of debug
+/// info is still found block by block from the same points.
+fn joined(pieces: &mut Vec<Range>, piece: Range) {
+    match pieces.last_mut() {
+        Some(last) if last.end.checked_add(1) == Some(piece.start) => last.end = piece.end,
+        _ => pieces.push(piece),
+    }
 }
 
 /// Which locals a touch of can reach the start of each block, following the given edges.
@@ -1051,6 +1083,27 @@ mod tests {
 
         let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    #[test]
+    fn a_local_wanted_across_a_run_of_blocks_is_one_piece_for_the_run() {
+        let (mut building, block) = Building::new();
+        let first = building.local(block, 0);
+        building.through(block, first);
+        let mut last = block;
+        for _ in 0..3 {
+            let next = building.func.create_block();
+            building.func.succs_mut(last).push(BlockCall::to(next));
+            building.func.build(next, building.nop).finish();
+            last = next;
+        }
+        let again = building.local(last, 0);
+        building.through(last, again);
+        let (reach, allocation) = building.allocate(1, 4);
+
+        let areas = areas(&building.func, &reach, &allocation.live, &allocation.order);
+        let pieces = areas[0].as_ref().expect("shares");
+        assert_eq!(pieces.len(), 1, "one piece from the first touch to the last: {pieces:?}");
     }
 
     /// A loop of one block, which is a block that is its own predecessor and its own successor.
