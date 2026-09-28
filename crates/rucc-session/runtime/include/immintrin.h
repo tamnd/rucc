@@ -32,6 +32,9 @@
  * macro `-msse4.2`, `-mcrc32` or `-mpopcnt` defines. See `tamnd/rucc#2003`.
  *
  * `<xsaveintrin.h>` is reached the same way and for the same reason, and holds `_xgetbv`.
+ *
+ * So are the AVX-512 headers, which hold what PostgreSQL's AVX-512 CRC32C and population count
+ * call and nothing more yet. See `tamnd/rucc#1988`.
  */
 
 #ifndef __RUCC_IMMINTRIN_H
@@ -54,5 +57,13 @@
 #include <smmintrin.h>
 
 #include <xsaveintrin.h>
+
+/* Unguarded for the same reason. Each function is built for its own extension, and a macro among
+ * them writes instructions only where it is used, which is inside a function built for it. */
+#include <avx512fintrin.h>
+#include <avx512bwintrin.h>
+#include <avx512vlintrin.h>
+#include <avx512vpopcntdqintrin.h>
+#include <vpclmulqdqintrin.h>
 
 #endif /* __RUCC_IMMINTRIN_H */

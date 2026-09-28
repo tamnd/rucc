@@ -82,6 +82,35 @@ int main (void)
     assert!(!store.contains("tbaa"), "{text}");
 }
 
+/// A structure passed by value is inlined as a copy made in the caller just before the call, so a
+/// body that writes to its parameter writes to the copy and the caller's own is left alone. The
+/// AVX-512 intrinsics take 64 byte vectors this way, and gcc inlines them at every level.
+#[test]
+fn a_structure_passed_by_value_is_inlined_as_a_copy() {
+    let text = ir(
+        "byvalue",
+        r#"
+struct three { long a, b, c; };
+
+static inline __attribute__((always_inline)) long bump (struct three t)
+{
+  t.a += 1;
+  return t.a + t.b + t.c;
+}
+
+int main (void)
+{
+  struct three t = { 1, 2, 3 };
+  long r = bump (t);
+  return (int) (r * 10 + t.a);
+}
+"#,
+    );
+    let main = body(&text, "main");
+    assert!(!main.iter().any(|line| line.contains("call @bump")), "{text}");
+    assert!(main.iter().any(|line| line.contains("memcpy")), "no copy was made:\n{text}");
+}
+
 /// The pack is the anonymous arguments of the call and the length is how many there were, and a
 /// wrapper every call was inlined into is not emitted.
 #[test]

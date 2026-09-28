@@ -219,6 +219,10 @@ impl Feature {
     /// instructions. For every other name gcc knows, a program can say it and have it remembered,
     /// which is what an attribute on a function built for a processor chosen at run time needs, but
     /// the command line may not turn it on for a whole unit and no macro claims it.
+    ///
+    /// The AVX-512 names and `vpclmulqdq` have the few intrinsics PostgreSQL calls, from functions
+    /// that carry the attribute. They are still not honoured, because each is built over AVX and
+    /// AVX2, which have no intrinsics here at all, and `__AVX512F__` would promise hundreds more.
     #[must_use]
     pub fn honoured(self) -> bool {
         self.row().honoured

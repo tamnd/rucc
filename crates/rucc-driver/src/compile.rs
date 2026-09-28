@@ -2195,6 +2195,92 @@ mod tests {
         assert!(l.contains("crc32l") && !l.contains("call"), "{l}");
     }
 
+    /// PostgreSQL's two AVX-512 configure probes, as its `config/c-compiler.m4` writes them, with
+    /// the functions made external so that each one is written out. Each compiles without a flag
+    /// and every intrinsic in it is inlined into the one function, since a call left behind would
+    /// be a call to a function built for an extension the caller may not have. Both were also run
+    /// under Intel SDE as a Sapphire Rapids, with PostgreSQL's own files, and gave what gcc 16's
+    /// build gives at `-O0` and `-O2`.
+    #[test]
+    fn the_shipped_avx512_headers_pass_postgres_probes() {
+        let popcount = concat!(
+            "#include <immintrin.h>\n",
+            "#include <stdint.h>\n",
+            "char buf[sizeof(__m512i)];\n",
+            "#if defined(__has_attribute) && __has_attribute (target)\n",
+            "__attribute__((target(\"avx512vpopcntdq,avx512bw\")))\n",
+            "#endif\n",
+            "int popcount_test(void)\n",
+            "{\n",
+            "  int64_t popcnt = 0;\n",
+            "  __m512i accum = _mm512_setzero_si512();\n",
+            "  __m512i val = _mm512_maskz_loadu_epi8((__mmask64) 0xf0f0f0f0f0f0f0f0, (const __m512i *) buf);\n",
+            "  __m512i cnt = _mm512_popcnt_epi64(val);\n",
+            "  accum = _mm512_add_epi64(accum, cnt);\n",
+            "  popcnt = _mm512_reduce_add_epi64(accum);\n",
+            "  return (int) popcnt;\n",
+            "}\n",
+        );
+        let pclmul = concat!(
+            "#include <immintrin.h>\n",
+            "__m512i x;\n",
+            "__m512i y;\n",
+            "#if defined(__has_attribute) && __has_attribute (target)\n",
+            "__attribute__((target(\"vpclmulqdq,avx512vl\")))\n",
+            "#endif\n",
+            "int avx512_pclmul_test(void)\n",
+            "{\n",
+            "  __m128i z;\n",
+            "  x = _mm512_xor_si512(_mm512_zextsi128_si512(_mm_cvtsi32_si128(0)), x);\n",
+            "  y = _mm512_clmulepi64_epi128(x, y, 0);\n",
+            "  z = _mm_ternarylogic_epi64(\n",
+            "            _mm512_castsi512_si128(y),\n",
+            "            _mm512_extracti32x4_epi32(y, 1),\n",
+            "            _mm512_extracti32x4_epi32(y, 2),\n",
+            "            0x96);\n",
+            "  return _mm_crc32_u64(0, _mm_extract_epi64(z, 0));\n",
+            "}\n",
+        );
+        let checks: [(&str, &str, &[&str]); 2] = [
+            (popcount, "popcount_test", &["kmovq", "vmovdqu8", "vpopcntq", "vpaddq", "vshufi64x2"]),
+            (pclmul, "avx512_pclmul_test", &["vpxorq", "vpclmulqdq", "vpternlogq", "crc32q"]),
+        ];
+        for (source, name, wanted) in checks {
+            for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+                let mut opts = freestanding();
+                opts.emit = EmitKind::Asm;
+                opts.opt_level = level;
+                let result = run(&opts, source);
+                assert_eq!(result.messages, Vec::<String>::new(), "{name} at {level:?}");
+                let text = result.text();
+                let start = text.find(&format!("\n{name}:")).expect("the probe is written out");
+                let body = &text[start..];
+                let body = &body[..body.find(".size").unwrap_or(body.len())];
+                for instruction in wanted {
+                    assert!(
+                        body.contains(instruction),
+                        "no {instruction} at {level:?} in:\n{body}"
+                    );
+                }
+                assert!(!body.contains("call"), "a call left behind at {level:?} in:\n{body}");
+            }
+        }
+    }
+
+    /// A function not built for the extension cannot call one of its intrinsics, which is the
+    /// refusal gcc gives in gcc's words, and what tells a probe without the attribute no.
+    #[test]
+    fn the_shipped_avx512_headers_refuse_a_caller_not_built_for_them() {
+        let result = run(
+            &freestanding(),
+            "#include <immintrin.h>\n__m512i f(__m512i a) { return _mm512_popcnt_epi64(a); }\n",
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm512_popcnt_epi64': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// A string gcc does not know is refused in gcc's words, and AArch64's own strings are
     /// something x86-64 does not know either.
     #[test]

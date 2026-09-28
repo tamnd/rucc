@@ -37,6 +37,10 @@ pub const DIR: &str = "<builtin>";
 /// to run before anything can be read.
 const HEADERS: &[(&str, &str)] = &[
     ("arm_neon.h", include_str!("../runtime/include/arm_neon.h")),
+    ("avx512bwintrin.h", include_str!("../runtime/include/avx512bwintrin.h")),
+    ("avx512fintrin.h", include_str!("../runtime/include/avx512fintrin.h")),
+    ("avx512vlintrin.h", include_str!("../runtime/include/avx512vlintrin.h")),
+    ("avx512vpopcntdqintrin.h", include_str!("../runtime/include/avx512vpopcntdqintrin.h")),
     ("cpuid.h", include_str!("../runtime/include/cpuid.h")),
     ("emmintrin.h", include_str!("../runtime/include/emmintrin.h")),
     ("float.h", include_str!("../runtime/include/float.h")),
@@ -55,6 +59,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("stddef.h", include_str!("../runtime/include/stddef.h")),
     ("stdint.h", include_str!("../runtime/include/stdint.h")),
     ("stdnoreturn.h", include_str!("../runtime/include/stdnoreturn.h")),
+    ("vpclmulqdqintrin.h", include_str!("../runtime/include/vpclmulqdqintrin.h")),
     ("x86intrin.h", include_str!("../runtime/include/x86intrin.h")),
     ("xmmintrin.h", include_str!("../runtime/include/xmmintrin.h")),
     ("xsaveintrin.h", include_str!("../runtime/include/xsaveintrin.h")),
