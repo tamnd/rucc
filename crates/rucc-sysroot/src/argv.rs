@@ -109,6 +109,13 @@ pub struct Invocation<'a> {
     pub export_dynamic: bool,
     /// `-s`, which drops the symbol table.
     pub strip: bool,
+    /// `-mwindows`, which makes a Windows program a GUI one: the `windows` subsystem, so no console
+    /// is opened for it, and GDI and the common dialogs on the line the way gcc puts them there.
+    /// Nothing on any other target.
+    pub gui: bool,
+    /// `-municode`, which starts a Windows program at `wmain` or `wWinMain` through `crt2u.o`
+    /// instead of `crt2.o`. Nothing for a DLL or on any other target.
+    pub unicode: bool,
 }
 
 /// A target, or a combination of a target and a mode, that has no line here.
@@ -315,7 +322,7 @@ fn coff(
         args.push("-shared".to_owned());
     } else {
         args.push("--subsystem".to_owned());
-        args.push("console".to_owned());
+        args.push(if options.gui { "windows" } else { "console" }.to_owned());
     }
     if matches!(options.mode, LinkMode::Static | LinkMode::StaticPie) {
         args.push("-static".to_owned());
@@ -365,7 +372,10 @@ fn sysroot_flag(sysroot: &Sysroot) -> String {
 /// [`Item::Linker`] is about.
 fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     let mut args = Vec::new();
-    let line = LinkLine::for_target(sysroot, options.mode, options.builtins);
+    let mut line = LinkLine::for_target(sysroot, options.mode, options.builtins);
+    if libc(sysroot.target()) == Libc::Import {
+        windows_flags(&mut line, options);
+    }
     if !options.no_startfiles {
         args.extend(shown(&line.start));
     }
@@ -401,6 +411,32 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     }
 
     args
+}
+
+/// What `-municode` and `-mwindows` change about a mingw-w64 line.
+///
+/// The start file and two libraries, and where the libraries go is gcc's: before `libadvapi32.a`,
+/// which is where its spec writes `-lgdi32 -lcomdlg32` for the second flag.
+fn windows_flags(line: &mut LinkLine, options: &Invocation<'_>) {
+    if options.unicode && options.mode != LinkMode::Shared {
+        for file in &mut line.start {
+            if file.file_name().is_some_and(|name| name == "crt2.o") {
+                file.set_file_name("crt2u.o");
+            }
+        }
+    }
+    if options.gui {
+        let at = line
+            .libraries
+            .iter()
+            .position(|path| path.file_name().is_some_and(|name| name == "libadvapi32.a"))
+            .unwrap_or(line.libraries.len());
+        let dir = line.libraries.first().and_then(|path| path.parent()).map(Path::to_path_buf);
+        let dir = dir.unwrap_or_default();
+        for (i, name) in ["libgdi32.a", "libcomdlg32.a"].into_iter().enumerate() {
+            line.libraries.insert(at + i, dir.join(name));
+        }
+    }
 }
 
 /// The libraries, with ours left off if that is what was asked for.
@@ -846,6 +882,34 @@ mod tests {
         for absent in ["-dynamic-linker", "-pie", "-no-pie", "--eh-frame-hdr"] {
             assert!(!args.contains(&absent.to_owned()), "{absent} in {args:?}");
         }
+    }
+
+    #[test]
+    fn mwindows_and_municode_change_the_subsystem_the_start_file_and_two_libraries() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let options = Invocation {
+            inputs: &one,
+            mode: LinkMode::Dynamic,
+            gui: true,
+            unicode: true,
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-windows-gnu";
+        let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+        let at = |name: &str| {
+            args.iter().position(|arg| arg.ends_with(name)).unwrap_or_else(|| panic!("{name}"))
+        };
+        let subsystem = args.iter().position(|arg| arg == "--subsystem").expect("the flag");
+        assert_eq!(args[subsystem + 1], "windows");
+        assert!(at("crt2u.o") < at("main.o"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("/crt2.o")), "{args:?}");
+        assert!(at("libmsvcrt.a") < at("libgdi32.a"), "{args:?}");
+        assert!(at("libcomdlg32.a") < at("libadvapi32.a"), "{args:?}");
+
+        // And neither says anything on an ELF line.
+        let linux = "x86_64-linux-musl";
+        let args = argv(target(linux), &sysroot(linux), &options).expect("a line");
+        assert!(!args.iter().any(|arg| arg.contains("gdi32") || arg.contains("crt2u")));
     }
 
     #[test]

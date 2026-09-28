@@ -1338,6 +1338,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fbuiltins-lib" => link.no_builtins_lib = false,
             "-rdynamic" | "-export-dynamic" => link.export_dynamic = true,
             "-s" => link.strip = true,
+            // mingw-w64's three. `-mwindows` and `-mconsole` pick the subsystem, last one wins,
+            // and `-municode` picks the start file and tells the headers through `UNICODE`, which is
+            // what gcc's spec does with it. All three are taken and ignored for other targets, as gcc
+            // built for mingw is the only gcc that knows them and a Makefile written for it is what
+            // passes them.
+            "-mwindows" => link.gui = true,
+            "-mconsole" => link.gui = false,
+            "-municode" => {
+                link.unicode = true;
+                opts.defines.push("UNICODE".to_owned());
+            }
             // Into the ordered input list rather than a list of its own, because a great many of
             // the linker's options are a bracket around the files after them and an option that
             // lost its place among them says nothing. `--whole-archive` is the one that found this.
@@ -2199,14 +2210,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // Flags that name something this compiler does not do and would not do differently
             // if it did. `-fno-ident` is about a comment in the output that we do not write
             // either way, and the others are about a way of ordering the compilation that has
-            // been GCC's only way for twenty years. Section 4.1 asks for the list to be short
-            // and for adding to it to be deliberate, which is why it is written out here.
+            // been GCC's only way for twenty years. `-mthreads` is mingw's, and what it links is
+            // `libmingwthrd.a`, which mingw-w64 keeps as an empty archive because its CRT does the
+            // thread cleanup for every program. Section 4.1 asks for the list to be short and for
+            // adding to it to be deliberate, which is why it is written out here.
             "-fno-ident"
             | "-fident"
             | "-funit-at-a-time"
             | "-fno-unit-at-a-time"
             | "-shared-libgcc"
             | "-static-libgcc"
+            | "-mthreads"
             | "-fpch-deps"
             | "-fno-pch-deps" => {}
             _ if arg.starts_with('-') && arg.len() > 1 => {
@@ -5944,6 +5958,16 @@ mod tests {
         let e = parse_args(&args(&["-c", "-fcf-protection=all", "a.c"])).unwrap_err();
         assert!(e.message.contains("is not a control flow protection"), "{}", e.message);
         assert!(e.message.contains("full, branch, return, none or check"), "{}", e.message);
+    }
+
+    #[test]
+    fn mingw_subsystem_and_unicode_flags_are_taken_last_one_winning() {
+        let (link, _) = linking(&["-mwindows", "-municode", "-mthreads", "-static-libgcc", "a.c"]);
+        assert!(link.gui && link.unicode);
+        let (link, _) = linking(&["-mwindows", "-mconsole", "a.c"]);
+        assert!(!link.gui);
+        let (opts, _) = compile(&["-municode", "-c", "a.c"]);
+        assert!(opts.defines.iter().any(|define| define == "UNICODE"), "{:?}", opts.defines);
     }
 
     #[test]
