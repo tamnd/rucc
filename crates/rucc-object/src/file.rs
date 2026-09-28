@@ -830,8 +830,11 @@ fn beyond(text: &Text, data: &Data, info: &Info) -> Result<(), Error> {
         }
     }
     for object in &data.objects {
-        if matches!(object.place, Place::Thread { .. }) {
-            return why(format!("'{}' is thread-local and this format is not", object.name));
+        if matches!(object.place, Place::Thread { zero: true }) {
+            return why(format!(
+                "'{}' is zeroed thread-local storage, which is not here",
+                object.name
+            ));
         }
         let Place::Named(name) = &object.place else { continue };
         if Array::of(name).is_some() {

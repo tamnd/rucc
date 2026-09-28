@@ -412,6 +412,8 @@ impl<'a> Parser<'a, '_> {
             Reach::Table
         } else if self.eat_word("thread") {
             Reach::Thread
+        } else if self.eat_word("secrel") {
+            Reach::Section
         } else {
             Reach::Itself
         };

@@ -189,6 +189,11 @@ pub enum Reach {
     /// The distance to the slot of the global offset table holding the symbol's offset inside a
     /// thread's own block of storage. See [`Mem::thread`].
     Thread,
+    /// How far the symbol is from the front of the section it is in, added to the base register
+    /// rather than to the instruction pointer. `IMAGE_REL_AMD64_SECREL` on COFF, which is how a
+    /// Windows thread finds its copy of a thread-local variable in the block `_tls_index` picks.
+    /// See [`Mem::section`].
+    Section,
 }
 
 /// A memory addressing mode, as the instruction holds it.
@@ -397,6 +402,16 @@ impl Mem {
     #[must_use]
     pub const fn thread(symbol: Symbol) -> Self {
         Self { reach: Reach::Thread, ..Self::of(symbol) }
+    }
+
+    /// That symbol's offset in its own section, added to the address in that register.
+    ///
+    /// A Windows thread's copy of the thread-local variables of one image is a copy of the image's
+    /// `.tls` section, so the offset of a variable in that section is also its offset in the copy.
+    /// The linker writes the offset into the four bytes of displacement.
+    #[must_use]
+    pub const fn section(base: Operand, symbol: Symbol) -> Self {
+        Self { symbol: Some(symbol), reach: Reach::Section, ..Self::at(base) }
     }
 
     /// The same address with an index register scaled by that much.

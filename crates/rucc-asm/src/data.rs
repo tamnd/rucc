@@ -320,7 +320,7 @@ fn variable(
 ) -> Result<Variable, Error> {
     let global = &module[id];
     let name = names.resolve(global.name).to_owned();
-    if global.tls.is_some() && !matches!(format, ObjectFormat::Elf | ObjectFormat::MachO) {
+    if global.tls.is_some() && format == ObjectFormat::Wasm {
         return Err(Error::Thread { name, format: format.as_str() });
     }
     let init = global.init.expect("a definition has an image");
@@ -401,7 +401,12 @@ fn variable(
         pieces.push(Piece::Zero(global.size - written));
     }
 
-    let place = place(module, names, id, &pieces, &addrs);
+    let place = match place(module, names, id, &pieces, &addrs) {
+        // A Windows image has no zeroed half of its thread-local template. Every thread gets a copy
+        // of the one `.tls` section, zeros included, which is what gcc writes there too.
+        Place::Thread { .. } if format == ObjectFormat::Coff => Place::Thread { zero: false },
+        place => place,
+    };
     let size = global.size.max(written);
     let binding = binding(global.linkage);
     let visibility = visibility(global.visibility);
@@ -872,16 +877,29 @@ mod tests {
         assert_eq!(data.objects[1].size, 4);
     }
 
-    /// Windows reaches a thread-local through a table of its own, which is not a section with a
-    /// flag on it, so the variable is refused by name there.
+    /// WebAssembly has no thread-local storage this writes, so the variable is refused by name.
     #[test]
     fn a_thread_local_variable_is_refused_on_a_format_that_does_not_spell_one_this_way() {
         let mut names = Interner::new();
         let mut module = module(&mut names);
         let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
         module[id].tls = Some(TlsModel::GlobalDynamic);
-        let format = ObjectFormat::Coff;
+        let format = ObjectFormat::Wasm;
         let error = globals(&module, &names, format).expect_err("a thread-local variable");
         assert_eq!(error, Error::Thread { name: "x".to_owned(), format: format.as_str() });
+    }
+
+    /// Windows copies one `.tls` section per thread and has no zeroed half, so a zeroed one is
+    /// written out as zeros.
+    #[test]
+    fn a_zeroed_thread_local_on_windows_is_written_out() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
+        module[id].tls = Some(TlsModel::GlobalDynamic);
+        let vars = globals(&module, &names, ObjectFormat::Coff).expect("a thread-local variable");
+        let data = vars.image();
+        assert_eq!(data.objects[0].place, Place::Thread { zero: false });
+        assert_eq!(data.objects[0].bytes, [0, 0, 0, 0]);
     }
 }

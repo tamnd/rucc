@@ -26,6 +26,7 @@ pub static SELECTOR: super::Selector = super::Selector {
         far: super::Reach::Own("got_64"),
         thread: super::Reach::Own("gottprel_64"),
         pointer: super::Pointer::Own("thread_64"),
+        indexed: None,
     },
     jumps: &super::Jumps {
         near: "adr_64",

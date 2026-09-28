@@ -2750,6 +2750,9 @@ impl<'a> Lowering<'a> {
         if self.elsewhere.described() {
             return self.thread_descriptor(inst, symbol, result);
         }
+        if self.elsewhere.indexed() {
+            return self.thread_indexed(inst, symbol, result);
+        }
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let gpr = self.gpr;
@@ -2846,11 +2849,52 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
+    /// A thread-local variable on Windows, which is four loads and no call.
+    ///
+    /// `_tls_index` is this image's slot in the array of `.tls` copies the thread block holds at
+    /// `%gs:88`, and the variable is as far into this thread's copy as it is into the section. The
+    /// C runtime defines the index and the linker writes the offset. See [`crate::select::Indexed`] for
+    /// the four instructions, which are the ones gcc writes.
+    fn thread_indexed(
+        &mut self,
+        inst: Inst,
+        symbol: Symbol,
+        result: Value,
+    ) -> Result<(), Unsupported> {
+        let Some(indexed) = self.selector.symbols.indexed.as_ref() else {
+            return Err(Unsupported::Unported { inst: Some(inst), what: Unported::Thread });
+        };
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+
+        let slot = self.out.new_vreg(gpr);
+        let tls_index = self.names.intern("_tls_index");
+        let index = self.named(indexed.index);
+        self.out.build(block, index).at(span).def(slot, gpr).mem(mir::Mem::of(tls_index)).finish();
+
+        let array = self.out.new_vreg(gpr);
+        let load = self.named(indexed.load);
+        let at = mir::Mem::in_segment(indexed.segment, indexed.at);
+        self.out.build(block, load).at(span).def(array, gpr).mem(at).finish();
+
+        let copy = self.out.new_vreg(gpr);
+        let mem =
+            mir::Mem::at(mir::Operand::read(array, gpr)).indexed(mir::Operand::read(slot, gpr), 8);
+        self.out.build(block, load).at(span).def(copy, gpr).mem(mem).finish();
+
+        let reg = self.new_reg(result);
+        let add = self.named(indexed.add);
+        let mem = mir::Mem::section(mir::Operand::read(copy, gpr), symbol);
+        self.out.build(block, add).at(span).def(reg, gpr).mem(mem).finish();
+        Ok(())
+    }
+
     /// Refuses the thread pointer where it is not written, which is Mach-O. Apple keeps it in a
     /// different register from the one Linux does on both machines, and nothing written for it
     /// has been checked on one.
     fn threads_written(&self, inst: Inst) -> Result<(), Unsupported> {
-        if self.elsewhere.described() {
+        if self.elsewhere.described() || self.elsewhere.indexed() {
             return Err(Unsupported::Unported { inst: Some(inst), what: Unported::Thread });
         }
         Ok(())

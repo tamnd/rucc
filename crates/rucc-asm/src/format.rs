@@ -282,11 +282,10 @@ impl Directives {
             (Directives::Elf, Place::Thread { zero: true }) => {
                 out.push_str("\t.section\t.tbss,\"awT\",@nobits\n");
             }
-            // COFF and Mach-O spell thread-local storage in ways that are not a section with a
-            // flag on it, and [`crate::globals`] refuses a thread-local variable on both of them
-            // before anything reaches here. This arm is here because the match is over every pair
-            // of a format and a place, not because it is one that can be taken.
-            (Directives::Coff, Place::Thread { .. }) => out.push_str("\t.data\n"),
+            // The section every thread gets a copy of, which the linker sorts in after the `.tls`
+            // the C runtime starts it with. There is no zeroed half, so [`crate::globals`] never
+            // gives this format a zeroed one.
+            (Directives::Coff, Place::Thread { .. }) => out.push_str("\t.section\t.tls$,\"dw\"\n"),
             (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
             (Directives::Elf, Place::RelocReadOnly { local }) => {
                 let name = if *local { ".data.rel.ro.local" } else { ".data.rel.ro" };
