@@ -1848,13 +1848,10 @@ block0(%0: i32):
             }
         };
         ONCE.replace("linkage(internal) {", &format!("linkage(internal){attrs} {{"))
+            .replace("    return %4", &format!("{}    return %4", local(callee, 5)))
             .replace(
-                "block0(%0: i32):\n    %1 = iconst",
-                &format!("block0(%0: i32):\n{}    %1 = iconst", local(callee, 5)),
-            )
-            .replace(
-                "block0(%0: i32):\n    %1 = call",
-                &format!("block0(%0: i32):\n{}    %1 = call", local(caller, 2)),
+                ") -> i32\n    return %1",
+                &format!(") -> i32\n{}    return %1", local(caller, 2)),
             )
     }
 
