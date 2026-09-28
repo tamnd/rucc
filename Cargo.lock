@@ -285,6 +285,7 @@ version = "0.11.18"
 dependencies = [
  "rucc-base",
  "rucc-cost",
+ "rucc-diag",
  "rucc-ir",
  "rucc-rules",
  "rucc-session",

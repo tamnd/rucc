@@ -935,6 +935,21 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
         }
         blocks.insert(from, to);
     }
+    // The lowering gives the callee's slots and the stores of its parameters the span of its
+    // whole body, which the line table reads as the line of the opening brace. That is the right
+    // answer in the callee's own prologue and the wrong one here: that line is outside the caller,
+    // and a line table that names it inside the caller sends a debugger to the top of another
+    // function. What those instructions do in the caller is take the arguments of the call, so
+    // they say the call instead, which is what gcc says for them. Every statement in the callee
+    // keeps its own place, and a callee with no body span, which is one the IR parser built, keeps
+    // every span it has.
+    let at = func.span(call);
+    let body = callee.declared;
+    let spliced = |inst: Inst| {
+        let span = callee.span(inst);
+        let prologue = span == body || !body.contains(span.lo);
+        if span.is_dummy() || body.is_dummy() || !prologue { span } else { at }
+    };
     let mut made = Vec::new();
     for from in callee.blocks() {
         for inst in callee.insts(from) {
@@ -949,12 +964,19 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
             };
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
             let shell = InstData { flags: data.flags, ..InstData::new(opcode) };
-            let new = func.create_inst(shell, &types, callee.span(inst));
+            let fixed = opcode == Opcode::Alloca && data.args.is_empty();
+            let first = func.insts(entry).next().expect("an entry block ends in something");
+            let span = if fixed {
+                // A slot joins the caller's frame, so it says what the caller's own slots say.
+                func.span(first)
+            } else {
+                spliced(inst)
+            };
+            let new = func.create_inst(shell, &types, span);
             for (old, value) in data.results().zip(func[new].results().collect::<Vec<Value>>()) {
                 values.insert(old, value);
             }
-            if opcode == Opcode::Alloca && data.args.is_empty() {
-                let first = func.insts(entry).next().expect("an entry block ends in something");
+            if fixed {
                 func.insert_before(new, first);
             } else {
                 func.append_inst(blocks[&from], new);
@@ -1247,6 +1269,7 @@ fn declaration(func: &Func) -> Func {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
+    use rucc_diag::Span;
 
     use super::*;
 
@@ -1387,6 +1410,78 @@ block0:
         );
         assert!(out.contains("iconst.i32 9"), "{out}");
         assert!(!out.contains("or."), "{out}");
+    }
+
+    /// Gives the instructions of a function those spans, in the order they are laid out.
+    fn respan(func: &mut Func, spans: &[Span]) {
+        let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+        assert_eq!(insts.len(), spans.len(), "one span for each instruction");
+        let mut forward = HashMap::new();
+        for (inst, &span) in insts.into_iter().zip(spans) {
+            let data = func[inst];
+            let types: Vec<Type> = data.results().map(|value| func[value].ty).collect();
+            let new = func.create_inst(data, &types, span);
+            let old: Vec<Value> = func[inst].results().collect();
+            forward.extend(old.into_iter().zip(func[new].results().collect::<Vec<Value>>()));
+            func.insert_before(new, inst);
+            func.remove_inst(inst);
+        }
+        crate::uses::substitute(func, &forward);
+    }
+
+    /// The callee's slot and the store of its parameter are at its opening brace, which is outside
+    /// the caller. Once inlined, the slot says what the caller's own slots say and the store says
+    /// the call, while a statement of the callee keeps its place.
+    #[test]
+    fn an_inlined_prologue_names_no_line_outside_the_caller() {
+        let text = format!(
+            r#"{HEAD}
+func @twice(i32) -> i32, linkage(internal), attrs(always_inline) {{
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    %2 = load.i32 %1, align 4
+    %3 = add.i32 %2, %2
+    return %3
+}}
+
+func @g(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    %2 = call @twice(%0) : (i32) -> i32
+    return %2
+}}
+"#
+        );
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let (brace, statement) = (Span::new(10, 50), Span::new(20, 30));
+        let (frame, call) = (Span::new(60, 100), Span::new(70, 80));
+        let g = names.intern("g");
+        for id in module.funcs().collect::<Vec<FuncId>>() {
+            let func = &mut module[id];
+            if func.name == g {
+                func.declared = frame;
+                respan(func, &[frame, call, call]);
+            } else {
+                func.declared = brace;
+                respan(func, &[brace, brace, statement, statement, statement]);
+            }
+        }
+        run(&mut module, None, true, Isa::baseline());
+        let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
+        let func = &module[id];
+        let mut seen = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let span = func.span(inst);
+                assert_ne!(span, brace, "{:?} kept the callee's brace", func[inst].opcode);
+                seen.push((func[inst].opcode, span));
+            }
+        }
+        assert!(seen.iter().all(|&(opcode, span)| opcode != Opcode::Alloca || span == frame));
+        assert!(seen.contains(&(Opcode::Store, call)), "{seen:?}");
+        assert!(seen.contains(&(Opcode::Load, statement)), "{seen:?}");
     }
 
     /// The anonymous arguments of the outer call are what the pack stands for, and the out of line
