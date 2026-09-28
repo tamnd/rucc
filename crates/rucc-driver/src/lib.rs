@@ -196,8 +196,10 @@ fn rewrite<'a>(arg: &'a str, flag: &str) -> Result<(&'a str, &'a str), CliError>
 enum Query {
     /// `-dumpmachine`, the triple.
     Machine,
-    /// `-dumpversion` and `-dumpfullversion`, which are the same three numbers here.
+    /// `-dumpversion`, the major number of the GCC release this compiler claims to be.
     Version,
+    /// `-dumpfullversion`, the same release in all three numbers.
+    FullVersion,
     /// `-print-multiarch`, the directory name a distribution files this target under.
     Multiarch,
     /// `-print-search-dirs`, in the three lines GCC prints.
@@ -690,7 +692,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // loop, because each one is about the target or the library search and the command
             // line has not finished saying what those are.
             "-dumpmachine" => query = Some(Query::Machine),
-            "-dumpversion" | "-dumpfullversion" => query = Some(Query::Version),
+            // Both answer with the GCC release in `__GNUC__` rather than our own version, because
+            // what asks is a build script deciding which GCC it is talking to, and `0.11` reads as
+            // a GCC too old to have anything. GCC 7 and later print only the major number for the
+            // first one, and that is the shape the scripts were written against.
+            "-dumpversion" => query = Some(Query::Version),
+            "-dumpfullversion" => query = Some(Query::FullVersion),
             "-print-multiarch" => query = Some(Query::Multiarch),
             "-print-search-dirs" => query = Some(Query::SearchDirs),
             "-print-sysroot" => query = Some(Query::Sysroot),
@@ -1129,6 +1136,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
+            // Preprocess the input, which a C compile always does. GCC has it for Fortran, and
+            // meson writes it when it asks a compiler for its predefined macros.
+            "-cpp" => {}
             // Nothing here writes colour, so all of these are the same answer, and it is the answer
             // that costs nothing: the diagnostics come out plain either way and no build depends on
             // an escape sequence being there. Taken rather than refused because cmake writes
@@ -2412,7 +2422,10 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
     };
     Ok(match query {
         Query::Machine => opts.target.to_string(),
-        Query::Version => VERSION.to_owned(),
+        Query::Version => opts.gnuc.major.to_string(),
+        Query::FullVersion => {
+            format!("{}.{}.{}", opts.gnuc.major, opts.gnuc.minor, opts.gnuc.patch)
+        }
         Query::Multiarch => link::multiarch(opts.target),
         // The three lines GCC prints, in its order and with its punctuation, because what reads
         // them is a script written against that shape. There is no installation directory to
@@ -3363,6 +3376,21 @@ pub fn run_as(program: &str, args: &[String]) -> i32 {
     }
 }
 
+/// What `--version` prints.
+///
+/// The first line is ours and is the one every harness we have reads. The second is for build
+/// systems that decide what kind of compiler they have by reading this text. Meson takes the GNU
+/// path only when it finds "Free Software Foundation" here, and otherwise stops with "Unknown
+/// compiler" before it has asked a single question, which is how the whole of a meson build is
+/// lost to one sentence. Past that point meson reads the version from `__GNUC__` and asks the
+/// preprocessor everything else, so the line decides the path and nothing more. It says what is
+/// true, that rucc speaks the dialect of GCC 16, and it does not claim to be GCC.
+fn banner() -> String {
+    format!(
+        "rucc {VERSION}\nA C compiler for the GNU C dialect of GCC 16 from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.\n"
+    )
+}
+
 /// Runs the driver and returns the process exit code.
 ///
 /// `args` excludes the program name. Output goes to `stdout` and errors to `stderr`, which
@@ -3374,7 +3402,7 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Ok(Action::Version) => {
-            println!("rucc {VERSION}");
+            print!("{}", banner());
             0
         }
         Ok(Action::Print(line)) => {
@@ -4006,6 +4034,7 @@ mod tests {
             "-fexcess-precision=fast",
             "-fexcess-precision=16",
             "-pipe",
+            "-cpp",
             "-fdiagnostics-color",
             "-fno-diagnostics-color",
             "-fdiagnostics-color=always",
@@ -4988,7 +5017,7 @@ mod tests {
 
         // `-dumpversion` is a different flag that happens to start the same way, and it is read
         // as itself rather than as a dump of nothing.
-        assert_eq!(printed(&["-dumpversion", "a.c"]), VERSION);
+        assert_eq!(printed(&["-dumpversion", "a.c"]), "16");
     }
 
     #[test]
@@ -6023,11 +6052,27 @@ mod tests {
     }
 
     #[test]
+    fn the_version_banner_keeps_our_first_line_and_takes_meson_down_the_gnu_path() {
+        let text = banner();
+        let mut lines = text.lines();
+        // Every harness we have reads the first line and nothing else.
+        assert_eq!(lines.next(), Some(format!("rucc {VERSION}").as_str()));
+        // The words meson looks for, in `mesonbuild/compilers/detect.py`.
+        assert!(text.contains("Free Software Foundation"), "{text}");
+        // GCC's own banner has three lines and so does this one, and the claim is the dialect.
+        assert!(lines.next().is_some_and(|l| l.contains("GCC 16")), "{text}");
+        assert!(lines.next().is_some() && lines.next().is_none(), "{text}");
+    }
+
+    #[test]
     fn the_questions_a_build_system_asks_before_it_compiles_anything() {
         let target = "--target=x86_64-unknown-linux-gnu";
         assert_eq!(printed(&[target, "-dumpmachine"]), "x86_64-unknown-linux-gnu");
-        assert_eq!(printed(&[target, "-dumpversion"]), VERSION);
-        assert_eq!(printed(&[target, "-dumpfullversion"]), VERSION);
+        assert_eq!(printed(&[target, "-dumpversion"]), "16");
+        assert_eq!(printed(&[target, "-dumpfullversion"]), "16.0.0");
+        // They follow the release claimed, since that is the one `__GNUC__` says.
+        assert_eq!(printed(&[target, "-fgnuc-version=15.2", "-dumpversion"]), "15");
+        assert_eq!(printed(&[target, "-fgnuc-version=15.2", "-dumpfullversion"]), "15.2.0");
         assert_eq!(printed(&[target, "-print-multiarch"]), "x86_64-linux-gnu");
         // A name nothing holds comes back unchanged, which is GCC's rule and is what makes the
         // answer safe to paste into a link line whether or not the file is there.

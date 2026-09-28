@@ -13,6 +13,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Scalar evolution keeps its answers in one table per loop. Settling what a loop's exit test holds used to empty that loop's answers by walking every answer for every loop, once per loop. On jtckdint's `test.c` at `-O2` the build takes about 6% fewer cycles.
 - The optimizer's liveness works out what each block reads and writes once, and only revisits a block when something it branches to changed. It used to allocate two function-wide sets and walk every instruction of every block on every round. On jtckdint's `test.c` at `-O2` the build runs 7.6% fewer instructions and takes a third fewer page faults.
 - Debug info for a variable that takes over another's value works out dominance from one dominator tree per function instead of two walks of the whole function for each block an assignment starts in. On jtckdint's `test.c` at `-O2` this is about 4% of the instructions the build runs.
+- `rucc --version` prints two more lines under `rucc 0.11.15`, saying that rucc is a compiler for the GNU C dialect of GCC 16 from the Free Software Foundation. Meson takes its GCC path only when it finds those words, and it stopped every meson build with "Unknown compiler" before this. The first line is unchanged, and it is still the only one our harnesses read (#1987).
+- `-dumpversion` prints the major number of the GCC release rucc claims, `16` by default, and `-dumpfullversion` prints all three, `16.0.0`. Both follow `-fgnuc-version=`. They used to print rucc's own version, which a build script comparing it with a GCC release reads as a GCC from before anything it needs (#1987).
+
+### Added
+
+- `-cpp` is accepted and does nothing, since a C compile is always preprocessed. Meson writes it when it asks for the predefined macros (#1987).
 
 ## 0.11.15
 
