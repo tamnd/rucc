@@ -398,6 +398,25 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
             filled[number as usize] += 1;
         }
     }
+    // And the blocks that write each one, the same way, so that whether a block stops the walk is
+    // a mark made once per value rather than a search of the block's row for every edge crossed.
+    let mut ends = vec![0usize; vregs + 1];
+    for &block in order.blocks() {
+        for &number in defined.row(block.index()) {
+            ends[number as usize + 1] += 1;
+        }
+    }
+    for number in 0..vregs {
+        ends[number + 1] += ends[number];
+    }
+    let mut writers = vec![0usize; ends[vregs]];
+    let mut filled = ends.clone();
+    for &block in order.blocks() {
+        for &number in defined.row(block.index()) {
+            writers[filled[number as usize]] = block.index();
+            filled[number as usize] += 1;
+        }
+    }
 
     let mut live_in = Rows::new(count);
     let mut live_out = Rows::new(count);
@@ -405,9 +424,13 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
     // to remember when the values come one at a time.
     let mut arrived = vec![u32::MAX; count];
     let mut left = vec![u32::MAX; count];
+    let mut wrote = vec![u32::MAX; count];
     let mut waiting = Vec::new();
     for number in 0..vregs {
         let value = u32::try_from(number).expect("a register number");
+        for &row in &writers[ends[number]..ends[number + 1]] {
+            wrote[row] = value;
+        }
         for &row in &readers[starts[number]..starts[number + 1]] {
             if arrived[row] != value {
                 arrived[row] = value;
@@ -421,7 +444,7 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
                     left[pred] = value;
                     live_out.push(pred, value);
                 }
-                if arrived[pred] != value && defined.row(pred).binary_search(&value).is_err() {
+                if arrived[pred] != value && wrote[pred] != value {
                     arrived[pred] = value;
                     live_in.push(pred, value);
                     waiting.push(pred);
@@ -444,9 +467,8 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
 ///
 /// What is actually true of the answer is that a block is live in a handful of values and not in
 /// the other two hundred thousand, so the numbers themselves are smaller than the bits. They are
-/// kept in order, which is what makes asking whether a block writes a value a binary search rather
-/// than a walk of the row, and it is the order a register number sorts in rather than any order of
-/// the program. tamnd/rucc#1072.
+/// kept in the order a register number sorts in rather than any order of the program.
+/// tamnd/rucc#1072.
 #[derive(Debug, Clone)]
 struct Rows {
     rows: Vec<Vec<u32>>,
