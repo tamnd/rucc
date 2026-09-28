@@ -6083,14 +6083,19 @@ impl<'a> Lowering<'a> {
     /// another block is read from a register there whatever this block decides. An instruction
     /// built by name rather than matched, a call being the one that matters, has no plan and so
     /// takes nothing, which is the right answer for it as well.
+    ///
+    /// The count is kept only for the values this block's instructions take. It used to be a slot
+    /// for every value in the function, cleared for every block, and on a function of thirty
+    /// thousand blocks and a hundred and seventy thousand values that clearing was four percent of
+    /// an optimized compile.
     fn left_alive(&self, insts: &[Inst], plans: &[Option<Plan>]) -> Option<Value> {
-        let mut taken = vec![0u32; self.uses.len()];
+        let mut taken: HashMap<Value, u32> = HashMap::new();
         for (&inst, plan) in insts.iter().zip(plans) {
             let Some(plan) = plan else { continue };
             let args = &self.source[self.source[inst].args];
             for (index, &arg) in args.iter().take(MAX_ARGS).enumerate() {
                 if plan[index] == Shown::Expand {
-                    taken[arg.index()] += 1;
+                    *taken.entry(arg).or_default() += 1;
                 }
             }
         }
@@ -6098,7 +6103,7 @@ impl<'a> Lowering<'a> {
             let Some(plan) = plan else { continue };
             let args = &self.source[self.source[inst].args];
             for (index, &arg) in args.iter().take(MAX_ARGS).enumerate() {
-                if plan[index] == Shown::Expand && taken[arg.index()] < self.uses[arg.index()] {
+                if plan[index] == Shown::Expand && taken[&arg] < self.uses[arg.index()] {
                     return Some(arg);
                 }
             }
