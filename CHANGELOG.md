@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- `cargo xtask version` checks that the committed Cargo.lock has every dependency between workspace members, not only their versions, so a lockfile that `--locked` would refuse fails the gate rather than the release.
+
 ## 0.11.13
 
 ### Added
