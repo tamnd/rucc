@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The register allocator's liveness lays its per block lists out end to end once the fixpoint is done, where it used to grow a list per block one value at a time. On a function of 22000 blocks with thousands of values live across most of it that takes 7 to 11% of the cycles off the whole `-O2` build, with the same output.
+
 ## 0.11.19
 
 ### Added
