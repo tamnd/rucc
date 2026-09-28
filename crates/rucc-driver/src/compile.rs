@@ -7628,6 +7628,19 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         }
     }
 
+    /// `nonnull` is answered yes and taken with or without operands, and a check the program
+    /// makes on a parameter it names stays, since nothing is assumed from the claim.
+    #[test]
+    fn nonnull_is_answered_yes_and_taken_with_or_without_operands() {
+        let text = ir("#if !__has_attribute(nonnull) || !__has_attribute(__nonnull__)\n\
+             #error nonnull\n\
+             #endif\n\
+             __attribute__((nonnull)) int first(char *p);\n\
+             int both(char *a, int n, char *b) __attribute__((__nonnull__(1, 3)));\n\
+             int both(char *a, int n, char *b) { return first(a) + n + (b != 0); }\n");
+        assert!(text.contains("func @both"), "{text}");
+    }
+
     /// A function with external linkage is emitted whatever this file does with it, because
     /// another one may call it, and that is what external linkage is.
     #[test]
