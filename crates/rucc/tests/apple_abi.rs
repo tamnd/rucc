@@ -231,9 +231,18 @@ long many(long a, long b, long c, long d, long e, long f, long g, long h, long i
 fn a_tentative_definition_is_common_on_darwin() {
     let source = "int tentative;\nint zero = 0;\nstatic int hidden;\n";
     let apple = listing("common", source, DARWIN, "-O0");
-    assert!(apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_tentative")), "{apple}");
-    assert!(!apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_zero")), "{apple}");
-    assert!(!apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_hidden")), "{apple}");
+    assert!(
+        apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_tentative")),
+        "{apple}"
+    );
+    assert!(
+        !apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_zero")),
+        "{apple}"
+    );
+    assert!(
+        !apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_hidden")),
+        "{apple}"
+    );
     let linux = listing("common-linux", source, LINUX, "-O0");
     assert!(!linux.contains(".comm"), "{linux}");
 }

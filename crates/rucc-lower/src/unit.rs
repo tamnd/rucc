@@ -1931,4 +1931,3 @@ fn assembler_name(tast: &Tast, target: &TargetInfo, id: StrId) -> String {
     }
     spelled
 }
-

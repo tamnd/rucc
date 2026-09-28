@@ -169,7 +169,8 @@ pub(crate) fn parse(
         let where_written = first.report_span();
         match (scope, name) {
             (None, n) if n == names.limit => {
-                let limit = count(operand, "limit", where_written, interner, diagnostics, expand, chars)?;
+                let limit =
+                    count(operand, "limit", where_written, interner, diagnostics, expand, chars)?;
                 params.limit = Some(limit);
             }
             (Some(s), n) if s == names.gnu && n == names.offset => {

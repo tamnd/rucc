@@ -568,7 +568,10 @@ mod tests {
     fn the_root_of_the_trie_is_the_head_of_every_pattern() {
         for table in tables() {
             let heads = pattern_heads(table);
-            assert!(!heads.is_empty(), "the table has rules and the root of the trie tests nothing");
+            assert!(
+                !heads.is_empty(),
+                "the table has rules and the root of the trie tests nothing"
+            );
             for rule in table.rules {
                 let head = rule
                     .pattern

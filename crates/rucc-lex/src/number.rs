@@ -1278,7 +1278,8 @@ mod tests {
         assert_eq!(FloatConstantType::Float64x.format(&aarch64()), Format::Quad);
         // `1.0w` goes where `__float80` goes, which is where `long double` is the x87 format.
         assert!(floating("1.0w", Std::C23, &i686).is_ok());
-        let msvc = TargetInfo::for_tuple("x86_64-windows-msvc".parse().expect("a row in the table"));
+        let msvc =
+            TargetInfo::for_tuple("x86_64-windows-msvc".parse().expect("a row in the table"));
         assert_eq!(floating("1.0w", Std::C23, &msvc), Err(FloatError::UnsupportedType));
         // The interchange types every machine has keep working on the machine that has least.
         for text in ["1.0f32", "1.0f64", "1.0f32x"] {
