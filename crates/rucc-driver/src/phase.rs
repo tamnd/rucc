@@ -718,9 +718,12 @@ impl Plan {
             // An input whose output has the name it has itself would be read and then written
             // over, and what it held would be gone. GCC compares the two names the way they
             // were written and so does this, which catches `rucc --emit=ir a.ir` and leaves
-            // the same file reached by two different paths to the file system.
+            // the same file reached by two different paths to the file system. `/dev/null` is
+            // left out, as gcc leaves out its bit bucket: nothing is lost by writing to it, and
+            // kbuild's cc-option asks whether a flag is taken by compiling `-xc /dev/null` with
+            // `-o /dev/null`, so refusing it refused every flag busybox probed for.
             if let Output::File(path) = &out {
-                if *path == input.path {
+                if *path == input.path && path != "/dev/null" {
                     return Err(plan_err(format!(
                         "input file `{}` is the same as the output file",
                         input.path
@@ -890,6 +893,10 @@ mod tests {
         // being refused for the same reason.
         assert!(Plan::new(&o, &inputs, Some("b.ir")).is_ok());
         assert!(Plan::new(&o, &inputs, Some("a.ir")).is_err());
+        // The bit bucket is not a file anything is kept in, which is how kbuild asks whether a
+        // flag is taken.
+        let null = Input { forced: Some(InputKind::C), ..Input::new("/dev/null") };
+        assert!(Plan::new(&linux(), &[null], Some("/dev/null")).is_ok());
     }
 
     #[test]

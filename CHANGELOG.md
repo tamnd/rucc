@@ -45,6 +45,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler reads a displacement written with any of the arithmetic a directive may use, so `80+0*16(%rdi)` and `1*8(%r12)` are 80 and 8 rather than being taken for names. busybox's SHA and TLS code writes offsets this way, in `.S` files and in `asm` templates alike.
+- A `_Static_assert` among the members of a struct or union is checked where it stands and adds no member, rather than being refused. gnulib's `verify_expr` hides one in an anonymous struct, which kept diffutils' gnulib tests from building.
+- An `asm` clobber list on x86-64 may name `xmm0` to `xmm15`, or `ymm0` to `ymm15`, rather than having the statement refused. The template is kept as text, which already takes every vector register a call may use away from the allocator across it. busybox's libbb/bitops.c needs this on every x86-64 build.
+- `-xc /dev/null -o /dev/null` compiles rather than being refused as an input written over by its own output, as gcc exempts its bit bucket. Kbuild's cc-option probes every flag this way, so busybox was built without `-std=gnu99` and read `nullptr` in bc.c as the C23 keyword.
 - `__builtin_signbit` and `__builtin_isnormal` of a `__float128` compile rather than failing on a bitcast to a 128 bit integer that no rule lowers. The sign is read from the top two bytes of the value in memory, as it already was for `long double` on x86-64.
 
 ## 0.11.14

@@ -932,3 +932,26 @@ fn ten_outputs_written_plus_and_early_fit_in_the_registers_there_are() {
     source.push_str(&format!("return {}; }}\n", sum.join(" + ")));
     asm("plus-early", &source);
 }
+
+#[test]
+fn a_clobber_list_may_name_the_vector_registers_the_template_uses() {
+    // busybox's libbb/bitops.c, which every x86-64 build of it takes because SSE is always there.
+    let text = asm(
+        "xmm-clobber",
+        "void f(void *dst, const void *src) {\n\
+         asm volatile(\"movups (%0),%%xmm0\\n\\tmovups (%1),%%xmm1\\n\\txorps %%xmm1,%%xmm0\\n\\t\
+         movups %%xmm0,(%0)\" : \"=r\" (dst), \"=r\" (src) : \"0\" (dst), \"1\" (src)\n\
+         : \"xmm0\", \"%ymm1\", \"memory\"); }\n",
+    );
+    assert!(body(&text, "f").contains("xorps"), "{text}");
+}
+
+#[test]
+fn a_vector_register_there_is_none_of_without_avx512_is_still_refused() {
+    for name in ["xmm16", "zmm0", "xmm01"] {
+        let source = format!("void f(void) {{ asm volatile(\"nop\" : : : \"{name}\"); }}\n");
+        let (ok, _, said) = run("xmm-none", &source);
+        assert!(!ok, "{name} was taken");
+        assert!(said.contains("no name for"), "{said}");
+    }
+}

@@ -2157,6 +2157,16 @@ impl Sum {
     }
 }
 
+/// The value of an expression that names nothing, or nothing for one that does or does not parse.
+///
+/// For the instruction reader, whose displacements are written with the same arithmetic a directive
+/// is. busybox's SHA code writes `80+0*16(%rdi)` so that the offsets line up with the rounds, and
+/// its TLS code writes `1*8(%r12)` for the words of a number.
+pub(crate) fn constant(text: &str) -> Option<i64> {
+    let mut parser = Parser { text: text.trim(), at: 0, here: (0, 0) };
+    parser.whole().ok()?.flat()
+}
+
 /// One expression, being read.
 struct Parser<'a> {
     text: &'a str,
@@ -2317,7 +2327,9 @@ impl Parser<'_> {
             (16, 2)
         } else if rest.starts_with("0b") || rest.starts_with("0B") {
             (2, 2)
-        } else if rest.len() > 1 && rest.starts_with('0') {
+        } else if rest.starts_with('0') && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+            // Octal only when a digit follows, because a nought on its own is a number too and
+            // `0*16` is nought times sixteen rather than an octal number with no digits in it.
             (8, 1)
         } else {
             (10, 0)
