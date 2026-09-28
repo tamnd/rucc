@@ -140,3 +140,22 @@ extern int b __attribute__((alias(a)));
     assert!(!ok, "the compiler took an identifier as a symbol name");
     assert!(said.contains("E0695"), "{said}");
 }
+
+/// A `.symver` in an `asm` at file scope is a second name with the version in its spelling, bound
+/// the way the name it stands for is. xz writes one for a name it declared with the alias
+/// attribute, so the version lands on what that alias stands for.
+#[test]
+fn a_symbol_version_is_a_second_name_written_back_as_the_symver_it_came_from() {
+    let text = asm(
+        "symver",
+        "\
+void get(void) {}
+extern void get_522(void) __attribute__((alias(\"get\")));
+__asm__(\".symver get_522, get@XZ_5.2.2\");
+__asm__(\".symver get, get@@@XZ_5.2\");
+",
+    );
+    assert!(text.contains("\t.symver\tget,get@XZ_5.2.2\n"), "{text}");
+    assert!(text.contains("\t.symver\tget,get@@XZ_5.2\n"), "{text}");
+    assert!(!text.contains(".globl\tget@"), "{text}");
+}
