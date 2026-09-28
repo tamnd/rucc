@@ -722,6 +722,12 @@ impl Checker<'_> {
         if let Some(node) = self.trap_builtin(function, span) {
             return node;
         }
+        // The three that ask what processor the program is running on, which are reads of what
+        // libgcc found out before `main`. In `check/builtin/cpu.rs`, with why the name has to be a
+        // string literal and why only x86-64 has them.
+        if let Some(node) = self.cpu_builtin(function, &args, signature.ret, span) {
+            return node;
+        }
         // The pair that forwards a function's anonymous arguments, which is answered here only to
         // refuse it where nothing could forward them. In `check/builtin/pack.rs`, with why the one
         // place it is accepted needs no forwarding.

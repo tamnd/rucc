@@ -235,6 +235,7 @@ impl Reach<'_> {
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
+            | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
                 self.expr(function);
