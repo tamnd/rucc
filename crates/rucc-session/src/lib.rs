@@ -1331,6 +1331,13 @@ pub enum EmitKind {
     /// type plane fits inside Tier D's memory budget, and it needs nothing past the type
     /// checker because it is a question about layouts rather than about code.
     TypeGranules,
+    /// Nothing at all, `-fsyntax-only`.
+    ///
+    /// The front end runs through the type checker and the diagnostics come out, and then the
+    /// compile stops. Build systems use it to ask whether a file compiles without paying for code
+    /// generation: meson runs its `has_header_symbol` and `has_function` probes this way, and
+    /// editors run it on every save.
+    SyntaxOnly,
 }
 
 impl EmitKind {
@@ -1347,6 +1354,7 @@ impl EmitKind {
             EmitKind::MirFinal => "mir-final",
             EmitKind::SafetySummary => "safety-summary",
             EmitKind::TypeGranules => "type-granules",
+            EmitKind::SyntaxOnly => "syntax-only",
         }
     }
 }
@@ -1366,6 +1374,7 @@ impl FromStr for EmitKind {
             "mir-final" => EmitKind::MirFinal,
             "safety-summary" => EmitKind::SafetySummary,
             "type-granules" => EmitKind::TypeGranules,
+            "syntax-only" => EmitKind::SyntaxOnly,
             _ => return Err(()),
         })
     }
@@ -2281,6 +2290,10 @@ pub struct Options {
     /// pass says which rewrite it is. Where both are given, a pass is stopped by whichever of
     /// the two is tighter.
     pub pass_fuel_global: Option<u32>,
+    /// Where `-frucc-trace=<file>` asked for one line of JSON per compiled file saying how long
+    /// each phase and each optimizer pass took. Appended to, never truncated, so that every
+    /// compiler in a parallel build can share one file.
+    pub trace: Option<String>,
     /// What `-fdisable-<pass>[=<range>]` and `-fenable-<pass>[=<range>]` said, in the order the
     /// command line said it, with `true` for the enabling half.
     ///
@@ -2430,6 +2443,7 @@ impl Options {
             passes: Vec::new(),
             pass_fuel: Vec::new(),
             pass_fuel_global: None,
+            trace: None,
             pass_gates: Vec::new(),
             dump_ir: Vec::new(),
             opt_info: Vec::new(),
@@ -2734,6 +2748,7 @@ mod tests {
             EmitKind::Tast,
             EmitKind::Ir,
             EmitKind::MirFinal,
+            EmitKind::SyntaxOnly,
         ] {
             assert_eq!(k.as_str().parse::<EmitKind>().unwrap(), k);
         }

@@ -124,6 +124,8 @@ pub struct Compiled {
     /// be the file that was compiled, and two runs of anything with a `__TIME__` in it are not
     /// the same text.
     pub temps: Temps,
+    /// Where the time went, phase by phase and pass by pass, for `-frucc-trace`.
+    pub timing: crate::trace::Timing,
 }
 
 /// The intermediate text a compilation went through, kept when `-save-temps` asked for it.
@@ -174,6 +176,7 @@ impl Compiled {
 /// as undeclared. One mistake is worth one message.
 #[must_use]
 pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
+    let mut clock = crate::trace::Clock::start();
     let mut sess = Session::new(opts.clone());
     // Before anything else interns a name. The keyword symbols have to be one unbroken run for
     // a lookup to be a subtraction, and the preprocessor interns every identifier it reads, so
@@ -188,6 +191,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
     let mut remarks = String::new();
+    // How long each optimizer pass took, for `-frucc-trace`.
+    let mut passes = Vec::new();
     // Filled in as the compilation goes past each of them, and only under `-save-temps`.
     let mut temps = Temps::default();
 
@@ -198,6 +203,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let Ok(file) = sess.sources.add_shared(crate::phase::source_name(name), bytes, None) else {
         return failure(format!("{name}: the source map has no room left for this file"));
     };
+    clock.lap("read");
 
     // Phases 1 to 4. The expanded stream is turned into pp-tokens straight away, because the
     // include context borrows the source map that rendering a diagnostic reads and the borrow
@@ -241,6 +247,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Taken here rather than at the end, because the preprocessor is done with and everything
     // after this is about the tree it produced.
     let deps = pp.dependencies().to_vec();
+    clock.lap("preprocess");
 
     // Phase 7, which is where a spelling becomes a keyword and a preprocessing number becomes
     // a constant of a type.
@@ -254,6 +261,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     };
     let (tokens, complaints) = convert(&expanded, &cx);
     diagnostics.extend(complaints);
+    clock.lap("convert");
 
     // Only the ones the file wrote, since a name nothing interned is one nothing can use.
     let type_names: Vec<Symbol> =
@@ -269,6 +277,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             type_names: &type_names,
         },
     );
+    clock.lap("parse");
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
 
@@ -299,6 +308,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         );
         checker.check_unit();
         let checked = checker.finish();
+        clock.lap("check");
         if !checked.failed() {
             match opts.emit {
                 EmitKind::Tast => {
@@ -389,30 +399,40 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     // The walk reports what it cannot build, and what it did build is printed
                     // anyway: a file with one construct missing from it is more use to read
                     // than nothing at all, and the errors are what stop it being compiled.
+                    clock.lap("lower");
                     let failed = lowered.diagnostics.iter().any(|d| d.severity.is_fatal());
                     if !failed {
                         // The verifier runs on everything the walk builds, always. It is the
                         // one check that a bug in the walk cannot talk its way past, and a
                         // wrong instruction found here costs a message rather than an hour
                         // in front of a debugger over the assembly it turned into.
-                        if let Err(errors) = rucc_ir::verify(&lowered.module, &sess.interner) {
+                        if let Err(errors) = clock
+                            .time("verify", || rucc_ir::verify(&lowered.module, &sess.interner))
+                        {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
-                        } else if let Err(complaints) =
-                            instrument(&mut lowered.module, &mut sess.interner, opts)
-                                .map(|done| instrumented = done)
+                        } else if let Err(complaints) = clock
+                            .time("instrument", || {
+                                instrument(&mut lowered.module, &mut sess.interner, opts)
+                            })
+                            .map(|done| instrumented = done)
                         {
                             diagnostics.extend(complaints);
-                        } else if let Err(complaints) = optimize(
-                            &mut lowered.module,
-                            &mut sess.interner,
-                            &sess.target,
-                            opts,
-                            name,
-                            &mut dumps,
-                            &mut remarks,
-                        ) {
+                        } else if let Err(complaints) = clock
+                            .time("optimize", || {
+                                optimize(
+                                    &mut lowered.module,
+                                    &mut sess.interner,
+                                    &sess.target,
+                                    opts,
+                                    name,
+                                    &mut dumps,
+                                    &mut remarks,
+                                )
+                            })
+                            .map(|times| passes = times)
+                        {
                             diagnostics.extend(complaints);
                         } else if opts.emit == EmitKind::SafetySummary {
                             // After the optimizer, because the number that matters is how many
@@ -441,19 +461,22 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         } else {
                             // The back end, which is every pass after the IR and which is
                             // where a construct nothing has a rule for is finally noticed.
-                            match generate(
-                                &mut lowered.module,
-                                &mut sess.interner,
-                                &sess.target,
-                                opts,
-                                &mut Recording {
-                                    fired: &mut fired,
-                                    pressure: &mut pressure,
-                                    lowerings: &mut lowerings,
-                                },
-                                &mut temps.assembly,
-                                Origin { map: &sess.sources, name, meaning: &meaning },
-                            ) {
+                            let made = clock.time("generate", || {
+                                generate(
+                                    &mut lowered.module,
+                                    &mut sess.interner,
+                                    &sess.target,
+                                    opts,
+                                    &mut Recording {
+                                        fired: &mut fired,
+                                        pressure: &mut pressure,
+                                        lowerings: &mut lowerings,
+                                    },
+                                    &mut temps.assembly,
+                                    Origin { map: &sess.sources, name, meaning: &meaning },
+                                )
+                            });
+                            match made {
                                 Ok(made) => artifact = made,
                                 Err(complaints) => diagnostics.extend(complaints),
                             }
@@ -461,6 +484,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     }
                     diagnostics.extend(lowered.diagnostics);
                 }
+                // The checker has said everything it has to say, and that is all that was asked.
+                EmitKind::SyntaxOnly => {}
                 _ => {}
             }
         }
@@ -501,7 +526,21 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
-    Compiled { artifact, messages, errors, fired, pressure, lowerings, dumps, remarks, deps, temps }
+    clock.passes(passes);
+    let timing = clock.finish();
+    Compiled {
+        artifact,
+        messages,
+        errors,
+        fired,
+        pressure,
+        lowerings,
+        dumps,
+        remarks,
+        deps,
+        temps,
+        timing,
+    }
 }
 
 /// Reads one file of IR, checks it, and prints it back.
@@ -565,6 +604,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         remarks: String::new(),
         deps: Vec::new(),
         temps: Temps::default(),
+        timing: crate::trace::Timing::default(),
     }
 }
 
@@ -645,6 +685,8 @@ struct Instrumented {
 /// this is a walk over an empty list rather than a branch on the level. See section 9.1 of
 /// `spec/09-optimizer.md` for why the pipelines are written out rather than assembled.
 ///
+/// Gives back how long each pass took, for `-frucc-trace`.
+///
 /// # Errors
 ///
 /// When a pass left the module in a state the verifier refuses, which is a bug in the pass and
@@ -658,7 +700,7 @@ fn optimize(
     file: &str,
     dumps: &mut Vec<rucc_opt::Dump>,
     remarks: &mut String,
-) -> Result<(), Vec<Diagnostic>> {
+) -> Result<Vec<(&'static str, std::time::Duration)>, Vec<Diagnostic>> {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     // What the analyses that read a body may believe about it. The same question the back end asks
     // about addresses, with one thing on top: `-fno-semantic-interposition` is the build promising
@@ -705,7 +747,7 @@ fn optimize(
     remarks.push_str(&rucc_opt::optinfo::render(file, &report, names, wants));
     dumps.extend(report.dumps);
     match report.broke.is_empty() {
-        true => Ok(()),
+        true => Ok(report.time),
         false => Err(report.broke.iter().map(|why| internal(why)).collect()),
     }
 }
@@ -1006,7 +1048,7 @@ fn generate(
             // the encoder's own tables, so reading it back is the encoder run over the same values,
             // and it is one path to get right rather than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
-            if aarch64 || rucc_asm::kept(&funcs, names, target) {
+            if aarch64 || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // The reader keeps the frame rows of a listing but not the personality routine or
                 // the call site tables, so a unit with a landing pad read back would unwind
                 // straight past its cleanups. Saying so beats a program that skips them.
@@ -1025,6 +1067,8 @@ fn generate(
                     rucc_asm::read_as(&listing, arch, target.object_format).map_err(|trouble| {
                         let what = if aarch64 {
                             "a unit for aarch64"
+                        } else if globals.kept() {
+                            "an `asm` at file scope"
                         } else {
                             "an `asm` template kept as text"
                         };
@@ -1707,6 +1751,7 @@ fn failure(message: String) -> Compiled {
         remarks: String::new(),
         deps: Vec::new(),
         temps: Temps::default(),
+        timing: crate::trace::Timing::default(),
     }
 }
 
@@ -4964,6 +5009,54 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(result.messages[0].contains(":3:"), "the call in calls: {:?}", result.messages);
     }
 
+    /// An `asm` at file scope with an instruction in it, which is how a unit writes a whole
+    /// function in assembly. The template goes into the listing as it was written, between the
+    /// markers gcc writes, and an object is assembled from that listing, so the function it
+    /// defines is defined in the object and the C that calls it calls it there. tcc's
+    /// `85_asm-outside-function.c` and `98_al_ax_extend.c` are this.
+    #[test]
+    fn an_asm_at_file_scope_with_an_instruction_in_it_is_assembled() {
+        let source = concat!(
+            "extern void vide(void);\n",
+            "__asm__(\".text;.globl _us;_us:;movl $0x1234ABCD, %eax;ret\");\n",
+            "__asm__(\"vide: ret\");\n",
+            "unsigned short _us(void);\n",
+            "int main(void) { vide(); return _us() == 0xABCD ? 0 : 1; }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        assert_eq!(result.text().matches("module asm ").count(), 2, "{}", result.text());
+
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("#APP\nvide: ret\n#NO_APP\n"), "{text}");
+        let main = text.find("main:").expect("main");
+        assert!(text.find("#NO_APP").expect("the markers") < main, "templates first: {text}");
+
+        opts.emit = EmitKind::Object;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let (bytes, defines) = match result.artifact {
+            Artifact::Object { bytes, defines } => (bytes, defines),
+            other => panic!("expected an object, got {other:?}"),
+        };
+        assert!(defines.iter().any(|name| name == "_us"), "{defines:?}");
+        // `mov $0x1234abcd, %eax` and the `ret` after it, which only the assembler wrote.
+        let us = [0xb8, 0xcd, 0xab, 0x34, 0x12, 0xc3];
+        assert!(bytes.windows(us.len()).any(|window| window == us), "the template's bytes");
+
+        // Elsewhere there is no reader for the listing, so the template is still refused there.
+        opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert!(!result.messages.is_empty(), "refused on Mach-O");
+        assert!(result.messages[0].contains("the instruction 'movl'"), "{:?}", result.messages);
+    }
+
     /// `return;` from a function that promised a value, which only C89 lets through and which
     /// therefore only reaches the IR builder under that dialect.
     ///
@@ -6860,6 +6953,61 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(saves.matches("= alloca").count(), 2, "the parameter and the local: {text}");
         assert!(saves.contains("store %9 -> %2"), "the local is written through: {text}");
         assert!(!plain.contains("alloca"), "nothing in the plain one needs a slot: {text}");
+    }
+
+    /// A value set before a library `sigsetjmp` and read after the `siglongjmp` keeps a spill slot
+    /// of its own.
+    ///
+    /// The shape of Postgres's `PG_TRY`. Five values are live across the call, one more than the
+    /// callee saved registers left over, so some go to the stack. They are dead on the arm that
+    /// runs first, and before this that arm's own values were given the same slots, so the arm the
+    /// jump lands in read them back. Every slot is written by one value, so no offset is stored to
+    /// twice.
+    #[test]
+    fn a_value_live_across_sigsetjmp_keeps_its_spill_slot() {
+        each_spill_slot_written_once(&across("int __sigsetjmp(sigjmp_buf, int);\n", "__sigsetjmp"));
+    }
+
+    /// The same shape through a function with a name nobody knows, which only the attribute says
+    /// comes back twice. tamnd/rucc#2012.
+    #[test]
+    fn a_value_live_across_a_returns_twice_call_keeps_its_spill_slot() {
+        let declared = "int save_here(sigjmp_buf, int) __attribute__((__returns_twice__));\n";
+        each_spill_slot_written_once(&across(declared, "save_here"));
+    }
+
+    /// Five values live across a call to `save`, declared by `declared`, and five more that die
+    /// before the jump back, which is enough to spill on x86-64.
+    fn across(declared: &str, save: &str) -> String {
+        asm(&format!(
+            "typedef long sigjmp_buf[25];\n{declared}int id(int);\nvoid thrower(int);\n\
+             int work(int n) {{\n\
+             \x20 int v0 = id(n), v1 = id(n + 1), v2 = id(n + 2), v3 = id(n + 3), v4 = id(n + 4);\n\
+             \x20 sigjmp_buf b;\n\
+             \x20 if ({save}(b, 0) == 0) {{\n\
+             \x20   int w0 = id(v0 + v1), w1 = id(v1 + v2), w2 = id(v2 + v3);\n\
+             \x20   int w3 = id(v3 + v4), w4 = id(v4 + v0);\n\
+             \x20   thrower(n);\n\
+             \x20   return w0 ^ w1 ^ w2 ^ w3 ^ w4;\n\
+             \x20 }}\n\
+             \x20 return v0 + v1 + v2 + v3 + v4;\n\
+             }}\n"
+        ))
+    }
+
+    /// No two spills in the text go to the same slot, and there is at least one.
+    fn each_spill_slot_written_once(text: &str) {
+        let mut stored = Vec::new();
+        for line in text.lines().map(str::trim) {
+            let Some(operands) = line.strip_prefix("movq\t%") else { continue };
+            if let Some((_, place)) = operands.split_once(", ") {
+                if place.ends_with("(%rsp)") {
+                    assert!(!stored.contains(&place), "{place} is written twice:\n{text}");
+                    stored.push(place);
+                }
+            }
+        }
+        assert!(!stored.is_empty(), "something should have been spilled:\n{text}");
     }
 
     /// What the save writes and where it leaves control, which is a new block.
@@ -9443,23 +9591,19 @@ block2:
         );
     }
 
-    /// The line drawn is the same one the `asm` inside a function draws: directives are read and
-    /// an instruction waits for an assembler. Refusing by name is what makes the wait visible.
+    /// A template of directives the reader does not take is refused by name rather than dropped.
+    /// One with an instruction in it goes to the assembler instead, which
+    /// `an_asm_at_file_scope_with_an_instruction_in_it_is_assembled` covers.
     #[test]
-    fn an_instruction_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
-        for source in [
-            "__asm__(\".text\\n.globl f\\nf:\\n  ret\\n\");\n",
-            "__asm__(\".data\\n.set alias, 4\\n\");\n",
-        ] {
-            let messages = errors(source);
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("not supported yet")
-                        && m.contains("in an `asm` at file scope")),
-                "{source}\n{messages:?}"
-            );
-        }
+    fn a_directive_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
+        let source = "__asm__(\".data\\n.set alias, 4\\n\");\n";
+        let messages = errors(source);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("not supported yet") && m.contains("in an `asm` at file scope")),
+            "{source}\n{messages:?}"
+        );
     }
 
     /// micropython's `nlr_push`, which is the program that asks for all of this. The body is the

@@ -7,6 +7,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The SSE4.2 checksum and population count intrinsics, and the flags that ask for them. `<nmmintrin.h>`, `<smmintrin.h>` and `<popcntintrin.h>` are shipped and reached from `<immintrin.h>` the way gcc reaches them, with `_mm_crc32_u8`, `_mm_crc32_u16`, `_mm_crc32_u32`, `_mm_crc32_u64`, `_mm_popcnt_u32` and `_mm_popcnt_u64`, each one `crc32` or `popcnt` instruction written as inline assembly because the back end does not lower target intrinsics yet (tamnd/rucc#200). The encoder and the assembler have the four `crc32` widths and both `popcnt` widths, byte for byte what GNU as writes. `-msse3`, `-mssse3`, `-msse4.1`, `-msse4.2`, `-mpopcnt`, `-mcrc32`, their `-mno-` forms and `-march=x86-64-v2`, `-v3`, `-v4` and `native` now decide which extensions a unit is built for, combined the way gcc 16 combines them, and define `__SSE3__` through `__SSE4_2__`, `__POPCNT__` and `__CRC32__` to match; a flag for an extension with no intrinsics here, such as `-mavx2`, is refused. This is what PostgreSQL's configure asks before it chooses its CRC32C code (#2003)
+- `-frucc-trace=<file>` appends one line of JSON per compiled file to the file, with the wall time of each phase from reading the source to generating code, the time each optimizer pass took across the module, and on Linux the peak memory of the process. A build can point every compiler at one file, since each line goes out in a single append. This is what the rucc-postgres harness reads to find which file and which pass a slow build spends its time in (#1987).
+- `-v` prints the header search list the way `gcc -v` does, from `#include "..." search starts here:` to `End of search list.`, since meson and cmake read it to find the system header directories. Meson warned that it found none before this (#1987).
+- `-cpp` is accepted and does nothing, since a C compile is always preprocessed. Meson writes it when it asks for the predefined macros (#1987).
+- `-fsyntax-only` runs the front end through the type checker, prints what it finds, and writes nothing. Meson's header and function probes compile this way, and so do editors (#1988).
+- An `asm` at file scope with instructions in it, which is how a unit writes a whole function in assembly, is compiled on ELF targets rather than refused. The template goes into the listing between `#APP` and `#NO_APP` as gcc writes it, and a unit with one is assembled from its listing so the symbols it defines are in the object. tcc's `85_asm-outside-function.c` and `98_al_ax_extend.c` match gcc 16 at `-O0` and `-O2` (#155).
+- `__attribute__((returns_twice))` is read, and `__has_attribute(returns_twice)` answers 1. A function that calls one declared with it gets the frame a caller of `setjmp` gets, with no two values sharing a stack slot and no tail calls, whatever the function is called. It used to be accepted and ignored, and the probe answered 0 (#2012).
 
 ### Changed
 
@@ -17,9 +23,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Scalar evolution keeps its answers in one table per loop. Settling what a loop's exit test holds used to empty that loop's answers by walking every answer for every loop, once per loop. On jtckdint's `test.c` at `-O2` the build takes about 6% fewer cycles.
 - The optimizer's liveness works out what each block reads and writes once, and only revisits a block when something it branches to changed. It used to allocate two function-wide sets and walk every instruction of every block on every round. On jtckdint's `test.c` at `-O2` the build runs 7.6% fewer instructions and takes a third fewer page faults.
 - Debug info for a variable that takes over another's value works out dominance from one dominator tree per function instead of two walks of the whole function for each block an assignment starts in. On jtckdint's `test.c` at `-O2` this is about 4% of the instructions the build runs.
+- `rucc --version` prints two more lines under `rucc 0.11.15`, saying that rucc is a compiler for the GNU C dialect of GCC 16 from the Free Software Foundation. Meson takes its GCC path only when it finds those words, and it stopped every meson build with "Unknown compiler" before this. The first line is unchanged, and it is still the only one our harnesses read (#1987).
+- `-dumpversion` prints the major number of the GCC release rucc claims, `16` by default, and `-dumpfullversion` prints all three, `16.0.0`. Both follow `-fgnuc-version=`. They used to print rucc's own version, which a build script comparing it with a GCC release reads as a GCC from before anything it needs (#1987).
 
 ### Fixed
 
+- On Darwin arm64 a `char`, `short` or `bool` argument is extended to 32 bits by the caller and a return value of those types by the callee, as Apple's ABI requires. clang's code relies on this, so a clang caller used to read `256` back from a rucc function returning `(unsigned char)255`, and a clang callee saw `(char)200` as a positive number.
+- A local set before a library `sigsetjmp` or `setjmp` and read after the `longjmp` keeps its value. In a function with more such values than callee saved registers, one that was spilled could have its slot handed to a value of the arm that ran first, so the arm the jump landed in read that value instead. It happened at every level, `-O0` included, and it is the shape of Postgres's `PG_TRY`. A function that calls something that returns twice now gives every local and spill slot its own bytes, as gcc does (#2018).
 - The `-S` output for a Darwin target assembles with Apple's assembler. A weak definition is `.globl` and `.weak_definition`, a weak reference is `.weak_reference`, and `.comm` gives its alignment as a power of two, where they were written the gas way and Apple's `as` either refused them or asked for the wrong boundary.
 
 ## 0.11.15
@@ -53,6 +63,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler reads a displacement written with any of the arithmetic a directive may use, so `80+0*16(%rdi)` and `1*8(%r12)` are 80 and 8 rather than being taken for names. busybox's SHA and TLS code writes offsets this way, in `.S` files and in `asm` templates alike.
+- A `_Static_assert` among the members of a struct or union is checked where it stands and adds no member, rather than being refused. gnulib's `verify_expr` hides one in an anonymous struct, which kept diffutils' gnulib tests from building.
+- An `asm` clobber list on x86-64 may name `xmm0` to `xmm15`, or `ymm0` to `ymm15`, rather than having the statement refused. The template is kept as text, which already takes every vector register a call may use away from the allocator across it. busybox's libbb/bitops.c needs this on every x86-64 build.
+- `-xc /dev/null -o /dev/null` compiles rather than being refused as an input written over by its own output, as gcc exempts its bit bucket. Kbuild's cc-option probes every flag this way, so busybox was built without `-std=gnu99` and read `nullptr` in bc.c as the C23 keyword.
 - `__builtin_signbit` and `__builtin_isnormal` of a `__float128` compile rather than failing on a bitcast to a 128 bit integer that no rule lowers. The sign is read from the top two bytes of the value in memory, as it already was for `long double` on x86-64.
 
 ## 0.11.14

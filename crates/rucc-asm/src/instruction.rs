@@ -787,6 +787,9 @@ fn whole(text: &str) -> Result<PhysReg, String> {
 /// is not a thing a relocation says.
 fn parted(text: &str) -> Result<(i64, Option<String>), String> {
     let text = text.trim();
+    if let Some(value) = crate::source::constant(text) {
+        return Ok((value, None));
+    }
     let mut total: i64 = 0;
     let mut sign: i64 = 1;
     let mut start = 0usize;
@@ -1141,6 +1144,12 @@ mod tests {
         assert_eq!(bytes("lea -512+128(%rsp), %rdi"), bytes("lea -384(%rsp), %rdi"));
         assert_eq!(bytes("movq 8+8+8(%rdi), %rax"), bytes("movq 24(%rdi), %rax"));
         assert_eq!(bytes("movq 32-8(%rdi), %rax"), bytes("movq 24(%rdi), %rax"));
+        // Products, which busybox's SHA code writes so the offset lines up with the round, and
+        // everything else a directive's expression may hold.
+        assert_eq!(bytes("movdqu 80+0*16(%rdi), %xmm1"), bytes("movdqu 80(%rdi), %xmm1"));
+        assert_eq!(bytes("movq 1*8(%r12), %rax"), bytes("movq 8(%r12), %rax"));
+        assert_eq!(bytes("movq -2*8(%rsp), %rax"), bytes("movq -16(%rsp), %rax"));
+        assert_eq!(bytes("movq 1<<4(%rdi), %rax"), bytes("movq 16(%rdi), %rax"));
     }
 
     #[test]

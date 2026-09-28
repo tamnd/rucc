@@ -453,8 +453,10 @@ pub fn compile_recording(
     // is written against blocks that end the way the middle end left them. Only on a machine that
     // can jump to a name, since the call stays a call on one that cannot.
     if flags.sibling && machine.insts.away.is_some() {
-        tail::mark(source, names);
+        tail::mark(source, names, elsewhere);
     }
+    // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
+    let alone = tail::comes_back(source, names, elsewhere);
     let lowered = lower::func(source, names, machine.selector, machine.conv, elsewhere)?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
@@ -607,8 +609,7 @@ pub fn compile_recording(
     // Only asked at all where the locals are allowed to share, since this is the whole of what says
     // whether a local may. The spill slots are laid out either way and this says nothing about
     // them.
-    let reach = flags
-        .reuse
+    let reach = (flags.reuse && !alone)
         .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
 
     // The instructions as they are now, for the locals the front end kept in values. The
@@ -636,7 +637,13 @@ pub fn compile_recording(
     // knows how many of those there are until the allocator has finished running out of registers,
     // and because a spill slot cannot be shared with a local until it is known there is one.
     let widths = frame::widths(&layout, &allocation);
-    let share = Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths);
+    // Nothing shares in a function that can be come back into, since the second arrival reads
+    // bytes the liveness says nobody wants. See [`tail::comes_back`].
+    let share = if alone {
+        Slots::apart(&stack.locals, &widths)
+    } else {
+        Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths)
+    };
     let layout = Layout { share: Some(&share), ..layout };
     let frame = Frame::of(&func, &allocation, &layout);
     // The one thing a naked function cannot be given. Everything else the attribute asks for is

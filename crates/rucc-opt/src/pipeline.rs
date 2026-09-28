@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
@@ -774,12 +775,24 @@ pub struct Report {
     pub broke: Vec<String>,
     /// How much fuel each pass spent, which is the number a bisection halves.
     pub spent: Vec<(&'static str, u32)>,
+    /// How long each pass took across the whole module, one line per pass in the order they
+    /// first ran, which is what `-frucc-trace` writes. A pass the list names twice is one line
+    /// with both runs added, the same as `spent`.
+    pub time: Vec<(&'static str, Duration)>,
     /// What every pass said about every function, in the order the passes ran and then in the
     /// order the module holds its functions. This is what `-fopt-info` prints.
     pub remarks: Vec<Remark>,
 }
 
 impl Report {
+    /// Adds what one run of a pass took to that pass's line.
+    fn took(&mut self, pass: &'static str, time: Duration) {
+        match self.time.iter_mut().find(|(it, _)| *it == pass) {
+            Some((_, total)) => *total += time,
+            None => self.time.push((pass, time)),
+        }
+    }
+
     /// Everything one pass said across the whole module, added up.
     ///
     /// The counts of an event are addable across functions because an event names a site in a
@@ -838,7 +851,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // `-fno-inline-functions-called-once` turns the called once half off alone. It is not a pass,
     // so the toggle only ever means this and never adds or removes anything from the list.
     let once = opts.wants(inline::ONCE);
-    for (id, stats) in inline::run(module, limit, once) {
+    let started = Instant::now();
+    let inlined = inline::run(module, limit, once);
+    report.took(inline::NAME, started.elapsed());
+    for (id, stats) in inlined {
         if opts.verify {
             if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
                 let func = names.resolve(module[id].name);
@@ -925,7 +941,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             (None, Some(left)) => Fuel::of(left),
             (None, None) => Fuel::unlimited(),
         };
+        let started = Instant::now();
         let folded = libcall::fold(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        report.took(libcall::NAME, started.elapsed());
         for (id, stats) in folded {
             if opts.verify {
                 if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
@@ -963,7 +981,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             (None, Some(left)) => Fuel::of(left),
             (None, None) => Fuel::unlimited(),
         };
-        for (id, stats) in ipcp::propagate(module, graph, &mut fuel) {
+        let started = Instant::now();
+        let changed = ipcp::propagate(module, graph, &mut fuel);
+        report.took(ipcp::NAME, started.elapsed());
+        for (id, stats) in changed {
             if opts.verify {
                 if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
                     let func = names.resolve(module[id].name);
@@ -992,7 +1013,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             (None, Some(left)) => Fuel::of(left),
             (None, None) => Fuel::unlimited(),
         };
-        for (id, stats) in ipasra::remove(module, graph, names, &mut fuel) {
+        let started = Instant::now();
+        let changed = ipasra::remove(module, graph, names, &mut fuel);
+        report.took(ipasra::NAME, started.elapsed());
+        for (id, stats) in changed {
             if opts.verify {
                 if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
                     let func = names.resolve(module[id].name);
@@ -1060,6 +1084,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         // measured from where it is written. See `crate::switch_conv`.
         let measures = module.tuple.arch() == Arch::X86_64
             && module.tuple.object_format() == ObjectFormat::Elf;
+        let started = Instant::now();
         for id in module.funcs() {
             if module[id].is_declaration() {
                 continue;
@@ -1117,6 +1142,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             // why the pass cannot leave recording until later. See `crate::stats`.
             report.remarks.push(Remark { pass: name, func: module[id].name, stats });
         }
+        report.took(name, started.elapsed());
         // Added to rather than pushed, so a pass the list names twice is one line here with what
         // both of its runs spent. That is the number a bisection halves, and two lines under one
         // name would be two numbers where the flag takes one.

@@ -159,6 +159,17 @@ fn listing(
     };
     writer.out.push_str(writer.directives.text());
     writer.out.push('\n');
+    // The `asm` at file scope that is instructions, first and between the markers gcc writes
+    // around it, which the reader takes as comments. What section it leaves the assembler in is
+    // its own business, so the functions after it are put back in the text section, which is
+    // where they would have been without it.
+    if !globals.file_asm.is_empty() {
+        for text in &globals.file_asm {
+            let _ = writeln!(writer.out, "#APP\n{text}\n#NO_APP");
+        }
+        writer.out.push_str(writer.directives.text());
+        writer.out.push('\n');
+    }
     for func in funcs {
         writer.func(func)?;
     }
@@ -925,7 +936,7 @@ mod tests {
         let names = Interner::new();
         print(
             &[],
-            &Globals { vars, weak: Vec::new() },
+            &Globals { vars, ..Globals::default() },
             &[],
             &names,
             &target(os),
@@ -940,8 +951,16 @@ mod tests {
         let names = Interner::new();
         let sections =
             Output { sections: Sections { functions: false, data: true }, ..Output::default() };
-        print(&[], &Globals { vars, weak: Vec::new() }, &[], &names, &target(os), true, sections)
-            .expect("a machine with a writer")
+        print(
+            &[],
+            &Globals { vars, ..Globals::default() },
+            &[],
+            &names,
+            &target(os),
+            true,
+            sections,
+        )
+        .expect("a machine with a writer")
     }
 
     /// Two functions of those names, written out with each of them given a section of its own.
@@ -1446,7 +1465,7 @@ mod tests {
         let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
         let text = print(
             &[],
-            &Globals { vars, weak: Vec::new() },
+            &Globals { vars, ..Globals::default() },
             &aliases,
             &names,
             &target(Os::Linux),

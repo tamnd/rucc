@@ -599,6 +599,11 @@ pub struct Module {
     relocs: Vec<Reloc>,
 
     symbols: HashMap<Symbol, SymbolRef>,
+
+    /// The `asm` written at file scope that the lowering could not read into globals, which is one
+    /// with an instruction in it, kept as the text it was written as. See
+    /// [`Module::add_file_asm`].
+    file_asm: Vec<String>,
 }
 
 impl Module {
@@ -618,7 +623,25 @@ impl Module {
             imms: Vec::new(),
             relocs: Vec::new(),
             symbols: HashMap::new(),
+            file_asm: Vec::new(),
         }
+    }
+
+    /// Keeps the text of an `asm` at file scope to be handed to the assembler as it was written.
+    ///
+    /// What it defines is invisible here: a function written in one is a declaration as far as
+    /// the IR knows, and the definition turns up when the listing is read. That is gcc's contract
+    /// too, where the template goes into the output between `#APP` and `#NO_APP` and nothing
+    /// before the assembler looks inside it.
+    pub fn add_file_asm(&mut self, text: String) {
+        self.file_asm.push(text);
+    }
+
+    /// The text of each `asm` at file scope kept by [`Module::add_file_asm`], in the order they
+    /// were written.
+    #[must_use]
+    pub fn file_asms(&self) -> &[String] {
+        &self.file_asm
     }
 
     // Symbols.

@@ -461,11 +461,10 @@ tests = []
 name = "returns_twice"
 kind = "attribute"
 gcc_version = "4.1"
-status = "unimplemented"
-answer = "error"
-used_by = ["glibc"]
-tests = []
-notes = "`setjmp` is declared with it, and ignoring it means the register allocator may keep a value in a register across a `longjmp`."
+status = "implemented"
+used_by = ["glibc", "postgres"]
+tests = ["rucc-sema::returns_twice_written_as_the_attribute_is_kept", "rucc-driver::a_value_live_across_a_returns_twice_call_keeps_its_spill_slot"]
+notes = "`setjmp` is declared with it. A function that calls one lays out its frame with no two values sharing a stack slot and makes no tail call, which is what the known names `setjmp`, `sigsetjmp`, `savectx`, `vfork` and `getcontext` already got. The register side needs nothing, since `longjmp` puts back the callee saved registers the `setjmp` wrote down."
 
 [[feature]]
 name = "no_instrument_function"

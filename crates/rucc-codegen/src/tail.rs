@@ -38,11 +38,17 @@ use rucc_ir::{Abi, AttrSet, Extra, Func, Inst, Opcode, Value};
 use rucc_mir as mir;
 use rucc_target::{FrameInsts, RegClass};
 
+use crate::elsewhere::Elsewhere;
+
 /// The functions a call to which comes back more than once, which is what `setjmp` is and what
 /// gcc's `special_function_p` lists. A name with underscores in front of it is the same function.
 ///
 /// Control coming back into the caller a second time needs the caller's frame, so a caller that
 /// makes one of these calls anywhere makes no tail call at all.
+///
+/// A function declared with `__attribute__((returns_twice))` is one as well, whatever it is called,
+/// and [`Elsewhere::twice`] is where that is asked. The list is still here for a program that
+/// declares `setjmp` itself without the attribute, which gcc also allows.
 const TWICE: &[&str] = &["setjmp", "sigsetjmp", "savectx", "vfork", "getcontext"];
 
 /// One call [`crate::lower`] built for a `tail_call`, and the pseudos that leave its answer where
@@ -57,7 +63,7 @@ pub struct Tail {
 
 /// Why no call in this function can be made in tail position, or `None` when one can.
 #[must_use]
-pub fn refusal(func: &Func, names: &Interner) -> Option<&'static str> {
+pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&'static str> {
     if func.attrs.set.contains(AttrSet::NAKED) {
         return Some("the function is naked and writes its own ending");
     }
@@ -73,7 +79,7 @@ pub fn refusal(func: &Func, names: &Interner) -> Option<&'static str> {
                 Opcode::VaStart => return Some("the function reads its own variable arguments"),
                 Opcode::ApplyArgs => return Some("the function keeps its arguments in the frame"),
                 Opcode::SetjmpMarker => return Some("the function saves a place to come back to"),
-                Opcode::Call if twice(func, inst, names) => {
+                Opcode::Call if twice(func, inst, names, elsewhere) => {
                     return Some("the function calls something that comes back twice");
                 }
                 _ => (),
@@ -83,17 +89,39 @@ pub fn refusal(func: &Func, names: &Interner) -> Option<&'static str> {
     None
 }
 
-/// Whether that call is to one of [`TWICE`].
-fn twice(func: &Func, inst: Inst, names: &Interner) -> bool {
+/// Whether control can come back into this function a second time from one call, through a
+/// `__builtin_setjmp` or a call to one of [`TWICE`] or to a function declared `returns_twice`.
+///
+/// The frame of such a function is laid out with nothing sharing anything. A value computed before
+/// the `setjmp` and read after the `longjmp` is live across the call on the arm that reads it, and
+/// dead on the arm that ran first, so liveness lets that arm reuse its spill slot. Registers are
+/// safe, since the jump puts back the callee saved registers the `setjmp` wrote down, but a spill
+/// slot is only memory and comes back holding whatever the first arm left in it. 7.13.2.1p3 only
+/// lets a local that changed after the `setjmp` come back indeterminate, and this one did not.
+/// Postgres's `PG_TRY` is `sigsetjmp` with exactly this shape, and gcc answers the same way by
+/// giving nothing live across such a call a slot it shares.
+#[must_use]
+pub fn comes_back(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> bool {
+    func.blocks().any(|block| {
+        func.insts(block).any(|inst| match func[inst].opcode {
+            Opcode::SetjmpMarker => true,
+            Opcode::Call => twice(func, inst, names, elsewhere),
+            _ => false,
+        })
+    })
+}
+
+/// Whether that call is to one of [`TWICE`] or to a function declared to be like them.
+fn twice(func: &Func, inst: Inst, names: &Interner, elsewhere: &Elsewhere) -> bool {
     let Extra::Call(info) = func[inst].extra else { return false };
     let Some(callee) = func[info].callee else { return false };
-    TWICE.contains(&names.resolve(callee).trim_start_matches('_'))
+    elsewhere.twice(callee) || TWICE.contains(&names.resolve(callee).trim_start_matches('_'))
 }
 
 /// Turns every call in tail position into a `tail_call`, unless [`refusal`] has a reason not to,
 /// and says how many it turned.
-pub fn mark(func: &mut Func, names: &Interner) -> usize {
-    if refusal(func, names).is_some() {
+pub fn mark(func: &mut Func, names: &Interner, elsewhere: &Elsewhere) -> usize {
+    if refusal(func, names, elsewhere).is_some() {
         return 0;
     }
     let blocks: Vec<_> = func.blocks().collect();
@@ -203,7 +231,8 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Flags, Func, InstData, Opcode, Signature, Type, Value};
 
-    use super::{mark, refusal};
+    use super::{comes_back, mark, refusal};
+    use crate::elsewhere::Elsewhere;
 
     /// `int f(int a) { return g(a); }`, and whatever `between` puts in front of the return.
     fn caller(
@@ -234,7 +263,7 @@ mod tests {
     fn a_call_whose_answer_is_returned_becomes_a_tail_call() {
         let mut names = Interner::new();
         let mut func = caller(&mut names, |_, _, got| got);
-        assert_eq!(mark(&mut func, &names), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
     }
 
@@ -244,7 +273,7 @@ mod tests {
         let mut func = caller(&mut names, |func, block, got| {
             Builder::new(func, block).binary(Opcode::Add, got, got, Flags::default())
         });
-        assert_eq!(mark(&mut func, &names), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Add, Opcode::Return]);
     }
 
@@ -255,8 +284,11 @@ mod tests {
             Builder::new(func, block).value(InstData::new(Opcode::Alloca), Type::PTR);
             got
         });
-        assert_eq!(refusal(&func, &names), Some("a local lives in the frame"));
-        assert_eq!(mark(&mut func, &names), 0);
+        assert_eq!(
+            refusal(&func, &names, &Elsewhere::default()),
+            Some("a local lives in the frame")
+        );
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
     }
 
     #[test]
@@ -269,9 +301,23 @@ mod tests {
             got
         });
         assert_eq!(
-            refusal(&func, &names),
+            refusal(&func, &names, &Elsewhere::default()),
             Some("the function calls something that comes back twice")
         );
-        assert_eq!(mark(&mut func, &names), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+    }
+
+    #[test]
+    fn glibcs_name_for_sigsetjmp_comes_back_and_an_ordinary_call_does_not() {
+        let mut names = Interner::new();
+        let setjmp = names.intern("__sigsetjmp");
+        let func = caller(&mut names, |func, block, got| {
+            let sig = func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+            Builder::new(func, block).call(setjmp, sig, &[]);
+            got
+        });
+        assert!(comes_back(&func, &names, &Elsewhere::default()));
+        let plain = caller(&mut names, |_, _, got| got);
+        assert!(!comes_back(&plain, &names, &Elsewhere::default()));
     }
 }

@@ -43,6 +43,7 @@ pub mod phase;
 pub mod preprocess;
 pub mod schedule;
 mod shapes;
+pub mod trace;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -196,8 +197,10 @@ fn rewrite<'a>(arg: &'a str, flag: &str) -> Result<(&'a str, &'a str), CliError>
 enum Query {
     /// `-dumpmachine`, the triple.
     Machine,
-    /// `-dumpversion` and `-dumpfullversion`, which are the same three numbers here.
+    /// `-dumpversion`, the major number of the GCC release this compiler claims to be.
     Version,
+    /// `-dumpfullversion`, the same release in all three numbers.
+    FullVersion,
     /// `-print-multiarch`, the directory name a distribution files this target under.
     Multiarch,
     /// `-print-search-dirs`, in the three lines GCC prints.
@@ -658,6 +661,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-c" => opts.emit = EmitKind::Object,
             "-S" => opts.emit = EmitKind::Asm,
             "-E" => opts.emit = EmitKind::Preprocessed,
+            "-fsyntax-only" => opts.emit = EmitKind::SyntaxOnly,
             "-g" => opts.debug_info = true,
             // GCC's own levels of how much debug information to write. Zero is none and every
             // other number is some, and this compiler has one amount, so the numbers above zero
@@ -761,7 +765,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // loop, because each one is about the target or the library search and the command
             // line has not finished saying what those are.
             "-dumpmachine" => query = Some(Query::Machine),
-            "-dumpversion" | "-dumpfullversion" => query = Some(Query::Version),
+            // Both answer with the GCC release in `__GNUC__` rather than our own version, because
+            // what asks is a build script deciding which GCC it is talking to, and `0.11` reads as
+            // a GCC too old to have anything. GCC 7 and later print only the major number for the
+            // first one, and that is the shape the scripts were written against.
+            "-dumpversion" => query = Some(Query::Version),
+            "-dumpfullversion" => query = Some(Query::FullVersion),
             "-print-multiarch" => query = Some(Query::Multiarch),
             "-print-search-dirs" => query = Some(Query::SearchDirs),
             "-print-sysroot" => query = Some(Query::Sysroot),
@@ -1200,6 +1209,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
+            // Preprocess the input, which a C compile always does. GCC has it for Fortran, and
+            // meson writes it when it asks a compiler for its predefined macros.
+            "-cpp" => {}
             // Nothing here writes colour, so all of these are the same answer, and it is the answer
             // that costs nothing: the diagnostics come out plain either way and no build depends on
             // an escape sequence being there. Taken rather than refused because cmake writes
@@ -1707,6 +1719,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .parse()
                     .map_err(|_| err(format!("`{count}` is not a number of transformations")))?;
                 opts.pass_fuel_global = Some(count);
+            }
+            _ if arg.starts_with("-frucc-trace=") => {
+                let path = &arg["-frucc-trace=".len()..];
+                if path.is_empty() {
+                    return Err(err("-frucc-trace= needs a file to write to"));
+                }
+                opts.trace = Some(path.to_owned());
             }
             // Everything from `-fopt-info` to the end of the argument, which is optional
             // keywords joined by hyphens and an optional `=<file>`. Checked here rather than
@@ -2531,7 +2550,10 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
     };
     Ok(match query {
         Query::Machine => opts.target.to_string(),
-        Query::Version => VERSION.to_owned(),
+        Query::Version => opts.gnuc.major.to_string(),
+        Query::FullVersion => {
+            format!("{}.{}.{}", opts.gnuc.major, opts.gnuc.minor, opts.gnuc.patch)
+        }
         Query::Multiarch => link::multiarch(opts.target),
         // The three lines GCC prints, in its order and with its punctuation, because what reads
         // them is a script written against that shape. There is no installation directory to
@@ -2869,6 +2891,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         if opts.time {
             say_time(&job.input, started.elapsed(), &mut stderr);
         }
+        failed |= !write_trace(opts, job, started, &result, &mut stderr);
         fired.merge(&result.fired);
         pressure.merge(&result.pressure);
         lowerings.merge(&result.lowerings);
@@ -3027,6 +3050,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             if opts.time {
                 say_time(&job.input, started.elapsed(), &mut stderr);
             }
+            failed |= !write_trace(opts, job, started, &result, &mut stderr);
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
             lowerings.merge(&result.lowerings);
@@ -3190,6 +3214,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             if opts.time {
                 say_time(&plan_job.input, started.elapsed(), &mut stderr);
             }
+            failed |= !write_trace(opts, plan_job, started, &result, &mut stderr);
             fired.merge(&result.fired);
             pressure.merge(&result.pressure);
             lowerings.merge(&result.lowerings);
@@ -3424,6 +3449,39 @@ fn write_temps(job: &Job, temps: &Temps, stderr: &mut impl std::io::Write) -> bo
     ok
 }
 
+/// Appends the file's line to the `-frucc-trace` file, when there is one.
+///
+/// Returns whether that went well, and says why on standard error when it did not.
+fn write_trace(
+    opts: &Options,
+    job: &Job,
+    started: std::time::Instant,
+    result: &Compiled,
+    stderr: &mut impl std::io::Write,
+) -> bool {
+    let Some(path) = &opts.trace else {
+        return true;
+    };
+    let output = match &job.output {
+        Output::Stdout => "-",
+        Output::File(path) | Output::Temporary(path) => path,
+    };
+    let record = trace::Record {
+        input: &job.input,
+        output,
+        ok: !result.failed(),
+        total: started.elapsed(),
+        timing: &result.timing,
+    };
+    match trace::append(path, &record) {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = writeln!(stderr, "rucc: error: {e}");
+            false
+        }
+    }
+}
+
 /// One line of `-time`, which is what a step was called and how long it took.
 ///
 /// GCC's two numbers are the user and the system time of a subprocess it ran. This compiler runs
@@ -3482,6 +3540,21 @@ pub fn run_as(program: &str, args: &[String]) -> i32 {
     }
 }
 
+/// What `--version` prints.
+///
+/// The first line is ours and is the one every harness we have reads. The second is for build
+/// systems that decide what kind of compiler they have by reading this text. Meson takes the GNU
+/// path only when it finds "Free Software Foundation" here, and otherwise stops with "Unknown
+/// compiler" before it has asked a single question, which is how the whole of a meson build is
+/// lost to one sentence. Past that point meson reads the version from `__GNUC__` and asks the
+/// preprocessor everything else, so the line decides the path and nothing more. It says what is
+/// true, that rucc speaks the dialect of GCC 16, and it does not claim to be GCC.
+fn banner() -> String {
+    format!(
+        "rucc {VERSION}\nA C compiler for the GNU C dialect of GCC 16 from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.\n"
+    )
+}
+
 /// Runs the driver and returns the process exit code.
 ///
 /// `args` excludes the program name. Output goes to `stdout` and errors to `stderr`, which
@@ -3493,7 +3566,7 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Ok(Action::Version) => {
-            println!("rucc {VERSION}");
+            print!("{}", banner());
             0
         }
         Ok(Action::Print(line)) => {
@@ -3545,6 +3618,9 @@ pub fn run(args: &[String]) -> i32 {
                 if verbose {
                     let _ = write!(stderr, "{}", plan.render());
                     let _ = writeln!(stderr, "workers: {}", jobs.count());
+                    // What `gcc -v` says about headers, because meson and cmake read it to find the
+                    // system directories.
+                    let _ = write!(stderr, "{}", opts.search.render_gcc());
                 }
             }
             if opts.emit == EmitKind::Preprocessed {
@@ -4125,6 +4201,7 @@ mod tests {
             "-fexcess-precision=fast",
             "-fexcess-precision=16",
             "-pipe",
+            "-cpp",
             "-fdiagnostics-color",
             "-fno-diagnostics-color",
             "-fdiagnostics-color=always",
@@ -4745,6 +4822,16 @@ mod tests {
     }
 
     #[test]
+    fn the_trace_file_is_taken_from_the_flag_and_an_empty_one_is_refused() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.trace, None);
+        let (opts, _) = compile(&["-c", "-frucc-trace=/tmp/compile.jsonl", "a.c"]);
+        assert_eq!(opts.trace.as_deref(), Some("/tmp/compile.jsonl"));
+        let e = parse_args(&args(&["-frucc-trace=", "a.c"])).unwrap_err();
+        assert!(e.message.contains("needs a file"), "{}", e.message);
+    }
+
+    #[test]
     fn a_gate_names_a_pass_and_optionally_the_functions_it_covers() {
         let (opts, _) = compile(&["-c", "-O2", "-fdisable-fold", "-fenable-fold=2-4,main", "a.c"]);
         assert_eq!(
@@ -5107,7 +5194,7 @@ mod tests {
 
         // `-dumpversion` is a different flag that happens to start the same way, and it is read
         // as itself rather than as a dump of nothing.
-        assert_eq!(printed(&["-dumpversion", "a.c"]), VERSION);
+        assert_eq!(printed(&["-dumpversion", "a.c"]), "16");
     }
 
     #[test]
@@ -6189,11 +6276,27 @@ mod tests {
     }
 
     #[test]
+    fn the_version_banner_keeps_our_first_line_and_takes_meson_down_the_gnu_path() {
+        let text = banner();
+        let mut lines = text.lines();
+        // Every harness we have reads the first line and nothing else.
+        assert_eq!(lines.next(), Some(format!("rucc {VERSION}").as_str()));
+        // The words meson looks for, in `mesonbuild/compilers/detect.py`.
+        assert!(text.contains("Free Software Foundation"), "{text}");
+        // GCC's own banner has three lines and so does this one, and the claim is the dialect.
+        assert!(lines.next().is_some_and(|l| l.contains("GCC 16")), "{text}");
+        assert!(lines.next().is_some() && lines.next().is_none(), "{text}");
+    }
+
+    #[test]
     fn the_questions_a_build_system_asks_before_it_compiles_anything() {
         let target = "--target=x86_64-unknown-linux-gnu";
         assert_eq!(printed(&[target, "-dumpmachine"]), "x86_64-unknown-linux-gnu");
-        assert_eq!(printed(&[target, "-dumpversion"]), VERSION);
-        assert_eq!(printed(&[target, "-dumpfullversion"]), VERSION);
+        assert_eq!(printed(&[target, "-dumpversion"]), "16");
+        assert_eq!(printed(&[target, "-dumpfullversion"]), "16.0.0");
+        // They follow the release claimed, since that is the one `__GNUC__` says.
+        assert_eq!(printed(&[target, "-fgnuc-version=15.2", "-dumpversion"]), "15");
+        assert_eq!(printed(&[target, "-fgnuc-version=15.2", "-dumpfullversion"]), "15.2.0");
         assert_eq!(printed(&[target, "-print-multiarch"]), "x86_64-linux-gnu");
         // A name nothing holds comes back unchanged, which is GCC's rule and is what makes the
         // answer safe to paste into a link line whether or not the file is there.
@@ -6444,6 +6547,27 @@ mod tests {
         // And the `-o` went to the file the rule replaced, which is left empty rather than
         // absent because a makefile that named it as a target will look for it.
         assert_eq!(std::fs::read(tree.path("a.i")).expect("the output should exist"), b"");
+    }
+
+    #[test]
+    fn syntax_only_checks_the_file_and_writes_nothing() {
+        // What meson's `has_header_symbol` probe does: compile with `-fsyntax-only` and read the
+        // exit status. A good file passes and leaves no output behind, a bad one fails.
+        let tree = TempTree::new(
+            "syntax-only",
+            &[
+                ("good.c", "int f(int x) { return x + 1; }\n"),
+                ("bad.c", "int f(void) { return y; }\n"),
+            ],
+        );
+        let (opts, _) = compile(&["-fsyntax-only", "a.c"]);
+        assert_eq!(opts.emit, EmitKind::SyntaxOnly);
+
+        let out = tree.path("good.o");
+        assert_eq!(run(&args(&["-fsyntax-only", "-o", &out, &tree.path("good.c")])), 0);
+        assert!(!std::path::Path::new(&out).exists(), "-fsyntax-only wrote {out}");
+        assert!(!std::path::Path::new(&tree.path("good.s")).exists());
+        assert_ne!(run(&args(&["-fsyntax-only", &tree.path("bad.c")])), 0);
     }
 
     #[test]

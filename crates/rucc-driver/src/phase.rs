@@ -423,7 +423,8 @@ pub fn last_phase(emit: EmitKind) -> Phase {
         | EmitKind::Ir
         | EmitKind::MirFinal
         | EmitKind::SafetySummary
-        | EmitKind::TypeGranules => Phase::Compile,
+        | EmitKind::TypeGranules
+        | EmitKind::SyntaxOnly => Phase::Compile,
         EmitKind::Object => Phase::Assemble,
         EmitKind::Archive => Phase::Archive,
         EmitKind::Executable => Phase::Link,
@@ -702,6 +703,10 @@ impl Plan {
                     Some(base) => Output::File(format!("{base}.{ext}")),
                     None => Output::Temporary(format!("{}.{ext}", stem(&input.path))),
                 }
+            } else if opts.emit == EmitKind::SyntaxOnly {
+                // Nothing is produced, so nothing is written, and an `-o` is ignored the way gcc
+                // ignores it. Standard output takes the empty artifact without leaving a file.
+                Output::Stdout
             } else if let Some(o) = named {
                 // `-o -` is standard output rather than a file of that name, which is what gcc
                 // does for everything it compiles, the object file included. Its link step is
@@ -718,9 +723,12 @@ impl Plan {
             // An input whose output has the name it has itself would be read and then written
             // over, and what it held would be gone. GCC compares the two names the way they
             // were written and so does this, which catches `rucc --emit=ir a.ir` and leaves
-            // the same file reached by two different paths to the file system.
+            // the same file reached by two different paths to the file system. `/dev/null` is
+            // left out, as gcc leaves out its bit bucket: nothing is lost by writing to it, and
+            // kbuild's cc-option asks whether a flag is taken by compiling `-xc /dev/null` with
+            // `-o /dev/null`, so refusing it refused every flag busybox probed for.
             if let Output::File(path) = &out {
-                if *path == input.path {
+                if *path == input.path && path != "/dev/null" {
                     return Err(plan_err(format!(
                         "input file `{}` is the same as the output file",
                         input.path
@@ -890,6 +898,10 @@ mod tests {
         // being refused for the same reason.
         assert!(Plan::new(&o, &inputs, Some("b.ir")).is_ok());
         assert!(Plan::new(&o, &inputs, Some("a.ir")).is_err());
+        // The bit bucket is not a file anything is kept in, which is how kbuild asks whether a
+        // flag is taken.
+        let null = Input { forced: Some(InputKind::C), ..Input::new("/dev/null") };
+        assert!(Plan::new(&linux(), &[null], Some("/dev/null")).is_ok());
     }
 
     #[test]
@@ -1134,6 +1146,17 @@ mod tests {
             o.emit = emit;
             assert_eq!(plan(&o, &["a.c"], None).jobs[0].output, Output::File(name.into()));
         }
+    }
+
+    #[test]
+    fn syntax_only_writes_no_file_even_when_given_a_name() {
+        let mut o = linux();
+        o.emit = EmitKind::SyntaxOnly;
+        assert_eq!(last_phase(o.emit), Phase::Compile);
+        let p = plan(&o, &["a.c", "b.c"], None);
+        assert!(p.jobs.iter().all(|job| job.output == Output::Stdout), "{:?}", p.jobs);
+        assert_eq!(plan(&o, &["a.c"], Some("a.o")).jobs[0].output, Output::Stdout);
+        assert!(!plan(&o, &["a.c"], None).render().contains("link:"));
     }
 
     #[test]

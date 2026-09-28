@@ -487,6 +487,9 @@ pub struct Insts {
     /// The instruction that writes a small constant into a general purpose register, which is
     /// what a byte count and a SysV vector count are.
     pub small: &'static str,
+    /// The instruction that extends a value of that type the way the attribute asks, for the one
+    /// side of a call that owes the other the bits above it, and [`None`] where nothing does.
+    pub extend: fn(Type, Abi) -> Option<&'static str>,
 }
 
 /// The x86-64 ones.
@@ -499,6 +502,7 @@ pub static X86_64: Insts = Insts {
     call_reg: CALL_REG,
     lea: "x64.lea_64",
     small: "x64.mov_ri_32",
+    extend: |_, _| None,
 };
 
 /// What the instruction that calls a name is called.
@@ -658,6 +662,10 @@ pub fn call(
     // files as one run is what needs it: the general purpose register a variadic float's second
     // copy goes in is the one at that position.
     let mut position = 0usize;
+    // The ones the callee reads as a whole 32 bit register when they are narrower than that, as
+    // where in `passed` each is and the instruction that makes its upper bits what the callee
+    // expects. Only an argument in a register, since one in memory is read at its own width.
+    let mut widen = Vec::new();
     for (index, &Passing { ty, reg, abi }) in args.iter().enumerate() {
         let refused = |missing| Refused { argument: Some(index), missing };
         // An eighty bit float is bytes in the argument area whatever the classification said, for
@@ -714,6 +722,9 @@ pub fn call(
         let class = class_of(ty, conv);
         match at {
             Where::Reg(at) => {
+                if let Some(name) = (insts.extend)(ty, abi) {
+                    widen.push((passed.len(), names.intern(name)));
+                }
                 // Only a register counts, because the count is of registers. An argument that went
                 // to memory is one the callee reads from memory whatever this says.
                 if class == conv.sse_class {
@@ -752,6 +763,17 @@ pub fn call(
     // in the register there makes the callee save a register file it was not given, and a count
     // that is too low makes it read an argument out of a register nothing put one in.
     let counted = if variadic { conv.vector_count } else { None };
+
+    for (at, name) in widen {
+        let (reg, _, class) = passed[at];
+        let wide = out.new_vreg(class);
+        out.build(block, mir::Opcode::new(name))
+            .at(span)
+            .def(wide, class)
+            .uses(reg, class)
+            .finish();
+        passed[at].0 = wide;
+    }
 
     // The arguments that go to memory go there now, in front of the call and after everything this
     // could have refused, so that a call it cannot make leaves no store behind either. The offset

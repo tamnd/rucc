@@ -386,6 +386,20 @@ fn vector_letter(constraint: &str) -> bool {
     })
 }
 
+/// The x86-64 vector register one entry of a clobber list names, spelled `xmm0` or `ymm0` with or
+/// without the sigil, or nothing for any other entry. Only the sixteen there are without AVX-512,
+/// so `zmm0` and `xmm16` are still refused as names this has no register for.
+fn vector_named(entry: &str) -> Option<PhysReg> {
+    let entry = entry.trim().trim_matches('"');
+    let entry = entry.strip_prefix('%').unwrap_or(entry);
+    let number = entry.strip_prefix("xmm").or_else(|| entry.strip_prefix("ymm"))?;
+    if number.len() > 1 && number.starts_with('0') {
+        return None;
+    }
+    let number: u8 = number.parse().ok()?;
+    (number < 16).then(|| x86_64::xmm(number))
+}
+
 /// Whether a line of a template names, by number, an operand `wanted` says yes to.
 ///
 /// `%%` is a percent sign rather than an operand, and a modifier letter may stand between the sign
@@ -1419,10 +1433,14 @@ impl<'a> Lowering<'a> {
                 // write is an instruction leaving the value in a register, and this one is left on
                 // the x87 stack instead. A rule could not name that stack any more than any other
                 // rule about this type could.
+                //
+                // And a return the convention asks this side to extend, which a rule has no way to
+                // know about since the signature is what says so and not the value.
                 Opcode::Return
                     if self.source[self.source[inst].args].len() > 1
                         || self.sret().is_some()
-                        || self.gives_back_x87(inst) =>
+                        || self.gives_back_x87(inst)
+                        || self.widens_return() =>
                 {
                     let values = self.source[self.source[inst].args].to_vec();
                     self.returned(inst, values)?;
@@ -1700,6 +1718,13 @@ impl<'a> Lowering<'a> {
     ///
     /// Where everything goes is worked out before anything is written, so a return this cannot
     /// make leaves no half of one behind.
+    /// Whether a value this function gives back has to be extended first, which is Apple's arm64
+    /// asking the callee to fill the 32 bits above a `char` or a `short` by its sign.
+    fn widens_return(&self) -> bool {
+        let returns = &self.source.signature().returns;
+        returns.iter().any(|it| (self.selector.abi.extend)(it.ty, it.abi).is_some())
+    }
+
     /// Whether what a `return` gives back goes back on the x87 stack, per [`abi::back_on_x87`].
     fn gives_back_x87(&self, inst: Inst) -> bool {
         self.x87_values(&self.source[self.source[inst].args])
@@ -1730,7 +1755,12 @@ impl<'a> Lowering<'a> {
             }
             return Ok(());
         }
-        for value in self.sret().into_iter().chain(values) {
+        // What the signature says about the bits above a narrow one, which on an ABI that extends
+        // it is an obligation of this side: the caller reads the whole of the 32 bit register.
+        let asked: Vec<Abi> = self.source.signature().returns.iter().map(|it| it.abi).collect();
+        let asked = asked.into_iter().chain(std::iter::repeat(Abi::Plain));
+        let sret = self.sret().map(|value| (value, Abi::Plain));
+        for (value, abi) in sret.into_iter().chain(values.into_iter().zip(asked)) {
             let ty = self.source[value].ty;
             let at = if crate::term::in_vector_file(ty) { &mut floats } else { &mut ints };
             // Why it cannot come back, and not only that it cannot. A type that travels nowhere
@@ -1746,12 +1776,19 @@ impl<'a> Lowering<'a> {
                 name.strip_prefix(self.selector.prefix()).ok_or_else(|| self.unsupported(inst))?;
             let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
             let [desc] = descs else { return Err(self.unsupported(inst)) };
-            parts.push((self.names.intern(name), self.reg_of(value)?, *desc));
+            let widen = (self.selector.abi.extend)(ty, abi).map(|name| self.names.intern(name));
+            parts.push((self.names.intern(name), self.reg_of(value)?, *desc, widen));
         }
 
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
-        for (opcode, reg, desc) in parts {
+        for (opcode, mut reg, desc, widen) in parts {
+            if let Some(widen) = widen {
+                let wide = self.out.new_vreg(desc.class);
+                let build = self.out.build(block, mir::Opcode::new(widen)).at(span);
+                build.def(wide, desc.class).uses(reg, desc.class).finish();
+                reg = wide;
+            }
             let operand = mir::Operand {
                 reg,
                 class: desc.class,
@@ -3901,6 +3938,13 @@ impl<'a> Lowering<'a> {
         // so the reader is told which ones those are and spells `%0` for one as the object.
         let memory: Vec<bool> = list.iter().map(|operand| operand.memory).collect();
         let template = self.names.resolve(info.template).to_string();
+        // A clobber list naming a vector register goes the way a template this cannot read does.
+        // The instructions read here are all in the general purpose file, and what keeps the text
+        // already takes every vector register a call may use away from the allocator across it.
+        let clobbers = self.names.resolve(info.clobbers);
+        if clobbers.split(',').any(|entry| vector_named(entry).is_some()) {
+            return self.kept(inst, &template, &list, &widths, &memory);
+        }
         let steps = if template.trim().is_empty() {
             Vec::new()
         } else {
@@ -4139,7 +4183,7 @@ impl<'a> Lowering<'a> {
         let named = if a64 {
             Self::clobbered_a64(inst, &clobbers)?
         } else {
-            Self::clobbered(inst, &clobbers)?.into_iter().map(|reg| (reg, self.gpr)).collect()
+            Self::clobbered_x86(inst, &clobbers, self.gpr, self.conv.sse_class)?
         };
         for &(reg, class) in &named {
             if !clobbered.iter().any(|&(had, of)| had == reg && of == class) {
@@ -4892,6 +4936,33 @@ impl<'a> Lowering<'a> {
             if !named.contains(&reg) {
                 named.push(reg);
             }
+        }
+        Ok(named)
+    }
+
+    /// [`Self::clobbered`] for a template kept as text, where a clobber may also name a vector
+    /// register, `xmm0` or its wider spelling `ymm0`, which busybox's `xorbuf16_aligned_long` does.
+    /// Each comes back with the file it is in, since `xmm0` and `rax` are both register nought.
+    fn clobbered_x86(
+        inst: Inst,
+        clobbers: &str,
+        gpr: RegClass,
+        sse: RegClass,
+    ) -> Result<Vec<(PhysReg, RegClass)>, Unsupported> {
+        let mut named = Vec::new();
+        let mut general = Vec::new();
+        for entry in clobbers.split(',') {
+            match vector_named(entry) {
+                Some(reg) => {
+                    if !named.contains(&(reg, sse)) {
+                        named.push((reg, sse));
+                    }
+                }
+                None => general.push(entry),
+            }
+        }
+        for reg in Self::clobbered(inst, &general.join(","))? {
+            named.push((reg, gpr));
         }
         Ok(named)
     }

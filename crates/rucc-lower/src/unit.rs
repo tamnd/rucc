@@ -489,6 +489,21 @@ impl Unit<'_> {
                     self.unsupported(&format!("{what} in an `asm` at file scope"), asm.span);
                     continue;
                 }
+                // An instruction, which the assembler reads rather than this, so the template is
+                // kept as it was written and the unit is assembled from its listing, where the
+                // template goes in the way gcc puts it into its own. Only on ELF, which is the
+                // syntax the listing reader knows.
+                Err(directives::Failed::Instruction(_))
+                    if self.target.object_format == ObjectFormat::Elf =>
+                {
+                    self.module.add_file_asm(template);
+                    continue;
+                }
+                Err(directives::Failed::Instruction(word)) => {
+                    let what = format!("the instruction '{word}' in an `asm` at file scope");
+                    self.unsupported(&what, asm.span);
+                    continue;
+                }
                 Err(directives::Failed::Missing(name, why)) => {
                     let message = format!("cannot open '{name}' for reading: {why}");
                     self.diagnostics.push(Diagnostic::error(message, asm.span).with_code("E0702"));
@@ -676,6 +691,7 @@ impl Unit<'_> {
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
         let noreturn = node.flags.contains(DeclFlags::NORETURN);
         let naked = node.flags.contains(DeclFlags::NAKED);
+        let twice = node.flags.contains(DeclFlags::RETURNS_TWICE);
         let effects = node.effects;
         let startup = node.startup;
         let span = tast.decl_span(decl);
@@ -728,6 +744,12 @@ impl Unit<'_> {
         // same places. See [`rucc_codegen`] for what reads it, which is the frame.
         if naked {
             func.attrs.set |= AttrSet::NAKED;
+        }
+        // A claim about what a call to it does, like `noreturn`, and it has to travel for the same
+        // reason: `sigsetjmp` is only ever declared here, and the frame of whoever calls it is
+        // what the claim changes. See `rucc_codegen::tail::comes_back` for what reads it.
+        if twice {
+            func.attrs.set |= AttrSet::RETURNS_TWICE;
         }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
