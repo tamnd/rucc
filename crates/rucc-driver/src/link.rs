@@ -808,9 +808,12 @@ fn linker_candidates(name: &str, opts: &LinkOptions, places: &[PathBuf]) -> Vec<
                 .filter(|p| executable(p)),
         );
     }
+    // The same spellings as on PATH, so `ld.lld` here and `ld.lld.exe` on Windows. Only `.exe`
+    // was tried at first, which found nothing in /usr/lib/llvm-19/bin on the Linux machines this
+    // search was written for.
     if is_lld(name) {
         for dir in places {
-            for file in spellings(&dir.join(name), &[".exe".to_owned()]) {
+            for file in spellings(&dir.join(name), &pathext) {
                 if executable(&file) && !found.contains(&file) {
                     found.push(file);
                 }
@@ -2231,6 +2234,21 @@ mod tests {
         );
         assert_eq!(spellings(&dir.join("lld-link.EXE"), &exts), [dir.join("lld-link.EXE")]);
         assert_eq!(spellings(&dir.join("ld.lld"), &[]), [dir.join("ld.lld")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_off_path_is_found_under_its_own_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("rucc-link-off-path-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        let lld = dir.join("ld.lld");
+        fs::write(&lld, "#!/bin/sh\n").expect("a file");
+        fs::set_permissions(&lld, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let found =
+            linker_candidates("ld.lld", &LinkOptions::default(), std::slice::from_ref(&dir));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(found.contains(&lld), "{found:?}");
     }
 
     #[test]
