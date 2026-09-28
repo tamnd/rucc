@@ -5386,6 +5386,34 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(text.matches("= landing").count(), 2, "one pad for a, one for b and a: {text}");
     }
 
+    /// A `goto` out of two scopes runs their handlers in front of its branch, and under
+    /// `-fexceptions` each one but the last is followed by an edge to the pad for the ones still
+    /// owed, as a handler at the end of a scope is. The branch goes after them.
+    #[test]
+    fn a_goto_that_runs_handlers_gives_each_one_an_edge_to_what_is_still_owed() {
+        let source = concat!(
+            "void done(int *p);\n",
+            "void f(int n) {\n",
+            "  int a __attribute__((cleanup(done))) = 1;\n",
+            "  { int b __attribute__((cleanup(done))) = 2;\n",
+            "    { int c __attribute__((cleanup(done))) = 3; if (n) goto out; }\n",
+            "  }\n",
+            "out:\n",
+            "  return;\n",
+            "}\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.exceptions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        // The goto's two for c and b, the two at the ends of the scopes of c and b, and the one
+        // the pad for c makes after b's handler. The pad for b only runs a's, so it has none.
+        assert_eq!(text.matches("= unwound").count(), 5, "{text}");
+        assert_eq!(text.matches("= landing").count(), 2, "{text}");
+    }
+
     /// Under `-fexceptions` a `cleanup` handler is owed a call on an unwind as well. On x86-64 ELF
     /// a call inside a handler's scope gets a landing pad that runs the handler and resumes the
     /// unwind, a handler with no call in its scope needs none, and without the flag the same source

@@ -13,6 +13,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The Windows release of `rucc.exe` carries its C runtime inside it, so it starts on a Windows machine that has never had the Visual C++ redistributable installed. 0.11.14 imported `VCRUNTIME140.dll` and did not. The release now checks the import table of what it built and fails if a C runtime DLL is in it. There is also a release for Windows on Arm, `aarch64-pc-windows-msvc`, built on a Windows 11 Arm runner (#2067).
 
+### Fixed
+
+- Under `-fexceptions` a `cleanup` handler that a `goto` out of its scope runs unwinds into the handlers still owed further out when it calls `pthread_exit` or is cancelled, as gcc does. Before this those handlers were skipped, since the calls a `goto` makes were put in front of its branch with no edge to a landing pad.
+
 ## 0.12.1
 
 ### Added

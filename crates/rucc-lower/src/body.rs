@@ -2121,14 +2121,25 @@ impl<'u> Body<'_, 'u> {
         let arriving = self.landings.get(&target).map_or([].as_slice(), Vec::as_slice);
         let shared =
             jump.from.iter().zip(arriving).take_while(|(from, to)| from.scope == to.scope).count();
-        let leaving: Vec<Vec<Cleanup>> = jump.holding.get(shared..).unwrap_or_default().to_vec();
-        for owed in leaving.iter().rev() {
-            for entry in owed.iter().rev() {
-                if let Some(inst) = self.cleanup_call(*entry, jump.span) {
-                    self.func.insert_before(inst, jump.inst);
-                }
-            }
+        // The branch comes out and goes back in at the end, since under `-fexceptions` a handler
+        // call that still owes the ones further out is followed by its own edge to a pad, and
+        // that edge ends the block it is in. What the branch passes its label was recorded
+        // against the block it was in, which holds everything the blocks after it see, since a
+        // handler call writes no variable.
+        let Some(block) = self.func.block_of(jump.inst) else { return };
+        self.func.remove_inst(jump.inst);
+        let walking = self.at.replace(block);
+        for scope in (shared..jump.holding.len()).rev() {
+            let outer: Vec<Cleanup> = jump.holding[..scope]
+                .iter()
+                .rev()
+                .flat_map(|owed| owed.iter().rev().copied())
+                .collect();
+            self.run_cleanups(&jump.holding[scope], &outer, jump.span);
         }
+        let end = self.block();
+        self.func.append_inst(end, jump.inst);
+        self.at = walking;
     }
 
     /// `&&name`, GNU's address of a label, which is a value a computed `goto` can jump to.
