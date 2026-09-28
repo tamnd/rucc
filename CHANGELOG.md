@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - A `switch` with a case that goes where the default goes, which is a `case` written just above `default:` or a case edge straight to the default block, is converted to arithmetic or a table like any other. That case leaves the `switch` and goes down the default edge, and for a table it is a hole. One such case used to make the arms differ and keep the whole `switch` as a jump table (#1932).
+- The register allocator gives the answer of a two address instruction the register of the value it reads whenever the two are never live at the same time, rather than only when nothing laid out after the instruction wants that value. A sum a loop carries round is no longer moved into a register of its own and copied back at the bottom of every turn when a `switch` inlined into the loop has an arm laid out after the addition. The whole of rucc-corpus runs 6.9% fewer instructions at `-O2` (#1965).
 
 ## 0.11.14
 

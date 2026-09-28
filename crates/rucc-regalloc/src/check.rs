@@ -255,23 +255,18 @@ fn together(first: Value<'_>, second: Value<'_>) -> bool {
 /// Whether one of the two is the answer a two address instruction wrote into the register it read
 /// the other from, which is the one overlap that is not a mistake.
 ///
-/// It only holds when the value being read is finished with at that instruction. A value read
-/// again afterwards needs its register afterwards, so writing over it is the plain bug this whole
-/// file exists to find.
-///
-/// It also only holds when the value being written is not already live where the instruction
-/// reads. The area read here is the one liveness worked out, without the extra point the reuse
-/// adds, so a value that covers the reuse point on its own is one that was already live on the way
-/// in. That is what a loop carrying its own answer round looks like: written at the bottom and read
-/// by the next turn. Such a value is wanted where the instruction reads as well as after it, so it
-/// is genuinely on top of the one it reuses and no excuse at the one instruction they share makes
+/// It only holds when the two are not live at the same time anywhere, asked of the areas liveness
+/// worked out, without the extra point the reuse adds. A value read again afterwards needs its
+/// register afterwards, so writing over it is the plain bug this whole file exists to find. And a
+/// value that covers the reuse point on its own is one that was already live on the way in. That
+/// is what a loop carrying its own answer round looks like: written at the bottom and read by the
+/// next turn. Such a value is wanted where the instruction reads as well as after it, so it is
+/// genuinely on top of the one it reuses and no excuse at the one instruction they share makes
 /// them fit in a single register.
 fn coalesced(first: Value<'_>, second: Value<'_>, reuses: &[Option<Reuse>], live: &Live) -> bool {
     let pair = |source: Value<'_>, dest: Value<'_>| {
         let Some(reuse) = reuses[index(dest.reg)] else { return false };
-        reuse.source == source.reg
-            && live.area(dest.reg).is_some_and(|area| !area.covers(reuse.at))
-            && live.range(source.reg).is_some_and(|r| r.end == reuse.at)
+        reuse.source == source.reg && crate::assign::apart(live, source.reg, dest.reg)
     };
     pair(first, second) || pair(second, first)
 }
