@@ -244,7 +244,7 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     // know nothing about them.
     d.set("__DATE__", &format!("\"{}\"", opts.timestamp.date));
     d.set("__TIME__", &format!("\"{}\"", opts.timestamp.time));
-    dialect(&mut d, opts);
+    dialect(&mut d, target, opts);
     optimization(&mut d, opts);
     platform(&mut d, target, opts);
     sizes(&mut d, target);
@@ -336,7 +336,7 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 }
 
 /// What the dialect flags say.
-fn dialect(d: &mut Defs, opts: &Predef) {
+fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.flag("__STDC__");
     d.set_if(opts.hosted, "__STDC_HOSTED__", "1");
     d.set_if(!opts.hosted, "__STDC_HOSTED__", "0");
@@ -379,7 +379,12 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     // meant yes. Saying nothing therefore does not withhold anything, it only makes the value
     // arrive from somewhere else.
     d.set_if(iec, "__STDC_IEC_60559_COMPLEX__", "201404L");
-    d.set("__STDC_ISO_10646__", "201706L");
+    // A promise that every `wchar_t` holds a UCS code point in every locale, which glibc's
+    // `<stdc-predef.h>` makes and Apple's library does not: a Mac `wchar_t` in a legacy locale
+    // is not Unicode, and clang for Apple leaves the macro out for that reason. A program that
+    // reads it to skip `mbstowcs` is the one that would be wrong.
+    let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
+    d.set_if(!apple, "__STDC_ISO_10646__", "201706L");
     // The type behind `char8_t`, which C23 added and no dialect before it has. It sits here
     // rather than next to `__CHAR16_TYPE__` and `__CHAR32_TYPE__` because those two are the
     // same in every dialect and this one is not, which is the whole reason a header can test
@@ -581,10 +586,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             }
         }
         Os::Darwin => {
+            // No `__unix__`, `__unix` or `unix`. clang for Apple defines none of them, and code
+            // that tests `__unix__` before `__APPLE__` takes the path written for Linux, where
+            // it reaches for `<linux/...>` headers or `/proc` and fails at build time or at
+            // run time. What a Mac is identified by is `__APPLE__` and `__MACH__`.
             d.flag("__APPLE__");
             d.flag("__MACH__");
-            d.flag("__unix__");
-            d.flag("__unix");
             d.set("__APPLE_CC__", "6000");
             d.set("__DYNAMIC__", "1");
             if triple.arch == Arch::Aarch64 {
@@ -608,9 +615,6 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // choose their swaps from it.
             d.flag("__LITTLE_ENDIAN__");
             deployment_target(d, target);
-            if opts.gnu_extensions {
-                d.flag("unix");
-            }
         }
         Os::Windows => {
             // Every spelling gcc has for this platform, because the mingw-w64 tree reads more
@@ -789,7 +793,13 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     // to be to share one. A cache line is sixty four bytes on every target here, and x86-64
     // gives that for both. Arm cores have been built with lines up to 256 bytes, so gcc and
     // clang both give 256 for the distance that has to be safe on any of them.
-    let destructive = if target.tuple.arch() == tuple::Arch::Aarch64 { "256" } else { "64" };
+    // Apple's cores are the exception that is known exactly, a 128 byte line, and clang for
+    // Apple says 128.
+    let destructive = match (target.tuple.arch(), target.tuple.os()) {
+        (tuple::Arch::Aarch64, tuple::Os::MacOs | tuple::Os::IOs) => "128",
+        (tuple::Arch::Aarch64, _) => "256",
+        _ => "64",
+    };
     d.set("__GCC_CONSTRUCTIVE_SIZE", "64");
     d.set("__GCC_DESTRUCTIVE_SIZE", destructive);
     let long = target.long_width / 8;
@@ -820,7 +830,15 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     // `short unsigned int` and this said four bytes there while `__WINT_WIDTH__` said sixteen
     // bits two hundred lines away.
     d.set("__SIZEOF_WINT_T__", &(wint(target).width / 8).to_string());
-    d.set("__BIGGEST_ALIGNMENT__", "16");
+    // The alignment of the most aligned scalar, which is `max_align_t`'s. That is sixteen where
+    // `long double` is sixteen bytes and eight on Apple arm64, where it is a `double`. What
+    // `aligned` with no argument gives is a separate number and is sixteen on every target,
+    // clang for Apple included.
+    let biggest = match (target.tuple.arch(), target.tuple.os()) {
+        (tuple::Arch::Aarch64, tuple::Os::MacOs | tuple::Os::IOs) => "8",
+        _ => "16",
+    };
+    d.set("__BIGGEST_ALIGNMENT__", biggest);
     // The `__BYTE_ORDER__` family, which the kernel and every serialisation library read.
     // The names of the orders are defined whichever one is in force, because code compares
     // against both.
@@ -907,6 +925,18 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     let wide_suffix = if lp64 { "L" } else { "LL" };
     let wide_max = format!("0x7fffffffffffffff{wide_suffix}");
     let wide_umax = format!("0xffffffffffffffffU{wide_suffix}");
+    // Apple is LP64 and still makes `int64_t` a `long long`, which `<sys/_types/_int64_t.h>`
+    // writes out by hand. The exact, least and fast sixty four bit types follow it, while
+    // `intmax_t`, `intptr_t` and `size_t` stay `long`. Saying `long` here gave a freestanding
+    // `stdint.h` an `int64_t` that the SDK's own typedef then redefined as a different type.
+    let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
+    let (int64, uint64, int64_suffix) = if apple {
+        ("long long int", "long long unsigned int", "LL")
+    } else {
+        (wide, wide_unsigned, wide_suffix)
+    };
+    let int64_max = format!("0x7fffffffffffffff{int64_suffix}");
+    let int64_umax = format!("0xffffffffffffffffU{int64_suffix}");
 
     d.set("__SCHAR_MAX__", "0x7f");
     d.set("__SHRT_MAX__", "0x7fff");
@@ -955,7 +985,7 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // No suffix. An `int` needs none, and the `U` on the unsigned side is added by `exact`
     // rather than being part of the width.
     exact(d, 32, "int", "unsigned int", "0x7fffffff", "0xffffffffU", "");
-    exact(d, 64, wide, wide_unsigned, &wide_max, &wide_umax, wide_suffix);
+    exact(d, 64, int64, uint64, &int64_max, &int64_umax, int64_suffix);
 
     // The fast types. GCC makes the 16 and 32 bit ones `long` on sixty four bit glibc, which
     // is what glibc's `stdint.h` says under `__WORDSIZE == 64` whatever the processor, and
@@ -997,10 +1027,10 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
         d.set(&format!("__INT_FAST{width}_MAX__"), max);
         d.set(&format!("__UINT_FAST{width}_MAX__"), umax);
     }
-    d.set("__INT_FAST64_TYPE__", wide);
-    d.set("__UINT_FAST64_TYPE__", wide_unsigned);
-    d.set("__INT_FAST64_MAX__", &wide_max);
-    d.set("__UINT_FAST64_MAX__", &wide_umax);
+    d.set("__INT_FAST64_TYPE__", int64);
+    d.set("__UINT_FAST64_TYPE__", uint64);
+    d.set("__INT_FAST64_MAX__", &int64_max);
+    d.set("__UINT_FAST64_MAX__", &int64_umax);
 
     let fast32 = if fast_is_wide { 64 } else { 32 };
     widths(d, target, &wchar, &wint, if fast16_is_short { 16 } else { fast32 }, fast32);
@@ -1578,6 +1608,45 @@ mod tests {
         assert!(has(&windows, "#define __LONG_MAX__ 0x7fffffffL"));
         assert!(has(&windows, "#define __INTMAX_MAX__ 0x7fffffffffffffffLL"));
         assert!(has(&windows, "#define __UINTMAX_MAX__ 0xffffffffffffffffULL"));
+    }
+
+    #[test]
+    fn apple_says_what_clang_for_apple_says_and_not_what_linux_does() {
+        // Each line is the value clang 17 prints for `-target arm64-apple-macos11 -dM`.
+        let darwin = set_for("aarch64-apple-darwin");
+        for line in [
+            "#define __INT64_TYPE__ long long int",
+            "#define __UINT64_TYPE__ long long unsigned int",
+            "#define __INT64_MAX__ 0x7fffffffffffffffLL",
+            "#define __UINT64_MAX__ 0xffffffffffffffffULL",
+            "#define __INT64_C(c) c ## LL",
+            "#define __UINT64_C(c) c ## ULL",
+            "#define __INT_LEAST64_TYPE__ long long int",
+            "#define __INT_FAST64_TYPE__ long long int",
+            "#define __UINT_FAST64_MAX__ 0xffffffffffffffffULL",
+            // `intmax_t` and `size_t` stay `long` on Apple, which is why they are not the same
+            // type as `int64_t` there.
+            "#define __INTMAX_TYPE__ long int",
+            "#define __SIZE_TYPE__ long unsigned int",
+            "#define __BIGGEST_ALIGNMENT__ 8",
+            "#define __GCC_DESTRUCTIVE_SIZE 128",
+        ] {
+            assert!(has(&darwin, line), "{line}");
+        }
+        for name in ["__unix__", "__unix", "unix", "__STDC_ISO_10646__"] {
+            assert!(!darwin.contains(&format!("#define {name} ")), "{name}");
+        }
+        // The same processor under Linux keeps every one of them.
+        let linux = set_for("aarch64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __INT64_TYPE__ long int"));
+        assert!(has(&linux, "#define __BIGGEST_ALIGNMENT__ 16"));
+        assert!(has(&linux, "#define __unix__ 1"));
+        assert!(linux.contains("#define __STDC_ISO_10646__ "));
+        // And an Intel Mac takes Apple's `int64_t` with its own alignment.
+        let intel = set_for("x86_64-apple-darwin");
+        assert!(has(&intel, "#define __INT64_TYPE__ long long int"));
+        assert!(has(&intel, "#define __BIGGEST_ALIGNMENT__ 16"));
+        assert!(!intel.contains("#define __unix__ "));
     }
 
     #[test]
