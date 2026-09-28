@@ -783,6 +783,7 @@ pub fn compile_recording(
     if flags.schedule {
         schedule::insts(
             &mut func,
+            (machine.conv.stack_pointer, machine.conv.int_class),
             machine.timing,
             machine.shapes,
             machine.flags,

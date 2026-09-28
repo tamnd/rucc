@@ -123,6 +123,13 @@
 //! them all in one chain costs a little freedom around `lea` and needs no new question of the
 //! target.
 //!
+//! An instruction that writes the stack pointer is in the chain too, for the opposite reason. Moving
+//! it up gives back memory the accesses behind it still use, and those may reach it through any
+//! register at all rather than the stack pointer. The epilogue of a frame that saved nothing is
+//! `movq %rbp, %rsp` and then `popq %rbp`, and without this the move went to the top of the block
+//! in a realigned frame, above every store to the frame, which left the frame below the stack
+//! pointer and outside the red zone while the body was still writing it.
+//!
 //! # What nothing moves across
 //!
 //! A call, because what a call does to memory and to the registers a convention does not preserve
@@ -167,7 +174,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rucc_base::{Interner, Symbol};
 use rucc_mir::{Block, Func, Inst, Reg, Role};
-use rucc_target::{FlagInsts, MachineInsts, RegClass, Timing, TimingInsts, Unit};
+use rucc_target::{FlagInsts, MachineInsts, PhysReg, RegClass, Timing, TimingInsts, Unit};
 
 /// A register as the graph keys on it: the number and the file it is in.
 ///
@@ -213,8 +220,12 @@ pub struct Scheduled {
 /// `pinned` is the instructions the caller needs left where they are. The block's own last
 /// instruction is always one, and the caller adds the comparisons [`crate::layout`] is going to
 /// fuse with a branch, which have to stay next to the branch for the fusion to happen.
+///
+/// `stack` is the stack pointer and the file it is in, since a write of it is ordered against
+/// memory like an access is.
 pub fn insts(
     func: &mut Func,
+    stack: (PhysReg, RegClass),
     timing: &TimingInsts,
     machine: &MachineInsts,
     flags: &FlagInsts,
@@ -224,7 +235,8 @@ pub fn insts(
 ) -> Scheduled {
     let blocks: Vec<Block> = func.blocks().collect();
     let mut done = Scheduled::default();
-    let mut known = Known { timing, machine, flags, names, seen: HashMap::new() };
+    let stack = (Reg::physical(stack.0), stack.1);
+    let mut known = Known { timing, machine, flags, names, stack, seen: HashMap::new() };
     for block in blocks {
         let was: Vec<Inst> = func.insts(block).collect();
         if was.len() < 3 {
@@ -283,6 +295,7 @@ struct Known<'a> {
     machine: &'a MachineInsts,
     flags: &'a FlagInsts,
     names: &'a Interner,
+    stack: Place,
     seen: HashMap<Symbol, Facts>,
 }
 
@@ -417,8 +430,11 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Vec<Node> {
             }
         }
 
-        // Memory and addresses, which are one chain. See the module comment.
-        if facts.touches_mem || func[inst].mem.is_some() {
+        // Memory, addresses and the stack pointer, which are one chain. See the module comment.
+        let moves_stack = func[func[inst].operands]
+            .iter()
+            .any(|operand| operand.role.is_def() && (operand.reg, operand.class) == known.stack);
+        if facts.touches_mem || func[inst].mem.is_some() || moves_stack {
             if let Some(before) = touched.replace(at) {
                 edge(&mut nodes, before, at, 0);
             }
@@ -581,9 +597,8 @@ fn fits(unit: Unit, used: &HashMap<Unit, u32>, issued: u32, timing: &TimingInsts
 #[cfg(test)]
 mod tests {
     use rucc_mir::{Constraint, Mem, Opcode, Operand};
-    use rucc_target::PhysReg;
     use rucc_target::x86_64::{
-        self, FLAGS, GPR, MACHINE, R8, R9, R10, RAX, RCX, RDI, RDX, RSI, TIMING, XMM,
+        self, FLAGS, GPR, MACHINE, R8, R9, R10, RAX, RBP, RCX, RDI, RDX, RSI, RSP, TIMING, XMM,
     };
 
     use super::*;
@@ -672,7 +687,7 @@ mod tests {
 
     /// The pass, with nothing pinned beyond the block's own last instruction.
     fn schedule(func: &mut Func, names: &Interner) -> Scheduled {
-        insts(func, &TIMING, &MACHINE, &FLAGS, names, false, &HashSet::new())
+        insts(func, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, names, false, &HashSet::new())
     }
 
     /// A chain of three where only one order computes the right answer.
@@ -724,6 +739,29 @@ mod tests {
         assert_eq!(
             shape(&func, &names, block),
             ["mov_rr_64", "call", "imul_rr_64", "add_rr_64", "ret"]
+        );
+    }
+
+    /// The epilogue of a frame that saved nothing, behind a store the multiply keeps waiting. The
+    /// move of the frame pointer into the stack pointer depends on nothing, so without the chain it
+    /// fills the multiply's latency and gives the frame back before the store into it has run.
+    #[test]
+    fn the_stack_pointer_is_not_given_back_before_a_store_into_the_frame() {
+        let (mut names, mut func, block) = empty();
+        alu(&mut func, &mut names, block, "imul_rr_64", RAX, RDX);
+        let store = op(&mut names, "mov_mr_64");
+        func.build(block, store)
+            .uses(reg(RAX), GPR)
+            .mem(Mem::at(Operand::read(reg(RCX), GPR)))
+            .finish();
+        mov(&mut func, &mut names, block, RSP, RBP);
+        bare(&mut func, &mut names, block, "ret");
+
+        schedule(&mut func, &names);
+        assert_eq!(
+            shape(&func, &names, block),
+            ["imul_rr_64", "mov_mr_64", "mov_rr_64", "ret"],
+            "the frame went back while the store into it was still waiting"
         );
     }
 

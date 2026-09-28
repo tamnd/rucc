@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The spill phase ahead of the register allocator only clears the values that have gone out of its list of open values at a point that is still over after the spills already chosen, which is the only place the list is read. It used to walk the whole list at every point that started out over. On jtckdint's `test.c` at `-O2` the build runs 82.55G instructions instead of 98.72G, with the same assembly (#2107).
 
+### Fixed
+
+- The scheduler no longer moves `movq %rbp, %rsp` above the body's own accesses to the frame. That move is the epilogue of a frame that uses a frame pointer and saves no other register, which covers a realigned frame such as a leaf with a `__m512i` local and a frame grown by `alloca` or a variable length array. The move names no memory, so at `-O2` it could go ahead of stores that reached the frame through another register, and they then wrote below the stack pointer outside the red zone, where a signal handler can overwrite them. An instruction that writes the stack pointer is now ordered against memory like a load or a store.
+
 ## 0.12.3
 
 Windows work from W2, a fix that lets `rucc.exe` find its fetched sysroot on a Windows machine, and a round of compile time work on the back end.
