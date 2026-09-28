@@ -29,8 +29,8 @@
 
 use object::write::{Object as Writer, Relocation, Symbol, SymbolSection};
 use object::{Architecture, Endianness, RelocationFlags, SectionKind, SymbolFlags, elf};
-use rucc_target::TargetInfo;
 use rucc_target::aarch64::Fixup;
+use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::file::{Error, Flavour};
@@ -83,6 +83,10 @@ pub struct Shape {
     /// `S`: the entries are strings ended by a zero rather than all of one length, which is where
     /// gcc puts every string literal. Only means anything beside `merge`.
     pub strings: bool,
+    /// The type and attributes of a Mach-O section, in the one word the format keeps them in,
+    /// which is what [`Shape::mach`] works out. Zero on the other two formats, where the fields
+    /// above are the whole answer, and zero is also an ordinary Mach-O section with nothing said.
+    pub mach: u32,
 }
 
 impl Shape {
@@ -136,6 +140,40 @@ impl Shape {
             _ if Array::of(name).is_some() => Shape { write: true, ..base },
             _ => Shape::default(),
         }
+    }
+
+    /// What a Mach-O section is, from its segment, its section and the type and attributes a
+    /// `.section` directive gave after them.
+    ///
+    /// The word the format keeps is the answer and the fields beside it are filled in from it, so
+    /// that what reads a shape without knowing the format still sees code as code and a zero
+    /// filled section as one that holds no bytes.
+    ///
+    /// # Errors
+    ///
+    /// A type or an attribute Apple's assembler does not take, as a sentence.
+    pub fn mach(
+        segment: &str,
+        section: &str,
+        kind: Option<&str>,
+        attributes: &[&str],
+    ) -> Result<Shape, String> {
+        let mach = crate::macho::section_flags(segment, section, kind, attributes)?;
+        let exec = mach & object::macho::S_ATTR_PURE_INSTRUCTIONS.0 != 0;
+        let typ = object::macho::SectionFlags(mach).typ();
+        let thread = matches!(
+            typ,
+            object::macho::S_THREAD_LOCAL_REGULAR | object::macho::S_THREAD_LOCAL_ZEROFILL
+        );
+        Ok(Shape {
+            alloc: true,
+            write: segment != "__TEXT",
+            exec,
+            thread,
+            bits: !crate::macho::zero_filled(mach),
+            mach,
+            ..Shape::default()
+        })
     }
 
     /// The flag word ELF holds these in.
@@ -267,6 +305,9 @@ pub struct Assembled {
     pub parts: Vec<Part>,
     /// The names, in the order the file defined or first referred to each of them.
     pub names: Vec<Name>,
+    /// Whether the file said `.subsections_via_symbols`, which tells a Mach-O linker it may cut
+    /// every section at every symbol in it. Nothing on the other two formats.
+    pub subsections: bool,
 }
 
 /// That, as a relocatable object in whichever of the two formats the target wants.
@@ -310,11 +351,16 @@ pub fn assembled_described(
     target: &TargetInfo,
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
-    // AArch64 on ELF and x86-64 on both. What an AArch64 file for Windows would need is a table of
-    // its own relocations and an unwind table of its own shape, and neither is written yet.
+    // AArch64 on ELF and Mach-O, and x86-64 on ELF and COFF. What an AArch64 file for Windows would
+    // need is a table of its own relocations and an unwind table of its own shape, and neither is
+    // written yet. Mach-O is a function of its own, since what it answers differently is most of
+    // what is below.
     let (flavour, machine) = match (Flavour::of(target), target.tuple.arch()) {
         (Some(flavour), Arch::X86_64) => (flavour, Architecture::X86_64),
         (Some(Flavour::Elf), Arch::Aarch64) => (Flavour::Elf, Architecture::Aarch64),
+        (None, Arch::Aarch64) if target.object_format == ObjectFormat::MachO => {
+            return crate::macho::write(input, target);
+        }
         _ => return Err(Error::Format { triple: target.tuple.to_string() }),
     };
     let flags_of = |kind, after| match machine {
@@ -658,7 +704,7 @@ mod tests {
         // of, and what it said about it is the letters.
         let mut odd = part(".init.text", vec![0x90]);
         odd.shape = Shape { alloc: true, exec: true, bits: true, ..Shape::default() };
-        let input = Assembled { parts: vec![odd], names: Vec::new() };
+        let input = Assembled { parts: vec![odd], names: Vec::new(), subsections: false };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".init.text").expect("the section");
@@ -678,7 +724,7 @@ mod tests {
         let mut room = part(".bss", Vec::new());
         room.size = 4096;
         room.align = 16;
-        let input = Assembled { parts: vec![room], names: Vec::new() };
+        let input = Assembled { parts: vec![room], names: Vec::new(), subsections: false };
         let bytes = assembled(&input, &target()).expect("an object");
         assert!(bytes.len() < 4096, "the empty space was written out: {} bytes", bytes.len());
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -697,6 +743,7 @@ mod tests {
         let input = Assembled {
             parts: vec![part(".text", vec![0; 8])],
             names: vec![at("plain", 4, Sort::Untyped, Binding::Global)],
+            subsections: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -713,6 +760,7 @@ mod tests {
                 at("run", 0, Sort::Func, Binding::Global),
                 at("held", 4, Sort::Object, Binding::Local),
             ],
+            subsections: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         assert_eq!(st_info(&bytes, "run") & 0xf, elf::STT_FUNC.0);
@@ -737,6 +785,7 @@ mod tests {
                 binding: Binding::Global,
                 visibility: Visibility::Default,
             }],
+            subsections: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         assert_eq!(st_info(&bytes, "shared"), elf::STB_GLOBAL.0 << 4 | elf::STT_OBJECT.0);
@@ -760,6 +809,7 @@ mod tests {
                 binding: Binding::Global,
                 visibility: Visibility::Default,
             }],
+            subsections: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -788,6 +838,7 @@ mod tests {
                 binding: Binding::Global,
                 visibility: Visibility::Default,
             }],
+            subsections: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -821,6 +872,7 @@ mod tests {
                 at("helper", 24, Sort::Func, Binding::Local),
                 at("shared", 28, Sort::Func, Binding::Global),
             ],
+            subsections: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -864,7 +916,7 @@ mod tests {
         };
         let mut name = at(".LC0", 0, Sort::Untyped, Binding::Local);
         name.at = Held::In { part: 1, offset: 0 };
-        let input = Assembled { parts: vec![text, strings], names: vec![name] };
+        let input = Assembled { parts: vec![text, strings], names: vec![name], subsections: false };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".rodata.str1.1").expect("the section");
@@ -894,7 +946,7 @@ mod tests {
             addend: 0,
             after: 0,
         });
-        let input = Assembled { parts: vec![data], names: Vec::new() };
+        let input = Assembled { parts: vec![data], names: Vec::new(), subsections: false };
         let why = assembled(&input, &target()).expect_err("this cannot be written");
         assert!(format!("{why}").contains("nowhere"), "{why}");
     }
@@ -903,7 +955,11 @@ mod tests {
     fn the_stack_is_marked_once_whoever_asked_for_it() {
         // A linker that does not find this marker in every input marks the stack executable, and a
         // file written by hand for one that cares often says it itself.
-        let bare = Assembled { parts: vec![part(".text", vec![0x90])], names: Vec::new() };
+        let bare = Assembled {
+            parts: vec![part(".text", vec![0x90])],
+            names: Vec::new(),
+            subsections: false,
+        };
         let bytes = assembled(&bare, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert!(file.section_by_name(".note.GNU-stack").is_some(), "the marker was left out");
@@ -911,6 +967,7 @@ mod tests {
         let said = Assembled {
             parts: vec![part(".text", vec![0x90]), part(".note.GNU-stack", Vec::new())],
             names: Vec::new(),
+            subsections: false,
         };
         let bytes = assembled(&said, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -934,13 +991,18 @@ mod tests {
                     visibility: Visibility::Default,
                 },
             ],
+            subsections: false,
         };
         assert_eq!(assembled_defines(&input), vec!["reachable".to_owned()]);
     }
 
     #[test]
     fn a_machine_this_does_not_write_is_refused_rather_than_written_wrong() {
-        let input = Assembled { parts: vec![part(".text", vec![0x90])], names: Vec::new() };
+        let input = Assembled {
+            parts: vec![part(".text", vec![0x90])],
+            names: Vec::new(),
+            subsections: false,
+        };
         let elsewhere = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Msvc));
         let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
         assert!(format!("{why}").contains("aarch64"), "{why}");
@@ -981,6 +1043,7 @@ mod tests {
                 table,
                 Name { at: Held::Undefined, ..at("g", 0, Sort::Untyped, Binding::Global) },
             ],
+            subsections: false,
         };
         let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Linux, Env::Gnu));
         let bytes = assembled(&input, &target).expect("an object");
@@ -1014,7 +1077,11 @@ mod tests {
         // Windows target, and until this it was refused with a message about there being no object
         // writer for the triple, which read as the whole back end being missing rather than this
         // one path through it.
-        let input = Assembled { parts: vec![part(".text", vec![0xc3])], names: Vec::new() };
+        let input = Assembled {
+            parts: vec![part(".text", vec![0xc3])],
+            names: Vec::new(),
+            subsections: false,
+        };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         assert_eq!(file.format(), object::BinaryFormat::Coff);
@@ -1041,6 +1108,7 @@ mod tests {
                 at("offered", 0, Sort::Untyped, Binding::Global),
                 at("ours", 4, Sort::Untyped, Binding::Local),
             ],
+            subsections: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1078,6 +1146,7 @@ mod tests {
                 binding: Binding::Global,
                 visibility: Visibility::Default,
             }],
+            subsections: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");

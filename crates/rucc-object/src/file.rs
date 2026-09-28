@@ -48,18 +48,21 @@ use crate::section::{
 };
 use crate::{coff, elf};
 
-/// Which of the two formats is being written, and therefore which set of answers the questions this
-/// module cannot decide get.
+/// Which of the three formats is being written, and therefore which set of answers the questions
+/// this module cannot decide get.
 ///
 /// A short list rather than a trait, because the list is short and closed: everything a format has
-/// an opinion about is a call to one of the methods below, so adding Mach-O is adding a third arm to
-/// each of them and the compiler names every one that was forgotten.
+/// an opinion about is a call to one of the methods below, so a format is an arm in each of them
+/// and the compiler names every one that was forgotten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flavour {
     /// Linux, the BSDs and the freestanding targets.
     Elf,
     /// Windows, under either of its two runtimes.
     Coff,
+    /// Apple's platforms, which are written only from a file of assembly and only for AArch64 so
+    /// far, so [`Flavour::of`] does not give it and [`crate::assembled`] asks for it by name.
+    MachO,
 }
 
 impl Flavour {
@@ -77,6 +80,7 @@ impl Flavour {
         match self {
             Flavour::Elf => BinaryFormat::Elf,
             Flavour::Coff => BinaryFormat::Coff,
+            Flavour::MachO => BinaryFormat::MachO,
         }
     }
 
@@ -88,6 +92,7 @@ impl Flavour {
         match self {
             Flavour::Elf => elf::r_type(reference).map(|r_type| RelocationFlags::Elf { r_type }),
             Flavour::Coff => coff::reloc(reference, after),
+            Flavour::MachO => crate::macho::reloc(reference, 0).ok(),
         }
     }
 
@@ -106,6 +111,13 @@ impl Flavour {
         match self {
             Flavour::Elf => elf::see(obj, id, binding, visibility),
             Flavour::Coff => {}
+            // Hidden is the one visibility Mach-O has a bit for, which keeps a name out of the
+            // image's exports and lets every object in the link see it. Protected has none.
+            Flavour::MachO => {
+                if binding != Binding::Local && visibility == Visibility::Hidden {
+                    obj.symbol_mut(id).scope = SymbolScope::Linkage;
+                }
+            }
         }
     }
 
@@ -116,6 +128,7 @@ impl Flavour {
         match self {
             Flavour::Elf => elf::REL_RO_LOCAL,
             Flavour::Coff => coff::REL_RO_LOCAL,
+            Flavour::MachO => None,
         }
     }
 
@@ -127,7 +140,7 @@ impl Flavour {
     fn gathered(self, array: Array) -> Option<SectionFlags> {
         match self {
             Flavour::Elf => Some(elf::gathered(array)),
-            Flavour::Coff => None,
+            Flavour::Coff | Flavour::MachO => None,
         }
     }
 
@@ -145,6 +158,10 @@ impl Flavour {
                 Some(SectionFlags::Elf { sh_type: shape.sh_type(), sh_flags: shape.sh_flags() })
             }
             Flavour::Coff => None,
+            Flavour::MachO => Some(SectionFlags::MachO {
+                flags: object::macho::SectionFlags(shape.mach),
+                reserved2: 0,
+            }),
         }
     }
 
@@ -159,7 +176,18 @@ impl Flavour {
     /// a `.globl` with no `.type` under it would quietly stop being offered. The kind with no
     /// function type on it and an external storage class is the data one, which is what gas for this
     /// platform writes for the same input, so that is what an untyped global becomes here.
+    ///
+    /// Mach-O keeps no type at all and the writer underneath has no label there, so a function is
+    /// text and everything else is data. A thread-local is data as well, because the kind the
+    /// writer has for one makes a descriptor for it and the listing has already written that.
     pub(crate) fn sort(self, sort: crate::source::Sort, binding: Binding) -> SymbolKind {
+        if self == Flavour::MachO {
+            return match sort {
+                crate::source::Sort::Func => SymbolKind::Text,
+                crate::source::Sort::File => SymbolKind::File,
+                _ => SymbolKind::Data,
+            };
+        }
         match sort {
             crate::source::Sort::Func => SymbolKind::Text,
             crate::source::Sort::Object => SymbolKind::Data,
@@ -177,6 +205,7 @@ impl Flavour {
         match self {
             Flavour::Elf => elf::marker(obj),
             Flavour::Coff => coff::marker(obj),
+            Flavour::MachO => {}
         }
     }
 
@@ -194,7 +223,7 @@ impl Flavour {
                 let note = obj.section_id(StandardSection::GnuProperty);
                 obj.append_section_data(note, &elf::record(property), 8);
             }
-            Flavour::Coff => {}
+            Flavour::Coff | Flavour::MachO => {}
         }
     }
 
@@ -205,6 +234,7 @@ impl Flavour {
         match self {
             Flavour::Elf => (elf::FRAMES, None),
             Flavour::Coff => (coff::FUNCTIONS, Some(coff::CODES)),
+            Flavour::MachO => (("__TEXT,__eh_frame", 8), None),
         }
     }
 
@@ -212,7 +242,9 @@ impl Flavour {
     fn finish(self, bytes: &mut [u8], ordered: &[String]) {
         match self {
             Flavour::Elf => elf::link(bytes, ordered),
-            Flavour::Coff => debug_assert!(ordered.is_empty(), "a record this format cannot write"),
+            Flavour::Coff | Flavour::MachO => {
+                debug_assert!(ordered.is_empty(), "a record this format cannot write");
+            }
         }
     }
 }

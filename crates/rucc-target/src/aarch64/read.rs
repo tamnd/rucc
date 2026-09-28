@@ -290,8 +290,41 @@ fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
             };
             (operator, name)
         }
+        None if text.contains('@') => return apple(text, symbol),
         None => (Operator::Plain, text),
     };
+    named(text, name, symbol)?;
+    Ok(operator)
+}
+
+/// A symbol with the part of its address Apple's assembler wants said after it, as in
+/// `_counter@PAGEOFF`.
+///
+/// `@PAGE` is what a bare name in `adrp` means to GNU as, so it is the plain operator here. The two
+/// thread-local slots fill the same fields the GNU spellings do, and that the slot holds a
+/// descriptor's address rather than an offset from the thread pointer is the platform's business
+/// and not the encoder's. An addend may be written before the suffix or after it.
+fn apple(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
+    let (name, rest) = text.split_once('@').ok_or_else(|| error(text))?;
+    let end = rest.find(['+', '-']).unwrap_or(rest.len());
+    let operator = match rest[..end].to_ascii_uppercase().as_str() {
+        "PAGE" => Operator::Plain,
+        "PAGEOFF" => Operator::Lo12,
+        "GOTPAGE" => Operator::Got,
+        "GOTPAGEOFF" => Operator::GotLo12,
+        "TLVPPAGE" => Operator::GotTprel,
+        "TLVPPAGEOFF" => Operator::GotTprelLo12,
+        _ => return Err(error(text)),
+    };
+    if end < rest.len() && name.get(1..).is_some_and(|tail| tail.contains(['+', '-'])) {
+        return Err(error(text));
+    }
+    named(text, &format!("{name}{}", &rest[end..]), symbol)?;
+    Ok(operator)
+}
+
+/// The name and the addend of a symbol with any operator already taken off it.
+fn named(text: &str, name: &str, symbol: &mut Named) -> Result<(), Error> {
     let (name, addend) = match name.char_indices().skip(1).find(|&(_, c)| c == '+' || c == '-') {
         Some((at, sign)) => {
             let digits = name[at + 1..].trim();
@@ -311,7 +344,7 @@ fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
         return Err(error(text));
     }
     *symbol = (Some(name.to_owned()), addend);
-    Ok(operator)
+    Ok(())
 }
 
 /// The barrier options by name, as the number the encoding gives each.
@@ -414,6 +447,9 @@ fn address(piece: &str, symbol: &mut Named) -> Result<Addr, Error> {
             let text = imm.strip_prefix('#').unwrap_or(imm);
             Offset::Symbol(reference(text, symbol)?)
         }
+        [imm] if imm.contains('@') => {
+            Offset::Symbol(apple(imm.strip_prefix('#').unwrap_or(imm), symbol)?)
+        }
         [imm] if imm.starts_with('#') => {
             Offset::Imm(imm.strip_prefix('#').and_then(number).ok_or_else(|| error(piece))?)
         }
@@ -482,6 +518,24 @@ mod tests {
         assert_eq!((line.symbol.as_deref(), line.addend), (Some("1b"), 0));
         assert!(read("b 1x").is_err());
         assert!(read("b table+").is_err());
+    }
+
+    #[test]
+    fn apple_says_the_part_of_the_address_after_the_name() {
+        let line = read("adrp x1, _counter@PAGE").unwrap();
+        assert_eq!(line.values[1], Value::Symbol(Operator::Plain));
+        assert_eq!(line.symbol.as_deref(), Some("_counter"));
+        let line = read("add x1, x1, _table+8@PAGEOFF").unwrap();
+        assert_eq!((line.symbol.as_deref(), line.addend), (Some("_table"), 8));
+        let line = read("add x1, x1, _table@PAGEOFF+8").unwrap();
+        assert_eq!((line.symbol.as_deref(), line.addend), (Some("_table"), 8));
+        let line = read("ldr x0, [x0, _environ@GOTPAGEOFF]").unwrap();
+        let Value::Mem(addr) = line.values[1] else { panic!("{:?}", line.values) };
+        assert_eq!(addr.offset, Offset::Symbol(Operator::GotLo12));
+        let line = read("adrp x0, _n@TLVPPAGE").unwrap();
+        assert_eq!(line.values[1], Value::Symbol(Operator::GotTprel));
+        assert!(read("adrp x0, _n@SIDEWAYS").is_err());
+        assert!(read("add x1, x1, _t+8@PAGEOFF+8").is_err());
     }
 
     /// A global may be called what a condition, a barrier or a register is called, and where the

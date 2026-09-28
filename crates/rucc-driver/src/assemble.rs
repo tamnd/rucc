@@ -54,7 +54,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
     };
 
     let target = rucc_target::TargetInfo::new(opts.target);
-    let assembled = match rucc_asm::read(&text, target.tuple.arch()) {
+    let assembled = match rucc_asm::read_as(&text, target.tuple.arch(), target.object_format) {
         Ok(assembled) => assembled,
         Err(trouble) => {
             // The same shape every other diagnostic in this compiler has, so that a build log
