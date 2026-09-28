@@ -3845,7 +3845,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[asm];
-        if !self.source[info.targets].is_empty() {
+        if self.jumps_from_text(inst) {
             return Err(Unsupported::Assembly { inst, refused: Written::Goto });
         }
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
@@ -4899,7 +4899,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[asm];
-        if !self.source[info.targets].is_empty() {
+        if self.jumps_from_text(inst) {
             return Err(Unsupported::Assembly { inst, refused: Written::Goto });
         }
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
@@ -5322,6 +5322,20 @@ impl<'a> Lowering<'a> {
     /// anything in this crate does and is why it is remembered before a single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
+        // An `asm goto` whose template has nothing in it can only fall through, since there is no
+        // instruction in it to jump with, so the only edge the machine block gets is the first
+        // one. The labels it names are still arms in the IR, which is what kept the passes above
+        // from assuming anything about the way into them, and here they are blocks nothing jumps
+        // to, the same as a label no `goto` names. One that does have instructions was refused by
+        // [`Self::jumps_from_text`] before this.
+        if self.source[term].opcode == Opcode::InlineAsm {
+            let Some(call) = self.source.successors(term).next() else { return Ok(()) };
+            let args: Vec<Value> = self.source[call.args].to_vec();
+            let regs =
+                args.into_iter().map(|value| self.reg_of(value)).collect::<Result<_, _>>()?;
+            *self.out.succs_mut(out) = vec![mir::BlockCall::with(self.out_block(call.block), regs)];
+            return Ok(());
+        }
         let leaves =
             matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch);
         let branch = if leaves { self.out.terminator(out) } else { None };
@@ -5353,6 +5367,21 @@ impl<'a> Lowering<'a> {
         }
         *self.out.succs_mut(out) = succs;
         Ok(())
+    }
+
+    /// Whether an `asm goto` has instructions in its template, which is what it would jump with.
+    ///
+    /// One with an empty template is what a program writes to tell the optimizer that control may
+    /// arrive at a label without saying how, and the torture suite has several of them. It never
+    /// jumps, so it is written as the statement it would be without its labels and a fall through
+    /// into its first arm. See [`Self::edges`]. One with anything in it needs the labels it names
+    /// written into the text and an edge for each of them the allocator knows about, and that is
+    /// still refused.
+    fn jumps_from_text(&self, inst: Inst) -> bool {
+        let Extra::Asm(asm) = self.source[inst].extra else { return false };
+        let info = self.source[asm];
+        !self.source[info.targets].is_empty()
+            && !self.names.resolve(info.template).trim().is_empty()
     }
 
     /// The machine IR block an IR block became.
