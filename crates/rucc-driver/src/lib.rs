@@ -3846,8 +3846,10 @@ mod tests {
         let inner = dir.join("inner.rsp");
         std::fs::write(&inner, "-lm\n").unwrap();
         let outer = dir.join("outer.rsp");
-        std::fs::write(&outer, format!("-o 'my prog' -Wl,--as-needed @{}\n", inner.display()))
-            .unwrap();
+        // Backslashes doubled, because the file is split the way libiberty splits one and a
+        // Windows path is full of them.
+        let named = inner.display().to_string().replace('\\', "\\\\");
+        std::fs::write(&outer, format!("-o 'my prog' -Wl,--as-needed @{named}\n")).unwrap();
         let line = args(&["x.o", &format!("@{}", outer.display()), "@no-such-file"]);
         assert_eq!(
             response_files(&line).unwrap(),
@@ -5267,7 +5269,7 @@ mod tests {
         // to get wrong and nothing to pin. That makes this a test the Linux runners carry, which is
         // where the case lives.
         let Some(host) = Triple::host() else { return };
-        if host.env != rucc_target::Env::Gnu {
+        if host.os != rucc_target::Os::Linux || host.env != rucc_target::Env::Gnu {
             return;
         }
         let pin = format!("--target={}.2.28", host.tuple());
@@ -6573,8 +6575,16 @@ mod tests {
 
         // And a compile for this machine has no sysroot, which is the empty line GCC prints when it
         // was configured without one rather than a `/` that would be a claim about the filesystem.
+        // Except on Windows, which has no C library of its own and reads the fetched tree for its
+        // own target as it would for any other.
         let host = Triple::host().expect("a host this compiler knows");
-        assert_eq!(printed(&[&format!("--target={host}"), "-print-sysroot"]), "");
+        let own = printed(&[&format!("--target={host}"), "-print-sysroot"]);
+        if host.os == rucc_target::Os::Windows {
+            let root = cache::dir().join("sysroots").join(host.tuple().to_string());
+            assert_eq!(own, root.display().to_string());
+        } else {
+            assert_eq!(own, "");
+        }
     }
 
     #[test]

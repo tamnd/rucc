@@ -77,9 +77,13 @@ for src in "$here"/*.c; do
             echo "FAIL $name $opt: exited with $status"
             sed 's/^/    /' "$got.lf" "$work/$name$opt.err" | head -20
             failed=$((failed + 1))
-        elif ! diff -u "$here/$name.out" "$got.lf" >"$work/$name$opt.diff"; then
-            echo "FAIL $name $opt: output differs"
-            sed 's/^/    /' "$work/$name$opt.diff"
+        # Compared in the shell rather than with diff, which the Git for Windows bash on a runner
+        # does not have.
+        elif [ "$(cat "$here/$name.out")" != "$(cat "$got.lf")" ]; then
+            echo "FAIL $name $opt: output differs, expected then got"
+            sed 's/^/    /' "$here/$name.out"
+            echo "    ..."
+            sed 's/^/    /' "$got.lf"
             failed=$((failed + 1))
         else
             echo "ok   $name $opt"
