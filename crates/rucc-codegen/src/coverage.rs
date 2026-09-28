@@ -174,6 +174,24 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
 /// the report and the capability table both read it.
 pub static NAMES: &[(&str, &str, &str)] = &[];
 
+/// [`NAMES`] for `aarch64.rules`.
+///
+/// A list of its own because the two rule files are not the same size yet and a name left out of
+/// one is not left out of the other: x86-64 moves a half through a vector register and AArch64
+/// has nothing for one so far. [`names`] is which list goes with which table.
+pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
+    ("load.f16", "a half, which nothing on this machine carries yet", "tamnd/rucc#2105"),
+    ("ret.f16", "the same, returned in `h0`", "tamnd/rucc#2105"),
+    ("bitcast.f16.i16", "the same, as the bits a constant or a negation is", "tamnd/rucc#2105"),
+    ("bitcast.i16.f16", "the same, the other way", "tamnd/rucc#2105"),
+];
+
+/// The names left for later in the rule file `table` is built from.
+#[must_use]
+pub fn names(table: &Table) -> &'static [(&'static str, &'static str, &'static str)] {
+    if table.source == crate::select::aarch64::TABLE.source { AARCH64_NAMES } else { NAMES }
+}
+
 /// What a target's rules cover, and what they do not.
 #[derive(Debug)]
 pub struct Report {
@@ -225,6 +243,7 @@ impl fmt::Display for Report {
 pub fn report(table: &Table) -> Report {
     let named = term::heads();
     let patterns = pattern_heads(table);
+    let later = names(table);
 
     let mut by_rule = Vec::new();
     let mut uncovered = Vec::new();
@@ -232,7 +251,7 @@ pub fn report(table: &Table) -> Report {
     for &(opcode, name) in &named {
         if patterns.contains(&name) {
             by_rule.push(opcode);
-        } else if NAMES.iter().any(|&(deliberate, ..)| deliberate == name) {
+        } else if later.iter().any(|&(deliberate, ..)| deliberate == name) {
             deferred.push((opcode, name));
         } else {
             uncovered.push((opcode, name));
@@ -388,19 +407,26 @@ mod tests {
     use super::*;
     use crate::select::x86_64::TABLE;
 
+    /// Every rule file there is, since each claim below is about a rule set and holds for each.
+    fn tables() -> [&'static Table; 2] {
+        [&TABLE, &crate::select::aarch64::TABLE]
+    }
+
     /// The claim the whole module is for, in the direction that matters: a name an instruction
     /// can be called by is a name a rule is written at. This is the width check as much as the
     /// opcode check, since a name is an opcode and a width together.
     #[test]
     fn every_name_an_instruction_can_have_is_one_a_rule_is_written_at() {
-        let report = report(&TABLE);
-        assert!(
-            report.uncovered.is_empty(),
-            "nothing in {} lowers these, and each is an opcode at a width the rule language can \
-             spell: {:?}",
-            report.source,
-            report.uncovered
-        );
+        for table in tables() {
+            let report = report(table);
+            assert!(
+                report.uncovered.is_empty(),
+                "nothing in {} lowers these, and each is an opcode at a width the rule language \
+                 can spell: {:?}",
+                report.source,
+                report.uncovered
+            );
+        }
     }
 
     /// And the other direction, which costs nothing to ask and finds a rule that can never fire.
@@ -408,13 +434,15 @@ mod tests {
     /// renamed or misspelled, and it would sit there proved and unreachable.
     #[test]
     fn every_name_a_rule_is_written_at_is_one_an_instruction_can_have() {
-        let report = report(&TABLE);
-        assert!(
-            report.unreachable.is_empty(),
-            "{} has rules for these and no instruction is ever called one: {:?}",
-            report.source,
-            report.unreachable
-        );
+        for table in tables() {
+            let report = report(table);
+            assert!(
+                report.unreachable.is_empty(),
+                "{} has rules for these and no instruction is ever called one: {:?}",
+                report.source,
+                report.unreachable
+            );
+        }
     }
 
     /// Every opcode is one of the three things, so a new opcode in the IR fails this until
@@ -422,13 +450,16 @@ mod tests {
     /// be written down when it is added rather than discovered by a user compiling a program.
     #[test]
     fn every_opcode_is_lowered_or_is_a_gap_somebody_wrote_down() {
-        let report = report(&TABLE);
-        assert!(
-            report.unaccounted.is_empty(),
-            "no rule lowers these, nothing rewrites them before selection, no runtime function \
-             stands for them and `GAPS` does not say why: {:?}",
-            report.unaccounted
-        );
+        for table in tables() {
+            let report = report(table);
+            assert!(
+                report.unaccounted.is_empty(),
+                "no rule in {} lowers these, nothing rewrites them before selection, no runtime \
+                 function stands for them and `GAPS` does not say why: {:?}",
+                report.source,
+                report.unaccounted
+            );
+        }
     }
 
     /// An entry that starts being covered fails, which is the rule every list in this project is
@@ -436,27 +467,31 @@ mod tests {
     /// that keeps claiming otherwise is a list nobody can read.
     #[test]
     fn an_entry_a_rule_now_covers_is_a_stale_entry() {
-        let report = report(&TABLE);
-        for &(opcode, where_) in capability::HAND {
-            assert!(
-                !report.by_rule.contains(&opcode),
-                "`{}` is lowered by a rule now, so the `HAND` entry saying it is lowered by \
-                 {where_} is stale",
-                opcode.name()
-            );
-        }
-        for &(opcode, why, issue) in GAPS {
-            assert!(
-                !report.by_rule.contains(&opcode),
-                "`{}` is lowered by a rule now, so the `GAPS` entry saying it is {why} is stale \
-                 and {issue} may be closed",
-                opcode.name()
-            );
-            assert!(
-                !report.elsewhere.contains(&opcode),
-                "`{}` is on both lists, so it is both lowered and not lowered",
-                opcode.name()
-            );
+        for table in tables() {
+            let report = report(table);
+            for &(opcode, where_) in capability::HAND {
+                assert!(
+                    !report.by_rule.contains(&opcode),
+                    "`{}` is lowered by a rule in {} now, so the `HAND` entry saying it is \
+                     lowered by {where_} is stale",
+                    opcode.name(),
+                    report.source
+                );
+            }
+            for &(opcode, why, issue) in GAPS {
+                assert!(
+                    !report.by_rule.contains(&opcode),
+                    "`{}` is lowered by a rule in {} now, so the `GAPS` entry saying it is {why} \
+                     is stale and {issue} may be closed",
+                    opcode.name(),
+                    report.source
+                );
+                assert!(
+                    !report.elsewhere.contains(&opcode),
+                    "`{}` is on both lists, so it is both lowered and not lowered",
+                    opcode.name()
+                );
+            }
         }
     }
 
@@ -466,22 +501,25 @@ mod tests {
     /// misspelling, and it would sit here excusing nothing.
     #[test]
     fn a_name_a_rule_is_written_at_is_not_a_name_left_for_later() {
-        let heads = pattern_heads(&TABLE);
         let named = term::heads();
-        for &(name, why, issue) in NAMES {
-            assert!(
-                !heads.contains(&name),
-                "`{name}` is lowered by a rule now, so the `NAMES` entry saying it is {why} is \
-                 stale and {issue} may be closer than it says"
-            );
-            assert!(
-                named.iter().any(|&(_, head)| head == name),
-                "`{name}` is not a name any instruction can have, so the `NAMES` entry excuses \
-                 nothing"
-            );
+        for table in tables() {
+            let heads = pattern_heads(table);
+            let later = names(table);
+            for &(name, why, issue) in later {
+                assert!(
+                    !heads.contains(&name),
+                    "`{name}` is lowered by a rule in {} now, so the entry saying it is {why} is \
+                     stale and {issue} may be closer than it says",
+                    table.source
+                );
+                assert!(
+                    named.iter().any(|&(_, head)| head == name),
+                    "`{name}` is not a name any instruction can have, so the entry excuses nothing"
+                );
+            }
+            let report = report(table);
+            assert_eq!(report.deferred.len(), later.len(), "{:?}", report.deferred);
         }
-        let report = report(&TABLE);
-        assert_eq!(report.deferred.len(), NAMES.len(), "{:?}", report.deferred);
     }
 
     /// Every gap names an issue, since a gap with no issue behind it is a gap nobody has decided
@@ -492,7 +530,8 @@ mod tests {
             .iter()
             .map(|&(_, _, issue)| issue)
             .chain(WIDTHS.iter().map(|&(_, _, issue)| issue))
-            .chain(NAMES.iter().map(|&(_, _, issue)| issue));
+            .chain(NAMES.iter().map(|&(_, _, issue)| issue))
+            .chain(AARCH64_NAMES.iter().map(|&(_, _, issue)| issue));
         for issue in issues {
             let number = issue
                 .strip_prefix("tamnd/rucc#")
@@ -506,18 +545,20 @@ mod tests {
     /// rather than in a file somebody has to go and read.
     #[test]
     fn the_count_is_reported() {
-        let report = report(&TABLE);
-        println!("{report}");
+        for table in tables() {
+            let report = report(table);
+            println!("{report}");
+            for &(name, why, issue) in names(table) {
+                println!("rucc-codegen: no rule at `{name}`, which is {why}: {issue}");
+            }
+            assert_eq!(report.gaps.len(), GAPS.len());
+        }
         for &(opcode, why, issue) in GAPS {
             println!("rucc-codegen: no lowering for `{}`, which is {why}: {issue}", opcode.name());
         }
         for &(width, why, issue) in WIDTHS {
             println!("rucc-codegen: no rule at {width}, which is {why}: {issue}");
         }
-        for &(name, why, issue) in NAMES {
-            println!("rucc-codegen: no rule at `{name}`, which is {why}: {issue}");
-        }
-        assert_eq!(report.gaps.len(), GAPS.len());
     }
 
     /// What the root of the trie is, which is the assumption [`pattern_heads`] rests on. If the
@@ -525,20 +566,23 @@ mod tests {
     /// coverage numbers quietly becoming a report about an empty list.
     #[test]
     fn the_root_of_the_trie_is_the_head_of_every_pattern() {
-        let heads = pattern_heads(&TABLE);
-        assert!(!heads.is_empty(), "the table has rules and the root of the trie tests nothing");
-        for rule in TABLE.rules {
-            let head = rule
-                .pattern
-                .strip_prefix('(')
-                .and_then(|rest| rest.split([' ', ')']).next())
-                .expect("a pattern is an application");
-            assert!(
-                heads.contains(&head),
-                "line {}: {} is a pattern whose head the root of the trie does not test",
-                rule.line,
-                rule.pattern
-            );
+        for table in tables() {
+            let heads = pattern_heads(table);
+            assert!(!heads.is_empty(), "the table has rules and the root of the trie tests nothing");
+            for rule in table.rules {
+                let head = rule
+                    .pattern
+                    .strip_prefix('(')
+                    .and_then(|rest| rest.split([' ', ')']).next())
+                    .expect("a pattern is an application");
+                assert!(
+                    heads.contains(&head),
+                    "{}:{}: {} is a pattern whose head the root of the trie does not test",
+                    table.source,
+                    rule.line,
+                    rule.pattern
+                );
+            }
         }
     }
 
