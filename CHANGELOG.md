@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The range analysis licm makes for each loop reads the loop tree licm already has, where it used to build its own for the whole function the first time a loop counter came up, so a function with thousands of loops built thousands of them. On jtckdint's main this takes about 4s off `-O2` (#1957).
 - Loop invariant code motion walks only the loop it is working on, in reverse postorder, where it used to walk every block in the function and skip the ones outside the loop. On jtckdint's main, with thousands of loops, this takes about 4s off `-O2` (#1957).
 - Working out where each local's stack bytes must hold their value takes the blocks in an order that follows the edges and revisits a block only when something it reads from changed. It used to sweep the blocks in layout order until nothing changed, and jtckdint's main has a chain a thousand blocks long laid out against its edges, so it took a thousand sweeps and several seconds. It now takes a few milliseconds (#1957).
 - Copying a loop header in front of its loop only walks that loop to add the new block parameter and point its readers at it, where it used to walk the whole function twice for every value the header carried. On jtckdint's main, which has thousands of loops, this takes `-O2` from 71s to 54s and `-O1` from 56s to 45s (#1957).

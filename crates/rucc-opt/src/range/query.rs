@@ -266,6 +266,8 @@ pub struct Ranges<'a> {
     /// A function with no loop in it never builds one, which is most of the functions in a C
     /// program, and a function with one builds it once however many counters it has.
     loops: Option<Loops>,
+    /// The loop tree the caller already had, which is read instead of building one.
+    given: Option<&'a Loops>,
 }
 
 impl<'a> Ranges<'a> {
@@ -290,7 +292,22 @@ impl<'a> Ranges<'a> {
             cycles: 0,
             spent: 0,
             loops: None,
+            given: None,
         }
+    }
+
+    /// The same analysis, reading the loop tree the caller already has rather than building its
+    /// own the first time a counter is asked about.
+    ///
+    /// It has to be the tree of the same graph and dominators this was handed. What it is for is
+    /// a caller that makes a fresh analysis per loop, because it changes the function between
+    /// loops, and so would otherwise build a tree of the whole function once per loop. licm is
+    /// that caller, and on jtckdint's main, with thousands of loops, those trees were a tenth of
+    /// the `-O2` build.
+    #[must_use]
+    pub fn knowing(mut self, loops: &'a Loops) -> Self {
+        self.given = Some(loops);
+        self
     }
 
     /// What the queries have done so far.
@@ -489,7 +506,10 @@ impl<'a> Ranges<'a> {
         if !ty.is_int() || !ty.is_scalar() {
             return None;
         }
-        let loops = self.loops.get_or_insert_with(|| Loops::new(self.cfg, self.dom));
+        let loops = match self.given {
+            Some(loops) => loops,
+            None => &*self.loops.get_or_insert_with(|| Loops::new(self.cfg, self.dom)),
+        };
         let id = loops.innermost(block)?;
         if loops.header(id) != block {
             return None;
