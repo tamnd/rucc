@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The x86-64 encoder finds the rows for a mnemonic by hashing it instead of walking all 1115 rows of the encoding table for every instruction it emits. On jtckdint's `test.c` at `-O2` the build runs about 6% fewer instructions.
 - The register allocator's liveness marks the blocks that write each value before following it back through the graph, instead of searching the block's list of written values at every edge. On jtckdint's `test.c` at `-O2` the build takes about 5% fewer cycles, and the code it emits is unchanged.
 - Scalar evolution keeps its answers in one table per loop. Settling what a loop's exit test holds used to empty that loop's answers by walking every answer for every loop, once per loop. On jtckdint's `test.c` at `-O2` the build takes about 6% fewer cycles.
 - The optimizer's liveness works out what each block reads and writes once, and only revisits a block when something it branches to changed. It used to allocate two function-wide sets and walk every instruction of every block on every round. On jtckdint's `test.c` at `-O2` the build runs 7.6% fewer instructions and takes a third fewer page faults.
@@ -35,14 +36,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A function with tens of thousands of blocks compiles about twice as fast from `-O1` up. The register allocator works out liveness one value at a time by walking back from where it is read, so the cost is the size of the answer and no longer whole rows merged over and over. The optimizer works out which stack slots escape once per function rather than once per loop in licm and once per candidate in phiopt. jtckdint's test.c went from 165s to 71s at `-O2` and from 130s to 56s at `-O1`, and its output still matches gcc's (#1045).
 - A `switch` with a case that goes where the default goes, which is a `case` written just above `default:` or a case edge straight to the default block, is converted to arithmetic or a table like any other. That case leaves the `switch` and goes down the default edge, and for a table it is a hole. One such case used to make the arms differ and keep the whole `switch` as a jump table (#1932).
 - The register allocator gives the answer of a two address instruction the register of the value it reads whenever the two are never live at the same time, rather than only when nothing laid out after the instruction wants that value. A sum a loop carries round is no longer moved into a register of its own and copied back at the bottom of every turn when a `switch` inlined into the loop has an arm laid out after the addition. The whole of rucc-corpus runs 6.9% fewer instructions at `-O2` (#1965).
+- The x86-64 and AArch64 targets find an opcode's description by hashing its name instead of walking the table. Passes ask the target about every instruction by name, and on x86-64 each question compared the name against up to 730 others. On jtckdint's `test.c` at `-O2` the build drops from 35.3 to 30.5 seconds of CPU time.
 
 ### Fixed
 
 - `__builtin_signbit` and `__builtin_isnormal` of a `__float128` compile rather than failing on a bitcast to a 128 bit integer that no rule lowers. The sign is read from the top two bytes of the value in memory, as it already was for `long double` on x86-64.
-
-### Changed
-
-- The x86-64 and AArch64 targets find an opcode's description by hashing its name instead of walking the table. Passes ask the target about every instruction by name, and on x86-64 each question compared the name against up to 730 others. On jtckdint's `test.c` at `-O2` the build drops from 35.3 to 30.5 seconds of CPU time.
 
 ## 0.11.14
 

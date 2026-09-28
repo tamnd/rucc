@@ -40,8 +40,11 @@
 //! other way round: the machine has a form that means one and carries no count, and we write the
 //! general form with a one in it, which is a byte longer and the same instruction.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::LazyLock;
 
+use crate::named;
 use crate::regs::{PhysReg, Segment};
 use crate::x86_64::text::{Arg, Width};
 
@@ -2184,7 +2187,13 @@ fn seen(row: &Encoding, imm: i64) -> i64 {
 
 /// Every row of that mnemonic with those arguments, in the order they are written.
 fn rows<'a>(mnemonic: &'a str, args: &'a [Kind]) -> impl Iterator<Item = &'static Encoding> + 'a {
-    ENCODINGS.iter().filter(move |row| row.mnemonic == mnemonic && row.args == args)
+    static AT: LazyLock<HashMap<&str, Vec<usize>>> =
+        LazyLock::new(|| named::every(ENCODINGS, |row| row.mnemonic));
+    AT.get(mnemonic)
+        .into_iter()
+        .flatten()
+        .map(|&at| &ENCODINGS[at])
+        .filter(move |row| row.args == args)
 }
 
 /// An address, with everything about it already decided.
