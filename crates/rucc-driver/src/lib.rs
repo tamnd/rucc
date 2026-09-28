@@ -3454,6 +3454,9 @@ pub fn run(args: &[String]) -> i32 {
                 if verbose {
                     let _ = write!(stderr, "{}", plan.render());
                     let _ = writeln!(stderr, "workers: {}", jobs.count());
+                    // What `gcc -v` says about headers, because meson and cmake read it to find the
+                    // system directories.
+                    let _ = write!(stderr, "{}", opts.search.render_gcc());
                 }
             }
             if opts.emit == EmitKind::Preprocessed {

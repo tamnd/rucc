@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `-v` prints the header search list the way `gcc -v` does, from `#include "..." search starts here:` to `End of search list.`, since meson and cmake read it to find the system header directories. Meson warned that it found none before this (#1987).
 - `-cpp` is accepted and does nothing, since a C compile is always preprocessed. Meson writes it when it asks for the predefined macros (#1987).
 
 ## 0.11.15
