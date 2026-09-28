@@ -167,9 +167,14 @@ pub enum Refusal {
 /// A removal has to know whether anything still reads what the instruction wrote, and asking the
 /// function that question once per commit is the length of the function once per commit. So it is
 /// asked once and the answer is carried, which each commit brings up to date with what it did.
+///
+/// A virtual register is counted by its number in a list rather than in a map, since the numbers
+/// run from nought with no gaps and this is asked about every operand of every function. The few
+/// physical registers an instruction names before allocation go in the map.
 #[derive(Debug, Clone, Default)]
 pub struct Reads {
-    counts: HashMap<mir::Reg, usize>,
+    virtuals: Vec<usize>,
+    physical: HashMap<mir::Reg, usize>,
 }
 
 impl Reads {
@@ -177,38 +182,54 @@ impl Reads {
     /// are.
     #[must_use]
     pub fn of(func: &mir::Func) -> Self {
-        let mut counts: HashMap<mir::Reg, usize> = HashMap::new();
+        let mut reads = Self { virtuals: vec![0; func.vregs()], physical: HashMap::new() };
         for block in func.blocks() {
             for inst in func.insts(block) {
                 for operand in &func[func[inst].operands] {
                     if operand.role == Role::Use {
-                        *counts.entry(operand.reg).or_insert(0) += 1;
+                        reads.gained(operand.reg);
                     }
                 }
             }
             for call in &func[block].succs {
                 for &arg in &call.args {
-                    *counts.entry(arg).or_insert(0) += 1;
+                    reads.gained(arg);
                 }
             }
         }
-        Self { counts }
+        reads
     }
 
     /// How many reads of that register there are.
     #[must_use]
     pub fn count(&self, reg: mir::Reg) -> usize {
-        self.counts.get(&reg).copied().unwrap_or(0)
+        match reg.number() {
+            Some(number) => self.virtuals.get(number as usize).copied().unwrap_or(0),
+            None => self.physical.get(&reg).copied().unwrap_or(0),
+        }
     }
 
     /// Records one read more.
     fn gained(&mut self, reg: mir::Reg) {
-        *self.counts.entry(reg).or_insert(0) += 1;
+        match reg.number() {
+            Some(number) => {
+                let number = number as usize;
+                if number >= self.virtuals.len() {
+                    self.virtuals.resize(number + 1, 0);
+                }
+                self.virtuals[number] += 1;
+            }
+            None => *self.physical.entry(reg).or_insert(0) += 1,
+        }
     }
 
     /// Records one read fewer.
     fn lost(&mut self, reg: mir::Reg) {
-        if let Some(count) = self.counts.get_mut(&reg) {
+        let count = match reg.number() {
+            Some(number) => self.virtuals.get_mut(number as usize),
+            None => self.physical.get_mut(&reg),
+        };
+        if let Some(count) = count {
             *count = count.saturating_sub(1);
         }
     }
