@@ -34,9 +34,9 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::named;
 use crate::aarch64::{FPR, GPR, v, x};
 use crate::machine::Address as Amode;
+use crate::named;
 use crate::operand::{Constraint, OperandDesc};
 
 use Form::{

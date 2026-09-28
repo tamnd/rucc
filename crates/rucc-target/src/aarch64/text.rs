@@ -27,11 +27,11 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::named;
 use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
 use crate::aarch64::read::system_field;
+use crate::named;
 
 use Arg::{
     At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Near, Page,
