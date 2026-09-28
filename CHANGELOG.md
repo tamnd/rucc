@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A function with tens of thousands of blocks compiles about twice as fast from `-O1` up. The register allocator works out liveness one value at a time by walking back from where it is read, so the cost is the size of the answer and no longer whole rows merged over and over. The optimizer works out which stack slots escape once per function rather than once per loop in licm and once per candidate in phiopt. jtckdint's test.c went from 165s to 71s at `-O2` and from 130s to 56s at `-O1`, and its output still matches gcc's (#1045).
 - A `switch` with a case that goes where the default goes, which is a `case` written just above `default:` or a case edge straight to the default block, is converted to arithmetic or a table like any other. That case leaves the `switch` and goes down the default edge, and for a table it is a hole. One such case used to make the arms differ and keep the whole `switch` as a jump table (#1932).
+- The register allocator gives the answer of a two address instruction the register of the value it reads whenever the two are never live at the same time, rather than only when nothing laid out after the instruction wants that value. A sum a loop carries round is no longer moved into a register of its own and copied back at the bottom of every turn when a `switch` inlined into the loop has an arm laid out after the addition. The whole of rucc-corpus runs 6.9% fewer instructions at `-O2` (#1965).
 
 ## 0.11.14
 

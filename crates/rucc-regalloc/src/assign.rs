@@ -453,8 +453,8 @@ fn available(
     !taken && !insisted
 }
 
-/// The register the value being reused is in, when this instruction is the last thing that reads
-/// it, the value being written starts here, and the register is otherwise free.
+/// The register the value being reused is in, when the value being written is never live at the
+/// same time as it and the register is otherwise free.
 fn coalesce(
     assignment: &Assignment,
     active: &[Held<'_>],
@@ -464,20 +464,32 @@ fn coalesce(
     reuse: Reuse,
 ) -> Option<PhysReg> {
     let Some(Place::Reg(at)) = assignment.place(reuse.source) else { return None };
-    let source = active.iter().find(|held| held.reg == reuse.source)?;
-    // A value read again later needs its register after this instruction would have overwritten
-    // it, so the two really do have to be different and the rewrite really does have to copy.
-    let dies = source.range.end == reuse.at;
-    // And the value being written must not be live where the instruction reads already. The area
-    // asked here is the one liveness worked out, without the point the reuse adds, so a value that
-    // covers the reuse point on its own is one that was live on the way into this instruction. That
-    // is what a loop carrying its own result round looks like: the instruction writes it at the
-    // bottom and the top of the loop reads what the last turn wrote. Such a value overlaps the one
-    // it reuses over the whole loop, so the two cannot be the same register no matter that the read
-    // here is the last one.
-    let begins = live.area(interval.reg).is_some_and(|area| !area.covers(reuse.at));
+    active.iter().find(|held| held.reg == reuse.source)?;
+    // The two have to be apart everywhere, asked of the areas liveness worked out and without the
+    // point the reuse adds, since that point is the one they are allowed to share.
+    //
+    // That covers both ways it can go wrong. A value read again later needs its register after
+    // this instruction would have overwritten it. And a value being written that is live where the
+    // instruction reads already is what a loop carrying its own result round looks like: the
+    // instruction writes it at the bottom and the top of the loop reads what the last turn wrote.
+    // Either way the two are wanted at once, and no register holds both.
+    //
+    // It used to be asked of the end of the interval around the value being read, and that is not
+    // the same question. A block laid out after this instruction where the value is still live,
+    // such as the default arm of a `switch` that joins back in above it, stretches the interval
+    // past this point when nothing past it reads the value at all. The sum a loop carries round
+    // then went into a new register and was copied back at the bottom of every turn.
+    // tamnd/rucc#1965.
     let free = available(active, blocked, interval, at, Some(reuse.source), Want::Allowed);
-    (dies && begins && free).then_some(at)
+    (apart(live, reuse.source, interval.reg) && free).then_some(at)
+}
+
+/// Whether two values are never live at the same time, going by what liveness worked out.
+pub(crate) fn apart(live: &Live, first: Reg, second: Reg) -> bool {
+    match (live.area(first), live.area(second)) {
+        (Some(first), Some(second)) => !first.overlaps(second),
+        _ => false,
+    }
 }
 
 /// Sends values to the stack to free a register: the ones wanted for longest, since a register
@@ -1049,6 +1061,50 @@ mod tests {
         // the answer is about to be copied into, holes or no holes. tamnd/rucc#982.
         let places = places(&func, &env());
         assert_ne!(places[index(sum)], places[index(loaded)]);
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &env());
+        assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
+    }
+
+    #[test]
+    fn a_sum_a_loop_carries_round_keeps_its_register_past_an_arm_laid_out_after_it() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let nop = Opcode::new(names.intern("x64.nop"));
+        let add = Opcode::new(names.intern("x64.add"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let join = func.create_block();
+        let arm = func.create_block();
+        let out = func.create_block();
+        let seed = func.new_vreg(GPR);
+        let term = func.new_vreg(GPR);
+        let next = func.new_vreg(GPR);
+        func.build(entry, nop).def(seed, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::with(head, vec![seed])];
+        let total = func.append_param(head, GPR);
+        func.build(head, nop).def(term, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(join), BlockCall::to(arm)];
+        func.build(join, add)
+            .operand(Operand::write(next, GPR).with(Constraint::Reuse(1)))
+            .uses(total, GPR)
+            .uses(term, GPR)
+            .finish();
+        *func.succs_mut(join) =
+            vec![BlockCall::with(head, vec![next]), BlockCall::with(out, vec![next])];
+        // The default arm of a `switch`, laid out after the addition it joins back in above. The
+        // sum is live in it and nothing in it or after it reads the sum again.
+        func.build(arm, nop).def(term, GPR).finish();
+        *func.succs_mut(arm) = vec![BlockCall::to(join)];
+        let result = func.append_param(out, GPR);
+        func.build(out, nop).uses(result, GPR).finish();
+
+        // The addition reads the sum for the last time, so the new sum goes where the old one was
+        // and the edge back to the top of the loop has nothing to move. tamnd/rucc#1965.
+        let places = places(&func, &env());
+        assert_eq!(places[index(next)], places[index(total)]);
 
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
