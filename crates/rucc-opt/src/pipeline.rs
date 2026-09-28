@@ -39,8 +39,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
 use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
 use rucc_session::OptLevel;
-use rucc_target::Isa;
-use rucc_tuple::{Arch, ObjectFormat};
+use rucc_target::{Isa, TargetInfo};
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
@@ -1090,8 +1089,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         let default = chosen.contains(&name);
         // Whether a table may hold how far a name is from it, which wants a four byte relocation
         // measured from where it is written. See `crate::switch_conv`.
-        let measures = module.tuple.arch() == Arch::X86_64
-            && module.tuple.object_format() == ObjectFormat::Elf;
+        let measures = TargetInfo::for_tuple(module.tuple).relative_tables;
         let started = Instant::now();
         for id in module.funcs() {
             if module[id].is_declaration() {

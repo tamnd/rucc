@@ -596,6 +596,19 @@ pub struct TargetInfo {
     pub lock_free_width: u32,
     /// The object format to emit.
     pub object_format: ObjectFormat,
+    /// Whether the output says where an unwind lands, which is the language specific data area
+    /// beside a function's call frame information that a cleanup under `-fexceptions` needs.
+    ///
+    /// x86-64 ELF and nothing else yet. It is a claim about what this compiler writes rather than
+    /// about what the platform can do, so lowering turns down a cleanup it could not honour on the
+    /// others instead of emitting one the unwinder would skip.
+    pub landing_pads: bool,
+    /// Whether a table in read only data may hold how far a label is from the table, as a four
+    /// byte relocation measured from where it is written.
+    ///
+    /// x86-64 ELF, which is the one output whose writer has been taught that relocation for data.
+    /// Everywhere else a jump table holds whole addresses.
+    pub relative_tables: bool,
     /// How bit-fields are allocated into storage, which is the one record layout question where
     /// two targets in this table run different algorithms rather than the same one over different
     /// numbers.
@@ -737,6 +750,13 @@ impl BitFieldStyle {
 /// The fields here are widths because that is what a predefined macro and a diagnostic say, and a
 /// layout is sizes because that is what `sizeof` says. The conversion belongs at the one boundary
 /// between them rather than at every reader of one of these fields.
+/// Whether `target` is the one output the unwind tables and relative jump tables are written for.
+fn x86_64_elf(target: TargetTuple, pointer_size: u64) -> bool {
+    target.arch() == tuple::Arch::X86_64
+        && target.object_format() == tuple::ObjectFormat::Elf
+        && pointer_size == 8
+}
+
 fn bits(bytes: u64) -> u32 {
     u32::try_from(bytes * 8).expect("no standard type is four billion bits wide")
 }
@@ -835,6 +855,8 @@ impl TargetInfo {
             // day a backend emits a sixteen byte atomic is the day this stops being one number.
             lock_free_width: 64,
             object_format: ObjectFormat::from_tuple(target.object_format()),
+            landing_pads: x86_64_elf(target, layout.pointer_size),
+            relative_tables: x86_64_elf(target, layout.pointer_size),
             bit_field_style: bit_field_style(target),
             unnamed_bit_field_aligns: unnamed_bit_field_aligns(target),
             // The environment and not the operating system, so `x86_64-windows-gnu` keeps GCC's

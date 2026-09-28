@@ -122,6 +122,7 @@ pub(crate) fn parse(
     interner: &mut Interner,
     diagnostics: &mut Vec<Diagnostic>,
     expand: &mut dyn FnMut(Vec<Tok>, &mut Interner) -> Vec<Tok>,
+    chars: cond::Chars,
 ) -> Option<Params> {
     let names = Names::new(interner);
     let mut params = Params::default();
@@ -168,12 +169,12 @@ pub(crate) fn parse(
         let where_written = first.report_span();
         match (scope, name) {
             (None, n) if n == names.limit => {
-                let limit = count(operand, "limit", where_written, interner, diagnostics, expand)?;
+                let limit = count(operand, "limit", where_written, interner, diagnostics, expand, chars)?;
                 params.limit = Some(limit);
             }
             (Some(s), n) if s == names.gnu && n == names.offset => {
                 params.offset =
-                    count(operand, "offset", where_written, interner, diagnostics, expand)?;
+                    count(operand, "offset", where_written, interner, diagnostics, expand, chars)?;
             }
             (None, n) if n == names.prefix => params.prefix = expand(operand.to_vec(), interner),
             (None, n) if n == names.suffix => params.suffix = expand(operand.to_vec(), interner),
@@ -209,9 +210,10 @@ fn count(
     interner: &mut Interner,
     diagnostics: &mut Vec<Diagnostic>,
     expand: &mut dyn FnMut(Vec<Tok>, &mut Interner) -> Vec<Tok>,
+    chars: cond::Chars,
 ) -> Option<u64> {
     let expanded = expand(operand.to_vec(), interner);
-    let value = cond::value(&expanded, interner, diagnostics, at, what)?;
+    let value = cond::value(&expanded, interner, diagnostics, at, what, chars)?;
     if value < 0 {
         diagnostics.push(
             Diagnostic::error(format!("`{what}` must not be negative"), at).with_code("E0348"),
