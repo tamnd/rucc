@@ -497,10 +497,10 @@ tests = []
 name = "target"
 kind = "attribute"
 gcc_version = "4.4"
-status = "unimplemented"
-answer = "error"
-used_by = ["ffmpeg", "openssl", "linux"]
-tests = []
+status = "implemented"
+used_by = ["ffmpeg", "openssl", "linux", "postgres"]
+tests = ["rucc-driver::a_function_built_for_sse4_2_calls_the_steps_without_a_flag", "rucc-driver::the_shipped_smmintrin_refuses_a_caller_not_built_for_the_checksum", "rucc-driver::a_target_string_gcc_does_not_know_is_refused", "rucc-driver::an_aarch64_target_string_is_still_accepted", "rucc-opt::a_callee_built_for_more_than_its_caller_stays_a_call", "rucc-target::an_attribute_string_gcc_refuses_is_refused_the_same_way"]
+notes = "On x86-64 the strings are read the way gcc 16 reads them: a comma separated list of extension names with or without `no-`, `arch=`, `tune=`, `fpmath=`, `prefer-vector-width=` and gcc's handful of plain options, with a name gcc does not know refused in gcc's words. The function is built for the unit's extensions and what the attribute adds, and that decides two things. A call to an `always_inline` function built for more than its caller is refused with gcc's `target specific option mismatch`, which is what lets the shipped intrinsics be called from a function whose attribute names `sse4.2` in a unit built for the baseline, and the inliner never copies a body built for more into a caller built for less. The code generator does not yet choose instructions by it, so `__builtin_popcount` in a function whose attribute names `popcnt` is still the portable sequence, `arch=` is only understood for the psABI level names, and `target_clones` and `#pragma GCC target` are not read. Every other target's strings, AArch64's `+crc` among them, are accepted and change nothing."
 
 [[feature]]
 name = "target_clones"

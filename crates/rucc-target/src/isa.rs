@@ -484,6 +484,181 @@ impl Choices {
     }
 }
 
+/// What the `target` attributes on one function said, which is [`Choices`] and the processor an
+/// `arch=` named, if one did.
+///
+/// A function can carry more than one attribute and each can have more than one string, and gcc
+/// reads them all as one comma separated list, so this is filled one string at a time and read once
+/// at the end, by [`Target::over`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Target {
+    /// The extensions named, with and without `no-`.
+    choices: Choices,
+    /// What the last `arch=` said the processor has, when it named a level of the psABI.
+    arch: Option<Isa>,
+    /// Whether the list was the single word `default`, which is the version of a function built
+    /// for the unit that the other versions stand beside.
+    default: bool,
+    /// How many options were read, which `default` needs to be alone among.
+    options: usize,
+}
+
+/// Why a `target` attribute string was refused, which is one of gcc's three messages for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetRefusal {
+    /// A name gcc does not know, or `default` alongside something else.
+    Unknown(String),
+    /// A known option with a value gcc does not know, like `fpmath=bogus`.
+    Value(String),
+    /// A `no-` in front of an option that has no negated form.
+    Negated(String),
+}
+
+impl fmt::Display for TargetRefusal {
+    /// gcc 16's wording, so a build log reads the same under either compiler.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetRefusal::Unknown(name) => {
+                write!(f, "attribute 'target' argument '{name}' is unknown")
+            }
+            TargetRefusal::Value(option) => {
+                write!(f, "attribute value '{option}' is unknown in 'target' attribute")
+            }
+            TargetRefusal::Negated(name) => {
+                write!(f, "pragma or attribute 'target(\"{name}\")' does not allow a negated form")
+            }
+        }
+    }
+}
+
+/// The options a `target` attribute may carry that say nothing about the instruction set, each as
+/// its name and whether a `no-` may stand in front of it. They choose how code is tuned or how
+/// floating point is done, which this compiler has one answer to, so each is accepted and has no
+/// effect.
+const PLAIN_OPTIONS: &[(&str, bool)] = &[
+    ("80387", true),
+    ("fancy-math-387", true),
+    ("ieee-fp", true),
+    ("inline-all-stringops", true),
+    ("inline-stringops-dynamically", true),
+    ("align-stringops", true),
+    ("recip", true),
+    ("cld", true),
+    ("general-regs-only", false),
+];
+
+impl Target {
+    /// Nothing read yet.
+    #[must_use]
+    pub fn new() -> Target {
+        Target::default()
+    }
+
+    /// One string of a `target` attribute, which is a comma separated list of options.
+    ///
+    /// An empty string says nothing, and gcc only warns about it. Nothing is trimmed, because gcc
+    /// trims nothing either, so `" sse4.2"` is a name it does not know.
+    ///
+    /// # Errors
+    ///
+    /// The first option gcc would refuse, and why.
+    pub fn read(&mut self, text: &str) -> Result<(), TargetRefusal> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        for option in text.split(',') {
+            self.option(option)?;
+        }
+        Ok(())
+    }
+
+    /// One option from the list.
+    fn option(&mut self, option: &str) -> Result<(), TargetRefusal> {
+        self.options += 1;
+        if option == "default" {
+            self.default = true;
+        }
+        if self.default && self.options > 1 {
+            return Err(TargetRefusal::Unknown("default".to_owned()));
+        }
+        if option == "default" {
+            return Ok(());
+        }
+        let (name, negated) = match option.strip_prefix("no-") {
+            Some(name) => (name, true),
+            None => (option, false),
+        };
+        if let Some((key, value)) = name.split_once('=') {
+            return self.valued(option, key, value, negated);
+        }
+        if let Some(&(_, negatable)) = PLAIN_OPTIONS.iter().find(|(known, _)| *known == name) {
+            return if negated && !negatable {
+                Err(TargetRefusal::Negated(name.to_owned()))
+            } else {
+                Ok(())
+            };
+        }
+        self.choices.read(option).map_err(|_| TargetRefusal::Unknown(option.to_owned()))
+    }
+
+    /// An option with a value: the processor to build for or to tune for, and two choices about
+    /// floating point and vector width that change nothing here.
+    ///
+    /// gcc refuses a processor it does not know, and this compiler knows only the names of the
+    /// psABI levels, so any other name is taken to be a processor with what the unit already has.
+    /// A `no-` in front of any of these is something gcc accepts and ignores.
+    fn valued(
+        &mut self,
+        option: &str,
+        key: &str,
+        value: &str,
+        negated: bool,
+    ) -> Result<(), TargetRefusal> {
+        let known = match key {
+            "arch" => {
+                if !negated {
+                    self.arch = Isa::level(value);
+                }
+                true
+            }
+            "tune" => true,
+            "fpmath" => ["387", "sse", "sse+387", "387+sse", "both"].contains(&value),
+            "prefer-vector-width" => ["none", "128", "256", "512"].contains(&value),
+            _ => return Err(TargetRefusal::Unknown(option.to_owned())),
+        };
+        if known { Ok(()) } else { Err(TargetRefusal::Value(option.to_owned())) }
+    }
+
+    /// The extensions the function is built for, given what the rest of the unit is built for.
+    ///
+    /// An `arch=` naming a level of the psABI adds that level's extensions to the unit's before
+    /// the named extensions are applied. gcc starts from the processor alone and keeps only what
+    /// the command line said explicitly, which this cannot tell apart from what `-march` supplied,
+    /// so the unit's set is kept whole: the difference is only ever an extension the unit had and
+    /// the named processor lacks.
+    #[must_use]
+    pub fn over(&self, unit: Isa) -> Isa {
+        let base = self.arch.map_or(unit, |arch| arch.union(unit));
+        self.choices.over(base)
+    }
+}
+
+impl std::str::FromStr for Isa {
+    type Err = String;
+
+    /// The comma separated names [`Isa`]'s `Display` writes, each taken alone without what it is
+    /// built over, which is what reading back a set written out needs.
+    fn from_str(text: &str) -> Result<Isa, String> {
+        let mut isa = Isa::NONE;
+        for name in text.split(',').filter(|name| !name.is_empty()) {
+            let feature =
+                Feature::named(name).ok_or_else(|| format!("`{name}` is not an extension"))?;
+            isa = isa.union(Isa(feature.bit()));
+        }
+        Ok(isa)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,5 +803,82 @@ mod tests {
         assert!(!isa.has(Feature::named("avx512bw").unwrap()));
         assert_eq!(Feature::named("avx512vpopcntdq").unwrap().macro_name(), "__AVX512VPOPCNTDQ__");
         assert_eq!(Feature::named("amx-tile").unwrap().macro_name(), "__AMX_TILE__");
+    }
+
+    /// What one function's attribute strings make of a unit built for `unit`.
+    fn attribute(strings: &[&str], unit: Isa) -> Result<Isa, TargetRefusal> {
+        let mut target = Target::new();
+        for text in strings {
+            target.read(text)?;
+        }
+        Ok(target.over(unit))
+    }
+
+    #[test]
+    fn an_attribute_string_is_a_list_over_the_unit() {
+        let base = Isa::baseline();
+        let sse42 = attribute(&["sse4.2"], base).unwrap();
+        for name in ["sse4.1", "ssse3", "sse3", "popcnt", "crc32", "sse2"] {
+            assert!(sse42.has(Feature::named(name).unwrap()), "{name}");
+        }
+        assert_eq!(
+            attribute(&["sse4.2,no-popcnt"], base).unwrap(),
+            sse42.minus(Isa::of(&["popcnt"]))
+        );
+        assert_eq!(attribute(&["sse4.2", "popcnt"], base).unwrap(), sse42);
+        assert_eq!(attribute(&["popcnt"], base).unwrap(), base.union(Isa::of(&["popcnt"])));
+        assert_eq!(
+            attribute(&["no-sse4.2"], sse42).unwrap(),
+            Isa::of(&["sse4.1", "mmx", "fxsr", "popcnt", "crc32"])
+        );
+        assert_eq!(attribute(&[""], base).unwrap(), base);
+        assert_eq!(attribute(&["default"], sse42).unwrap(), sse42);
+        let wide = attribute(&["avx512vpopcntdq,avx512bw"], base).unwrap();
+        assert!(wide.has(Feature::named("avx512bw").unwrap()) && wide.covers(sse42));
+    }
+
+    #[test]
+    fn an_attribute_arch_brings_a_level_and_other_options_change_nothing() {
+        let base = Isa::baseline();
+        let v2 = Isa::level("x86-64-v2").unwrap();
+        assert!(attribute(&["arch=x86-64-v2"], base).unwrap().covers(v2));
+        assert_eq!(attribute(&["arch=haswell,no-avx"], base).unwrap(), base);
+        let plain = "tune=generic,fpmath=sse+387,prefer-vector-width=256,cld,no-cld,80387,\
+                     general-regs-only,no-arch=x86-64,mwait";
+        assert_eq!(attribute(&[plain], base).unwrap(), base.union(Isa::of(&["mwait"])));
+    }
+
+    #[test]
+    fn an_attribute_string_gcc_refuses_is_refused_the_same_way() {
+        let base = Isa::baseline();
+        let unknown = |name: &str| Err(TargetRefusal::Unknown(name.to_owned()));
+        assert_eq!(attribute(&["foo"], base), unknown("foo"));
+        assert_eq!(attribute(&[" sse4.2"], base), unknown(" sse4.2"));
+        assert_eq!(attribute(&["SSE4.2"], base), unknown("SSE4.2"));
+        assert_eq!(attribute(&["sse4.2,,popcnt"], base), unknown(""));
+        assert_eq!(attribute(&["branch-cost=3"], base), unknown("branch-cost=3"));
+        assert_eq!(attribute(&["no-default"], base), unknown("no-default"));
+        assert_eq!(attribute(&["default,sse4.2"], base), unknown("default"));
+        assert_eq!(
+            attribute(&["fpmath=bogus"], base),
+            Err(TargetRefusal::Value("fpmath=bogus".to_owned()))
+        );
+        let negated = attribute(&["no-general-regs-only"], base).unwrap_err();
+        assert_eq!(
+            negated.to_string(),
+            "pragma or attribute 'target(\"general-regs-only\")' does not allow a negated form"
+        );
+        assert_eq!(
+            TargetRefusal::Unknown("foo".to_owned()).to_string(),
+            "attribute 'target' argument 'foo' is unknown"
+        );
+    }
+
+    #[test]
+    fn a_set_written_out_reads_back_the_same() {
+        let isa = Isa::level("x86-64-v3").unwrap().union(Isa::of(&["crc32"]));
+        assert_eq!(isa.to_string().parse::<Isa>(), Ok(isa));
+        assert_eq!("".parse::<Isa>(), Ok(Isa::NONE));
+        assert!("sse9".parse::<Isa>().is_err());
     }
 }

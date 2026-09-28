@@ -46,7 +46,7 @@ use crate::decl::{
     Startup, StorageDuration,
 };
 use crate::eval;
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::scope::Binding;
 use crate::tast::Const;
 
@@ -583,6 +583,49 @@ impl Checker<'_> {
         self.finish_call(callee, function, checked, span)
     }
 
+    /// Refuses a call that names an `always_inline` function built for extensions its caller is
+    /// not built for, which gcc refuses in the same words.
+    ///
+    /// Such a call has to be inlined and cannot be: the body uses instructions the caller may not
+    /// assume, which is the whole reason the callee was given a `target` attribute. The shipped
+    /// intrinsics are the functions this is for. `_mm_crc32_u32` is built for `crc32`, so calling
+    /// it from a function that is not, in a unit that is not, is a mistake gcc stops at, and a
+    /// function with `target("sse4.2")` on it may call it without the unit being built for it.
+    ///
+    /// Only a callee with a `target` attribute of its own is compared. One without is built for
+    /// whatever its caller is, which is gcc's rule for an `always_inline` function too.
+    fn check_inlined_target(&mut self, callee: ExprId, span: Span) {
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = self.tast[callee].kind
+        else {
+            return;
+        };
+        let ExprKind::Decl(decl) = self.tast[operand].kind else { return };
+        if !self.tast[decl].flags.contains(DeclFlags::ALWAYS_INLINE) {
+            return;
+        }
+        let Some(wanted) = self.tast.target(decl) else { return };
+        let caller = self.defining.and_then(|id| self.tast.target(id)).unwrap_or(self.cx.isa);
+        if caller.covers(wanted) {
+            return;
+        }
+        let name = self.tast[decl].name.map_or("", |name| self.text(name));
+        let what = format!(
+            "inlining failed in call to 'always_inline' '{name}': target specific option mismatch"
+        );
+        let missing = wanted.minus(caller);
+        let note = format!(
+            "'{name}' is built for {missing} as well, which neither this function nor the unit is; \
+             a 'target' attribute on this function or the matching '-m' flag gives it"
+        );
+        let at = self.tast.decl_span(decl);
+        self.report(
+            Diagnostic::error(what, span)
+                .with_code("E0721")
+                .note(format!("'{name}' is declared here"), at)
+                .help(note, span),
+        );
+    }
+
     /// The rest of a call, once the callee and the arguments are checked nodes.
     ///
     /// Split out because a type generic builtin arrives here having built its own callee out of
@@ -615,6 +658,7 @@ impl Checker<'_> {
             }
             return self.poison(span);
         };
+        self.check_inlined_target(callee, span);
 
         if signature.prototyped {
             let (wanted, given) = (signature.params.len(), checked.len());

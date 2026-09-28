@@ -24,12 +24,14 @@
  * instruction's own: the running value comes in and goes out in the same register, and the new
  * data may be a register or memory, which is why its constraint is `rm`.
  *
- * # Why they are behind a macro
+ * # Why each is built for `crc32`
  *
  * For the reason `<popcntintrin.h>` gives at more length: gcc refuses a call from a function not
- * built for the instruction, this compiler cannot yet tell functions apart, so the names exist
- * when `__CRC32__` is defined and not otherwise. `-mcrc32`, `-msse4.2` and `-march=x86-64-v2`
- * define it, which is what gcc does. See `tamnd/rucc#2003`.
+ * built for the instruction, and a function carrying `__attribute__((target("sse4.2")))` or
+ * `target("crc32")` is built for it whatever the rest of the unit is. PostgreSQL's checksum is
+ * written that way, and its configure tries the call without a flag before it tries `-msse4.2`.
+ * `-mcrc32`, `-msse4.2` and `-march=x86-64-v2` build the whole unit for it. See
+ * `tamnd/rucc#2002`.
  */
 
 #ifndef __RUCC_SMMINTRIN_H
@@ -38,23 +40,21 @@
 #include <emmintrin.h>
 #include <popcntintrin.h>
 
-#ifdef __CRC32__
-
-static __inline__ unsigned int __attribute__((__always_inline__))
+static __inline__ unsigned int __attribute__((__always_inline__, __target__("crc32")))
 _mm_crc32_u8(unsigned int __C, unsigned char __V)
 {
   __asm__("crc32b %1, %0" : "+r"(__C) : "rm"(__V));
   return __C;
 }
 
-static __inline__ unsigned int __attribute__((__always_inline__))
+static __inline__ unsigned int __attribute__((__always_inline__, __target__("crc32")))
 _mm_crc32_u16(unsigned int __C, unsigned short __V)
 {
   __asm__("crc32w %1, %0" : "+r"(__C) : "rm"(__V));
   return __C;
 }
 
-static __inline__ unsigned int __attribute__((__always_inline__))
+static __inline__ unsigned int __attribute__((__always_inline__, __target__("crc32")))
 _mm_crc32_u32(unsigned int __C, unsigned int __V)
 {
   __asm__("crc32l %1, %0" : "+r"(__C) : "rm"(__V));
@@ -64,13 +64,11 @@ _mm_crc32_u32(unsigned int __C, unsigned int __V)
 /* The only one whose running value is sixty four bits wide, because the instruction's is: the
  * sixty four bit form writes a whole register whose top half is always zero, and gcc's copy
  * hands that back as the `unsigned long long` it is. */
-static __inline__ unsigned long long __attribute__((__always_inline__))
+static __inline__ unsigned long long __attribute__((__always_inline__, __target__("crc32")))
 _mm_crc32_u64(unsigned long long __C, unsigned long long __V)
 {
   __asm__("crc32q %1, %0" : "+r"(__C) : "rm"(__V));
   return __C;
 }
-
-#endif /* __CRC32__ */
 
 #endif /* __RUCC_SMMINTRIN_H */

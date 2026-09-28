@@ -773,6 +773,9 @@ impl Unit<'_> {
         } else if node.flags.contains(DeclFlags::DECLARED_INLINE) {
             func.attrs.set |= AttrSet::INLINE_HINT;
         }
+        // What a `target` attribute said the function is built for, which the inliner compares
+        // against each caller: a body built for SSE4.2 is not copied into one that is not.
+        func.target = tast.target(decl);
         // An inline definition this unit calls, which this unit puts a copy of out of line for
         // every call the inliner leaves alone. See [`Self::out_of_line`].
         let copied = body.is_some() && self.out_of_line(decl, node.inline);
