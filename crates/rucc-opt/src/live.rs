@@ -41,84 +41,124 @@
 //! held in a register, and that decision belongs where the registers are being counted rather than
 //! here.
 
+use std::cmp::Ordering;
+
 use rucc_ir::{Block, Func, Inst, Value};
 
 use crate::cfg::Cfg;
 
-/// A dense set of values.
+/// A set of values, kept as the words of a bitmap that have something in them.
 ///
-/// One bit per value rather than a hash set, because the fixpoint unions one of these per edge
-/// per round and a union of two bitmaps is a loop over words.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A bitmap because the fixpoint unions one of these per edge per round, and a union of two
+/// bitmaps is a loop over words. Only the words with a bit set are kept, because what is live at
+/// one place is a few runs of neighbouring values out of the whole function. On jtckdint's `main`,
+/// with 200000 values and 30000 blocks, a whole bitmap per block was 1.3 GB for the live-ins and
+/// live-outs together, and fewer than one word in a hundred had anything in it. Allocating that,
+/// clearing it and copying it round the fixpoint was most of what working out liveness cost.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Set {
-    words: Vec<u64>,
+    /// Which word of the bitmap each is, and the word. In order and never zero, so two sets with
+    /// the same values in them are the same list.
+    words: Vec<(u32, u64)>,
 }
 
 impl Set {
-    /// An empty set with room for that many values.
-    fn with_room_for(values: usize) -> Self {
-        Self { words: vec![0; values.div_ceil(64)] }
+    /// Where the word holding that value is, or where it would go.
+    fn find(&self, value: Value) -> (Result<usize, usize>, u64) {
+        let at = value.index();
+        let word = u32::try_from(at / 64).expect("a value number fits in 32 bits");
+        (self.words.binary_search_by_key(&word, |&(word, _)| word), 1 << (at % 64))
     }
 
     fn contains(&self, value: Value) -> bool {
-        let at = value.index();
-        match self.words.get(at / 64) {
-            Some(word) => word & (1 << (at % 64)) != 0,
-            None => false,
+        match self.find(value) {
+            (Ok(at), bit) => self.words[at].1 & bit != 0,
+            (Err(_), _) => false,
         }
     }
 
     /// Puts it in, and answers whether it was not already there.
     fn insert(&mut self, value: Value) -> bool {
-        let at = value.index();
-        let word = &mut self.words[at / 64];
-        let bit = 1 << (at % 64);
-        let had = *word & bit != 0;
-        *word |= bit;
-        !had
+        match self.find(value) {
+            (Ok(at), bit) => {
+                let word = &mut self.words[at].1;
+                let had = *word & bit != 0;
+                *word |= bit;
+                !had
+            }
+            (Err(at), bit) => {
+                let word = u32::try_from(value.index() / 64).expect("checked by find");
+                self.words.insert(at, (word, bit));
+                true
+            }
+        }
     }
 
     /// Takes it out, and answers whether it was there.
     fn remove(&mut self, value: Value) -> bool {
-        let at = value.index();
-        let word = &mut self.words[at / 64];
-        let bit = 1 << (at % 64);
+        let (Ok(at), bit) = self.find(value) else {
+            return false;
+        };
+        let word = &mut self.words[at].1;
         let had = *word & bit != 0;
         *word &= !bit;
+        if *word == 0 {
+            self.words.remove(at);
+        }
         had
     }
 
-    /// Adds everything in the other, and answers whether that changed anything.
-    fn union_with(&mut self, other: &Self) -> bool {
-        let mut changed = false;
-        for (mine, theirs) in self.words.iter_mut().zip(&other.words) {
-            let before = *mine;
-            *mine |= theirs;
-            changed |= *mine != before;
+    /// Adds everything in the other.
+    fn union_with(&mut self, other: &Self) {
+        if other.words.is_empty() {
+            return;
         }
-        changed
+        if self.words.is_empty() {
+            self.words.clone_from(&other.words);
+            return;
+        }
+        let (mine, theirs) = (&self.words, &other.words);
+        let mut both = Vec::with_capacity(mine.len() + theirs.len());
+        let (mut left, mut right) = (0, 0);
+        while left < mine.len() && right < theirs.len() {
+            let ((at, word), (other_at, other_word)) = (mine[left], theirs[right]);
+            match at.cmp(&other_at) {
+                Ordering::Less => {
+                    both.push((at, word));
+                    left += 1;
+                }
+                Ordering::Greater => {
+                    both.push((other_at, other_word));
+                    right += 1;
+                }
+                Ordering::Equal => {
+                    both.push((at, word | other_word));
+                    left += 1;
+                    right += 1;
+                }
+            }
+        }
+        both.extend_from_slice(&mine[left..]);
+        both.extend_from_slice(&theirs[right..]);
+        self.words = both;
     }
 
     /// Takes everything out.
     fn clear(&mut self) {
-        self.words.fill(0);
+        self.words.clear();
     }
 
     fn len(&self) -> usize {
-        self.words.iter().map(|word| word.count_ones() as usize).sum()
+        self.words.iter().map(|&(_, word)| word.count_ones() as usize).sum()
     }
 
     /// Them, in order.
     ///
-    /// The empty words are skipped and the set bits of the rest are taken one at a time rather than
-    /// by testing all sixty four. A set has a word per sixty four values in the whole function, so
-    /// testing every bit of every word costs the size of the function every time somebody asks what
-    /// is live somewhere, whatever the answer turns out to be, and on a function of a hundred and
-    /// ninety thousand instructions that was most of an optimized compile. tamnd/rucc#1015.
+    /// The set bits of each word are taken one at a time rather than by testing all sixty four.
     fn iter(&self) -> impl Iterator<Item = Value> + use<'_> {
-        self.words.iter().enumerate().filter(|&(_, &word)| word != 0).flat_map(|(at, &word)| {
-            Bits(word).map(move |bit| Value::new((at * 64 + bit as usize) as u32))
-        })
+        self.words
+            .iter()
+            .flat_map(|&(at, word)| Bits(word).map(move |bit| Value::new(at * 64 + bit)))
     }
 }
 
@@ -157,10 +197,8 @@ impl Liveness {
     #[must_use]
     pub fn of(func: &Func, cfg: &Cfg) -> Self {
         let blocks = cfg.capacity();
-        let values = func.counts().values;
-        let empty = Set::with_room_for(values);
-        let mut live_in = vec![empty.clone(); blocks];
-        let mut live_out = vec![empty; blocks];
+        let mut live_in = vec![Set::default(); blocks];
+        let mut live_out = vec![Set::default(); blocks];
 
         // What each block reads before it writes, and what it writes, parameters included. Live in
         // is then live out with the second taken out and the first put in, which is what walking
@@ -168,8 +206,8 @@ impl Liveness {
         let order: Vec<Block> = cfg.postorder().to_vec();
         let mut reads: Vec<Vec<Value>> = vec![Vec::new(); blocks];
         let mut writes: Vec<Vec<Value>> = vec![Vec::new(); blocks];
-        let mut defined = Set::with_room_for(values);
-        let mut read = Set::with_room_for(values);
+        let mut defined = Set::default();
+        let mut read = Set::default();
         for &block in &order {
             let at = block.index();
             for &param in &func[block].params {
@@ -201,7 +239,7 @@ impl Liveness {
         // allows one order to do that. A loop is what makes a second round necessary, and the
         // second round is only the blocks something changed under.
         let mut stale = vec![true; blocks];
-        let mut set = Set::with_room_for(values);
+        let mut set = Set::default();
         let mut again = true;
         while again {
             again = false;
@@ -377,9 +415,9 @@ fn walk(func: &Func, block: Block, set: &mut Set, mut at: impl FnMut(Inst, &Set,
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Block, Builder, Flags, Func, Opcode, Signature, Type};
+    use rucc_ir::{Block, Builder, Flags, Func, Opcode, Signature, Type, Value};
 
-    use super::Liveness;
+    use super::{Liveness, Set};
     use crate::cfg::Cfg;
 
     const I32: Type = Type::int(32);
@@ -395,6 +433,40 @@ mod tests {
         let cfg = Cfg::new(func);
         let live = Liveness::of(func, &cfg);
         (cfg, live)
+    }
+
+    #[test]
+    fn a_set_keeps_only_the_words_with_something_in_them() {
+        let value = Value::new;
+        let mut first = Set::default();
+        assert!(first.insert(value(3)));
+        assert!(first.insert(value(200)));
+        assert!(!first.insert(value(3)), "it was already there");
+        assert!(first.insert(value(70)));
+        assert!(first.remove(value(70)));
+        assert!(!first.remove(value(70)), "it went the first time");
+        assert!(!first.remove(value(5000)), "nothing was ever near it");
+        assert_eq!(first.words.len(), 2, "the word 70 was in went with it");
+
+        let mut second = Set::default();
+        second.insert(value(64));
+        second.insert(value(200));
+        second.insert(value(201));
+        second.insert(value(9000));
+        first.union_with(&second);
+        let all: Vec<u32> = first.iter().map(|value| value.raw()).collect();
+        assert_eq!(all, [3, 64, 200, 201, 9000]);
+        assert_eq!(first.len(), 5);
+        assert!(first.contains(value(201)) && !first.contains(value(202)));
+
+        // Put in the other way round and taken out again, it is the same list, which is what the
+        // fixpoint compares to know it is done.
+        let mut again = Set::default();
+        for number in [9000, 201, 5, 200, 64, 3] {
+            again.insert(value(number));
+        }
+        again.remove(value(5));
+        assert_eq!(again, first);
     }
 
     #[test]
