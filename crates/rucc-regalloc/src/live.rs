@@ -326,8 +326,8 @@ fn note(here: &mut [Option<Range>], touched: &mut Vec<usize>, reg: Reg, point: P
 /// want from anybody, while one it reads and then writes is.
 fn exposed(func: &Func, order: &Order) -> (Rows, Rows) {
     let vregs = func.vregs();
-    let mut used = Rows::new(func.block_count());
-    let mut defined = Rows::new(func.block_count());
+    let mut used = Vec::new();
+    let mut defined = Vec::new();
     let mut reads = Building::new(vregs);
     let mut writes = Building::new(vregs);
     for &block in order.blocks() {
@@ -352,10 +352,10 @@ fn exposed(func: &Func, order: &Order) -> (Rows, Rows) {
             reads.remove(param.reg);
             writes.insert(param.reg);
         }
-        used.set(row, &reads.take());
-        defined.set(row, &writes.take());
+        used.extend(reads.take().into_iter().map(|number| (row_of(row), number)));
+        defined.extend(writes.take().into_iter().map(|number| (row_of(row), number)));
     }
-    (used, defined)
+    (Rows::gather(func.block_count(), &used), Rows::gather(func.block_count(), &defined))
 }
 
 /// The fixpoint: what arrives live in each block, and what leaves live.
@@ -418,8 +418,8 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
         }
     }
 
-    let mut live_in = Rows::new(count);
-    let mut live_out = Rows::new(count);
+    let mut live_in = Vec::new();
+    let mut live_out = Vec::new();
     // The last value each block was found live into and live out of, which is all a block needs
     // to remember when the values come one at a time.
     let mut arrived = vec![u32::MAX; count];
@@ -434,7 +434,7 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
         for &row in &readers[starts[number]..starts[number + 1]] {
             if arrived[row] != value {
                 arrived[row] = value;
-                live_in.push(row, value);
+                live_in.push((row_of(row), value));
                 waiting.push(row);
             }
         }
@@ -442,17 +442,17 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
             for &pred in &preds[row] {
                 if left[pred] != value {
                     left[pred] = value;
-                    live_out.push(pred, value);
+                    live_out.push((row_of(pred), value));
                 }
                 if arrived[pred] != value && wrote[pred] != value {
                     arrived[pred] = value;
-                    live_in.push(pred, value);
+                    live_in.push((row_of(pred), value));
                     waiting.push(pred);
                 }
             }
         }
     }
-    (live_in, live_out)
+    (Rows::gather(count, &live_in), Rows::gather(count, &live_out))
 }
 
 /// A set of virtual registers for each block, held as the numbers in it.
@@ -469,36 +469,51 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
 /// the other two hundred thousand, so the numbers themselves are smaller than the bits. They are
 /// kept in the order a register number sorts in rather than any order of the program.
 /// tamnd/rucc#1072.
+///
+/// The rows are one list end to end, laid out once every number is known. They used to be a list
+/// per block that each number was pushed onto as the fixpoint found it, and on jtckdint, with
+/// thousands of values live across most of 22000 blocks, growing those lists one number at a time
+/// and copying them every time one ran out of room was about half of working out liveness.
 #[derive(Debug, Clone)]
 struct Rows {
-    rows: Vec<Vec<u32>>,
+    /// Where each row starts in `numbers`, with one more at the end for where the last one stops.
+    starts: Vec<usize>,
+    numbers: Vec<u32>,
 }
 
 impl Rows {
-    fn new(rows: usize) -> Self {
-        Self { rows: vec![Vec::new(); rows] }
+    /// The rows out of a list of which row each number goes in. The numbers keep the order they
+    /// come in within a row, so a row is in order when the caller hands its numbers over in order.
+    fn gather(rows: usize, pairs: &[(u32, u32)]) -> Self {
+        let mut starts = vec![0usize; rows + 1];
+        for &(row, _) in pairs {
+            starts[row as usize + 1] += 1;
+        }
+        for row in 0..rows {
+            starts[row + 1] += starts[row];
+        }
+        let mut filled = starts.clone();
+        let mut numbers = vec![0u32; pairs.len()];
+        for &(row, number) in pairs {
+            let at = &mut filled[row as usize];
+            numbers[*at] = number;
+            *at += 1;
+        }
+        Self { starts, numbers }
     }
 
     fn row(&self, row: usize) -> &[u32] {
-        &self.rows[row]
-    }
-
-    /// Puts the numbers in the row in place of whatever it had.
-    fn set(&mut self, row: usize, numbers: &[u32]) {
-        let row = &mut self.rows[row];
-        row.clear();
-        row.extend_from_slice(numbers);
-    }
-
-    /// Adds a number past everything the row has, which keeps it in order only because the caller
-    /// adds them in order.
-    fn push(&mut self, row: usize, number: u32) {
-        self.rows[row].push(number);
+        &self.numbers[self.starts[row]..self.starts[row + 1]]
     }
 
     fn iter(&self, row: usize) -> impl Iterator<Item = Reg> + '_ {
-        self.rows[row].iter().copied().map(Reg::virtual_reg)
+        self.row(row).iter().copied().map(Reg::virtual_reg)
     }
+}
+
+/// A block's index as the row it is in [`Rows`].
+fn row_of(index: usize) -> u32 {
+    u32::try_from(index).expect("a block number")
 }
 
 /// One block's set while it is being worked out, as a flag per register and a list of which to
