@@ -2,3 +2,9 @@
 # spec/18-package-layout.md section 18.7.
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# The MSVC C runtime linked in rather than imported, so that rucc.exe runs on a Windows machine
+# with no Visual C++ redistributable installed. 0.11.14 imported VCRUNTIME140.dll and did not
+# start on a fresh Windows 11. The release workflow checks the imports of what it built.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
