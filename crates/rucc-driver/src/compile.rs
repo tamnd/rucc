@@ -304,6 +304,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 short_enums: opts.short_enums,
                 ms_extensions: sess.ms_extensions(),
                 trapping_math: opts.trapping_math,
+                isa: opts.isa,
             },
         );
         checker.check_unit();
@@ -718,6 +719,9 @@ fn optimize(
     // call to `puts` needs both of those to be off.
     settings.builtins = opts.builtins && opts.hosted;
     settings.no_builtin.clone_from(&opts.no_builtin);
+    // What a function with no `target` attribute is built for, which the inliner compares a
+    // callee with one against.
+    settings.isa = opts.isa;
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.global_fuel = opts.pass_fuel_global;
     settings.verify |= opts.verify_each;
@@ -2151,16 +2155,68 @@ mod tests {
         }
     }
 
-    /// Without the flag the names are not there, which is the answer gcc's refusal gives a
-    /// configure probe: a unit not built for the instruction cannot call it.
+    /// Without the flag a function not built for the instruction cannot call it, which is gcc's
+    /// refusal in gcc's words and the answer a configure probe reads.
     #[test]
-    fn the_shipped_smmintrin_has_no_checksum_for_a_unit_not_built_for_it() {
+    fn the_shipped_smmintrin_refuses_a_caller_not_built_for_the_checksum() {
         let result = run(
             &freestanding(),
             "#include <immintrin.h>\nunsigned f(unsigned c) { return _mm_crc32_u32(c, 1); }\n",
         );
         let said = result.messages.join("\n");
-        assert!(said.contains("_mm_crc32_u32"), "{said}");
+        let refusal = "inlining failed in call to 'always_inline' '_mm_crc32_u32': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
+    /// A function carrying the attribute is built for the instruction whatever the unit is, which
+    /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
+    /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when
+    /// `__has_attribute` says it is there, so that has to say so as well.
+    #[test]
+    fn a_function_built_for_sse4_2_calls_the_steps_without_a_flag() {
+        let mut opts = freestanding();
+        opts.emit = EmitKind::Asm;
+        let source = concat!(
+            "#include <nmmintrin.h>\n",
+            "#if defined(__has_attribute) && __has_attribute (target)\n",
+            "__attribute__((target(\"sse4.2\")))\n",
+            "#endif\n",
+            "unsigned l(unsigned c, unsigned v) { return _mm_crc32_u32(c, v); }\n",
+            "__attribute__((target(\"popcnt\")))\n",
+            "int n(unsigned v) { return _mm_popcnt_u32(v); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("crc32l") && text.contains("popcntl"), "{text}");
+        let l = &text[text.find("\nl:").expect("l is defined")..];
+        let l = &l[..l.find("ret").expect("l returns")];
+        assert!(l.contains("crc32l") && !l.contains("call"), "{l}");
+    }
+
+    /// A string gcc does not know is refused in gcc's words, and AArch64's own strings are
+    /// something x86-64 does not know either.
+    #[test]
+    fn a_target_string_gcc_does_not_know_is_refused() {
+        for (string, name) in [("sse5", "sse5"), ("+crc", "+crc"), ("sse4.2,foo", "foo")] {
+            let source =
+                format!("__attribute__((target(\"{string}\"))) int f(void) {{ return 0; }}\n");
+            let said = run(&freestanding(), &source).messages.join("\n");
+            let wanted = format!("attribute 'target' argument '{name}' is unknown");
+            assert!(said.contains(&wanted), "{string}: {said}");
+        }
+    }
+
+    /// AArch64 has strings of its own, which the x86-64 reading does not look at, so the
+    /// checksum PostgreSQL builds there with `target("+crc")` still compiles.
+    #[test]
+    fn an_aarch64_target_string_is_still_accepted() {
+        let mut opts = freestanding();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "__attribute__((target(\"+crc\"))) int f(void) { return 0; }\n";
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
     }
 
     #[test]

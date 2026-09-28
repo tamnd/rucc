@@ -42,7 +42,7 @@ use rucc_ast::{AlignSpec, AttrArg, AttrList};
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::Encoding;
-use rucc_target::TargetInfo;
+use rucc_target::{Isa, Target, TargetInfo};
 use rucc_types::{
     FloatKind, IntKind, TypeId, TypeKind, float_format, int_width, integer_info, is_arithmetic,
     is_complex, is_real_floating, layout,
@@ -725,6 +725,57 @@ impl Checker<'_> {
             options.extend(text.split(',').map(|part| part.trim().to_string()));
         }
         options
+    }
+
+    /// The x86-64 extensions `__attribute__((target(...)))` says a function is built for, read
+    /// from every list the declaration has, and nothing when none of them has the attribute.
+    ///
+    /// Every string of every `target` attribute is one comma separated list to gcc, so they are
+    /// read into one [`Target`] and applied over the unit's set once, at the end. A name gcc does
+    /// not know is refused in gcc's words, and a declaration with a refused string is taken to be
+    /// built for the unit, since gcc drops the attribute that carried it.
+    ///
+    /// Only on x86-64. Every other target has strings of its own, AArch64's `+crc` among them,
+    /// and nothing here reads them: they are accepted and change nothing, which is what they did
+    /// before x86-64's were read.
+    pub(in crate::check) fn targeted(&mut self, lists: &[AttrList]) -> Option<Isa> {
+        if self.cx.target.tuple.arch().as_str() != "x86_64" {
+            return None;
+        }
+        let ast = self.ast;
+        let mut target = Target::new();
+        let (mut said, mut refused) = (false, false);
+        for &list in lists {
+            for &attr in &ast[list] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    || rucc_gnu::unarmour(self.text(attr.name)) != "target"
+                {
+                    continue;
+                }
+                said = true;
+                for &arg in &ast[attr.args] {
+                    let AttrArg::Expr(expr) = arg else { continue };
+                    let checked = self.expr(expr);
+                    let at = self.tast.expr_span(checked);
+                    let ExprKind::Str(id) = self.tast[checked].kind else {
+                        let what = "attribute 'target' argument not a string";
+                        self.report(Diagnostic::error(what, at).with_code("E0720"));
+                        refused = true;
+                        continue;
+                    };
+                    let text: String = self.tast[id]
+                        .elements
+                        .iter()
+                        .filter_map(|&unit| char::from_u32(unit))
+                        .collect();
+                    if let Err(why) = target.read(&text) {
+                        self.report(Diagnostic::error(why.to_string(), at).with_code("E0720"));
+                        refused = true;
+                    }
+                }
+            }
+        }
+        (said && !refused).then(|| target.over(self.cx.isa))
     }
 
     /// What an attribute list promises a call to this function does.

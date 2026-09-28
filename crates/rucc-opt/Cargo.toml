@@ -19,12 +19,14 @@ workspace = true
 # for the optimization level and nothing else, since the level is what selects a pipeline.
 # `rucc-cost` is where every threshold a pass consults has to come from, per section 40.12, and
 # this crate is its first caller. `rucc-tuple` is for the one pass that has to know the calling
-# convention, which is the inliner forwarding the anonymous arguments of a call.
+# convention, which is the inliner forwarding the anonymous arguments of a call. `rucc-target` is
+# for the set of x86-64 extensions the inliner compares a caller and a callee by.
 [dependencies]
 rucc-base = { workspace = true }
 rucc-cost = { workspace = true }
 rucc-ir = { workspace = true }
 rucc-session = { workspace = true }
+rucc-target = { workspace = true }
 rucc-tuple = { workspace = true }
 
 # The rule compiler, which turns `rules/*.rules` into the table `src/rules` includes. A build
@@ -32,7 +34,3 @@ rucc-tuple = { workspace = true }
 # tooling, it is outside the layer stack, and nothing it holds is in the compiler that ships.
 [build-dependencies]
 rucc-rules = { workspace = true }
-
-# The target is only needed to build a module to run a pass over.
-[dev-dependencies]
-rucc-target = { workspace = true }

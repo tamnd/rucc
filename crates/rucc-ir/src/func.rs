@@ -31,7 +31,7 @@ use std::ops::{Index, IndexMut};
 
 use rucc_base::{Idx, Symbol};
 use rucc_diag::Span;
-use rucc_target::Slot;
+use rucc_target::{Isa, Slot};
 
 use crate::inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Extra,
@@ -76,6 +76,14 @@ pub struct Func {
     /// What is true of the whole function, which is what a caller reads when it wants to know
     /// what a call to it does without looking inside.
     pub attrs: Attrs,
+    /// The x86-64 extensions the function is built for, when `__attribute__((target(...)))`
+    /// said, and `None` for one built for whatever the module is built for.
+    ///
+    /// The inliner is what reads it. A body built for more than its caller may not be copied into
+    /// the caller, because what it was allowed to assume stops being true there, so a callee
+    /// built for SSE4.2 stays a call from a function that is not. It is the whole set rather than
+    /// what the attribute added, so the comparison needs nothing else.
+    pub target: Option<Isa>,
     /// Where it was declared, which is what a debugger says the prologue is.
     ///
     /// Not any instruction's span, and that is the point of it. The pushes, the frame and the
@@ -154,6 +162,7 @@ impl Func {
             section: None,
             align: None,
             attrs: Attrs::NONE,
+            target: None,
             declared: Span::DUMMY,
             values: Vec::new(),
             insts: Vec::new(),

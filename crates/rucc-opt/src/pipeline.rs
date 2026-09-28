@@ -39,6 +39,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
 use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
 use rucc_session::OptLevel;
+use rucc_target::Isa;
 use rucc_tuple::{Arch, ObjectFormat};
 
 use crate::{
@@ -653,6 +654,12 @@ pub struct Options {
     pub builtins: bool,
     /// The library names `-fno-builtin-<name>` took away one at a time.
     pub no_builtin: Vec<String>,
+    /// The x86-64 extensions the module is built for, which a function without a `target`
+    /// attribute of its own is built for.
+    ///
+    /// [`crate::inline`] compares it against a callee that has one. None at all is the default,
+    /// which is the answer that inlines least: a callee built for anything more stays a call.
+    pub isa: Isa,
 }
 
 impl Default for Options {
@@ -670,6 +677,7 @@ impl Default for Options {
             interposition: Pic::Executable,
             builtins: true,
             no_builtin: Vec::new(),
+            isa: Isa::NONE,
         }
     }
 }
@@ -852,7 +860,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // so the toggle only ever means this and never adds or removes anything from the list.
     let once = opts.wants(inline::ONCE);
     let started = Instant::now();
-    let inlined = inline::run(module, limit, once);
+    let inlined = inline::run(module, limit, once, opts.isa);
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {
         if opts.verify {

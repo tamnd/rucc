@@ -86,6 +86,7 @@ use rucc_ir::{
     Float, Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
     Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
+use rucc_target::Isa;
 use rucc_tuple::{Arch, Os};
 
 use crate::Stats;
@@ -151,6 +152,9 @@ pub enum InlineFailure {
     /// The call has a landing pad, which covers the call and would cover none of the calls the
     /// body makes once it was copied in.
     Unwinds,
+    /// The callee is built for x86-64 extensions the caller is not, so its body may use
+    /// instructions the caller may not assume. gcc's words for it are the ones used.
+    Target,
 }
 
 impl InlineFailure {
@@ -171,6 +175,7 @@ impl InlineFailure {
             Self::TooLarge => "always_inline call not inlined: callee too large",
             Self::TooDeep => "always_inline call not inlined: call inside too many loops",
             Self::Unwinds => "always_inline call not inlined: call has a landing pad",
+            Self::Target => "always_inline call not inlined: target specific option mismatch",
         }
     }
 
@@ -191,6 +196,7 @@ impl InlineFailure {
             Self::TooLarge => "inline call not inlined: callee too large",
             Self::TooDeep => "inline call not inlined: call inside too many loops",
             Self::Unwinds => "inline call not inlined: call has a landing pad",
+            Self::Target => "inline call not inlined: target specific option mismatch",
         }
     }
 
@@ -221,6 +227,9 @@ impl InlineFailure {
                 "call to a function called once not inlined: call inside too many loops"
             }
             Self::Unwinds => "call to a function called once not inlined: call has a landing pad",
+            Self::Target => {
+                "call to a function called once not inlined: target specific option mismatch"
+            }
         }
     }
 }
@@ -231,7 +240,10 @@ impl InlineFailure {
 ///
 /// Then turns every function still holding a `va_arg_pack` into a declaration. See the module
 /// documentation for why that is the right thing to do with one.
-pub fn run(module: &mut Module, limit: Option<u32>, once: bool) -> Vec<(FuncId, Stats)> {
+///
+/// `isa` is what the module is built for, which is what a function without a `target` attribute
+/// is built for. A callee built for more than its caller is never copied into it.
+pub fn run(module: &mut Module, limit: Option<u32>, once: bool, isa: Isa) -> Vec<(FuncId, Stats)> {
     let once = if limit.is_some() && once { called_once(module) } else { HashSet::new() };
     let wanted: HashMap<Symbol, (FuncId, Kind)> = module
         .funcs()
@@ -263,7 +275,7 @@ pub fn run(module: &mut Module, limit: Option<u32>, once: bool) -> Vec<(FuncId, 
         let convention = Convention::of(module);
         let mut state = HashMap::new();
         let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
-        let how = How { wanted: &wanted, convention, limit };
+        let how = How { wanted: &wanted, convention, limit, isa };
         for id in module.funcs().collect::<Vec<FuncId>>() {
             settle(module, id, &how, &mut state, &mut done);
         }
@@ -337,6 +349,8 @@ struct How<'a> {
     convention: Convention,
     /// How many instructions a callee declared `inline` may have.
     limit: usize,
+    /// What a function without a `target` attribute of its own is built for.
+    isa: Isa,
 }
 
 /// Where a function is in being settled.
@@ -411,6 +425,14 @@ fn settle(
         if deep.contains(&call) {
             stats.missed(why(InlineFailure::TooDeep));
             continue;
+        }
+        // A body built for more than the caller cannot go into it, whatever else is true of the
+        // call, so this is asked before anything is settled or measured.
+        if let Some(wanted) = module[callee].target {
+            if !module[id].target.unwrap_or(how.isa).covers(wanted) {
+                stats.missed(why(InlineFailure::Target));
+                continue;
+            }
         }
         settle(module, callee, how, state, done);
         // Measured once the callee is settled, since what is copied is the body with its own
@@ -1110,6 +1132,7 @@ fn declaration(func: &Func) -> Func {
     declared.spelled = func.spelled;
     declared.visibility = func.visibility;
     declared.attrs = func.attrs;
+    declared.target = func.target;
     declared.attrs.set = declared.attrs.set.without(AttrSet::INLINE_ONLY);
     declared.declared = func.declared;
     declared.linkage = Linkage::External;
@@ -1141,11 +1164,48 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        let said = format!("{:?}", run(&mut module, limit, once));
+        let said = format!("{:?}", run(&mut module, limit, once, Isa::baseline()));
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
         (rucc_ir::print(&module, &names), said)
+    }
+
+    /// A callee built for SSE4.2 stays a call from a caller that is not, whether it asked to be
+    /// inlined always or only hinted, and goes in where the caller is built for it too.
+    #[test]
+    fn a_callee_built_for_more_than_its_caller_stays_a_call() {
+        let sse42 = "mmx,sse,sse2,sse3,ssse3,sse4.1,sse4.2,popcnt,crc32,fxsr";
+        for attrs in ["always_inline", "inline_hint"] {
+            let body = format!(
+                r#"
+func @step(i32) -> i32, linkage(internal), attrs({attrs}), target "{sse42}" {{
+block0(%0: i32):
+    %1 = add.i32 %0, %0
+    return %1
+}}
+
+func @plain(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = call @step(%0) : (i32) -> i32
+    return %1
+}}
+
+func @fast(i32) -> i32, linkage(external), target "{sse42}" {{
+block0(%0: i32):
+    %1 = call @step(%0) : (i32) -> i32
+    return %1
+}}
+"#
+            );
+            let (out, said) = inlined_with(&body, Some(100), false);
+            let plain = &out
+                [out.find("func @plain").expect("plain")..out.find("func @fast").expect("fast")];
+            let fast = &out[out.find("func @fast").expect("fast")..];
+            assert!(plain.contains("call @step"), "{attrs}: {out}");
+            assert!(!fast.contains("call @step"), "{attrs}: {out}");
+            assert!(said.contains("not inlined: target specific option mismatch"), "{said}");
+        }
     }
 
     /// The body goes where the call was, its return becomes a jump, and its local goes to the

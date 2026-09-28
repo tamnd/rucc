@@ -356,13 +356,20 @@ impl Checker<'_> {
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
         }
+        // The specifiers only, for the reason `noreturn` above reads them only. This is where a
+        // program picking its fastest path at run time writes it, on the definition of the path.
+        if let Some(isa) = self.targeted(&[specs.attrs]) {
+            self.tast.record_target(id, isa);
+        }
         if nested {
             return Some(id);
         }
         // Read after the merge, because a declaration above the definition has a say in whether
         // the definition is emitted and the merge is what has settled it.
         let emitted = self.tast[id].inline.emits();
+        let outer = self.defining.replace(id);
         let (stmt, params) = self.function_body(ty, name, span, params, body, emitted);
+        self.defining = outer;
         let mut node = self.tast[id].clone();
         node.params = params;
         node.body = Some(stmt);
@@ -711,6 +718,13 @@ impl Checker<'_> {
         // Kept for the debug information, which names the typedef where the program did.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
+        }
+        // Both places, for the reason `noreturn` above reads both. gcc says nothing about the
+        // attribute on an object beyond that it is ignored, and it is not read there at all.
+        if kind == DeclKind::Function {
+            if let Some(isa) = self.targeted(&[specs.attrs, item.attrs]) {
+                self.tast.record_target(id, isa);
+            }
         }
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.

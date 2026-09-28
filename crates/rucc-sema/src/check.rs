@@ -54,7 +54,7 @@ use rucc_ast::Ast;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Severity, Span};
 use rucc_session::Std;
-use rucc_target::{Lane, TargetInfo, TypeName};
+use rucc_target::{Isa, Lane, TargetInfo, TypeName};
 use rucc_types::{ArrayLen, FloatKind, IntKind, RecordKind, TypeId, TypeKind, Types, int_width};
 
 use crate::convert::Conv;
@@ -114,6 +114,13 @@ pub struct Context<'a> {
     /// front end does, and because gcc folds under it at `-O0` as well, where there is no
     /// optimizer to do it. [`crate::convert::Conv`] is where it is read.
     pub trapping_math: bool,
+    /// The x86-64 extensions the unit is built for, which the command line decided, and
+    /// [`Isa::NONE`] on every other target.
+    ///
+    /// A function carrying `__attribute__((target(...)))` is built for this and what the
+    /// attribute adds, and a call to an `always_inline` function built for more than its caller
+    /// is refused, the way gcc refuses it. See `check/attr.rs`.
+    pub isa: Isa,
 }
 
 impl<'a> Context<'a> {
@@ -134,6 +141,7 @@ impl<'a> Context<'a> {
             short_enums: false,
             ms_extensions: false,
             trapping_math: true,
+            isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
         }
     }
 
@@ -279,6 +287,11 @@ pub struct Checker<'a> {
     /// before anything knows what it is under, so this is what tells the one case from the other,
     /// and it is set for exactly as long as the callee is being checked.
     pub(in crate::check) calling: Option<Symbol>,
+    /// The function whose body is being checked, and nothing outside one.
+    ///
+    /// What a call in the body may inline depends on the extensions the function is built for,
+    /// which a `target` attribute on it decides, and that is kept against the declaration.
+    pub(in crate::check) defining: Option<DeclId>,
 }
 
 impl<'a> Checker<'a> {
@@ -298,6 +311,7 @@ impl<'a> Checker<'a> {
             declared_builtins: Vec::new(),
             refused_sizes: 0,
             calling: None,
+            defining: None,
         };
         checker.declare_type_names();
         checker

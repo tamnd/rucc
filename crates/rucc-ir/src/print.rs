@@ -308,6 +308,10 @@ impl<'a> Printer<'a> {
             self.out.push_str(", spelled ");
             self.string(self.names.resolve(spelled).as_bytes());
         }
+        if let Some(target) = func.target {
+            self.out.push_str(", target ");
+            self.string(target.to_string().as_bytes());
+        }
         if func.is_declaration() {
             self.out.push_str(";\n");
             return;

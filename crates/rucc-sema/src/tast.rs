@@ -20,6 +20,7 @@ use rucc_base::float::Float;
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
+use rucc_target::Isa;
 use rucc_types::{TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
@@ -159,6 +160,7 @@ pub struct Tast {
     vlas: Vec<ExprId>,
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
+    targets: Vec<(DeclId, Isa)>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 
@@ -355,6 +357,27 @@ impl Tast {
     #[must_use]
     pub fn spellings(&self) -> &[(DeclId, Symbol, TypeId)] {
         &self.spellings
+    }
+
+    /// Records the extensions `__attribute__((target(...)))` said a function is built for, which is
+    /// the unit's set with what the attribute added.
+    ///
+    /// A handful of functions in a unit carry one, which is why this is a list beside the tree
+    /// rather than a field on every declaration, where a set of a hundred and twenty eight bits
+    /// would double the size of each. It is a fact about the name, and the first declaration to
+    /// say something stands, the way [`Decl::visibility`] does: gcc refuses a later one that
+    /// disagrees, and the usual program writes it once, on the definition.
+    pub fn record_target(&mut self, decl: DeclId, isa: Isa) {
+        if self.target(decl).is_none() {
+            self.targets.push((decl, isa));
+        }
+    }
+
+    /// The extensions a function was built for, when a `target` attribute said, and nothing when
+    /// it is built for what the unit is.
+    #[must_use]
+    pub fn target(&self, decl: DeclId) -> Option<Isa> {
+        self.targets.iter().find(|&&(at, _)| at == decl).map(|&(_, isa)| isa)
     }
 
     /// Records that a label names a statement, which is not known when the label is created

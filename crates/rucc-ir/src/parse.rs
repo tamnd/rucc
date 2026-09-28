@@ -475,6 +475,13 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "attrs" => func.attrs = self.attrs()?,
                 "section" => func.section = Some(self.symbol_from_string()?),
                 "spelled" => func.spelled = Some(self.symbol_from_string()?),
+                "target" => {
+                    let text = self.quoted_str()?;
+                    match text.parse() {
+                        Ok(isa) => func.target = Some(isa),
+                        Err(why) => return self.fail(why),
+                    }
+                }
                 other => return self.fail(format!("a function has no `{other}`")),
             }
         }
@@ -2093,6 +2100,19 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
             "{HEADER}\nfunc @my_strstr(ptr, ptr) -> ptr, linkage(external), spelled \"strstr\";\n"
         );
         assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn the_extensions_a_function_is_built_for_come_back_as_written() {
+        // The inliner compares these, so a dump read back has to have the same set it was
+        // written from, or a callee built for SSE4.2 would inline into a caller that is not.
+        let text = format!(
+            "{HEADER}\nfunc @f(i32) -> i32, linkage(external), \
+             target \"mmx,sse,sse2,sse3,ssse3,sse4.1,sse4.2,popcnt,crc32,fxsr\";\n"
+        );
+        assert_eq!(round_trip(&text), text);
+        let wrong = format!("{HEADER}\nfunc @f(i32) -> i32, target \"sse9\";\n");
+        assert!(error(&wrong).ends_with("`sse9` is not an extension"), "{}", error(&wrong));
     }
 
     #[test]
