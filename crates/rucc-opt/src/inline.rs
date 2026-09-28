@@ -1850,8 +1850,15 @@ block0(%0: i32):
         ONCE.replace("linkage(internal) {", &format!("linkage(internal){attrs} {{"))
             .replace("    return %4", &format!("{}    return %4", local(callee, 5)))
             .replace(
-                ") -> i32\n    return %1",
-                &format!(") -> i32\n{}    return %1", local(caller, 2)),
+                "    %1 = call @scale(%0) : (i32) -> i32\n    return %1",
+                &if caller == 0 {
+                    "    %1 = call @scale(%0) : (i32) -> i32\n    return %1".to_string()
+                } else {
+                    format!(
+                        "{}    %2 = call @scale(%0) : (i32) -> i32\n    return %2",
+                        local(caller, 1)
+                    )
+                },
             )
     }
 
