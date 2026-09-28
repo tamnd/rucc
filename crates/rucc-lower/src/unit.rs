@@ -1924,10 +1924,10 @@ fn take_run(bytes: &mut BTreeMap<u64, u8>, start: u64) -> Option<Vec<u8>> {
 fn assembler_name(tast: &Tast, target: &TargetInfo, id: StrId) -> String {
     let spelled: String =
         tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
-    if target.object_format == ObjectFormat::MachO
-        && let Some(bare) = spelled.strip_prefix('_')
-    {
-        return bare.to_string();
+    if target.object_format == ObjectFormat::MachO {
+        if let Some(bare) = spelled.strip_prefix('_') {
+            return bare.to_string();
+        }
     }
     spelled
 }

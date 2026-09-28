@@ -262,8 +262,7 @@ options:
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
-  -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway
-  -f[no-]common          merge tentative definitions at the link, on by default for Darwin
+  -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
