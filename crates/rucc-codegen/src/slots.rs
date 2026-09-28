@@ -104,7 +104,8 @@
 //! with that many slots that are all live at once would spend the lot, and it gets the layout it
 //! would have got anyway.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rucc_base::Interner;
 use rucc_mir::{Func, Inst, Opcode, Reg};
@@ -277,7 +278,7 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> 
     let mut order: Vec<usize> = (0..wants.len()).collect();
     order.sort_by_key(|&want| {
         let Want { size, align, .. } = wants[want];
-        (std::cmp::Reverse(align), std::cmp::Reverse(size), want)
+        (Reverse(align), Reverse(size), want)
     });
 
     let mut cells: Vec<Cell> = Vec::new();
@@ -502,8 +503,15 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
 ///
 /// One walk stands for both directions. Handed the edges into each block it says which locals were
 /// touched somewhere above, and handed the edges out of each block it says which are touched
-/// somewhere below. The sweep goes the way the edges point so that a straight line settles in one
-/// pass and only a loop costs a second.
+/// somewhere below. Blocks are taken in [`settling`]'s order, so a block with no loop around it is
+/// looked at after everything it reads from is final and only once, and a block is only looked at
+/// again when a block it reads from changed.
+///
+/// It used to be rounds over every block in the line's order until one changed nothing, which
+/// settles a straight stretch in one round only when the line runs the way the edges do. It does
+/// not have to: jtckdint's main has a chain a thousand blocks long laid out against its edges, and
+/// the rounds over its 16000 blocks took a thousand passes and five seconds to move the answer down
+/// it one block at a time.
 ///
 /// A block is allowed to be its own neighbour, which is what a loop of one block is, and the row it
 /// is working on is a copy for that reason. Reading a block's own answer back is a no change either
@@ -515,24 +523,79 @@ fn spread(
     words: usize,
     forward: bool,
 ) -> Vec<Vec<u64>> {
-    let mut out = vec![vec![0u64; words]; edges.len()];
-    let mut going = true;
-    while going {
-        going = false;
-        for at in 0..edges.len() {
-            let at = if forward { at } else { edges.len() - 1 - at };
-            let mut row = out[at].clone();
-            for &from in &edges[at] {
-                for word in 0..words {
-                    let had = row[word];
-                    row[word] |= out[from][word] | touched[from][word];
-                    going |= row[word] != had;
+    let count = edges.len();
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (at, froms) in edges.iter().enumerate() {
+        for &from in froms {
+            readers[from].push(at);
+        }
+    }
+    let order = settling(&readers, forward);
+    let mut rank = vec![0; count];
+    for (place, &at) in order.iter().enumerate() {
+        rank[at] = place;
+    }
+    let mut out = vec![vec![0u64; words]; count];
+    let mut waiting: BinaryHeap<Reverse<usize>> = (0..count).map(Reverse).collect();
+    let mut queued = vec![true; count];
+    let mut row = vec![0u64; words];
+    while let Some(Reverse(place)) = waiting.pop() {
+        let at = order[place];
+        queued[at] = false;
+        row.copy_from_slice(&out[at]);
+        let mut grew = false;
+        for &from in &edges[at] {
+            for word in 0..words {
+                let had = row[word];
+                row[word] |= out[from][word] | touched[from][word];
+                grew |= row[word] != had;
+            }
+        }
+        if grew {
+            out[at].copy_from_slice(&row);
+            for &reader in &readers[at] {
+                if !queued[reader] {
+                    queued[reader] = true;
+                    waiting.push(Reverse(rank[reader]));
                 }
             }
-            out[at] = row;
         }
     }
     out
+}
+
+/// The blocks in an order where, loops aside, every block comes after the blocks it reads from.
+///
+/// That is reverse postorder of a walk along the way the answer flows, from every block in turn so
+/// that one nothing reaches is still in it. Any walk's reverse postorder puts a block after all its
+/// predecessors once the back edges are left out, whichever block it starts from.
+fn settling(readers: &[Vec<usize>], forward: bool) -> Vec<usize> {
+    let count = readers.len();
+    let mut seen = vec![false; count];
+    let mut post = Vec::with_capacity(count);
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let roots: Vec<usize> = if forward { (0..count).collect() } else { (0..count).rev().collect() };
+    for root in roots {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        stack.push((root, 0));
+        while let Some((at, next)) = stack.last_mut() {
+            if let Some(&to) = readers[*at].get(*next) {
+                *next += 1;
+                if !seen[to] {
+                    seen[to] = true;
+                    stack.push((to, 0));
+                }
+            } else {
+                post.push(*at);
+                stack.pop();
+            }
+        }
+    }
+    post.reverse();
+    post
 }
 
 /// Everywhere one local is reached from.
