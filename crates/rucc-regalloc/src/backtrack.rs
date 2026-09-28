@@ -54,6 +54,16 @@
 //! rather than of values because a function with many short values that never meet is cheap
 //! however many there are.
 //!
+//! # What the spill phase adds
+//!
+//! It runs twice when [`crate::pressure`] finds a point with more values live than registers. Once
+//! as above, where a value goes to the stack only when the queue reaches it and it can take no
+//! register back, and once with the values [`crate::spill`] picked sent to the stack before the
+//! queue starts. The first is better where the pressure is brief and eviction settles it in a few
+//! moves. The second is better where it is long, since the values that go are picked by weight
+//! across every point that is over rather than by which one the queue met last. Neither wins
+//! everywhere, so both are costed.
+//!
 //! It also gives up when it would lose. The linear scan runs as well, which is cheap next to this,
 //! and the answer kept is the one with the lower [`cost`]: the loads and stores of the values on
 //! the stack and the copies between the ends of each tie left apart, each counted by how often its
@@ -70,6 +80,8 @@ use rucc_target::{PhysReg, RegClass};
 use crate::assign::{self, Assignment, Blocks, Env, Place, Reuse, Want};
 use crate::live::{Area, Live, Range};
 use crate::order::Order;
+use crate::pressure::Pressure;
+use crate::spill;
 
 /// How many questions of whether two values are both wanted a function may ask before it is handed
 /// to the linear scan.
@@ -97,10 +109,21 @@ struct Value<'a> {
 #[must_use]
 pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment {
     let linear = assign::assign(func, order, live, env);
-    match within(func, order, live, env, BUDGET) {
-        Some(ours) if cost(func, order, &ours) <= cost(func, order, &linear) => ours,
-        _ => linear,
+    let mut best = cost(func, order, &linear);
+    let mut kept = linear;
+    let pressure = Pressure::of(func, order, live, env);
+    let spilled = spill::choose(func, live, &pressure);
+    // With nothing sent ahead the second try would be the first one again.
+    let tries: &[&[Reg]] = if spilled.is_empty() { &[&[]] } else { &[&[], &spilled] };
+    for &early in tries {
+        let Some(ours) = placed(func, order, live, env, BUDGET, early) else { break };
+        let spent = cost(func, order, &ours);
+        if spent <= best {
+            best = spent;
+            kept = ours;
+        }
     }
+    kept
 }
 
 /// What an assignment is expected to cost a function, in instructions each counted by how often
@@ -166,6 +189,17 @@ pub fn within(
     env: &Env,
     budget: u64,
 ) -> Option<Assignment> {
+    placed(func, order, live, env, budget, &[])
+}
+
+fn placed(
+    func: &Func,
+    order: &Order,
+    live: &Live,
+    env: &Env,
+    budget: u64,
+    early: &[Reg],
+) -> Option<Assignment> {
     let blocked = assign::blocked(func, order);
     let forced = assign::forced(func);
     let reuses = assign::reuses(func, order);
@@ -207,7 +241,7 @@ pub fn within(
     let mut lost = vec![0u32; count];
     while let Some((_, Reverse(number))) = queue.pop() {
         let Some(value) = values[number] else { continue };
-        if forced.contains(&value.reg) {
+        if forced.contains(&value.reg) || early.contains(&value.reg) {
             assignment.spill(value.reg, value.class);
             continue;
         }
@@ -522,7 +556,7 @@ impl<'a> State<'a, '_> {
 }
 
 /// How much of the line a value is live over.
-fn size(area: Area<'_>) -> u32 {
+pub(crate) fn size(area: Area<'_>) -> u32 {
     area.pieces().map(|piece| piece.end - piece.start + 1).sum()
 }
 
@@ -530,7 +564,7 @@ fn size(area: Area<'_>) -> u32 {
 ///
 /// A block that says nothing about how often it runs counts as running once, so a function with no
 /// weights on it is counted by how many times each value is named.
-fn costs(func: &Func) -> Vec<u128> {
+pub(crate) fn costs(func: &Func) -> Vec<u128> {
     let mut costs = vec![0u128; func.vregs()];
     let mut add = |reg: Reg, weight: u128| {
         let number = reg.number().and_then(|number| usize::try_from(number).ok());
@@ -650,6 +684,36 @@ mod tests {
                 named(assignment.place(reg))
             })
             .collect()
+    }
+
+    #[test]
+    fn a_value_the_spill_phase_picked_goes_to_the_stack_and_the_rest_fit() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let busy = func.new_vreg(GPR);
+        let once = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        func.build(block, opcode).def(busy, GPR).finish();
+        func.build(block, opcode).def(once, GPR).finish();
+        func.build(block, opcode).def(other, GPR).finish();
+        for _ in 0..3 {
+            func.build(block, opcode).uses(busy, GPR).uses(other, GPR).finish();
+        }
+        func.build(block, opcode).uses(once, GPR).uses(busy, GPR).uses(other, GPR).finish();
+
+        let env = narrow(2);
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let pressure = Pressure::of(&func, &order, &live, &env);
+        let early = spill::choose(&func, &live, &pressure);
+        assert_eq!(early, [once]);
+        let assignment = placed(&func, &order, &live, &env, BUDGET, &early).expect("in budget");
+        let problems = check::check(&func, &order, &live, &assignment);
+        assert!(problems.is_empty(), "{}", check::report(&problems));
+        assert_eq!(named(assignment.place(once)), "slot");
+        assert_eq!(assignment.spilled(), 1);
     }
 
     #[test]
