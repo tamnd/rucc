@@ -126,3 +126,101 @@ fn a_darwin_object_carries_its_debug_information() {
     }
     assert!(has(b"__DWARF"));
 }
+
+/// Calls that go past the eight argument registers, and a variadic one.
+const STACKED: &str = "\
+int pk(int a, int b, int c, int d, int e, int f, int g, int h, char i, short j, int k, char l);
+int callpk(void) { return pk(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12); }
+int va(int n, ...);
+int callva(void) { return va(1, 42, 3.0); }
+";
+
+/// Whether one of those instructions is a store to this place in the outgoing arguments.
+fn stores_at(body: &[&str], place: &str) -> bool {
+    body.iter().any(|line| line.starts_with("str") && line.ends_with(&format!(", {place}")))
+}
+
+/// Apple packs arguments on the stack to their own size and alignment where AAPCS64 gives each
+/// one an eight byte slot. clang's `pk` reads `j` from `[sp, #2]`, so a caller that wrote it at
+/// `[sp, #8]` hands it `l` instead.
+#[test]
+fn a_stack_argument_is_packed_to_its_own_alignment_on_darwin() {
+    for level in ["-O0", "-O2"] {
+        let asm = listing(&format!("packed{level}"), STACKED, DARWIN, level);
+        let call = body(&asm, "_callpk");
+        for place in ["[sp]", "[sp, #2]", "[sp, #4]", "[sp, #8]"] {
+            assert!(stores_at(&call, place), "{level} {place}\n{asm}");
+        }
+    }
+    let asm = listing("packed-linux", STACKED, LINUX, "-O2");
+    let call = body(&asm, "callpk");
+    for place in ["[sp]", "[sp, #8]", "[sp, #16]", "[sp, #24]"] {
+        assert!(stores_at(&call, place), "{place}\n{asm}");
+    }
+    assert!(!stores_at(&call, "[sp, #2]"), "{asm}");
+}
+
+/// Apple passes every argument a `...` stands for on the stack, eight bytes each, and its
+/// `va_list` is a plain pointer that walks them. clang's `va` never looks in `w1` or `d0`, so the
+/// `42` and the `3.0` have to be in memory before the call.
+#[test]
+fn a_variadic_argument_goes_on_the_stack_on_darwin() {
+    for level in ["-O0", "-O2"] {
+        let asm = listing(&format!("variadic{level}"), STACKED, DARWIN, level);
+        let call = body(&asm, "_callva");
+        assert!(stores_at(&call, "[sp]") && stores_at(&call, "[sp, #8]"), "{level}\n{asm}");
+    }
+    let asm = listing("variadic-linux", STACKED, LINUX, "-O2");
+    let call = body(&asm, "callva");
+    assert!(!call.iter().any(|line| line.starts_with("str") && line.contains("[sp")), "{asm}");
+}
+
+/// The word a data label is given, as written in the listing.
+fn word<'a>(listing: &'a str, label: &str) -> Option<&'a str> {
+    let mut lines = listing.lines().skip_while(|line| *line != format!("{label}:"));
+    lines.nth(1).map(str::trim)
+}
+
+/// The types whose size or sign Apple chose differently: a plain `char` is signed, `wchar_t` is a
+/// signed `int`, and `long double` is the same eight bytes as `double`. A structure holding any
+/// of them is laid out differently by clang if rucc got one wrong.
+const TYPES: &str = "\
+#include <stddef.h>
+int chars = (char)-1 < 0;
+int wides = sizeof(wchar_t) * 10 + ((wchar_t)-1 < 0);
+int longs = sizeof(long double);
+long double sum(long double a, long double b) { return a + b; }
+";
+
+#[test]
+fn a_plain_char_is_signed_and_a_long_double_is_a_double_on_darwin() {
+    let asm = listing("types", TYPES, DARWIN, "-O2");
+    assert_eq!(word(&asm, "_chars"), Some(".long\t1"), "{asm}");
+    assert_eq!(word(&asm, "_wides"), Some(".long\t41"), "{asm}");
+    assert_eq!(word(&asm, "_longs"), Some(".long\t8"), "{asm}");
+    assert!(has(&body(&asm, "_sum"), "fadd", "d0"), "{asm}");
+    let asm = listing("types-linux", TYPES, LINUX, "-O2");
+    assert_ne!(word(&asm, "chars"), Some(".long\t1"), "{asm}");
+    assert_eq!(word(&asm, "wides"), Some(".long\t40"), "{asm}");
+    assert_eq!(word(&asm, "longs"), Some(".long\t16"), "{asm}");
+    assert!(body(&asm, "sum").iter().any(|line| line.contains("__addtf3")), "{asm}");
+}
+
+/// Apple keeps `x18` for the system, which may change it at any moment, so a value left there is
+/// lost. Twenty live arguments are more than the registers a call destroys, which is when an
+/// allocator reaches for it.
+#[test]
+fn the_platform_register_is_never_used_on_darwin() {
+    let many = "\
+long many(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j,
+          long k, long l, long m, long n, long o, long p, long q, long r, long s, long t) {
+    return (a * b + c * d + e * f + g * h + i * j + k * l + m * n + o * p + q * r + s * t)
+        * (a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q + r + s + t);
+}
+";
+    for level in ["-O0", "-O2"] {
+        let asm = listing(&format!("x18{level}"), many, DARWIN, level);
+        assert!(body(&asm, "_many").len() > 20, "{asm}");
+        assert!(!asm.contains("x18") && !asm.contains("w18"), "{level}\n{asm}");
+    }
+}
