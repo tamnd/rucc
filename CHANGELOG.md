@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.12.3
+
+Windows work from W2, a fix that lets `rucc.exe` find its fetched sysroot on a Windows machine, and a round of compile time work on the back end.
+
 ### Added
 
 - `tests/exec/windows` gains `wide.c`, a `wmain` program built with `-municode` that checks a character outside the basic plane is two UTF-16 units, and `environ.c`, which reads `environ` and `_timezone` from the C runtime DLL with no `dllimport` in the source. A program there can name its own compile flags on a `/* flags: */` line (#2068).
