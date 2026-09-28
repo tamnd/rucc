@@ -2581,7 +2581,7 @@ impl Session {
     /// reason [`Options::common`] gives.
     #[must_use]
     pub fn common(&self) -> bool {
-        self.opts.common.unwrap_or(self.opts.target.os.is_darwin())
+        self.opts.common.unwrap_or(self.opts.target.os == Os::Darwin)
     }
 
     /// Records a diagnostic.
