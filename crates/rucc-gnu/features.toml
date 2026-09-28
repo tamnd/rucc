@@ -419,17 +419,19 @@ tests = []
 name = "hot"
 kind = "attribute"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux"]
-tests = []
+tests = ["rucc-sema::cold_and_hot_written_as_attributes_are_kept"]
+notes = "It reaches the IR as `attrs(hot)`. Nothing acts on it yet. It is only a hint, so the program is the same without it."
 
 [[feature]]
 name = "cold"
 kind = "attribute"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "systemd"]
-tests = []
+tests = ["rucc-sema::cold_and_hot_written_as_attributes_are_kept"]
+notes = "It reaches the IR as `attrs(cold)`, and `rucc_opt::predict` makes the path to a call of a cold function the unlikely one. Postgres marks `errstart_cold` with it so the error path of every `elog` is laid out away from the hot code."
 
 [[feature]]
 name = "pure"

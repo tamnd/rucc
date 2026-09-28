@@ -157,6 +157,12 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NAKED) {
             head.push_str(" naked");
         }
+        if node.flags.contains(DeclFlags::COLD) {
+            head.push_str(" cold");
+        }
+        if node.flags.contains(DeclFlags::HOT) {
+            head.push_str(" hot");
+        }
         if node.flags.contains(DeclFlags::RETURNS_TWICE) {
             head.push_str(" returns-twice");
         }

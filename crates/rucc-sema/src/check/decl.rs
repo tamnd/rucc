@@ -93,7 +93,8 @@ struct Declared {
     twice: bool,
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
-    /// [`DeclFlags::NO_STRICT_ALIASING`] and [`DeclFlags::NO_INSTRUMENT`] and nothing else.
+    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::COLD`] and
+    /// [`DeclFlags::HOT`] and nothing else.
     inlining: DeclFlags,
     /// What this declaration promised a call to it does, from `const` and `pure`.
     effects: Effects,
@@ -2687,6 +2688,26 @@ mod tests {
             "decl #0 setjmp : int(void) function external declared returns-twice\n"
         );
         assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+    }
+
+    #[test]
+    fn cold_and_hot_written_as_attributes_are_kept() {
+        for (spelling, word) in [("__cold__", "cold"), ("hot", "hot")] {
+            let mut f = Fixture::new();
+            let mut specs = f.int_specs();
+            specs.attrs = f.attribute(spelling);
+            let decl = f.var(specs, "report", &[function()], None);
+
+            let mut c = f.checker();
+            let list = c.check_decl(decl);
+            let id = only(&c, list);
+
+            assert_eq!(
+                dump(&c, id),
+                format!("decl #0 report : int(void) function external declared {word}\n")
+            );
+            assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        }
     }
 
     #[test]

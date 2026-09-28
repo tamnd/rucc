@@ -313,6 +313,19 @@ impl DeclFlags {
     /// [`Self::NORETURN`] is, because it is written in the same place for the same reason.
     pub const RETURNS_TWICE: Self = Self(1 << 11);
 
+    /// `__attribute__((cold))` was written on a declaration of this name.
+    ///
+    /// A call to it is unlikely, so the branch that leads to one is the unlikely side. Postgres
+    /// writes it on `errstart_cold`, which is how every `elog(ERROR)` path is marked as the one
+    /// that is not taken. Merged the way [`Self::ALWAYS_INLINE`] is, since the header is where it
+    /// is written.
+    pub const COLD: Self = Self(1 << 12);
+
+    /// `__attribute__((hot))` was written on a declaration of this name. Merged the way
+    /// [`Self::COLD`] is. Where a name ends up with both, the IR keeps `cold`, as gcc does after
+    /// its warning.
+    pub const HOT: Self = Self(1 << 13);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

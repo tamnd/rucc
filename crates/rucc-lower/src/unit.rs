@@ -773,6 +773,14 @@ impl Unit<'_> {
         } else if node.flags.contains(DeclFlags::DECLARED_INLINE) {
             func.attrs.set |= AttrSet::INLINE_HINT;
         }
+        // How often it is called, which `rucc_opt::predict` reads off the callee to make the path
+        // to a call of a cold function the unlikely one. The IR will not have both, and a name
+        // that said both gets `cold`.
+        if node.flags.contains(DeclFlags::COLD) {
+            func.attrs.set |= AttrSet::COLD;
+        } else if node.flags.contains(DeclFlags::HOT) {
+            func.attrs.set |= AttrSet::HOT;
+        }
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
