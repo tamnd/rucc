@@ -126,7 +126,10 @@
 //! # What nothing moves across
 //!
 //! A call, because what a call does to memory and to the registers a convention does not preserve
-//! is not in its operands. An instruction the target does not describe, on the same reasoning
+//! is not in its operands. A branch or a return, for the same reason: a `ret` reads the value in
+//! `rax` without naming it. One only turns up in the middle of a block when an `asm` template put
+//! it there, and a naked function's `movl $42, %eax; ret` is the case that found it, where the
+//! `ret` was moved above the `mov`. An instruction the target does not describe, on the same reasoning
 //! backwards. An instruction the target describes as doing something the timing model does not
 //! cover, which is [`Unit::Fixed`]: a fence, a trap, a landing pad, the padding a patcher was
 //! promised. And an instruction that carries a frame rule, because those rules say what the
@@ -287,9 +290,9 @@ impl Known<'_> {
     /// What the target says about this instruction's opcode, and whether nothing may be moved
     /// across the instruction.
     ///
-    /// See the module comment. The four barriers are a call, a name the target does not have, a
-    /// name the target has and the timing model does not cover, and an instruction carrying a frame
-    /// rule.
+    /// See the module comment. The five barriers are a call, a branch or a return, a name the
+    /// target does not have, a name the target has and the timing model does not cover, and an
+    /// instruction carrying a frame rule.
     fn of(&mut self, func: &Func, inst: Inst) -> Facts {
         let symbol = func[inst].opcode.name();
         let (timing, machine, flags, names) = (self.timing, self.machine, self.flags, self.names);
@@ -300,7 +303,7 @@ impl Known<'_> {
             Facts {
                 barrier: machine.calls(name)
                     || !machine.has(name)
-                    || cost.is_none_or(|cost| cost.unit == Unit::Fixed),
+                    || cost.is_none_or(|cost| matches!(cost.unit, Unit::Fixed | Unit::Branch)),
                 timing: cost,
                 reads_flags: flags.reads(bare).is_some(),
                 writes_flags: (flags.writes)(bare),
@@ -879,6 +882,22 @@ mod tests {
         let done = schedule(&mut func, &names);
         assert_eq!(done.moved, 0);
         assert_eq!(shape(&func, &names, block), ["mov_rr_64", "ud2", "imul_rr_64", "ret"]);
+    }
+
+    /// A return in the middle of a block, which only an `asm` template writes. It reads `rax`
+    /// without naming it, so the `mov` in front of it has nothing tying it there but this.
+    #[test]
+    fn a_return_an_asm_template_wrote_is_a_barrier() {
+        let (mut names, mut func, block) = empty();
+        mov(&mut func, &mut names, block, RAX, RDX);
+        bare(&mut func, &mut names, block, "ret");
+        alu(&mut func, &mut names, block, "imul_rr_64", RSI, R9);
+        bare(&mut func, &mut names, block, "ud2");
+
+        assert_eq!(TIMING.of("x64.ret").expect("described").unit, Unit::Branch);
+        let done = schedule(&mut func, &names);
+        assert_eq!(done.moved, 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64", "ret", "imul_rr_64", "ud2"]);
     }
 
     /// The property that holds whatever the model says, since the model chooses among orders and
