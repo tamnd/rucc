@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.14
+
 ### Added
 
 - An `asm` statement over `long double` operands in `t` and `u` is compiled on x86-64, with the inputs pushed onto the x87 stack before the template and the outputs popped into their slots after it. One that leaves an input on the stack is refused. The assembler knows the operand-less x87 instructions such a template names, like `fpatan`, `fsqrt`, `fyl2x`, `fsin` and `fldpi`, and gcc-torture `990413-2.c` passes at every level (#349).
