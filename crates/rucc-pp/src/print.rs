@@ -15,7 +15,7 @@
 
 use rucc_base::Interner;
 use rucc_diag::{FileId, SourceMap};
-use rucc_lex::{PpTokenKind, TokenFlags};
+use rucc_lex::{PpTokenKind, Punct, TokenFlags};
 
 use crate::directive::LineDirective;
 use crate::include::{quoted, spelling};
@@ -76,6 +76,7 @@ pub fn print(
         stack: vec![main],
         lines,
         next: 0,
+        directive: false,
     };
     printer.start();
     let mut previous: Option<Tok> = None;
@@ -113,6 +114,8 @@ struct Printer<'a> {
     lines: &'a [LineDirective],
     /// How many of them have been written out.
     next: usize,
+    /// Whether the current output line is a `#pragma` or another directive line.
+    directive: bool,
 }
 
 impl Printer<'_> {
@@ -149,10 +152,26 @@ impl Printer<'_> {
         // in, and where it says it is is the presented one, since that is what a marker says.
         // `sources` is copied out of `self` so that the borrow of the name outlives the call
         // that needs `self` mutably. It is a shared reference the printer does not own.
+        // A directive is a line of its own, and so is whatever comes after one, even when both
+        // come from one source line. `_Pragma` makes that happen: a macro that expands to two of
+        // them puts both on the line it was used on, and the second `#` read back in the middle
+        // of the first line is a stray token rather than a pragma, which is how gcc sees it.
+        // What comes after a pragma is marked as starting a line when the pragma is made. The
+        // new line gets a marker, as in gcc, so the line numbers after it stay right.
+        let starts_line = tok.flags.has(TokenFlags::START_OF_LINE);
+        let hash = starts_line && tok.is(Punct::Hash);
+        let breaks = hash || (self.directive && starts_line);
+        if starts_line {
+            self.directive = hash;
+        }
         let sources = self.sources;
         if let Some(file) = sources.lookup_file(at) {
             if let Some(loc) = sources.presumed(at) {
                 self.move_to(file, loc.name, loc.line, loc.column);
+                if breaks && self.printed {
+                    self.end_line();
+                    self.jump(loc.name, loc.line);
+                }
             }
         }
         let text = spelling(tok, self.interner);
@@ -410,6 +429,20 @@ mod tests {
     fn the_first_line_says_which_file_this_is() {
         let mut run = Run::new();
         assert_eq!(run.go("int x;\n"), "# 1 \"/main.c\"\nint x;\n");
+    }
+
+    #[test]
+    fn two_pragmas_from_one_macro_are_two_lines_and_what_follows_is_a_third() {
+        let mut run = Run::new();
+        let src = "#define P _Pragma(\"a\") _Pragma(\"b\")\nP int x;\nint y;\n";
+        assert_eq!(
+            run.go(src),
+            "# 1 \"/main.c\"\n\n#pragma a\n# 2 \"/main.c\"\n#pragma b\n# 2 \"/main.c\"\n int x;\nint y;\n"
+        );
+        assert_eq!(
+            run.print(src, PrintOptions { line_markers: false }),
+            "#pragma a\n#pragma b\n int x;\nint y;\n"
+        );
     }
 
     #[test]
