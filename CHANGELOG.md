@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.16
+
 ### Added
 
 - `__attribute__((target(...)))` on x86-64 is read the way gcc reads it. The strings name extensions with or without `no-`, plus `arch=`, `tune=` and gcc's other options, and a name gcc does not know is refused in gcc's words. A function carrying the attribute may call the shipped SSE4.2 and population count intrinsics without the matching `-m` flag. A call to one from a function not built for it is refused with gcc's `target specific option mismatch`, and the inliner never copies a body built for more extensions into a caller built for fewer. AArch64 strings such as `+crc` are still accepted. (#2002)
