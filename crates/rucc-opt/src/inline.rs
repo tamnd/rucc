@@ -157,8 +157,9 @@ pub enum InlineFailure {
     TooLarge,
     /// The call is inside more loops than a function called once may be inlined into.
     TooDeep,
-    /// The call has a landing pad, which covers the call and would cover none of the calls the
-    /// body makes once it was copied in.
+    /// The call has a landing pad but not in the shape the lowering builds, an `unwound` straight
+    /// after it read by the branch that ends its block, so there is no pad to hand the calls the
+    /// body makes once it is copied in.
     Unwinds,
     /// The callee is built for x86-64 extensions the caller is not, so its body may use
     /// instructions the caller may not assume. gcc's words for it are the ones used.
@@ -566,9 +567,10 @@ fn check(
     convention: Convention,
     kind: Kind,
 ) -> Result<Plan, InlineFailure> {
-    // The pad is for an unwind out of this call, and the table that says so names the call
-    // by where it is. A copy of the body in its place is calls the table knows nothing about.
-    if func.unwinds_to_pad(call) {
+    // The pad is for an unwind out of this call, and the table that says so names the call by
+    // where it is. A copy of the body in its place is calls the table knows nothing about, so
+    // `copy` gives each of them the same pad, which needs the pad to be found.
+    if func.unwinds_to_pad(call) && unwind_arms(func, call).is_none() {
         return Err(InlineFailure::Unwinds);
     }
     let entry = callee.entry().ok_or(InlineFailure::Mismatch)?;
@@ -891,6 +893,10 @@ fn forwardable(
 fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
     let block = func.block_of(call).expect("a call being inlined is in a block");
     let entry = func.entry().expect("a function with a call in it has a body");
+    // Where an unwind out of the call went, and where a return from it went, when a `cleanup`
+    // handler's scope gave it a pad. Read before the block is split, since the split moves the
+    // branch that says so.
+    let arms = unwind_arms(func, call);
 
     // The part after the call, which takes the call's results as parameters.
     let after = func.create_block();
@@ -903,6 +909,22 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
     for inst in moving {
         func.remove_inst(inst);
         func.append_inst(after, inst);
+    }
+    // With the call gone the `unwound` behind it has nothing to ask about, and the branch on it
+    // goes where a return went, always.
+    if let Some((unwound, branch, _, returned)) = arms {
+        func.remove_inst(unwound);
+        func.remove_inst(branch);
+        let args = func[returned.args].to_vec();
+        let args = func.push_values(&args);
+        let to = func.push_block_calls(&[BlockCall { args, ..returned }]);
+        let span = func.span(branch);
+        let jump = func.create_inst(
+            InstData { extra: Extra::Targets(to), ..InstData::new(Opcode::Jump) },
+            &[],
+            span,
+        );
+        func.append_inst(after, jump);
     }
 
     // The callee's blocks and their parameters, and then its instructions with their results, so
@@ -984,6 +1006,18 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
             made.push((inst, new));
         }
     }
+
+    // The calls of the body that an unwind leaves with no pad of the callee's to run, which are
+    // the ones given the caller's below. A call with a pad of its own already goes somewhere, and
+    // that pad ends in `_Unwind_Resume`, which is one of these.
+    let bare: Vec<Inst> = made
+        .iter()
+        .filter(|&&(inst, _)| {
+            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect)
+                && !callee.unwinds_to_pad(inst)
+        })
+        .map(|&(_, new)| new)
+        .collect();
 
     let keep = func[call].results().count();
     for (inst, new) in made {
@@ -1081,6 +1115,59 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
     crate::uses::substitute(func, &forward);
     func.remove_inst(call);
     func.append_inst(block, jump);
+
+    // An unwind out of any of those calls passes through the call that was inlined, so it owes
+    // what that call's pad does. Each one gets the edge the lowering gives a call in a handler's
+    // scope, an `unwound` and a branch on it to the pad, with the rest of its block moved behind
+    // the branch. Several calls sharing one pad is fine, since the code generator finds a call's
+    // pad by its branch and no machine edge ever enters one.
+    if let Some((_, _, pad, _)) = arms {
+        for new in bare {
+            let block = func.block_of(new).expect("a copied call is in a block");
+            let rest = func.create_block();
+            let moving: Vec<Inst> =
+                func.insts(block).skip_while(|&inst| inst != new).skip(1).collect();
+            for inst in moving {
+                func.remove_inst(inst);
+                func.append_inst(rest, inst);
+            }
+            let span = func.span(new);
+            let unwound = func.create_inst(InstData::new(Opcode::Unwound), &[Type::I1], span);
+            func.append_inst(block, unwound);
+            let cond = func[unwound].results().next().expect("an unwound has its answer");
+            let args = func[pad.args].to_vec();
+            let args = func.push_values(&args);
+            let to = func.push_block_calls(&[
+                BlockCall { args, ..pad },
+                BlockCall::new(rest, ValueList::EMPTY),
+            ]);
+            let branch = func.create_inst(
+                InstData { extra: Extra::Targets(to), ..InstData::new(Opcode::BrIf) },
+                &[],
+                span,
+            );
+            func[branch].args = func.push_values(&[cond]);
+            func.append_inst(block, branch);
+        }
+    }
+}
+
+/// The `unwound` behind a call with a pad, the branch on it that ends the call's block, and the
+/// branch's two arms, the pad first and then where a return goes. `None` for a call with no pad,
+/// and for one whose edge is not in the shape the lowering builds.
+fn unwind_arms(func: &Func, call: Inst) -> Option<(Inst, Inst, BlockCall, BlockCall)> {
+    let unwound = func.next_inst(call).filter(|&next| func[next].opcode == Opcode::Unwound)?;
+    let block = func.block_of(call)?;
+    let branch = func.insts(block).last()?;
+    let answer = func[unwound].results().next()?;
+    if func[branch].opcode != Opcode::BrIf || func[func[branch].args].first() != Some(&answer) {
+        return None;
+    }
+    let Extra::Targets(list) = func[branch].extra else { return None };
+    match func[list] {
+        [pad, returned] => Some((unwound, branch, pad, returned)),
+        _ => None,
+    }
 }
 
 /// Appends what the pack stands for to the arguments of one call, putting each group the plan
@@ -1788,5 +1875,71 @@ block0(%0: i32):
         assert_eq!(sysv(&before, Some(&[1, 1])), Some(Vec::new()));
         assert_eq!(sysv(&before, None), None);
         assert_eq!(sysv(&outer, None), Some(Vec::new()));
+    }
+
+    /// A function with a `cleanup` handler of its own, called from inside the scope of one of the
+    /// caller's, both under `-fexceptions`. The lowering gives each call in a handler's scope an
+    /// `unwound` and a branch on it to a pad that runs the handlers and resumes the unwind.
+    const PADDED: &str = r#"
+func @hinted(i32), linkage(internal), attrs(inline_hint) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 5
+    store %2 -> %1, align 4
+    call @leave(%0) : (i32)
+    %3 = unwound.i1
+    br_if %3, block1, block2
+
+block1:
+    %4 = landing.ptr
+    call @done(%1) : (ptr)
+    call @_Unwind_Resume(%4) : (ptr)
+    unreachable
+
+block2:
+    call @done(%1) : (ptr)
+    return
+}
+
+func @outer(i32), linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 1
+    store %2 -> %1, align 4
+    call @hinted(%0) : (i32)
+    %3 = unwound.i1
+    br_if %3, block1, block2
+
+block1:
+    %4 = landing.ptr
+    call @done(%1) : (ptr)
+    call @_Unwind_Resume(%4) : (ptr)
+    unreachable
+
+block2:
+    call @done(%1) : (ptr)
+    return
+}
+"#;
+
+    /// Inlined, the body's calls are calls the caller's pad has to cover, since an unwind out of
+    /// any of them passes through the call that was there. The one with a pad of its own keeps it,
+    /// and that pad's `_Unwind_Resume` is covered like the rest, which is how the unwind gets from
+    /// the callee's handler to the caller's. The `unwound` of the call that went has nothing left
+    /// to ask about and goes with it.
+    #[test]
+    fn a_call_with_a_landing_pad_is_inlined_and_the_pad_covers_the_body() {
+        let out = inlined_under(PADDED, Some(70));
+        let outer = &out[out.find("func @outer").expect("outer is there")..];
+        assert!(!outer.contains("call @hinted"), "{out}");
+        // The callee's own edge, and one for each of the three calls in the body that had none:
+        // the handler on the way out, the handler in its pad and the resume after it.
+        assert_eq!(outer.matches("= unwound").count(), 4, "{outer}");
+        assert_eq!(outer.matches("= landing").count(), 2, "{outer}");
+        assert_eq!(outer.matches("call @_Unwind_Resume").count(), 2, "{outer}");
+        // The caller's pad is where three of those edges go, and the fourth is the callee's.
+        assert_eq!(outer.matches(", block1, ").count(), 3, "{outer}");
+        // At -O0 nothing is inlined, pad or not.
+        assert!(inlined(PADDED).contains("call @hinted"));
     }
 }
