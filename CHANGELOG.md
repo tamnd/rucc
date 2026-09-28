@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `rucc_base::dfp` converts the text of a decimal floating constant to the bits of `_Decimal32`, `_Decimal64` or `_Decimal128` in the BID encoding gcc uses on x86-64 and AArch64, rounding to nearest with ties to even and keeping the exponent the text wrote, and reads the bits back. Nothing calls it yet. It is the first part of #207.
+
 ## 0.11.14
 
 ### Added
