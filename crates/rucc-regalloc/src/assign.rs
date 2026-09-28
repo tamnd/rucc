@@ -181,6 +181,11 @@ pub struct Assignment {
 }
 
 impl Assignment {
+    /// Records that the sources of `inst` are to be swapped, for an answer written over the second.
+    pub(crate) fn commute(&mut self, inst: Inst) {
+        self.commuted.push(inst);
+    }
+
     /// An assignment that says nothing yet about a function with that many values.
     ///
     /// This and [`Assignment::put`] and [`Assignment::take_slot`] are how an allocator says what
@@ -255,7 +260,7 @@ impl Assignment {
     }
 
     /// Puts a value on the stack, in a slot of its own.
-    fn spill(&mut self, reg: Reg, class: RegClass) {
+    pub(crate) fn spill(&mut self, reg: Reg, class: RegClass) {
         let slot = self.take_slot(class);
         self.put(reg, Place::Slot(slot));
     }
@@ -302,16 +307,16 @@ struct Blocked {
 
 /// A value written into the register another operand of the same instruction was read from.
 #[derive(Debug, Clone, Copy)]
-struct Reuse {
+pub(crate) struct Reuse {
     /// The value being read, which is the one whose register would do.
-    source: Reg,
+    pub(crate) source: Reg,
     /// The other value the instruction reads, when the instruction reads the two either way round
     /// and so could write its answer over this one instead.
-    second: Option<Reg>,
+    pub(crate) second: Option<Reg>,
     /// Where the instruction reads it.
-    at: Point,
+    pub(crate) at: Point,
     /// The instruction, which is swapped round if the answer takes the second value's register.
-    inst: Inst,
+    pub(crate) inst: Inst,
 }
 
 /// Decides where every value in a function lives.
@@ -424,7 +429,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
 
 /// How much a register suits an interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Want {
+pub(crate) enum Want {
     /// Nothing insists on it anywhere the range reaches, so taking it costs nobody anything.
     Clear,
     /// Something insists on it somewhere the range reaches and nowhere the value is live, so taking
@@ -443,12 +448,28 @@ enum Want {
 /// It used to be a flat list walked from one end for every candidate register of every interval,
 /// which is quadratic in the size of a function and is most of the compile on a large one. See
 /// tamnd/rucc#1003 for the profile that found it.
-struct Blocks {
+pub(crate) struct Blocks {
     /// The constraints, sorted by class, then by register, then by point.
     all: Vec<Blocked>,
 }
 
 impl Blocks {
+    /// Whether an instruction insists on `at` where a value over `area` would be in its way: at any
+    /// point the value's range reaches when the register is wanted clear, and only at a point the
+    /// value is live at when it is merely wanted allowed. The value's own operands never count.
+    pub(crate) fn insists(
+        &self,
+        reg: Reg,
+        class: RegClass,
+        area: Area<'_>,
+        range: Range,
+        at: PhysReg,
+        want: Want,
+    ) -> bool {
+        self.over(class, at, range)
+            .any(|one| one.by != Some(reg) && (want == Want::Clear || area.covers(one.point)))
+    }
+
     /// The constraints on one register of one class at the points an interval covers.
     ///
     /// Both ends of the walk come from the ordering rather than from a test, so what comes back is
@@ -602,7 +623,7 @@ fn spill_one<'a>(
 /// A physical register an operand names outright counts the same way. Nothing before allocation
 /// writes one except an instruction that has to, and it has to for the length of that one
 /// instruction, which is the same statement a fixed constraint makes.
-fn blocked(func: &Func, order: &Order) -> Blocks {
+pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
     let mut blocked = Vec::new();
     let mut claimed: Vec<(RegClass, PhysReg)> = Vec::new();
     for block in func.blocks() {
@@ -686,7 +707,7 @@ fn insisted(operand: &Operand) -> Option<PhysReg> {
 /// insist on the register a parameter arrived in, which the call it is handed to has usually taken
 /// back for an argument of its own by then, and behind that is the register the convention passes
 /// it in, which is free and is exactly where the value wants to end up.
-fn hints(func: &Func) -> Vec<Vec<PhysReg>> {
+pub(crate) fn hints(func: &Func) -> Vec<Vec<PhysReg>> {
     let mut hints = vec![Vec::new(); func.vregs()];
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -705,7 +726,7 @@ fn hints(func: &Func) -> Vec<Vec<PhysReg>> {
 }
 
 /// The block parameters each value is passed to, by the virtual register passed.
-fn passed(func: &Func) -> Vec<Vec<Reg>> {
+pub(crate) fn passed(func: &Func) -> Vec<Vec<Reg>> {
     let mut passed = vec![Vec::new(); func.vregs()];
     for block in func.blocks() {
         for call in &func[block].succs {
@@ -723,7 +744,7 @@ fn passed(func: &Func) -> Vec<Vec<Reg>> {
 }
 
 /// The values that have to be on the stack whatever else is true of them.
-fn forced(func: &Func) -> Vec<Reg> {
+pub(crate) fn forced(func: &Func) -> Vec<Reg> {
     let mut forced = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -741,7 +762,7 @@ fn forced(func: &Func) -> Vec<Reg> {
 }
 
 /// The value each two address instruction reuses, by the virtual register it writes.
-fn reuses(func: &Func, order: &Order) -> Vec<Option<Reuse>> {
+pub(crate) fn reuses(func: &Func, order: &Order) -> Vec<Option<Reuse>> {
     let mut reuses = vec![None; func.vregs()];
     for block in func.blocks() {
         for inst in func.insts(block) {
