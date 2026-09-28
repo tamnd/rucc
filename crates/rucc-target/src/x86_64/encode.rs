@@ -49,7 +49,9 @@ use crate::regs::{PhysReg, Segment};
 use crate::x86_64::text::{Arg, Width};
 
 use Fits::{Signed8, Signed32};
-use Size::{Byte, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Untracked, Word, WordQuad};
+use Size::{
+    Byte, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Untracked, Word, WordDouble, WordQuad,
+};
 
 /// What kind of thing one argument of an instruction is.
 ///
@@ -138,6 +140,14 @@ pub enum Size {
     SingleQuad,
     /// The `0xF2` prefix with `REX.W` set, which is the `double` ones.
     DoubleQuad,
+    /// The `0x66` prefix and then the `0xF2` one, which is `crc32w`.
+    ///
+    /// The only size here that is two prefix bytes. `0xF2` is what makes `0F 38 F1` a checksum
+    /// step rather than `movbe`, and `0x66` is what makes the operand it reads sixteen bits, so the
+    /// two answer different questions the way the pairs above do, except that the second answer is
+    /// a byte of its own rather than a bit in the REX byte. gas writes `0x66` first and the manual
+    /// lists it that way, and the bytes have to match what gas writes.
+    WordDouble,
     /// The `0x3E` prefix, which is `notrack` in front of an indirect jump or call.
     ///
     /// Not a size either. With indirect branch tracking on, a jump through a register has to land
@@ -157,7 +167,7 @@ impl Size {
         match self {
             Word | WordQuad => Some(0x66),
             Single | SingleQuad => Some(0xF3),
-            Double | DoubleQuad => Some(0xF2),
+            Double | DoubleQuad | WordDouble => Some(0xF2),
             Untracked => Some(0x3E),
             Byte | Long | Quad => None,
         }
@@ -1422,6 +1432,30 @@ static ENCODINGS: &[Encoding] = &[
     bytes("lzcntq", &MR, SingleQuad, &[0x0F, 0xBD], pair(0, 1), NO_IMM),
     bytes("tzcntl", &MR, Single, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
     bytes("tzcntq", &MR, SingleQuad, &[0x0F, 0xBC], pair(0, 1), NO_IMM),
+    // Counting the bits that are set, which is the third opcode of the same family and the one
+    // `__builtin_popcount` is short for. Its own feature bit rather than part of any SSE level, so
+    // a processor has it or not whatever else it has, and `-mpopcnt` is what says it does. No
+    // sixteen bit form, for the reason the two counts above have none.
+    bytes("popcntl", &RR, Single, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
+    bytes("popcntq", &RR, SingleQuad, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
+    bytes("popcntl", &MR, Single, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
+    bytes("popcntq", &MR, SingleQuad, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
+    // One step of the CRC-32C checksum, which is SSE4.2 and is what `_mm_crc32_u8` and its three
+    // wider siblings are. The destination is the running checksum and the source is the next one,
+    // two, four or eight bytes of data, so the letter is the width of the source and not of the
+    // destination: every form but the last accumulates into a thirty two bit register, and the
+    // last is written on sixty four bits only because `REX.W` is how the machine says the source is
+    // eight bytes, with the top half of the destination cleared. The byte form is its own opcode,
+    // `F0`, the way every byte form on this machine is, and the rest share `F1` and are told apart
+    // by the prefixes. See `Size::WordDouble` for the sixteen bit one.
+    bytes("crc32b", &RR, Double, &[0x0F, 0x38, 0xF0], pair(0, 1), NO_IMM),
+    bytes("crc32w", &RR, WordDouble, &[0x0F, 0x38, 0xF1], pair(0, 1), NO_IMM),
+    bytes("crc32l", &RR, Double, &[0x0F, 0x38, 0xF1], pair(0, 1), NO_IMM),
+    bytes("crc32q", &RR, DoubleQuad, &[0x0F, 0x38, 0xF1], pair(0, 1), NO_IMM),
+    bytes("crc32b", &MR, Double, &[0x0F, 0x38, 0xF0], pair(0, 1), NO_IMM),
+    bytes("crc32w", &MR, WordDouble, &[0x0F, 0x38, 0xF1], pair(0, 1), NO_IMM),
+    bytes("crc32l", &MR, Double, &[0x0F, 0x38, 0xF1], pair(0, 1), NO_IMM),
+    bytes("crc32q", &MR, DoubleQuad, &[0x0F, 0x38, 0xF1], pair(0, 1), NO_IMM),
     // Turning a number round, which reverses the bytes of a register in place. The register is in
     // the low three bits of the second opcode byte rather than in an addressing byte, the way a
     // push and a pop hold theirs, so there is no `ModRM` here at all.
@@ -2536,6 +2570,11 @@ impl Writer<'_> {
         if let Some(prefix) = self.segment() {
             out.push(prefix);
         }
+        // The operand size byte in front of the mandatory one, for the one size that is both. See
+        // `Size::WordDouble`.
+        if self.row.size == WordDouble {
+            out.push(0x66);
+        }
         if let Some(prefix) = self.row.size.prefix() {
             out.push(prefix);
         }
@@ -2747,7 +2786,7 @@ mod tests {
     use super::*;
     use crate::x86_64::text::written;
     use crate::x86_64::{
-        INSTS, R8, R10, R12, R13, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, xmm,
+        INSTS, R8, R9, R10, R12, R13, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, xmm,
     };
 
     /// The bytes of that instruction, as a string a person can compare with a disassembler's.
@@ -3349,6 +3388,23 @@ mod tests {
         let counted = Addr { base: Some(RBX), ..Addr::default() };
         assert_eq!(hex("lzcntq", &[Value::Mem(counted), quad(RAX)]), "f3 48 0f bd 03");
         assert_eq!(hex("tzcntl", &[Value::Mem(counted), long(RAX)]), "f3 0f bc 03");
+        // The population count beside them, and the checksum step, whose sixteen bit form is the
+        // one row here with two prefix bytes. Every expected string is what GNU as 2.46 writes
+        // for the same line.
+        assert_eq!(hex("popcntl", &[long(RDX), long(RAX)]), "f3 0f b8 c2");
+        assert_eq!(hex("popcntq", &[quad(RDX), quad(RAX)]), "f3 48 0f b8 c2");
+        assert_eq!(hex("popcntq", &[quad(R8), quad(RAX)]), "f3 49 0f b8 c0");
+        assert_eq!(hex("popcntl", &[Value::Mem(counted), long(RAX)]), "f3 0f b8 03");
+        assert_eq!(hex("crc32b", &[byte(RCX), long(RAX)]), "f2 0f 38 f0 c1");
+        assert_eq!(hex("crc32b", &[byte(RSI), long(RAX)]), "f2 40 0f 38 f0 c6");
+        assert_eq!(hex("crc32w", &[word(RCX), long(RAX)]), "66 f2 0f 38 f1 c1");
+        assert_eq!(hex("crc32w", &[word(R9), long(R10)]), "66 f2 45 0f 38 f1 d1");
+        assert_eq!(hex("crc32l", &[long(RCX), long(RAX)]), "f2 0f 38 f1 c1");
+        assert_eq!(hex("crc32l", &[long(R8), long(RDX)]), "f2 41 0f 38 f1 d0");
+        assert_eq!(hex("crc32q", &[quad(RCX), quad(RAX)]), "f2 48 0f 38 f1 c1");
+        assert_eq!(hex("crc32q", &[quad(R12), quad(R13)]), "f2 4d 0f 38 f1 ec");
+        assert_eq!(hex("crc32b", &[Value::Mem(counted), long(RAX)]), "f2 0f 38 f0 03");
+        assert_eq!(hex("crc32q", &[Value::Mem(counted), quad(RAX)]), "f2 48 0f 38 f1 03");
         // Reversing the bytes of a register, whose register is in the opcode and not beside it, so
         // the high half of the register file moves the prefix rather than a bit of an addressing
         // byte. `bswapq` on `r12` is the one that shows both at once.

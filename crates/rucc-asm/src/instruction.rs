@@ -407,6 +407,22 @@ fn spelled(
     operands: &[Operand],
     values: &[Value],
 ) -> Result<(String, &'static Encoding), String> {
+    // The byte form of the checksum step has two encodings, one into a thirty two bit register
+    // and one into a sixty four bit register with REX.W. Both leave the same zero extended value
+    // behind, but the encoder's rows are told apart by the kinds of their operands and not by
+    // their widths, so the second would come out as the first under a different register name
+    // and the bytes would not be the ones gas writes. Nothing a compiler writes needs it, gcc's
+    // `_mm_crc32_u8` included, so it is refused rather than given a row of its own.
+    if matches!(word, "crc32" | "crc32b")
+        && matches!(operands.last(), Some(Operand::Reg(_, Width::Quad)))
+        && (word == "crc32b"
+            || matches!(operands.first(), Some(Operand::Reg(_, Width::Byte) | Operand::High(_))))
+    {
+        return Err(format!(
+            "'{word}' of a byte into a sixty four bit register is not written yet, and the thirty \
+             two bit register of the same number gives the same answer"
+        ));
+    }
     let kinds: Vec<_> = values.iter().map(|value| value.kind()).collect();
     let imm = values
         .iter()
@@ -517,6 +533,17 @@ const COUNTED: &[&str] = &["shl", "shr", "sar", "sal", "rol", "ror", "rcl", "rcr
 /// carries its width, which was tried before this, or a shift counted in `cl`, or a line no
 /// assembler would take.
 fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
+    // The checksum step reads a byte, a word, a long or a quad and accumulates it into a register
+    // that is thirty two bits whatever it read, so `crc32 %sil, %eax` names two widths and is not
+    // a mistake either. The letter gas puts on it is the width of what is read, which is the first
+    // operand, and a first operand that is an address says nothing, which gas refuses too.
+    if word == "crc32" {
+        return Ok(match operands.first() {
+            Some(Operand::Reg(_, width)) => Some(*width),
+            Some(Operand::High(_)) => Some(Width::Byte),
+            _ => None,
+        });
+    }
     let mut width = None;
     let counted = COUNTED.contains(&word) && operands.len() > 1;
     for operand in operands.iter().skip(usize::from(counted)) {
@@ -1258,11 +1285,30 @@ mod tests {
     }
 
     #[test]
+    fn the_checksum_step_takes_its_letter_from_what_it_reads() {
+        // Two widths in one line, which is the instruction and not a disagreement. The bytes are
+        // what GNU as 2.46 writes for the same lines.
+        assert_eq!(bytes("crc32 %sil, %eax"), [0xf2, 0x40, 0x0f, 0x38, 0xf0, 0xc6]);
+        assert_eq!(bytes("crc32 %cx, %eax"), [0x66, 0xf2, 0x0f, 0x38, 0xf1, 0xc1]);
+        assert_eq!(bytes("crc32 %edx, %eax"), [0xf2, 0x0f, 0x38, 0xf1, 0xc2]);
+        assert_eq!(bytes("crc32 %r9, %rax"), [0xf2, 0x49, 0x0f, 0x38, 0xf1, 0xc1]);
+        assert_eq!(bytes("crc32l (%rdi), %eax"), [0xf2, 0x0f, 0x38, 0xf1, 0x07]);
+        assert_eq!(bytes("popcnt %rdi, %rax"), [0xf3, 0x48, 0x0f, 0xb8, 0xc7]);
+        // An address says nothing about how much of it is read, so the letter has to be written.
+        assert!(refused("crc32 (%rdi), %eax").contains("crc32"));
+        // A byte into a sixty four bit register is a REX.W form gas has and this does not, and
+        // writing the thirty two bit form in its place would be different bytes.
+        assert!(refused("crc32b %al, %rcx").contains("sixty four"));
+        assert!(refused("crc32 %al, %rcx").contains("sixty four"));
+    }
+
+    #[test]
     fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name() {
         // One nothing in the compiler writes and nothing in the encoder has a row for, which is a
         // set that shrinks every time a hand written file needs another one. It was `bswap` until
-        // tamnd/rucc#1329 gave that one bytes, and it is a population count now.
-        let why = refused("popcnt %rax, %rdx");
-        assert!(why.contains("popcnt"), "{why}");
+        // tamnd/rucc#1329 gave that one bytes and a population count until tamnd/rucc#2003 did the
+        // same, and it is a round of AES now.
+        let why = refused("aesenc %xmm1, %xmm0");
+        assert!(why.contains("aesenc"), "{why}");
     }
 }

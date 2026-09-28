@@ -451,6 +451,70 @@ fn preprocessor_args(args: &[String]) -> Vec<String> {
     out
 }
 
+/// The extension a `-m` flag names and whether it turns it on, when it names one.
+///
+/// `-mno-` is the off form of every one of them, which is also how gcc spells it. A flag that is
+/// not an extension, `-mno-red-zone` say, is `None` and is left to the rest of the parser.
+fn isa_name(arg: &str) -> Option<(&str, rucc_target::Feature, bool)> {
+    let rest = arg.strip_prefix("-m")?;
+    let (name, on) = match rest.strip_prefix("no-") {
+        Some(name) => (name, false),
+        None => (rest, true),
+    };
+    let known =
+        if on { rucc_target::Feature::named(name) } else { rucc_target::Feature::named_off(name) };
+    known.map(|feature| (name, feature, on))
+}
+
+/// The extensions the machine running the compiler has, which is what `-march=native` means.
+///
+/// Asked of the processor with `cpuid`, through the standard library, and only when the compiler
+/// is running on an x86-64 at all. Anywhere else there is no processor to ask about an x86-64 one,
+/// and gcc on such a machine builds for the baseline, which is what this does. The list is the
+/// extensions whose names are stable in the standard library at this workspace's minimum Rust
+/// version, which covers everything [`rucc_target::Feature::honoured`] says yes to and a good deal
+/// that it does not.
+fn native_isa() -> rucc_target::Isa {
+    let base = rucc_target::Isa::baseline();
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut isa = rucc_target::Choices::new();
+        macro_rules! asked {
+            ($($detected:tt => $name:literal),* $(,)?) => {
+                $(if std::arch::is_x86_feature_detected!($detected) {
+                    isa.read($name).expect("a name gcc knows");
+                })*
+            };
+        }
+        asked! {
+            "sse3" => "sse3",
+            "ssse3" => "ssse3",
+            "sse4.1" => "sse4.1",
+            "sse4.2" => "sse4.2",
+            "sse4a" => "sse4a",
+            "popcnt" => "popcnt",
+            "avx" => "avx",
+            "avx2" => "avx2",
+            "fma" => "fma",
+            "f16c" => "f16c",
+            "bmi1" => "bmi",
+            "bmi2" => "bmi2",
+            "lzcnt" => "lzcnt",
+            "xsave" => "xsave",
+            "aes" => "aes",
+            "pclmulqdq" => "pclmul",
+            "sha" => "sha",
+            "cmpxchg16b" => "cx16",
+            "adx" => "adx",
+            "rdrand" => "rdrnd",
+            "rdseed" => "rdseed",
+        }
+        isa.over(base)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    base
+}
+
 /// Parses a command line, without the program name.
 ///
 /// # Errors
@@ -510,6 +574,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-mdaz-ftz` and `-mno-daz-ftz`, which decide the startup file directly and outrank the
     // family on that one question.
     let mut daz_ftz: Option<bool> = None;
+    // The instruction set extensions the `-m` flags named, in order, and the processor `-march`
+    // named last. Both are weighed after the loop, because a processor supplies only what no flag
+    // spoke for whichever order they came in, and because `--target=` may come after either and
+    // decide that neither means anything. See `rucc_target::isa`.
+    let mut isa = rucc_target::Choices::new();
+    let mut isa_flag: Option<&str> = None;
+    let mut march: Option<&str> = None;
     // What `-fexceptions` and `-fno-exceptions` last said, if either was written. It is kept apart
     // from the field because `-fnon-call-exceptions` turns exceptions on only when neither was,
     // which is gcc's rule and is why `-fno-exceptions -fnon-call-exceptions` defines no
@@ -1886,14 +1957,40 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     )));
                 }
             }
-            // Which processor in the family to generate for. This compiler emits the base
-            // instruction set of the architecture and nothing above it, so a program built with
-            // any of these runs on the machine that was named; it is a program that could have
-            // been faster rather than a program that is wrong, which is what makes these safe to
-            // take and ignore where a flag that changed the meaning of the code would not be.
-            _ if arg.starts_with("-march=")
-                || arg.starts_with("-mtune=")
-                || arg.starts_with("-mcpu=") => {}
+            // One extension of the x86-64 instruction set, on or off, which is `-msse4.2` and its
+            // relatives. Only the ones this compiler has the intrinsics for may be turned on for a
+            // whole unit, because what turning one on does here is define the macro, and a macro
+            // is a promise to a header that the names behind it exist. Turning one off is taken
+            // for any name gcc knows, since nothing is promised by it, except for the baseline:
+            // SSE2 is where the psABI passes a `double`, so a unit without it is a different
+            // calling convention and not a smaller instruction set.
+            _ if isa_name(arg).is_some() => {
+                let Some((_, feature, on)) = isa_name(arg) else { continue };
+                if on && !feature.honoured() {
+                    return Err(err(format!(
+                        "{arg}: this compiler has no intrinsics for {} yet, so it cannot build a \
+                         whole unit for it",
+                        feature.name()
+                    )));
+                }
+                if !on && rucc_target::Isa::baseline().has(feature) {
+                    return Err(err(format!(
+                        "{arg}: {} is part of the x86-64 baseline and the psABI passes values in \
+                         it, so a unit built without it would call and be called differently",
+                        feature.name()
+                    )));
+                }
+                isa.read(&arg["-m".len()..]).map_err(|_| err(format!("unknown option `{arg}`")))?;
+                isa_flag.get_or_insert(arg);
+            }
+            // Which processor in the family to build for. What it decides is the extensions of
+            // the instruction set the unit may assume, which is the macros, and only on x86-64;
+            // see `rucc_target::isa`. A processor it has no list for is built for as the
+            // baseline, which is a program that could have been faster rather than a program
+            // that is wrong, and the same goes for every other target's processors. `-mtune=`
+            // says what to schedule for and changes nothing a program can see.
+            _ if arg.starts_with("-march=") => march = Some(&arg["-march=".len()..]),
+            _ if arg.starts_with("-mtune=") || arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
             // the target already uses and refused otherwise.
             _ if arg.starts_with("-mabi=") => {
@@ -2074,6 +2171,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         || last("-ffast-math", "-fno-fast-math")
         || last("-funsafe-math-optimizations", "-fno-unsafe-math-optimizations");
     link.daz_ftz = daz_ftz;
+    // The extensions, now that the target is known. On x86-64 the processor supplies whatever no
+    // flag said. Anywhere else there are none to have, and a flag naming one is gcc's unknown
+    // option there too, so it is refused the same way it would have been had it not looked like
+    // an x86 flag.
+    match opts.target.arch {
+        rucc_target::Arch::X86_64 => {
+            let base = match march {
+                Some("native") => native_isa(),
+                Some(name) => {
+                    rucc_target::Isa::level(name).unwrap_or_else(rucc_target::Isa::baseline)
+                }
+                None => rucc_target::Isa::baseline(),
+            };
+            opts.isa = isa.over(base);
+        }
+        rucc_target::Arch::Aarch64 | rucc_target::Arch::Riscv64 => {
+            if let Some(flag) = isa_flag {
+                return Err(err(format!("unknown option `{flag}`")));
+            }
+            opts.isa = rucc_target::Isa::NONE;
+        }
+    }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
@@ -6010,6 +6129,53 @@ mod tests {
         assert_eq!(opts.target.to_string(), "x86_64-unknown-linux-gnu");
         let wrong = refused(&["--target=x86_64-unknown-linux-gnu", "-mabi=ms", "-c", "a.c"]);
         assert!(wrong.contains("sysv convention"), "{wrong}");
+    }
+
+    /// Whether a unit built with that command line has the extension called `name`.
+    fn has(line: &[&str], name: &str) -> bool {
+        let x86 = ["--target=x86_64-unknown-linux-gnu", "-c", "a.c"];
+        let (opts, _) = compile(&[&x86[..], line].concat());
+        opts.isa.has(rucc_target::Feature::named(name).expect("a feature"))
+    }
+
+    #[test]
+    fn the_sse_flags_and_the_processor_levels_name_extensions() {
+        // tamnd/rucc#2003. Every one of these was an unknown option before, and Postgres's
+        // configure probe for the CRC-32C intrinsics is compiled with the first.
+        assert!(has(&["-msse4.2"], "sse4.2") && has(&["-msse4.2"], "crc32"));
+        assert!(has(&["-msse4.2"], "ssse3") && has(&["-msse4.2"], "popcnt"));
+        assert!(!has(&[], "sse3") && !has(&[], "popcnt"));
+        assert!(has(&["-mssse3"], "sse3") && !has(&["-mssse3"], "sse4.1"));
+        assert!(has(&["-msse4"], "sse4.2") && !has(&["-msse4", "-mno-sse4"], "sse4.1"));
+        assert!(has(&["-mpopcnt"], "popcnt") && !has(&["-mpopcnt"], "sse3"));
+        assert!(has(&["-mcrc32"], "crc32"));
+        assert!(!has(&["-msse4.2", "-mno-popcnt"], "popcnt"));
+        // A processor supplies what no flag spoke for, whichever order they came in.
+        assert!(has(&["-march=x86-64-v2"], "sse4.2"));
+        assert!(!has(&["-march=x86-64-v2", "-mno-sse4.2"], "sse4.2"));
+        assert!(!has(&["-mno-sse4.2", "-march=x86-64-v2"], "sse4.2"));
+        assert!(has(&["-mno-sse4.2", "-march=x86-64-v2"], "sse4.1"));
+        assert!(!has(&["-march=x86-64-v2", "-march=x86-64"], "sse3"));
+        // One it has no list for is the baseline, as it was when all of them were.
+        assert!(!has(&["-march=pentium-m"], "sse3"));
+        assert!(has(&["-march=x86-64-v3"], "avx2"));
+        // Turning off what is never on is nothing, and the flag is still gcc's.
+        assert!(!has(&["-mno-avx512f"], "avx512f"));
+    }
+
+    #[test]
+    fn an_extension_this_compiler_cannot_provide_for_a_whole_unit_is_refused() {
+        let x86 = ["--target=x86_64-unknown-linux-gnu", "-c", "a.c"];
+        let said = refused(&[&x86[..], &["-mavx2"]].concat());
+        assert!(said.contains("no intrinsics for avx2"), "{said}");
+        let said = refused(&[&x86[..], &["-mno-sse2"]].concat());
+        assert!(said.contains("baseline"), "{said}");
+        assert!(refused(&[&x86[..], &["-msse5"]].concat()).contains("unknown option"));
+        // No other target has these, whichever side of the target the flag was written on.
+        let said = refused(&["-msse4.2", "--target=aarch64-linux-gnu", "-c", "a.c"]);
+        assert!(said.contains("unknown option `-msse4.2`"), "{said}");
+        let (opts, _) = compile(&["--target=aarch64-linux-gnu", "-march=armv8-a+crc", "-c", "a.c"]);
+        assert_eq!(opts.isa, rucc_target::Isa::NONE);
     }
 
     #[test]

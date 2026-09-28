@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The SSE4.2 checksum and population count intrinsics, and the flags that ask for them. `<nmmintrin.h>`, `<smmintrin.h>` and `<popcntintrin.h>` are shipped and reached from `<immintrin.h>` the way gcc reaches them, with `_mm_crc32_u8`, `_mm_crc32_u16`, `_mm_crc32_u32`, `_mm_crc32_u64`, `_mm_popcnt_u32` and `_mm_popcnt_u64`, each one `crc32` or `popcnt` instruction written as inline assembly because the back end does not lower target intrinsics yet (tamnd/rucc#200). The encoder and the assembler have the four `crc32` widths and both `popcnt` widths, byte for byte what GNU as writes. `-msse3`, `-mssse3`, `-msse4.1`, `-msse4.2`, `-mpopcnt`, `-mcrc32`, their `-mno-` forms and `-march=x86-64-v2`, `-v3`, `-v4` and `native` now decide which extensions a unit is built for, combined the way gcc 16 combines them, and define `__SSE3__` through `__SSE4_2__`, `__POPCNT__` and `__CRC32__` to match; a flag for an extension with no intrinsics here, such as `-mavx2`, is refused. This is what PostgreSQL's configure asks before it chooses its CRC32C code (#2003)
+
 ### Changed
 
 - Induction variable optimization gathers what reads each value once per function and looks only at the readers of a loop's counter when deciding whether it can count down, instead of walking the whole function once for every loop. On jtckdint's `test.c` at `-O2` the build runs about 9% fewer instructions and 7% fewer cycles, and the code it emits is unchanged.

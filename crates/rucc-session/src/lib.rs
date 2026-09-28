@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Os, TargetInfo, Triple};
+use rucc_target::{Arch, Isa, Os, TargetInfo, Triple};
 
 /// An optimisation level.
 ///
@@ -1889,6 +1889,15 @@ pub struct Options {
     /// makes the promise false, and every kernel build in the wild passes `-mno-red-zone` for
     /// exactly that reason. A convention without a red zone ignores this.
     pub red_zone: bool,
+    /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
+    /// flags that name one, such as `-msse4.2`.
+    ///
+    /// What it decides today is the macros, `__SSE4_2__` and the rest, which is how a header or a
+    /// configure probe finds out, and which functions a function built for less may call without
+    /// saying so. The code generator emits the baseline whatever this says, so a unit built for
+    /// more runs anywhere and is slower than it could be rather than wrong. Only x86-64 has any,
+    /// and every other target's is [`Isa::NONE`]. See `rucc_target::isa`.
+    pub isa: Isa,
     /// Whether the blocks of a function are put in the order their weights say rather than in the
     /// order the shape of the graph gives, from `-freorder-blocks` and `-fno-reorder-blocks`.
     ///
@@ -2358,6 +2367,10 @@ impl Options {
             profile_data: Profile::default(),
             frame_pointer: None,
             red_zone: true,
+            isa: match target.arch {
+                Arch::X86_64 => Isa::baseline(),
+                Arch::Aarch64 | Arch::Riscv64 => Isa::NONE,
+            },
             reorder_blocks: None,
             schedule_insns: None,
             sibling_calls: None,

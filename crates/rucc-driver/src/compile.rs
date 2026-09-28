@@ -2076,6 +2076,48 @@ mod tests {
         }
     }
 
+    /// The CRC32C steps and the population counts are each one instruction, and the point of
+    /// naming them rather than writing the loop in C is that instruction, so what is checked is
+    /// the assembly and not only that the names resolve. `-msse4.2` is what PostgreSQL's
+    /// configure passes, and it has to bring popcnt and crc32 with it the way gcc's does.
+    #[test]
+    fn the_shipped_nmmintrin_is_one_instruction_per_step_under_sse4_2() {
+        let mut opts = freestanding();
+        opts.emit = EmitKind::Asm;
+        let mut choices = rucc_target::Choices::new();
+        choices.read("sse4.2").expect("gcc knows sse4.2");
+        opts.isa = choices.over(opts.isa);
+        let source = concat!(
+            "#include <nmmintrin.h>\n",
+            "unsigned b(unsigned c, unsigned char v) { return _mm_crc32_u8(c, v); }\n",
+            "unsigned w(unsigned c, unsigned short v) { return _mm_crc32_u16(c, v); }\n",
+            "unsigned l(unsigned c, unsigned v) { return _mm_crc32_u32(c, v); }\n",
+            "unsigned long long q(unsigned long long c, unsigned long long v) {\n",
+            "  return _mm_crc32_u64(c, v);\n",
+            "}\n",
+            "int n(unsigned v) { return _mm_popcnt_u32(v); }\n",
+            "long long m(unsigned long long v) { return _mm_popcnt_u64(v); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        for step in ["crc32b", "crc32w", "crc32l", "crc32q", "popcntl", "popcntq"] {
+            assert!(text.contains(step), "no {step} in:\n{text}");
+        }
+    }
+
+    /// Without the flag the names are not there, which is the answer gcc's refusal gives a
+    /// configure probe: a unit not built for the instruction cannot call it.
+    #[test]
+    fn the_shipped_smmintrin_has_no_checksum_for_a_unit_not_built_for_it() {
+        let result = run(
+            &freestanding(),
+            "#include <immintrin.h>\nunsigned f(unsigned c) { return _mm_crc32_u32(c, 1); }\n",
+        );
+        let said = result.messages.join("\n");
+        assert!(said.contains("_mm_crc32_u32"), "{said}");
+    }
+
     #[test]
     fn the_three_formality_headers_still_have_to_work() {
         let text = shipped(concat!(
