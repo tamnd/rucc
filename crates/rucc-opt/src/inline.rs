@@ -530,7 +530,13 @@ fn check(
     if results.len() > returns.len() || results.iter().zip(&returns).any(|(a, b)| a != b) {
         return Err(InlineFailure::Mismatch);
     }
-    if callee.signature().params.iter().any(|param| matches!(param.abi, Abi::ByVal { .. })) {
+    // An `always_inline` function that takes a structure or a vector by value is inlined with a
+    // copy of the argument in the caller, which is what the call would have made. The intrinsics
+    // over 64 byte vectors are all of this kind, and gcc inlines them at every level. Other calls
+    // are still left alone, since that changes which calls are inlined across a whole program.
+    if kind != Kind::Always
+        && callee.signature().params.iter().any(|param| matches!(param.abi, Abi::ByVal { .. }))
+    {
         return Err(InlineFailure::ByValue);
     }
 
@@ -851,7 +857,14 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
     // next sees `1 + 1` rather than a block parameter that only `simplify-cfg` would later find
     // is always `1`.
     let start = callee.entry().expect("checked to have a body");
-    let passed = func[func[call].args][..plan.fixed].to_vec();
+    let mut passed = func[func[call].args][..plan.fixed].to_vec();
+    // An argument passed by value is the callee's own copy, which it may write to, so the body
+    // gets a copy made in the caller's frame just before the call, as the call would have.
+    for (at, param) in callee.signature().params.iter().enumerate().take(plan.fixed) {
+        if let Abi::ByVal { size, align, .. } = param.abi {
+            passed[at] = by_value(func, entry, call, passed[at], size, align);
+        }
+    }
     let mut blocks = HashMap::new();
     let mut values = HashMap::new();
     for from in callee.blocks() {
@@ -1025,6 +1038,41 @@ fn pass_on(
         at = end;
     }
     Some(now)
+}
+
+/// A slot of `size` bytes in the caller's frame with the object `from` points at copied into it
+/// just before the call, which is what a call passing that object by value makes.
+fn by_value(
+    func: &mut Func,
+    entry: Block,
+    call: Inst,
+    from: Value,
+    size: u64,
+    align: u32,
+) -> Value {
+    let span = func.span(call);
+    let info = MemInfo {
+        size,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let mem = func.add_mem(info);
+    let alloca = InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
+    let alloca = func.create_inst(alloca, &[Type::PTR], span);
+    let first = func.insts(entry).next().expect("an entry block ends in something");
+    func.insert_before(alloca, first);
+    let slot = func[alloca].results().next().expect("an alloca has a result");
+    let copy = InstData {
+        args: func.push_values(&[slot, from]),
+        extra: Extra::Mem(func.add_mem(info)),
+        ..InstData::new(Opcode::Memcpy)
+    };
+    let copy = func.create_inst(copy, &[], span);
+    func.insert_before(copy, call);
+    slot
 }
 
 /// Stores the pieces of one structure, eight bytes apart the way the registers held them, in a

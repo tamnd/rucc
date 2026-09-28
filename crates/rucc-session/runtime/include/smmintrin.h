@@ -71,4 +71,9 @@ _mm_crc32_u64(unsigned long long __C, unsigned long long __V)
   return __C;
 }
 
+/* SSE4.1's `pextrq`, the 64 bit lane N of X. Written as a lane read, which is what the instruction
+ * does, since the vector is in memory here and the lane is one load away. A macro because N has to
+ * be a constant, as it does for gcc. */
+#define _mm_extract_epi64(X, N) ((long long)((__v2di)(__m128i)(X))[(N) & 1])
+
 #endif /* __RUCC_SMMINTRIN_H */
