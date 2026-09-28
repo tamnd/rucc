@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.12.2
+
+The 0.12.0 and 0.12.1 tags were never published. The release checks refused both because of a let chain in the driver, which needs a newer Rust than the workspace promises. 0.12.2 is the first release with their changes, so the two sections below are part of this release too.
+
 ### Added
 
 - rucc links programs and shared libraries for Apple targets. It runs Apple's `ld`, or `ld64.lld`, with `-platform_version` taken from the deployment target and the SDK's own version, and `-syslibroot` pointing at the SDK the header search already finds through `-isysroot`, `SDKROOT` or `xcrun`. `-r` works there too.
