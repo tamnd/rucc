@@ -43,8 +43,8 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Apart, Array, Binding, Data, Info, Object, Output, Place, Property, Reference, Reloc,
-    Sections, Text, Visibility,
+    Alias, Apart, Array, Binding, Data, EXCEPT_TABLE, Info, Object, Output, Place, Property,
+    Reference, Reloc, Sections, Text, Visibility,
 };
 use crate::{coff, elf};
 
@@ -599,8 +599,25 @@ pub fn write(
                 described.insert(label.name.clone(), id);
             }
         }
+        // The call site tables of the functions with a landing pad, which a record reaches through
+        // the section's own symbol and the table's offset in it, the same way gcc's records do.
+        // The personality routine's pointer is an ordinary data symbol of this file and is looked
+        // up with the rest below.
+        if !text.unwind.except.is_empty() {
+            let except =
+                obj.add_section(Vec::new(), EXCEPT_TABLE.into(), SectionKind::ReadOnlyData);
+            obj.append_section_data(except, &text.unwind.except, 4);
+            described.insert(EXCEPT_TABLE.to_owned(), obj.section_symbol(except));
+        }
         for reloc in &text.unwind.relocs {
-            let (symbol, addend) = match described.get(&reloc.symbol) {
+            let found = described.get(&reloc.symbol).or_else(|| {
+                // Only a variable this file defines. A function is reached through its section
+                // below for the reasons given there, and a name defined somewhere else is refused
+                // there as well.
+                let ours = data.objects.iter().any(|object| object.name == reloc.symbol);
+                if ours { symbols.get(&reloc.symbol) } else { None }
+            });
+            let (symbol, addend) = match found {
                 // A description in the section above, reached by its own name and needing no
                 // correction, since the name is at the description rather than at the front of the
                 // section it is in.
@@ -1089,6 +1106,7 @@ mod tests {
             binding,
             visibility: Visibility::Default,
             patch: None,
+            landings: Vec::new(),
         }
     }
 

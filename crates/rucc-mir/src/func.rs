@@ -272,6 +272,14 @@ pub struct Func {
     /// machine function that does not carry this is one whose relocation names a symbol nobody
     /// ever defines.
     pub labels: Vec<(Block, Symbol)>,
+    /// Each call an unwind lands somewhere from, and the block it lands in.
+    ///
+    /// The block is a landing pad: nothing in the function branches to it and it is reached only
+    /// by the unwinder, which reads where to go from the call site table the assembler writes out
+    /// of this. Written by the lowering, which is where the edge from the call to the pad stops
+    /// being an edge, and read by the assembler and the listing. The call rather than its block,
+    /// because a pass that splits a block moves the call with it.
+    pub landings: Vec<(Inst, Block)>,
     /// Where the function was declared, from the IR function it was lowered from.
     ///
     /// Nothing in this crate reads it, and it is here for the reason [`Func::binding`] is here:
@@ -401,6 +409,7 @@ impl Func {
             cfi: Vec::new(),
             patch: None,
             labels: Vec::new(),
+            landings: Vec::new(),
             declared: Span::DUMMY,
             locals: Vec::new(),
             sharing: Vec::new(),

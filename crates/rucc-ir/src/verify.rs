@@ -1615,6 +1615,24 @@ impl<'a> Verifier<'a> {
                 }
             }
 
+            // The unwind edge a call inside a cleanup handler's scope has under `-fexceptions`.
+            // An `unwound` with no call in front of it is one whose call was folded away, and it
+            // answers false, so only the shape is checked. The exception has to be the first thing
+            // its pad does, because the code generator finds the pad by it.
+            Opcode::Unwound => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    self.produces(opcode, res(0), Type::I1);
+                }
+            }
+            Opcode::Landing => {
+                if self.takes(opcode, arity, 0) && results == 1 {
+                    self.produces(opcode, res(0), Type::PTR);
+                }
+                if func.prev_inst(inst).is_some() {
+                    self.error("landing is not the first instruction of its block".to_string());
+                }
+            }
+
             // What is left says nothing about its operands here: inline assembly is whatever its
             // constraints say, and a target intrinsic is the target's own rule.
             Opcode::InlineAsm | Opcode::TargetIntrinsic => {}

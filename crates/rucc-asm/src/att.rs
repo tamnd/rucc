@@ -43,6 +43,7 @@
 //! value in a register until something reads it, which is a fact the allocator needed and the
 //! machine does not, and by here it has been acted on: the register in the operand is the answer.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
@@ -256,6 +257,17 @@ impl Writer<'_> {
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
         }
+        // The personality routine and the call site table, for a function with a landing pad, in
+        // gcc's spelling, which is what the unwind writer puts in the object as well. See
+        // `crate::unwind`. The calls with a pad are named on either side below, since the table
+        // says where they are by label.
+        let pads: HashMap<Inst, Block> = func.landings.iter().copied().collect();
+        let local = self.directives.local();
+        if unwind && !pads.is_empty() {
+            let _ = writeln!(self.out, "\t.cfi_personality 0x9b,{}", rucc_ir::PERSONALITY_REF);
+            let _ = writeln!(self.out, "\t.cfi_lsda 0x1b,{local}LSDA_{name}");
+        }
+        let mut sites = Vec::new();
         let end = func.cfi_end();
         // How long each loop is, which the listing cannot say without the lengths of the
         // instructions in it. The object writer's encoder is asked, and a function it cannot
@@ -288,7 +300,15 @@ impl Writer<'_> {
                 if let Some(which) = self.marks {
                     let _ = writeln!(self.out, "{}:", spell_mark(self.directives, which, inst));
                 }
+                let site = pads.get(&inst).map(|&pad| (sites.len(), pad));
+                if let Some((at, _)) = site {
+                    let _ = writeln!(self.out, "{local}EHB{at}_{name}:");
+                }
                 self.inst(func, block, inst, &name)?;
+                if let Some((at, pad)) = site {
+                    let _ = writeln!(self.out, "{local}EHE{at}_{name}:");
+                    sites.push(pad);
+                }
                 if unwind && Some(inst) != end {
                     for op in func.cfi_after(inst) {
                         self.cfi(op);
@@ -299,6 +319,9 @@ impl Writer<'_> {
         self.tables(func, &name);
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_endproc");
+            if !sites.is_empty() {
+                self.call_sites(&name, &sites);
+            }
         }
         self.directives.close(&mut self.out, &name);
         if let Some(which) = &mut self.marks {
@@ -760,6 +783,38 @@ impl Writer<'_> {
             } else {
                 let _ = writeln!(self.out, "{}", self.directives.text());
             }
+        }
+    }
+
+    /// The call site table of a function with a landing pad, in its own section as gcc writes it.
+    ///
+    /// No landing pad base and no type table, then one row per call: where it starts and how long
+    /// it is, where its pad is, and an action of zero, which says the pad is a cleanup. Every
+    /// distance is from the function's own label, which is what a missing base means. `sites` is
+    /// the pad of each call in the order the calls were written, which is the order the unwinder
+    /// wants them in.
+    fn call_sites(&mut self, name: &str, sites: &[Block]) {
+        let local = self.directives.local();
+        let _ = writeln!(self.out, "\t.section\t{},\"a\",@progbits", rucc_object::EXCEPT_TABLE);
+        let _ = writeln!(self.out, "\t.p2align\t2");
+        let _ = writeln!(self.out, "{local}LSDA_{name}:");
+        let _ = writeln!(self.out, "\t.byte\t0xff\n\t.byte\t0xff\n\t.byte\t0x1");
+        let _ = writeln!(self.out, "\t.uleb128\t{local}LSDACSE_{name}-{local}LSDACSB_{name}");
+        let _ = writeln!(self.out, "{local}LSDACSB_{name}:");
+        for (at, &pad) in sites.iter().enumerate() {
+            let pad = self.label(name, pad);
+            let _ = writeln!(self.out, "\t.uleb128\t{local}EHB{at}_{name}-{name}");
+            let _ = writeln!(self.out, "\t.uleb128\t{local}EHE{at}_{name}-{local}EHB{at}_{name}");
+            let _ = writeln!(self.out, "\t.uleb128\t{pad}-{name}");
+            let _ = writeln!(self.out, "\t.uleb128\t0");
+        }
+        let _ = writeln!(self.out, "{local}LSDACSE_{name}:");
+        // Back to the function's section, since what closes the function measures its size from
+        // where the assembler is.
+        if self.sections.functions {
+            let _ = writeln!(self.out, "\t.section\t.text.{name},\"ax\",@progbits");
+        } else {
+            let _ = writeln!(self.out, "{}", self.directives.text());
         }
     }
 

@@ -79,6 +79,13 @@ pub const MILESTONE: &str = "M2";
 /// can act on rather than with a parse error twenty lines in.
 pub const FORMAT_VERSION: u32 = 0;
 
+/// The routine that runs a C function's landing pads, which is libgcc's. See [`Opcode::Landing`].
+pub const PERSONALITY: &str = "__gcc_personality_v0";
+
+/// The name of the pointer to [`PERSONALITY`] that the header of an unwind table reaches it
+/// through, which is gcc's name for the same object.
+pub const PERSONALITY_REF: &str = "DW.ref.__gcc_personality_v0";
+
 #[cfg(test)]
 mod tests {
     #[test]

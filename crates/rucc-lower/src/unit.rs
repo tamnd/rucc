@@ -984,6 +984,31 @@ impl Unit<'_> {
         self.place_global(global);
     }
 
+    /// The pointer to the personality routine every landing pad in this unit is run by, which the
+    /// header of the unwind table reaches through. Made once however many pads there are.
+    ///
+    /// gcc makes it a hidden weak object in a group of its own, so that every object of a link
+    /// shares one. This one is local to the unit, which costs a word per object and needs neither
+    /// a group nor a weak definition, and what an unwinder reads through it is the same address.
+    /// It is a pointer rather than the routine itself because the routine is in the C runtime's
+    /// shared library, and a table in a read only section cannot hold the distance to a name the
+    /// dynamic linker places: the header holds the distance to this, and this holds the address.
+    pub(crate) fn personality(&mut self) {
+        let name = self.names.intern(rucc_ir::PERSONALITY_REF);
+        if self.module.lookup(name).is_some() {
+            return;
+        }
+        let size = u64::from(self.target.pointer_width / 8);
+        let align = u32::try_from(size).unwrap_or(1);
+        let mut global = Global::new(name, size, align);
+        global.linkage = IrLinkage::Internal;
+        let routine = self.names.intern(rucc_ir::PERSONALITY);
+        let size = u32::try_from(size).unwrap_or(0);
+        let reloc = self.module.add_reloc(Reloc { symbol: routine, addend: 0, size });
+        global.init = Some(self.module.push_data(&[Datum::Addr(reloc)]));
+        self.module.add_global(global);
+    }
+
     /// The section an entry goes in, and [`None`] for a format with no way to ask for one.
     ///
     /// ELF has both halves and the linker sorts the numbered sections ahead of the plain one, so
