@@ -367,6 +367,34 @@ jobs:
       - name: write every import library both ways and compare the bytes
         run: cargo xtask implib
 
+  # The Windows programs in tests/exec/windows, cross compiled here and run under Wine, so that a
+  # change which breaks what a Windows program needs at run time shows up on every pull request
+  # and does not wait for the Windows runner. lld 19 is the oldest lld the driver accepts for a
+  # windows-gnu link, and it is left off PATH because finding it is part of what users rely on.
+  # The first program Wine starts creates its prefix, which is the slow part of this job.
+  wine:
+    name: windows programs under wine
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install lld 19 and wine
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y lld-19 wine64
+          /usr/lib/wine/wine64 --version
+      - name: build rucc, the sysroot and the runtime
+        run: |
+          cargo build --release --bin rucc
+          ./target/release/rucc --fetch x86_64-windows-gnu
+          cargo xtask builtins --target x86_64-windows-gnu
+      - name: run tests/exec/windows
+        env:
+          WINEDEBUG: -all
+          WINEPREFIX: ${{ runner.temp }}/wine
+        run: tests/exec/windows/run.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" /usr/lib/wine/wine64
+
   # spec/safe-memory/03-bug-model.md section 3.7 says every row of the bug model has test cases
   # and a number in CI. This is that number. It is the only job that runs what the compiler
   # produced rather than reading it, which it can do here because the runner is the machine the
@@ -615,7 +643,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, safety, accounting, audit, differential, abi-differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, safety, accounting, audit, differential, abi-differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed
