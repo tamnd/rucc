@@ -394,6 +394,63 @@ const SANITIZERS: [&str; 34] = [
     "memory",
 ];
 
+/// The command line with every `-Wp,` this compiler understands spelled as its own flags.
+///
+/// The preprocessor is inside this compiler, so what a build hands it through `-Wp,` has to be
+/// read here. Kbuild is the reason: every object in the Linux kernel and in busybox is compiled
+/// with `-Wp,-MD,dir/.name.o.d`, which is cpp's spelling of `-MD -MF dir/.name.o.d`. cpp's `-MD`
+/// and `-MMD` take the file as their next word where the driver's do not, and the rest are the
+/// same flags in both. A `-Wp,` holding anything else is left as it was so the loop refuses it,
+/// because dropping part of what a build asked the preprocessor for would be the silent kind of
+/// wrong.
+fn preprocessor_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(list) = arg.strip_prefix("-Wp,") else {
+            out.push(arg.clone());
+            continue;
+        };
+        let words: Vec<&str> = list.split(',').collect();
+        let mut spelled = Vec::new();
+        let mut i = 0;
+        let understood = loop {
+            let Some(&word) = words.get(i) else {
+                break true;
+            };
+            i += 1;
+            match word {
+                "-MD" | "-MMD" | "-MF" | "-MT" | "-MQ" => {
+                    let Some(&value) = words.get(i) else {
+                        break false;
+                    };
+                    i += 1;
+                    if word == "-MD" || word == "-MMD" {
+                        spelled.extend([word.to_owned(), "-MF".to_owned()]);
+                    } else {
+                        spelled.push(word.to_owned());
+                    }
+                    spelled.push(value.to_owned());
+                }
+                "-MP" => spelled.push(word.to_owned()),
+                _ if word.len() > 2
+                    && (word.starts_with("-D")
+                        || word.starts_with("-U")
+                        || word.starts_with("-I")) =>
+                {
+                    spelled.push(word.to_owned());
+                }
+                _ => break false,
+            }
+        };
+        if understood {
+            out.extend(spelled);
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
 /// Parses a command line, without the program name.
 ///
 /// # Errors
@@ -401,6 +458,8 @@ const SANITIZERS: [&str; 34] = [
 /// Returns the message to print when the arguments do not name a compilation this compiler
 /// can attempt.
 pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
+    let expanded = preprocessor_args(args);
+    let args = expanded.as_slice();
     let host = Triple::host()
         .ok_or_else(|| err("this host is not a supported target and no --target was given"))?;
     let mut opts = Options::new(host);
@@ -1881,11 +1940,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      section 4.4",
                 ));
             }
-            // Arguments meant for a separate assembler or preprocessor, which this compiler does
-            // not have: both are inside it and neither reads a command line. Refused rather than
-            // dropped, because every one of these says something about the output and a build
-            // that asked for `-Wa,--noexecstack` and was silently given an executable stack got
-            // the opposite of what it asked for.
+            // Arguments meant for a separate assembler, which this compiler does not have: it is
+            // inside it and does not read a command line. Refused rather than dropped, because
+            // every one of these says something about the output and a build that asked for
+            // `-Wa,--noexecstack` and was silently given an executable stack got the opposite of
+            // what it asked for. The `-Wp,` ones this compiler understands were turned into its
+            // own flags before the loop, so one that reaches here is one it does not.
             _ if arg.starts_with("-Wa,") || arg.starts_with("-Wp,") => {
                 return Err(err(format!(
                     "`{arg}` is an argument for a separate assembler or preprocessor, and both \
@@ -5647,7 +5707,7 @@ mod tests {
     fn an_argument_for_a_separate_tool_is_refused_rather_than_dropped() {
         // Every one of these says something about the output, so the wrong answer is silence.
         assert!(refused(&["-Wa,--noexecstack", "-c", "a.c"]).contains("separate assembler"));
-        assert!(refused(&["-Wp,-DX", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate assembler"));
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
         assert!(refused(&["-mcmodel=kernel", "-c", "a.c"]).contains("small code model"));
         assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
@@ -6139,6 +6199,27 @@ mod tests {
             let e = parse_args(&args(&[flag])).unwrap_err();
             assert!(e.message.contains("requires an argument"), "{}", e.message);
         }
+    }
+
+    /// Kbuild's spelling, which is how busybox and the kernel ask for every dependency file.
+    #[test]
+    fn a_dependency_file_asked_for_through_the_preprocessor_is_written_where_it_said() {
+        let (opts, _) = compile(&["-Wp,-MD,applets/.applets.o.d", "-c", "a.c"]);
+        assert!(opts.deps.emit);
+        assert!(opts.deps.system_headers);
+        assert_eq!(opts.deps.file.as_deref(), Some("applets/.applets.o.d"));
+
+        let (opts, _) = compile(&["-Wp,-MMD,x.d,-MP,-MT,x.o", "-c", "a.c"]);
+        assert!(!opts.deps.system_headers);
+        assert!(opts.deps.phony);
+        assert_eq!(opts.deps.file.as_deref(), Some("x.d"));
+        assert_eq!(opts.deps.targets, vec!["x.o".to_owned()]);
+    }
+
+    #[test]
+    fn a_preprocessor_flag_this_compiler_does_not_read_is_still_refused_whole() {
+        assert!(refused(&["-Wp,-MD", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-Wp,-MD,x.d,-C", "-c", "a.c"]).contains("-Wp,-MD,x.d,-C"));
     }
 
     /// A directory of sources for one test, removed when the test is done with it.
