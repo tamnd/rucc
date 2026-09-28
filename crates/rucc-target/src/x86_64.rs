@@ -39,7 +39,8 @@ mod text;
 mod timing;
 
 pub use crate::x86_64::encode::{
-    Addr, Encoding, Error, Fields, Fits, Holes, ImmSize, Kind, Size, Value, encode, encoding, nops,
+    Addr, Encoding, Error, Evex, Fields, Fits, Holes, ImmSize, Kind, Length, Opmask, Size, Tuple,
+    Value, encode, encode_masked, encoding, nops,
 };
 pub use crate::x86_64::insts::{
     ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,

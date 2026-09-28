@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The x86-64 encoder and the assembler write EVEX encoded AVX-512 instructions: `vmovdqu64`, `vmovdqa64`, `vmovdqu8`, `vpaddq`, `vpandq`, `vpxorq`, `vpternlogq`, `vpopcntq`, `vpclmulqdq`, `vextracti32x4`, `vextracti64x4`, `vbroadcasti32x4`, `vpbroadcastb`, `vshufi64x2`, `vpshufd` and `vmovq`, plus `kmovq`. They take `%xmm0` to `%xmm31`, `%ymm0` to `%ymm31`, `%zmm0` to `%zmm31` and `%k0` to `%k7`, a mask and zeroing written as `{%k1}{z}`, and the scaled one byte displacement EVEX uses. An instruction that also has a VEX form is written that way when nothing about its operands needs EVEX, as gas does. A file of every form comes out byte for byte what GNU as 2.46 writes. These are the instructions Postgres's AVX-512 CRC32C and population count code needs (#1988).
+
 ### Changed
 
 - `-mxsave` is taken for a whole unit and defines `__XSAVE__`, as with gcc 16, since `_xgetbv` now ships. `-march=x86-64-v3` defines it too. `xsaveopt`, `xsavec` and `xsaves` are still refused, since their intrinsics do not ship yet (#1988).

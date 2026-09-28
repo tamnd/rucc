@@ -30,7 +30,8 @@
 //! either is silent.
 
 use rucc_target::x86_64::{
-    Addr, Encoding, ImmSize, RAX, Value, Width, encode, encoding, gpr_named, xmm,
+    Addr, Encoding, ImmSize, Length, Opmask, RAX, Value, Width, encode_masked, encoding, gpr_named,
+    xmm,
 };
 use rucc_target::{PhysReg, Segment};
 
@@ -113,6 +114,11 @@ enum Operand {
     High(PhysReg),
     /// A vector register.
     Xmm(PhysReg),
+    /// A vector register only AVX-512 can name, which is `xmm16` and above, any `ymm` and any
+    /// `zmm`. By number, since the numbers go past what [`PhysReg`] has for the vector file.
+    Vector(u8, Length),
+    /// A mask register, `k0` to `k7`.
+    Mask(u8),
     /// A place on the x87 stack, by its depth.
     Stack(u8),
     /// An address, and the name in its displacement when it has one.
@@ -144,8 +150,18 @@ const STANDING: i64 = 0x1000_0000;
 /// A sentence saying what about the line could not be read, with no line number on it, since the
 /// caller is the one that knows which line this was.
 pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
-    let mut operands: Vec<Operand> =
-        args.iter().map(|arg| operand(arg.trim())).collect::<Result<_, _>>()?;
+    let mut mask = Opmask::default();
+    let mut operands = Vec::with_capacity(args.len());
+    for arg in args {
+        let (text, said) = masked(arg.trim())?;
+        if let Some(said) = said {
+            if mask != Opmask::default() {
+                return Err("an instruction has one mask and this one names two".to_owned());
+            }
+            mask = said;
+        }
+        operands.push(operand(text)?);
+    }
     let predicated = predicated(word);
     let word = match &predicated {
         Some((name, which)) => {
@@ -201,7 +217,8 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
     }
 
     let mut bytes = Vec::with_capacity(16);
-    let holes = encode(&mnemonic, &values, &mut bytes).map_err(|why| why.to_string())?;
+    let holes =
+        encode_masked(&mnemonic, &values, mask, &mut bytes).map_err(|why| why.to_string())?;
     if !named.is_empty() {
         if let Some(last) = bytes.last_mut() {
             *last = last.wrapping_add(named[which]).wrapping_sub(row_depths[which]);
@@ -578,12 +595,47 @@ fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
     Ok(width)
 }
 
+/// An operand without the mask AVX-512 writes after it, and the mask.
+///
+/// `%zmm0{%k1}{z}` is `zmm0` written under `k1` with what the mask leaves out zeroed, and the
+/// braces are after whichever operand the instruction writes, which is the destination of a load
+/// and the address of a store. `{%k0}` is refused the way gas refuses it, since zero in the field is
+/// what no mask at all is written as.
+fn masked(text: &str) -> Result<(&str, Option<Opmask>), String> {
+    let Some(cut) = text.find('{') else { return Ok((text, None)) };
+    let mut mask = Opmask::default();
+    let mut rest = &text[cut..];
+    while let Some(inside) = rest.strip_prefix('{') {
+        let Some(end) = inside.find('}') else {
+            return Err(format!("'{text}' opens a brace it does not close"));
+        };
+        match inside[..end].trim() {
+            "z" => mask.zero = true,
+            name => match name.strip_prefix("%k").and_then(|number| number.parse::<u8>().ok()) {
+                Some(number @ 1..=7) => mask.k = number,
+                _ => {
+                    return Err(format!(
+                        "'{name}' is not a mask an instruction can be written under"
+                    ));
+                }
+            },
+        }
+        rest = inside[end + 1..].trim_start();
+    }
+    if !rest.is_empty() || mask.k == 0 {
+        return Err(format!("'{text}' is not a mask an instruction can be written under"));
+    }
+    Ok((text[..cut].trim_end(), Some(mask)))
+}
+
 /// What the encoder is handed for one of these, with `standing` for an expression not worked out.
 fn value(operand: &Operand, standing: i64) -> Value {
     match operand {
         Operand::Reg(reg, width) => Value::Reg(*reg, *width),
         Operand::High(reg) => Value::High(*reg),
         Operand::Xmm(reg) => Value::Xmm(*reg),
+        Operand::Vector(number, length) => Value::Vector(*number, *length),
+        Operand::Mask(number) => Value::Mask(*number),
         Operand::Stack(_) => Value::Stack,
         Operand::Mem(addr, _) => Value::Mem(*addr),
         Operand::Imm(number) => Value::Imm(*number),
@@ -672,6 +724,22 @@ fn register(name: &str) -> Result<Operand, String> {
             if number < 16 {
                 return Ok(Operand::Xmm(PhysReg::new(number)));
             }
+        }
+    }
+    // The registers AVX-512 added, and the longer names of all of them, which only an EVEX or VEX
+    // row takes. `xmm0` to `xmm15` stay the value above, since every row that takes them already
+    // knows that one.
+    for (prefix, length) in [("xmm", Length::Xmm), ("ymm", Length::Ymm), ("zmm", Length::Zmm)] {
+        let Some(rest) = name.strip_prefix(prefix) else { continue };
+        if let Ok(number) = rest.parse::<u8>() {
+            if number < 32 && (rest == "0" || !rest.starts_with('0')) {
+                return Ok(Operand::Vector(number, length));
+            }
+        }
+    }
+    if let Some(Ok(number)) = name.strip_prefix('k').map(str::parse::<u8>) {
+        if number < 8 {
+            return Ok(Operand::Mask(number));
         }
     }
     Err(format!("'%{name}' is not a register this compiler has"))
@@ -1354,5 +1422,80 @@ mod tests {
         // same, and it is a round of AES now.
         let why = refused("aesenc %xmm1, %xmm0");
         assert!(why.contains("aesenc"), "{why}");
+    }
+
+    /// The AVX-512 instructions the intrinsics in the runtime headers write, each checked against
+    /// what GNU as writes for the same line.
+    #[test]
+    fn the_avx512_instructions_the_intrinsics_write_are_read() {
+        let lines: &[(&str, &[u8])] = &[
+            ("vmovdqu64 (%rdi), %zmm16", &[0x62, 0xe1, 0xfe, 0x48, 0x6f, 0x07]),
+            ("vmovdqu64 64(%rdi), %zmm17", &[0x62, 0xe1, 0xfe, 0x48, 0x6f, 0x4f, 0x01]),
+            ("vmovdqu64 -128(%rsp), %zmm31", &[0x62, 0x61, 0xfe, 0x48, 0x6f, 0x7c, 0x24, 0xfe]),
+            ("vmovdqu64 100(%rdi), %zmm16", &[0x62, 0xe1, 0xfe, 0x48, 0x6f, 0x87, 0x64, 0, 0, 0]),
+            (
+                "vmovdqu64 %zmm20, 64(%rsp,%rcx,8)",
+                &[0x62, 0xe1, 0xfe, 0x48, 0x7f, 0x64, 0xcc, 0x01],
+            ),
+            ("vmovdqu64 %zmm8, %zmm25", &[0x62, 0x41, 0xfe, 0x48, 0x6f, 0xc8]),
+            ("vmovdqu64 (%r12), %zmm9", &[0x62, 0x51, 0xfe, 0x48, 0x6f, 0x0c, 0x24]),
+            ("vmovdqu64 %xmm16, (%rax)", &[0x62, 0xe1, 0xfe, 0x08, 0x7f, 0x00]),
+            ("vmovdqu64 %ymm16, 32(%rax)", &[0x62, 0xe1, 0xfe, 0x28, 0x7f, 0x40, 0x01]),
+            ("vmovdqa64 %xmm1, %xmm18", &[0x62, 0xe1, 0xfd, 0x08, 0x6f, 0xd1]),
+            ("vmovdqu8 (%rbx), %zmm16{%k1}{z}", &[0x62, 0xe1, 0x7f, 0xc9, 0x6f, 0x03]),
+            ("vmovdqu8 (%r9,%r10), %zmm30{%k7}{z}", &[0x62, 0x01, 0x7f, 0xcf, 0x6f, 0x34, 0x11]),
+            ("vmovdqu8 (%rbx), %zmm16{%k1}", &[0x62, 0xe1, 0x7f, 0x49, 0x6f, 0x03]),
+            ("vmovdqu8 %zmm16, (%rbx){%k2}", &[0x62, 0xe1, 0x7f, 0x4a, 0x7f, 0x03]),
+            ("kmovq %rax, %k1", &[0xc4, 0xe1, 0xfb, 0x92, 0xc8]),
+            ("kmovq %r13, %k7", &[0xc4, 0xc1, 0xfb, 0x92, 0xfd]),
+            ("kmovq %k3, %r9", &[0xc4, 0x61, 0xfb, 0x93, 0xcb]),
+            ("vpaddq %zmm16, %zmm17, %zmm18", &[0x62, 0xa1, 0xf5, 0x40, 0xd4, 0xd0]),
+            ("vpaddq 128(%rax), %zmm17, %zmm18", &[0x62, 0xe1, 0xf5, 0x40, 0xd4, 0x50, 0x02]),
+            ("vpaddq %xmm1, %xmm2, %xmm3", &[0xc5, 0xe9, 0xd4, 0xd9]),
+            ("vpaddq %ymm9, %ymm10, %ymm11", &[0xc4, 0x41, 0x2d, 0xd4, 0xd9]),
+            ("vpandq 64(%rdx), %zmm17, %zmm18", &[0x62, 0xe1, 0xf5, 0x40, 0xdb, 0x52, 0x01]),
+            ("vpxorq %xmm16, %xmm17, %xmm18", &[0x62, 0xa1, 0xf5, 0x00, 0xef, 0xd0]),
+            (
+                "vpternlogq $0x96, 64(%rax), %zmm17, %zmm18",
+                &[0x62, 0xe3, 0xf5, 0x40, 0x25, 0x50, 0x01, 0x96],
+            ),
+            (
+                "vpternlogq $150, %xmm16, %xmm17, %xmm18",
+                &[0x62, 0xa3, 0xf5, 0x00, 0x25, 0xd0, 0x96],
+            ),
+            ("vpopcntq (%rax), %zmm17", &[0x62, 0xe2, 0xfd, 0x48, 0x55, 0x08]),
+            ("vpclmulqdq $17, %zmm16, %zmm17, %zmm18", &[0x62, 0xa3, 0x75, 0x40, 0x44, 0xd0, 0x11]),
+            ("vpclmulqdq $0, %xmm1, %xmm2, %xmm3", &[0xc4, 0xe3, 0x69, 0x44, 0xd9, 0x00]),
+            ("vextracti32x4 $3, %zmm16, %xmm1", &[0x62, 0xe3, 0x7d, 0x48, 0x39, 0xc1, 0x03]),
+            (
+                "vextracti32x4 $2, %zmm16, 32(%rax)",
+                &[0x62, 0xe3, 0x7d, 0x48, 0x39, 0x40, 0x02, 0x02],
+            ),
+            ("vextracti64x4 $1, %zmm16, %ymm17", &[0x62, 0xa3, 0xfd, 0x48, 0x3b, 0xc1, 0x01]),
+            ("vbroadcasti32x4 32(%rax), %zmm16", &[0x62, 0xe2, 0x7d, 0x48, 0x5a, 0x40, 0x02]),
+            ("vpbroadcastb %eax, %zmm1", &[0x62, 0xf2, 0x7d, 0x48, 0x7a, 0xc8]),
+            (
+                "vshufi64x2 $0xb1, (%rax), %zmm16, %zmm17",
+                &[0x62, 0xe3, 0xfd, 0x40, 0x43, 0x08, 0xb1],
+            ),
+            ("vpshufd $0x4e, %zmm16, %zmm17", &[0x62, 0xa1, 0x7d, 0x48, 0x70, 0xc8, 0x4e]),
+            ("vpshufd $0x4e, %xmm1, %xmm2", &[0xc5, 0xf9, 0x70, 0xd1, 0x4e]),
+            ("vmovq %xmm16, %rax", &[0x62, 0xe1, 0xfd, 0x08, 0x7e, 0xc0]),
+            ("vmovq %xmm1, %rax", &[0xc4, 0xe1, 0xf9, 0x7e, 0xc8]),
+            ("vmovq %rax, %xmm16", &[0x62, 0xe1, 0xfd, 0x08, 0x6e, 0xc0]),
+        ];
+        for (line, expected) in lines {
+            assert_eq!(bytes(line), *expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_mask_that_is_not_one_is_refused() {
+        assert!(refused("vmovdqu8 (%rbx), %zmm16{%k0}").contains("mask"));
+        assert!(refused("vmovdqu8 (%rbx), %zmm16{%k8}").contains("mask"));
+        assert!(refused("vmovdqu8 (%rbx), %zmm16{%k1").contains("brace"));
+        assert!(refused("addq %rax, %rbx{%k1}").contains("mask"));
+        assert!(refused("paddq %xmm16, %xmm1").contains("argument"));
+        assert!(refused("vmovdqu64 %zmm32, %zmm1").contains("register"));
     }
 }
