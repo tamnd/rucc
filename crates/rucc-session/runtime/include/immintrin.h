@@ -26,10 +26,11 @@
  * On x86-64 all three macros are always defined, because SSE2 is in the baseline the ABI names,
  * so in practice this header is the SSE2 header plus a comment.
  *
- * `<smmintrin.h>` is reached the way gcc reaches it, whatever the command line said. What it
- * holds so far is the CRC32C steps and, through `<popcntintrin.h>`, the population counts, each
- * of which is an instruction outside the baseline and each of which that header puts behind the
- * macro `-msse4.2`, `-mcrc32` or `-mpopcnt` defines. See `tamnd/rucc#2003`.
+ * `<smmintrin.h>` is reached the way gcc reaches it, whatever the command line said, and brings
+ * SSE3, SSSE3, SSE4.1 and SSE4.2 with it through `<tmmintrin.h>` and `<pmmintrin.h>`, and the
+ * population counts through `<popcntintrin.h>`. Every name in them is an instruction outside the
+ * baseline, and each is built for its extension, so a function that is not built for it cannot
+ * call it. See `tamnd/rucc#2003` and `tamnd/rucc#2045`.
  *
  * `<xsaveintrin.h>` is reached the same way and for the same reason, and holds `_xgetbv`.
  *
@@ -52,8 +53,8 @@
 #include <emmintrin.h>
 #endif
 
-/* Unguarded, because the names inside it are each behind the macro for their own instruction and
- * a program built without them gets exactly the names gcc would let it call. */
+/* Unguarded, because every name inside it is built for its own extension, and a function built
+ * without that extension is refused the call the way gcc refuses it. */
 #include <smmintrin.h>
 
 #include <xsaveintrin.h>
