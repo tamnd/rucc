@@ -12,6 +12,8 @@
 #
 # A program whose first lines have "args:" in them is run with those arguments, read with the shell's
 # quoting and no wildcard expansion, from this directory so that a wildcard has something to match.
+# One whose first lines have "flags:" in them is compiled with those flags as well, such as
+# -municode for a program that starts at wmain.
 set -euo pipefail
 
 bless=0
@@ -42,6 +44,8 @@ for src in "$here"/*.c; do
         eval "args=($line)"
         set +f
     fi
+    flags=$(sed -n '1,3s|^/\* flags: \(.*\) \*/$|\1|p' "$src")
+    read -r -a flags <<<"$flags"
     opts=(-O0 -O2)
     if [ $bless = 1 ]; then
         opts=(-O2)
@@ -50,7 +54,7 @@ for src in "$here"/*.c; do
         exe="$work/$name$opt.exe"
         got="$work/$name$opt.txt"
         ran=$((ran + 1))
-        if ! (cd "$here" && "${cc[@]}" "$opt" "$name.c" -o "$exe") >"$work/$name$opt.log" 2>&1; then
+        if ! (cd "$here" && "${cc[@]}" "$opt" ${flags[@]+"${flags[@]}"} "$name.c" -o "$exe") >"$work/$name$opt.log" 2>&1; then
             echo "FAIL $name $opt: did not build"
             sed 's/^/    /' "$work/$name$opt.log"
             failed=$((failed + 1))
