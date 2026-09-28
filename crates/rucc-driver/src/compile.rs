@@ -955,7 +955,6 @@ fn generate(
         switch: opts.switch_shape.as_deref().and_then(rucc_codegen::switch::Force::named),
         // On from `-O2` and at `-Os`, which is where gcc turns `-foptimize-sibling-calls` on.
         sibling: opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls()),
-        debug: opts.debug_info,
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

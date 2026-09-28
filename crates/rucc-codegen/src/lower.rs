@@ -854,25 +854,7 @@ pub fn func(
     conv: &'static CallRegs,
     elsewhere: &Elsewhere,
 ) -> Result<Lowered, Unsupported> {
-    func_for(source, names, selector, conv, elsewhere, true)
-}
-
-/// [`func`], for a build that says whether it writes debugging information. Without it the walk
-/// leaves out which value each declaration holds on the way into each block, since that is read
-/// only for the debugging information.
-///
-/// # Errors
-///
-/// The same as [`func`].
-pub fn func_for(
-    source: &Func,
-    names: &mut Interner,
-    selector: &'static Selector,
-    conv: &'static CallRegs,
-    elsewhere: &Elsewhere,
-    debug: bool,
-) -> Result<Lowered, Unsupported> {
-    Lowering::new(source, names, selector, conv, elsewhere, debug).run()
+    Lowering::new(source, names, selector, conv, elsewhere).run()
 }
 
 /// What the matcher settled on for one block, indexed the way the block's instructions are.
@@ -920,9 +902,6 @@ struct Lowering<'a> {
     /// Which names this function may not work an address out for itself, which is a fact about the
     /// module and so is worked out before any of this and handed in.
     elsewhere: &'a Elsewhere,
-    /// Whether the build writes debugging information, which is the one thing that reads which
-    /// value a declaration holds on the way into each block.
-    debug: bool,
     /// What the function wants its stack to look like, filled in as the walk finds out.
     stack: Stack,
     /// What a `va_start` in this function has to write, or nothing for a function that takes no
@@ -1067,7 +1046,6 @@ impl<'a> Lowering<'a> {
         selector: &'static Selector,
         conv: &'static CallRegs,
         elsewhere: &'a Elsewhere,
-        debug: bool,
     ) -> Self {
         let counts = source.counts();
         let name = source.name;
@@ -1104,7 +1082,6 @@ impl<'a> Lowering<'a> {
             selector,
             conv,
             elsewhere,
-            debug,
             stack: Stack::default(),
             varargs: None,
             slots: vec![None; counts.values],
@@ -1189,12 +1166,8 @@ impl<'a> Lowering<'a> {
         // Which of its values a declaration holds on the way into a block, for the blocks where
         // two of them are live at once. A block a pass took out says nothing, and neither does a
         // value the map above has lost the register of, since that is not the same as having none.
-        // Only for a build that writes debugging information, since that is all that reads it,
-        // and on a function of tens of thousands of blocks it is a walk of all of them for every
-        // local.
         let mut entries = Vec::new();
-        let held = if self.debug { crate::holding::on_entry(self.source) } else { Vec::new() };
-        for (decl, block, value) in held {
+        for (decl, block, value) in crate::holding::on_entry(self.source) {
             if let (Some(block), Some(reg)) = (self.blocks[block.index()], self.regs[value.index()])
             {
                 entries.push((decl, block, reg));

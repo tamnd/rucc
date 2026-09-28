@@ -334,19 +334,14 @@ pub struct Flags {
     /// Whether a call in tail position becomes a jump, which `-foptimize-sibling-calls` asks for
     /// and `-O2` and `-Os` turn on. See [`crate::tail`].
     pub sibling: bool,
-    /// Whether the build writes debugging information, which `-g` asks for. Where each local is
-    /// over which instructions is worked out only then, since nothing else reads it. See
-    /// [`crate::kept`].
-    pub debug: bool,
 }
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
     /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
     /// nothing in the frame sharing with anything, no scheduling, no loop padded to a boundary and
-    /// code that is meant to be fast rather than small, with no debugging information, which is
-    /// what a convention that has a red zone says at `-O0` when nobody on the command line has said
-    /// otherwise.
+    /// code that is meant to be fast rather than small, which is what a convention that has a red
+    /// zone says at `-O0` when nobody on the command line has said otherwise.
     fn default() -> Self {
         Self {
             frame_pointer: false,
@@ -365,7 +360,6 @@ impl Default for Flags {
             goal: Goal::Speed,
             switch: None,
             sibling: false,
-            debug: false,
         }
     }
 }
@@ -476,8 +470,7 @@ pub fn compile_recording(
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
-    let lowered =
-        lower::func_for(source, names, machine.selector, machine.conv, elsewhere, flags.debug)?;
+    let lowered = lower::func(source, names, machine.selector, machine.conv, elsewhere)?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
     // Straight after selection, because this is the last moment the machine blocks and the IR
@@ -641,12 +634,8 @@ pub fn compile_recording(
     // Or where a local the program declared may share its bytes, which is only where there is a
     // `reach`, since a local that shares is in the frame over part of the function and the part is
     // asked about the same way.
-    //
-    // Only for a build that writes debugging information, since the stretches are read by nothing
-    // else.
-    let line = (flags.debug
-        && (!func.named.is_empty() || (reach.is_some() && !stack.declared.is_empty())))
-    .then(|| kept::before(&func));
+    let line = (!func.named.is_empty() || (reach.is_some() && !stack.declared.is_empty()))
+        .then(|| kept::before(&func));
 
     // Which arithmetic reads its two sources either way round, so the allocator may write the
     // answer over whichever of the two is finished with. Marked here rather than at selection
@@ -1015,9 +1004,9 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { debug: true, ..Flags::default() };
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-            .expect("every instruction has a rule");
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
 
         // `int f(int a) { int x = a + a; return x; }` with nothing taking the address of `x`, so
         // it never reaches the frame and the only answer about it is a register. The sum is
