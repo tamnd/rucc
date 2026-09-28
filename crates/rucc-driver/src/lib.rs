@@ -790,13 +790,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // so far is for quoted includes only, and that a quoted include stops looking next
             // to the file that wrote it.
             "-I-" => opts.search.split_quote_chain(),
-            "-x" => {
-                let lang = args.get(i).ok_or_else(|| err("-x requires an argument"))?;
-                i += 1;
+            // `-x c` and `-xc`, both of which gcc takes. busybox and toybox probe the compiler
+            // with the joined one.
+            _ if arg.starts_with("-x") => {
+                let lang = joined_or_next(arg, 2, args, &mut i)?;
                 forced = if lang == "none" {
                     None
                 } else {
-                    Some(InputKind::from_x_arg(lang).map_err(|e| err(format!("{e}")))?)
+                    Some(InputKind::from_x_arg(&lang).map_err(|e| err(format!("{e}")))?)
                 };
             }
             // Not a GCC flag. spec/03-architecture.md section 3.5 compiles several
@@ -3572,6 +3573,14 @@ mod tests {
     #[test]
     fn dash_x_applies_to_later_inputs_only_and_none_stops_it() {
         let (_, plan) = compile(&["a.o", "-x", "c", "b.txt", "-x", "none", "c.o"]);
+        assert_eq!(plan.jobs[0].kind, InputKind::LinkerInput);
+        assert_eq!(plan.jobs[1].kind, InputKind::C);
+        assert_eq!(plan.jobs[2].kind, InputKind::LinkerInput);
+    }
+
+    #[test]
+    fn dash_x_can_be_joined_to_its_language() {
+        let (_, plan) = compile(&["a.o", "-xc", "b.txt", "-xnone", "c.o"]);
         assert_eq!(plan.jobs[0].kind, InputKind::LinkerInput);
         assert_eq!(plan.jobs[1].kind, InputKind::C);
         assert_eq!(plan.jobs[2].kind, InputKind::LinkerInput);
