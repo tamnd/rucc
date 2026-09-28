@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- Instruction selection counts which values a block's instructions fold away in a map of that block's own, instead of zeroing a counter for every value in the function once per block. On jtckdint's `test.c` at `-O2` the build runs about 2% fewer instructions and cycles, and the code it emits is unchanged.
 - The x86-64 encoder finds the rows for a mnemonic by hashing it instead of walking all 1115 rows of the encoding table for every instruction it emits. On jtckdint's `test.c` at `-O2` the build runs about 6% fewer instructions.
 - The register allocator's liveness marks the blocks that write each value before following it back through the graph, instead of searching the block's list of written values at every edge. On jtckdint's `test.c` at `-O2` the build takes about 5% fewer cycles, and the code it emits is unchanged.
 - Scalar evolution keeps its answers in one table per loop. Settling what a loop's exit test holds used to empty that loop's answers by walking every answer for every loop, once per loop. On jtckdint's `test.c` at `-O2` the build takes about 6% fewer cycles.
