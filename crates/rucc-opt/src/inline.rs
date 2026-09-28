@@ -58,6 +58,18 @@
 //! which is what gcc answers and what `bcp-1.c` checks. `-fno-inline` turns this half off and
 //! leaves `always_inline` alone, which is what the flag does in gcc.
 //!
+//! From `-O1` up it also takes the call to a `static` function that nothing reaches any other way,
+//! which is the called once rule of section 33.1 and gcc's `-finline-functions-called-once`. The
+//! function need not be declared `inline` and may be as large as `max-inline-functions-called-once
+//! -insns`, because once its one call is inlined nothing refers to it and it becomes a declaration,
+//! which emits nothing, so the program loses a call and gains nothing. That has to happen here: the
+//! lowering chose which `static` functions to emit from the source, before any call was inlined.
+//! A `static` helper called from one loop is the shape
+//! this is for, and it is everywhere in C, which is tamnd/rucc#1932. Reaching it any other way is a
+//! second call site, a tail call, its address taken by an instruction or written into an image, or
+//! an alias naming it. `used`, `noinline`, `optnone` and `naked` each keep it a call. `-fno-inline`
+//! turns this off with the declared half, which is what gcc does.
+//!
 //! A body that takes the address of one of its own labels is copied with the label, so each copy
 //! has an address of its own, which is what gcc does and what `990208-1.c` checks. A body that
 //! jumps to such an address, or whose labels a static table holds, is refused, since the copy
@@ -66,9 +78,10 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
+use rucc_cost::heuristics::INLINE_CALLED_ONCE_INSNS;
 use rucc_ir::{
-    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Def, Drains, Extra, Float,
-    Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
+    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
+    Float, Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
     Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
 use rucc_tuple::{Arch, Os};
@@ -83,6 +96,8 @@ const INLINED: &str = "always_inline call inlined";
 
 const HINT_INLINED: &str = "inline call inlined";
 
+const ONCE_INLINED: &str = "call to a static function called once inlined";
+
 /// Which of the two reasons a function is inlined for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -90,6 +105,9 @@ enum Kind {
     Always,
     /// `inline`, which is a hint taken when the body is small enough.
     Hinted,
+    /// A `static` function reached by one call and no other way, whose out of line copy goes
+    /// away once that call is inlined.
+    Once,
 }
 
 /// Why a call to an `always_inline` function was not inlined.
@@ -157,30 +175,65 @@ impl InlineFailure {
             Self::TooLarge => "inline call not inlined: callee too large",
         }
     }
+
+    /// What `-fopt-info` says about it for the one call to a `static` function called once.
+    #[must_use]
+    pub const fn once(self) -> &'static str {
+        match self {
+            Self::Recursive => "call to a function called once not inlined: recursive",
+            Self::Mismatch => "call to a function called once not inlined: arguments do not match",
+            Self::ByValue => {
+                "call to a function called once not inlined: structure passed by value"
+            }
+            Self::VaStart => "call to a function called once not inlined: callee uses va_start",
+            Self::ComputedGoto => {
+                "call to a function called once not inlined: callee has a computed goto"
+            }
+            Self::Setjmp => "call to a function called once not inlined: callee calls setjmp",
+            Self::ApplyArgs => {
+                "call to a function called once not inlined: callee uses __builtin_apply_args"
+            }
+            Self::MemorySsa => "call to a function called once not inlined: memory SSA present",
+            Self::Pack => {
+                "call to a function called once not inlined: va_arg_pack cannot be forwarded"
+            }
+            Self::Alloca => "call to a function called once not inlined: callee calls alloca",
+            Self::TooLarge => "call to a function called once not inlined: callee too large",
+        }
+    }
 }
 
 /// Inlines every call to an `always_inline` function that can be, and with a `limit` every call to
-/// a function declared `inline` whose body is no larger than that, and says what it did where.
+/// a function declared `inline` whose body is no larger than that and the one call to a `static`
+/// function called once, and says what it did where.
 ///
 /// Then turns every function still holding a `va_arg_pack` into a declaration. See the module
 /// documentation for why that is the right thing to do with one.
 pub fn run(module: &mut Module, limit: Option<u32>) -> Vec<(FuncId, Stats)> {
+    let once = if limit.is_some() { called_once(module) } else { HashSet::new() };
     let wanted: HashMap<Symbol, (FuncId, Kind)> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
         .filter_map(|id| {
-            let set = module[id].attrs.set;
+            let func = &module[id];
+            let set = func.attrs.set;
             let kind = if set.contains(AttrSet::ALWAYS_INLINE) {
                 Kind::Always
-            } else if limit.is_some()
-                && set.contains(AttrSet::INLINE_HINT)
-                && set.without(AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED) == set
+            } else if limit.is_none()
+                || set.without(AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED) != set
             {
+                return None;
+            } else if func.linkage == Linkage::Internal
+                && !set.contains(AttrSet::USED)
+                && once.contains(&func.name)
+            {
+                Kind::Once
+            } else if set.contains(AttrSet::INLINE_HINT) {
                 Kind::Hinted
             } else {
                 return None;
             };
-            Some((module[id].name, (id, kind)))
+            Some((func.name, (id, kind)))
         })
         .collect();
     let mut done = Vec::new();
@@ -192,9 +245,66 @@ pub fn run(module: &mut Module, limit: Option<u32>) -> Vec<(FuncId, Stats)> {
         for id in module.funcs().collect::<Vec<FuncId>>() {
             settle(module, id, &how, &mut state, &mut done);
         }
+        let (calls, elsewhere) = references(module);
+        for &(id, kind) in wanted.values() {
+            let name = module[id].name;
+            if kind == Kind::Once && !calls.contains_key(&name) && !elsewhere.contains(&name) {
+                module[id] = declaration(&module[id]);
+            }
+        }
     }
     withdraw(module);
     done
+}
+
+/// The names the module reaches by exactly one direct call and in no other way.
+///
+/// Any other way is a second call, a tail call, an instruction that takes the address, an image
+/// that holds it, or an alias that names it. Whether a name is a `static` function that may be
+/// inlined is for the caller to ask.
+fn called_once(module: &Module) -> HashSet<Symbol> {
+    let (calls, elsewhere) = references(module);
+    calls
+        .into_iter()
+        .filter(|&(name, count)| count == 1 && !elsewhere.contains(&name))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// How many direct calls the module makes to each name, and the names it reaches any other way.
+fn references(module: &Module) -> (HashMap<Symbol, usize>, HashSet<Symbol>) {
+    let mut calls: HashMap<Symbol, usize> = HashMap::new();
+    let mut elsewhere = HashSet::new();
+    for id in module.funcs() {
+        let func = &module[id];
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            match func[inst].extra {
+                Extra::Call(info) if func[inst].opcode == Opcode::Call => {
+                    if let Some(callee) = func[info].callee {
+                        *calls.entry(callee).or_default() += 1;
+                    }
+                }
+                Extra::Call(info) => elsewhere.extend(func[info].callee),
+                Extra::Symbol(name) => {
+                    elsewhere.insert(name);
+                }
+                _ => {}
+            }
+        }
+    }
+    for id in module.globals() {
+        let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
+        for datum in init {
+            if let Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } = *datum
+            {
+                elsewhere.insert(module[reloc].symbol);
+            }
+        }
+    }
+    for id in module.aliases() {
+        elsewhere.insert(module[id].target);
+    }
+    (calls, elsewhere)
 }
 
 /// What stays the same for every function [`settle`] visits.
@@ -252,6 +362,7 @@ fn settle(
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
             Kind::Hinted => failure.hint(),
+            Kind::Once => failure.once(),
         };
         if callee == id || state.get(&callee) == Some(&State::Settling) {
             stats.missed(why(InlineFailure::Recursive));
@@ -260,13 +371,21 @@ fn settle(
         settle(module, callee, how, state, done);
         // Measured once the callee is settled, since what is copied is the body with its own
         // calls already inlined.
-        if kind == Kind::Hinted && size(&module[callee]) > how.limit {
+        let most = match kind {
+            Kind::Always => usize::MAX,
+            Kind::Hinted => how.limit,
+            Kind::Once => INLINE_CALLED_ONCE_INSNS as usize,
+        };
+        if size(&module[callee]) > most {
             stats.missed(why(InlineFailure::TooLarge));
             continue;
         }
         match splice(module, id, call, callee, how.convention, kind) {
-            Ok(()) if kind == Kind::Always => stats.optimized(INLINED),
-            Ok(()) => stats.optimized(HINT_INLINED),
+            Ok(()) => stats.optimized(match kind {
+                Kind::Always => INLINED,
+                Kind::Hinted => HINT_INLINED,
+                Kind::Once => ONCE_INLINED,
+            }),
             Err(failure) => stats.missed(why(failure)),
         }
     }
@@ -365,7 +484,7 @@ fn check(
             match callee[inst].opcode {
                 Opcode::VaStart => return Err(InlineFailure::VaStart),
                 Opcode::IndirectBr => return Err(InlineFailure::ComputedGoto),
-                Opcode::Alloca if kind == Kind::Hinted && !callee[inst].args.is_empty() => {
+                Opcode::Alloca if kind != Kind::Always && !callee[inst].args.is_empty() => {
                     return Err(InlineFailure::Alloca);
                 }
                 Opcode::SetjmpMarker => return Err(InlineFailure::Setjmp),
@@ -932,15 +1051,20 @@ fn withdraw(module: &mut Module) {
         if !holds && !func.attrs.set.contains(AttrSet::INLINE_ONLY) {
             continue;
         }
-        let mut declared = Func::new(func.name, func.signature().clone());
-        declared.spelled = func.spelled;
-        declared.visibility = func.visibility;
-        declared.attrs = func.attrs;
-        declared.attrs.set = declared.attrs.set.without(AttrSet::INLINE_ONLY);
-        declared.declared = func.declared;
-        declared.linkage = Linkage::External;
-        module[id] = declared;
+        module[id] = declaration(func);
     }
+}
+
+/// A declaration of that function under the same name, with no body and nothing to emit.
+fn declaration(func: &Func) -> Func {
+    let mut declared = Func::new(func.name, func.signature().clone());
+    declared.spelled = func.spelled;
+    declared.visibility = func.visibility;
+    declared.attrs = func.attrs;
+    declared.attrs.set = declared.attrs.set.without(AttrSet::INLINE_ONLY);
+    declared.declared = func.declared;
+    declared.linkage = Linkage::External;
+    declared
 }
 
 #[cfg(test)]
@@ -1083,6 +1207,93 @@ block0(%0: i32):
     fn a_function_declared_inline_over_the_limit_is_left_alone() {
         let out = inlined_under(HINTED, Some(2));
         assert!(out.contains("call @bump"), "{out}");
+    }
+
+    /// A `static` function nobody declared `inline`, called from one place.
+    const ONCE: &str = r#"
+func @scale(i32) -> i32, linkage(internal) {
+block0(%0: i32):
+    %1 = iconst.i32 3
+    %2 = mul.i32 %0, %1
+    %3 = iconst.i32 1
+    %4 = add.i32 %2, %3
+    return %4
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @scale(%0) : (i32) -> i32
+    return %1
+}
+"#;
+
+    /// Its one call goes in above `-O0` whatever the limit on a function declared `inline` is,
+    /// since the out of line copy goes away with it, and stays a call at `-O0`.
+    #[test]
+    fn a_static_function_called_once_is_inlined_above_o0() {
+        let out = inlined_under(ONCE, Some(2));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @scale"), "{out}");
+        assert!(g.contains("mul %0"), "{out}");
+        let out = inlined_under(ONCE, None);
+        assert!(out.contains("call @scale"), "{out}");
+    }
+
+    /// Once its one call is inlined nothing reaches the body, so it goes rather than being emitted
+    /// next to the copy.
+    #[test]
+    fn a_static_function_called_once_is_not_kept_once_inlined() {
+        let out = inlined_under(ONCE, Some(2));
+        assert_eq!(out.matches("mul ").count(), 1, "{out}");
+        assert!(!out.contains("linkage(internal)"), "{out}");
+    }
+
+    /// Called from two places it is a function nobody declared `inline`, which stays a call.
+    #[test]
+    fn a_static_function_called_twice_stays_a_call() {
+        let twice = ONCE.replace(
+            "    %1 = call @scale(%0) : (i32) -> i32\n    return %1",
+            "    %1 = call @scale(%0) : (i32) -> i32\n    %2 = call @scale(%1) : (i32) -> i32\n    \
+             return %2",
+        );
+        assert_ne!(twice, ONCE);
+        let out = inlined_under(&twice, Some(70));
+        assert_eq!(out.matches("call @scale").count(), 2, "{out}");
+    }
+
+    /// One another object can call keeps its copy, so inlining the call here would only grow the
+    /// program.
+    #[test]
+    fn a_function_other_objects_can_call_stays_a_call_when_called_once() {
+        let external = ONCE.replace(
+            "@scale(i32) -> i32, linkage(internal)",
+            "@scale(i32) -> i32, linkage(external)",
+        );
+        assert_ne!(external, ONCE);
+        let out = inlined_under(&external, Some(70));
+        assert!(out.contains("call @scale"), "{out}");
+    }
+
+    /// Its address is a way to reach it that is not the call, so the copy has to stay and the call
+    /// stays with it.
+    #[test]
+    fn a_static_function_whose_address_is_taken_stays_a_call() {
+        let taken = ONCE.replace(
+            "    %1 = call @scale(%0) : (i32) -> i32\n    return %1",
+            "    %1 = call @scale(%0) : (i32) -> i32\n    %2 = global_addr @scale\n    return %1",
+        );
+        assert_ne!(taken, ONCE);
+        let out = inlined_under(&taken, Some(70));
+        assert!(out.contains("call @scale"), "{out}");
+    }
+
+    /// `noinline` is kept whoever calls it how often.
+    #[test]
+    fn a_static_function_called_once_and_marked_noinline_stays_a_call() {
+        let kept = ONCE.replace("linkage(internal) {", "linkage(internal), attrs(noinline) {");
+        assert_ne!(kept, ONCE);
+        let out = inlined_under(&kept, Some(70));
+        assert!(out.contains("call @scale"), "{out}");
     }
 
     /// Each copy of a body that takes the address of its own label gets a label of its own, which

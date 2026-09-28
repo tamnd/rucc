@@ -63,6 +63,12 @@
 //! return, and in either case with the same values in every position but one. That one is the
 //! answer. Section 24.5 gives up on arms that assign more than one thing and so does this.
 //!
+//! A case that goes where the default goes is not an arm. That is a `case 15:` written just above
+//! `default:`, which the front end gives a block of its own that only jumps to the default's, or a
+//! case edge straight to the default block. It leaves the `switch` before the arms are looked at, so
+//! its label goes to the default down the default edge, and for a table it is a hole like any
+//! other. Until tamnd/rucc#1932 one case like that made the arms differ and kept the whole `switch`.
+//!
 //! The answers are `a * label + b` at every label, checked at every label rather than fitted to two
 //! of them and believed. The check is done in the answer's own width with wrapping, because that is
 //! what the arithmetic this writes will do, and the arithmetic is written with no flags on it so
@@ -333,6 +339,9 @@ struct Plan {
     /// Values between two labels that get a case of their own going to the load, because the
     /// default gives what their cell holds.
     holes: Vec<i128>,
+    /// Where in the `switch`'s list of cases the ones that went where the default goes are. They
+    /// leave the `switch`.
+    defaulted: Vec<usize>,
 }
 
 /// How the answer is worked out from the label.
@@ -403,6 +412,28 @@ fn plan(
     let labels: Vec<i128> = func[info.cases].iter().map(|imm| imm.signed(ty)).collect();
     let Some((&default, arms)) = calls.split_first() else { return Err(ARMS_DIFFER) };
     if arms.len() != labels.len() || arms.len() < LABELS {
+        return Err(TOO_FEW);
+    }
+    // A case that goes where the default goes is the default's. The block it went through, if it
+    // went through one and nothing else reaches it, goes with the arms.
+    let mut defaulted = Vec::new();
+    let mut gone = Vec::new();
+    let mut kept = Vec::with_capacity(arms.len());
+    let mut kept_labels = Vec::with_capacity(labels.len());
+    for (at, (&call, &label)) in arms.iter().zip(&labels).enumerate() {
+        match defaults(func, call, default) {
+            Some(through) => {
+                defaulted.push(at);
+                gone.extend(through.filter(|&block| cfg.predecessors(block).len() == 1));
+            }
+            None => {
+                kept.push(call);
+                kept_labels.push(label);
+            }
+        }
+    }
+    let (arms, labels) = (&kept[..], kept_labels);
+    if arms.len() < LABELS {
         return Err(TOO_FEW);
     }
     // A block that is both an arm and the default is not an arm this may take away, and it looks
@@ -504,9 +535,30 @@ fn plan(
         args,
         answer,
         how,
-        arms: arms.iter().map(|call| call.block).collect(),
+        arms: arms.iter().map(|call| call.block).chain(gone).collect(),
         holes,
+        defaulted,
     })
+}
+
+/// Whether a case goes where the default goes, and the block it went through to get there if it
+/// went through one.
+///
+/// Where the default goes is its block with its values. A block gone through is one that holds
+/// nothing but a jump there, and that nothing takes the address of.
+fn defaults(func: &Func, call: BlockCall, default: BlockCall) -> Option<Option<Block>> {
+    let there =
+        |call: BlockCall| call.block == default.block && func[call.args] == func[default.args];
+    if there(call) {
+        return Some(None);
+    }
+    if !call.args.is_empty() || call.block == default.block || func.block_name(call.block).is_some()
+    {
+        return None;
+    }
+    let last = func.terminator(call.block)?;
+    let only = func.insts(call.block).count() == 1 && func[last].opcode == Opcode::Jump;
+    (only && func.successors(last).next().is_some_and(there)).then_some(Some(call.block))
 }
 
 /// What the default gives in the answer's place, when that is all it does differently from an arm.
@@ -854,16 +906,21 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
     };
 
     // Every case edge, and only the case edges: the default is the first target and stays where it
-    // was pointing.
+    // was pointing. A case that went where the default goes leaves, and the default edge takes it.
     let Extra::Switch(info) = func[plan.inst].extra else { return };
     let empty = func.push_values(&[]);
-    let mut calls: Vec<BlockCall> = func[func[info].targets].to_vec();
-    for call in &mut calls[1..] {
+    let before: Vec<Imm> = func[func[info].cases].to_vec();
+    let mut calls: Vec<BlockCall> = func[func[info].targets][..1].to_vec();
+    let mut cases = Vec::with_capacity(before.len() + plan.holes.len());
+    for (at, &case) in before.iter().enumerate() {
+        if plan.defaulted.contains(&at) {
+            continue;
+        }
         // No hint: the cases that had one had one each, and a single edge standing for all of them
         // cannot carry a number that was true of one arm.
-        *call = BlockCall::new(hit, empty);
+        calls.push(BlockCall::new(hit, empty));
+        cases.push(case);
     }
-    let mut cases: Vec<Imm> = func[func[info].cases].to_vec();
     for &hole in &plan.holes {
         calls.push(BlockCall::new(hit, empty));
         cases.push(Imm::int(hole, plan.ty));
@@ -897,7 +954,7 @@ mod tests {
     };
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{PLACE_IS_ODD, SwitchConv};
+    use super::{PLACE_IS_ODD, SwitchConv, TOO_FEW};
     use crate::image::Images;
     use crate::stats::Kind;
     use crate::{Fuel, Pass, ReadOnly, Stats, Table};
@@ -950,6 +1007,51 @@ mod tests {
         let cases: Vec<(i128, Block)> = labels.iter().copied().zip(arms.iter().copied()).collect();
         Builder::new(&mut func, head).switch(value, default, &cases);
         func
+    }
+
+    /// The same as [`returning`] at 32 bits, with more labels that go where the default goes.
+    ///
+    /// Each goes through a block of its own that only jumps to the default when `through` is set,
+    /// which is what the front end makes of a `case` written just above `default:`, and straight to
+    /// the default when it is not.
+    fn falling(labels: &[i128], answers: &[i128], extra: &[i128], through: bool) -> Func {
+        let ty = i32();
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let head = func.create_block();
+        let value = func.append_param(head, ty);
+        let default = func.create_block();
+        let arms: Vec<Block> = answers.iter().map(|_| func.create_block()).collect();
+        for (&arm, &answer) in arms.iter().zip(answers) {
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.iconst(ty, answer);
+            build.ret(&[it]);
+        }
+        let mut build = Builder::new(&mut func, default);
+        let it = build.iconst(ty, 999);
+        build.ret(&[it]);
+        let mut cases: Vec<(i128, Block)> =
+            labels.iter().copied().zip(arms.iter().copied()).collect();
+        for &label in extra {
+            let to = if through {
+                let block = func.create_block();
+                Builder::new(&mut func, block).jump(default, &[]);
+                block
+            } else {
+                default
+            };
+            cases.push((label, to));
+        }
+        Builder::new(&mut func, head).switch(value, default, &cases);
+        func
+    }
+
+    /// The labels the `switch` still has, in the order it has them.
+    fn labels(func: &Func) -> Vec<i128> {
+        let head = func.entry().expect("a function with blocks in it");
+        let term = func.terminator(head).expect("a head block has one");
+        let Extra::Switch(info) = func[term].extra else { panic!("the head ends in no switch") };
+        func[func[info].cases].iter().map(|imm| imm.signed(i32())).collect()
     }
 
     /// The blocks every case edge goes to, which is one block when the pass has fired.
@@ -1320,6 +1422,59 @@ mod tests {
         for (label, answer) in [(1, 10), (2, 20), (3, 999), (4, 40), (5, 55)] {
             assert_eq!(looked_up(&func, arm, label, &tables), answer);
         }
+    }
+
+    /// The shape of tamnd/rucc#1932: the last case is written just above `default:` and falls into
+    /// it, so its block only jumps to the default's. It leaves the `switch`, the rest are a line,
+    /// and the block it went through goes with the arms.
+    #[test]
+    fn a_case_that_falls_into_the_default_is_the_defaults() {
+        let mut func = falling(&[0, 1, 2, 3], &[1, 2, 3, 4], &[4], true);
+        assert!(fired(&convert(&mut func)));
+        assert_eq!(labels(&func), [0, 1, 2, 3]);
+        assert_eq!(func.blocks().count(), 3, "the head, the default and the arithmetic");
+        let arm = arm(&func);
+        for label in 0..4 {
+            assert_eq!(answer(&func, arm, label), label + 1);
+        }
+    }
+
+    /// A case edge straight to the default block was an arm that was also the default, which kept
+    /// the `switch` before.
+    #[test]
+    fn a_case_edge_straight_to_the_default_is_the_defaults() {
+        let mut func = falling(&[0, 1, 2, 3], &[1, 2, 3, 4], &[4], false);
+        assert!(fired(&convert(&mut func)));
+        assert_eq!(labels(&func), [0, 1, 2, 3]);
+        let arm = arm(&func);
+        for label in 0..4 {
+            assert_eq!(answer(&func, arm, label), label + 1);
+        }
+    }
+
+    /// Between two labels a case that falls into the default is a hole, and the default only
+    /// answers, so the hole reads what the default gives out of the table.
+    #[test]
+    fn a_case_that_falls_into_the_default_between_two_labels_is_a_hole() {
+        let mut func = falling(&[0, 1, 3, 4], &[5, 9, 2, 7], &[2], true);
+        let (stats, tables) = tabled(&mut func);
+        assert!(fired(&stats));
+        assert_eq!(tables[0].cells, [5, 9, 999, 2, 7]);
+        assert_eq!(labels(&func), [0, 1, 3, 4, 2]);
+        let arm = arm(&func);
+        for (label, answer) in [(0, 5), (1, 9), (2, 999), (3, 2), (4, 7)] {
+            assert_eq!(looked_up(&func, arm, label, &tables), answer);
+        }
+    }
+
+    /// What is left once the default's cases are out is what has to pay for the arithmetic.
+    #[test]
+    fn two_labels_left_once_the_defaults_are_out_are_not_enough() {
+        let mut func = falling(&[0, 1], &[1, 2], &[2, 3], true);
+        let stats = convert(&mut func);
+        assert!(!fired(&stats));
+        assert_eq!(stats.count(Kind::Missed, TOO_FEW), 1, "{stats:?}");
+        assert_eq!(labels(&func), [0, 1, 2, 3]);
     }
 
     /// A hole is a cell nothing reads when the default does something other than answer.

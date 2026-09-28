@@ -7,6 +7,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `rucc_base::dfp` converts the text of a decimal floating constant to the bits of `_Decimal32`, `_Decimal64` or `_Decimal128` in the BID encoding gcc uses on x86-64 and AArch64, rounding to nearest with ties to even and keeping the exponent the text wrote, and reads the bits back. Nothing calls it yet. It is the first part of #207.
+- From `-O1` up the one call to a `static` function that nothing reaches any other way is inlined whatever the function's size up to 4000 instructions, and the function is then not emitted, which is gcc's `-finline-functions-called-once`. A helper written to name a step and called from the one loop that needs it now costs no call. A second call, a tail call, its address taken or written into data, an alias of it, or `used`, `noinline`, `optnone` or `naked` on it keeps it a call, and `-fopt-info-missed` says why when one is refused (#1932).
+
+### Changed
+
+- A `switch` with a case that goes where the default goes, which is a `case` written just above `default:` or a case edge straight to the default block, is converted to arithmetic or a table like any other. That case leaves the `switch` and goes down the default edge, and for a table it is a hole. One such case used to make the arms differ and keep the whole `switch` as a jump table (#1932).
 
 ## 0.11.14
 
