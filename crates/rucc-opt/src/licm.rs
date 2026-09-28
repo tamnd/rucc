@@ -585,7 +585,7 @@ impl Job<'_> {
             .filter(|&inst| bounds_a_lifetime(func, inst))
             .collect();
         let bounds = !boundaries.is_empty();
-        let mut ranges = Ranges::new(func, self.cfg, self.dom);
+        let mut ranges = Ranges::new(func, self.cfg, self.dom).knowing(self.loops);
         // One oracle for the loop, built only where there is something to ask about, since
         // building one walks the whole body for the escape set. The count is shared by every
         // load in the loop, so one loop cannot ask more than [`ALIAS_STEPS`] however many
