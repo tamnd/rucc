@@ -29,7 +29,7 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `aarch64-ios` | 4 | 3 | no | a distinct OS from macOS, with its own platform value and availability macros |
 | `aarch64-ios-simulator` | 4 | 4 | no | three table rows rather than work, once the Darwin path exists |
 | `aarch64-ios-macabi` | 4 | 4 | no | Mac Catalyst, which zig added in 0.16 and which costs a platform value |
-| `x86_64-windows-gnu` | 4 | 1 | yes | mingw-w64, and the default env for Windows because it is the one we can ship |
+| `x86_64-windows-gnu` | 3 | 1 | yes | mingw-w64, and the default env for Windows because it is the one we can ship |
 | `x86_64-windows-msvc` | 4 | 2 | yes | needs a fetched SDK, so the ABI is ours and the dialect is not |
 | `aarch64-windows-gnu` | 4 | 2 | yes |  |
 | `aarch64-windows-msvc` | 4 | 3 | yes |  |

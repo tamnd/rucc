@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - rucc links programs and shared libraries for Apple targets. It runs Apple's `ld`, or `ld64.lld`, with `-platform_version` taken from the deployment target and the SDK's own version, and `-syslibroot` pointing at the SDK the header search already finds through `-isysroot`, `SDKROOT` or `xcrun`. `-r` works there too.
+- CI runs `tests/exec/windows` natively on a `windows-2025` runner with rucc and no flags, and again with MinGW GCC from MSYS2 as a check on the expected output. The objects rucc writes there are hashed and compared with the ones it writes on Linux, which have to be the same bytes. `x86_64-windows-gnu` moves from tier 4 to tier 3 in `docs/TARGETS.md` (#2067).
 
 ### Changed
 

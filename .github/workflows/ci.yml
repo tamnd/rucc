@@ -394,6 +394,65 @@ jobs:
           WINEDEBUG: -all
           WINEPREFIX: ${{ runner.temp }}/wine
         run: tests/exec/windows/run.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" /usr/lib/wine/wine64
+      - name: hash the objects
+        run: tests/exec/windows/objects.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" > objects-linux.txt
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: objects-linux
+          path: objects-linux.txt
+          retention-days: 7
+
+  # The same programs built by rucc on Windows itself, with no flags, since x86_64-windows-gnu is
+  # the default target there. lld is the one in the LLVM install the image carries, which the
+  # driver finds on PATH or under %ProgramFiles%\LLVM\bin. MinGW GCC from MSYS2 then
+  # runs the same programs, as a check that the expected output is still what gcc says on a
+  # real Windows machine and not only under Wine.
+  windows:
+    name: windows programs on windows
+    needs: quick
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: build rucc, the sysroot and the runtime
+        run: |
+          cargo build --release --bin rucc
+          ./target/release/rucc.exe --fetch x86_64-windows-gnu
+          cargo xtask builtins --target x86_64-windows-gnu
+      - name: run tests/exec/windows with rucc
+        run: tests/exec/windows/run.sh "$PWD/target/release/rucc.exe"
+      - name: hash the objects
+        run: tests/exec/windows/objects.sh "$PWD/target/release/rucc.exe" > objects-windows.txt
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: objects-windows
+          path: objects-windows.txt
+          retention-days: 7
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      - name: run tests/exec/windows with MinGW GCC
+        shell: msys2 {0}
+        run: tests/exec/windows/run.sh gcc
+
+  # rucc on Windows and rucc on Linux have to write the same object for the same source and
+  # target. The two jobs above each hash what they wrote and this compares the lists.
+  windows-objects:
+    name: the same objects from windows and linux
+    needs: [wine, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: objects-*
+          merge-multiple: true
+      - name: compare
+        run: diff objects-linux.txt objects-windows.txt
 
   # spec/safe-memory/03-bug-model.md section 3.7 says every row of the bug model has test cases
   # and a number in CI. This is that number. It is the only job that runs what the compiler
@@ -643,7 +702,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, safety, accounting, audit, differential, abi-differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, windows, windows-objects, safety, accounting, audit, differential, abi-differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

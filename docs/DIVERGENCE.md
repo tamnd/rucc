@@ -48,6 +48,6 @@ The glibc rows link dynamically against a loader and a shared libc for the targe
 
 The android rows have no bionic available. What the reference ships is bionic's headers, so those rows compile and there is nothing to link against.
 
-The Darwin and Windows rows need a different kind of emulator than qemu user mode, which runs Linux binaries. The Darwin rows run on the machine they were built for, when that machine is a mac, and the Windows rows run on a Windows runner. Neither is emulation, so neither belongs in this document except to say why it is not here.
+The Darwin and Windows rows need a different kind of emulator than qemu user mode, which runs Linux binaries. The Darwin rows run on the machine they were built for, when that machine is a mac. `x86_64-windows-gnu` runs in two places on every pull request: natively on a `windows-2025` runner, and under Wine on Linux. Wine is not an emulator but a second implementation of the Windows API, so a program that passes under Wine and fails on Windows is a Wine or C runtime difference rather than a compiler bug, and the native job is the one that settles it. The two jobs also have to write the same objects byte for byte. The other Windows rows are compiled and not run yet.
 
 `loongarch64-linux-gnu` is the row that will stay emulated the longest. Document 04.6 records that the hardware is not purchasable outside China, so unless that changes it is a qemu-only target permanently, and its entry in this document is the whole of its evidence rather than a supplement to hardware.
