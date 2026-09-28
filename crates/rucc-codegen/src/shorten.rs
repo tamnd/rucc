@@ -162,6 +162,8 @@
 //! last rewrite is about the ones that were not computing anything rather than about address
 //! computation in general.
 
+use std::collections::HashMap;
+
 use rucc_base::Interner;
 use rucc_cost::Goal;
 use rucc_mir::{self as mir, Role};
@@ -194,10 +196,11 @@ pub fn shorter(
     let names = &*names;
     let mut counts = changes::Reads::of(func);
     let mut took = 0;
+    let mut seen = HashMap::new();
     // Whether the rewrite that spends the condition state may be asked for at all. The narrower
     // instruction neither reads the state nor writes it, so it is not asked this and a function
     // this turns down still gets that one.
-    let free = !carried(func, short, flags, names);
+    let free = !carried(func, short, flags, names, &mut seen);
     // Whether the rewrite that trades the carry for a byte may be asked for. It is the one thing
     // here that is not free, so it waits for a level that said it wanted small code.
     let small = free && goal == Goal::Size;
@@ -212,7 +215,10 @@ pub fn shorter(
         // writes everything but the carry ends the life of neither.
         let mut carry = false;
         for inst in func.insts(block).collect::<Vec<_>>().into_iter().rev() {
-            if free && !live {
+            // Asked again after each rewrite that is taken, since what stands there then is another
+            // instruction and the questions below are about that one.
+            let mut known = Known::of(&mut seen, func, short, flags, names, inst);
+            if free && !live && known.zeroing {
                 let into = shorter_form(func, short, names, &opcodes, inst);
                 if into.is_some_and(|op| zeroed(func, &mut counts, machine, names, inst, op)) {
                     took += 1;
@@ -223,9 +229,14 @@ pub fn shorter(
             }
             // The zero that could not become an exclusive or can still be written in fewer bytes,
             // which is why this is asked after that one and not instead of it.
-            let into = narrower_form(func, short, names, &opcodes, inst);
+            let into = if known.narrowing {
+                narrower_form(func, short, names, &opcodes, inst)
+            } else {
+                None
+            };
             if into.is_some_and(|op| narrowed(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
+                known = Known::of(&mut seen, func, short, flags, names, inst);
                 // What stands there now is the same instruction at half the width, which is a
                 // move either way, so what it does to the state is what it did before: nothing.
             }
@@ -233,37 +244,42 @@ pub fn shorter(
             // is live comes into it, because the shorter instruction writes the same five bits of
             // state the comparison wrote, so this is asked of every instruction whatever the walk
             // has seen behind it.
-            let into = tested_form(func, short, names, &opcodes, inst);
+            let into =
+                if known.testing { tested_form(func, short, names, &opcodes, inst) } else { None };
             if into.is_some_and(|op| tested(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
+                known = Known::of(&mut seen, func, short, flags, names, inst);
             }
             // An address that is a register, written as the move it is. Nothing about the condition
             // state comes into it either, since neither instruction writes any, so this is asked of
             // every instruction the same way the narrower move is.
-            let into = copied_form(func, short, names, &opcodes, inst);
+            let into =
+                if known.copying { copied_form(func, short, names, &opcodes, inst) } else { None };
             if into.is_some_and(|op| copied(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
+                known = Known::of(&mut seen, func, short, flags, names, inst);
             }
             // Adding one with the one in the opcode, which is the only rewrite here that is a
             // trade. It needs the carry to be dead rather than the whole state, since that is the
             // only part of the state the shorter instruction leaves behind, and it needs the level
             // to have asked for small code.
-            if small && !carry {
+            if small && !carry && known.stepping {
                 let into = stepped_form(func, short, names, &opcodes, inst);
                 if into.is_some_and(|op| stepped(func, &mut counts, machine, names, inst, op)) {
                     took += 1;
+                    known = Known::of(&mut seen, func, short, flags, names, inst);
                     // What stands there now writes everything but the carry, and the carry was
                     // already dead, so both answers below are the ones they already are and the
                     // walk past it is the walk it would have taken anyway.
                 }
             }
-            let Some(name) = opcode(func, flags, names, inst) else {
+            if !known.covered {
                 // A name the description does not cover may have read the state and may have
                 // written it, and the answer that finds fewer rewrites is that it read it.
                 live = true;
                 carry = true;
                 continue;
-            };
+            }
             // What it reads before whether it writes, because an instruction can do both and the
             // read it does is a read of what is there now. An add with carry is the one that does,
             // and asking the other way round would call it the end of the state's life and let a
@@ -275,10 +291,10 @@ pub fn shorter(
             // than extending one. Asking the description which kind it is rather than stopping at
             // the word read is most of what this pass gets to do in real code, since a C function
             // of any size has one of these in it.
-            if flags.asks_what_it_reads(name) {
+            if known.own {
                 live = false;
                 carry = false;
-            } else if let Some(reads) = flags.reads(name) {
+            } else if let Some(reads) = known.reads {
                 live = true;
                 // Which part of the state the condition on it is about. A condition that asks where
                 // a value sits as an unsigned number reads the carry, and so does an instruction
@@ -286,7 +302,7 @@ pub fn shorter(
                 if matches!(reads, Reads::Unsigned | Reads::Carry) {
                     carry = true;
                 }
-            } else if (flags.writes)(name) && !short.steps(name) {
+            } else if known.ends {
                 // An instruction that writes the state ends the life of everything in it. One that
                 // writes all of it but the carry ends the life of none of it, which is the second
                 // half of the sentence and is why this asks the description rather than stopping at
@@ -319,19 +335,91 @@ pub fn shorter(
 /// Counting it as a read is the difference between this turning down a few functions and turning
 /// down most of them, because a comparison that keeps a byte is what every `!` and every `==` in a
 /// value position comes out as.
-fn carried(func: &mir::Func, short: &ShortInsts, flags: &FlagInsts, names: &Interner) -> bool {
+fn carried(
+    func: &mir::Func,
+    short: &ShortInsts,
+    flags: &FlagInsts,
+    names: &Interner,
+    seen: &mut HashMap<mir::Opcode, Known>,
+) -> bool {
     func.blocks().any(|block| {
         for inst in func.insts(block) {
-            let Some(name) = opcode(func, flags, names, inst) else { return true };
-            if flags.reads(name).is_some() && !flags.asks_what_it_reads(name) {
+            let known = Known::of(seen, func, short, flags, names, inst);
+            if !known.covered {
                 return true;
             }
-            if (flags.writes)(name) && !short.steps(name) {
+            if known.reads.is_some() && !known.own {
+                return true;
+            }
+            if known.ends {
                 return false;
             }
         }
         false
     })
+}
+
+/// What the description says about one opcode, asked once for each opcode a function has rather
+/// than once for each instruction.
+///
+/// Every answer here is a walk down one of the target's tables comparing names, and the walk above
+/// asks most of them of every instruction while nearly every answer is no. A function has a few
+/// hundred opcodes at most, so each one is asked about the first time it turns up and read back
+/// after that. On jtckdint's `test.c` at `-O2` the comparing of names in this pass was about two and
+/// a half percent of the build.
+///
+/// The forms are only whether the table has an entry for the name. Whether the instruction carries
+/// the number or the address the shorter one needs is the instruction's own business and is still
+/// asked of it.
+#[derive(Debug, Clone, Copy)]
+struct Known {
+    /// Whether it has a shorter way of writing zero.
+    zeroing: bool,
+    /// Whether it has a narrower instruction.
+    narrowing: bool,
+    /// Whether it has a shorter way of comparing against zero.
+    testing: bool,
+    /// Whether it has a move that says the same thing.
+    copying: bool,
+    /// Whether it has a shorter addition for some number.
+    stepping: bool,
+    /// Whether the description covers the name at all. See [`opcode`].
+    covered: bool,
+    /// Whether it reads what it wrote itself. See [`FlagInsts::asks_what_it_reads`].
+    own: bool,
+    /// Which part of the condition state it reads.
+    reads: Option<Reads>,
+    /// Whether it writes the whole of the condition state, the carry included.
+    ends: bool,
+}
+
+impl Known {
+    fn of(
+        seen: &mut HashMap<mir::Opcode, Self>,
+        func: &mir::Func,
+        short: &ShortInsts,
+        flags: &FlagInsts,
+        names: &Interner,
+        inst: mir::Inst,
+    ) -> Self {
+        *seen.entry(func[inst].opcode).or_insert_with(|| {
+            let bare = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix);
+            let has =
+                |name: fn(&ShortInsts, &str) -> bool| bare.is_some_and(|bare| name(short, bare));
+            let name = opcode(func, flags, names, inst);
+            Self {
+                zeroing: has(|short, bare| short.zeroed(bare).is_some()),
+                narrowing: has(|short, bare| short.narrowed(bare).is_some()),
+                testing: has(|short, bare| short.tested(bare).is_some()),
+                copying: has(|short, bare| short.copied(bare).is_some()),
+                stepping: has(|short, bare| short.stepping.iter().any(|entry| entry.name == bare)),
+                covered: name.is_some(),
+                own: name.is_some_and(|name| flags.asks_what_it_reads(name)),
+                reads: name.and_then(|name| flags.reads(name)),
+                ends: name.is_some_and(|name| (flags.writes)(name) && !short.steps(name)),
+            }
+        })
+    }
 }
 
 /// The shorter instruction this one has, when it has one and the constant it carries is the one
