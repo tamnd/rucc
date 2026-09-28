@@ -6923,23 +6923,38 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// twice.
     #[test]
     fn a_value_live_across_sigsetjmp_keeps_its_spill_slot() {
-        let text = asm(concat!(
-            "typedef long sigjmp_buf[25];\n",
-            "int __sigsetjmp(sigjmp_buf, int);\n",
-            "int id(int);\n",
-            "void thrower(int);\n",
-            "int work(int n) {\n",
-            "  int v0 = id(n), v1 = id(n + 1), v2 = id(n + 2), v3 = id(n + 3), v4 = id(n + 4);\n",
-            "  sigjmp_buf b;\n",
-            "  if (__sigsetjmp(b, 0) == 0) {\n",
-            "    int w0 = id(v0 + v1), w1 = id(v1 + v2), w2 = id(v2 + v3);\n",
-            "    int w3 = id(v3 + v4), w4 = id(v4 + v0);\n",
-            "    thrower(n);\n",
-            "    return w0 ^ w1 ^ w2 ^ w3 ^ w4;\n",
-            "  }\n",
-            "  return v0 + v1 + v2 + v3 + v4;\n",
-            "}\n",
-        ));
+        each_spill_slot_written_once(&across("int __sigsetjmp(sigjmp_buf, int);\n", "__sigsetjmp"));
+    }
+
+    /// The same shape through a function with a name nobody knows, which only the attribute says
+    /// comes back twice. tamnd/rucc#2012.
+    #[test]
+    fn a_value_live_across_a_returns_twice_call_keeps_its_spill_slot() {
+        let declared = "int save_here(sigjmp_buf, int) __attribute__((__returns_twice__));\n";
+        each_spill_slot_written_once(&across(declared, "save_here"));
+    }
+
+    /// Five values live across a call to `save`, declared by `declared`, and five more that die
+    /// before the jump back, which is enough to spill on x86-64.
+    fn across(declared: &str, save: &str) -> String {
+        asm(&format!(
+            "typedef long sigjmp_buf[25];\n{declared}int id(int);\nvoid thrower(int);\n\
+             int work(int n) {{\n\
+             \x20 int v0 = id(n), v1 = id(n + 1), v2 = id(n + 2), v3 = id(n + 3), v4 = id(n + 4);\n\
+             \x20 sigjmp_buf b;\n\
+             \x20 if ({save}(b, 0) == 0) {{\n\
+             \x20   int w0 = id(v0 + v1), w1 = id(v1 + v2), w2 = id(v2 + v3);\n\
+             \x20   int w3 = id(v3 + v4), w4 = id(v4 + v0);\n\
+             \x20   thrower(n);\n\
+             \x20   return w0 ^ w1 ^ w2 ^ w3 ^ w4;\n\
+             \x20 }}\n\
+             \x20 return v0 + v1 + v2 + v3 + v4;\n\
+             }}\n"
+        ))
+    }
+
+    /// No two spills in the text go to the same slot, and there is at least one.
+    fn each_spill_slot_written_once(text: &str) {
         let mut stored = Vec::new();
         for line in text.lines().map(str::trim) {
             let Some(operands) = line.strip_prefix("movq\t%") else { continue };

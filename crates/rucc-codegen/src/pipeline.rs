@@ -453,10 +453,10 @@ pub fn compile_recording(
     // is written against blocks that end the way the middle end left them. Only on a machine that
     // can jump to a name, since the call stays a call on one that cannot.
     if flags.sibling && machine.insts.away.is_some() {
-        tail::mark(source, names);
+        tail::mark(source, names, elsewhere);
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
-    let alone = tail::comes_back(source, names);
+    let alone = tail::comes_back(source, names, elsewhere);
     let lowered = lower::func(source, names, machine.selector, machine.conv, elsewhere)?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;

@@ -157,6 +157,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NAKED) {
             head.push_str(" naked");
         }
+        if node.flags.contains(DeclFlags::RETURNS_TWICE) {
+            head.push_str(" returns-twice");
+        }
         if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
             head.push_str(" always_inline");
         }

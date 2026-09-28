@@ -660,6 +660,19 @@ impl Checker<'_> {
         })
     }
 
+    /// Whether an attribute list says a call to this function may come back more than once.
+    ///
+    /// `__attribute__((returns_twice))`, under the namespace test [`Self::never_returns`] is under
+    /// and through the same unarmouring. glibc writes it on `setjmp`, `vfork` and their relatives
+    /// as `__returns_twice__`, and Postgres checks for it with `__has_attribute` before it trusts
+    /// its own `sigsetjmp` wrappers.
+    pub(in crate::check) fn returns_twice(&self, attrs: AttrList) -> bool {
+        self.ast[attrs].iter().any(|attr| {
+            !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                && rucc_gnu::unarmour(self.text(attr.name)) == "returns_twice"
+        })
+    }
+
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
