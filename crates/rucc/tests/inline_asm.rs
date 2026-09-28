@@ -904,3 +904,31 @@ fn a_unit_with_a_template_kept_as_text_builds_with_debug_information() {
     assert!(bytes.windows(11).any(|at| at == b".debug_line"), "no line table in the object");
     assert!(!bytes.windows(8).any(|at| at == b"rucc_row"), "a row label reached the object");
 }
+
+#[test]
+fn a_constant_expression_given_as_n_is_spelled_as_a_number_without_optimisation() {
+    // xz's range decoder hands `RC_BIT_MODEL_OFFSET`, a sum of shifts, to an `n` operand and writes
+    // it as `%c[...]` in front of an address. Without optimisation the sum is arithmetic like any
+    // other, so it has to be folded before the back end sees it or it arrives in a register.
+    let source = "long f(long p) { long r; \
+                  asm (\"lea %c1(%2), %0\\n1:\" : \"=r\" (r) : \"n\" ((1U << 5) - 1 - (1U << 11)), \
+                  \"r\" (p)); return r; }\n";
+    let text = asm("folded-n", source);
+    assert!(body(&text, "f").contains("-2017("), "{text}");
+}
+
+#[test]
+fn ten_outputs_written_plus_and_early_fit_in_the_registers_there_are() {
+    // `+&` is one register shared with the input, the same as `+`, and ten of them with one more
+    // input is what xz's range decoder hands a single template. Taking each as a register of its
+    // own and a copy ran the allocator out of registers.
+    let mut source = String::from("unsigned f(unsigned *p) {\n");
+    for n in 0..10 {
+        source.push_str(&format!("unsigned a{n} = p[{n}];\n"));
+    }
+    let outputs: Vec<String> = (0..10).map(|n| format!("\"+&r\" (a{n})")).collect();
+    source.push_str(&format!("asm (\"1:\" : {} : \"r\" (p));\n", outputs.join(", ")));
+    let sum: Vec<String> = (0..10).map(|n| format!("a{n}")).collect();
+    source.push_str(&format!("return {}; }}\n", sum.join(" + ")));
+    asm("plus-early", &source);
+}

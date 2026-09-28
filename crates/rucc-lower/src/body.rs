@@ -2267,6 +2267,7 @@ impl<'u> Body<'_, 'u> {
             results.push(ty);
             writes.push(place);
         }
+        let outputs = tast[node.outputs].len();
         for index in 0..tast[node.inputs].len() {
             let operand = tast[node.inputs][index];
             let at = tast.expr_span(operand.value);
@@ -2278,6 +2279,9 @@ impl<'u> Body<'_, 'u> {
             } else if let Some(ty) = self.record_in_a_register(ty) {
                 let place = self.place(operand.value);
                 let value = self.load_record(place, ty, at);
+                args.push(value);
+            } else if let Some(value) = self.asm_immediate(&written[outputs + index], operand.value)
+            {
                 args.push(value);
             } else {
                 let value = self.value(operand.value);
@@ -5260,6 +5264,34 @@ impl<'u> Body<'_, 'u> {
         let mut build = self.build(span);
         let zero = build.iconst(ty, 0);
         build.icmp(IntPred::Ne, value, zero)
+    }
+
+    /// An `asm` input that has to be a number the template can spell, folded to that number.
+    ///
+    /// A constraint of `i` or `n` promises the operand is known before the program runs, and a
+    /// template is free to write it as `$%0` or `%c0`. Without optimisation an enumerator or a
+    /// macro that adds two of them is lowered as arithmetic like any other expression, so the
+    /// back end would find a register where the template expects a number. xz's range decoder
+    /// passes `RC_BIT_MODEL_OFFSET` that way. Folding it here makes the operand the same constant
+    /// at every level. An address is left alone, since the relocation it needs is the back end's.
+    fn asm_immediate(&mut self, constraint: &str, expr: ExprId) -> Option<Value> {
+        let letters = constraint.split('{').next().unwrap_or_default();
+        if !letters.contains(['i', 'n']) {
+            return None;
+        }
+        let tast = self.tast();
+        let ty = tast[expr].ty;
+        integer_info(self.types(), ty, self.target())?;
+        let mut eval = Eval::new(tast, self.types(), self.target(), self.unit.names);
+        let folded = eval.constant(expr);
+        if eval.addressed() || !eval.finish().is_empty() {
+            return None;
+        }
+        let span = tast.expr_span(expr);
+        match folded {
+            Ok(value @ Const::Int(_)) => self.constant(value, ty, span),
+            _ => None,
+        }
     }
 
     /// A constant the checking folded.

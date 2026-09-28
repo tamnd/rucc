@@ -24,6 +24,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `#undef` of a name that starts with `__STDC_` is allowed, as gcc allows it. Only `defined` is refused. gnulib's config.h undefines `__STDC_WANT_LIB_EXT1__`, so diffutils, grep and gzip did not build.
 - `-x` takes its language joined as well as separate, so `-xc` works as it does in gcc. busybox and toybox probe the compiler with it.
 - `__builtin_add_overflow_p`, `__builtin_sub_overflow_p` and `__builtin_mul_overflow_p` of two constants are integer constant expressions, as they are in gcc. gnulib's intprops asserts about them with `static_assert`, so sed's gnulib tests did not build.
+- An `asm` input with an `i` or `n` constraint is folded to its number at every level, so a constant expression like xz's `RC_BIT_MODEL_OFFSET` can be spelled `%c[...]` at `-O0` too.
+- An `asm` output written `+&` shares its register with the input it is tied to, as one written `+` does. Before this each one took a second register and a copy, and the eleven operands of xz's range decoder crashed the register allocator.
 
 ## 0.11.13
 
