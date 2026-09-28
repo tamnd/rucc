@@ -127,7 +127,9 @@ pub enum InlineFailure {
     Recursive,
     /// The arguments or the results of the call are not what the body takes and gives.
     Mismatch,
-    /// A parameter is a structure passed by value, whose copy the call is what makes.
+    /// A parameter is a structure passed by value, whose copy the call is what makes. Only a call
+    /// that is not `always_inline` is refused for this. An `always_inline` one is inlined with the
+    /// copy made in the caller.
     ByValue,
     /// The body starts a variable argument list of its own, which only a frame of its own has.
     VaStart,
