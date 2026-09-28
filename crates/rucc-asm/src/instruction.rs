@@ -1303,6 +1303,8 @@ mod tests {
         assert_eq!(bytes("crc32 %r9, %rax"), [0xf2, 0x49, 0x0f, 0x38, 0xf1, 0xc1]);
         assert_eq!(bytes("crc32l (%rdi), %eax"), [0xf2, 0x0f, 0x38, 0xf1, 0x07]);
         assert_eq!(bytes("popcnt %rdi, %rax"), [0xf3, 0x48, 0x0f, 0xb8, 0xc7]);
+        assert_eq!(bytes("xgetbv"), [0x0f, 0x01, 0xd0]);
+        assert_eq!(bytes("cpuid"), [0x0f, 0xa2]);
         // An address says nothing about how much of it is read, so the letter has to be written.
         assert!(refused("crc32 (%rdi), %eax").contains("crc32"));
         // A byte into a sixty four bit register is a REX.W form gas has and this does not, and

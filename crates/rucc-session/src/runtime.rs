@@ -37,6 +37,7 @@ pub const DIR: &str = "<builtin>";
 /// to run before anything can be read.
 const HEADERS: &[(&str, &str)] = &[
     ("arm_neon.h", include_str!("../runtime/include/arm_neon.h")),
+    ("cpuid.h", include_str!("../runtime/include/cpuid.h")),
     ("emmintrin.h", include_str!("../runtime/include/emmintrin.h")),
     ("float.h", include_str!("../runtime/include/float.h")),
     ("immintrin.h", include_str!("../runtime/include/immintrin.h")),
@@ -56,6 +57,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("stdnoreturn.h", include_str!("../runtime/include/stdnoreturn.h")),
     ("x86intrin.h", include_str!("../runtime/include/x86intrin.h")),
     ("xmmintrin.h", include_str!("../runtime/include/xmmintrin.h")),
+    ("xsaveintrin.h", include_str!("../runtime/include/xsaveintrin.h")),
 ];
 
 /// The names of the shipped headers, sorted.
