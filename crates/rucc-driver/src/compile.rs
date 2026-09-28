@@ -1148,9 +1148,13 @@ fn placed(
     };
     let mut text = rucc_object::Text::default();
     let mut lines = Vec::with_capacity(funcs.len());
+    // The name the listing gave each function, which on Mach-O has the underscore in front. The
+    // debug information keeps the C name, and the object writer puts the underscore back on when
+    // it looks one up.
+    let symbol = rucc_asm::Directives::of(target.object_format).symbol();
     for (which, func) in funcs.iter().enumerate() {
         let name = names.resolve(func.name);
-        let Some((part, start)) = offset(name) else {
+        let Some((part, start)) = offset(&format!("{symbol}{name}")) else {
             return Err(format!("the listing has no label for the function '{name}'"));
         };
         let mut rows = Vec::with_capacity(func.inst_count() + 1);
@@ -1170,7 +1174,13 @@ fn placed(
                 rows.push(rucc_asm::Row { at, span: func.span(inst), inst: Some(inst) });
             }
         }
-        let len = at.get(name).map_or(0, |name| name.size);
+        // What `.size` said, or on a format without it, how far the label after the last
+        // instruction is from the front.
+        let size = at.get(format!("{symbol}{name}").as_str()).map_or(0, |name| name.size);
+        let len = match offset(&rucc_asm::mark_end(target, which)) {
+            Some((held, end)) if size == 0 && held == part && end >= start => end - start,
+            _ => size,
+        };
         text.funcs.push(rucc_object::Extent {
             name: name.to_owned(),
             start: usize::try_from(start).map_err(|why| why.to_string())?,
@@ -1398,6 +1408,7 @@ fn describe(
         // off what was written rather than asked again, so the two cannot disagree about whether
         // the table a frame base is read through is there.
         frames: opts.unwinds() || frames.is_some(),
+        mach_o: target.object_format == rucc_target::ObjectFormat::MachO,
     };
     let mut info = rucc_debug::write(&unit).map_err(|why| why.to_string())?;
     info.chunks.extend(frames.clone());

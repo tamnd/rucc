@@ -124,6 +124,16 @@ pub fn mark(target: &TargetInfo, func: usize, inst: Inst) -> String {
     spell_mark(Directives::of(target.object_format), func, inst)
 }
 
+/// The label [`print_marked`] puts after the last instruction of the function with this place in
+/// the list.
+///
+/// ELF says how long a function is with `.size` and the reader keeps it, but Mach-O has no such
+/// directive, and how far this label is from the function's own symbol is the same length there.
+#[must_use]
+pub fn mark_end(target: &TargetInfo, func: usize) -> String {
+    format!("{}rucc_end{func}", Directives::of(target.object_format).local())
+}
+
 fn spell_mark(directives: Directives, func: usize, inst: Inst) -> String {
     format!("{}rucc_row{func}_{}", directives.local(), inst.index())
 }
@@ -335,6 +345,9 @@ impl Writer<'_> {
                     }
                 }
             }
+        }
+        if let Some(which) = self.marks {
+            let _ = writeln!(self.out, "{}rucc_end{which}:", self.directives.local());
         }
         self.tables(func, &name);
         if unwind {

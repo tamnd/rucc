@@ -46,17 +46,16 @@ use rucc_target::aarch64::Fixup;
 use rucc_tuple::{Env, Os, Version};
 
 use crate::file::{Error, Flavour, scope_of};
-use crate::section::{Binding, Reference};
+use crate::section::{Binding, Info, Reference};
 use crate::source::{Assembled, Held, Name, Sort};
 
 /// A file of assembly for AArch64, as a Mach-O object.
 ///
 /// The same three passes [`crate::assembled`] makes for the other two formats: every section, then
 /// every name, then every relocation, since each wants the one before it finished. What differs is
-/// in the module comment above. Debug information is not written yet: DWARF on a Mac lives in
-/// sections of its own segment that the linker leaves out and `dsymutil` gathers, which is a
-/// layout of its own rather than a new name for the ELF one.
-pub(crate) fn write(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, Error> {
+/// in the module comment above, and where the debug information in `info` goes, which is the
+/// last section below.
+pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Result<Vec<u8>, Error> {
     let refused = |why: String| Error::Refused { why };
     let mut obj = Writer::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
     // The listing already wrote the underscore every C name has on this format, so the writer
@@ -173,7 +172,71 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo) -> Result<Vec<u8>, E
             obj.add_relocation(*id, record).map_err(|why| refused(why.to_string()))?;
         }
     }
+    described(&mut obj, &symbols, info).map_err(refused)?;
     obj.write().map_err(|why| refused(why.to_string()))
+}
+
+/// The debug sections, in `__DWARF`, which is the segment the linker leaves out of the image.
+///
+/// A Mac does not link DWARF. ld64 writes a map into the image that says which object each
+/// function came from and where it went, and `dsymutil` reads each object's own sections through
+/// that map, or a debugger does the same thing without it. So a place in one debug section that
+/// names another is never moved by a linker, and is written as the offset it is with no relocation,
+/// which is what clang does. What names a function or a variable is an address and keeps its
+/// relocation, since that is how the map is matched to the object. The debug information knows
+/// those by their C names, and the symbol is the same name with the underscore in front.
+fn described(
+    obj: &mut Writer<'_>,
+    symbols: &HashMap<&str, object::write::SymbolId>,
+    info: &Info,
+) -> Result<(), String> {
+    let debug = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect::<HashSet<_>>();
+    for chunk in &info.chunks {
+        let section = debug_section(&chunk.name)?;
+        let id = obj.add_section(b"__DWARF".to_vec(), section.into_bytes(), SectionKind::Debug);
+        // An ordinary section, which is a type of zero, holding debug information.
+        let flags = macho::S_ATTR_DEBUG;
+        obj.section_mut(id).flags = SectionFlags::MachO { flags, reserved2: 0 };
+        let mut bytes = chunk.bytes.clone();
+        let mut relocs = Vec::new();
+        for reloc in &chunk.relocs {
+            let Reference::Address { bytes: width } = reloc.kind else {
+                return Err(format!("{:?} in the debug information", reloc.kind));
+            };
+            if debug.contains(reloc.symbol.as_str()) {
+                let at = reloc.at;
+                let Some(place) = bytes.get_mut(at..at + usize::from(width)) else {
+                    return Err(format!("a place past the end of {}", chunk.name));
+                };
+                place.copy_from_slice(&reloc.addend.to_le_bytes()[..usize::from(width)]);
+                continue;
+            }
+            let name = format!("_{}", reloc.symbol);
+            let Some(&symbol) = symbols.get(name.as_str()) else {
+                return Err(format!("'{name}' is named by the debug information and not defined"));
+            };
+            let flags = self::reloc(reloc.kind, reloc.addend)?;
+            let addend = reloc.addend;
+            relocs.push(Relocation { offset: reloc.at as u64, symbol, addend, flags });
+        }
+        obj.append_section_data(id, &bytes, 1);
+        for record in relocs {
+            obj.add_relocation(id, record).map_err(|why| why.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// The Mach-O name of a DWARF section, which is its ELF name with two underscores for the dot, cut
+/// to the sixteen bytes a section name has. `.debug_str_offsets` is `__debug_str_offs`, the same
+/// as clang's.
+fn debug_section(name: &str) -> Result<String, String> {
+    let Some(rest) = name.strip_prefix(".debug_") else {
+        return Err(format!("'{name}' is not a DWARF section"));
+    };
+    let mut spelled = format!("__debug_{rest}");
+    spelled.truncate(16);
+    Ok(spelled)
 }
 
 /// The largest addend an `ARM64_RELOC_ADDEND` can carry either way, which is what fits in the
@@ -457,7 +520,7 @@ mod tests {
             subsections: true,
         };
         let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
-        let bytes = write(&input, &target).unwrap();
+        let bytes = write(&input, &target, &Info::default()).unwrap();
         let file = object::File::parse(&bytes[..]).unwrap();
         assert_eq!(file.format(), BinaryFormat::MachO);
         assert_eq!(file.architecture(), Architecture::Aarch64);
@@ -494,7 +557,7 @@ mod tests {
         f.sort = Sort::Func;
         let input = Assembled { parts: vec![text, frames], names: vec![f], subsections: true };
         let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
-        let bytes = write(&input, &target).unwrap();
+        let bytes = write(&input, &target, &Info::default()).unwrap();
         let file = MachOFile64::<Endianness>::parse(&bytes[..]).unwrap();
         let section = file.section_by_name("__eh_frame").unwrap();
         let pairs: Vec<_> = section
@@ -507,6 +570,50 @@ mod tests {
         let subtractor = (8, macho::ARM64_RELOC_SUBTRACTOR, true, 2);
         assert_eq!(pairs, [subtractor, (8, macho::ARM64_RELOC_UNSIGNED, true, 2)]);
         assert_eq!(section.data().unwrap()[8..12], (-8i32).to_le_bytes());
+    }
+
+    /// A place in one debug section that names another is written as the offset it is, since no
+    /// linker moves either, and an address keeps its relocation, against the function's symbol
+    /// with the underscore the debug information leaves off.
+    #[test]
+    fn debug_information_goes_in_the_dwarf_segment_with_only_its_addresses_relocated() {
+        use crate::section::Chunk;
+
+        let text = part("__TEXT", "__text", vec![0; 8], 8);
+        let mut f = name("_f", 0, 0, Binding::Local);
+        f.sort = Sort::Func;
+        let input = Assembled { parts: vec![text], names: vec![f], subsections: true };
+        let reloc = |at, symbol: &str, bytes, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Address { bytes },
+            addend,
+            after: 0,
+        };
+        let unit = Chunk {
+            name: ".debug_info".to_owned(),
+            bytes: vec![0; 24],
+            relocs: vec![reloc(8, ".debug_abbrev", 4, 0x10), reloc(12, "f", 8, 4)],
+        };
+        let abbrev = Chunk { name: ".debug_abbrev".to_owned(), bytes: vec![0; 32], relocs: vec![] };
+        let offsets =
+            Chunk { name: ".debug_str_offsets".to_owned(), bytes: vec![0; 8], relocs: vec![] };
+        let info = Info { chunks: vec![unit, abbrev, offsets] };
+        let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        let bytes = write(&input, &target, &info).unwrap();
+        let file = object::File::parse(&bytes[..]).unwrap();
+        let unit = file.section_by_name("__debug_info").unwrap();
+        assert_eq!(unit.segment_name(), Ok(Some("__DWARF")));
+        let SectionFlags::MachO { flags, .. } = unit.flags() else { panic!() };
+        assert_eq!(flags, macho::S_ATTR_DEBUG);
+        let data = unit.data().unwrap();
+        assert_eq!(data[8..12], 0x10u32.to_le_bytes());
+        assert_eq!(data[12..20], 4u64.to_le_bytes());
+        let relocs: Vec<_> = unit.relocations().collect();
+        let [(12, reloc)] = relocs.as_slice() else { panic!("{relocs:?}") };
+        let object::RelocationTarget::Symbol(index) = reloc.target() else { panic!() };
+        assert_eq!(file.symbol_by_index(index).unwrap().name(), Ok("_f"));
+        assert!(file.section_by_name("__debug_str_offs").is_some());
     }
 
     #[test]
