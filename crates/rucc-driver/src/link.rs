@@ -122,6 +122,10 @@ pub struct LinkOptions {
     pub export_dynamic: bool,
     /// `-s`, which drops the symbol table.
     pub strip: bool,
+    /// `-mwindows` rather than `-mconsole`, whichever came last. Only a Windows line reads it.
+    pub gui: bool,
+    /// `-municode`, which only a Windows line reads.
+    pub unicode: bool,
     /// `-fno-builtins-lib`, which leaves our own runtime off the line so that the machine's
     /// libgcc answers for everything instead.
     pub no_builtins_lib: bool,
@@ -643,6 +647,8 @@ fn cross_line(
         builtins: ours.as_deref(),
         export_dynamic: opts.export_dynamic,
         strip: opts.strip,
+        gui: opts.gui,
+        unicode: opts.unicode,
     };
     argv::argv(target.tuple(), sysroot, &invocation)
         .map_err(|why| Error::Cross { why: why.to_string() })
@@ -788,16 +794,23 @@ fn linker_candidates(name: &str, opts: &LinkOptions, places: &[PathBuf]) -> Vec<
         let path = PathBuf::from(name);
         return if path.is_file() { vec![path] } else { Vec::new() };
     }
-    let mut found: Vec<PathBuf> =
-        opts.prefixes.iter().map(|dir| dir.join(name)).filter(|path| path.is_file()).collect();
+    let pathext = pathext();
+    let mut found: Vec<PathBuf> = opts
+        .prefixes
+        .iter()
+        .flat_map(|dir| spellings(&dir.join(name), &pathext))
+        .filter(|path| path.is_file())
+        .collect();
     if let Some(path) = std::env::var_os("PATH") {
         found.extend(
-            std::env::split_paths(&path).map(|dir| dir.join(name)).filter(|p| executable(p)),
+            std::env::split_paths(&path)
+                .flat_map(|dir| spellings(&dir.join(name), &pathext))
+                .filter(|p| executable(p)),
         );
     }
     if is_lld(name) {
         for dir in places {
-            for file in [dir.join(name), dir.join(format!("{name}.exe"))] {
+            for file in spellings(&dir.join(name), &[".exe".to_owned()]) {
                 if executable(&file) && !found.contains(&file) {
                     found.push(file);
                 }
@@ -805,6 +818,43 @@ fn linker_candidates(name: &str, opts: &LinkOptions, places: &[PathBuf]) -> Vec<
         }
     }
     found
+}
+
+/// The extensions a program name is tried with, from `PATHEXT` on Windows and none elsewhere.
+///
+/// `ld.lld` on Windows is `ld.lld.exe`, and looking for the bare name finds nothing, which is how
+/// a Windows host with LLVM installed and on `PATH` used to be told there was no linker. `PATHEXT`
+/// is what `cmd.exe` uses for the same question, and when it is unset the list is the one
+/// Windows ships with.
+fn pathext() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let list = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    list.split(';').filter(|ext| ext.starts_with('.')).map(str::to_ascii_lowercase).collect()
+}
+
+/// A path with each extension added, or as given when there are none or it already ends in one.
+///
+/// `ld.lld` ends in `.lld`, which is not an extension anybody runs, so the check is against the
+/// list rather than against whether there is a dot in the name at all. The bare name is left out
+/// when there is a list, because a file called `ld.lld` in a Git Bash directory on Windows is a
+/// shell script that `CreateProcess` cannot start.
+fn spellings(path: &Path, exts: &[String]) -> Vec<PathBuf> {
+    let has = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| exts.iter().any(|e| e[1..].eq_ignore_ascii_case(ext)));
+    if exts.is_empty() || has {
+        return vec![path.to_path_buf()];
+    }
+    exts.iter()
+        .map(|ext| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(ext);
+            PathBuf::from(name)
+        })
+        .collect()
 }
 
 /// Whether a name is one of the spellings lld is installed under.
@@ -2043,6 +2093,18 @@ mod tests {
         let error = find(windows, &opts).expect_err("only 18 is here");
         assert!(matches!(error, Error::TooOld { found: 18, .. }), "{error:?}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_program_name_is_tried_with_each_pathext_extension_it_does_not_already_have() {
+        let exts = vec![".com".to_owned(), ".exe".to_owned()];
+        let dir = Path::new("bin");
+        assert_eq!(
+            spellings(&dir.join("ld.lld"), &exts),
+            [dir.join("ld.lld.com"), dir.join("ld.lld.exe")]
+        );
+        assert_eq!(spellings(&dir.join("lld-link.EXE"), &exts), [dir.join("lld-link.EXE")]);
+        assert_eq!(spellings(&dir.join("ld.lld"), &[]), [dir.join("ld.lld")]);
     }
 
     #[test]

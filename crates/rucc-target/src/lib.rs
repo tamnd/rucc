@@ -376,10 +376,14 @@ impl Triple {
         // the code it compiles will be linked against, and it is right on every machine where
         // rucc was built for the machine it runs on.
         let linux = if cfg!(target_env = "musl") { Env::Musl } else { Env::Gnu };
+        // Windows is gnu whichever ABI rucc itself was built for. An `rucc.exe` built with MSVC
+        // still has no Windows SDK to link against on a fresh machine, and it can fetch the
+        // mingw-w64 sysroot, so `rucc hello.c` works there only if the default is the one it can
+        // fetch. `--target=x86_64-windows-msvc` is still there for somebody who has the SDK.
         let (os, env) = match std::env::consts::OS {
             "linux" => (Os::Linux, linux),
             "macos" => (Os::Darwin, Env::None),
-            "windows" => (Os::Windows, Env::Msvc),
+            "windows" => (Os::Windows, Env::Gnu),
             _ => return None,
         };
         Some(Self::new(arch, os, env))
@@ -452,9 +456,11 @@ impl FromStr for Triple {
         }
 
         let os = os.ok_or_else(|| err("unknown operating system"))?;
+        // The same defaults as `rucc_tuple::Os::default_env`, so that `x86_64-pc-windows` means
+        // one target whichever of the two parsers read it, and it means the mingw-w64 one because
+        // that is the one a fresh machine can link for.
         let env = env.unwrap_or(match os {
-            Os::Linux => Env::Gnu,
-            Os::Windows => Env::Msvc,
+            Os::Linux | Os::Windows => Env::Gnu,
             Os::Darwin | Os::None => Env::None,
         });
         Ok(Self::new(arch, os, env))
@@ -1019,7 +1025,7 @@ mod tests {
         let t: Triple = "x86_64-unknown-linux".parse().unwrap();
         assert_eq!(t.env, Env::Gnu);
         let w: Triple = "x86_64-pc-windows".parse().unwrap();
-        assert_eq!(w.env, Env::Msvc);
+        assert_eq!(w.env, Env::Gnu);
     }
 
     #[test]
