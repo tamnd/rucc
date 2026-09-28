@@ -2189,7 +2189,11 @@ fn seen(row: &Encoding, imm: i64) -> i64 {
 fn rows<'a>(mnemonic: &'a str, args: &'a [Kind]) -> impl Iterator<Item = &'static Encoding> + 'a {
     static AT: LazyLock<HashMap<&str, Vec<usize>>> =
         LazyLock::new(|| named::every(ENCODINGS, |row| row.mnemonic));
-    AT.get(mnemonic).into_iter().flatten().map(|&at| &ENCODINGS[at]).filter(move |row| row.args == args)
+    AT.get(mnemonic)
+        .into_iter()
+        .flatten()
+        .map(|&at| &ENCODINGS[at])
+        .filter(move |row| row.args == args)
 }
 
 /// An address, with everything about it already decided.
