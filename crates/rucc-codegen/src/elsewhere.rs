@@ -72,6 +72,7 @@ pub struct Elsewhere {
     threads: HashSet<Symbol>,
     twice: HashSet<Symbol>,
     described: bool,
+    indexed: bool,
 }
 
 impl Elsewhere {
@@ -95,7 +96,8 @@ impl Elsewhere {
             .map(|id| module[id].name)
             .collect();
         let described = format == ObjectFormat::MachO;
-        Self { threads, twice, described, ..Self::table(module, pic, format, copies) }
+        let indexed = format == ObjectFormat::Coff;
+        Self { threads, twice, described, indexed, ..Self::table(module, pic, format, copies) }
     }
 
     /// The half of the above that is about the global offset table, which is the older one.
@@ -188,6 +190,13 @@ impl Elsewhere {
     #[must_use]
     pub const fn described(&self) -> bool {
         self.described
+    }
+
+    /// Whether a thread-local variable is reached through the array of `.tls` copies a Windows
+    /// thread keeps, which is how COFF does it. See `crate::select::Indexed`.
+    #[must_use]
+    pub const fn indexed(&self) -> bool {
+        self.indexed
     }
 }
 

@@ -36,6 +36,13 @@ pub static SELECTOR: super::Selector = super::Selector {
         // prefix, so the width here is part of the requirement rather than a choice.
         thread: super::Reach::Mode("mov_rm_64"),
         pointer: super::Pointer::Segment("mov_rm_64", rucc_target::Segment::Fs),
+        indexed: Some(super::Indexed {
+            index: "mov_rm_32",
+            load: "mov_rm_64",
+            segment: rucc_target::Segment::Gs,
+            at: 0x58,
+            add: "lea_64",
+        }),
     },
     jumps: &super::Jumps {
         near: "lea_64",

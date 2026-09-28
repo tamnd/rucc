@@ -666,6 +666,7 @@ impl Assembler<'_> {
                                 Reach::Itself => Reference::Data,
                                 Reach::Table => Reference::Got,
                                 Reach::Thread => Reference::Thread,
+                                Reach::Section => Reference::Section,
                             };
                             wanted = Some((symbol, kind, i64::from(addr.disp)));
                         }
@@ -722,6 +723,7 @@ impl Assembler<'_> {
                     | Reference::GotBare
                     | Reference::GotKept
                     | Reference::Thread => holes.rip,
+                    Reference::Section => holes.disp,
                     // An address written into an image rather than reached by an instruction, and
                     // how far something is from the front of one, which is what a table of data
                     // holds. Nothing above produces either, because every reference an instruction
@@ -735,7 +737,12 @@ impl Assembler<'_> {
                     }
                 };
                 let at = at.expect("an instruction naming a symbol leaves room for the distance");
-                let addend = disp - i64::try_from(end - at).expect("an instruction this long");
+                let addend = match kind {
+                    // Counted from the front of the section, so nothing about where the
+                    // instruction ends comes into it.
+                    Reference::Section => disp,
+                    _ => disp - i64::try_from(end - at).expect("an instruction this long"),
+                };
                 // How many bytes of the instruction come after the four the linker writes over,
                 // which is what is left of the distance from the hole to the end of it. Already in
                 // the addend and written down again because COFF wants the two apart, and there is
@@ -795,9 +802,12 @@ impl Assembler<'_> {
         // sort out: what it needs from here is that the address was written that way at all.
         let names = symbol.is_some() || amode.block.is_some() || amode.table.is_some();
         let rip = names && base.is_none() && index.is_none();
-        let addr =
-            Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment: amode.segment };
-        Ok((addr, if rip { symbol } else { None }))
+        // Or a symbol's offset in its section added to a register, which is the linker's to fill
+        // in as well but is not counted from the instruction.
+        let linked = symbol.is_some() && amode.reach == Reach::Section;
+        let segment = amode.segment;
+        let addr = Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment, linked };
+        Ok((addr, if rip || linked { symbol } else { None }))
     }
 
     /// The real register one operand ended up in.

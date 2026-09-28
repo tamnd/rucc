@@ -730,6 +730,8 @@ impl Writer<'_> {
                 Reach::Table => out.push_str("@GOTPCREL"),
                 Reach::Thread if self.directives == Directives::MachO => out.push_str("@TLVP"),
                 Reach::Thread => out.push_str("@GOTTPOFF"),
+                // How far into its section, which is how far into a thread's copy of `.tls`.
+                Reach::Section => out.push_str("@SECREL32"),
             }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };

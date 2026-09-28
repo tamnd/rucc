@@ -1,0 +1,5 @@
+thread 0 saw 1007 10 101
+thread 1 saw 2007 20 112
+thread 2 saw 3007 30 123
+thread 3 saw 4007 40 134
+main saw 0 7 4 p 100
