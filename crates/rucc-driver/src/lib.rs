@@ -397,6 +397,90 @@ const SANITIZERS: [&str; 34] = [
     "memory",
 ];
 
+/// The command line with every `@file` replaced by the words in the file, the way gcc does it.
+///
+/// Meson writes the link of a large target this way, so that a command line holding a thousand
+/// objects stays under the limit the system puts on one. Postgres's `postgres` executable is the
+/// one link in its tree that meson writes as `@postgres.rsp`, and before this the name went to
+/// the linker as it was. GNU ld reads response files itself, so it opened the file and found
+/// `-Wl,--as-needed` in it, which is a driver flag it has never heard of.
+///
+/// The rules are libiberty's `expandargv`, since that is what gcc and every other GNU tool read
+/// these files with. Words are split on white space, a single or a double quote keeps white
+/// space in a word until the matching quote, and a backslash makes the character after it an
+/// ordinary one, inside quotes as well as outside. A word the file gives that starts with `@` is
+/// read as a response file in turn. A name that cannot be opened is left on the command line as
+/// it was, which is what gcc does and which is how a file really called `@x.c` still reaches the
+/// loop, where it is refused as an unknown input rather than swallowed. The depth is capped so a
+/// file that names itself is an error and not a hang.
+fn response_files(args: &[String]) -> Result<Vec<String>, CliError> {
+    const DEEPEST: usize = 64;
+    fn expand(args: &[String], depth: usize, out: &mut Vec<String>) -> Result<(), CliError> {
+        for arg in args {
+            let Some(name) = arg.strip_prefix('@') else {
+                out.push(arg.clone());
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(name) else {
+                out.push(arg.clone());
+                continue;
+            };
+            if depth == DEEPEST {
+                return Err(err(format!("response file '{name}' is nested too deeply")));
+            }
+            expand(&response_words(&text), depth + 1, out)?;
+        }
+        Ok(())
+    }
+    if !args.iter().any(|arg| arg.starts_with('@')) {
+        return Ok(args.to_vec());
+    }
+    let mut out = Vec::with_capacity(args.len());
+    expand(args, 0, &mut out)?;
+    Ok(out)
+}
+
+/// The words of one response file, split the way libiberty's `buildargv` splits them.
+fn response_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    // Whether a word has begun, which is not the same as `word` having something in it: `''` is
+    // an empty word of its own and has to reach the command line as one.
+    let mut begun = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+                begun = true;
+            }
+            _ if quote == Some(c) => quote = None,
+            _ if quote.is_some() => word.push(c),
+            '\'' | '"' => {
+                quote = Some(c);
+                begun = true;
+            }
+            _ if c.is_whitespace() => {
+                if begun {
+                    words.push(std::mem::take(&mut word));
+                    begun = false;
+                }
+            }
+            _ => {
+                word.push(c);
+                begun = true;
+            }
+        }
+    }
+    if begun {
+        words.push(word);
+    }
+    words
+}
+
 /// The command line with every `-Wp,` this compiler understands spelled as its own flags.
 ///
 /// The preprocessor is inside this compiler, so what a build hands it through `-Wp,` has to be
@@ -525,7 +609,7 @@ fn native_isa() -> rucc_target::Isa {
 /// Returns the message to print when the arguments do not name a compilation this compiler
 /// can attempt.
 pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
-    let expanded = preprocessor_args(args);
+    let expanded = preprocessor_args(&response_files(args)?);
     let args = expanded.as_slice();
     let host = Triple::host()
         .ok_or_else(|| err("this host is not a supported target and no --target was given"))?;
@@ -3666,6 +3750,34 @@ mod tests {
     /// nameless member is on, which is off here and on there. Both are the compiler being right, and
     /// a test that leaves the target to the host is asking a question with two correct answers.
     const LINUX: &str = "--target=x86_64-unknown-linux-gnu";
+
+    #[test]
+    fn a_response_file_is_split_the_way_libiberty_splits_one() {
+        let words = response_words("-Wl,--as-needed  'a b' \"c d\"\ne\\ f '' \"it's\" g\\\\h\n");
+        assert_eq!(words, ["-Wl,--as-needed", "a b", "c d", "e f", "", "it's", "g\\h"]);
+        assert!(response_words(" \n\t").is_empty());
+    }
+
+    #[test]
+    fn a_response_file_on_the_command_line_is_read_in_its_place() {
+        let dir = std::env::temp_dir().join(format!("rucc-rsp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let inner = dir.join("inner.rsp");
+        std::fs::write(&inner, "-lm\n").unwrap();
+        let outer = dir.join("outer.rsp");
+        std::fs::write(&outer, format!("-o 'my prog' -Wl,--as-needed @{}\n", inner.display()))
+            .unwrap();
+        let line = args(&["x.o", &format!("@{}", outer.display()), "@no-such-file"]);
+        assert_eq!(
+            response_files(&line).unwrap(),
+            args(&["x.o", "-o", "my prog", "-Wl,--as-needed", "-lm", "@no-such-file"])
+        );
+        let itself = dir.join("itself.rsp");
+        std::fs::write(&itself, format!("@{}", itself.display())).unwrap();
+        let looped = response_files(&args(&[&format!("@{}", itself.display())]));
+        assert!(looped.is_err(), "a file that names itself should be refused");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn help_and_version_win_over_everything_else() {
