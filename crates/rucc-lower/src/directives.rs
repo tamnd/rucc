@@ -11,10 +11,10 @@
 //! the whole of what the incbin header does, an alias table is `.globl` and a label, and a
 //! version script's worth of `.set` is the same shape again.
 //!
-//! So a template made of directives is read here and becomes the globals it defines, and a
-//! template with an instruction in it is refused by name until there is something that can turn
-//! one into bytes. That is the same line drawn in the same place as for the `asm` in a function,
-//! which refuses a template with anything in it today.
+//! So a template made of directives is read here and becomes the globals it defines. A template
+//! with an instruction in it is handed back as [`Failed::Instruction`], and on ELF the unit keeps
+//! it as text and is assembled from its listing, the way gcc hands one to gas. Elsewhere there is
+//! no reader for the listing and it is refused by name.
 //!
 //! # Why globals rather than text
 //!
@@ -67,6 +67,10 @@ pub(crate) enum Failed {
     /// The string completes a sentence that ends in "is not supported yet", so it reads as a
     /// noun phrase and names the construct rather than describing the reader.
     Unsupported(String),
+    /// An instruction, which is the one thing this reader leaves to the assembler, named so the
+    /// message can say which when there is no assembler to leave it to. See
+    /// [`crate::unit`], which keeps such a template as text.
+    Instruction(String),
     /// A file `.incbin` named that could not be read, with the reason the operating system gave.
     Missing(String, String),
 }
@@ -358,7 +362,7 @@ impl<'a> Assembler<'a> {
         }
         let operands = rest[word.len()..].trim();
         if !word.starts_with('.') {
-            return Err(unsupported(format!("the instruction '{word}'")));
+            return Err(Failed::Instruction(word.to_owned()));
         }
         self.directive(word, operands)
     }
@@ -1595,11 +1599,11 @@ gSize:
         }
     }
 
-    /// An instruction is the thing this does not do, and the message says which one it was.
+    /// An instruction is the thing this does not do, and the failure says which one it was.
     #[test]
     fn a_template_with_an_instruction_in_it_is_refused_by_name() {
         let failed = read(".text\nf:\n movq %rsp, %rbp\n ret\n").expect_err("it is refused");
-        assert_eq!(failed, Failed::Unsupported("the instruction 'movq'".to_owned()));
+        assert_eq!(failed, Failed::Instruction("movq".to_owned()));
     }
 
     /// The rest of what is refused, each with a message that names what was written.

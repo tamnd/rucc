@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-v` prints the header search list the way `gcc -v` does, from `#include "..." search starts here:` to `End of search list.`, since meson and cmake read it to find the system header directories. Meson warned that it found none before this (#1987).
 - `-cpp` is accepted and does nothing, since a C compile is always preprocessed. Meson writes it when it asks for the predefined macros (#1987).
 - `-fsyntax-only` runs the front end through the type checker, prints what it finds, and writes nothing. Meson's header and function probes compile this way, and so do editors (#1988).
+- An `asm` at file scope with instructions in it, which is how a unit writes a whole function in assembly, is compiled on ELF targets rather than refused. The template goes into the listing between `#APP` and `#NO_APP` as gcc writes it, and a unit with one is assembled from its listing so the symbols it defines are in the object. tcc's `85_asm-outside-function.c` and `98_al_ax_extend.c` match gcc 16 at `-O0` and `-O2` (#155).
 
 ### Changed
 

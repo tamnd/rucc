@@ -140,6 +140,14 @@ impl<'a> Printer<'a> {
         let _ = writeln!(self.out, "; format {FORMAT_VERSION}");
         let _ = writeln!(self.out, "target triple = \"{}\"", module.tuple.to_llvm_string());
         let _ = writeln!(self.out, "target datalayout = \"{}\"", module.datalayout);
+        if !module.file_asms().is_empty() {
+            self.out.push('\n');
+            for text in module.file_asms() {
+                self.out.push_str("module asm ");
+                self.string(text.as_bytes());
+                self.out.push('\n');
+            }
+        }
 
         if module.globals().next().is_some() {
             self.out.push('\n');

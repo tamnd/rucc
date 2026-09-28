@@ -489,6 +489,21 @@ impl Unit<'_> {
                     self.unsupported(&format!("{what} in an `asm` at file scope"), asm.span);
                     continue;
                 }
+                // An instruction, which the assembler reads rather than this, so the template is
+                // kept as it was written and the unit is assembled from its listing, where the
+                // template goes in the way gcc puts it into its own. Only on ELF, which is the
+                // syntax the listing reader knows.
+                Err(directives::Failed::Instruction(_))
+                    if self.target.object_format == ObjectFormat::Elf =>
+                {
+                    self.module.add_file_asm(template);
+                    continue;
+                }
+                Err(directives::Failed::Instruction(word)) => {
+                    let what = format!("the instruction '{word}' in an `asm` at file scope");
+                    self.unsupported(&what, asm.span);
+                    continue;
+                }
                 Err(directives::Failed::Missing(name, why)) => {
                     let message = format!("cannot open '{name}' for reading: {why}");
                     self.diagnostics.push(Diagnostic::error(message, asm.span).with_code("E0702"));

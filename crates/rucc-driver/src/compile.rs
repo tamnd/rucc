@@ -1048,7 +1048,7 @@ fn generate(
             // the encoder's own tables, so reading it back is the encoder run over the same values,
             // and it is one path to get right rather than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
-            if aarch64 || rucc_asm::kept(&funcs, names, target) {
+            if aarch64 || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // The reader keeps the frame rows of a listing but not the personality routine or
                 // the call site tables, so a unit with a landing pad read back would unwind
                 // straight past its cleanups. Saying so beats a program that skips them.
@@ -1067,6 +1067,8 @@ fn generate(
                     rucc_asm::read_as(&listing, arch, target.object_format).map_err(|trouble| {
                         let what = if aarch64 {
                             "a unit for aarch64"
+                        } else if globals.kept() {
+                            "an `asm` at file scope"
                         } else {
                             "an `asm` template kept as text"
                         };
@@ -4963,6 +4965,54 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
         assert!(result.messages[0].contains("landing pad"), "{:?}", result.messages);
         assert!(result.messages[0].contains(":3:"), "the call in calls: {:?}", result.messages);
+    }
+
+    /// An `asm` at file scope with an instruction in it, which is how a unit writes a whole
+    /// function in assembly. The template goes into the listing as it was written, between the
+    /// markers gcc writes, and an object is assembled from that listing, so the function it
+    /// defines is defined in the object and the C that calls it calls it there. tcc's
+    /// `85_asm-outside-function.c` and `98_al_ax_extend.c` are this.
+    #[test]
+    fn an_asm_at_file_scope_with_an_instruction_in_it_is_assembled() {
+        let source = concat!(
+            "extern void vide(void);\n",
+            "__asm__(\".text;.globl _us;_us:;movl $0x1234ABCD, %eax;ret\");\n",
+            "__asm__(\"vide: ret\");\n",
+            "unsigned short _us(void);\n",
+            "int main(void) { vide(); return _us() == 0xABCD ? 0 : 1; }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        assert_eq!(result.text().matches("module asm ").count(), 2, "{}", result.text());
+
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains("#APP\nvide: ret\n#NO_APP\n"), "{text}");
+        let main = text.find("main:").expect("main");
+        assert!(text.find("#NO_APP").expect("the markers") < main, "templates first: {text}");
+
+        opts.emit = EmitKind::Object;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let (bytes, defines) = match result.artifact {
+            Artifact::Object { bytes, defines } => (bytes, defines),
+            other => panic!("expected an object, got {other:?}"),
+        };
+        assert!(defines.iter().any(|name| name == "_us"), "{defines:?}");
+        // `mov $0x1234abcd, %eax` and the `ret` after it, which only the assembler wrote.
+        let us = [0xb8, 0xcd, 0xab, 0x34, 0x12, 0xc3];
+        assert!(bytes.windows(us.len()).any(|window| window == us), "the template's bytes");
+
+        // Elsewhere there is no reader for the listing, so the template is still refused there.
+        opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert!(!result.messages.is_empty(), "refused on Mach-O");
+        assert!(result.messages[0].contains("the instruction 'movl'"), "{:?}", result.messages);
     }
 
     /// `return;` from a function that promised a value, which only C89 lets through and which
@@ -9444,23 +9494,19 @@ block2:
         );
     }
 
-    /// The line drawn is the same one the `asm` inside a function draws: directives are read and
-    /// an instruction waits for an assembler. Refusing by name is what makes the wait visible.
+    /// A template of directives the reader does not take is refused by name rather than dropped.
+    /// One with an instruction in it goes to the assembler instead, which
+    /// `an_asm_at_file_scope_with_an_instruction_in_it_is_assembled` covers.
     #[test]
-    fn an_instruction_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
-        for source in [
-            "__asm__(\".text\\n.globl f\\nf:\\n  ret\\n\");\n",
-            "__asm__(\".data\\n.set alias, 4\\n\");\n",
-        ] {
-            let messages = errors(source);
-            assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("not supported yet")
-                        && m.contains("in an `asm` at file scope")),
-                "{source}\n{messages:?}"
-            );
-        }
+    fn a_directive_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
+        let source = "__asm__(\".data\\n.set alias, 4\\n\");\n";
+        let messages = errors(source);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("not supported yet") && m.contains("in an `asm` at file scope")),
+            "{source}\n{messages:?}"
+        );
     }
 
     /// micropython's `nlr_push`, which is the program that asks for all of this. The body is the
