@@ -88,9 +88,40 @@ jobs:
             ./target/release/rucc --fetch "$target"
           done
 
+  # The runtime every cross link ends with, built once here and put in every archive, so that a
+  # release user gets a Windows or Linux program out of `--target` without a source checkout and a
+  # `cargo xtask builtins` of their own. One host is enough, because the archive is the compiler's
+  # output for the target and does not depend on which machine ran it. The list is the targets whose
+  # builtins this compiler can build today, written out rather than discovered, so that one of them
+  # breaking fails the release instead of quietly shipping without it.
+  builtins:
+    name: builtins for every cross target
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      TARGETS: x86_64-linux-gnu x86_64-linux-musl aarch64-linux-gnu aarch64-linux-musl x86_64-windows-gnu aarch64-macos
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: build them
+        run: |
+          set -euo pipefail
+          for target in $TARGETS; do
+            cargo xtask builtins --target "$target"
+            mkdir -p "lib/rucc/$target"
+            cp "target/$target/release/librucc_builtins.a" "lib/rucc/$target/"
+          done
+          find lib -type f | sort
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: builtins
+          path: lib
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: build for ${{ matrix.target }}
-    needs: verify
+    needs: [verify, builtins]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -122,6 +153,10 @@ jobs:
       # above produced.
       - name: size
         run: cargo xtask size --target ${{ matrix.target }} --no-build
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: builtins
+          path: builtins/lib
       # Both formats, because the people who want a .zip and the people who want a .tar.gz do
       # not overlap and neither group should have to install a tool. The script is what makes
       # the two of them reproducible, which is section 13.6 of
@@ -137,7 +172,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             binary="$binary.exe"
           fi
-          .github/package.sh "$name" "$binary"
+          .github/package.sh "$name" "$binary" dist builtins/lib
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: dist-${{ matrix.target }}
@@ -148,9 +183,37 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # What a release user does first, done with the archive they would download: unpack it on a
+  # clean Linux machine, fetch the Windows sysroot, and link hello world with nothing but
+  # `--target`. lld comes from `apt install lld-19`, which is what the compiler tells an Ubuntu
+  # 24.04 user to run, and it is left off PATH on purpose, because finding it in
+  # /usr/lib/llvm-19/bin is part of what is being checked.
+  smoke:
+    name: smoke test the Linux archive
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: dist-x86_64-unknown-linux-gnu
+          path: dist
+      - name: install lld 19
+        run: sudo apt-get install -y lld-19
+      - name: hello world for Windows from the archive alone
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf dist/*.tar.gz -C unpacked
+          rucc=$(echo unpacked/*/rucc)
+          "$rucc" --fetch x86_64-windows-gnu
+          printf '#include <stdio.h>\nint main(void) { puts("hello"); return 0; }\n' > hello.c
+          "$rucc" --target=x86_64-windows-gnu hello.c -o hello.exe
+          file hello.exe
+          file hello.exe | grep -q 'PE32+ executable'
+
   publish:
     name: publish
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
