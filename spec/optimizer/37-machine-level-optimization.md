@@ -173,6 +173,18 @@ above selection; the *decision* belongs here. The three-instances-at-three-point
 because each earlier pass exposes more opportunities, and rucc should not copy it; one instance,
 after combining, before allocation.
 
+Measured before building it, and not built. tamnd/rucc#1178 asked whether the pass was still wanted
+once `crates/rucc-opt/src/phiopt.rs` turns a diamond into a select above selection. The shape a
+machine level if-conversion takes is a conditional branch over one to three instructions that only
+read and write registers, landing on the label straight after them. Compiling all 3,100 programs of
+tamnd/rucc-corpus at `-O2`, rucc leaves none of those and GCC 16 leaves ten, eight of them over
+moves and two over arithmetic, while rucc writes 12,753 conditional moves to GCC's 895. Over the
+SQLite amalgamation 3.53.4 it is none for rucc against ten for GCC, with 607 conditional moves to
+GCC's 775. A pass that looks for the shape would find nothing to do. What is left of the decision
+this paragraph gives to the machine level is the other direction, a select that should have stayed
+a branch because the branch is predictable, and that is a question about the cost model phiopt
+reads rather than a pass below selection.
+
 **Redundant extension elimination.** `gcc/ree.cc`, 1,433 lines. On x86-64 a 32-bit operation
 zero-extends into the 64-bit register, so an explicit zero-extension after it is dead. On RISC-V a
 `W`-suffixed operation sign-extends, per spec 10.2's own example rule. These facts are target
@@ -387,6 +399,9 @@ if-conversion, bit-group dead code elimination, compare elimination, addressing-
 after: hard-register copy propagation, size-directed peepholes, and, per target and post-1.0, pair
 fusion and register renaming. Plus the change-application framework of 37.2, which is shared
 infrastructure rather than a pass and which should exist before the first of them.
+
+If-conversion stays on the list and is not built. Section 37.4 gives the measurement: phiopt
+above selection already leaves it nothing to find, on the corpus and on SQLite.
 
 The two findings that carry beyond this document: **GCC is retrofitting SSA onto RTL and paying
 9,607 lines for it**, which settles spec 10.1's design choice as the incumbent's own direction; and
