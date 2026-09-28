@@ -1840,21 +1840,21 @@ block0(%0: i32):
     /// `ONCE` with a local of `callee` bytes in the function called once and one of `caller` bytes
     /// in the function calling it, where either is left out at zero.
     fn framed(callee: u64, caller: u64, attrs: &str) -> String {
-        let local = |size: u64| {
+        let local = |size: u64, number: u32| {
             if size == 0 {
                 String::new()
             } else {
-                format!("    %9 = alloca, size {size}, align 16\n")
+                format!("    %{number} = alloca, size {size}, align 16\n")
             }
         };
         ONCE.replace("linkage(internal) {", &format!("linkage(internal){attrs} {{"))
             .replace(
                 "block0(%0: i32):\n    %1 = iconst",
-                &format!("block0(%0: i32):\n{}    %1 = iconst", local(callee)),
+                &format!("block0(%0: i32):\n{}    %1 = iconst", local(callee, 5)),
             )
             .replace(
                 "block0(%0: i32):\n    %1 = call",
-                &format!("block0(%0: i32):\n{}    %1 = call", local(caller)),
+                &format!("block0(%0: i32):\n{}    %1 = call", local(caller, 2)),
             )
     }
 
