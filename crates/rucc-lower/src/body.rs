@@ -36,9 +36,9 @@ use rucc_ir::{
     VaInfo, Value,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, DeclFlags, DeclId, DeclKind, Eval, ExprId,
-    ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt,
-    StmtId, StorageDuration, Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind, Eval,
+    ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign,
+    Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Arch, ObjectFormat, Pass, TargetInfo, Triple};
 use rucc_types::{
@@ -5136,6 +5136,37 @@ impl<'u> Body<'_, 'u> {
             ExprKind::ThreadPointer => {
                 Some(self.build(span).value(InstData::new(Opcode::ThreadPointer), Type::PTR))
             }
+            // One word of what libgcc found out about the processor, read where libgcc keeps it and
+            // tested. The object is declared on the way, so that a unit that never wrote a
+            // declaration of it still hands the linker a name to resolve against libgcc.a.
+            ExprKind::CpuModel { object, word, test } => {
+                let symbol = self.unit.libgcc_object(object.symbol(), object.size());
+                let base = self.global_addr(symbol, span);
+                let at = self.offset(base, u64::from(word) * 4, span);
+                let int = Type::int(32);
+                let mut build = self.build(span);
+                let loaded = build.load(int, at, untyped(4), Flags::NONE);
+                Some(match test {
+                    // The bit where it stands, the way gcc answers, except for the top one, which
+                    // as an `int` would be negative and which gcc answers one for instead.
+                    CpuTest::Bit(bit) => {
+                        let mask = build.iconst(int, i128::from(1u32 << bit));
+                        let masked = build.binary(Opcode::And, loaded, mask, Flags::NONE);
+                        if bit == 31 {
+                            let zero = build.iconst(int, 0);
+                            let set = build.icmp(IntPred::Ne, masked, zero);
+                            build.unary(Opcode::ZExt, set, int)
+                        } else {
+                            masked
+                        }
+                    }
+                    CpuTest::Equals(value) => {
+                        let wanted = build.iconst(int, i128::from(value));
+                        let same = build.icmp(IntPred::Eq, loaded, wanted);
+                        build.unary(Opcode::ZExt, same, int)
+                    }
+                })
+            }
             // The same, for the block of arguments: what goes in it is written on the way into the
             // function by the back end, and this is only where it is.
             ExprKind::ApplyArgs => {
@@ -8458,6 +8489,7 @@ impl Scan<'_> {
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
+            | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
                 self.expr(function);

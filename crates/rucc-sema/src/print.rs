@@ -54,7 +54,7 @@ use crate::decl::{
     DeclFlags, DeclId, DeclKind, Definition, Effects, Linkage, Priority, StorageDuration,
     Visibility,
 };
-use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk, JumpAsk};
+use crate::expr::{Category, CpuTest, Expr, ExprId, ExprKind, FrameAsk, JumpAsk};
 use crate::stmt::{CaseId, Stmt, StmtId};
 use crate::tast::{Base, Const, LabelId, Tast};
 
@@ -547,6 +547,13 @@ impl<'a> Printer<'a> {
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
+            ExprKind::CpuModel { object, word, test } => {
+                let asked = match test {
+                    CpuTest::Bit(bit) => format!("bit {bit}"),
+                    CpuTest::Equals(value) => format!("equals {value}"),
+                };
+                format!("cpu-model {}[{word}] {asked}", object.symbol())
+            }
             ExprKind::ApplyArgs => "apply-args".to_owned(),
             ExprKind::Apply { size, .. } => format!("apply {size}"),
             ExprKind::ObjectSize { kind, .. } => format!("object-size {kind}"),
@@ -571,6 +578,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
+            | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
                 self.expr(function);

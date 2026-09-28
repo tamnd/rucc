@@ -4717,6 +4717,103 @@ decl #0 x : int object external static defined
         assert!(text.contains("\taddl\t"), "the block goes on after a stop: {text}");
     }
 
+    /// `__builtin_cpu_init` is a call to libgcc's `__cpu_indicator_init` and nothing else, which
+    /// is what gcc 16.2.0 writes for it. The name the program wrote does not reach the object
+    /// file, because no library defines it.
+    #[test]
+    fn cpu_init_is_a_call_to_the_libgcc_function_that_fills_in_the_model() {
+        let text = asm("void start(void) { __builtin_cpu_init(); }\n");
+        assert!(text.contains("\tcall\t__cpu_indicator_init"), "{text}");
+        assert!(!text.contains("__builtin_cpu_init"), "{text}");
+    }
+
+    /// `__builtin_cpu_supports` is a load of the word the feature's bit is in and an `and` with
+    /// the bit, and the answer is the bit where it stands, which is gcc 16.2.0's lowering.
+    ///
+    /// Three names, one from each place libgcc keeps the bits: sse4.2 is bit 8 of the last word of
+    /// `__cpu_model`, vpclmulqdq is bit 1 of the first word of `__cpu_features2`, and xsave is bit
+    /// 17 of its second word. The fourth is the top bit of a word, which gcc answers one for
+    /// rather than the bit, so there is a compare after the `and`.
+    #[test]
+    fn cpu_supports_is_a_bit_of_the_words_libgcc_fills_in() {
+        let text = asm("int f(void) { return __builtin_cpu_supports(\"sse4.2\"); }\n");
+        assert!(text.contains("__cpu_model"), "{text}");
+        assert!(text.contains("12(%"), "the fourth word of the model: {text}");
+        assert!(text.contains("$256"), "{text}");
+        assert!(!text.contains("\tcall"), "the answer is a read and not a call: {text}");
+
+        let text = asm("int f(void) { return __builtin_cpu_supports(\"vpclmulqdq\"); }\n");
+        assert!(text.contains("__cpu_features2"), "{text}");
+        assert!(text.contains("$2,"), "{text}");
+
+        let text = asm("int f(void) { return __builtin_cpu_supports(\"xsave\"); }\n");
+        assert!(text.contains("__cpu_features2"), "{text}");
+        assert!(text.contains("4(%"), "the second word of the second object: {text}");
+        assert!(text.contains("$131072"), "{text}");
+
+        let text = asm("int f(void) { return __builtin_cpu_supports(\"avx512vbmi2\"); }\n");
+        assert!(text.contains("set"), "the top bit is answered as a one: {text}");
+    }
+
+    /// `__builtin_cpu_is` is a compare of one word of `__cpu_model` with a number: the vendor for
+    /// `amd`, which is 2, and the subtype for `znver4`, which is 29.
+    #[test]
+    fn cpu_is_compares_one_word_of_the_model_with_a_number() {
+        let text = asm("int f(void) { return __builtin_cpu_is(\"amd\"); }\n");
+        assert!(text.contains("__cpu_model"), "{text}");
+        assert!(text.contains("$2,"), "{text}");
+
+        let text = asm("int f(void) { return __builtin_cpu_is(\"znver4\"); }\n");
+        assert!(text.contains("8(%"), "the subtype is the third word: {text}");
+        assert!(text.contains("$29,"), "{text}");
+    }
+
+    /// The name picks the word and the bit, so it has to be a string literal, and it has to be
+    /// one gcc knows. Both are errors in gcc 16.2.0's words, and so is asking on a target other
+    /// than x86-64, where nothing defines what these read.
+    #[test]
+    fn a_cpu_builtin_takes_a_name_it_knows_written_as_a_literal() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        for (source, wanted) in [
+            (
+                "int f(const char *s) { return __builtin_cpu_supports(s); }\n",
+                "parameter to builtin must be a string constant or literal",
+            ),
+            (
+                "int f(void) { return __builtin_cpu_supports(\"sse5\"); }\n",
+                "parameter to builtin not valid: sse5",
+            ),
+            (
+                "int f(void) { return __builtin_cpu_is(\"sse\"); }\n",
+                "parameter to builtin not valid: sse",
+            ),
+        ] {
+            let result = run(&opts, source);
+            assert!(
+                result.messages.iter().any(|m| m.contains(wanted)),
+                "{source}{:?}",
+                result.messages
+            );
+        }
+        // A cast in front of the literal is looked through, the way gcc looks through it.
+        let text = asm("int f(void) { return __builtin_cpu_supports((const char *)\"avx2\"); }\n");
+        assert!(text.contains("$1024"), "{text}");
+
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        for source in [
+            "void f(void) { __builtin_cpu_init(); }\n",
+            "int f(void) { return __builtin_cpu_supports(\"sse4.2\"); }\n",
+        ] {
+            let result = run(&opts, source);
+            assert!(
+                result.messages.iter().any(|m| m.contains("only available on x86-64")),
+                "{source}{:?}",
+                result.messages
+            );
+        }
+    }
+
     /// The promise about the low bits of an address, whose value is the address.
     ///
     /// Nothing here reads an alignment fact about a value yet, so what the call leaves behind is

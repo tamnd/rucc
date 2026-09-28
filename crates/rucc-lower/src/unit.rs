@@ -1733,6 +1733,21 @@ impl Unit<'_> {
         Some(self.renamed.get(&symbol).copied().unwrap_or(symbol))
     }
 
+    /// The symbol of one of the objects libgcc defines and the program only reads, declared in
+    /// the module the first time it is asked for.
+    ///
+    /// These are `__cpu_model` and `__cpu_features2`, which `__builtin_cpu_supports` and
+    /// `__builtin_cpu_is` read. The program never declares them, so without this the load would
+    /// be from a name the module knows nothing about. The declaration is the one gcc makes, an
+    /// external object with the ordinary visibility and no image, and a declaration the program
+    /// did write of the same name is left as it is, since it says the same thing.
+    pub(crate) fn libgcc_object(&mut self, name: &str, size: u64) -> Symbol {
+        let symbol = self.names.intern(name);
+        // External, the ordinary visibility and no image, which is what a new global is.
+        self.place_global(Global::new(symbol, size, 4));
+        symbol
+    }
+
     /// The name an object or a function is known by in the object file.
     pub(crate) fn symbol_of(&mut self, decl: DeclId) -> Symbol {
         let tast = self.tast;

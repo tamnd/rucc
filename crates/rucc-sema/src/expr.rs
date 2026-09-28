@@ -477,6 +477,21 @@ pub enum ExprKind {
     /// about the machine the program is running on rather than anything computed from the program,
     /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
     ThreadPointer,
+    /// `__builtin_cpu_supports("name")` and `__builtin_cpu_is("name")`, one word of what libgcc
+    /// found out about the processor, tested.
+    ///
+    /// It has no operands, because the name the program wrote has already been looked up and is
+    /// a word and a test here. The words are libgcc's own `__cpu_model` and `__cpu_features2`,
+    /// which `__cpu_indicator_init` fills in before `main` runs, so the answer is a load and an
+    /// `and` or a compare and not a call. See `check/builtin/cpu.rs`.
+    CpuModel {
+        /// Which of libgcc's two objects the word is in.
+        object: CpuObject,
+        /// Which word of it, counted in four byte words from the start of the object.
+        word: u8,
+        /// What is asked of the word.
+        test: CpuTest,
+    },
     /// `__builtin_apply_args()`, the address of a block holding every argument this function was
     /// called with, the ones in registers and where the ones in memory are.
     ///
@@ -566,6 +581,51 @@ pub enum JumpAsk {
     Save,
     /// `__builtin_longjmp`, which reads it back and goes there, and never answers at all.
     Restore,
+}
+
+/// Which of the two objects libgcc keeps what it found out about the processor in.
+///
+/// Both are defined by libgcc and filled in by its `__cpu_indicator_init`, and the layouts are
+/// gcc's: `__cpu_model` is four `unsigned int`s, the vendor, the type, the subtype and the first
+/// thirty two feature bits, and `__cpu_features2` is three more words of feature bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuObject {
+    /// `__cpu_model`.
+    Model,
+    /// `__cpu_features2`.
+    Features2,
+}
+
+impl CpuObject {
+    /// The name libgcc defines it under, which is the symbol the load is from.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CpuObject::Model => "__cpu_model",
+            CpuObject::Features2 => "__cpu_features2",
+        }
+    }
+
+    /// How many bytes libgcc's definition of it has.
+    #[must_use]
+    pub fn size(self) -> u64 {
+        match self {
+            CpuObject::Model => 16,
+            CpuObject::Features2 => 12,
+        }
+    }
+}
+
+/// What `__builtin_cpu_supports` or `__builtin_cpu_is` asks of the word it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuTest {
+    /// Whether one bit is set, which is `__builtin_cpu_supports`. The answer is the bit where it
+    /// stands, the way gcc gives it, and not a one: `__builtin_cpu_supports("sse4.2")` is 256 on
+    /// a processor that has it. The top bit is the exception, since as an `int` it would be
+    /// negative, and gcc answers one for that bit instead.
+    Bit(u8),
+    /// Whether the word is this number, which is `__builtin_cpu_is`, answering one or zero.
+    Equals(u32),
 }
 
 /// Which of the two things about a frame one of the address builtins asks for.

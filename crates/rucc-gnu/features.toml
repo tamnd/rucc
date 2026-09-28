@@ -1084,6 +1084,37 @@ tests = ["rucc-driver::the_address_of_this_thread_s_own_storage_is_read_out_of_t
 notes = "The address of the block of storage the running thread has, which on x86-64 is one instruction, movq %fs:0. The signature is kept because the call is checked against it, and the node is put in its place after that in check/builtin/thread.rs. What a program does with the answer is its own business, since the layout of what is behind the pointer is the C library's and not the compiler's, which is why an allocator that keeps a cache per thread writes this rather than a thread-local of its own."
 
 [[feature]]
+name = "__builtin_cpu_init"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = "void(void)"
+library = "__cpu_indicator_init"
+used_by = ["postgres"]
+tests = ["rucc-sema::the_names_are_rows_of_the_table_that_carry_a_signature", "rucc-driver::cpu_init_is_a_call_to_the_libgcc_function_that_fills_in_the_model"]
+notes = "A call to libgcc's __cpu_indicator_init, which is what gcc 16.2.0 writes. libgcc already runs it as a constructor before main, so a program only needs this in a constructor of its own that may run first. x86-64 only, and refused on any other target, because nothing there defines the function. The link finds it in libgcc.a, which the driver passes whenever there is a gcc on the machine."
+
+[[feature]]
+name = "__builtin_cpu_supports"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = "int(const char *)"
+used_by = ["postgres"]
+tests = ["rucc-sema::the_names_are_rows_of_the_table_that_carry_a_signature", "rucc-sema::every_feature_is_a_bit_of_a_word_libgcc_has", "rucc-driver::cpu_supports_is_a_bit_of_the_words_libgcc_fills_in", "rucc-driver::a_cpu_builtin_takes_a_name_it_knows_written_as_a_literal"]
+notes = "A load of the word of __cpu_model or __cpu_features2 the feature is in and an and with its bit, which is gcc 16.2.0's lowering. The answer is the bit where it stands and not a one, as in gcc, except for the top bit of a word, which gcc answers one for. Every one of the 116 names gcc 16 takes is here, the x86-64 level names included, with the bit numbers of gcc's enum processor_features, each checked against what gcc 16.2.0 compiles it to. The name has to be a string literal and an unknown name is an error, in gcc's words. x86-64 only. The table is in check/builtin/cpu.rs."
+
+[[feature]]
+name = "__builtin_cpu_is"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = "int(const char *)"
+used_by = []
+tests = ["rucc-sema::the_names_are_rows_of_the_table_that_carry_a_signature", "rucc-driver::cpu_is_compares_one_word_of_the_model_with_a_number", "rucc-driver::a_cpu_builtin_takes_a_name_it_knows_written_as_a_literal"]
+notes = "Whether the vendor, type or subtype word of __cpu_model is one number, answering one or zero, which is gcc 16.2.0's lowering. The 72 names are the rows of gcc 16's processor_alias_table that carry a model, with its numbers, each checked against what gcc 16.2.0 compiles it to. The same rules about the argument as __builtin_cpu_supports, and x86-64 only."
+
+[[feature]]
 name = "__builtin_alloca"
 kind = "builtin"
 gcc_version = "2.0"

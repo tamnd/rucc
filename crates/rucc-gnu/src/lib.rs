@@ -292,16 +292,22 @@ mod tests {
         }
     }
 
-    /// Every one of them so far is the name with the prefix taken off, which is the rule GCC
-    /// documents. The field is written out anyway, so this is what checks the two agree.
+    /// Nearly every one of them is the name with the prefix taken off, which is the rule GCC
+    /// documents. The field is written out anyway, so this is what checks the two agree. The
+    /// one exception is `__builtin_cpu_init`, which GCC turns into a call to the libgcc
+    /// function that fills in the CPU model.
     #[test]
     fn the_library_function_is_the_name_without_the_prefix() {
+        const OTHER_NAMES: &[(&str, &str)] = &[("__builtin_cpu_init", "__cpu_indicator_init")];
         for feature in FEATURES {
             if feature.library.is_empty() {
                 continue;
             }
-            let bare = feature.name.strip_prefix("__builtin_");
-            assert_eq!(bare, Some(feature.library), "{} names something else", feature.name);
+            let expected = match OTHER_NAMES.iter().find(|(name, _)| *name == feature.name) {
+                Some((_, library)) => Some(*library),
+                None => feature.name.strip_prefix("__builtin_"),
+            };
+            assert_eq!(expected, Some(feature.library), "{} names something else", feature.name);
         }
     }
 
