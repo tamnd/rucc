@@ -14,6 +14,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The optimizer's liveness works out what each block reads and writes once, and only revisits a block when something it branches to changed. It used to allocate two function-wide sets and walk every instruction of every block on every round. On jtckdint's `test.c` at `-O2` the build runs 7.6% fewer instructions and takes a third fewer page faults.
 - Debug info for a variable that takes over another's value works out dominance from one dominator tree per function instead of two walks of the whole function for each block an assignment starts in. On jtckdint's `test.c` at `-O2` this is about 4% of the instructions the build runs.
 
+### Fixed
+
+- The `-S` output for a Darwin target assembles with Apple's assembler. A weak definition is `.globl` and `.weak_definition`, a weak reference is `.weak_reference`, and `.comm` gives its alignment as a power of two, where they were written the gas way and Apple's `as` either refused them or asked for the wrong boundary.
+
 ## 0.11.15
 
 ### Added
