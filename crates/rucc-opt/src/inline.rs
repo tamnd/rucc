@@ -86,7 +86,10 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
-use rucc_cost::heuristics::{INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH};
+use rucc_cost::heuristics::{
+    INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_FRAME_GROWTH,
+    INLINE_LARGE_FRAME,
+};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
     Float, Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
@@ -157,6 +160,9 @@ pub enum InlineFailure {
     TooLarge,
     /// The call is inside more loops than a function called once may be inlined into.
     TooDeep,
+    /// The body's locals would make the caller's frame larger than it is allowed to grow. Only a
+    /// call that is not `always_inline` is refused for this.
+    Frame,
     /// The call has a landing pad but not in the shape the lowering builds, an `unwound` straight
     /// after it read by the branch that ends its block, so there is no pad to hand the calls the
     /// body makes once it is copied in.
@@ -183,6 +189,7 @@ impl InlineFailure {
             Self::Alloca => "always_inline call not inlined: callee calls alloca",
             Self::TooLarge => "always_inline call not inlined: callee too large",
             Self::TooDeep => "always_inline call not inlined: call inside too many loops",
+            Self::Frame => "always_inline call not inlined: stack frame growth limit reached",
             Self::Unwinds => "always_inline call not inlined: call has a landing pad",
             Self::Target => "always_inline call not inlined: target specific option mismatch",
         }
@@ -204,6 +211,7 @@ impl InlineFailure {
             Self::Alloca => "inline call not inlined: callee calls alloca",
             Self::TooLarge => "inline call not inlined: callee too large",
             Self::TooDeep => "inline call not inlined: call inside too many loops",
+            Self::Frame => "inline call not inlined: stack frame growth limit reached",
             Self::Unwinds => "inline call not inlined: call has a landing pad",
             Self::Target => "inline call not inlined: target specific option mismatch",
         }
@@ -234,6 +242,9 @@ impl InlineFailure {
             Self::TooLarge => "call to a function called once not inlined: callee too large",
             Self::TooDeep => {
                 "call to a function called once not inlined: call inside too many loops"
+            }
+            Self::Frame => {
+                "call to a function called once not inlined: stack frame growth limit reached"
             }
             Self::Unwinds => "call to a function called once not inlined: call has a landing pad",
             Self::Target => {
@@ -432,6 +443,9 @@ fn settle(
         return;
     }
     state.insert(id, State::Settling);
+    // The caller's own locals, before anything is copied into it, which is what the growth of its
+    // frame is measured against.
+    let own = frame(&module[id]);
     // The calls as the function was written. A call that arrives inside a body being inlined is
     // one the callee's own settling already had its chance at. A function that asked not to be
     // optimized is left with its calls, except for the ones that are a promise.
@@ -504,6 +518,10 @@ fn settle(
             stats.missed(why(InlineFailure::TooLarge));
             continue;
         }
+        if kind != Kind::Always && !fits(own, frame(&module[id]), frame(&module[callee])) {
+            stats.missed(why(InlineFailure::Frame));
+            continue;
+        }
         match splice(module, id, call, callee, how.convention, kind) {
             Ok(()) => stats.optimized(match kind {
                 Kind::Always => INLINED,
@@ -522,6 +540,43 @@ fn settle(
 /// How many instructions a body has, which is what the limit on a callee declared `inline` counts.
 fn size(func: &Func) -> usize {
     func.blocks().map(|block| func.insts(block).count()).sum()
+}
+
+/// How many bytes of locals a body keeps in memory, which is every `alloca` of a fixed size in it.
+///
+/// The lowering already gave every local that never has its address taken a register, so what is
+/// left is the arrays, the structures and the scalars something points at. That is gcc's
+/// `estimated_stack_size` less its packing: gcc lets locals of two scopes that never overlap share
+/// bytes, and the slot allocator here only lets two share when neither has its address go anywhere
+/// it cannot follow, which is not true of most arrays, so the sum is the honest estimate.
+fn frame(func: &Func) -> u64 {
+    func.blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
+        .filter_map(|inst| match func[inst].extra {
+            Extra::Mem(mem) => Some(func[mem].size),
+            _ => None,
+        })
+        .sum()
+}
+
+/// Whether a caller whose own locals came to `own` bytes, and whose locals come to `now` bytes with
+/// what has been inlined into it so far, can take a body whose locals come to `body` more.
+///
+/// This is gcc's `caller_growth_limits` test for the stack. The frame may grow to
+/// `large-stack-frame-growth` percent more than the caller's own locals, and a frame no larger than
+/// `large-stack-frame` bytes is always fine. gcc also lets a call through when a sibling already
+/// made the frame that large, on the grounds that the two bodies will share bytes. That is left
+/// out, since here they do not (see [`frame`]), which is tamnd/rucc#1989.
+///
+/// Without this a small function with a large buffer, called once from a function with none,
+/// moves the buffer into the caller, and a caller of many such helpers ends up with all their
+/// buffers at once where gcc has one at a time. `select_default_timezone` in postgres's `initdb`
+/// had a frame of 44560 bytes this way, against gcc's 16.
+fn fits(own: u64, now: u64, body: u64) -> bool {
+    let limit = own + own * u64::from(INLINE_FRAME_GROWTH) / 100;
+    let after = now + body;
+    after <= limit || after <= u64::from(INLINE_LARGE_FRAME)
 }
 
 /// Inlines one call, or says why not and leaves the caller as it was.
@@ -1780,6 +1835,60 @@ block0(%0: i32):
         assert_ne!(hinted, ONCE);
         let (out, _) = inlined_with(&hinted, Some(70), false);
         assert!(!out.contains("call @scale"), "{out}");
+    }
+
+    /// `ONCE` with a local of `callee` bytes in the function called once and one of `caller` bytes
+    /// in the function calling it, where either is left out at zero.
+    fn framed(callee: u64, caller: u64, attrs: &str) -> String {
+        let local = |size: u64| {
+            if size == 0 {
+                String::new()
+            } else {
+                format!("    %9 = alloca, size {size}, align 16\n")
+            }
+        };
+        ONCE.replace("linkage(internal) {", &format!("linkage(internal){attrs} {{"))
+            .replace(
+                "block0(%0: i32):\n    %1 = iconst",
+                &format!("block0(%0: i32):\n{}    %1 = iconst", local(callee)),
+            )
+            .replace(
+                "block0(%0: i32):\n    %1 = call",
+                &format!("block0(%0: i32):\n{}    %1 = call", local(caller)),
+            )
+    }
+
+    /// A body whose locals would make the caller's frame more than eleven times its own locals, and
+    /// more than 256 bytes, stays a call with a remark that says so, which is gcc's
+    /// `large-stack-frame-growth` and `large-stack-frame`.
+    #[test]
+    fn a_body_that_would_grow_the_frame_too_far_stays_a_call() {
+        let fixture = framed(4096, 0, "");
+        assert_eq!(fixture.matches("alloca").count(), 1, "{fixture}");
+        let (out, said) = inlined_with(&fixture, Some(70), true);
+        assert!(out.contains("call @scale"), "{out}");
+        assert!(said.contains("stack frame growth limit reached"), "{said}");
+        let (out, _) = inlined_with(&framed(4096, 256, ""), Some(70), true);
+        assert!(out.contains("call @scale"), "{out}");
+    }
+
+    /// Small locals always go in, and so do large ones in a caller whose own are large enough.
+    #[test]
+    fn a_body_that_grows_the_frame_within_the_limit_is_inlined() {
+        let (out, _) = inlined_with(&framed(256, 0, ""), Some(70), true);
+        assert!(!out.contains("call @scale"), "{out}");
+        let fixture = framed(4096, 1024, "");
+        assert_eq!(fixture.matches("alloca").count(), 2, "{fixture}");
+        let (out, _) = inlined_with(&fixture, Some(70), true);
+        assert!(!out.contains("call @scale"), "{out}");
+    }
+
+    /// `always_inline` is a promise and the frame does not change that.
+    #[test]
+    fn an_always_inline_body_goes_in_whatever_it_does_to_the_frame() {
+        let (out, _) = inlined_with(&framed(4096, 0, ", attrs(always_inline)"), Some(70), true);
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @scale"), "{out}");
     }
 
     /// `noinline` is kept whoever calls it how often.
