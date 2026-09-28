@@ -418,13 +418,16 @@ impl Pass for PhiOpt {
         if func.entry().is_none() {
             return stats;
         }
+        // What a store only one arm made asks about the whole function. Worked out the first time
+        // one is asked about and dropped at each conversion, since that is the only edit made here.
+        let mut frame = None;
         for head in func.blocks().collect::<Vec<Block>>() {
             let cfg = an.cfg(func);
             if !cfg.reaches(head) {
                 continue;
             }
             let Some(shape) = diamond(func, cfg, head) else { continue };
-            let store = storing(func, &shape);
+            let store = storing(func, &shape, &mut frame);
             // Before the refusals rather than after, because one of them is about a value having a
             // width a select is lowered at, and a value the condition settles gets no select at all.
             // The waste that costs is a range query on a diamond that then turns out to have an
@@ -480,6 +483,7 @@ impl Pass for PhiOpt {
                 .filter(|&inst| func[inst].opcode == Opcode::Load)
                 .count();
             convert(func, &shape, &plan, store.as_ref(), &implied);
+            frame = None;
             // The graph was about the function as it was a moment ago, and the manager clears the
             // cache after the pass returns, which is too late for the next block.
             an.clear();
@@ -899,13 +903,34 @@ fn mismatch(func: &Func, shape: &Diamond) -> &'static str {
 ///
 /// Two stores to the same place are the half of the transformation that needs no proof. One store
 /// is the half that does, and [`alone`] is where it is asked for.
-fn storing(func: &Func, shape: &Diamond) -> Option<Stored> {
+fn storing(func: &Func, shape: &Diamond, frame: &mut Option<Frame>) -> Option<Stored> {
     let found = shape.arms.map(|arm| arm.and_then(|block| stored_in(func, block)));
     match found {
         [Some(then), Some(other)] => both(func, [then, other]),
-        [Some(one), None] => alone(func, shape, one, 0),
-        [None, Some(one)] => alone(func, shape, one, 1),
+        [Some(one), None] => alone(func, shape, one, 0, frame),
+        [None, Some(one)] => alone(func, shape, one, 1, frame),
         [None, None] => None,
+    }
+}
+
+/// The two things [`alone`] asks about the whole function rather than about the diamond.
+///
+/// Each is a walk over every instruction, so working them out for each diamond made the pass
+/// quadratic in a long function with a guarded store in every other block.
+struct Frame {
+    /// Whether anything gives stack back part way through, which refuses the function whole.
+    gives_back: bool,
+    /// Which locals had their address leave it.
+    escapes: Escapes,
+}
+
+impl Frame {
+    fn of(func: &Func) -> Self {
+        let gives_back = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .any(|one| func[one].opcode == Opcode::StackRestore);
+        Self { gives_back, escapes: Escapes::of(func) }
     }
 }
 
@@ -954,7 +979,13 @@ fn both(func: &Func, insts: [Inst; 2]) -> Option<Stored> {
 ///
 /// The side is the one that stores. The other side stores too once this is done, and what it
 /// stores is what it would have found had it looked.
-fn alone(func: &Func, shape: &Diamond, inst: Inst, side: usize) -> Option<Stored> {
+fn alone(
+    func: &Func,
+    shape: &Diamond,
+    inst: Inst,
+    side: usize,
+    frame: &mut Option<Frame>,
+) -> Option<Stored> {
     let data = func[inst];
     if data.flags.contains(Flags::VOLATILE) {
         return None;
@@ -969,11 +1000,8 @@ fn alone(func: &Func, shape: &Diamond, inst: Inst, side: usize) -> Option<Stored
         return None;
     }
     let (Origin::Local(slot), _) = alias::origin(func, addr) else { return None };
-    let gives_back = func
-        .blocks()
-        .flat_map(|block| func.insts(block))
-        .any(|one| func[one].opcode == Opcode::StackRestore);
-    if gives_back || Escapes::of(func).escaped(slot) {
+    let frame = frame.get_or_insert_with(|| Frame::of(func));
+    if frame.gives_back || frame.escapes.escaped(slot) {
         return None;
     }
     let mut values = [None, None];
