@@ -9,8 +9,9 @@
 //! is wanted. So is [`moves`], which puts the moves an edge turns into in an order they can be
 //! made in one at a time. The single pass allocator's decision is in [`assign`]: where every value
 //! of a function goes, in one linear scan, which is what `-O0` asks for. The rewrite that makes
-//! that decision true in the function is in [`rewrite`], and [`run`] is the two of them together,
-//! which is the whole of the `-O0` allocator. [`check`] reads an assignment back and says whether
+//! that decision true in the function is in [`rewrite`], with what each instruction needs around
+//! it for the machine to accept the places worked out in [`legalize`], and [`run`] is the two of
+//! them together, which is the whole of the `-O0` allocator. [`check`] reads an assignment back and says whether
 //! it is one the machine can run, which [`run`] asserts on in debug and CI builds and which the
 //! backtracking allocator is held to the same way. [`trace`] asks the other half of the question,
 //! which is whether the rewrite wrote that decision down without losing a value on the way: it
@@ -30,6 +31,7 @@
 pub mod assign;
 pub mod backtrack;
 pub mod check;
+pub mod legalize;
 pub mod live;
 pub mod moves;
 pub mod order;
