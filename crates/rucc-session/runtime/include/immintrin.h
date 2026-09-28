@@ -25,6 +25,11 @@
  *
  * On x86-64 all three macros are always defined, because SSE2 is in the baseline the ABI names,
  * so in practice this header is the SSE2 header plus a comment.
+ *
+ * `<smmintrin.h>` is reached the way gcc reaches it, whatever the command line said. What it
+ * holds so far is the CRC32C steps and, through `<popcntintrin.h>`, the population counts, each
+ * of which is an instruction outside the baseline and each of which that header puts behind the
+ * macro `-msse4.2`, `-mcrc32` or `-mpopcnt` defines. See `tamnd/rucc#2003`.
  */
 
 #ifndef __RUCC_IMMINTRIN_H
@@ -41,5 +46,9 @@
 #ifdef __SSE2__
 #include <emmintrin.h>
 #endif
+
+/* Unguarded, because the names inside it are each behind the macro for their own instruction and
+ * a program built without them gets exactly the names gcc would let it call. */
+#include <smmintrin.h>
 
 #endif /* __RUCC_IMMINTRIN_H */

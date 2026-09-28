@@ -21,7 +21,7 @@
 
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, Math, OptLevel, Options, Pic, Std};
-use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+use rucc_target::{Arch, Env, Isa, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
 /// The name a diagnostic about the generated set points at.
@@ -137,6 +137,9 @@ pub struct Predef {
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines.
     pub undefines: Vec<String>,
+    /// The instruction set extensions the unit is built for, which decides `__SSE4_2__` and the
+    /// rest of that family on x86-64 and nothing anywhere else.
+    pub isa: Isa,
 }
 
 impl Predef {
@@ -157,6 +160,7 @@ impl Predef {
             exceptions: false,
             defines: Vec::new(),
             undefines: Vec::new(),
+            isa: Isa::baseline(),
         }
     }
 }
@@ -183,6 +187,7 @@ impl Predef {
             exceptions: opts.exceptions,
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
+            isa: opts.isa,
         }
     }
 }
@@ -497,16 +502,19 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__x86_64");
             d.flag("__amd64__");
             d.flag("__amd64");
-            d.flag("__SSE__");
-            d.flag("__SSE2__");
-            d.flag("__MMX__");
+            // One macro per extension the unit is built for, which is `__SSE__`, `__SSE2__`,
+            // `__MMX__` and `__FXSR__` for the baseline every x86-64 has, and `__SSE4_2__` and
+            // its relatives for what `-march=` and `-msse4.2` add. Only the extensions this
+            // compiler has the intrinsics for get one, see `rucc_target::isa`.
+            for name in opts.isa.macros() {
+                d.flag(&name);
+            }
             d.flag("__SSE_MATH__");
             d.flag("__SSE2_MATH__");
             d.flag("__k8");
             d.flag("__k8__");
-            // FXSAVE and FXRSTOR, which every x86-64 has, and the small code model, which is
-            // the default and the only one a program gets without being told otherwise.
-            d.flag("__FXSR__");
+            // The small code model, which is the default and the only one a program gets without
+            // being told otherwise.
             d.flag("__code_model_small__");
             // The MMX registers are not used on x86-64: the sixty four bit operations go
             // through SSE instead. gcc's own `xmmintrin.h` reads this to decide how to write
@@ -1742,6 +1750,30 @@ mod tests {
         // A wide character is sixteen bits on Windows, so a wide string is UTF-16 there.
         let windows = set_for("x86_64-pc-windows-msvc");
         assert!(has(&windows, "#define __GNUC_WIDE_EXECUTION_CHARSET_NAME \"UTF-16LE\""));
+    }
+
+    #[test]
+    fn the_extensions_the_unit_is_built_for_are_macros() {
+        // tamnd/rucc#2003. The baseline is four macros and SSE4.2 is six more, which is gcc 16's
+        // `-msse4.2 -dM` output, and the unit's set is what decides it rather than the target.
+        let triple: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
+        let mut choices = rucc_target::Choices::new();
+        choices.read("sse4.2").expect("a name gcc knows");
+        let opts = Predef { isa: choices.over(Isa::baseline()), ..Predef::new() };
+        let text = built_in(&TargetInfo::new(triple), &opts);
+        for name in
+            ["SSE", "SSE2", "MMX", "FXSR", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32"]
+        {
+            assert!(has(&text, &format!("#define __{name}__ 1")), "{name}");
+        }
+        let plain = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&plain, "#define __SSE2__ 1"));
+        for name in ["__SSE3__", "__SSE4_2__", "__POPCNT__", "__CRC32__"] {
+            assert!(!plain.contains(name), "{name}");
+        }
+        // AArch64 has none of them whatever the set says, since the set is an x86-64 one.
+        let arm: Triple = "aarch64-unknown-linux-gnu".parse().expect("a triple");
+        assert!(!built_in(&TargetInfo::new(arm), &opts).contains("__SSE"));
     }
 
     #[test]
