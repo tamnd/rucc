@@ -231,6 +231,14 @@
       (x64.and_ri_64 x k)
       (spec (= (bvand x k) (result))))
 
+(rule (lower (or.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.or_ri_8 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.or_ri_16 x k)
+      (spec (= (bvor x k) (result))))
+
 (rule (lower (or.i32 (value.i32 x) (iconst.i32 k)))
       (x64.or_ri_32 x k)
       (spec (= (bvor x k) (result))))
@@ -239,6 +247,14 @@
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
       (x64.or_ri_64 x k)
       (spec (= (bvor x k) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.xor_ri_8 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.xor_ri_16 x k)
+      (spec (= (bvxor x k) (result))))
 
 (rule (lower (xor.i32 (value.i32 x) (iconst.i32 k)))
       (x64.xor_ri_32 x k)

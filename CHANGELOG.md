@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An `always_inline` call whose immediate operand is written as constant arithmetic, such as `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC`, is folded to the constant after inlining at `-O0` too, and a `static` `always_inline` function with every call inlined is no longer emitted out of line, as with gcc (#2045).
 - `-g` on Darwin arm64 writes DWARF into the object's `__DWARF` segment the way clang does, with the unit's name and directory in `.debug_str` where ld64 reads them. Apple's `ld` lists the object in the debug map, `dsymutil` turns it into a `.dSYM` with the linked addresses, and lldb stops at a rucc function on the right line and reads its variables.
 
+### Changed
+
+- An 8-bit or 16-bit `|` or `^` with a constant is one `or` or `xor` with an immediate on x86-64 again, and it folds into a memory destination the way the 32-bit and 64-bit forms do. Both rules are proved by `rucc-verify`. A narrow shift by a variable count stays as it is: the IR takes the count modulo the width and the machine masks it by 31, so no single instruction rule for it can be proved.
+
 ### Fixed
 
 - A function inlined under `-g` no longer names its own opening brace inside its caller's line table. The slots it declares and the stores of its parameters kept the line of the callee's brace, which is outside the caller, so a debugger stopped there was sent to the top of another function. The slots now say what the caller's own slots say and the stores say the call, as with gcc 16. `cargo xtask lines` had been failing on SQLite's `insertCell` and `insertCellFast` since #2013 made the address of such a slot an instruction of its own.
