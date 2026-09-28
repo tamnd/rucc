@@ -258,6 +258,7 @@ pub struct Frame {
     late: bool,
     grows: bool,
     naked: bool,
+    usage: u32,
 }
 
 impl Frame {
@@ -450,6 +451,12 @@ impl Frame {
             *at += shift;
         }
 
+        // What `-fstack-usage` reports, worked out here because this is the one place every term
+        // of it is in hand. See [`Frame::usage`] for what the number is. Every push comes before
+        // the prologue forces an alignment, so the pushes are what gets rounded up.
+        let pushes = conv.return_address + push * pushed;
+        let usage = realign.map_or(pushes, |to| pushes.next_multiple_of(to)) + size;
+
         Self {
             saved_int,
             saved_sse,
@@ -479,6 +486,7 @@ impl Frame {
             late,
             grows: layout.grows,
             naked: layout.naked,
+            usage,
         }
     }
 
@@ -632,6 +640,31 @@ impl Frame {
     #[must_use]
     pub fn late(&self) -> bool {
         self.late
+    }
+
+    /// How many bytes of stack the function uses, not counting what a variable length array or an
+    /// `alloca` takes while it runs, which is the number `-fstack-usage` reports.
+    ///
+    /// Counted the way gcc counts its own frames, so that the two compilers' reports can be
+    /// compared function by function: the distance from the stack pointer the caller held just
+    /// before its call instruction down to where the prologue leaves the stack pointer. That is
+    /// the return address when the call pushes one, every register the prologue pushes, the frame
+    /// pointer among them, and the size the prologue subtracts, which already holds the saved
+    /// vector registers, the locals, the spill slots, the canary and the outgoing argument area.
+    /// Bytes a leaf keeps in the red zone are not counted, and gcc does not count them either.
+    ///
+    /// A frame whose alignment the prologue forces has the pushes rounded up to that alignment
+    /// before the rest is added, which is gcc's rule for the same frame. It is exact when the
+    /// caller's stack pointer happened to be aligned that far already, and otherwise it is off by
+    /// less than the alignment in one direction or the other, since how much the rounding throws
+    /// away depends on where the caller's stack pointer was.
+    ///
+    /// The two numbers agree on what they count and not always on the bytes: a function whose
+    /// locals rucc keeps in fewer or more slots than gcc does comes out smaller or larger by that
+    /// much. A frame that [`Frame::grows`] is reported as `dynamic` beside this, the same as gcc.
+    #[must_use]
+    pub fn usage(&self) -> u32 {
+        self.usage
     }
 }
 

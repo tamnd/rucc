@@ -725,6 +725,10 @@ impl Unit<'_> {
         // span of its own, so this is the only place the fact can come from. A declaration has no
         // body and produces no prologue, so it falls back to the declarator and nothing reads it.
         func.declared = body.map_or(span, |body| tast.stmt_span(body));
+        // And where the name is written in the definition, which is what a report about the
+        // function as a whole points at. Not `span`, which is the first declaration and is a
+        // prototype at the top of the file as often as not.
+        func.named = tast.definition_span(decl);
         // The larger of what this function asked for and what the command line asked of all of
         // them, since the attribute is a requirement and the flag is a preference, and a
         // preference does not get to move a function off a boundary its own source named.

@@ -100,6 +100,15 @@ pub struct Func {
     /// instruction, and a field and a method of the same name on the same type is a reading
     /// hazard for no gain.
     pub declared: Span,
+    /// Where its name is written in the declarator of the definition, which is where gcc says a
+    /// function is when it reports on one as a whole.
+    ///
+    /// Not [`Func::declared`], which is the opening brace, and the two are on different lines in
+    /// the style that puts the brace underneath. `-fstack-usage` names a function by this, so a
+    /// file written in that style still lines up with gcc's report line for line.
+    ///
+    /// [`Span::DUMMY`] wherever [`Func::declared`] is, and for the same reason.
+    pub named: Span,
 
     values: Vec<ValueData>,
     insts: Vec<InstData>,
@@ -164,6 +173,7 @@ impl Func {
             attrs: Attrs::NONE,
             target: None,
             declared: Span::DUMMY,
+            named: Span::DUMMY,
             values: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),

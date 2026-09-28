@@ -13,6 +13,7 @@
 //! putting the table inside the tree would mean a pass that only wants to ask what a type is
 //! has to borrow the tree to do it.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::Index;
 
@@ -161,6 +162,7 @@ pub struct Tast {
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     targets: Vec<(DeclId, Isa)>,
+    defined_at: HashMap<DeclId, Span>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 
@@ -357,6 +359,26 @@ impl Tast {
     #[must_use]
     pub fn spellings(&self) -> &[(DeclId, Symbol, TypeId)] {
         &self.spellings
+    }
+
+    /// Records where the name is written in a function's definition, when the function was
+    /// declared somewhere else first.
+    ///
+    /// [`Tast::decl_span`] is where the name was first declared, which is what a diagnostic about
+    /// a conflicting declaration points back at. A report about the function as a whole points at
+    /// the definition instead, the way gcc's does, and in a file that declares its `static`
+    /// functions at the top and defines them further down the two are far apart.
+    pub fn record_definition(&mut self, decl: DeclId, span: Span) {
+        if span != self.decl_span(decl) {
+            self.defined_at.insert(decl, span);
+        }
+    }
+
+    /// Where the name is written in a function's definition, which is [`Tast::decl_span`] unless
+    /// [`Tast::record_definition`] said otherwise.
+    #[must_use]
+    pub fn definition_span(&self, decl: DeclId) -> Span {
+        self.defined_at.get(&decl).copied().unwrap_or_else(|| self.decl_span(decl))
     }
 
     /// Records the extensions `__attribute__((target(...)))` said a function is built for, which is

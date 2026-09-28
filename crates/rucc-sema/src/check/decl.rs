@@ -375,6 +375,7 @@ impl Checker<'_> {
         node.params = params;
         node.body = Some(stmt);
         self.tast.set_decl(id, node);
+        self.tast.record_definition(id, span);
         Some(id)
     }
 
