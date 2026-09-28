@@ -16,8 +16,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On a Windows host the default target is `x86_64-windows-gnu`, where it was `x86_64-windows-msvc`, which there is no sysroot to fetch for. A tuple that names Windows and no environment, such as `x86_64-pc-windows`, now means the gnu one everywhere it is read, where one parser in the compiler read it as msvc and another as gnu (#2067).
 - On Windows the linker search tries each extension in `PATHEXT`, so an `ld.lld.exe` on PATH or in a `-B` directory is found. Before this a Windows host with LLVM installed was told there was no linker (#2067).
 - `-g` for a Windows target warns once and writes the object without debug information, where it used to stop with internal error E0652. Build systems pass `-g` by default, so their first compile no longer fails. This lasts until the COFF writer has DWARF sections (#2066).
-
 - The register allocator's liveness lays its per block lists out end to end once the fixpoint is done, where it used to grow a list per block one value at a time. On a function of 22000 blocks with thousands of values live across most of it that takes 7 to 11% of the cycles off the whole `-O2` build, with the same output.
+- Under `-fexceptions` a call inside the scope of a `cleanup` handler can be inlined now, where the inliner used to leave it a call. Every call in the copied body gets the caller's landing pad, including the `_Unwind_Resume` at the end of the callee's own pads, so an unwind runs the callee's handlers and then the caller's. Handlers run by `pthread_exit` and `pthread_cancel` from inside a body inlined two levels deep print the same order as gcc 16 from `-O0` to `-O3` and `-Os` (#1951).
 
 ## 0.11.19
 
