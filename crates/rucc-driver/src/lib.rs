@@ -44,6 +44,7 @@ pub mod preprocess;
 pub mod schedule;
 mod shapes;
 pub mod trace;
+mod warnings;
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -2160,12 +2161,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 )));
             }
             // Everything else in the `-W` family. `spec/04-driver-and-cli.md` section 4.1 has
-            // this one as a rule about build systems rather than about warnings: autoconf finds
-            // out whether a warning flag exists by passing it and looking at the exit status, so
-            // a compiler that refuses one it has not heard of fails a configure script written
-            // for a GCC newer than itself. The names are not checked against a list because this
-            // compiler has no warning groups for a list to be of, which #485 is about.
-            _ if arg.starts_with("-W") => {}
+            // this one as a rule about build systems rather than about warnings: autoconf and
+            // meson find out whether a warning flag exists by passing it and looking at the exit
+            // status, so the answer has to be gcc's. A name gcc knows is accepted, and one it does
+            // not is refused, the way gcc refuses clang's names. `-Wno-` of a name nobody knows is
+            // accepted, because gcc accepts it too, but `-Werror=` and `-Wno-error=` of one are
+            // not. None of them turns anything on yet, which #485 is about.
+            _ if arg.starts_with("-W") => {
+                let name = &arg["-W".len()..];
+                let named = name.strip_prefix("error=").or_else(|| name.strip_prefix("no-error="));
+                if let Some(named) = named {
+                    if !warnings::known(named) {
+                        return Err(err(format!("`{arg}`: no option `-W{named}`")));
+                    }
+                } else if !name.is_empty() && !name.starts_with("no-") && !warnings::known(name) {
+                    return Err(err(format!("unknown option `{arg}`")));
+                }
+            }
             // Flags that name something this compiler does not do and would not do differently
             // if it did. `-fno-ident` is about a comment in the output that we do not write
             // either way, and the others are about a way of ordering the compilation that has
@@ -2176,7 +2188,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             | "-funit-at-a-time"
             | "-fno-unit-at-a-time"
             | "-shared-libgcc"
-            | "-static-libgcc" => {}
+            | "-static-libgcc"
+            | "-fpch-deps"
+            | "-fno-pch-deps" => {}
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 // Silently ignoring an unknown flag is how a build ends up not doing what
                 // its author asked. spec/13-gnu-compat.md section 13.4 makes this an error
@@ -5999,10 +6013,10 @@ mod tests {
     }
 
     #[test]
-    fn a_warning_flag_this_compiler_has_not_heard_of_is_taken_rather_than_refused() {
+    fn a_warning_flag_gcc_knows_is_taken_even_though_nothing_reads_it() {
         // The rule in section 4.1, and the reason for it is autoconf: a configure script finds
         // out whether a warning flag exists by passing it and looking at the exit status, so a
-        // compiler that refuses one it does not know fails a script written for a newer GCC.
+        // compiler that refuses one gcc knows fails a script written for gcc.
         let (opts, _) = compile(&["-Wall", "-Wextra", "-Wno-format-truncation", "-c", "a.c"]);
         assert!(!opts.warnings_are_errors);
         assert!(opts.warnings);
@@ -6020,6 +6034,27 @@ mod tests {
         assert!(!opts.system_header_warnings);
         let (opts, _) = compile(&["-pedantic-errors", "-c", "a.c"]);
         assert!(opts.pedantic && opts.warnings_are_errors);
+    }
+
+    #[test]
+    fn a_warning_flag_gcc_refuses_is_refused_here_too() {
+        // Postgres's meson build probes these, and with rucc taking them it ended up passing four
+        // clang warnings that the gcc build had dropped.
+        for flag in ["-Wcast-function-type-strict", "-Wunused-command-line-argument"] {
+            assert_eq!(refused(&[flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
+        }
+        assert_eq!(
+            refused(&["-Werror=unguarded-availability-new", "-c", "a.c"]),
+            "`-Werror=unguarded-availability-new`: no option `-Wunguarded-availability-new`"
+        );
+        assert!(refused(&["-Wno-error=nonsense", "-c", "a.c"]).contains("no option `-Wnonsense`"));
+        // gcc takes `-Wno-` of a name it does not know, and says nothing unless something else
+        // is said, and it takes C++ and Fortran names on a C compile.
+        for flag in
+            ["-Wno-cast-function-type-strict", "-Werror=format", "-Wformat=2", "-Wabi-tag", "-W"]
+        {
+            compile(&[flag, "-c", "a.c"]);
+        }
     }
 
     #[test]
