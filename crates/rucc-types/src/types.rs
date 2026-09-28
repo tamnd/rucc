@@ -170,7 +170,7 @@ pub struct Types {
     void: TypeId,
     boolean: TypeId,
     ints: [TypeId; 13],
-    floats: [TypeId; 9],
+    floats: [TypeId; FloatKind::ALL.len()],
 }
 
 impl Default for Types {
@@ -202,7 +202,7 @@ impl Types {
             void: TypeId(Idx::new(0)),
             boolean: TypeId(Idx::new(0)),
             ints: [TypeId(Idx::new(0)); 13],
-            floats: [TypeId(Idx::new(0)); 9],
+            floats: [TypeId(Idx::new(0)); FloatKind::ALL.len()],
         };
         types.void = types.intern(Type::new(TypeKind::Void));
         types.boolean = types.intern(Type::new(TypeKind::Bool));

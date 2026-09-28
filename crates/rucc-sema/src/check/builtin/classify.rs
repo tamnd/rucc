@@ -114,6 +114,19 @@ const FAMILY: &[Question] = &[
     any("__builtin_signbit", Asks::Node(Classify::SignBit)),
     at("__builtin_signbitf", Asks::Node(Classify::SignBit), FloatKind::Float),
     at("__builtin_signbitl", Asks::Node(Classify::SignBit), FloatKind::LongDouble),
+    // gcc's names for the decimal types, which only exist on a target that has them.
+    at("__builtin_isnand32", Asks::Node(Classify::Nan), FloatKind::Decimal32),
+    at("__builtin_isnand64", Asks::Node(Classify::Nan), FloatKind::Decimal64),
+    at("__builtin_isnand128", Asks::Node(Classify::Nan), FloatKind::Decimal128),
+    at("__builtin_isinfd32", Asks::Node(Classify::Infinite), FloatKind::Decimal32),
+    at("__builtin_isinfd64", Asks::Node(Classify::Infinite), FloatKind::Decimal64),
+    at("__builtin_isinfd128", Asks::Node(Classify::Infinite), FloatKind::Decimal128),
+    at("__builtin_finited32", Asks::Node(Classify::Finite), FloatKind::Decimal32),
+    at("__builtin_finited64", Asks::Node(Classify::Finite), FloatKind::Decimal64),
+    at("__builtin_finited128", Asks::Node(Classify::Finite), FloatKind::Decimal128),
+    at("__builtin_signbitd32", Asks::Node(Classify::SignBit), FloatKind::Decimal32),
+    at("__builtin_signbitd64", Asks::Node(Classify::SignBit), FloatKind::Decimal64),
+    at("__builtin_signbitd128", Asks::Node(Classify::SignBit), FloatKind::Decimal128),
 ];
 
 /// The one name of the family that is not a row of [`FAMILY`], because it takes five answers in
@@ -146,6 +159,9 @@ impl Checker<'_> {
             return Some(self.fpclassify_call(args, span));
         }
         let question = *FAMILY.iter().find(|question| question.name == spelled)?;
+        if question.at.is_some_and(FloatKind::is_decimal) && !self.cx.target.has_decimal_float {
+            return None;
+        }
         Some(self.classify_call(question, args, span))
     }
 
@@ -266,10 +282,10 @@ impl Checker<'_> {
             Asks::Node(op) if op.is_pair() => {
                 // Both sides in one type, which is what the standard's macro promises and what
                 // the IR's comparison needs: there is no comparing an `f32` with an `f64`.
-                let (lhs, rhs) = self
-                    .conv()
-                    .usual_arithmetic(converted[0], converted[1])
-                    .expect("two floating point operands");
+                let Some((lhs, rhs)) = self.conv().usual_arithmetic(converted[0], converted[1])
+                else {
+                    return self.mixed_decimal(span);
+                };
                 self.classify_node(op, lhs, Some(rhs), span)
             }
             Asks::Node(op) => self.classify_node(op, converted[0], None, span),

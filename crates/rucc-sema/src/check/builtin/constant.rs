@@ -86,6 +86,17 @@ const TABLE: &[(&str, Answer)] = &[
     ("__builtin_nans", Answer::Nan(FloatKind::Double, false)),
     ("__builtin_nansf", Answer::Nan(FloatKind::Float, false)),
     ("__builtin_nansl", Answer::Nan(FloatKind::LongDouble, false)),
+    // The decimal names, which gcc has on the targets that have the types. A name for a type the
+    // target lacks is refused where its prototype is, the same as any other unknown builtin.
+    ("__builtin_infd32", Answer::Infinity(FloatKind::Decimal32)),
+    ("__builtin_infd64", Answer::Infinity(FloatKind::Decimal64)),
+    ("__builtin_infd128", Answer::Infinity(FloatKind::Decimal128)),
+    ("__builtin_nand32", Answer::Nan(FloatKind::Decimal32, true)),
+    ("__builtin_nand64", Answer::Nan(FloatKind::Decimal64, true)),
+    ("__builtin_nand128", Answer::Nan(FloatKind::Decimal128, true)),
+    ("__builtin_nansd32", Answer::Nan(FloatKind::Decimal32, false)),
+    ("__builtin_nansd64", Answer::Nan(FloatKind::Decimal64, false)),
+    ("__builtin_nansd128", Answer::Nan(FloatKind::Decimal128, false)),
     ("__builtin_strlen", Answer::Length),
     ("__builtin_strcmp", Answer::Compare),
 ];
@@ -100,6 +111,11 @@ impl Checker<'_> {
     ) -> Option<ExprId> {
         let spelled = self.text(name);
         let &(_, answer) = TABLE.iter().find(|(row, _)| *row == spelled)?;
+        if let Answer::Infinity(kind) | Answer::Nan(kind, _) = answer {
+            if kind.is_decimal() && !self.cx.target.has_decimal_float {
+                return None;
+            }
+        }
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
         if written.len() != answer.arity() {
             // A call with the wrong number of arguments is a mistake, and the ordinary path is

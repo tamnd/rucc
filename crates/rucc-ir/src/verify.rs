@@ -49,7 +49,7 @@ use crate::inst::{
     Abi, Block, CallInfo, Def, Inst, MetaNode, Param, PlaneNode, Signature, VaInfo, Value,
 };
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
-use crate::{Extra, MemOrder, Meta, Opcode, PrefetchHint, Type};
+use crate::{Extra, Float, MemOrder, Meta, Opcode, PrefetchHint, Type};
 
 /// One thing wrong with a module.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2001,7 +2001,13 @@ impl<'a> Verifier<'a> {
     /// A conversion that has to go the way its name says.
     fn widens(&mut self, opcode: Opcode, to: Type, from: Type, wider: bool) {
         let (a, b) = (to.lane().bits(), from.lane().bits());
-        let ok = if wider { a > b } else { a < b };
+        // A decimal and a binary float of the same width are different numbers in the same bits, so
+        // a conversion between them is real work at one width. Which of the two opcodes it is goes
+        // by the name libgcc gives the routine: toward the decimal is a widening and away from it is
+        // a narrowing, so `_Decimal64` from `double` is `fpext` and `double` from it is `fptrunc`.
+        let decimal = |ty: Type| ty.lane().format().is_some_and(Float::is_decimal);
+        let across = a == b && decimal(to) != decimal(from) && decimal(to) == wider;
+        let ok = across || if wider { a > b } else { a < b };
         if !ok {
             let way = if wider { "wider" } else { "narrower" };
             self.error(format!(

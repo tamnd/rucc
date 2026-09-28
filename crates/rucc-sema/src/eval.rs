@@ -626,6 +626,12 @@ impl<'a> Eval<'a> {
         if let Some(ordering) = compare_float(op, left, right) {
             return Ok(Const::Int(i128::from(ordering)));
         }
+        // Decimal arithmetic is libgcc's and is not folded here, so a decimal sum is computed by
+        // the program and is not a constant expression to this compiler. gcc folds it, and a
+        // static initializer that needs one is the case tamnd/rucc#207 still has open.
+        if left.format().decimal().is_some() {
+            return Err(self.stop(expr));
+        }
         // The status is dropped on purpose. Overflowing to an infinity and dropping a digit are
         // both things a constant is allowed to do and neither compiler says a word about either.
         let (value, _) = match op {

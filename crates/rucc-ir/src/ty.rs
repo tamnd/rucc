@@ -126,6 +126,12 @@ pub enum Float {
     F80,
     /// IEEE binary128, which is `_Float128`, and `long double` on AArch64 Linux.
     F128,
+    /// IEEE decimal32 in the binary integer encoding, which is `_Decimal32`.
+    D32,
+    /// IEEE decimal64 in the binary integer encoding, which is `_Decimal64`.
+    D64,
+    /// IEEE decimal128 in the binary integer encoding, which is `_Decimal128`.
+    D128,
 }
 
 impl Float {
@@ -140,11 +146,27 @@ impl Float {
             Self::F32 => 32,
             Self::F64 => 64,
             Self::F80 => 80,
-            Self::F128 => 128,
+            Self::F128 | Self::D128 => 128,
+            Self::D32 => 32,
+            Self::D64 => 64,
         }
     }
 
-    /// The format of that width, if there is one.
+    /// Whether this is one of the three decimal formats.
+    ///
+    /// A decimal shares its width with a binary format, and it travels in the same registers as
+    /// the binary format of that width does, which is why most of the back end never has to ask.
+    /// What must ask is anything that computes with the value or reads its bits as a number,
+    /// because the same sixty four bits are a different number in the two encodings.
+    #[must_use]
+    pub const fn is_decimal(self) -> bool {
+        matches!(self, Self::D32 | Self::D64 | Self::D128)
+    }
+
+    /// The binary format of that width, if there is one.
+    ///
+    /// Never a decimal one, because a width alone does not say decimal, and a caller that has a
+    /// width and wants a type has a binary type in mind.
     #[must_use]
     pub const fn from_bits(bits: u32) -> Option<Self> {
         match bits {
@@ -184,13 +206,32 @@ impl Float {
             Self::F64 => Format::Double,
             Self::F80 => Format::X87Extended,
             Self::F128 => Format::Quad,
+            Self::D32 => Format::Decimal32,
+            Self::D64 => Format::Decimal64,
+            Self::D128 => Format::Decimal128,
+        }
+    }
+
+    /// What goes in the width field of a packed type, which is the width with a flag for decimal.
+    const fn code(self) -> u32 {
+        if self.is_decimal() { self.bits() | DECIMAL } else { self.bits() }
+    }
+
+    /// The inverse of [`Float::code`].
+    const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            c if c == DECIMAL | 32 => Some(Self::D32),
+            c if c == DECIMAL | 64 => Some(Self::D64),
+            c if c == DECIMAL | 128 => Some(Self::D128),
+            _ => Self::from_bits(code),
         }
     }
 }
 
 impl fmt::Display for Float {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "f{}", self.bits())
+        let letter = if self.is_decimal() { 'd' } else { 'f' };
+        write!(f, "{letter}{}", self.bits())
     }
 }
 
@@ -201,6 +242,11 @@ const BITS_MASK: u32 = 0xffff;
 const LANES_SHIFT: u32 = 16;
 const LANES_MASK: u32 = 0x1fff;
 const KIND_SHIFT: u32 = 29;
+
+// The top bit of the width field on a float says the format is decimal. No binary float is
+// anywhere near that wide, so the flag costs no width, and it is on the float kind only, since
+// an integer does use the whole field.
+const DECIMAL: u32 = 1 << 15;
 
 impl Type {
     /// The widest integer that can be represented, which is what limits `_BitInt`.
@@ -244,7 +290,7 @@ impl Type {
     /// A floating point value in the given format.
     #[must_use]
     pub const fn float(format: Float) -> Self {
-        Self::pack(Kind::Float, format.bits(), 1)
+        Self::pack(Kind::Float, format.code(), 1)
     }
 
     /// A vector of `lanes` copies of `lane`.
@@ -263,7 +309,7 @@ impl Type {
             matches!(lane.kind(), Kind::Int | Kind::Float),
             "a vector's lane is an integer or a floating point value"
         );
-        Self::pack(lane.kind(), lane.bits(), lanes)
+        Self::pack(lane.kind(), lane.field(), lanes)
     }
 
     /// Which of the six kinds this is.
@@ -286,6 +332,14 @@ impl Type {
     /// target for the first and `spec/safe-memory/05-representation.md` for the second.
     #[must_use]
     pub const fn bits(self) -> u32 {
+        match self.kind() {
+            Kind::Float => self.field() & !DECIMAL,
+            _ => self.field(),
+        }
+    }
+
+    /// The width field as it is packed, which on a float carries the decimal flag as well.
+    const fn field(self) -> u32 {
         self.0 >> BITS_SHIFT & BITS_MASK
     }
 
@@ -310,7 +364,7 @@ impl Type {
     /// The type of one lane, which for a scalar is the type itself.
     #[must_use]
     pub const fn lane(self) -> Self {
-        Self::pack(self.kind(), self.bits(), 1)
+        Self::pack(self.kind(), self.field(), 1)
     }
 
     /// The same shape as this, with the lane type replaced.
@@ -367,7 +421,7 @@ impl Type {
     #[must_use]
     pub const fn format(self) -> Option<Float> {
         match self.kind() {
-            Kind::Float => Float::from_bits(self.bits()),
+            Kind::Float => Float::from_code(self.field()),
             _ => None,
         }
     }
@@ -402,10 +456,11 @@ impl Type {
             Some((head, lanes)) => (head, parse_u32(lanes).filter(|&n| n > 1)?),
             None => (text, 1),
         };
-        let bits = parse_u32(head.strip_prefix(['i', 'f'])?)?;
+        let bits = parse_u32(head.strip_prefix(['i', 'f', 'd'])?)?;
         let lane = match head.as_bytes()[0] {
             b'i' if bits > 0 && bits <= Self::MAX_BITS => Self::int(bits),
             b'f' => Self::float(Float::from_bits(bits)?),
+            b'd' if bits < DECIMAL => Self::float(Float::from_code(bits | DECIMAL)?),
             _ => return None,
         };
         if lanes > Self::MAX_LANES {
@@ -434,7 +489,10 @@ impl fmt::Display for Type {
             Kind::Mem => return f.write_str("mem"),
             Kind::Cap => return f.write_str("cap"),
             Kind::Int => write!(f, "i{}", self.bits())?,
-            Kind::Float => write!(f, "f{}", self.bits())?,
+            Kind::Float => match self.format() {
+                Some(format) => write!(f, "{format}")?,
+                None => write!(f, "f{}", self.bits())?,
+            },
         }
         if self.is_vector() {
             write!(f, "x{}", self.lanes())?;
@@ -609,6 +667,27 @@ mod tests {
         }
         assert_eq!(Float::from_bits(24), None);
         assert_eq!(Type::int(32).format(), None);
+    }
+
+    #[test]
+    fn a_decimal_is_its_own_type_at_a_width_a_binary_format_has() {
+        for (decimal, binary) in
+            [(Float::D32, Float::F32), (Float::D64, Float::F64), (Float::D128, Float::F128)]
+        {
+            let ty = Type::float(decimal);
+            assert_ne!(ty, Type::float(binary));
+            assert_eq!(ty.bits(), binary.bits());
+            assert_eq!(ty.format(), Some(decimal));
+            assert!(ty.is_float() && decimal.is_decimal() && !binary.is_decimal());
+            assert_eq!(Type::parse(&ty.to_string()), Some(ty));
+            let vector = Type::vector(ty, 4);
+            assert_eq!(vector.lane(), ty);
+            assert_eq!(Type::parse(&vector.to_string()), Some(vector));
+        }
+        assert_eq!(Type::float(Float::D64).to_string(), "d64");
+        assert_eq!(Float::from_bits(64), Some(Float::F64));
+        assert_eq!(Type::parse("d16"), None);
+        assert_eq!(Type::parse("d80"), None);
     }
 
     #[test]

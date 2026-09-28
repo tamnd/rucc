@@ -359,6 +359,12 @@ fn floating(func: &Func, value: Value) -> Option<Float> {
     }
     let Extra::Imm(at) = func[inst].extra else { return None };
     let format = func[value].ty.format()?.encoding();
+    // A decimal constant decodes, but the arithmetic a fold does on it is binary and would read the
+    // coefficient as a significand, so a decimal is never a constant here. Its operations become
+    // library calls in the back end instead, tamnd/rucc#207.
+    if format.decimal().is_some() {
+        return None;
+    }
     Some(Float::from_bits(format, func[at].bits()))
 }
 

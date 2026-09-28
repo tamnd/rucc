@@ -28,7 +28,7 @@ use std::iter;
 
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::{Float as Real, Format};
-use rucc_base::{Idx, Symbol};
+use rucc_base::{Idx, Symbol, dfp};
 use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
@@ -270,6 +270,13 @@ const X87_TOP: u64 = 8;
 /// as wide as.
 fn is_x87(ty: Type) -> bool {
     ty.lane().bits() == 80
+}
+
+/// Whether a floating point type has its sign read and changed through memory rather than on an
+/// integer as wide as the value: the x87 format, which no integer is as wide as, and the formats
+/// of a hundred and twenty eight bits, whose integer is two registers that no bitcast reaches.
+fn signed_in_memory(ty: Type) -> bool {
+    is_x87(ty) || ty.lane().bits() == 128
 }
 
 /// An access that names no type, for the reads and writes of a value's own bytes where the type the
@@ -4192,7 +4199,12 @@ impl<'u> Body<'_, 'u> {
             Format::Double => "d",
             Format::X87Extended => "x",
             Format::Quad => "t",
-            Format::BFloat16 | Format::DoubleDouble => return None,
+            // A complex decimal is not a type C has, so there is never a routine to name.
+            Format::BFloat16
+            | Format::DoubleDouble
+            | Format::Decimal32
+            | Format::Decimal64
+            | Format::Decimal128 => return None,
         };
         Some(format!("__{what}{mode}c3"))
     }
@@ -5407,7 +5419,11 @@ impl<'u> Body<'_, 'u> {
                 self.build(span).unary(opcode, value, into)
             }
             (false, true, false, true) => {
-                let opcode = if into.bits() > out.bits() { Opcode::FPExt } else { Opcode::FPTrunc };
+                // At one width the two are a decimal and a binary format, and the conversion into
+                // the decimal is the widening, which is the way libgcc names its routines.
+                let decimal = into.format().is_some_and(rucc_ir::Float::is_decimal);
+                let wider = into.bits() > out.bits() || (into.bits() == out.bits() && decimal);
+                let opcode = if wider { Opcode::FPExt } else { Opcode::FPTrunc };
                 self.build(span).unary(opcode, value, into)
             }
             _ => {
@@ -5845,7 +5861,7 @@ impl<'u> Body<'_, 'u> {
         }
         let ir = self.func[value].ty;
         if op == Classify::SignBit {
-            if is_x87(ir) {
+            if signed_in_memory(ir) {
                 let (_, _, word) = self.x87_top(value, span);
                 let mut build = self.build(span);
                 let zero = build.iconst(Type::int(16), 0);
@@ -5912,11 +5928,31 @@ impl<'u> Body<'_, 'u> {
         // is compared as a value instead, which gives the same answer for every value the format
         // can spell: the magnitude has no sign to get in the way of an ordered comparison, and a
         // NaN fails both of them.
+        //
+        // And except for the decimal formats, whose bits are not a binary magnitude at all. A
+        // decimal is normal when its magnitude is at least one at the smallest exponent a number
+        // of all the digits can be written with, whatever the coefficient it was spelled with, so
+        // it is compared as a value too.
         let ir = self.func[value].ty;
-        if is_x87(ir) {
-            let magnitude = self.x87_sign(value, None, span);
-            let low = Real::smallest_normal(format, false).to_bits();
-            let high = Real::infinity(format, false).to_bits();
+        if signed_in_memory(ir) || format.decimal().is_some() {
+            let magnitude = match ir.lane().bits() {
+                32 | 64 => {
+                    let clear = self.magnitude(value, span);
+                    self.build(span).unary(Opcode::Bitcast, clear, ir)
+                }
+                _ => self.x87_sign(value, None, span),
+            };
+            let (low, high) = match format.decimal() {
+                Some(width) => {
+                    let digits = i32::try_from(width.digits()).expect("a handful of digits");
+                    let least = width.min_exponent() + digits - 1;
+                    (dfp::encode(false, 1, least, width), dfp::infinity(false, width))
+                }
+                None => (
+                    Real::smallest_normal(format, false).to_bits(),
+                    Real::infinity(format, false).to_bits(),
+                ),
+            };
             let mut build = self.build(span);
             let low = build.fconst(ir, low);
             let high = build.fconst(ir, high);
@@ -6068,7 +6104,7 @@ impl<'u> Body<'_, 'u> {
             Sign::Of => Some(self.value(rhs.expect("copysign takes a second operand"))),
         };
         let float = self.func[value].ty;
-        if is_x87(float) {
+        if signed_in_memory(float) {
             return self.x87_sign(value, from, span);
         }
         let bits = Type::int(float.lane().bits());
@@ -6098,8 +6134,15 @@ impl<'u> Body<'_, 'u> {
     ///
     /// The slot, the address of the word in it and the word are what come back.
     fn x87_top(&mut self, value: Value, span: Span) -> (Value, Value, Value) {
+        // The last two bytes of the ten for the x87 format, and the last two of the sixteen for
+        // the formats that fill them, or the first two where the most significant byte comes first.
+        let at_top = match self.func[value].ty.lane().bits() {
+            80 => X87_TOP,
+            _ if self.target().little_endian => X87_SLOT - 2,
+            _ => 0,
+        };
         let at = self.scratch(X87_SLOT, X87_SLOT as u32, span);
-        let top = self.offset(at, X87_TOP, span);
+        let top = self.offset(at, at_top, span);
         let mut build = self.build(span);
         build.store(value, at, untyped(X87_SLOT as u32), Flags::NONE);
         let word = build.load(Type::int(16), top, untyped(2), Flags::NONE);

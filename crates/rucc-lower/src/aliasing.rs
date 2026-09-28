@@ -208,6 +208,9 @@ const fn floating(kind: FloatKind) -> &'static str {
         FloatKind::LongDouble => "long double",
         FloatKind::Float64x => "_Float64x",
         FloatKind::Float128 => "_Float128",
+        FloatKind::Decimal32 => "_Decimal32",
+        FloatKind::Decimal64 => "_Decimal64",
+        FloatKind::Decimal128 => "_Decimal128",
     }
 }
 

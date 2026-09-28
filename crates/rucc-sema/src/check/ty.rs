@@ -361,16 +361,21 @@ impl Checker<'_> {
                     self.unavailable_type(spell_scalar(scalar), span);
                     self.types.float(FloatKind::Double)
                 }
-                // The decimal floating types are named by keywords the lexer and the parser
-                // both know and are deferred past 1.0 by `spec/19-open-questions.md`, so one of
-                // them is refused where it is written rather than given a type it is not.
+                // A decimal floating type on a target the back end has no routines for, in the
+                // words gcc uses on a target it was built without them for.
                 _ => {
-                    self.unsupported_type(&format!("the type `{}`", spell_scalar(scalar)), span);
+                    self.report(
+                        Diagnostic::error(
+                            "decimal floating-point not supported for this target".to_string(),
+                            span,
+                        )
+                        .with_code("E0519"),
+                    );
                     self.types.float(FloatKind::Double)
                 }
             },
             Complexity::Complex => match (scalar, kind, float) {
-                (_, _, Some(kind)) => self.types.complex_float(kind),
+                (_, _, Some(kind)) if !kind.is_decimal() => self.types.complex_float(kind),
                 // `_Complex int`, which is gcc's and not C's: the halves are integers and
                 // everything else about the type is the same. gcc has had it for as long as it
                 // has had complex types and the torture suite writes it, and `-pedantic` says
@@ -443,8 +448,8 @@ impl Checker<'_> {
             Complexity::Imaginary => {
                 self.unsupported_type("`_Imaginary`", span);
                 match float {
-                    Some(kind) => self.types.complex_float(kind),
-                    None => self.complex_double(),
+                    Some(kind) if !kind.is_decimal() => self.types.complex_float(kind),
+                    _ => self.complex_double(),
                 }
             }
         }
@@ -1442,6 +1447,9 @@ fn float_kind(scalar: Scalar, target: &TargetInfo) -> Option<FloatKind> {
         Scalar::Float80 if target.long_double_format == Format::X87Extended => {
             Some(FloatKind::LongDouble)
         }
+        Scalar::Decimal32 if target.has_decimal_float => Some(FloatKind::Decimal32),
+        Scalar::Decimal64 if target.has_decimal_float => Some(FloatKind::Decimal64),
+        Scalar::Decimal128 if target.has_decimal_float => Some(FloatKind::Decimal128),
         _ => None,
     }
 }
@@ -1811,17 +1819,22 @@ mod tests {
     }
 
     #[test]
-    fn a_decimal_floating_type_is_recognised_and_says_it_is_not_written_yet() {
-        // Deferred past 1.0 by `spec/19-open-questions.md`. The keyword is in the table and the
-        // parser takes it, so the message has to be the one that says so rather than the one
-        // for a keyword nobody has heard of.
-        let mut fixture = Fixture::new();
+    fn a_decimal_floating_type_is_a_type_where_the_back_end_has_the_routines_for_it() {
+        let mut fixture = Fixture::for_tuple("x86_64-linux-gnu");
         let specs = fixture.keywords(&[BuiltinSet::DECIMAL64]);
         let plain = fixture.declarator(Some("x"), &[]);
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, specs, plain), "_Decimal64");
+        assert!(messages(&checker).is_empty());
 
+        // Anywhere else it is turned away in the words gcc uses on a target it was built
+        // without them for, and stands in as `double`.
+        let mut fixture = Fixture::for_tuple("aarch64-linux-gnu");
+        let specs = fixture.keywords(&[BuiltinSet::DECIMAL64]);
+        let plain = fixture.declarator(Some("x"), &[]);
         let mut checker = fixture.checker();
         assert_eq!(built(&mut checker, specs, plain), "double");
-        assert_eq!(message(&checker), "the type `_Decimal64` is not supported yet");
+        assert_eq!(message(&checker), "decimal floating-point not supported for this target");
     }
 
     #[test]

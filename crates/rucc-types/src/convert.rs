@@ -276,6 +276,15 @@ fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo)
     let kind = match (left, right) {
         (None, None) => return None,
         (Some(kind), None) | (None, Some(kind)) => kind,
+        // A decimal and a binary type have no common type, and the pair falls through to the
+        // integer rules, which have no answer either, so the operation is refused. Two decimals
+        // go to the wider one, which is the whole of their ranking.
+        (Some(a), Some(b)) if a.is_decimal() || b.is_decimal() => {
+            if a.is_decimal() != b.is_decimal() {
+                return None;
+            }
+            if float_width(a, target) >= float_width(b, target) { a } else { b }
+        }
         (Some(a), Some(b)) => {
             if float_rank(a, target) >= float_rank(b, target) {
                 a

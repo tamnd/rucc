@@ -42,13 +42,15 @@
 use crate::decimal::{Decimal, Fraction};
 
 mod arith;
+mod dec;
 
 pub use crate::float::arith::Integral;
 
 /// A floating point format.
 ///
-/// Six of the seven are IEEE 754 binary encodings and the seventh is not, which is why
+/// Six of the ten are IEEE 754 binary encodings and the other four are not, which is why
 /// [`Format::is_ieee`] exists and why most of the questions below are answerable for six of them.
+/// The four are the double-double and the three decimal formats.
 /// The split is the same one the psABIs make, so this is the enum `rucc-abi` describes a target's
 /// scalar types with as well as the one [`Float`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,17 +83,28 @@ pub enum Format {
     ///
     /// [`Float`] does not represent one, per [`Format::is_ieee`].
     DoubleDouble,
+    /// IEEE decimal32 in the binary integer decimal encoding, which C spells `_Decimal32`.
+    ///
+    /// The three decimal formats are IEEE 754 formats but not binary ones, and nothing about a
+    /// binary format's precision, exponent or significand fields means anything for them, so
+    /// [`Format::is_ieee`] answers false for them as it does for the double-double and [`Float`]
+    /// refuses them. What a decimal constant is made of is in [`crate::dfp`].
+    Decimal32,
+    /// IEEE decimal64 in the binary integer decimal encoding, which C spells `_Decimal64`.
+    Decimal64,
+    /// IEEE decimal128 in the binary integer decimal encoding, which C spells `_Decimal128`.
+    Decimal128,
 }
 
-/// What every IEEE-only question on a double-double fails with.
+/// What every IEEE binary question on a double-double or a decimal format fails with.
 ///
 /// A function rather than a `panic!` in each arm, because the same sentence in five places drifts
 /// into five sentences, and because `panic!` in a `const fn` takes a literal and will not take a
 /// constant.
 const fn not_ieee() -> ! {
     panic!(
-        "the double-double format is a pair of doubles rather than an IEEE encoding, so it has no \
-         single precision, no exponent range and no significand field to ask about"
+        "the double-double format is a pair of doubles and the decimal formats count in tens, so \
+         neither has a binary precision, exponent range or significand field to ask about"
     )
 }
 
@@ -108,6 +121,9 @@ impl Format {
             Format::X87Extended => "f80",
             Format::Quad => "f128",
             Format::DoubleDouble => "ppc-f128",
+            Format::Decimal32 => "d32",
+            Format::Decimal64 => "d64",
+            Format::Decimal128 => "d128",
         }
     }
 
@@ -122,12 +138,15 @@ impl Format {
             "f80" => Format::X87Extended,
             "f128" => Format::Quad,
             "ppc-f128" => Format::DoubleDouble,
+            "d32" => Format::Decimal32,
+            "d64" => Format::Decimal64,
+            "d128" => Format::Decimal128,
             _ => return None,
         })
     }
 
     /// Whether the format is an IEEE 754 binary encoding, which is every one of them but the
-    /// double-double.
+    /// double-double and the three decimal ones.
     ///
     /// This is the guard on the rest of this type and on [`Float`]. A number in an IEEE encoding
     /// is a sign, an exponent and one significand, which is what [`Float`] stores, so every
@@ -137,7 +156,29 @@ impl Format {
     /// enough to right to be believed and wrong often enough to matter.
     #[must_use]
     pub const fn is_ieee(self) -> bool {
-        !matches!(self, Format::DoubleDouble)
+        !matches!(
+            self,
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128
+        )
+    }
+
+    /// The decimal format this is, and [`None`] for every binary one.
+    ///
+    /// ```
+    /// use rucc_base::dfp::Width;
+    /// use rucc_base::float::Format;
+    ///
+    /// assert_eq!(Format::Decimal64.decimal(), Some(Width::D64));
+    /// assert_eq!(Format::Double.decimal(), None);
+    /// ```
+    #[must_use]
+    pub const fn decimal(self) -> Option<crate::dfp::Width> {
+        match self {
+            Format::Decimal32 => Some(crate::dfp::Width::D32),
+            Format::Decimal64 => Some(crate::dfp::Width::D64),
+            Format::Decimal128 => Some(crate::dfp::Width::D128),
+            _ => None,
+        }
     }
 
     /// The number of significand bits, counting the leading one whether it is stored or not.
@@ -154,7 +195,9 @@ impl Format {
             Format::Double => 53,
             Format::X87Extended => 64,
             Format::Quad => 113,
-            Format::DoubleDouble => not_ieee(),
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+                not_ieee()
+            }
         }
     }
 
@@ -170,7 +213,9 @@ impl Format {
             Format::BFloat16 | Format::Single => 127,
             Format::Double => 1023,
             Format::X87Extended | Format::Quad => 16383,
-            Format::DoubleDouble => not_ieee(),
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+                not_ieee()
+            }
         }
     }
 
@@ -194,10 +239,10 @@ impl Format {
     pub const fn width(self) -> u32 {
         match self {
             Format::Half | Format::BFloat16 => 16,
-            Format::Single => 32,
-            Format::Double => 64,
+            Format::Single | Format::Decimal32 => 32,
+            Format::Double | Format::Decimal64 => 64,
             Format::X87Extended => 80,
-            Format::Quad | Format::DoubleDouble => 128,
+            Format::Quad | Format::DoubleDouble | Format::Decimal128 => 128,
         }
     }
 
@@ -213,7 +258,9 @@ impl Format {
             Format::Half | Format::BFloat16 | Format::Single | Format::Double | Format::Quad => {
                 false
             }
-            Format::DoubleDouble => not_ieee(),
+            Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
+                not_ieee()
+            }
         }
     }
 
@@ -331,6 +378,12 @@ const fn ieee(format: Format) -> Format {
     if format.is_ieee() { format } else { not_ieee() }
 }
 
+/// The format a [`Float`] is being built in where a decimal one is as good as a binary one, which
+/// is the zeros, the infinities and the encoding. See `float/dec.rs` for what a decimal is here.
+const fn carried(format: Format) -> Format {
+    if format.is_ieee() || format.decimal().is_some() { format } else { not_ieee() }
+}
+
 impl Float {
     /// A zero of the given sign.
     ///
@@ -339,7 +392,13 @@ impl Float {
     /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub const fn zero(format: Format, sign: bool) -> Float {
-        Float { format: ieee(format), category: Category::Zero, sign, exponent: 0, significand: 0 }
+        Float {
+            format: carried(format),
+            category: Category::Zero,
+            sign,
+            exponent: 0,
+            significand: 0,
+        }
     }
 
     /// An infinity of the given sign.
@@ -350,7 +409,7 @@ impl Float {
     #[must_use]
     pub const fn infinity(format: Format, sign: bool) -> Float {
         Float {
-            format: ieee(format),
+            format: carried(format),
             category: Category::Infinite,
             sign,
             exponent: 0,
@@ -389,11 +448,18 @@ impl Float {
     /// nothing in it is an infinity rather than a nan, so a payload of zero becomes the highest
     /// bit that is left, which is the value gcc gives `__builtin_nans("")`.
     ///
+    /// A decimal nan takes no payload here and is the one gcc writes for `__builtin_nand32("")`,
+    /// with the exponent saying whether it signals the way [`Float::to_bits`] reads it.
+    ///
     /// # Panics
     ///
-    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    /// If the format is neither an IEEE encoding, per [`Format::is_ieee`], nor a decimal one.
     #[must_use]
     pub const fn nan_with(format: Format, sign: bool, quiet: bool, payload: u128) -> Float {
+        if format.decimal().is_some() {
+            let exponent = if quiet { 0 } else { 1 };
+            return Float { format, category: Category::Nan, sign, exponent, significand: 0 };
+        }
         let format = ieee(format);
         let mut significand = payload & (Float::quiet_bit(format) - 1);
         if quiet {
@@ -457,7 +523,10 @@ impl Float {
     /// A zero is not, a subnormal is not, and an infinity and a nan are not, which is the five
     /// way split `fpclassify` asks about with the subnormal case being whatever is left.
     #[must_use]
-    pub const fn is_normal(self) -> bool {
+    pub fn is_normal(self) -> bool {
+        if let Some(width) = self.format.decimal() {
+            return self.decimal_is_normal(width);
+        }
         matches!(self.category, Category::Finite)
             && self.significand >> (self.format.precision() - 1) != 0
     }
@@ -480,6 +549,10 @@ impl Float {
     /// caller's bug and a bad spelling is the program's, which is why one is a panic and the
     /// other is an error.
     pub fn parse(text: &str, format: Format) -> Result<(Float, Status), ParseError> {
+        if let Some(width) = format.decimal() {
+            let (bits, status) = crate::dfp::parse(text, width)?;
+            return Ok((Float::decimal_from_bits(format, width, bits), status));
+        }
         let format = ieee(format);
         let bytes = text.as_bytes();
         let (sign, rest) = match bytes.first() {
@@ -501,6 +574,9 @@ impl Float {
     #[must_use]
     pub fn to_bits(self) -> u128 {
         let format = self.format;
+        if let Some(width) = format.decimal() {
+            return self.decimal_bits(width);
+        }
         let significand_mask = (1u128 << format.significand_bits()) - 1;
         let (exponent_field, significand_field) = match self.category {
             Category::Zero => (0, 0),
@@ -538,6 +614,9 @@ impl Float {
     /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
     #[must_use]
     pub fn from_bits(format: Format, bits: u128) -> Float {
+        if let Some(width) = format.decimal() {
+            return Float::decimal_from_bits(format, width, bits);
+        }
         let format = ieee(format);
         let significand_bits = format.significand_bits();
         let sign = (bits >> (format.width() - 1)) & 1 == 1;
@@ -594,6 +673,9 @@ impl Float {
     /// there is no exponent that gives one and no constant that is one.
     #[must_use]
     pub fn to_hex(self) -> String {
+        if self.format.decimal().is_some() {
+            return self.decimal_spelling();
+        }
         let sign = if self.sign { "-" } else { "" };
         match self.category {
             Category::Nan => format!("{sign}nan"),
@@ -1247,7 +1329,7 @@ mod tests {
     }
 
     /// Every format there is, so that a new one has to be added here and answered for below.
-    const EVERY_FORMAT: [Format; 7] = [
+    const EVERY_FORMAT: [Format; 10] = [
         Format::Half,
         Format::BFloat16,
         Format::Single,
@@ -1255,12 +1337,16 @@ mod tests {
         Format::X87Extended,
         Format::Quad,
         Format::DoubleDouble,
+        Format::Decimal32,
+        Format::Decimal64,
+        Format::Decimal128,
     ];
 
     #[test]
-    fn the_double_double_is_the_one_format_that_is_not_an_ieee_encoding() {
+    fn the_double_double_and_the_decimals_are_the_formats_that_are_not_binary_ieee() {
         for format in EVERY_FORMAT {
-            assert_eq!(format.is_ieee(), format != Format::DoubleDouble, "{format:?}");
+            let binary = format != Format::DoubleDouble && format.decimal().is_none();
+            assert_eq!(format.is_ieee(), binary, "{format:?}");
         }
     }
 

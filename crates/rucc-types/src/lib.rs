@@ -326,17 +326,43 @@ mod tests {
         // that `long double` and `_Float64x` hold on x86-64 takes sixteen bytes to store.
         assert_eq!(
             sizes(&linux()),
-            [(2, 2), (4, 4), (4, 4), (8, 8), (8, 8), (8, 8), (16, 16), (16, 16), (16, 16)]
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (16, 16),
+                (16, 16),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16)
+            ]
         );
         assert_eq!(
             sizes(&target("aarch64-apple-darwin")),
-            [(2, 2), (4, 4), (4, 4), (8, 8), (8, 8), (8, 8), (8, 8), (16, 16), (16, 16)]
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (16, 16),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16)
+            ]
         );
     }
 
     #[test]
     fn every_floating_type_has_a_slot_of_its_own_and_a_name_of_its_own() {
-        // Nine types and nine ids, which is what makes `_Float64` and `double` two types that
+        // Twelve types and twelve ids, which is what makes `_Float64` and `double` two types that
         // `_Generic` can tell apart rather than one type with two spellings.
         let types = Types::new();
         let mut seen = Vec::new();
@@ -361,6 +387,9 @@ mod tests {
                 "long double",
                 "_Float64x",
                 "_Float128",
+                "_Decimal32",
+                "_Decimal64",
+                "_Decimal128",
             ]
         );
     }

@@ -251,9 +251,10 @@ impl IntKind {
 /// `_Float64` and `double` are both binary64 and are two types, which `_Generic` can tell apart
 /// and which decides what `_Float64 + double` is.
 ///
-/// `_Float128x` is a type no target gcc supports has, so it is not here. The decimal floating
-/// types from C23 are deferred past 1.0 by `spec/19-open-questions.md` and are deliberately
-/// absent rather than present and unimplemented.
+/// `_Float128x` is a type no target gcc supports has, so it is not here. The three decimal
+/// floating types from C23 are, and they are real floating types like the others in every way
+/// except the one that matters most: a decimal and a binary type never meet in an operation, so
+/// the usual arithmetic conversions have no answer for the pair and the program is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FloatKind {
     /// `_Float16`, always the binary16 format.
@@ -279,6 +280,12 @@ pub enum FloatKind {
     Float64x,
     /// `_Float128`, always the binary128 format.
     Float128,
+    /// `_Decimal32`, the decimal32 format in the binary integer encoding.
+    Decimal32,
+    /// `_Decimal64`, the decimal64 format in the binary integer encoding.
+    Decimal64,
+    /// `_Decimal128`, the decimal128 format in the binary integer encoding.
+    Decimal128,
 }
 
 impl FloatKind {
@@ -287,7 +294,7 @@ impl FloatKind {
     /// Not in rank order, because there is no such order to put them in: which of `long double`
     /// and `_Float64x` is the wider one is a question about the target, and on Apple the answer
     /// is the second.
-    pub const ALL: [FloatKind; 9] = [
+    pub const ALL: [FloatKind; 12] = [
         FloatKind::Float16,
         FloatKind::Float,
         FloatKind::Float32,
@@ -297,6 +304,9 @@ impl FloatKind {
         FloatKind::LongDouble,
         FloatKind::Float64x,
         FloatKind::Float128,
+        FloatKind::Decimal32,
+        FloatKind::Decimal64,
+        FloatKind::Decimal128,
     ];
 
     /// A dense index, so that one of these can select a slot in a fixed size array.
@@ -311,7 +321,16 @@ impl FloatKind {
             FloatKind::LongDouble => 6,
             FloatKind::Float64x => 7,
             FloatKind::Float128 => 8,
+            FloatKind::Decimal32 => 9,
+            FloatKind::Decimal64 => 10,
+            FloatKind::Decimal128 => 11,
         }
+    }
+
+    /// Whether this is one of the three decimal types.
+    #[must_use]
+    pub const fn is_decimal(self) -> bool {
+        matches!(self, FloatKind::Decimal32 | FloatKind::Decimal64 | FloatKind::Decimal128)
     }
 
     /// What decides between two of these when they have the same format.
@@ -339,6 +358,11 @@ impl FloatKind {
             FloatKind::Float32 => 9,
             FloatKind::Float64 => 10,
             FloatKind::Float128 => 11,
+            // Never compared with a binary type, and each decimal is its own format, so these
+            // only have to be distinct.
+            FloatKind::Decimal32 => 12,
+            FloatKind::Decimal64 => 13,
+            FloatKind::Decimal128 => 14,
         }
     }
 
@@ -355,6 +379,9 @@ impl FloatKind {
             FloatKind::LongDouble => "long double",
             FloatKind::Float64x => "_Float64x",
             FloatKind::Float128 => "_Float128",
+            FloatKind::Decimal32 => "_Decimal32",
+            FloatKind::Decimal64 => "_Decimal64",
+            FloatKind::Decimal128 => "_Decimal128",
         }
     }
 }

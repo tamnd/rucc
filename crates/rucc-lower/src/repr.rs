@@ -71,6 +71,9 @@ pub(crate) fn ir_format(format: rucc_base::float::Format) -> Option<Float> {
         Format::Double => Some(Float::F64),
         Format::X87Extended => Some(Float::F80),
         Format::Quad => Some(Float::F128),
+        Format::Decimal32 => Some(Float::D32),
+        Format::Decimal64 => Some(Float::D64),
+        Format::Decimal128 => Some(Float::D128),
         Format::BFloat16 | Format::DoubleDouble => None,
     }
 }

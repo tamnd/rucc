@@ -543,6 +543,15 @@ pub struct TargetInfo {
     /// vendor name rather than the type, which is why it is missing on rows where the type is
     /// there.
     pub has_float128: bool,
+    /// Whether the target has `_Decimal32`, `_Decimal64` and `_Decimal128`.
+    ///
+    /// Only x86-64 Linux today. gcc has the three types on more rows than that, but a decimal is
+    /// a call into libgcc for everything but a move, and the only encoding the back end names
+    /// routines for is the binary integer one x86 uses. PowerPC and s390x use the densely packed
+    /// encoding and are a different set of routines, and the other rows are untested, so a
+    /// program that writes one there is told the type is not available rather than handed code
+    /// nobody has run.
+    pub has_decimal_float: bool,
     /// Width of `wchar_t` in bits, which decides what a wide literal is encoded in.
     ///
     /// It is 16 on Windows, so a wide string there is UTF-16 and a character outside the basic
@@ -802,6 +811,10 @@ impl TargetInfo {
             float64x_format: float64x_format(target),
             has_float16: has_float16(target),
             has_float128: has_float128(target),
+            has_decimal_float: matches!(
+                (target.arch(), target.os()),
+                (tuple::Arch::X86_64, tuple::Os::Linux)
+            ),
             wchar_width: bits(layout.wchar_size),
             wchar_is_signed: layout.wchar_is_signed,
             bit_int_granule: bit_int_granule(target),
@@ -1304,6 +1317,15 @@ mod tests {
         // `_Float64x`, so Apple and Windows keep both types.
         assert!(of("aarch64-apple-darwin").has_float16);
         assert!(of("x86_64-pc-windows-msvc").has_float128);
+    }
+
+    #[test]
+    fn the_decimal_types_are_on_the_one_row_the_back_end_calls_routines_for() {
+        let of = |tuple: &str| TargetInfo::for_tuple(tuple.parse().expect("a row in the table"));
+        assert!(of("x86_64-linux-gnu").has_decimal_float);
+        for tuple in ["aarch64-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"] {
+            assert!(!of(tuple).has_decimal_float, "{tuple}");
+        }
     }
 
     #[test]

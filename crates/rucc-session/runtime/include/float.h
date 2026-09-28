@@ -136,4 +136,82 @@
 #define LDBL_HAS_QUIET_NAN __LDBL_HAS_QUIET_NAN__
 #endif
 
+/* The decimal types, which are there only where the compiler says so with __DEC32_MANT_DIG__. The
+   conditions are gcc's, so a program that asks for these the way it would ask gcc gets them. */
+#ifdef __DEC32_MANT_DIG__
+#if defined(__STDC_WANT_DEC_FP__) || defined(__STDC_WANT_IEC_60559_DFP_EXT__) || \
+    (defined(__STDC_VERSION__) && __STDC_VERSION__ > 201710L)
+#undef DEC32_MANT_DIG
+#undef DEC64_MANT_DIG
+#undef DEC128_MANT_DIG
+#undef DEC32_MIN_EXP
+#undef DEC64_MIN_EXP
+#undef DEC128_MIN_EXP
+#undef DEC32_MAX_EXP
+#undef DEC64_MAX_EXP
+#undef DEC128_MAX_EXP
+#undef DEC32_MAX
+#undef DEC64_MAX
+#undef DEC128_MAX
+#undef DEC32_EPSILON
+#undef DEC64_EPSILON
+#undef DEC128_EPSILON
+#undef DEC32_MIN
+#undef DEC64_MIN
+#undef DEC128_MIN
+#undef DEC_EVAL_METHOD
+#define DEC32_MANT_DIG __DEC32_MANT_DIG__
+#define DEC64_MANT_DIG __DEC64_MANT_DIG__
+#define DEC128_MANT_DIG __DEC128_MANT_DIG__
+#define DEC32_MIN_EXP __DEC32_MIN_EXP__
+#define DEC64_MIN_EXP __DEC64_MIN_EXP__
+#define DEC128_MIN_EXP __DEC128_MIN_EXP__
+#define DEC32_MAX_EXP __DEC32_MAX_EXP__
+#define DEC64_MAX_EXP __DEC64_MAX_EXP__
+#define DEC128_MAX_EXP __DEC128_MAX_EXP__
+#define DEC32_MAX __DEC32_MAX__
+#define DEC64_MAX __DEC64_MAX__
+#define DEC128_MAX __DEC128_MAX__
+#define DEC32_EPSILON __DEC32_EPSILON__
+#define DEC64_EPSILON __DEC64_EPSILON__
+#define DEC128_EPSILON __DEC128_EPSILON__
+#define DEC32_MIN __DEC32_MIN__
+#define DEC64_MIN __DEC64_MIN__
+#define DEC128_MIN __DEC128_MIN__
+#define DEC_EVAL_METHOD __DEC_EVAL_METHOD__
+#endif
+
+#ifdef __STDC_WANT_DEC_FP__
+#undef DEC32_SUBNORMAL_MIN
+#undef DEC64_SUBNORMAL_MIN
+#undef DEC128_SUBNORMAL_MIN
+#define DEC32_SUBNORMAL_MIN __DEC32_SUBNORMAL_MIN__
+#define DEC64_SUBNORMAL_MIN __DEC64_SUBNORMAL_MIN__
+#define DEC128_SUBNORMAL_MIN __DEC128_SUBNORMAL_MIN__
+#endif
+
+#if defined(__STDC_WANT_IEC_60559_DFP_EXT__) || \
+    (defined(__STDC_VERSION__) && __STDC_VERSION__ > 201710L)
+#undef DEC32_TRUE_MIN
+#undef DEC64_TRUE_MIN
+#undef DEC128_TRUE_MIN
+#define DEC32_TRUE_MIN __DEC32_SUBNORMAL_MIN__
+#define DEC64_TRUE_MIN __DEC64_SUBNORMAL_MIN__
+#define DEC128_TRUE_MIN __DEC128_SUBNORMAL_MIN__
+#endif
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ > 201710L
+#undef DEC_INFINITY
+#undef DEC_NAN
+#undef DEC32_SNAN
+#undef DEC64_SNAN
+#undef DEC128_SNAN
+#define DEC_INFINITY (__builtin_infd32())
+#define DEC_NAN (__builtin_nand32(""))
+#define DEC32_SNAN (__builtin_nansd32(""))
+#define DEC64_SNAN (__builtin_nansd64(""))
+#define DEC128_SNAN (__builtin_nansd128(""))
+#endif
+#endif
+
 #endif
