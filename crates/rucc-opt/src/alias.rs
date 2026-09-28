@@ -80,6 +80,7 @@
 //! does an access through a pointer that came out of memory, which is not a question about names
 //! and never will be.
 
+use std::cell::OnceCell;
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
@@ -521,15 +522,18 @@ impl Counts {
 /// an address is. That is a copy of four module facts rather than the module itself, so that a
 /// pass handed `&mut module[id]` can still build this. See [`crate::outside`] for why.
 ///
-/// The escape analysis is run once when this is built, since every query may ask it and it is one
-/// walk over the function.
+/// The escape analysis is run the first time a query needs it and kept, since it is one walk over
+/// the function and every query after that may ask it. Not when this is built, because a pass that
+/// builds one of these and then adds the summaries would walk the function twice and throw the
+/// first answer away, and licm builds one per loop, so on a function with hundreds of loops that
+/// was most of the time spent compiling it.
 #[derive(Debug)]
 pub struct Alias<'a> {
     func: &'a Func,
     outside: &'a Outside,
     summaries: Option<&'a Summaries>,
     options: Options,
-    escapes: Escapes,
+    escapes: OnceCell<Escapes>,
     counts: Counts,
 }
 
@@ -548,7 +552,7 @@ impl<'a> Alias<'a> {
             outside,
             summaries: None,
             options,
-            escapes: Escapes::of(func),
+            escapes: OnceCell::new(),
             counts: Counts::default(),
         }
     }
@@ -560,15 +564,18 @@ impl<'a> Alias<'a> {
     /// unit is answered from what that function's body actually does. See [`crate::modref`].
     #[must_use]
     pub fn knowing(mut self, summaries: &'a Summaries) -> Self {
-        self.escapes = Escapes::knowing(self.func, summaries);
+        self.escapes = OnceCell::new();
         self.summaries = Some(summaries);
         self
     }
 
     /// Which locals escaped, for a caller that wants the fact on its own.
     #[must_use]
-    pub const fn escapes(&self) -> &Escapes {
-        &self.escapes
+    pub fn escapes(&self) -> &Escapes {
+        self.escapes.get_or_init(|| match self.summaries {
+            Some(summaries) => Escapes::knowing(self.func, summaries),
+            None => Escapes::of(self.func),
+        })
     }
 
     /// What each layer has answered so far.
@@ -716,7 +723,7 @@ impl<'a> Alias<'a> {
     /// the other reference is not to it.
     fn private(&self, reference: &Access) -> Option<Inst> {
         match reference.origin {
-            Origin::Local(local) if !self.escapes.escaped(local) => Some(local),
+            Origin::Local(local) if !self.escapes().escaped(local) => Some(local),
             _ => None,
         }
     }

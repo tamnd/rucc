@@ -33,10 +33,11 @@
 //!
 //! # How it is computed
 //!
-//! Which values arrive live in each block and which leave live is a fixpoint over the blocks, run
-//! backwards because liveness flows backwards, and it is a fixpoint rather than one pass because
-//! a loop carries a value from the end of a block round to a block in front of it. The pieces then
-//! come from one walk over the instructions, a block at a time.
+//! Which values arrive live in each block and which leave live is found one value at a time, by
+//! walking backwards from the blocks that read it through their predecessors until a block that
+//! writes it. Backwards because liveness flows backwards, and a walk rather than one pass over the
+//! blocks because a loop carries a value from the end of a block round to a block in front of it.
+//! The pieces then come from one walk over the instructions, a block at a time.
 //!
 //! What each block arrives holding is kept as the register numbers rather than as a bit each, and
 //! `Rows` in this module says why. The short of it is that a block is live in a handful of values
@@ -49,9 +50,6 @@
 //! leaves live and to its last read otherwise. Two stretches join into one piece when the blocks
 //! they are in are next to each other in the line, which is what makes a value carried round a loop
 //! one piece over the whole loop rather than one per block in it.
-
-use std::cmp::Ordering;
-use std::collections::VecDeque;
 
 use rucc_mir::{Block, Func, Reg, Role};
 
@@ -362,102 +360,76 @@ fn exposed(func: &Func, order: &Order) -> (Rows, Rows) {
 
 /// The fixpoint: what arrives live in each block, and what leaves live.
 ///
-/// A list of blocks to look at again rather than rounds over all of them. Every block is looked at
-/// once, in reverse, and after that a block is only looked at when what arrives live in one of the
-/// blocks after it changed, which is the only thing that can change its own answer. Rounds over
-/// every block cost the whole function each time for the few blocks a loop moved, and jtckdint's
-/// function of 22000 blocks spent more than half of its build doing that.
+/// One value at a time rather than one block at a time. A value is live into every block a read of
+/// it can be reached from without passing something that writes it, so starting from the blocks
+/// that read it first and walking back through their predecessors until a block that writes it
+/// finds exactly those, and it visits each block the value is live in once. What that costs is the
+/// size of the answer. The list of blocks it replaced looked at a block again whenever anything
+/// arriving live after it changed and merged whole rows each time, and on jtckdint's function of
+/// 22000 blocks, with a few thousand values live across most of it, that merging was half of the
+/// whole `-O2` compile.
+///
+/// The rows come out in order for free, because the values are walked in the order their numbers
+/// sort in and each is only ever added to the end of a row.
 fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows) {
     let count = func.block_count();
-    let mut live_in = Rows::new(count);
-    let mut live_out = Rows::new(count);
-    let mut placed = vec![false; count];
-    for &block in order.blocks() {
-        placed[block.index()] = true;
-    }
-    let mut preds: Vec<Vec<Block>> = vec![Vec::new(); count];
+    let vregs = func.vregs();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); count];
     for &block in order.blocks() {
         for call in &func[block].succs {
-            preds[call.block.index()].push(block);
+            preds[call.block.index()].push(block.index());
         }
     }
-    let mut waiting: VecDeque<Block> = order.blocks().iter().rev().copied().collect();
-    let mut queued = placed.clone();
-    let (mut out, mut scratch, mut rest, mut next) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    while let Some(block) = waiting.pop_front() {
-        let row = block.index();
-        queued[row] = false;
-        leaving(func, block, &live_in, &mut out, &mut scratch);
-        without(&out, defined.row(row), &mut rest);
-        union(used.row(row), &rest, &mut next);
-        if live_in.row(row) != next.as_slice() {
-            live_in.set(row, &next);
+    // The blocks that read each value before writing it, by register number, end to end.
+    let mut starts = vec![0usize; vregs + 1];
+    for &block in order.blocks() {
+        for &number in used.row(block.index()) {
+            starts[number as usize + 1] += 1;
+        }
+    }
+    for number in 0..vregs {
+        starts[number + 1] += starts[number];
+    }
+    let mut readers = vec![0usize; starts[vregs]];
+    let mut filled = starts.clone();
+    for &block in order.blocks() {
+        for &number in used.row(block.index()) {
+            readers[filled[number as usize]] = block.index();
+            filled[number as usize] += 1;
+        }
+    }
+
+    let mut live_in = Rows::new(count);
+    let mut live_out = Rows::new(count);
+    // The last value each block was found live into and live out of, which is all a block needs
+    // to remember when the values come one at a time.
+    let mut arrived = vec![u32::MAX; count];
+    let mut left = vec![u32::MAX; count];
+    let mut waiting = Vec::new();
+    for number in 0..vregs {
+        let value = u32::try_from(number).expect("a register number");
+        for &row in &readers[starts[number]..starts[number + 1]] {
+            if arrived[row] != value {
+                arrived[row] = value;
+                live_in.push(row, value);
+                waiting.push(row);
+            }
+        }
+        while let Some(row) = waiting.pop() {
             for &pred in &preds[row] {
-                if placed[pred.index()] && !queued[pred.index()] {
-                    queued[pred.index()] = true;
-                    waiting.push_back(pred);
+                if left[pred] != value {
+                    left[pred] = value;
+                    live_out.push(pred, value);
+                }
+                if arrived[pred] != value && defined.row(pred).binary_search(&value).is_err() {
+                    arrived[pred] = value;
+                    live_in.push(pred, value);
+                    waiting.push(pred);
                 }
             }
         }
     }
-    for &block in order.blocks() {
-        leaving(func, block, &live_in, &mut out, &mut scratch);
-        live_out.set(block.index(), &out);
-    }
     (live_in, live_out)
-}
-
-/// What leaves a block live, which is what arrives live in any block it goes to.
-fn leaving(func: &Func, block: Block, live_in: &Rows, out: &mut Vec<u32>, scratch: &mut Vec<u32>) {
-    out.clear();
-    for call in &func[block].succs {
-        union(out, live_in.row(call.block.index()), scratch);
-        std::mem::swap(out, scratch);
-    }
-}
-
-/// Everything in either list, in order, into a buffer the caller keeps.
-///
-/// Both are sorted and neither holds a number twice, so this is one walk of the two together
-/// rather than a concatenation and a sort.
-fn union(one: &[u32], two: &[u32], out: &mut Vec<u32>) {
-    out.clear();
-    let (mut here, mut there) = (0, 0);
-    while here < one.len() && there < two.len() {
-        match one[here].cmp(&two[there]) {
-            Ordering::Less => {
-                out.push(one[here]);
-                here += 1;
-            }
-            Ordering::Greater => {
-                out.push(two[there]);
-                there += 1;
-            }
-            Ordering::Equal => {
-                out.push(one[here]);
-                here += 1;
-                there += 1;
-            }
-        }
-    }
-    out.extend_from_slice(&one[here..]);
-    out.extend_from_slice(&two[there..]);
-}
-
-/// Everything in the first list that is not in the second, in order.
-fn without(one: &[u32], two: &[u32], out: &mut Vec<u32>) {
-    out.clear();
-    let mut there = 0;
-    for &number in one {
-        while there < two.len() && two[there] < number {
-            there += 1;
-        }
-        if there < two.len() && two[there] == number {
-            continue;
-        }
-        out.push(number);
-    }
 }
 
 /// A set of virtual registers for each block, held as the numbers in it.
@@ -472,9 +444,9 @@ fn without(one: &[u32], two: &[u32], out: &mut Vec<u32>) {
 ///
 /// What is actually true of the answer is that a block is live in a handful of values and not in
 /// the other two hundred thousand, so the numbers themselves are smaller than the bits. They are
-/// kept in order, which is what makes the union and the difference the fixpoint needs one walk of
-/// two lists rather than a search per element, and it is the order a register number sorts in
-/// rather than any order of the program. tamnd/rucc#1072.
+/// kept in order, which is what makes asking whether a block writes a value a binary search rather
+/// than a walk of the row, and it is the order a register number sorts in rather than any order of
+/// the program. tamnd/rucc#1072.
 #[derive(Debug, Clone)]
 struct Rows {
     rows: Vec<Vec<u32>>,
@@ -489,13 +461,17 @@ impl Rows {
         &self.rows[row]
     }
 
-    /// Puts the numbers in the row, keeping whatever the row had already allocated, since the
-    /// fixpoint writes every row once a round and a set that grew by one would otherwise be a set
-    /// that allocated again.
+    /// Puts the numbers in the row in place of whatever it had.
     fn set(&mut self, row: usize, numbers: &[u32]) {
         let row = &mut self.rows[row];
         row.clear();
         row.extend_from_slice(numbers);
+    }
+
+    /// Adds a number past everything the row has, which keeps it in order only because the caller
+    /// adds them in order.
+    fn push(&mut self, row: usize, number: u32) {
+        self.rows[row].push(number);
     }
 
     fn iter(&self, row: usize) -> impl Iterator<Item = Reg> + '_ {
@@ -617,7 +593,7 @@ mod tests {
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
         // The block in between never mentions it and it is live all the way through, which is
-        // the whole reason this is a fixpoint over the blocks and not a walk over the code.
+        // the whole reason this walks the blocks and not only the code that names it.
         assert_eq!(regs(live.live_in(middle)), vec![0]);
         assert_eq!(regs(live.live_out(middle)), vec![0]);
         assert!(live.range(value).expect("live somewhere").covers(order.start(middle)));
