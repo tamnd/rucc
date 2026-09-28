@@ -1331,6 +1331,13 @@ pub enum EmitKind {
     /// type plane fits inside Tier D's memory budget, and it needs nothing past the type
     /// checker because it is a question about layouts rather than about code.
     TypeGranules,
+    /// Nothing at all, `-fsyntax-only`.
+    ///
+    /// The front end runs through the type checker and the diagnostics come out, and then the
+    /// compile stops. Build systems use it to ask whether a file compiles without paying for code
+    /// generation: meson runs its `has_header_symbol` and `has_function` probes this way, and
+    /// editors run it on every save.
+    SyntaxOnly,
 }
 
 impl EmitKind {
@@ -1347,6 +1354,7 @@ impl EmitKind {
             EmitKind::MirFinal => "mir-final",
             EmitKind::SafetySummary => "safety-summary",
             EmitKind::TypeGranules => "type-granules",
+            EmitKind::SyntaxOnly => "syntax-only",
         }
     }
 }
@@ -1366,6 +1374,7 @@ impl FromStr for EmitKind {
             "mir-final" => EmitKind::MirFinal,
             "safety-summary" => EmitKind::SafetySummary,
             "type-granules" => EmitKind::TypeGranules,
+            "syntax-only" => EmitKind::SyntaxOnly,
             _ => return Err(()),
         })
     }
@@ -2726,6 +2735,7 @@ mod tests {
             EmitKind::Tast,
             EmitKind::Ir,
             EmitKind::MirFinal,
+            EmitKind::SyntaxOnly,
         ] {
             assert_eq!(k.as_str().parse::<EmitKind>().unwrap(), k);
         }

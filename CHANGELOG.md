@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-frucc-trace=<file>` appends one line of JSON per compiled file to the file, with the wall time of each phase from reading the source to generating code, the time each optimizer pass took across the module, and on Linux the peak memory of the process. A build can point every compiler at one file, since each line goes out in a single append. This is what the rucc-postgres harness reads to find which file and which pass a slow build spends its time in (#1987).
 - `-v` prints the header search list the way `gcc -v` does, from `#include "..." search starts here:` to `End of search list.`, since meson and cmake read it to find the system header directories. Meson warned that it found none before this (#1987).
 - `-cpp` is accepted and does nothing, since a C compile is always preprocessed. Meson writes it when it asks for the predefined macros (#1987).
+- `-fsyntax-only` runs the front end through the type checker, prints what it finds, and writes nothing. Meson's header and function probes compile this way, and so do editors (#1988).
 
 ### Changed
 

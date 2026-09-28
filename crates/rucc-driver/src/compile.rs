@@ -484,6 +484,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     }
                     diagnostics.extend(lowered.diagnostics);
                 }
+                // The checker has said everything it has to say, and that is all that was asked.
+                EmitKind::SyntaxOnly => {}
                 _ => {}
             }
         }
