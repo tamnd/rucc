@@ -4,7 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Every release archive carries `librucc_builtins.a` for each cross target whose runtime this compiler can build today, under `lib/rucc/<target>/` beside the binary, and the driver looks there. A user who unpacks a release on Linux or macOS and runs `rucc --fetch x86_64-windows-gnu` can now link a Windows program with nothing but `--target`, where the link used to stop and ask for a `cargo xtask builtins` from a source checkout. The release also gains a job that does exactly that with the Linux archive and checks the result is a PE32+ executable (#2066).
+
 ### Changed
+
+- The linker search looks where lld is installed without being put on PATH: Homebrew's `lld` and `llvm` directories, `/usr/lib/llvm-<N>/bin` and `/usr/lib64/llvm<N>/bin` newest first, and `%ProgramFiles%\LLVM\bin`. For a windows-gnu link an lld older than 19 is passed over for a newer one found later, so Ubuntu 24.04 with `lld-19` installed links without a change to PATH. When there is no lld at all, or only one that is too old, the error says how to get one on the machine it is running on (#2066).
+- A link against the fetched mingw-w64 sysroot no longer falls back to `x86_64-w64-mingw32-ld`. GNU ld cannot read the IMPORT_NAME_EXPORTAS records in its import libraries and failed with a page of undefined references to symbols like `__imp__fmode`, so a machine without lld now gets the message above instead (#2066).
+- `-g` for a Windows target warns once and writes the object without debug information, where it used to stop with internal error E0652. Build systems pass `-g` by default, so their first compile no longer fails. This lasts until the COFF writer has DWARF sections (#2066).
 
 - The register allocator's liveness lays its per block lists out end to end once the fixpoint is done, where it used to grow a list per block one value at a time. On a function of 22000 blocks with thousands of values live across most of it that takes 7 to 11% of the cycles off the whole `-O2` build, with the same output.
 

@@ -287,7 +287,17 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::NoLinker { tried } => {
-                write!(f, "no linker was found; tried {}", tried.join(", "))
+                write!(f, "no linker was found; tried {}", tried.join(", "))?;
+                // Only when lld was one of the names, because that is the linker every cross
+                // target here is linked with and the one there is a single answer for.
+                if tried.iter().any(|name| is_lld(name)) {
+                    write!(
+                        f,
+                        ". lld {LLD_EXPORTAS} or newer links for every target, and {}",
+                        lld_advice()
+                    )?;
+                }
+                Ok(())
             }
             Error::Named { name } => {
                 write!(f, "-fuse-ld={name} asks for a linker that is not on this machine")
@@ -322,8 +332,9 @@ impl std::fmt::Display for Error {
                  of its aliases, `_crt_atexit == atexit` among them, as IMPORT_NAME_EXPORTAS \
                  records in its import libraries, which lld learned to read in {LLD_EXPORTAS}. An \
                  older one neither reads them nor says so: it writes an import by ordinal zero, the \
-                 link succeeds, and the program dies at startup. Install lld {LLD_EXPORTAS} or \
-                 newer, or name one with -fuse-ld="
+                 link succeeds, and the program dies at startup. No newer lld was found either. \
+                 For lld {LLD_EXPORTAS} or newer, {}, or name one with -fuse-ld=",
+                lld_advice()
             ),
             Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
             Error::Refused { status } => write!(f, "the linker {status}"),
@@ -354,7 +365,19 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         // A name rather than a path, so `-fuse-ld=mold` finds a `mold` that is not `ld.mold`.
         return vec![format!("ld.{named}"), named.clone()];
     }
-    if cross_sysroot(target, opts).is_some() || distro_cross(target, opts).is_some() {
+    if cross_sysroot(target, opts).is_some() {
+        let mut names = cross_order(target);
+        // The mingw-w64 sysroot this release fetches has import libraries that GNU ld cannot link
+        // against: the `==` aliases are IMPORT_NAME_EXPORTAS records, and binutils reports every
+        // one of them as an undefined reference to a symbol like `__imp__fmode`. So on this path
+        // lld is the only linker worth finding, and a machine without one is told how to get it
+        // instead of being handed a page of undefined references.
+        if (target.os, target.env) == (Os::Windows, Env::Gnu) {
+            names.retain(|name| is_lld(name));
+        }
+        return names;
+    }
+    if distro_cross(target, opts).is_some() {
         return cross_order(target);
     }
     match target.os {
@@ -729,27 +752,124 @@ pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
 /// nothing was, which name the candidates so that the message says what was looked for.
 pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
     let tried = order(target, opts);
+    let places = lld_dirs(Path::new("/"), std::env::var_os("ProgramFiles").map(PathBuf::from));
+    // The first linker [`suitable`] turned down, which is the answer when nothing after it is any
+    // better. Ubuntu 24.04 has lld 18 on PATH and lld 19 under /usr/lib/llvm-19/bin once somebody
+    // installs `lld-19`, and the second is the one to use without asking them to change PATH.
+    let mut refused = None;
     for name in &tried {
-        if name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') {
-            let path = PathBuf::from(name);
-            if path.is_file() {
-                return Ok(Linker { name: name.clone(), path });
-            }
-            continue;
-        }
-        for dir in &opts.prefixes {
-            let path = dir.join(name);
-            if path.is_file() {
-                return Ok(Linker { name: name.clone(), path });
+        for path in linker_candidates(name, opts, &places) {
+            let linker = Linker { name: name.clone(), path };
+            match suitable(target, &linker) {
+                Ok(()) => return Ok(linker),
+                Err(why) => {
+                    refused.get_or_insert(why);
+                }
             }
         }
-        if let Some(path) = on_path(name) {
-            return Ok(Linker { name: name.clone(), path });
-        }
+    }
+    if let Some(why) = refused {
+        return Err(why);
     }
     match &opts.use_ld {
         Some(name) => Err(Error::Named { name: name.clone() }),
         None => Err(Error::NoLinker { tried }),
+    }
+}
+
+/// Every file a linker of this name could be, in the order they are asked.
+///
+/// A name with a separator in it is a path and is the only answer. Otherwise the `-B` prefixes,
+/// then every directory on `PATH` rather than the first hit, then the places an lld is installed
+/// without being put on `PATH`. All of them rather than the first, because the first may be an lld
+/// that [`suitable`] turns down and a later one may not be.
+fn linker_candidates(name: &str, opts: &LinkOptions, places: &[PathBuf]) -> Vec<PathBuf> {
+    if name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') {
+        let path = PathBuf::from(name);
+        return if path.is_file() { vec![path] } else { Vec::new() };
+    }
+    let mut found: Vec<PathBuf> =
+        opts.prefixes.iter().map(|dir| dir.join(name)).filter(|path| path.is_file()).collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        found.extend(
+            std::env::split_paths(&path).map(|dir| dir.join(name)).filter(|p| executable(p)),
+        );
+    }
+    if is_lld(name) {
+        for dir in places {
+            for file in [dir.join(name), dir.join(format!("{name}.exe"))] {
+                if executable(&file) && !found.contains(&file) {
+                    found.push(file);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Whether a name is one of the spellings lld is installed under.
+fn is_lld(name: &str) -> bool {
+    matches!(name, "ld.lld" | "lld" | "lld-link")
+}
+
+/// Where lld is installed without being on `PATH`, newest first where a version is in the name.
+///
+/// Homebrew's `lld` and `llvm` formulae, whose `llvm` is keg-only and so never on `PATH` unless
+/// somebody put it there. Debian and Ubuntu's `lld-<N>` packages, which put the real program in
+/// `/usr/lib/llvm-<N>/bin` and only a versioned name in `/usr/bin`. Fedora's compatibility packages,
+/// which do the same under `/usr/lib64/llvm<N>/bin`. And the LLVM installer for Windows, which puts
+/// everything in `%ProgramFiles%\LLVM\bin` and leaves adding it to `PATH` as a checkbox that is off.
+///
+/// `root` is `/` except in the tests, which build the same tree somewhere they are allowed to.
+fn lld_dirs(root: &Path, program_files: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        "opt/homebrew/opt/lld/bin",
+        "opt/homebrew/opt/llvm/bin",
+        "usr/local/opt/lld/bin",
+        "usr/local/opt/llvm/bin",
+        "home/linuxbrew/.linuxbrew/opt/lld/bin",
+        "home/linuxbrew/.linuxbrew/opt/llvm/bin",
+    ]
+    .iter()
+    .map(|dir| root.join(dir))
+    .collect();
+    for (parent, prefix) in [("usr/lib", "llvm-"), ("usr/lib64", "llvm")] {
+        let mut versions: Vec<(u32, PathBuf)> = fs::read_dir(root.join(parent))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let version = name.to_str()?.strip_prefix(prefix)?.parse().ok()?;
+                Some((version, entry.path().join("bin")))
+            })
+            .collect();
+        versions.sort_by_key(|(version, _)| std::cmp::Reverse(*version));
+        dirs.extend(versions.into_iter().map(|(_, dir)| dir));
+    }
+    if let Some(dir) = program_files {
+        dirs.push(dir.join("LLVM").join("bin"));
+    }
+    dirs
+}
+
+/// Where to get an lld on the machine this compiler is running on, as the end of a sentence.
+///
+/// One per host rather than a list of every package manager, because the person reading it has one
+/// machine and wants the one command for it. Each names a place [`lld_dirs`] looks, so that doing
+/// what it says is enough and nobody has to edit `PATH` afterwards.
+fn lld_advice() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "`brew install lld` installs one, and rucc finds it in Homebrew's directory without a \
+         change to PATH"
+    } else if cfg!(windows) {
+        "the LLVM installer from https://github.com/llvm/llvm-project/releases, or `winget install \
+         LLVM.LLVM`, installs one in %ProgramFiles%\\LLVM\\bin, where rucc finds it without a \
+         change to PATH"
+    } else {
+        "on Debian and Ubuntu `apt install lld-19` installs one in /usr/lib/llvm-19/bin and on \
+         Fedora `dnf install lld` installs one on PATH, and rucc finds either without a change to \
+         PATH"
     }
 }
 
@@ -816,15 +936,6 @@ fn lld_major(text: &str) -> Option<u32> {
     let mut words = text.split_whitespace();
     words.find(|word| *word == "LLD")?;
     words.next()?.split('.').next()?.parse().ok()
-}
-
-/// The first executable of that name on `PATH`.
-///
-/// Executability is checked rather than assumed, because a directory of that name on `PATH` is
-/// not a thing to try to run and neither is a file nobody may execute.
-fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| executable(p))
 }
 
 /// Whether a path is a file this process could run.
@@ -1194,6 +1305,11 @@ pub fn builtins_archive(target: Triple, prefixes: &[PathBuf]) -> Option<PathBuf>
     if let Some(dir) =
         std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf))
     {
+        // A release archive: the compiler at the top of the unpacked directory and the runtime
+        // beside it in `lib/rucc/<triple>`, which is how `.github/package.sh` lays one out.
+        for triple in &spellings {
+            places.push(dir.join("lib").join("rucc").join(triple).join(NAME));
+        }
         if let Some(up) = dir.parent() {
             for triple in &spellings {
                 // An install: the compiler in `bin` and its runtime in `lib/rucc/<triple>`.
@@ -1897,6 +2013,71 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn an_old_lld_first_in_line_is_passed_over_for_a_newer_one_behind_it() {
+        // Ubuntu 24.04 after `apt install lld-19`: 18 is the one on PATH and 19 is somewhere else.
+        // Two -B prefixes stand in for the two places, since the search asks them in order too. The
+        // name is one nothing on this machine is called, so a real lld on PATH does not answer.
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("rucc-link-two-lld-{}", std::process::id()));
+        let mut prefixes = Vec::new();
+        for (dir, version) in [("old", "18.1.3"), ("new", "19.1.7")] {
+            let dir = root.join(dir);
+            fs::create_dir_all(&dir).expect("a temporary directory");
+            let path = dir.join("ld.rucc-test-lld");
+            fs::write(&path, format!("#!/bin/sh\necho 'Ubuntu LLD {version}'\n"))
+                .expect("a script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+            prefixes.push(dir);
+        }
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions {
+            use_ld: Some("rucc-test-lld".to_owned()),
+            prefixes,
+            ..LinkOptions::default()
+        };
+        let found = find(windows, &opts).expect("the newer one");
+        assert_eq!(found.path, root.join("new").join("ld.rucc-test-lld"));
+
+        // With only the old one there, the answer is the refusal that names it.
+        let opts = LinkOptions { prefixes: vec![root.join("old")], ..opts };
+        let error = find(windows, &opts).expect_err("only 18 is here");
+        assert!(matches!(error, Error::TooOld { found: 18, .. }), "{error:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lld_is_looked_for_where_package_managers_put_it_newest_version_first() {
+        let root = std::env::temp_dir().join(format!("rucc-link-lld-dirs-{}", std::process::id()));
+        for dir in ["usr/lib/llvm-18/bin", "usr/lib/llvm-19/bin", "usr/lib/llvm-9/bin", "usr/lib/x"]
+        {
+            fs::create_dir_all(root.join(dir)).expect("a temporary directory");
+        }
+        let dirs = lld_dirs(&root, Some(PathBuf::from("C:/Program Files")));
+        let under_lib: Vec<_> =
+            dirs.iter().filter(|dir| dir.starts_with(root.join("usr/lib"))).collect();
+        assert_eq!(
+            under_lib,
+            [
+                &root.join("usr/lib/llvm-19/bin"),
+                &root.join("usr/lib/llvm-18/bin"),
+                &root.join("usr/lib/llvm-9/bin")
+            ]
+        );
+        assert!(dirs.contains(&root.join("opt/homebrew/opt/lld/bin")), "{dirs:?}");
+        assert_eq!(dirs.last(), Some(&PathBuf::from("C:/Program Files").join("LLVM").join("bin")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_linker_says_where_to_get_lld_only_when_lld_was_looked_for() {
+        let cross = Error::NoLinker { tried: vec!["ld.lld".to_owned(), "lld".to_owned()] };
+        assert!(cross.to_string().contains("lld 19 or newer"), "{cross}");
+        let native = Error::NoLinker { tried: vec!["ld".to_owned()] };
+        assert_eq!(native.to_string(), "no linker was found; tried ld");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_linker_that_will_not_say_what_it_is_is_left_alone() {
         // Every linker that is not an lld reaches this check too, and what it can establish is
         // that a specific old lld is here rather than that anything else is fit. Turning "I did
@@ -2044,6 +2225,12 @@ mod tests {
         // And what the user wrote still comes first, the way it does on the line itself.
         let mine = LinkOptions { search: vec![PathBuf::from("/opt/mine")], ..cached() };
         assert_eq!(search_dirs(&mine, foreign())[0], PathBuf::from("/opt/mine"));
+    }
+
+    #[test]
+    fn gnu_ld_is_not_looked_for_against_the_fetched_mingw_sysroot() {
+        let windows = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        assert_eq!(order(windows, &cached()), ["ld.lld", "lld"]);
     }
 
     #[test]

@@ -14,10 +14,12 @@
 # The comparison is the part worth having. A reproducibility claim nobody checks is a claim that
 # broke a year ago and nobody noticed, and section 13.6 says the check costs a CI job.
 #
-# usage: .github/package.sh <name> <binary> [outdir]
+# usage: .github/package.sh <name> <binary> [outdir] [lib]
 #
 # <name> is the directory inside the archives and the stem of their names, which is
-# rucc-<tag>-<target>. <binary> is the file to put in it. [outdir] defaults to dist.
+# rucc-<tag>-<target>. <binary> is the file to put in it. [outdir] defaults to dist. [lib], when
+# given, is a directory copied in as lib/ beside the binary, which is where the release keeps the
+# builtins archive for each cross target as lib/rucc/<target>/librucc_builtins.a.
 #
 # What this does not claim is that two different hosts produce the same archive. That would need the
 # same tar and the same gzip on all five runners, and it is not what section 13.6 is about: the
@@ -31,6 +33,7 @@ set -euo pipefail
 name=${1:?the archive name, which is rucc-<tag>-<target>}
 binary=${2:?the binary to package}
 out=${3:-dist}
+lib=${4:-}
 
 [ -f "$binary" ] || { echo "package: $binary is not there" >&2; exit 1; }
 
@@ -54,14 +57,18 @@ sha256() {
   fi
 }
 
-# Everything that goes in, which is the binary and the four files somebody needs to know what they
-# have: what it is, what they may do with it, what changed, and what it will bring onto a machine
-# for each target, which is the manifest of section 13.5.
+# Everything that goes in, which is the binary, the builtins when there are any, and the four files
+# somebody needs to know what they have: what it is, what they may do with it, what changed, and
+# what it will bring onto a machine for each target, which is the manifest of section 13.5.
 stage() {
   local into=$1
   mkdir -p "$into/$name"
   cp "$binary" "$into/$name/"
   cp README.md LICENSE-APACHE CHANGELOG.md PROVENANCE "$into/$name/"
+  if [ -n "$lib" ]; then
+    [ -d "$lib" ] || { echo "package: $lib is not a directory" >&2; exit 1; }
+    cp -R "$lib" "$into/$name/lib"
+  fi
   # Sorted here rather than by either archiver, because one of the two cannot sort. The names are
   # relative to the directory the archivers run in, which is how they end up in the archive.
   (cd "$into" && find "$name" -type f | LC_ALL=C sort > .files)

@@ -2437,6 +2437,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // question cannot be answered until the whole path is known.
     opts.search.remove_duplicates();
 
+    // The COFF writer has no DWARF sections yet, and refusing `-g` stops every build system at its
+    // first compile, since they all pass it by default. So it is dropped with one warning and the
+    // object is written without debug information, which is what the program would have run as
+    // anyway. This goes when DWARF in COFF lands.
+    if opts.debug_info && opts.target.os.object_format() == ObjectFormat::Coff {
+        opts.debug_info = false;
+        notes.push(format!(
+            "-g is ignored for {}, because this compiler does not write debug information into \
+             COFF objects yet",
+            opts.target.tuple().to_canonical_string()
+        ));
+    }
+
     // The target has to be resolved before the configuration is printed, so this check comes
     // after the loop rather than at the point `--print-config` was seen.
     if print_config {
@@ -3112,13 +3125,8 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         Ok(linker) => linker,
         Err(why) => return complain(why),
     };
-    // And whether the one that was found can do this link, which for one linker and one target is
-    // a question only the linker itself can answer. Here rather than inside the search, because
-    // what it does is refuse rather than move on to the next candidate: nothing else in the list
-    // links a produced Windows sysroot either.
-    if let Err(why) = link::suitable(opts.target, &linker) {
-        return complain(why);
-    }
+    // Whether the one that was found can do this link is asked inside the search, which moves on
+    // past an lld that is too old to a newer one somewhere else and refuses only when there is none.
     // The glibc stubs, which are the one part of a cross sysroot written here rather than fetched.
     // Before compiling for the same reason as the rest, and never for `-###`, which writes nothing.
     if let Err(why) = link::write_stubs(opts.target, link) {
@@ -3862,6 +3870,18 @@ mod tests {
     #[test]
     fn a_command_line_with_nothing_wrong_with_it_carries_no_notes() {
         assert_eq!(notes(&["-c", "a.c"]), Vec::<String>::new());
+    }
+
+    /// `-g` for Windows is dropped with a warning rather than failing the compile, until the COFF
+    /// writer has DWARF sections to put it in.
+    #[test]
+    fn debug_information_for_coff_is_dropped_with_a_warning() {
+        let said = notes(&["--target=x86_64-windows-gnu", "-g", "-c", "a.c"]);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("-g is ignored for x86_64-windows-gnu"), "{said:?}");
+        let (opts, _) = compile(&["--target=x86_64-windows-gnu", "-g", "-c", "a.c"]);
+        assert!(!opts.debug_info);
+        assert_eq!(notes(&["--target=x86_64-linux-gnu", "-g", "-c", "a.c"]), Vec::<String>::new());
     }
 
     /// A directory that is not there contributes nothing to the search path, so there is no tree to
