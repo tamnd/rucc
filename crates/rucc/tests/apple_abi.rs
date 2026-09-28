@@ -103,3 +103,26 @@ fn a_darwin_function_says_how_to_unwind_through_it() {
     assert_eq!(asm.matches(".cfi_startproc").count(), 4, "{asm}");
     assert_eq!(asm.matches(".cfi_endproc").count(), 4, "{asm}");
 }
+
+/// A build that asks for debug information gets it, in the `__DWARF` segment where `dsymutil` and
+/// a debugger look for it, rather than an object with none or no object at all.
+#[test]
+fn a_darwin_object_carries_its_debug_information() {
+    let path = fixture("debug", NARROW);
+    let object = path.with_extension("o");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={DARWIN}"))
+        .args(["-g", "-O1", "-c", "-o"])
+        .arg(&object)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let bytes = std::fs::read(&object).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let has = |name: &[u8]| bytes.windows(name.len()).any(|at| at == name);
+    for section in ["__debug_info", "__debug_line", "__debug_abbrev"] {
+        assert!(has(section.as_bytes()), "no {section}");
+    }
+    assert!(has(b"__DWARF"));
+}

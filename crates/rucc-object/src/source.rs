@@ -359,7 +359,7 @@ pub fn assembled_described(
         (Some(flavour), Arch::X86_64) => (flavour, Architecture::X86_64),
         (Some(Flavour::Elf), Arch::Aarch64) => (Flavour::Elf, Architecture::Aarch64),
         (None, Arch::Aarch64) if target.object_format == ObjectFormat::MachO => {
-            return crate::macho::write(input, target);
+            return crate::macho::write(input, target, info);
         }
         _ => return Err(Error::Format { triple: target.tuple.to_string() }),
     };

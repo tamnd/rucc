@@ -8,11 +8,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `<pmmintrin.h>` and `<tmmintrin.h>` ship with the SSE3 and SSSE3 intrinsics, and `<smmintrin.h>` and `<nmmintrin.h>` now have the rest of SSE4.1 and SSE4.2: the rounding, blend, dot product, insert and extract, min and max, widening and `ptest` functions, `_mm_cmpgt_epi64`, and the `_mm_cmpistr*` and `_mm_cmpestr*` string compares. `<immintrin.h>` brings them all in, as it does with gcc. Each is the instruction gcc writes and is built for its own extension, so a function with `__attribute__((target("ssse3")))` or a unit built with `-msse4.1` can call it and anything else is refused. Every function gives the same answer as gcc 16 at `-O0` to `-O3`. `_mm_monitor`, `_mm_mwait` and the denormals-zero macros are left out (#2045).
 - An `always_inline` call whose immediate operand is written as constant arithmetic, such as `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC`, is folded to the constant after inlining at `-O0` too, and a `static` `always_inline` function with every call inlined is no longer emitted out of line, as with gcc (#2045).
+- `-g` on Darwin arm64 writes DWARF into the object's `__DWARF` segment the way clang does, with the unit's name and directory in `.debug_str` where ld64 reads them. Apple's `ld` lists the object in the debug map, `dsymutil` turns it into a `.dSYM` with the linked addresses, and lldb stops at a rucc function on the right line and reads its variables.
 
 ### Fixed
 
 - A function inlined under `-g` no longer names its own opening brace inside its caller's line table. The slots it declares and the stores of its parameters kept the line of the callee's brace, which is outside the caller, so a debugger stopped there was sent to the top of another function. The slots now say what the caller's own slots say and the stores say the call, as with gcc 16. `cargo xtask lines` had been failing on SQLite's `insertCell` and `insertCellFast` since #2013 made the address of such a slot an instruction of its own.
 - A parameter the optimizer drops because nothing uses it no longer leaves its `!aligned`, `!bounds` or `!init` fact behind. The IR printer wrote the stale fact as `%? = !aligned(4)`, and `--emit=ir` output from `-O2` could not be read back. Four Postgres translation units hit this in the IR round trip check (#2048).
+- `-g -c` for `aarch64-apple-darwin` no longer stops with "the listing has no label for the function", which came from looking a function up without the `_` Apple puts in front of its name.
 
 ## 0.11.18
 

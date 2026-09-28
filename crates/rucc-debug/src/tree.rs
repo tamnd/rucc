@@ -715,6 +715,7 @@ mod tests {
             globals: Vec::new(),
             pointer: 8,
             frames: true,
+            mach_o: false,
         }
     }
 

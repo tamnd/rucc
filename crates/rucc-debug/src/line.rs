@@ -98,6 +98,13 @@ pub struct Unit {
     /// rather than written as something no debugger can follow. The locations that would be
     /// measured from it are left off with it.
     pub frames: bool,
+    /// Whether the unit goes in a Mach-O object.
+    ///
+    /// ld64 reads the unit's name and directory to write the map a debugger finds the object
+    /// through, and it reads them only from `.debug_str`. Given a reference into `.debug_line_str`
+    /// it leaves the object out of the map, or crashes, so on a Mac those three strings go where
+    /// clang puts them and the line program's own strings stay where they are.
+    pub mach_o: bool,
 }
 
 /// One function: where each of its instructions came from, and what it is.
@@ -284,14 +291,30 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     dwarf.unit.line_program = program;
     let covers = dwarf.unit.ranges.add(gimli::write::RangeList(ranges));
     let root = dwarf.unit.root();
-    let producer = text(&unit.producer, encoding, &mut dwarf.line_strings);
-    let name = text(&unit.name, encoding, &mut dwarf.line_strings);
-    let dir = text(&unit.dir, encoding, &mut dwarf.line_strings);
+    let mut said = Vec::with_capacity(3);
+    for (attr, val) in [
+        (gimli::DW_AT_producer, &unit.producer),
+        (gimli::DW_AT_name, &unit.name),
+        (gimli::DW_AT_comp_dir, &unit.dir),
+    ] {
+        let val = if unit.mach_o {
+            let bytes: Vec<u8> = val.bytes().filter(|&byte| byte != 0).collect();
+            gimli::write::AttributeValue::StringRef(dwarf.strings.add(bytes))
+        } else {
+            let string = text(val, encoding, &mut dwarf.line_strings);
+            gimli::write::AttributeValue::LineStringRef(held(string)?)
+        };
+        said.push((attr, val));
+    }
     let root = dwarf.unit.get_mut(root);
-    root.set(gimli::DW_AT_producer, gimli::write::AttributeValue::LineStringRef(held(producer)?));
+    let mut said = said.into_iter();
+    if let Some((attr, val)) = said.next() {
+        root.set(attr, val);
+    }
     root.set(gimli::DW_AT_language, gimli::write::AttributeValue::Language(gimli::DW_LANG_C11));
-    root.set(gimli::DW_AT_name, gimli::write::AttributeValue::LineStringRef(held(name)?));
-    root.set(gimli::DW_AT_comp_dir, gimli::write::AttributeValue::LineStringRef(held(dir)?));
+    for (attr, val) in said {
+        root.set(attr, val);
+    }
     root.set(gimli::DW_AT_stmt_list, gimli::write::AttributeValue::LineProgramRef);
     root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
     tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs, &unit.globals, unit.frames)?;
@@ -394,6 +417,7 @@ mod tests {
             globals: Vec::new(),
             pointer: 8,
             frames: true,
+            mach_o: false,
         }
     }
 
@@ -433,6 +457,22 @@ mod tests {
         assert!(rest.clone().count() > 0);
         assert!(rest.clone().all(|reloc| reloc.symbol == ".debug_line_str"));
         assert!(rest.clone().all(|reloc| reloc.kind == Reference::Address { bytes: 4 }));
+    }
+
+    /// On a Mac the unit's own name, directory and producer are read from `.debug_str`, which is
+    /// the only place ld64 looks for them when it writes the map `dsymutil` follows to the object.
+    #[test]
+    fn a_mach_o_unit_names_itself_in_the_strings_ld64_reads() {
+        let unit = Unit { mach_o: true, ..one() };
+        let info = write(&unit).expect("sections");
+        let strings = info.chunks.iter().find(|chunk| chunk.name == ".debug_str").expect("strings");
+        for name in ["rucc", "a.c"] {
+            let held = format!("{name}\0");
+            assert!(strings.bytes.windows(held.len()).any(|at| at == held.as_bytes()), "{name}");
+        }
+        let unit = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        assert!(unit.relocs.iter().all(|reloc| reloc.symbol != ".debug_line_str"));
+        assert!(unit.relocs.iter().any(|reloc| reloc.symbol == ".debug_str"));
     }
 
     /// A file with nothing to say writes no sections rather than empty ones.
