@@ -4,12 +4,10 @@
  * written as inline assembly for the reason <avx512fintrin.h> gives.
  */
 
-#ifndef __RUCC_IMMINTRIN_H
-#error "Never use <avx512vpopcntdqintrin.h> directly; include <immintrin.h> instead."
-#endif
-
 #ifndef __RUCC_AVX512VPOPCNTDQINTRIN_H
 #define __RUCC_AVX512VPOPCNTDQINTRIN_H
+
+#include <avx512fintrin.h>
 
 static __inline__ __m512i __attribute__((__always_inline__, __target__("avx512vpopcntdq")))
 _mm512_popcnt_epi64(__m512i __A)

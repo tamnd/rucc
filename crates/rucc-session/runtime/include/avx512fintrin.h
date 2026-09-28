@@ -1,6 +1,6 @@
 /* avx512fintrin.h, the AVX-512 foundation intrinsics.
  *
- * Reached through <immintrin.h> the way gcc reaches it, and not meant to be included on its own.
+ * Reached through <immintrin.h> the way gcc reaches it, and complete on its own as well.
  * What is here is what PostgreSQL's AVX-512 CRC32C and population count code call: the 64 byte
  * vector type, loads, the bitwise and add operations, the lane moves and the reduction. See
  * `tamnd/rucc#1988`.
@@ -24,10 +24,6 @@
  * gcc refuses it. The moves between a 16 byte and a 64 byte vector are plain C, since they are
  * moves and nothing more.
  */
-
-#ifndef __RUCC_IMMINTRIN_H
-#error "Never use <avx512fintrin.h> directly; include <immintrin.h> instead."
-#endif
 
 #ifndef __RUCC_AVX512FINTRIN_H
 #define __RUCC_AVX512FINTRIN_H

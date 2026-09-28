@@ -5,12 +5,10 @@
  * It is `vpternlogq` on `xmm16` and up, which is what needs `avx512vl`.
  */
 
-#ifndef __RUCC_IMMINTRIN_H
-#error "Never use <avx512vlintrin.h> directly; include <immintrin.h> instead."
-#endif
-
 #ifndef __RUCC_AVX512VLINTRIN_H
 #define __RUCC_AVX512VLINTRIN_H
+
+#include <emmintrin.h>
 
 #define _mm_ternarylogic_epi64(A, B, C, I)                                                     \
   __extension__({                                                                              \

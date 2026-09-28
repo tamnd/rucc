@@ -2257,7 +2257,10 @@ mod tests {
                 let body = &text[start..];
                 let body = &body[..body.find(".size").unwrap_or(body.len())];
                 for instruction in wanted {
-                    assert!(body.contains(instruction), "no {instruction} at {level:?} in:\n{body}");
+                    assert!(
+                        body.contains(instruction),
+                        "no {instruction} at {level:?} in:\n{body}"
+                    );
                 }
                 assert!(!body.contains("call"), "a call left behind at {level:?} in:\n{body}");
             }

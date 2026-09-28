@@ -8,12 +8,10 @@
  * uses for anything else.
  */
 
-#ifndef __RUCC_IMMINTRIN_H
-#error "Never use <avx512bwintrin.h> directly; include <immintrin.h> instead."
-#endif
-
 #ifndef __RUCC_AVX512BWINTRIN_H
 #define __RUCC_AVX512BWINTRIN_H
+
+#include <avx512fintrin.h>
 
 typedef unsigned int __mmask32;
 typedef unsigned long long __mmask64;

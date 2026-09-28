@@ -7,12 +7,10 @@
  * gives.
  */
 
-#ifndef __RUCC_IMMINTRIN_H
-#error "Never use <vpclmulqdqintrin.h> directly; include <immintrin.h> instead."
-#endif
-
 #ifndef __RUCC_VPCLMULQDQINTRIN_H
 #define __RUCC_VPCLMULQDQINTRIN_H
+
+#include <avx512fintrin.h>
 
 #define _mm512_clmulepi64_epi128(A, B, I)                                                      \
   __extension__({                                                                              \
