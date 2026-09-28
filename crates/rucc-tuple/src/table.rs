@@ -292,7 +292,7 @@ pub const TARGETS: &[TargetEntry] = &[
     // Windows.
     TargetEntry {
         tuple: "x86_64-windows-gnu",
-        tier: Tier::Recognized,
+        tier: Tier::InProgress,
         planned: Tier::Supported,
         host: Host::Yes,
         note: "mingw-w64, and the default env for Windows because it is the one we can ship",

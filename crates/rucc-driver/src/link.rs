@@ -1730,11 +1730,9 @@ fn split_for_file(args: &[String]) -> (Vec<String>, Vec<String>) {
     let mut rest = Vec::with_capacity(args.len());
     let mut words = args.iter();
     while let Some(arg) = words.next() {
-        if arg == "-m"
-            && let Some(machine) = words.next()
-        {
+        if arg == "-m" {
             front.push(arg.clone());
-            front.push(machine.clone());
+            front.extend(words.next().cloned());
         } else {
             rest.push(arg.clone());
         }
