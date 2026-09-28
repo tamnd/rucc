@@ -577,6 +577,25 @@ impl Func {
         self.inst_layout[inst.index()].block
     }
 
+    /// The instruction after this one in its block, if it is in one and is not the last.
+    #[must_use]
+    pub fn next_inst(&self, inst: Inst) -> Option<Inst> {
+        self.inst_layout[inst.index()].next
+    }
+
+    /// The instruction before this one in its block, if it is in one and is not the first.
+    #[must_use]
+    pub fn prev_inst(&self, inst: Inst) -> Option<Inst> {
+        self.inst_layout[inst.index()].prev
+    }
+
+    /// Whether this call has an unwind edge, which is an `unwound` straight after it. See
+    /// [`Opcode::Unwound`].
+    #[must_use]
+    pub fn unwinds_to_pad(&self, call: Inst) -> bool {
+        self.next_inst(call).is_some_and(|next| self[next].opcode == Opcode::Unwound)
+    }
+
     /// The version of memory an instruction reads, when the function carries memory SSA.
     ///
     /// Document 09 of `spec/optimizer`. Memory is a value of type `mem`, it is the last operand

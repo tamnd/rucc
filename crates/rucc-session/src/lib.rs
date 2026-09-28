@@ -2434,10 +2434,11 @@ impl Options {
     /// Either request is answered with the same table, so what decides is whether either of them
     /// is standing. Asked here rather than worked out at the two places that write a table, since
     /// those two writing different answers for one function is what `spec/11-asm-objects-debug.md`
-    /// section 11.1 says must not be possible.
+    /// section 11.1 says must not be possible. `-fexceptions` asks for one too, as it does of gcc,
+    /// since a landing pad nothing can find is a cleanup that never runs.
     #[must_use]
     pub const fn unwinds(&self) -> bool {
-        self.async_unwind_tables || self.unwind_tables
+        self.async_unwind_tables || self.unwind_tables || self.exceptions
     }
 
     /// Whether every function keeps a frame pointer: what the command line said, or what the

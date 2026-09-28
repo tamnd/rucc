@@ -34,6 +34,8 @@
 //! written as single byte nops. A longer nop is fewer instructions to decode and the padding
 //! between two functions is never executed, so there is nothing to be gained by it.
 
+use std::collections::HashMap;
+
 use rucc_base::Interner;
 use rucc_diag::Span;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
@@ -42,7 +44,7 @@ use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
 use rucc_object::{
-    Binding, Chunk, Extent, FUNC_ALIGN, Held, Marker, Patch, Reference, Reloc, Table, Text,
+    Binding, Chunk, Extent, FUNC_ALIGN, Held, Marker, Patch, Reference, Reloc, Site, Table, Text,
     Visibility,
 };
 
@@ -178,9 +180,20 @@ pub fn assemble(
             room: None,
             loops: Vec::new(),
             apart: target.object_format == ObjectFormat::Elf,
+            sites: Vec::new(),
         };
         assembler.func()?;
         let room = assembler.room;
+        let blocks = std::mem::take(&mut assembler.blocks);
+        let mut landings: Vec<Site> = std::mem::take(&mut assembler.sites)
+            .into_iter()
+            .map(|(at, end, pad)| Site {
+                start: at,
+                len: end - at,
+                pad: blocks[pad.index()] - start,
+            })
+            .collect();
+        landings.sort_by_key(|site| site.start);
         rows.push(std::mem::take(&mut assembler.rows));
         all.push(std::mem::take(&mut assembler.lines));
         let len = text.bytes.len() - start;
@@ -203,6 +216,7 @@ pub fn assemble(
             binding: binding(func.binding),
             visibility: visibility(func.visibility),
             patch,
+            landings,
         });
     }
     // In whichever of the two shapes the target reads, which is what decides whether a prologue
@@ -322,6 +336,9 @@ struct Assembler<'a> {
     /// Whether the jump tables go in `.rodata` rather than after the code, which they do on ELF.
     /// See [`Self::tables`].
     apart: bool,
+    /// Where each call an unwind lands from began and ended, counted from the front of the
+    /// function, with the pad it lands in. See [`rucc_mir::Func::landings`].
+    sites: Vec<(usize, usize, Block)>,
 }
 
 /// How long each loop in the function is, from its head to the end of the last jump back to it,
@@ -357,6 +374,7 @@ pub(crate) fn loop_sizes(
         room: None,
         loops: Vec::new(),
         apart: false,
+        sites: Vec::new(),
     };
     scratch.lay()?;
     for jump in &scratch.jumps {
@@ -392,6 +410,8 @@ impl Assembler<'_> {
             self.lines.push(Row { at: 0, span: self.func.declared, inst: None });
         }
         let end = self.func.cfi_end();
+        self.sites.clear();
+        let pads: HashMap<Inst, Block> = self.func.landings.iter().copied().collect();
         for block in self.func.blocks() {
             // The head of a loop is padded the way the listing asks the assembler to pad it, with
             // instructions rather than single bytes, since the block in front of it may fall in.
@@ -429,7 +449,12 @@ impl Assembler<'_> {
                     let at = self.text.bytes.len() - self.start;
                     self.lines.push(Row { at, span: self.func.span(inst), inst: Some(inst) });
                 }
+                let began = self.text.bytes.len() - self.start;
                 self.inst(block, inst)?;
+                // A call an unwind lands somewhere from, as the bytes it is. See [`Site`].
+                if let Some(&pad) = pads.get(&inst) {
+                    self.sites.push((began, self.text.bytes.len() - self.start, pad));
+                }
                 if Some(inst) == end {
                     continue;
                 }
@@ -872,6 +897,7 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
             patch: None,
+            landings: Vec::new(),
         };
         assert_eq!(text.funcs, [f]);
         assert!(text.relocs.is_empty());

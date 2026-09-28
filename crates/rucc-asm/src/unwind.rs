@@ -48,7 +48,7 @@
 //! image that Windows wants instead.
 
 use rucc_mir::CfiOp;
-use rucc_object::{Chunk, Extent, Marker, Reference, Reloc, Unwind};
+use rucc_object::{Chunk, EXCEPT_TABLE, Extent, Marker, Reference, Reloc, Unwind};
 use rucc_target::{CallRegs, ObjectFormat};
 
 use crate::Error;
@@ -67,6 +67,16 @@ const CODE_ALIGN: u64 = 1;
 /// in a process whose load address is not known when the file is written, and four bytes rather
 /// than eight because no program puts two gigabytes between a function and its own unwind record.
 const PCREL_SDATA4: u8 = 0x1b;
+
+/// The same, read through: the four bytes are the distance to a pointer and the pointer is the
+/// answer, which is how the header reaches the personality routine.
+const INDIRECT_PCREL_SDATA4: u8 = 0x9b;
+
+/// A field of the call site table that is not there.
+const OMIT: u8 = 0xff;
+
+/// How the rows of a call site table spell their numbers, which is as unsigned LEB128.
+const ULEB128: u8 = 0x01;
 
 // The opcodes, which are DWARF's and are in section 6.4.2 of the standard. The three with the high
 // bits set carry a small operand in the low six and have a longer form for the rest.
@@ -163,10 +173,31 @@ pub(crate) fn debug_frame(
 const DEBUG_FRAME: &str = ".debug_frame";
 
 /// The table the two formats that read DWARF want: one header, then one record per function.
+///
+/// A second header, naming the personality routine, when a function has a landing pad, and each
+/// function with one points at that header instead and says where its call site table is. The
+/// header is shared, since what it says is the same for every function, and a function with no
+/// pad keeps pointing at the plain one, which is what gas writes for the same listing.
 fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Unwind {
     let mut table = Table::new(conv, false);
     table.header(conv);
+    let plain = table.cie;
+    let personal = funcs.iter().any(|func| !func.landings.is_empty()).then(|| {
+        table.personal_header(conv);
+        table.cie
+    });
     for (func, rows) in funcs.iter().zip(rows) {
+        match personal.filter(|_| !func.landings.is_empty()) {
+            Some(cie) => {
+                table.cie = cie;
+                let lsda = table.call_sites(func);
+                table.lsda = Some(lsda);
+            }
+            None => {
+                table.cie = plain;
+                table.lsda = None;
+            }
+        }
         table.record(func, rows);
     }
     table.out
@@ -190,6 +221,9 @@ struct Table {
     /// Whether this is the debugger's copy, which spells three things differently: what marks the
     /// header, how a record says where its header is, and how it says where its function is.
     debug: bool,
+    /// Where in [`EXCEPT_TABLE`] the call site table of the record being written is, when it has
+    /// one. See [`Table::call_sites`].
+    lsda: Option<usize>,
 }
 
 impl Table {
@@ -199,7 +233,7 @@ impl Table {
         // Negative because every slot is below the end of the frame, and dividing by it is what
         // makes the number written for one positive, which is a byte shorter than a signed one.
         let slot = -i64::from(conv.word);
-        Self { out: Unwind::default(), cie: 0, slot, align, debug }
+        Self { out: Unwind::default(), cie: 0, slot, align, debug, lsda: None }
     }
 
     /// The header every record in this object points back at.
@@ -227,6 +261,75 @@ impl Table {
             uleb(&mut self.out.bytes, 1);
             self.out.bytes.push(PCREL_SDATA4);
         }
+        self.starts(conv, start);
+    }
+
+    /// The header the records of functions with a landing pad point back at.
+    ///
+    /// `zPLR` rather than `zR`. `P` is the personality routine, which the unwinder calls for every
+    /// frame of this kind it passes through and which is what reads the call site table and sends
+    /// control to a pad. It is reached through the pointer the lowering made, because the routine
+    /// is in a shared library and this section is not written at load time. `L` says each record
+    /// has the distance to its call site table in its augmentation. Both are gcc's encodings for
+    /// position independent code, which is what everything here is.
+    fn personal_header(&mut self, conv: &CallRegs) {
+        let start = self.out.bytes.len();
+        self.cie = start;
+        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.out.bytes.push(1);
+        self.out.bytes.extend_from_slice(b"zPLR\0");
+        uleb(&mut self.out.bytes, CODE_ALIGN);
+        sleb(&mut self.out.bytes, self.slot);
+        uleb(&mut self.out.bytes, u64::from(conv.dwarf_return_address));
+        // The encoding byte and four bytes of pointer for `P`, and a byte each for `L` and `R`.
+        uleb(&mut self.out.bytes, 7);
+        self.out.bytes.push(INDIRECT_PCREL_SDATA4);
+        self.out.relocs.push(Reloc {
+            at: self.out.bytes.len(),
+            symbol: rucc_ir::PERSONALITY_REF.to_owned(),
+            kind: Reference::Data,
+            addend: 0,
+            after: 0,
+        });
+        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.out.bytes.push(PCREL_SDATA4);
+        self.out.bytes.push(PCREL_SDATA4);
+        self.starts(conv, start);
+    }
+
+    /// Where the call site table of one function goes, written at the end of [`EXCEPT_TABLE`], and
+    /// the offset it starts at.
+    ///
+    /// gcc's layout for a C function. No landing pad base, so the pads are counted from the start
+    /// of the function, and no type table, since nothing in C is caught by type. Then the rows,
+    /// one per call with a pad, each the call's offset and length and the pad's offset as unsigned
+    /// numbers of as many bytes as they need, and an action of zero, which says the pad is a
+    /// cleanup and the unwind goes on once it has run. A call with no row is one the unwind passes
+    /// through, which is what the C personality does with an address the table does not cover.
+    fn call_sites(&mut self, func: &Extent) -> usize {
+        let out = &mut self.out.except;
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        let at = out.len();
+        out.push(OMIT);
+        out.push(OMIT);
+        out.push(ULEB128);
+        let mut rows = Vec::new();
+        for site in &func.landings {
+            uleb(&mut rows, site.start as u64);
+            uleb(&mut rows, site.len as u64);
+            uleb(&mut rows, site.pad as u64);
+            uleb(&mut rows, 0);
+        }
+        uleb(out, rows.len() as u64);
+        out.extend_from_slice(&rows);
+        at
+    }
+
+    /// What every header ends with: the state a call leaves behind, and the padding.
+    fn starts(&mut self, conv: &CallRegs, start: usize) {
         // The state a call leaves behind, which is where every function on this machine starts. On
         // x86-64 the frame ends one word above the stack pointer, because the call pushed a return
         // address, and that return address is the word below the end. On AArch64 the call pushed
@@ -314,8 +417,22 @@ impl Table {
         self.out.bytes.extend_from_slice(&len.to_le_bytes());
         // No augmentation of its own. The header said `zR` and `R` is answered there, so what is
         // left for a record is a length of zero, which still has to be written because `z`
-        // promised a length would be there.
-        uleb(&mut self.out.bytes, 0);
+        // promised a length would be there. A function with a landing pad has four bytes, the
+        // distance to its call site table, since its header said `L`.
+        match self.lsda {
+            None => uleb(&mut self.out.bytes, 0),
+            Some(lsda) => {
+                uleb(&mut self.out.bytes, 4);
+                self.out.relocs.push(Reloc {
+                    at: self.out.bytes.len(),
+                    symbol: EXCEPT_TABLE.to_owned(),
+                    kind: Reference::Data,
+                    addend: i64::try_from(lsda).expect("a table this size"),
+                    after: 0,
+                });
+                self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
     }
 
     /// One row, as the opcode DWARF spells it.
@@ -791,6 +908,7 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
             patch: None,
+            landings: Vec::new(),
         }
     }
 

@@ -1390,6 +1390,7 @@ impl Reader {
                 binding: Binding::Local,
                 visibility: Visibility::Default,
                 patch: None,
+                landings: Vec::new(),
             })
             .collect();
         let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();

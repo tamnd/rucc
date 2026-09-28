@@ -173,7 +173,16 @@ pub struct Unwind {
     /// it points at are in two different sections, so there is no distance either of them can be
     /// written with instead.
     pub labels: Vec<Marker>,
+    /// The table of where each call an unwind lands from goes, which is `.gcc_except_table` and
+    /// is empty in a file with no landing pad in it. One header per function that has any, each
+    /// found by the record of its function through a relocation against this section, which is
+    /// what the name [`EXCEPT_TABLE`] in a relocation of [`Self::relocs`] stands for.
+    pub except: Vec<u8>,
 }
+
+/// The name of the section the call site tables go in, which is also what a relocation against it
+/// names. See [`Unwind::except`].
+pub const EXCEPT_TABLE: &str = ".gcc_except_table";
 
 /// The debug information, as the bytes of the sections it goes in.
 ///
@@ -295,6 +304,24 @@ pub struct Extent {
     /// Where the room a patcher was promised is, or `None` in a function promised none, which is
     /// every function on a command line that did not ask. See [`Patch`].
     pub patch: Option<Patch>,
+    /// Each call an unwind lands somewhere from, in the order they are in the function, which is
+    /// empty in every function with no cleanup handler to run on the way out. See [`Site`].
+    pub landings: Vec<Site>,
+}
+
+/// One call an unwind out of lands in a pad, as distances from [`Extent::start`].
+///
+/// What a row of the call site table in `.gcc_except_table` says, which is the bytes of the call
+/// and where the pad is. An unwinder looking up a return address finds the call it is the end of,
+/// so the range is the call's own bytes and nothing around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Site {
+    /// Where the call begins.
+    pub start: usize,
+    /// How many bytes it is.
+    pub len: usize,
+    /// Where the pad begins.
+    pub pad: usize,
 }
 
 /// The variables a file defines, and what the linker has to be told about them.

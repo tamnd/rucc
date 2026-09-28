@@ -175,6 +175,13 @@ pub static HAND: &[(Opcode, &str)] = &[
         Opcode::LongjmpMarker,
         "`crate::lower`, as the four words read back, the frame put back and the jump",
     ),
+    // The pair that sends an unwind to a landing pad. The first is no instruction at all: the
+    // edge it names is written into the call site table rather than into the code, which is what
+    // makes the pad a place only the unwinder goes. The second is the copy out of the register the
+    // personality routine left the exception in, and it is here because only the pad's first
+    // instruction can be one and a rule cannot see where in its block an instruction is.
+    (Opcode::Unwound, "`crate::lower`, as a row of the call site table rather than an instruction"),
+    (Opcode::Landing, "`crate::lower`, as a copy of the exception out of the return register"),
     // No instruction at all. The IR keeps the width the same and the machine has one register
     // file for both, so the value is already where it needs to be.
     (Opcode::PtrToInt, "`crate::lower`, which renames the value rather than computing anything"),

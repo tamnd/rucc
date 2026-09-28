@@ -941,6 +941,13 @@ struct Lowering<'a> {
     /// is the first one after it once the block has been filled. See
     /// [`rucc_ir::Func::declare_value_from`].
     marks: HashMap<Block, Vec<Mark>>,
+    /// The frame slot each fixed size `alloca` was given, which a landing pad writes the address
+    /// of again rather than reading the register the rest of the function has it in. See
+    /// [`Self::pad`].
+    frame_slots: HashMap<Value, usize>,
+    /// The machine call each IR call with an unwind edge became, which [`Self::edges`] pairs with
+    /// the pad the edge went to. See [`rucc_ir::Opcode::Unwound`].
+    unwinding: HashMap<Inst, mir::Inst>,
 }
 
 /// What a `va_start` in a variadic function writes into the list it is given.
@@ -1070,6 +1077,8 @@ impl<'a> Lowering<'a> {
             applied: None,
             fired: Fired::new(),
             marks: HashMap::new(),
+            frame_slots: HashMap::new(),
+            unwinding: HashMap::new(),
         }
     }
 
@@ -1223,6 +1232,7 @@ impl<'a> Lowering<'a> {
             }
             self.settle(block, &arriving)?;
         }
+        let kept = self.pad(block)?;
 
         // What each instruction matched, and which instructions were folded into another. The
         // decision is made for the whole block before any of it is written, and it is made more
@@ -1260,6 +1270,12 @@ impl<'a> Lowering<'a> {
             match self.source[inst].opcode {
                 Opcode::Call | Opcode::CallIndirect => {
                     self.called(inst)?;
+                    continue;
+                }
+                // The exception a landing pad was entered with, which the unwinder left in the
+                // first return register. Built by name for the reason a named register is.
+                Opcode::Landing => {
+                    self.landing(inst)?;
                     continue;
                 }
                 // A call and the return behind it, which is what `crate::tail::mark` made it out
@@ -1517,6 +1533,9 @@ impl<'a> Lowering<'a> {
         // See [`Self::saves_place`].
         let last = self.at.expect("a block is being filled");
         self.edges(block, last)?;
+        for (value, reg) in kept {
+            self.regs[value.index()] = reg;
+        }
         // Now that the block is filled, the instruction after each place an assignment was is the
         // first one it holds its value at. One with nothing after it, which a block ending in the
         // assignment would be, stays unanswered.
@@ -1598,6 +1617,10 @@ impl<'a> Lowering<'a> {
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
+        if self.source.unwinds_to_pad(inst) {
+            let call = self.out.insts(block).last().expect("the call just built");
+            self.unwinding.insert(inst, call);
+        }
         let calls = &mut self.stack.calls;
         *calls = Some(calls.unwrap_or(0).max(made.outgoing));
         // An eighty bit value came back on the x87 stack, and the one thing that has to happen
@@ -1783,6 +1806,7 @@ impl<'a> Lowering<'a> {
         let made =
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, index));
+        self.frame_slots.insert(result, index);
         Ok(())
     }
 
@@ -5496,6 +5520,24 @@ impl<'a> Lowering<'a> {
             *self.out.succs_mut(out) = vec![mir::BlockCall::with(self.out_block(call.block), regs)];
             return Ok(());
         }
+        // A call's unwind edge, which is not an edge of the machine function at all. The branch was
+        // never written, so what the block has is the arm control takes when the call returns, and
+        // the pad is a block with nothing in front of it that the call site table is what reaches.
+        // See [`Self::pad`] for why that is a block the allocator can be handed.
+        if let Some(unwound) = self.unwind_edge(term) {
+            let arms: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
+            let next = arms[1];
+            let args: Vec<Value> = self.source[next.args].to_vec();
+            let regs =
+                args.into_iter().map(|value| self.reg_of(value)).collect::<Result<_, _>>()?;
+            *self.out.succs_mut(out) = vec![mir::BlockCall::with(self.out_block(next.block), regs)];
+            let call = self.source.prev_inst(unwound).and_then(|call| self.unwinding.get(&call));
+            if let Some(&call) = call {
+                let pad = self.out_block(arms[0].block);
+                self.out.landings.push((call, pad));
+            }
+            return Ok(());
+        }
         let leaves =
             matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch);
         let branch = if leaves { self.out.terminator(out) } else { None };
@@ -5527,6 +5569,105 @@ impl<'a> Lowering<'a> {
         }
         *self.out.succs_mut(out) = succs;
         Ok(())
+    }
+
+    /// The `unwound` a branch reads, when the branch is a call's unwind edge.
+    fn unwind_edge(&self, inst: Inst) -> Option<Inst> {
+        let data = &self.source[inst];
+        if data.opcode != Opcode::BrIf {
+            return None;
+        }
+        let &cond = self.source[data.args].first()?;
+        match self.source[cond].def {
+            Def::Result { inst, .. } if self.source[inst].opcode == Opcode::Unwound => Some(inst),
+            _ => None,
+        }
+    }
+
+    /// The exception a landing pad was entered with, as a copy out of the register the unwinder
+    /// left it in, which is the first register a value comes back in.
+    fn landing(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let held = *self.conv.int_returns.first().ok_or_else(|| self.unsupported(inst))?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let mov = self.selector.frame.moves(self.gpr).expect("a class the target says how to move");
+        let mov = self.named(mov.mov);
+        let into = self.new_reg(result);
+        self.out
+            .build(block, mov)
+            .at(span)
+            .operand(mir::Operand::write(into, self.gpr))
+            .operand(
+                mir::Operand::read(mir::Reg::physical(held), self.gpr)
+                    .with(Constraint::Fixed(held)),
+            )
+            .finish();
+        Ok(())
+    }
+
+    /// Makes a landing pad a block that reads nothing from the blocks around it, and says what to
+    /// put back once it has been filled.
+    ///
+    /// The pad has no machine block in front of it, because the edge into it is not one the machine
+    /// takes: control arrives from the unwinder, with the registers the frame rules at the call put
+    /// back. So nothing the allocator keeps in a register can reach it, and a value it reads from
+    /// elsewhere is made again inside it. What a pad reads is the address of each object a handler
+    /// is owed, which is a slot of the frame, the address of a name, or a constant, and each of
+    /// those can be written a second time from nothing. Anything else is refused.
+    ///
+    /// The registers the rest of the function knows those values by are put back afterwards,
+    /// which is what the answer is for: the pad's copies are its own.
+    fn pad(&mut self, block: Block) -> Result<Vec<(Value, Option<mir::Reg>)>, Unsupported> {
+        let mut kept = Vec::new();
+        let first = self.source.insts(block).next();
+        if !first.is_some_and(|inst| self.source[inst].opcode == Opcode::Landing) {
+            return Ok(kept);
+        }
+        let out = self.at.expect("a block is being filled");
+        let insts: Vec<Inst> = self.source.insts(block).collect();
+        for inst in insts {
+            let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
+            for value in args {
+                let Def::Result { inst: def, .. } = self.source[value].def else {
+                    return Err(self.unsupported(inst));
+                };
+                if self.source.block_of(def) == Some(block)
+                    || kept.iter().any(|&(done, _)| done == value)
+                {
+                    continue;
+                }
+                match self.source[def].opcode {
+                    Opcode::IConst => {}
+                    Opcode::Alloca => {
+                        let &index =
+                            self.frame_slots.get(&value).ok_or_else(|| self.unsupported(def))?;
+                        kept.push((value, self.regs[value.index()]));
+                        let reg = self.out.new_vreg(self.gpr);
+                        self.regs[value.index()] = Some(reg);
+                        let lea = self.named(self.selector.frame.lea);
+                        let sp = mir::Reg::physical(self.conv.stack_pointer);
+                        let sp = mir::Operand::read(sp, self.gpr);
+                        let span = self.source.span(def);
+                        let made = self
+                            .out
+                            .build(out, lea)
+                            .at(span)
+                            .def(reg, self.gpr)
+                            .mem(mir::Mem::at(sp))
+                            .finish();
+                        self.stack.addresses.push((made, index));
+                    }
+                    Opcode::GlobalAddr => {
+                        kept.push((value, self.regs[value.index()]));
+                        self.regs[value.index()] = None;
+                        self.address_of(def)?;
+                    }
+                    _ => return Err(self.unsupported(def)),
+                }
+            }
+        }
+        Ok(kept)
     }
 
     /// Whether an `asm goto` has instructions in its template, which is what it would jump with.
@@ -5899,6 +6040,10 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         match data.opcode {
             Opcode::IConst | Opcode::Jump | Opcode::Unreachable | Opcode::UnreachableHint => true,
+            // The question of whether a call unwound and the branch on its answer, neither of which
+            // is an instruction. See [`Self::edges`].
+            Opcode::Unwound => true,
+            Opcode::BrIf => self.unwind_edge(inst).is_some(),
             Opcode::Return => self.source[data.args].is_empty() && self.sret().is_none(),
             _ => false,
         }

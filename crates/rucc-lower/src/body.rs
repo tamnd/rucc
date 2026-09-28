@@ -40,7 +40,7 @@ use rucc_sema::{
     ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign, Stmt,
     StmtId, StorageDuration, Tast,
 };
-use rucc_target::{Pass, TargetInfo};
+use rucc_target::{Arch, ObjectFormat, Pass, TargetInfo, Triple};
 use rucc_types::{
     ArrayLen, Extent, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId,
     integer_info, pointee,
@@ -7790,22 +7790,76 @@ impl<'u> Body<'_, 'u> {
         self.call_into(callee, args, None, span)
     }
 
-    /// Turns down a call an exception could unwind out of while a scope owes a handler.
+    /// Turns down a call an exception could unwind out of while a scope owes a handler, on a
+    /// target this cannot give a landing pad.
     ///
     /// Under `-fexceptions` the handler is owed a call on the way out whichever way the scope is
-    /// left, and an unwind is the way nothing here has a landing pad for. Building the call anyway
-    /// would be a unit that compiles and then skips the handler exactly when a thread is cancelled
-    /// or a C++ exception passes through, so it is refused where it is written. A handler with no
-    /// call in its scope is left alone, because nothing can unwind out of a scope that calls
-    /// nothing.
+    /// left, and an unwind is left through the pad [`Self::landing_pad`] builds. That pad is read
+    /// by the unwinder through a language specific data area, which only the x86-64 ELF output
+    /// writes, so everywhere else building the call anyway would be a unit that compiles and then
+    /// skips the handler exactly when a thread is cancelled or a C++ exception passes through. It
+    /// is refused where it is written. A handler with no call in its scope is left alone, because
+    /// nothing can unwind out of a scope that calls nothing.
     fn unwinds_past_a_cleanup(&mut self, span: Span) {
-        if self.unit.exceptions && self.owes_anything() {
+        if self.unit.exceptions && self.owes_anything() && !self.has_landing_pads() {
             self.unsupported(
                 "a landing pad to run a cleanup handler when an exception unwinds through a call \
-                 in its scope under -fexceptions",
+                 in its scope under -fexceptions on this target",
                 span,
             );
         }
+    }
+
+    /// Whether the output for this target can say where an unwind lands, which is x86-64 ELF.
+    fn has_landing_pads(&self) -> bool {
+        let target = self.target();
+        target.object_format == ObjectFormat::Elf
+            && target.pointer_width == 64
+            && Triple::from_tuple(target.tuple).is_some_and(|triple| triple.arch == Arch::X86_64)
+    }
+
+    /// The edge an unwind takes out of the call just built, when a scope owes a handler.
+    ///
+    /// The call is followed by an `unwound`, which is the question of whether control came back
+    /// from it normally or was sent to the pad by the unwinder, and a branch on the answer. Nothing
+    /// is emitted for either: the code generator takes the branch's first arm out of the graph it
+    /// allocates registers over and writes it into the call site table instead, so what runs is
+    /// the call and the code after it as though the branch were not there. What the branch buys
+    /// is that every pass between here and there sees an edge from the call to the pad and keeps
+    /// the pad and what it reads alive, which no side table would.
+    ///
+    /// The pad is what gcc's is: the exception the unwinder left behind, the handlers every open
+    /// scope owes with the innermost scope first, and `_Unwind_Resume` to carry on unwinding. The
+    /// handlers are the ones owed now, so an object declared after this call is not among them,
+    /// which is right because an unwind through this call never saw it declared.
+    fn landing_pad(&mut self, span: Span) {
+        if !self.unit.exceptions || !self.owes_anything() || !self.has_landing_pads() {
+            return;
+        }
+        let unwound = self.build(span).value(InstData::new(Opcode::Unwound), Type::I1);
+        let pad = self.new_block();
+        let next = self.new_block();
+        self.br_if(unwound, pad, next, span);
+        self.seal_once(pad);
+        self.seal_once(next);
+
+        self.at = Some(pad);
+        let exception = self.build(span).value(InstData::new(Opcode::Landing), Type::PTR);
+        let owed: Vec<Vec<Cleanup>> = self.cleanups.clone();
+        for scope in owed.iter().rev() {
+            for entry in scope.iter().rev() {
+                if let Some(inst) = self.cleanup_call(*entry, span) {
+                    let block = self.block();
+                    self.func.append_inst(block, inst);
+                }
+            }
+        }
+        self.unit.personality();
+        let resume = self.unit.names.intern("_Unwind_Resume");
+        let sig = self.func.add_signature(Signature::new().with_params(&[Type::PTR]));
+        self.build(span).call_varargs(resume, sig, &[exception], &[]);
+        self.build(span).unreachable();
+        self.at = Some(next);
     }
 
     /// A call, direct when the callee is a function and indirect when it is a pointer.
@@ -7974,6 +8028,7 @@ impl<'u> Body<'_, 'u> {
                 )
             }
         };
+        self.landing_pad(span);
 
         match plan.ret.pass {
             Pass::Ignore => None,

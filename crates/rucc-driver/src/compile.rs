@@ -1007,6 +1007,15 @@ fn generate(
             // and it is one path to get right rather than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
             if aarch64 || rucc_asm::kept(&funcs, names, target) {
+                // The reader keeps the frame rows of a listing but not the personality routine or
+                // the call site tables, so a unit with a landing pad read back would unwind
+                // straight past its cleanups. Saying so beats a program that skips them.
+                if funcs.iter().any(|func| !func.landings.is_empty()) {
+                    return Err(vec![unsupported(
+                        "a cleanup that runs during an unwind, in a unit whose listing is read \
+                         back by the assembler",
+                    )]);
+                }
                 let print = if opts.debug_info { rucc_asm::print_marked } else { rucc_asm::print };
                 let listing =
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
@@ -1121,6 +1130,7 @@ fn placed(
             binding: rucc_object::Binding::Global,
             visibility: rucc_object::Visibility::Default,
             patch: None,
+            landings: Vec::new(),
         });
         lines.push(rows);
     }
@@ -4857,12 +4867,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!result.text().contains("call @__cyg_profile"), "off unless asked for");
     }
 
-    /// Under `-fexceptions` a `cleanup` handler is owed a call on an unwind as well, and nothing
-    /// here builds the landing pad that would make it. So a call inside a handler's scope is
-    /// turned down by name, a handler with no call in its scope is left alone, and without the
-    /// flag the same source compiles as it always did.
+    /// Under `-fexceptions` a `cleanup` handler is owed a call on an unwind as well. On x86-64 ELF
+    /// a call inside a handler's scope gets a landing pad that runs the handler and resumes the
+    /// unwind, a handler with no call in its scope needs none, and without the flag the same source
+    /// compiles as it always did. Everywhere else the call is turned down by name, since no pad is
+    /// built there.
     #[test]
-    fn a_call_an_unwind_would_leave_a_cleanup_behind_is_refused_under_exceptions() {
+    fn a_call_an_unwind_would_leave_a_cleanup_behind_gets_a_landing_pad_under_exceptions() {
         let source = concat!(
             "void done(int *p);\n",
             "void work(void);\n",
@@ -4874,8 +4885,36 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+        assert!(!result.text().contains("landing"), "{}", result.text());
 
         opts.exceptions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        assert_eq!(text.matches("= landing").count(), 1, "only the call in calls: {text}");
+        assert!(text.contains("_Unwind_Resume"), "{text}");
+
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains(".cfi_personality 0x9b,DW.ref.__gcc_personality_v0"), "{text}");
+        assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_calls"), "{text}");
+        assert!(text.contains(".gcc_except_table"), "{text}");
+        assert_eq!(text.matches(".cfi_lsda").count(), 1, "{text}");
+
+        opts.emit = EmitKind::Object;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let bytes = result.artifact.bytes();
+        let has = |what: &[u8]| bytes.windows(what.len()).any(|window| window == what);
+        assert!(has(b".gcc_except_table\0"), "the call site table has a section");
+        assert!(has(b"zPLR\0"), "a header naming the personality routine");
+        assert!(has(b"zR\0"), "and the plain one for the functions with no pad");
+        assert!(has(b"DW.ref.__gcc_personality_v0\0"), "the pointer the header reads through");
+
+        opts.emit = EmitKind::Ir;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let result = run(&opts, source);
         assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
         assert!(result.messages[0].contains("landing pad"), "{:?}", result.messages);
@@ -9688,6 +9727,7 @@ away:
             binding: rucc_object::Binding::Global,
             visibility: rucc_object::Visibility::Default,
             patch: None,
+            landings: Vec::new(),
         }
     }
 

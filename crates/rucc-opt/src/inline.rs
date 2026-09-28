@@ -148,6 +148,9 @@ pub enum InlineFailure {
     TooLarge,
     /// The call is inside more loops than a function called once may be inlined into.
     TooDeep,
+    /// The call has a landing pad, which covers the call and would cover none of the calls the
+    /// body makes once it was copied in.
+    Unwinds,
 }
 
 impl InlineFailure {
@@ -167,6 +170,7 @@ impl InlineFailure {
             Self::Alloca => "always_inline call not inlined: callee calls alloca",
             Self::TooLarge => "always_inline call not inlined: callee too large",
             Self::TooDeep => "always_inline call not inlined: call inside too many loops",
+            Self::Unwinds => "always_inline call not inlined: call has a landing pad",
         }
     }
 
@@ -186,6 +190,7 @@ impl InlineFailure {
             Self::Alloca => "inline call not inlined: callee calls alloca",
             Self::TooLarge => "inline call not inlined: callee too large",
             Self::TooDeep => "inline call not inlined: call inside too many loops",
+            Self::Unwinds => "inline call not inlined: call has a landing pad",
         }
     }
 
@@ -215,6 +220,7 @@ impl InlineFailure {
             Self::TooDeep => {
                 "call to a function called once not inlined: call inside too many loops"
             }
+            Self::Unwinds => "call to a function called once not inlined: call has a landing pad",
         }
     }
 }
@@ -481,6 +487,11 @@ fn check(
     convention: Convention,
     kind: Kind,
 ) -> Result<Plan, InlineFailure> {
+    // The pad is for an unwind out of this call, and the table that says so names the call
+    // by where it is. A copy of the body in its place is calls the table knows nothing about.
+    if func.unwinds_to_pad(call) {
+        return Err(InlineFailure::Unwinds);
+    }
     let entry = callee.entry().ok_or(InlineFailure::Mismatch)?;
     let params = &callee[entry].params;
     let args = &func[func[call].args];

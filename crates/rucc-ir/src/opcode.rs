@@ -697,6 +697,23 @@ pub enum Opcode {
     /// where control goes is not a block of this function. What follows it is written and never
     /// reached.
     LongjmpMarker,
+    /// Whether the call just before this in its block unwound rather than returned.
+    ///
+    /// No operands and one `i1`, and nothing but the condition of the `br_if` that ends the block
+    /// reads it. That branch is the edge an exception travels to the landing pad on, written as
+    /// an ordinary edge so that every pass that walks the graph sees the pad as reachable and
+    /// keeps what the pad reads alive, which is the whole reason the answer is a value and not
+    /// something the call says about itself. Nothing computes it: the code generator writes no
+    /// instruction for it or for the branch, and the call is given the pad in the table the
+    /// unwinder reads instead. So it has to stay where it is, straight after its call, and one
+    /// with no call in front of it, which is a call something folded away, answers false.
+    Unwound,
+    /// The exception an unwind arrived at a landing pad with, which is the first thing in the
+    /// block a `br_if` on [`Opcode::Unwound`] sends it to.
+    ///
+    /// No operands and one pointer, which is what the unwinder left in the first return register
+    /// and what `_Unwind_Resume` is handed at the end of the pad to carry on unwinding.
+    Landing,
     /// A target-specific intrinsic, named rather than enumerated, for the vector builtins.
     TargetIntrinsic,
 
@@ -844,6 +861,8 @@ impl Opcode {
             Self::StackRestore => "stackrestore",
             Self::SetjmpMarker => "setjmp_marker",
             Self::LongjmpMarker => "longjmp_marker",
+            Self::Unwound => "unwound",
+            Self::Landing => "landing",
             Self::TargetIntrinsic => "target_intrinsic",
             Self::InlineAsm => "inline_asm",
         }
@@ -1014,6 +1033,10 @@ impl Opcode {
                 // The stack pointer, which is a register and not memory. Putting it back is a
                 // different matter and is below, because it takes storage away.
                 | Self::StackSave
+                // Two questions about how control arrived, which read the unwinder's answer
+                // rather than anything in memory.
+                | Self::Unwound
+                | Self::Landing
                 // Control, which goes somewhere rather than touching anything. A tail call is
                 // not here, because it is a call.
                 | Self::Jump
@@ -1564,6 +1587,8 @@ static ALL: &[Opcode] = &[
     Opcode::StackRestore,
     Opcode::SetjmpMarker,
     Opcode::LongjmpMarker,
+    Opcode::Unwound,
+    Opcode::Landing,
     Opcode::TargetIntrinsic,
     Opcode::InlineAsm,
 ];
