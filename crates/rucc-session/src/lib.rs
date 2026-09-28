@@ -98,6 +98,15 @@ impl OptLevel {
     pub const fn sibling_calls(self) -> bool {
         !matches!(self, OptLevel::O0 | OptLevel::O1)
     }
+
+    /// Whether every function keeps a frame pointer when the command line did not say.
+    ///
+    /// Only at `-O0`, which is where gcc keeps one. Code built without optimization is code
+    /// somebody is going to step through, and an asm statement written for that build may walk
+    /// the frame through `%rbp` itself, the way chibicc's own test of asm returns early.
+    pub const fn frame_pointer(self) -> bool {
+        matches!(self, OptLevel::O0)
+    }
 }
 
 impl fmt::Display for OptLevel {
@@ -1863,12 +1872,15 @@ pub struct Options {
     /// answer to whether `-pg` asked for a call to a profiler on the way into every function, and
     /// the two are different questions about the same word.
     pub profile_data: Profile,
-    /// Whether every function keeps a frame pointer, from `-fno-omit-frame-pointer`.
+    /// Whether every function keeps a frame pointer, from `-fno-omit-frame-pointer` and
+    /// `-fomit-frame-pointer`.
     ///
-    /// Off by default, which is what gcc does at every level above `-O0` and what leaves the
-    /// register free for the allocator. A profiler that walks the stack by following saved frame
-    /// pointers needs it on, and so does any code a debugger has to unwind without unwind tables.
-    pub frame_pointer: bool,
+    /// `None` is a command line that said neither, and then the level decides: kept at `-O0` and
+    /// left out above it, which is what gcc does and what leaves the register free for the
+    /// allocator once there is an allocator worth leaving it to. A profiler that walks the stack
+    /// by following saved frame pointers needs it on, and so does any code a debugger has to
+    /// unwind without unwind tables. Read it through `keeps_frame_pointer`.
+    pub frame_pointer: Option<bool>,
     /// Whether the red zone may be used, from `-mno-red-zone` turned around.
     ///
     /// The 128 bytes below the stack pointer that the System V psABI promises no signal handler
@@ -2344,7 +2356,7 @@ impl Options {
             compress: Compress::None,
             lto: Lto::default(),
             profile_data: Profile::default(),
-            frame_pointer: false,
+            frame_pointer: None,
             red_zone: true,
             reorder_blocks: None,
             schedule_insns: None,
@@ -2426,6 +2438,16 @@ impl Options {
     #[must_use]
     pub const fn unwinds(&self) -> bool {
         self.async_unwind_tables || self.unwind_tables
+    }
+
+    /// Whether every function keeps a frame pointer: what the command line said, or what the
+    /// level says when it said nothing.
+    #[must_use]
+    pub const fn keeps_frame_pointer(&self) -> bool {
+        match self.frame_pointer {
+            Some(kept) => kept,
+            None => self.opt_level.frame_pointer(),
+        }
     }
 }
 

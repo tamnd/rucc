@@ -832,7 +832,7 @@ fn generate(
         ))]);
     }
     let flags = pipeline::Flags {
-        frame_pointer: opts.frame_pointer,
+        frame_pointer: opts.keeps_frame_pointer(),
         red_zone: opts.red_zone,
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
@@ -1709,6 +1709,9 @@ mod tests {
     fn options() -> Options {
         let mut opts = Options::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
         opts.emit = EmitKind::Tast;
+        // The tests here read the code a function turns into, and a frame pointer in every one
+        // of them is noise that says nothing about what each test is about.
+        opts.frame_pointer = Some(false);
         opts
     }
 
@@ -3614,11 +3617,16 @@ decl #0 x : int object external static defined
     #[test]
     fn the_frame_flags_on_the_command_line_reach_the_generated_frame() {
         let source = "int f(int a) { return a; }\n";
-        assert!(!mir(source).contains("$rbp"), "a leaf needs no frame pointer by default");
+        assert!(!mir(source).contains("$rbp"), "a leaf needs no frame pointer when told so");
 
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        opts.frame_pointer = true;
+        opts.frame_pointer = Some(true);
+        let kept = run(&opts, source).text().to_owned();
+        assert!(kept.contains("x64.push_64 $rbp"), "{kept}");
+
+        // Nothing said at -O0 is a frame pointer, which is what gcc keeps there.
+        opts.frame_pointer = None;
         let kept = run(&opts, source).text().to_owned();
         assert!(kept.contains("x64.push_64 $rbp"), "{kept}");
     }

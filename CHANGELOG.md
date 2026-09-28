@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- Every function keeps a frame pointer at `-O0` unless `-fomit-frame-pointer` says otherwise, as gcc 16 does. An `asm` statement written for that build can walk the frame through `%rbp` itself, and chibicc's `test/asm.c`, which returns early that way, passes now.
 - `cargo xtask version` checks that the committed Cargo.lock has every dependency between workspace members, not only their versions, so a lockfile that `--locked` would refuse fails the gate rather than the release.
 
 ### Fixed

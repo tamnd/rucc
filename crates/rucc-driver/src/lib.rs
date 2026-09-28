@@ -683,8 +683,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-gnu89-inline" => opts.gnu89_inline = false,
             // Both directions of each, because a build system that wants one of these usually
             // writes it beside the flag that turns it back off for one directory.
-            "-fno-omit-frame-pointer" => opts.frame_pointer = true,
-            "-fomit-frame-pointer" => opts.frame_pointer = false,
+            "-fno-omit-frame-pointer" => opts.frame_pointer = Some(true),
+            "-fomit-frame-pointer" => opts.frame_pointer = Some(false),
             // Both directions again, for the same reason, and a third answer for a command line
             // that wrote neither: see `reorder_blocks` in `rucc_session`.
             "-freorder-blocks" => opts.reorder_blocks = Some(true),
@@ -2517,7 +2517,7 @@ pub fn print_config(opts: &Options) -> String {
     let _ = writeln!(out, "safety: {}", sess.opts.safety);
     let _ = writeln!(out, "emit: {}", sess.opts.emit.as_str());
     let _ = writeln!(out, "debug-info: {}", sess.opts.debug_info);
-    let _ = writeln!(out, "frame-pointer: {}", sess.opts.frame_pointer);
+    let _ = writeln!(out, "frame-pointer: {}", sess.opts.keeps_frame_pointer());
     let _ = writeln!(out, "red-zone: {}", sess.opts.red_zone);
     let _ = writeln!(out, "stack-protector: {}", sess.opts.protector);
     let _ = writeln!(out, "stack-clash-protection: {}", sess.opts.stack_clash);
@@ -5159,11 +5159,14 @@ mod tests {
     #[test]
     fn the_two_frame_flags_are_read_in_both_directions() {
         let (opts, _) = compile(&["-c", "a.c"]);
-        assert!(!opts.frame_pointer, "gcc omits it above -O0 and so does this");
+        assert_eq!(opts.frame_pointer, None, "nothing said, so the level decides");
+        assert!(opts.keeps_frame_pointer(), "and at -O0 gcc keeps one, so this does too");
+        let (opts, _) = compile(&["-c", "-O1", "a.c"]);
+        assert!(!opts.keeps_frame_pointer(), "gcc omits it above -O0 and so does this");
         assert!(opts.red_zone, "the psABI has one and nothing said not to use it");
 
         let (opts, _) = compile(&["-c", "-fno-omit-frame-pointer", "-mno-red-zone", "a.c"]);
-        assert!(opts.frame_pointer);
+        assert_eq!(opts.frame_pointer, Some(true));
         assert!(!opts.red_zone);
 
         let (opts, _) = compile(&[
@@ -5174,7 +5177,8 @@ mod tests {
             "-mred-zone",
             "a.c",
         ]);
-        assert!(!opts.frame_pointer, "the last one wins, as it does in gcc");
+        assert_eq!(opts.frame_pointer, Some(false), "the last one wins, as it does in gcc");
+        assert!(!opts.keeps_frame_pointer(), "and it wins over the level too");
         assert!(opts.red_zone);
     }
 
