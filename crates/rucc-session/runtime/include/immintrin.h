@@ -30,6 +30,8 @@
  * holds so far is the CRC32C steps and, through `<popcntintrin.h>`, the population counts, each
  * of which is an instruction outside the baseline and each of which that header puts behind the
  * macro `-msse4.2`, `-mcrc32` or `-mpopcnt` defines. See `tamnd/rucc#2003`.
+ *
+ * `<xsaveintrin.h>` is reached the same way and for the same reason, and holds `_xgetbv`.
  */
 
 #ifndef __RUCC_IMMINTRIN_H
@@ -50,5 +52,7 @@
 /* Unguarded, because the names inside it are each behind the macro for their own instruction and
  * a program built without them gets exactly the names gcc would let it call. */
 #include <smmintrin.h>
+
+#include <xsaveintrin.h>
 
 #endif /* __RUCC_IMMINTRIN_H */

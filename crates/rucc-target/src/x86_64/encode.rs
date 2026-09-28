@@ -1670,6 +1670,11 @@ static ENCODINGS: &[Encoding] = &[
     // are none in the text: every register it touches is named by the instruction rather than by
     // anything written beside it, so there is no addressing byte and nothing to put in one.
     bytes("cpuid", &NO_ARGS, Long, &[0x0F, 0xA2], NO_MODRM, NO_IMM),
+    // Which parts of the register state the operating system saves on a switch, read from the
+    // control register `%ecx` names into `%edx:%eax`. A program asks before it uses AVX or AVX-512,
+    // since a processor that has the registers is no use when the kernel does not keep them. The
+    // three bytes are one opcode with the addressing byte fixed, which is why there is no pair.
+    bytes("xgetbv", &NO_ARGS, Long, &[0x0F, 0x01, 0xD0], NO_MODRM, NO_IMM),
     // The other string instructions and the move again with a repeat prefix, whose operands are
     // registers the opcode names for itself. A repeat
     // prefix is one of the mandatory prefixes as far as the table is concerned, since it has to
