@@ -6913,6 +6913,46 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!plain.contains("alloca"), "nothing in the plain one needs a slot: {text}");
     }
 
+    /// A value set before a library `sigsetjmp` and read after the `siglongjmp` keeps a spill slot
+    /// of its own.
+    ///
+    /// The shape of Postgres's `PG_TRY`. Five values are live across the call, one more than the
+    /// callee saved registers left over, so some go to the stack. They are dead on the arm that
+    /// runs first, and before this that arm's own values were given the same slots, so the arm the
+    /// jump lands in read them back. Every slot is written by one value, so no offset is stored to
+    /// twice.
+    #[test]
+    fn a_value_live_across_sigsetjmp_keeps_its_spill_slot() {
+        let text = asm(concat!(
+            "typedef long sigjmp_buf[25];\n",
+            "int __sigsetjmp(sigjmp_buf, int);\n",
+            "int id(int);\n",
+            "void thrower(int);\n",
+            "int work(int n) {\n",
+            "  int v0 = id(n), v1 = id(n + 1), v2 = id(n + 2), v3 = id(n + 3), v4 = id(n + 4);\n",
+            "  sigjmp_buf b;\n",
+            "  if (__sigsetjmp(b, 0) == 0) {\n",
+            "    int w0 = id(v0 + v1), w1 = id(v1 + v2), w2 = id(v2 + v3);\n",
+            "    int w3 = id(v3 + v4), w4 = id(v4 + v0);\n",
+            "    thrower(n);\n",
+            "    return w0 ^ w1 ^ w2 ^ w3 ^ w4;\n",
+            "  }\n",
+            "  return v0 + v1 + v2 + v3 + v4;\n",
+            "}\n",
+        ));
+        let mut stored = Vec::new();
+        for line in text.lines().map(str::trim) {
+            let Some(operands) = line.strip_prefix("movq\t%") else { continue };
+            if let Some((_, place)) = operands.split_once(", ") {
+                if place.ends_with("(%rsp)") {
+                    assert!(!stored.contains(&place), "{place} is written twice:\n{text}");
+                    stored.push(place);
+                }
+            }
+        }
+        assert!(!stored.is_empty(), "something should have been spilled:\n{text}");
+    }
+
     /// What the save writes and where it leaves control, which is a new block.
     ///
     /// Four words: the frame pointer, the address to come back to, the stack pointer, and the

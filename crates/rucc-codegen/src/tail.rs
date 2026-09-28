@@ -83,6 +83,28 @@ pub fn refusal(func: &Func, names: &Interner) -> Option<&'static str> {
     None
 }
 
+/// Whether control can come back into this function a second time from one call, through a
+/// `__builtin_setjmp` or a call to one of [`TWICE`].
+///
+/// The frame of such a function is laid out with nothing sharing anything. A value computed before
+/// the `setjmp` and read after the `longjmp` is live across the call on the arm that reads it, and
+/// dead on the arm that ran first, so liveness lets that arm reuse its spill slot. Registers are
+/// safe, since the jump puts back the callee saved registers the `setjmp` wrote down, but a spill
+/// slot is only memory and comes back holding whatever the first arm left in it. 7.13.2.1p3 only
+/// lets a local that changed after the `setjmp` come back indeterminate, and this one did not.
+/// Postgres's `PG_TRY` is `sigsetjmp` with exactly this shape, and gcc answers the same way by
+/// giving nothing live across such a call a slot it shares.
+#[must_use]
+pub fn comes_back(func: &Func, names: &Interner) -> bool {
+    func.blocks().any(|block| {
+        func.insts(block).any(|inst| match func[inst].opcode {
+            Opcode::SetjmpMarker => true,
+            Opcode::Call => twice(func, inst, names),
+            _ => false,
+        })
+    })
+}
+
 /// Whether that call is to one of [`TWICE`].
 fn twice(func: &Func, inst: Inst, names: &Interner) -> bool {
     let Extra::Call(info) = func[inst].extra else { return false };
@@ -203,7 +225,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Flags, Func, InstData, Opcode, Signature, Type, Value};
 
-    use super::{mark, refusal};
+    use super::{comes_back, mark, refusal};
 
     /// `int f(int a) { return g(a); }`, and whatever `between` puts in front of the return.
     fn caller(
@@ -273,5 +295,19 @@ mod tests {
             Some("the function calls something that comes back twice")
         );
         assert_eq!(mark(&mut func, &names), 0);
+    }
+
+    #[test]
+    fn glibcs_name_for_sigsetjmp_comes_back_and_an_ordinary_call_does_not() {
+        let mut names = Interner::new();
+        let setjmp = names.intern("__sigsetjmp");
+        let func = caller(&mut names, |func, block, got| {
+            let sig = func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+            Builder::new(func, block).call(setjmp, sig, &[]);
+            got
+        });
+        assert!(comes_back(&func, &names));
+        let plain = caller(&mut names, |_, _, got| got);
+        assert!(!comes_back(&plain, &names));
     }
 }

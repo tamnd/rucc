@@ -27,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - On Darwin arm64 a `char`, `short` or `bool` argument is extended to 32 bits by the caller and a return value of those types by the callee, as Apple's ABI requires. clang's code relies on this, so a clang caller used to read `256` back from a rucc function returning `(unsigned char)255`, and a clang callee saw `(char)200` as a positive number.
+- A local set before a library `sigsetjmp` or `setjmp` and read after the `longjmp` keeps its value. In a function with more such values than callee saved registers, one that was spilled could have its slot handed to a value of the arm that ran first, so the arm the jump landed in read that value instead. It happened at every level, `-O0` included, and it is the shape of Postgres's `PG_TRY`. A function that calls something that returns twice now gives every local and spill slot its own bytes, as gcc does (#2018).
 - The `-S` output for a Darwin target assembles with Apple's assembler. A weak definition is `.globl` and `.weak_definition`, a weak reference is `.weak_reference`, and `.comm` gives its alignment as a power of two, where they were written the gas way and Apple's `as` either refused them or asked for the wrong boundary.
 
 ## 0.11.15
