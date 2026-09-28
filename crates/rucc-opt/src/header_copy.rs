@@ -192,6 +192,10 @@ struct Job {
     /// The values the header defines and the rest of the loop reads, which need a merge at
     /// [`Job::body`] once there are two ways to get there.
     carried: Vec<Value>,
+    /// Every block in the loop, which is everywhere [`merge`] has to look. [`carried`] has already
+    /// refused a loop whose values are read anywhere else, and every edge into the body comes from
+    /// inside the loop, so the rest of the function has nothing to rewrite.
+    blocks: Vec<Block>,
 }
 
 /// One loop the cheap checks accepted, waiting on the walk that says what it carries.
@@ -246,7 +250,11 @@ impl HeaderCopy {
             }
         }
         let jobs = carried(func, dom, loops, wanted, stats, say);
-        independent(loops, jobs)
+        let mut jobs = independent(loops, jobs);
+        for job in &mut jobs {
+            job.blocks = loops.blocks(job.id).to_vec();
+        }
+        jobs
     }
 
     /// Whether this loop can have its header copied, and why not when it cannot.
@@ -384,6 +392,7 @@ fn carried(
             entry: candidate.entry,
             body: candidate.body,
             carried,
+            blocks: Vec::new(),
         });
     }
     jobs
@@ -564,9 +573,13 @@ fn clone_branch(func: &mut Func, into: Block, term: Inst, map: &HashMap<Value, V
 /// what the copy worked out, which is the value on the first. Anything else is a block inside the
 /// loop, and what is current there is the parameter itself, which is available because the body
 /// dominates the whole loop the moment the copy is the only way in.
+///
+/// Only the loop and the copy are walked. This used to be two walks of the whole function for
+/// every value carried, and a function with thousands of loops paid for that thousands of times
+/// over: jtckdint's main spent a fifth of its `-O2` build in this pass.
 fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) {
     let param = func.append_param(job.body, func[value].ty);
-    for block in func.blocks().collect::<Vec<_>>() {
+    for &block in job.blocks.iter().chain([&copy]) {
         let Some(term) = func.terminator(block) else { continue };
         let carry = if block == job.header {
             value
@@ -602,8 +615,8 @@ fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) 
     // Everything the header used to reach reads the parameter now. The header itself does not:
     // what it hands the body is still its own definition, and that is the edge the parameter was
     // put there to distinguish.
-    for block in func.blocks().collect::<Vec<_>>() {
-        if block == job.header || block == copy {
+    for &block in &job.blocks {
+        if block == job.header {
             continue;
         }
         for inst in func.insts(block).collect::<Vec<_>>() {
