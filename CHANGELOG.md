@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `tests/exec/windows` gains `wide.c`, a `wmain` program built with `-municode` that checks a character outside the basic plane is two UTF-16 units, and `environ.c`, which reads `environ` and `_timezone` from the C runtime DLL with no `dllimport` in the source. A program there can name its own compile flags on a `/* flags: */` line (#2068).
 - `__attribute__((destructor))` works on COFF targets. rucc writes a small constructor at the destructor's priority that hands the function to `atexit`, so destructors run after `main` in the reverse of their priority order, the same as MinGW GCC. `tests/exec/windows/ctor.c` checks the order against GCC's output (#2068).
+- `_Thread_local` and `__thread` variables work on x86-64 Windows. They go in `.tls$`, and an access reads `_tls_index`, finds this image's block through `%gs:88`, and adds the variable's `SECREL32` offset, which is the sequence GCC writes. The COFF writer gains the `IMAGE_REL_AMD64_SECREL` relocation for it. arm64 Windows still refuses a thread-local variable. `tests/exec/windows/tls.c` runs four threads against GCC's output (#2068).
 
 ## 0.12.2
 
