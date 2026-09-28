@@ -266,8 +266,8 @@ options:
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
-  -fwrapv, -fwrapv-pointer, -fno-strict-overflow   signed or pointer overflow wraps
-  -ftrapv                signed overflow stops the program instead
+  -fwrapv, -fwrapv-pointer, -fno-strict-overflow, -ftrapv   overflow wraps, or stops the program
+  -f[no-]exceptions, -f[no-]non-call-exceptions   let an exception unwind through the code
   -f[no-]signed-char, -f[no-]unsigned-char, -f[no-]short-enums   change the ABI
   -ffp-contract=<how>    fuse a multiply and an addition: fast, on or off
   -f[no-]fast-math and each of its members, -f[no-]rounding-math, -fexcess-precision=<how>
@@ -451,6 +451,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-mdaz-ftz` and `-mno-daz-ftz`, which decide the startup file directly and outrank the
     // family on that one question.
     let mut daz_ftz: Option<bool> = None;
+    // What `-fexceptions` and `-fno-exceptions` last said, if either was written. It is kept apart
+    // from the field because `-fnon-call-exceptions` turns exceptions on only when neither was,
+    // which is gcc's rule and is why `-fno-exceptions -fnon-call-exceptions` defines no
+    // `__EXCEPTIONS` whichever order the two come in.
+    let mut exceptions: Option<bool> = None;
     // `-x` applies to inputs that come after it and stays in effect until the next one, which
     // is why it is tracked across the loop rather than attached to a single argument.
     let mut forced: Option<InputKind> = None;
@@ -785,13 +790,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // so far is for quoted includes only, and that a quoted include stops looking next
             // to the file that wrote it.
             "-I-" => opts.search.split_quote_chain(),
-            "-x" => {
-                let lang = args.get(i).ok_or_else(|| err("-x requires an argument"))?;
-                i += 1;
+            // `-x c` and `-xc`, both of which gcc takes. busybox and toybox probe the compiler
+            // with the joined one.
+            _ if arg.starts_with("-x") => {
+                let lang = joined_or_next(arg, 2, args, &mut i)?;
                 forced = if lang == "none" {
                     None
                 } else {
-                    Some(InputKind::from_x_arg(lang).map_err(|e| err(format!("{e}")))?)
+                    Some(InputKind::from_x_arg(&lang).map_err(|e| err(format!("{e}")))?)
                 };
             }
             // Not a GCC flag. spec/03-architecture.md section 3.5 compiles several
@@ -1733,19 +1739,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     )));
                 }
             }
-            // The one that came in on the same `dg-options` lines as `-ffast-math` and is the other
-            // half of section 4.1's rule, because it changes what the program does and not how
-            // fast it does it. The negative form is what this compiler does anyway, so it is taken
-            // and dropped, which is the shape `-fnested-functions` has above.
-            "-fnon-call-exceptions" => {
-                return Err(err(
-                    "-fnon-call-exceptions is a promise that an instruction which is not a call \
-                     can raise an exception the unwinder finds a handler for, and nothing here \
-                     produces a landing pad for a trapping instruction. A program built without it \
-                     would unwind past the handler it wrote",
-                ));
-            }
-            "-fno-non-call-exceptions" => {}
+            // What C has of exceptions, which is a `cleanup` handler an unwind has to run and the
+            // `__EXCEPTIONS` that tells a header so. The walk is what turns down the handler it has
+            // no landing pad for, so a unit with none of them is taken whole.
+            "-fexceptions" => exceptions = Some(true),
+            "-fno-exceptions" => exceptions = Some(false),
+            "-fnon-call-exceptions" => opts.non_call_exceptions = true,
+            "-fno-non-call-exceptions" => opts.non_call_exceptions = false,
+            // Whether an instruction that could raise one may still be deleted when nothing uses
+            // what it computes. Nothing here keeps a dead one, and neither does gcc in a C unit
+            // with no handler around it, so both spellings describe the code as it is.
+            "-fdelete-dead-exceptions" | "-fno-delete-dead-exceptions" => {}
             "-finstrument-functions" => opts.instrument_functions = true,
             "-fno-instrument-functions" => opts.instrument_functions = false,
             // The unstable options, spelled the way rustc spells them and carrying the same
@@ -2003,6 +2007,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         || last("-ffast-math", "-fno-fast-math")
         || last("-funsafe-math-optimizations", "-fno-unsafe-math-optimizations");
     link.daz_ftz = daz_ftz;
+    opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -3574,6 +3579,14 @@ mod tests {
     }
 
     #[test]
+    fn dash_x_can_be_joined_to_its_language() {
+        let (_, plan) = compile(&["a.o", "-xc", "b.txt", "-xnone", "c.o"]);
+        assert_eq!(plan.jobs[0].kind, InputKind::LinkerInput);
+        assert_eq!(plan.jobs[1].kind, InputKind::C);
+        assert_eq!(plan.jobs[2].kind, InputKind::LinkerInput);
+    }
+
+    #[test]
     fn dash_j_reaches_the_scheduler_and_defaults_to_the_machine() {
         let (_, _, jobs) = match parse_args(&args(&["-j4", "a.c"])).unwrap() {
             Action::Compile { opts, plan, jobs, .. } => (opts, plan, jobs),
@@ -4119,16 +4132,29 @@ mod tests {
         assert!(e.message.contains("UTF-8"), "what is read is worth saying: {}", e.message);
     }
 
-    /// The other half of the same rule. This one changes what the program does rather than how
-    /// fast it does it, so it is refused with the reason, and its negative is what happens anyway
-    /// and is taken.
+    /// `-fnon-call-exceptions` turns exceptions on unless `-fexceptions` or `-fno-exceptions` was
+    /// written, and the one written wins whichever side of it it is on, which is gcc 16's reading.
     #[test]
-    fn the_one_that_changes_the_answer_is_refused_and_its_negative_is_taken() {
-        let e = parse_args(&args(&["-c", "-fnon-call-exceptions", "a.c"])).unwrap_err();
-        assert!(e.message.contains("landing pad"), "{}", e.message);
-        assert!(!e.message.contains("unknown option"), "it deserves a reason");
-
-        let (opts, _) = compile(&["-c", "-fno-non-call-exceptions", "a.c"]);
+    fn exceptions_are_on_when_asked_for_and_non_call_ones_ask_unless_told_not_to() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.exceptions && !opts.non_call_exceptions, "gcc's default for C is off");
+        let (opts, _) = compile(&["-c", "-fexceptions", "a.c"]);
+        assert!(opts.exceptions && !opts.non_call_exceptions);
+        let (opts, _) = compile(&["-c", "-fexceptions", "-fno-exceptions", "a.c"]);
+        assert!(!opts.exceptions);
+        let (opts, _) = compile(&["-c", "-fnon-call-exceptions", "a.c"]);
+        assert!(opts.exceptions && opts.non_call_exceptions);
+        for line in [
+            ["-fno-exceptions", "-fnon-call-exceptions"],
+            ["-fnon-call-exceptions", "-fno-exceptions"],
+        ] {
+            let (opts, _) = compile(&["-c", line[0], line[1], "a.c"]);
+            assert!(!opts.exceptions && opts.non_call_exceptions, "{line:?}");
+        }
+        let (opts, _) =
+            compile(&["-c", "-fnon-call-exceptions", "-fno-non-call-exceptions", "a.c"]);
+        assert!(!opts.exceptions && !opts.non_call_exceptions);
+        let (opts, _) = compile(&["-c", "-fno-delete-dead-exceptions", "a.c"]);
         assert_eq!(opts.emit, EmitKind::Object);
     }
 

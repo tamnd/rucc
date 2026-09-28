@@ -1318,10 +1318,12 @@ impl Preprocessor {
             );
             return;
         };
-        // The standard reserves these and GCC refuses to let them go, because code that
-        // undefines `__FILE__` and then uses it is broken in a way that is very hard to see.
+        // `defined` is the one name gcc refuses. A predefined name such as `__STDC_VERSION__` or
+        // `__FILE__` gets a warning there and goes all the same, and a name that only looks like
+        // one of them is an ordinary macro: gnulib's config.h undefines `__STDC_WANT_LIB_EXT1__`,
+        // which Annex K leaves to the program to define.
         let text = interner.resolve(name);
-        if text == "defined" || text.starts_with("__STDC_") {
+        if text == "defined" {
             self.diagnostics.push(
                 Diagnostic::error(format!("`{text}` cannot be undefined"), rest[0].span)
                     .with_code("E0337"),
@@ -2312,6 +2314,15 @@ mod tests {
         let mut run = Run::new();
         run.go("#undef defined\n");
         assert_eq!(run.messages(), vec!["`defined` cannot be undefined".to_owned()]);
+    }
+
+    #[test]
+    fn a_name_that_only_looks_reserved_can_be_undefined() {
+        let mut run = Run::new();
+        let src = "#define __STDC_WANT_LIB_EXT1__ 0\n#undef __STDC_WANT_LIB_EXT1__\n\
+                   #ifndef __STDC_WANT_LIB_EXT1__\ngone\n#endif\n";
+        assert_eq!(run.go(src), "gone");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
     }
 
     #[test]

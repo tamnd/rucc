@@ -131,6 +131,8 @@ pub struct Predef {
     /// The rest of the `-ffast-math` family. Each licence has a macro of its own and the family
     /// together decides `__FAST_MATH__` and whether the arithmetic is still IEC 60559's.
     pub math: Math,
+    /// Whether an exception may unwind through this unit, from `-fexceptions`.
+    pub exceptions: bool,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines.
@@ -152,6 +154,7 @@ impl Predef {
             glibc_minor: None,
             trapping_math: true,
             math: Math::default(),
+            exceptions: false,
             defines: Vec::new(),
             undefines: Vec::new(),
         }
@@ -177,6 +180,7 @@ impl Predef {
             glibc_minor: opts.glibc_minor,
             trapping_math: opts.trapping_math,
             math: opts.math,
+            exceptions: opts.exceptions,
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
         }
@@ -339,6 +343,10 @@ fn dialect(d: &mut Defs, opts: &Predef) {
     d.flag_if(!opts.gnu_extensions, "__STRICT_ANSI__");
     d.flag("__STDC_UTF_16__");
     d.flag("__STDC_UTF_32__");
+    // What glibc's `<pthread.h>` reads to spell `pthread_cleanup_push` with a `cleanup` attribute
+    // rather than with `setjmp`, and gcc defines it in C for `-fexceptions` and for
+    // `-fnon-call-exceptions` alone.
+    d.flag_if(opts.exceptions, "__EXCEPTIONS");
     // Only while the arithmetic is IEC 60559's, which a fast math licence ends. glibc's
     // `<stdc-predef.h>` writes the same four from `__GCC_IEC_559` and writes none of them when that
     // is zero, so saying them here under `-ffast-math` would be the redefinition described below
@@ -1630,6 +1638,16 @@ mod tests {
             assert!(!plain.contains(&format!("#define {name} ")), "{name}");
         }
         assert!(has(&plain, "#define __STDC_IEC_559__ 1"));
+    }
+
+    /// `__EXCEPTIONS` is the one macro `-fexceptions` adds in C, and it is not there without it.
+    #[test]
+    fn exceptions_are_announced_to_the_headers_that_ask() {
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().expect("a triple"));
+        let mut opts = Predef::new();
+        assert!(!built_in(&target, &opts).contains("__EXCEPTIONS"));
+        opts.exceptions = true;
+        assert!(has(&built_in(&target, &opts), "#define __EXCEPTIONS 1"));
     }
 
     /// The set gcc defines that headers read and that are true here. Written out one line at a

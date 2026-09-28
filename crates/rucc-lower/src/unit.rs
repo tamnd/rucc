@@ -179,6 +179,13 @@ pub struct Context<'a> {
     /// that is inlined takes its two calls with it and they still name the function they were
     /// written for. A pass over the IR would see the body only after that had happened to it.
     pub instrument: bool,
+    /// Whether an exception may unwind through what the walk builds, which is `-fexceptions`.
+    ///
+    /// What it asks of C is that a `cleanup` handler run when an unwind passes through its scope,
+    /// and that takes a landing pad and a table the personality routine reads, neither of which is
+    /// built yet. So what it does here is turn down the one shape the missing pad would change the
+    /// meaning of, a call made while a handler is owed, rather than build it without the pad.
+    pub exceptions: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -202,6 +209,7 @@ impl fmt::Debug for Context<'_> {
             .field("contract", &self.contract)
             .field("align", &self.align)
             .field("instrument", &self.instrument)
+            .field("exceptions", &self.exceptions)
             .finish_non_exhaustive()
     }
 }
@@ -267,6 +275,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         contract,
         align,
         instrument,
+        exceptions,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -286,6 +295,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         contract,
         align,
         instrument,
+        exceptions,
         read,
         module,
         diagnostics: Vec::new(),
@@ -333,6 +343,8 @@ pub(crate) struct Unit<'a> {
     align: Option<u32>,
     /// Whether the profiling hooks are called. See [`Context::instrument`].
     pub(crate) instrument: bool,
+    /// Whether an exception may unwind through the unit. See [`Context::exceptions`].
+    pub(crate) exceptions: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,

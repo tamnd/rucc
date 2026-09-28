@@ -6,12 +6,21 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- An `asm` statement over `long double` operands in `t` and `u` is compiled on x86-64, with the inputs pushed onto the x87 stack before the template and the outputs popped into their slots after it. One that leaves an input on the stack is refused. The assembler knows the operand-less x87 instructions such a template names, like `fpatan`, `fsqrt`, `fyl2x`, `fsin` and `fldpi`, and gcc-torture `990413-2.c` passes at every level (#349).
+- An `asm goto` whose template is empty is compiled now rather than refused. It cannot jump, so it falls through into its first arm, and gcc-torture `pr121957.c` and `pr123625-3.c` pass at every level (#349).
+- `-fexceptions`, `-fno-exceptions`, `-fnon-call-exceptions`, `-fno-non-call-exceptions` and both spellings of `-fdelete-dead-exceptions` are taken, and `-fnon-call-exceptions` turns exceptions on unless `-fno-exceptions` was written, as in gcc 16. `__EXCEPTIONS` is defined when they are on. There is no landing pad yet, so a call inside the scope of a `cleanup` handler under `-fexceptions` is refused where it is written rather than compiled to skip the handler on an unwind (#1052, #1951).
 - A call in tail position becomes the epilogue and a jump at `-O2`, `-O3`, `-Os` and `-Oz` on x86-64, as gcc does, and `-foptimize-sibling-calls` and `-fno-optimize-sibling-calls` turn it on and off at any level. A chain of calls like that now runs in the same stack however long it is, which is what a state machine written as functions calling each other needs. The call has to be direct, give back exactly what the caller gives back, and pass every argument in a register. The whole function is turned down when it has a local in its frame, reads its own variable arguments, or calls `setjmp`, `vfork` or anything else that comes back twice, so no pointer into the frame can be live when it is given back. `cargo xtask tail` runs every shape against gcc at every level and walks ten million calls between two functions in a one megabyte stack (#365).
 - `.symver` in an `asm` at file scope gives a name a second one with its version in the spelling, as gas does, bound the way the first name is. `@@@` is written as `@@`, since the name is always defined here. A `.set` or `.symver` of a name declared with the alias attribute now reaches what that alias stands for. xz's liblzma keeps its old symbol versions this way and did not build.
 
 ### Changed
 
 - `cargo xtask version` checks that the committed Cargo.lock has every dependency between workspace members, not only their versions, so a lockfile that `--locked` would refuse fails the gate rather than the release.
+
+### Fixed
+
+- `#undef` of a name that starts with `__STDC_` is allowed, as gcc allows it. Only `defined` is refused. gnulib's config.h undefines `__STDC_WANT_LIB_EXT1__`, so diffutils, grep and gzip did not build.
+- `-x` takes its language joined as well as separate, so `-xc` works as it does in gcc. busybox and toybox probe the compiler with it.
+- `__builtin_add_overflow_p`, `__builtin_sub_overflow_p` and `__builtin_mul_overflow_p` of two constants are integer constant expressions, as they are in gcc. gnulib's intprops asserts about them with `static_assert`, so sed's gnulib tests did not build.
 
 ## 0.11.13
 
