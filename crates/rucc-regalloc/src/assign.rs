@@ -104,7 +104,7 @@
 
 use std::cmp::Reverse;
 
-use rucc_mir::{Constraint, Func, Operand, Reg, Role};
+use rucc_mir::{Constraint, Flags, Func, Inst, Operand, Reg, Role};
 use rucc_target::{PhysReg, RegClass};
 
 use crate::live::{Area, Live, Range};
@@ -177,6 +177,7 @@ impl Env {
 pub struct Assignment {
     places: Vec<Option<Place>>,
     slots: Vec<RegClass>,
+    commuted: Vec<Inst>,
 }
 
 impl Assignment {
@@ -188,7 +189,17 @@ impl Assignment {
     /// checker in [`crate::check`] reads an assignment without caring which allocator wrote it.
     #[must_use]
     pub fn empty(vregs: usize) -> Self {
-        Self { places: vec![None; vregs], slots: Vec::new() }
+        Self { places: vec![None; vregs], slots: Vec::new(), commuted: Vec::new() }
+    }
+
+    /// The two address instructions whose answer went into the register of their second source.
+    ///
+    /// Each has to have its two sources swapped before anything reads the assignment against the
+    /// function, which [`crate::run`] does. After that the answer reuses what is then the first
+    /// source, as every two address instruction does. tamnd/rucc#1895.
+    #[must_use]
+    pub fn commuted(&self) -> &[Inst] {
+        &self.commuted
     }
 
     /// Records where a value went.
@@ -294,8 +305,13 @@ struct Blocked {
 struct Reuse {
     /// The value being read, which is the one whose register would do.
     source: Reg,
+    /// The other value the instruction reads, when the instruction reads the two either way round
+    /// and so could write its answer over this one instead.
+    second: Option<Reg>,
     /// Where the instruction reads it.
     at: Point,
+    /// The instruction, which is swapped round if the answer takes the second value's register.
+    inst: Inst,
 }
 
 /// Decides where every value in a function lives.
@@ -310,6 +326,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
     let forced = forced(func);
     let reuses = reuses(func, order);
     let hints = hints(func);
+    let passed = passed(func);
 
     let mut intervals = Vec::with_capacity(func.vregs());
     for (number, reuse) in reuses.iter().enumerate() {
@@ -341,8 +358,34 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
             "a value in class {}, which the target hands out no registers from",
             interval.class.number()
         );
-        let two_address = reuses[index(interval.reg)]
-            .and_then(|reuse| coalesce(&assignment, &active, &blocked, live, interval, reuse));
+        let reuse = reuses[index(interval.reg)];
+        let coalesced = |source| coalesce(&assignment, &active, &blocked, live, interval, source);
+        let first = reuse.and_then(|reuse| coalesced(reuse.source));
+        let second = reuse.and_then(|reuse| reuse.second).and_then(coalesced);
+        // An instruction that reads its sources either way round can write over the second one
+        // instead, which is what it needs when the first is read again later and the second is
+        // not. When both would do, the first is kept unless only the second is where something
+        // wants the answer, which saves the move in front of that reader.
+        //
+        // A block the answer is passed to wants it where that block's parameter already is. That
+        // has to count as much as an instruction asking for a register. A sum a loop carries is
+        // passed back to the parameter it was read from, and taking the register of the other
+        // source because the sum is also printed at the end moves the copy onto the back edge,
+        // where it runs every turn instead of once.
+        let hinted_at = |at: Option<PhysReg>| {
+            at.is_some_and(|at| {
+                hints[index(interval.reg)].contains(&at)
+                    || passed[index(interval.reg)]
+                        .iter()
+                        .any(|&param| assignment.place(param) == Some(Place::Reg(at)))
+            })
+        };
+        let commute =
+            second.is_some() && (first.is_none() || hinted_at(second) && !hinted_at(first));
+        let two_address = if commute { second } else { first };
+        if let (true, Some(reuse)) = (commute, reuse) {
+            assignment.commuted.push(reuse.inst);
+        }
         // The reuse comes first, because a two address instruction that has to copy its left
         // operand in pays for the copy whatever the hint says, and taking the hint here would buy
         // one move at the cost of another.
@@ -461,10 +504,10 @@ fn coalesce(
     blocked: &Blocks,
     live: &Live,
     interval: Interval<'_>,
-    reuse: Reuse,
+    source: Reg,
 ) -> Option<PhysReg> {
-    let Some(Place::Reg(at)) = assignment.place(reuse.source) else { return None };
-    active.iter().find(|held| held.reg == reuse.source)?;
+    let Some(Place::Reg(at)) = assignment.place(source) else { return None };
+    active.iter().find(|held| held.reg == source)?;
     // The two have to be apart everywhere, asked of the areas liveness worked out and without the
     // point the reuse adds, since that point is the one they are allowed to share.
     //
@@ -480,8 +523,8 @@ fn coalesce(
     // past this point when nothing past it reads the value at all. The sum a loop carries round
     // then went into a new register and was copied back at the bottom of every turn.
     // tamnd/rucc#1965.
-    let free = available(active, blocked, interval, at, Some(reuse.source), Want::Allowed);
-    (apart(live, reuse.source, interval.reg) && free).then_some(at)
+    let free = available(active, blocked, interval, at, Some(source), Want::Allowed);
+    (apart(live, source, interval.reg) && free).then_some(at)
 }
 
 /// Whether two values are never live at the same time, going by what liveness worked out.
@@ -661,6 +704,24 @@ fn hints(func: &Func) -> Vec<Vec<PhysReg>> {
     hints
 }
 
+/// The block parameters each value is passed to, by the virtual register passed.
+fn passed(func: &Func) -> Vec<Vec<Reg>> {
+    let mut passed = vec![Vec::new(); func.vregs()];
+    for block in func.blocks() {
+        for call in &func[block].succs {
+            for (&arg, param) in call.args.iter().zip(&func[call.block].params) {
+                let number = arg.number().and_then(|number| usize::try_from(number).ok());
+                let Some(number) = number else { continue };
+                let to: &mut Vec<Reg> = &mut passed[number];
+                if !to.contains(&param.reg) {
+                    to.push(param.reg);
+                }
+            }
+        }
+    }
+    passed
+}
+
 /// The values that have to be on the stack whatever else is true of them.
 fn forced(func: &Func) -> Vec<Reg> {
     let mut forced = Vec::new();
@@ -690,11 +751,30 @@ fn reuses(func: &Func, order: &Order) -> Vec<Option<Reuse>> {
                 let number = operand.reg.number().and_then(|number| usize::try_from(number).ok());
                 let Some(number) = number else { continue };
                 let source = operands[usize::from(other)].reg;
-                reuses[number] = Some(Reuse { source, at: order.early(inst) });
+                let second = if func[inst].flags.contains(Flags::COMMUTES) {
+                    swappable(operands, usize::from(other))
+                } else {
+                    None
+                };
+                reuses[number] = Some(Reuse { source, second, at: order.early(inst), inst });
             }
         }
     }
     reuses
+}
+
+/// The second source of an instruction that reads its two sources either way round, when the
+/// answer could go over it instead of over the first.
+///
+/// Only the shape of a two address instruction with two sources, the answer and then the two, with
+/// the answer reusing the first. The second has to be a value of the same class that asks for
+/// nothing more than a register, since after the swap it is the one the answer reuses.
+fn swappable(operands: &[Operand], other: usize) -> Option<Reg> {
+    let [answer, first, second] = operands else { return None };
+    let same = second.class == first.class && second.class == answer.class;
+    let plain = second.role == Role::Use && second.constraint == Constraint::Reg;
+    (other == 1 && same && plain && second.reg.is_virtual() && second.reg != first.reg)
+        .then_some(second.reg)
 }
 
 /// A virtual register's number as a table index.
@@ -705,8 +785,8 @@ fn index(reg: Reg) -> usize {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_mir::{BlockCall, Opcode, Operand};
-    use rucc_target::x86_64::{GPR, R13, R14, R15, RAX, RCX, RDX, REGS, SYSV};
+    use rucc_mir::{BlockCall, Opcode, Operand, Param};
+    use rucc_target::x86_64::{GPR, R13, R14, R15, RAX, RCX, RDX, REGS, RSI, SYSV};
 
     use super::*;
 
@@ -965,6 +1045,145 @@ mod tests {
         // have the right one's either, because the rewrite is about to write a move into it before
         // the addition has read anything.
         assert_eq!(places(&func, &env()), ["rax", "rcx", "rdx"]);
+    }
+
+    #[test]
+    fn an_answer_that_commutes_goes_over_the_source_that_is_finished_with() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(left, GPR).finish();
+        func.build(block, opcode).def(right, GPR).finish();
+        let add = func
+            .build(block, opcode)
+            .flags(Flags::COMMUTES)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode).uses(left, GPR).uses(sum, GPR).finish();
+
+        // The same shape as the one above where the answer got a register of its own, except that
+        // the addition reads its sources either way round, so the answer goes where the right one
+        // was and the instruction is marked to be swapped.
+        assert_eq!(places(&func, &env()), ["rax", "rcx", "rcx"]);
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &env());
+        assert_eq!(assignment.commuted(), [add]);
+
+        // Once swapped, the instruction is an ordinary reuse of its first source, the checker and
+        // the trace agree with it, and nothing has to be moved in front of it. The rewrite has put
+        // the registers in by then, so the right one is `rcx` and the left one `rax`.
+        let allocation = crate::run(&mut func, &env(), "f", true);
+        assert!(allocation.edits.is_empty());
+        let operands = &func[func[add].operands];
+        let (first, second) = (operands[1].reg.phys(), operands[2].reg.phys());
+        assert_eq!((first, second), (Some(RCX), Some(RAX)));
+    }
+
+    #[test]
+    fn an_answer_that_commutes_takes_the_source_something_after_it_wants() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(left, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(right, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        let add = func
+            .build(block, opcode)
+            .flags(Flags::COMMUTES)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode)
+            .operand(Operand::read(sum, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+
+        // Both sources are finished with, so either register would do for the answer. The one
+        // reading it wants it in `rax`, which is where the right one already is, so it goes there
+        // and nothing is moved in front of that reader.
+        let names = places(&func, &env());
+        assert_eq!(names[2], "rax");
+        assert_ne!(names[0], "rax");
+        let allocation = crate::run(&mut func, &env(), "f", true);
+        assert!(allocation.edits.is_empty());
+        assert_eq!(func[func[add].operands][1].reg.phys(), Some(RAX));
+    }
+
+    #[test]
+    fn an_answer_that_commutes_stays_where_the_loop_passes_it() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let out = func.create_block();
+        let seed = func.new_vreg(GPR);
+        let total = func.new_vreg(GPR);
+        let term = func.new_vreg(GPR);
+        let next = func.new_vreg(GPR);
+        func.build(entry, opcode).def(seed, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::with(head, vec![seed])];
+        func.params_mut(head).push(Param { reg: total, class: GPR });
+        func.build(head, opcode).def(term, GPR).finish();
+        let add = func
+            .build(head, opcode)
+            .flags(Flags::COMMUTES)
+            .operand(Operand::write(next, GPR).with(Constraint::Reuse(1)))
+            .uses(total, GPR)
+            .uses(term, GPR)
+            .finish();
+        func.build(head, opcode)
+            .operand(Operand::read(next, GPR).with(Constraint::Fixed(RSI)))
+            .finish();
+        *func.succs_mut(head) = vec![BlockCall::with(head, vec![next]), BlockCall::to(out)];
+
+        // Both sources are finished with and the sum is wanted in `rsi` as well, but the loop
+        // passes it back to `total`, so it goes where `total` is and the back edge has nothing to
+        // copy.
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = assign(&func, &order, &live, &env());
+        assert_eq!(assignment.place(next), assignment.place(total));
+        assert!(!assignment.commuted().contains(&add));
+    }
+
+    #[test]
+    fn an_answer_that_does_not_commute_leaves_its_sources_where_they_are() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let left = func.new_vreg(GPR);
+        let right = func.new_vreg(GPR);
+        let sum = func.new_vreg(GPR);
+        func.build(block, opcode).def(left, GPR).finish();
+        func.build(block, opcode).def(right, GPR).finish();
+        func.build(block, opcode)
+            .flags(Flags::COMMUTES)
+            .operand(Operand::write(sum, GPR).with(Constraint::Reuse(1)))
+            .uses(left, GPR)
+            .uses(right, GPR)
+            .finish();
+        func.build(block, opcode).uses(right, GPR).finish();
+
+        // The left one is finished with, so the answer goes over it as it always did, and there is
+        // nothing to swap.
+        assert_eq!(places(&func, &env()), ["rax", "rcx", "rax"]);
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        assert!(assign(&func, &order, &live, &env()).commuted().is_empty());
     }
 
     #[test]

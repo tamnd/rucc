@@ -555,6 +555,14 @@ impl Flags {
     /// as well. See [`InstData::flags`] and tamnd/rucc#1302.
     pub const VOLATILE: Self = Self(1);
 
+    /// The instruction reads its two sources either way round.
+    ///
+    /// The one flag the program has nothing to do with. The target knows which of its two address
+    /// instructions commute, and the allocator needs to know it of the instruction in front of it
+    /// to write the answer over the second source when the first is still wanted. It is set just
+    /// before allocation, so no pass above that has to carry it. See tamnd/rucc#1895.
+    pub const COMMUTES: Self = Self(2);
+
     /// Both of them at once.
     #[must_use]
     pub const fn with(self, other: Self) -> Self {
@@ -582,6 +590,9 @@ impl fmt::Display for Flags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.contains(Self::VOLATILE) {
             f.write_str(" volatile")?;
+        }
+        if self.contains(Self::COMMUTES) {
+            f.write_str(" commutes")?;
         }
         Ok(())
     }

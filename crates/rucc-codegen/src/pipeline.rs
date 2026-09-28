@@ -623,6 +623,11 @@ pub fn compile_recording(
     let line = (!func.named.is_empty() || (reach.is_some() && !stack.declared.is_empty()))
         .then(|| kept::before(&func));
 
+    // Which arithmetic reads its two sources either way round, so the allocator may write the
+    // answer over whichever of the two is finished with. Marked here rather than at selection
+    // because every pass in between that rewrites an instruction would have to carry the mark.
+    commuting(&mut func, machine.shapes, names);
+
     let called = names.resolve(func.name).to_owned();
     let allocation = rucc_regalloc::run(&mut func, &machine.env, &called, flags.verify);
     recording.pressure.record(&called, Cost::of(&allocation));
@@ -786,6 +791,16 @@ pub fn compile_recording(
     Ok(func)
 }
 
+/// Marks every instruction the machine says reads its two sources either way round.
+fn commuting(func: &mut mir::Func, shapes: &MachineInsts, names: &Interner) {
+    let insts: Vec<mir::Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in insts {
+        if shapes.commutes(names.resolve(func[inst].opcode.name())) {
+            func[inst].flags = func[inst].flags.with(mir::Flags::COMMUTES);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_ir::{Builder, Flags as IrFlags, Func, Opcode, Restrict, Signature, Type};
@@ -891,15 +906,16 @@ mod tests {
 
         // `int f(int a, int b) { return a + b; }` end to end. A leaf that spills nothing needs no
         // frame at all, so there is no prologue to see. The one move left is the one the machine's
-        // addition needs, since the sum is written into the register the left operand was read
-        // from and the return wants it in `rax`.
+        // addition needs, since the sum is written into the register one of the two operands was
+        // read from and the return wants it in `rax`. The addition is marked as reading them
+        // either way round, which is why the allocator was free to pick.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
             "mfunc @f {\n\
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rdi(reuse 1) = x64.add_rr_32 $rdi, $rsi\n    \
+             $rdi(reuse 1) = x64.add_rr_32 commutes $rdi, $rsi\n    \
              $rax = x64.mov_rr_64 $rdi\n    \
              x64.ret_val_32 $rax($rax)\n    \
              x64.ret\n\

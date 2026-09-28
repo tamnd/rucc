@@ -74,6 +74,13 @@ pub struct MachineInsts {
     /// down as reads rather than as writes, so a pass reading the operand vector would be told a
     /// value in an argument register survives a call it does not survive.
     pub calls: fn(&str) -> bool,
+    /// Whether an instruction of that name reads its two sources either way round.
+    ///
+    /// Asked by the allocator of a two address instruction, which may then write the answer over
+    /// whichever of the two sources is finished with rather than only over the first. Such an
+    /// instruction's operands are the answer and then the two sources, and swapping the sources
+    /// changes nothing the machine computes. tamnd/rucc#1895.
+    pub commutes: fn(&str) -> bool,
     /// What an addressing mode on this target may multiply its index by.
     ///
     /// A list rather than a range because the machines that have an index have a handful of
@@ -108,6 +115,12 @@ impl MachineInsts {
     #[must_use]
     pub fn calls(&self, name: &str) -> bool {
         (self.calls)(self.bare(name))
+    }
+
+    /// Whether an instruction of that name reads its two sources either way round on this target.
+    #[must_use]
+    pub fn commutes(&self, name: &str) -> bool {
+        (self.commutes)(self.bare(name))
     }
 
     /// Whether an instruction of that name reads or writes memory on this target.

@@ -296,6 +296,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     takes_mem: machine_takes_mem,
     touches_mem: machine_touches_mem,
     calls: machine_calls,
+    commutes: machine_commutes,
     scales: &[1],
     index_and_disp: false,
 };
@@ -328,6 +329,15 @@ fn machine_touches_mem(name: &str) -> bool {
 #[must_use]
 fn machine_calls(name: &str) -> bool {
     form(name) == Some(Form::Call)
+}
+
+/// Whether an instruction of that name reads its two sources either way round.
+///
+/// Nothing here writes its answer over one of its sources, so there is no choice of which source
+/// for the allocator to make.
+#[must_use]
+fn machine_commutes(_name: &str) -> bool {
+    false
 }
 
 /// Whether the instruction of that name is one that copies the low bits of its source.

@@ -259,6 +259,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     takes_mem: machine_takes_mem,
     touches_mem: machine_touches_mem,
     calls: machine_calls,
+    commutes: machine_commutes,
     scales: &[1, 2, 4, 8],
     index_and_disp: true,
 };
@@ -295,6 +296,19 @@ fn machine_touches_mem(name: &str) -> bool {
 #[must_use]
 fn machine_calls(name: &str) -> bool {
     form(name) == Some(Form::Call)
+}
+
+/// Whether an instruction of that name reads its two sources either way round.
+///
+/// The register forms of addition, the three bitwise operations and the multiply, which are
+/// [`Form::AluRr`] and write their answer over the first source. Subtraction is the same form and
+/// does not commute, which is why this is a list of names and not a question about the form.
+#[must_use]
+fn machine_commutes(name: &str) -> bool {
+    form(name) == Some(Form::AluRr)
+        && ["add_rr_", "and_rr_", "or_rr_", "xor_rr_", "imul_rr_"]
+            .iter()
+            .any(|operation| name.starts_with(operation))
 }
 
 /// Whether the instruction of that name is one that copies the low bits of its source.
