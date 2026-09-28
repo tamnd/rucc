@@ -2959,9 +2959,8 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
     let flavour = match opts.target.os.object_format() {
         ObjectFormat::Elf => rucc_archive::Flavour::Gnu,
         ObjectFormat::Coff => rucc_archive::Flavour::Coff,
-        // Mach-O wants the BSD flavour, whose index is a different member under a different name,
-        // and wasm has no archives of its own at all. Neither has an object writer either, so a
-        // command line reaching this would have failed in the next step regardless.
+        // Mach-O wants the BSD flavour, whose index is a different member under a different name
+        // and which is not written yet, and wasm has no archives of its own at all.
         format @ (ObjectFormat::MachO | ObjectFormat::Wasm) => {
             return complain(format!(
                 "there is no archive format for {} objects in this compiler yet",

@@ -1020,17 +1020,19 @@ fn generate(
                 let listing =
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
                         .map_err(refused)?;
-                let read = rucc_asm::read(&listing, target.tuple.arch()).map_err(|trouble| {
-                    let what = if aarch64 {
-                        "a unit for aarch64"
-                    } else {
-                        "an `asm` template kept as text"
-                    };
-                    vec![unsupported(&format!(
-                        "{what}, whose listing the assembler stopped at on line {}: {}",
-                        trouble.line, trouble.why
-                    ))]
-                })?;
+                let arch = target.tuple.arch();
+                let read =
+                    rucc_asm::read_as(&listing, arch, target.object_format).map_err(|trouble| {
+                        let what = if aarch64 {
+                            "a unit for aarch64"
+                        } else {
+                            "an `asm` template kept as text"
+                        };
+                        vec![unsupported(&format!(
+                            "{what}, whose listing the assembler stopped at on line {}: {}",
+                            trouble.line, trouble.why
+                        ))]
+                    })?;
                 let info = if opts.debug_info {
                     let assembled =
                         placed(&read, &funcs, names, target).map_err(|why| vec![internal(&why)])?;
@@ -1041,8 +1043,7 @@ fn generate(
                 };
                 let defines = rucc_object::assembled_defines(&read);
                 let bytes =
-                    rucc_object::assembled_described(&read, &TargetInfo::new(opts.target), &info)
-                        .map_err(wrote)?;
+                    rucc_object::assembled_described(&read, target, &info).map_err(wrote)?;
                 return Ok(Artifact::Object { bytes, defines });
             }
             let assembled = rucc_asm::assemble(&funcs, names, target, unwind, opts.debug_info)

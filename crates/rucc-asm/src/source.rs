@@ -75,6 +75,20 @@ impl std::error::Error for Trouble {}
 /// it cannot read, an expression that does not reduce to something a relocation can say, or a file
 /// that is malformed. Every one of them carries the line it was on.
 pub fn read(text: &str, arch: Arch) -> Result<Assembled, Trouble> {
+    read_as(text, arch, ObjectFormat::Elf)
+}
+
+/// The same, for a file written for the object format given.
+///
+/// Only Mach-O reads differently. A section there is a segment and a section, `__TEXT,__text`,
+/// and the file uses a handful of directives gas has no use for elsewhere, `.zerofill` and
+/// `.private_extern` among them. ELF and COFF share the names this reads, and the COFF writer
+/// makes its own out of them.
+///
+/// # Errors
+///
+/// As [`read`].
+pub fn read_as(text: &str, arch: Arch, format: ObjectFormat) -> Result<Assembled, Trouble> {
     // Every branch starts out in its two byte form and the file is read again with the ones that
     // did not reach written long, until none is left over. A branch made long never goes back, so
     // each pass has more long ones than the last and there are only so many branches, which is how
@@ -82,7 +96,8 @@ pub fn read(text: &str, arch: Arch) -> Result<Assembled, Trouble> {
     let mut long = std::collections::HashSet::new();
     loop {
         let aarch64 = arch == Arch::Aarch64;
-        let mut reader = Reader { long: long.clone(), aarch64, ..Reader::default() };
+        let macho = format == ObjectFormat::MachO;
+        let mut reader = Reader { long: long.clone(), aarch64, macho, ..Reader::default() };
         reader.run(text)?;
         match reader.finish()? {
             Ok(done) => return Ok(done),
@@ -221,6 +236,11 @@ struct Reader {
     aligns: Vec<Aligned>,
     /// Whether the file is for AArch64 rather than x86-64.
     aarch64: bool,
+    /// Whether the file is for Mach-O, where a section is named by its segment as well.
+    macho: bool,
+    /// Whether the file said `.subsections_via_symbols`, which tells the linker it may take the
+    /// file apart at every name.
+    subsections: bool,
     line: usize,
 }
 
@@ -229,7 +249,14 @@ impl Reader {
     fn run(&mut self, text: &str) -> Result<(), Trouble> {
         // Before anything else, so that a file which never names a section still has one and a
         // stray directive has somewhere to go. gas starts in `.text` and so does this.
-        self.section(".text", Shape::of(".text"));
+        if self.macho {
+            // Nothing in this file writes the unwind table for Mach-O yet, and ld64 does without
+            // one for a function that has no entry, so the rules are read and then dropped.
+            self.no_unwind = true;
+            self.apple_section("__TEXT", "__text", None, &[])?;
+        } else {
+            self.section(".text", Shape::of(".text"));
+        }
         let mut commenting = false;
         for (index, raw) in text.lines().enumerate() {
             self.line = index + 1;
@@ -686,10 +713,33 @@ impl Reader {
     fn directive(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
         let args = split(rest, ',');
         match word {
+            "text" | "data" | "bss" | "rodata" | "const" | "cstring" | "const_data"
+                if self.macho =>
+            {
+                self.apple_plain(word, rest)?;
+            }
             "text" | "data" | "bss" | "rodata" => {
                 self.plain(word, rest)?;
             }
+            "section" if self.macho => self.apple_section_directive(&args)?,
             "section" => self.section_directive(&args)?,
+            "zerofill" if self.macho => self.zerofill(&args, false)?,
+            "tbss" if self.macho => self.zerofill(&args, true)?,
+            "subsections_via_symbols" if self.macho => self.subsections = true,
+            "private_extern" if self.macho => self.sight(&args, Visibility::Hidden)?,
+            "weak_definition" | "weak_reference" if self.macho => {
+                self.bind(&args, Binding::Weak)?;
+            }
+            // The platform and the oldest version of it the file is for. The writer puts the
+            // target's own in the file, which is where the compiler's listing got these from.
+            "build_version"
+            | "macosx_version_min"
+            | "ios_version_min"
+            | "tvos_version_min"
+            | "watchos_version_min"
+            | "data_region"
+            | "end_data_region"
+                if self.macho => {}
             "pushsection" => {
                 self.stack.push(self.here);
                 self.section_directive(&args)?;
@@ -920,6 +970,110 @@ impl Reader {
         Ok(())
     }
 
+    /// `.text` and the other short names Apple's assembler has for a section, on Mach-O.
+    fn apple_plain(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
+        if !rest.trim().is_empty() && rest.trim() != "0" {
+            let what =
+                format!("'.{word} {}' is a subsection, which is not written yet", rest.trim());
+            return Err(self.bad(&what));
+        }
+        let (segment, section) = match word {
+            "text" => ("__TEXT", "__text"),
+            "data" => ("__DATA", "__data"),
+            "bss" => ("__DATA", "__bss"),
+            "cstring" => ("__TEXT", "__cstring"),
+            "const_data" => ("__DATA", "__const"),
+            _ => ("__TEXT", "__const"),
+        };
+        self.apple_section(segment, section, None, &[])
+    }
+
+    /// `.section segment,section[,type[,attribute+attribute]]`, on Mach-O.
+    fn apple_section_directive(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let [segment, section, ..] = args else {
+            return Err(self.bad(".section on Mach-O wants a segment and a section"));
+        };
+        let kind = args.get(2).map(|kind| kind.trim()).filter(|kind| !kind.is_empty());
+        let attributes = args.get(3).map_or(String::new(), |list| list.trim().to_owned());
+        let attributes: Vec<&str> =
+            attributes.split('+').map(str::trim).filter(|word| !word.is_empty()).collect();
+        // A fifth operand is the size of one stub in a section of them, which only a linker's
+        // own output has.
+        if args.len() > 4 {
+            return Err(self.bad("a Mach-O section with a stub size is not written"));
+        }
+        self.apple_section(segment.trim(), section.trim(), kind, &attributes)
+    }
+
+    /// Go to a Mach-O section, making it the first time.
+    fn apple_section(
+        &mut self,
+        segment: &str,
+        section: &str,
+        kind: Option<&str>,
+        attributes: &[&str],
+    ) -> Result<(), Trouble> {
+        let shape =
+            Shape::mach(segment, section, kind, attributes).map_err(|why| self.bad(&why))?;
+        self.section(&format!("{segment},{section}"), shape);
+        Ok(())
+    }
+
+    /// `.zerofill segment,section,name,size,power` and `.tbss name,size,power`.
+    ///
+    /// Room for a name in a section of zeroes, made without going to that section, which is how
+    /// Apple's assembler writes what gas would write as `.bss` and a label. `.zerofill` with only
+    /// the first two operands makes the section and nothing in it.
+    fn zerofill(&mut self, args: &[String], thread: bool) -> Result<(), Trouble> {
+        let (segment, section, rest) = if thread {
+            ("__DATA".to_owned(), "__thread_bss".to_owned(), args)
+        } else {
+            let [segment, section, rest @ ..] = args else {
+                return Err(self.bad(".zerofill wants a segment and a section"));
+            };
+            (segment.trim().to_owned(), section.trim().to_owned(), rest)
+        };
+        // Made or found and not gone to, so neither where the file is writing nor what
+        // `.previous` means changes.
+        let (was, before) = (self.here, self.before);
+        self.apple_section(&segment, &section, None, &[])?;
+        let at = self.here;
+        (self.here, self.before) = (was, before);
+        let Some(name) = rest.first() else {
+            return Ok(());
+        };
+        if !(2..=3).contains(&rest.len()) || self.parts[at].shape.bits {
+            let what = format!("'{segment},{section}' is not a section this can make room in");
+            return Err(self.bad(&what));
+        }
+        let size = self.number(&rest[1])?;
+        let size = self.count(size)?;
+        let align = match rest.get(2) {
+            Some(arg) => {
+                let power = self.number(arg)?;
+                let power = self.count(power)?;
+                if power > 15 {
+                    return Err(self.bad(&format!("an alignment of 2^{power} is too large")));
+                }
+                1 << power
+            }
+            None => 1,
+        };
+        let sym = self.sym(name.trim());
+        let part = &mut self.parts[at];
+        part.align = part.align.max(align);
+        part.size = part.size.next_multiple_of(align);
+        let offset = part.size;
+        part.size += size;
+        self.labelled.insert(at);
+        self.syms[sym].at = Held::In { part: at, offset };
+        self.syms[sym].size = size;
+        if self.syms[sym].sort == Sort::Untyped {
+            self.syms[sym].sort = if thread { Sort::Thread } else { Sort::Object };
+        }
+        Ok(())
+    }
+
     /// Go to a section, making it if this is the first time the file has named it.
     ///
     /// The flags are taken from the first mention. A second `.section .text,"ax"` after a plain
@@ -1128,6 +1282,15 @@ impl Reader {
         let size = self.number(&args[1])?;
         let size = self.count(size)?;
         let align = match args.get(2) {
+            // Apple's assembler takes the alignment as a power of two, the way `.p2align` does.
+            Some(arg) if self.macho => {
+                let power = self.number(&arg.clone())?;
+                let power = self.count(power)?;
+                if power > 15 {
+                    return Err(self.bad(&format!("an alignment of 2^{power} is too large")));
+                }
+                1 << power
+            }
             Some(arg) => {
                 let align = self.number(&arg.clone())?;
                 self.count(align)?.max(1)
@@ -1151,7 +1314,11 @@ impl Reader {
         self.syms[sym].sort = Sort::Object;
         if local {
             let was = self.here;
-            self.section(".bss", Shape::of(".bss"));
+            if self.macho {
+                self.apple_section("__DATA", "__bss", None, &[])?;
+            } else {
+                self.section(".bss", Shape::of(".bss"));
+            }
             let part = &mut self.parts[self.here];
             part.align = part.align.max(align);
             let over = part.size % align;
@@ -1367,7 +1534,7 @@ impl Reader {
                 visibility: sym.visibility,
             });
         }
-        Ok(Ok(Assembled { parts, names }))
+        Ok(Ok(Assembled { parts, names, subsections: self.subsections }))
     }
 
     /// The unwind table the frame rules describe, as a section of its own.
@@ -2564,6 +2731,51 @@ mod tests {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
+    }
+
+    #[test]
+    fn a_mac_listing_reads_as_segments_and_sections() {
+        let text = "\t.section\t__TEXT,__text,regular,pure_instructions
+\t.p2align\t2
+\t.globl\t_main
+\t.private_extern\t_main
+_main:
+Lmain_0:
+\tadrp x0, _counter@PAGE
+\tldr w0, [x0, _counter@PAGEOFF]
+\tret
+\t.section\t__DATA,__data
+\t.globl\t_counter
+_counter:
+\t.long\t3
+\t.globl\t_zeros
+\t.zerofill\t__DATA,__bss,_zeros,400,4
+\t.long\t4
+\t.section\t__DATA,__thread_data,thread_local_regular
+_tls$tlv$init:
+\t.long\t5
+\t.weak_definition\t_counter
+\t.subsections_via_symbols
+";
+        let done = match read_as(text, Arch::Aarch64, ObjectFormat::MachO) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        assert!(done.subsections);
+        let names: Vec<&str> = done.parts.iter().map(|part| part.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["__TEXT,__text", "__DATA,__data", "__DATA,__bss", "__DATA,__thread_data"]
+        );
+        assert!(done.parts[0].shape.exec && done.parts[3].shape.thread);
+        // `.zerofill` made room without going there, so the second word is in `__data`.
+        assert_eq!(done.parts[1].bytes, [3, 0, 0, 0, 4, 0, 0, 0]);
+        assert_eq!((done.parts[2].size, done.parts[2].align), (400, 16));
+        let named = |name: &str| done.names.iter().find(|n| n.name == name).unwrap();
+        assert_eq!(named("_main").visibility, Visibility::Hidden);
+        assert_eq!(named("_counter").binding, Binding::Weak);
+        assert_eq!(named("_zeros").at, Held::In { part: 2, offset: 0 });
+        assert_eq!(done.parts[0].relocs.len(), 2);
     }
 
     /// The bytes of the section of that name.
