@@ -262,7 +262,8 @@ options:
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
-  -fPIC -fpic -fPIE -fpie, -fno-common, -pipe   what it does anyway
+  -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway
+  -f[no-]common          merge tentative definitions at the link, on by default for Darwin
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
@@ -1155,12 +1156,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-function-sections" => opts.function_sections = false,
             "-fdata-sections" => opts.data_sections = true,
             "-fno-data-sections" => opts.data_sections = false,
-            // Another description of what this compiler does. A file scope declaration with no
-            // initializer is written into `.bss` as an ordinary defined symbol, not offered to the
-            // linker as a common one for it to merge, which is what `-fno-common` asks for and what
-            // gcc has done by default since 10. Nothing in the front end produces `Linkage::Common`
-            // at all.
-            "-fno-common" => {}
+            // Whether a file scope declaration with no initializer is offered to the linker as a
+            // common symbol for it to merge, or written into `.bss` as an ordinary defined one.
+            // Unwritten, the target answers, which is on for Darwin and off everywhere else.
+            "-fcommon" => opts.common = Some(true),
+            "-fno-common" => opts.common = Some(false),
             // What overflows rather than being undefined. Every one of these takes something away
             // from the optimizer rather than asking it to do anything, which is why the negative
             // spellings are the interesting ones and the positive spellings are the default.
@@ -1213,16 +1213,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // build has it off.
             "-fms-extensions" => opts.ms_extensions = Some(true),
             "-fno-ms-extensions" => opts.ms_extensions = Some(false),
-            // And the request, which is the one that cannot be granted. It is a real difference and
-            // not a preference: two files each writing `int g;` link under `-fcommon` and are a
-            // duplicate definition without it, which is the whole reason the flag survives.
-            "-fcommon" => {
-                return Err(err(
-                    "a tentative definition is written into .bss as its own symbol here, and \
-                     nothing emits the common symbol this asks the linker to merge. Give the \
-                     variable a definition in one file and declare it extern in the others",
-                ));
-            }
             // Both directions of this one are recorded, and what they decide is whether lowering
             // names the type each access goes through. Turning it off is the front end leaving the
             // name off rather than a pass being told to ignore one it can see, which is one
@@ -4395,7 +4385,6 @@ mod tests {
         // unknown option. What they have in common is that the answer rucc gives is the answer
         // they ask for, so there is nothing to implement and nothing to refuse.
         for flag in [
-            "-fno-common",
             "-fstrict-aliasing",
             "-fno-strict-aliasing",
             "-fdelete-null-pointer-checks",
@@ -4718,12 +4707,21 @@ mod tests {
     }
 
     #[test]
-    fn asking_the_linker_to_merge_tentative_definitions_is_told_why_it_is_not_coming() {
-        // The one of that family that is a request rather than a description, and it is a real
-        // difference: two files each writing `int g;` link under it and do not without it.
-        let e = parse_args(&args(&["-fcommon", "a.c"])).unwrap_err();
-        assert!(e.message.contains(".bss"), "{}", e.message);
-        assert!(e.message.contains("extern"), "the way out is worth saying: {}", e.message);
+    fn a_tentative_definition_is_common_on_darwin_unless_told_otherwise() {
+        // Two files each writing `int g;` link under `-fcommon` and do not without it, and Apple's
+        // clang has it on where every other compiler rucc stands in for has it off.
+        let (opts, _) = compile(&[LINUX, "-c", "a.c"]);
+        assert!(!Session::new(*opts).common());
+
+        let (opts, _) = compile(&["-c", "--target=aarch64-apple-darwin", "a.c"]);
+        assert!(Session::new(*opts).common());
+
+        let (opts, _) = compile(&[LINUX, "-c", "-fcommon", "a.c"]);
+        assert!(Session::new(*opts).common());
+
+        let (opts, _) =
+            compile(&["-c", "--target=aarch64-apple-darwin", "-fcommon", "-fno-common", "a.c"]);
+        assert!(!Session::new(*opts).common());
     }
 
     #[test]

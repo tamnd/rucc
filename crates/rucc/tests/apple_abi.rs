@@ -224,3 +224,27 @@ long many(long a, long b, long c, long d, long e, long f, long g, long h, long i
         assert!(!asm.contains("x18") && !asm.contains("w18"), "{level}\n{asm}");
     }
 }
+
+/// A tentative definition is a common symbol on Darwin, which is what Apple's clang does without
+/// being asked, so two files that each write `int g;` link there the way they do with clang.
+#[test]
+fn a_tentative_definition_is_common_on_darwin() {
+    let source = "int tentative;\nint zero = 0;\nstatic int hidden;\n";
+    let apple = listing("common", source, DARWIN, "-O0");
+    assert!(apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_tentative")), "{apple}");
+    assert!(!apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_zero")), "{apple}");
+    assert!(!apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_hidden")), "{apple}");
+    let linux = listing("common-linux", source, LINUX, "-O0");
+    assert!(!linux.contains(".comm"), "{linux}");
+}
+
+/// A name given with `__asm__` is the name the linker sees, so on Darwin it is written as it was
+/// spelled and not given a second underscore, which is how the system headers name the variants
+/// of `fopen` and the rest.
+#[test]
+fn an_asm_label_is_not_decorated_again_on_darwin() {
+    let source = "int renamed(int) __asm(\"_real\");\nint call(int x) { return renamed(x); }\n";
+    let apple = listing("label", source, DARWIN, "-O0");
+    assert!(apple.contains("_real"), "{apple}");
+    assert!(!apple.contains("__real"), "{apple}");
+}

@@ -2048,6 +2048,14 @@ pub struct Options {
     /// Windows headers need it, because `<objidl.h>` and the rest close a nameless union with
     /// `} DUMMYUNIONNAME;` and the macro expands to nothing.
     pub ms_extensions: Option<bool>,
+    /// Whether a tentative definition is offered to the linker as a common symbol, from
+    /// `-fcommon` and `-fno-common`.
+    ///
+    /// Two files that each write `int g;` link under it and are a duplicate definition without
+    /// it. The default is on for a Darwin target and off everywhere else, which is what the
+    /// compiler each platform ships does: Apple's clang still has it on, and gcc has had it off
+    /// since 10, as has clang everywhere but Darwin.
+    pub common: Option<bool>,
     /// Whether an access names the type it goes through, from `-fstrict-aliasing` and
     /// `-fno-strict-aliasing`.
     ///
@@ -2422,6 +2430,7 @@ impl Options {
             char_signed: None,
             short_enums: false,
             ms_extensions: None,
+            common: None,
             strict_aliasing: true,
             fp_contract: Contract::Off,
             trapping_math: true,
@@ -2564,6 +2573,15 @@ impl Session {
     #[must_use]
     pub fn ms_extensions(&self) -> bool {
         self.opts.ms_extensions.unwrap_or(self.opts.target.os == Os::Windows)
+    }
+
+    /// Whether a tentative definition is a common symbol rather than one in `.bss`.
+    ///
+    /// The command line answers where it said anything and the target answers otherwise, for the
+    /// reason [`Options::common`] gives.
+    #[must_use]
+    pub fn common(&self) -> bool {
+        self.opts.common.unwrap_or(self.opts.target.os.is_darwin())
     }
 
     /// Records a diagnostic.

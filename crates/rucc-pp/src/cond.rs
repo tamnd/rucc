@@ -484,11 +484,11 @@ fn parse_char(text: &str, chars: Chars) -> Result<Val, String> {
         .ok_or_else(|| format!("`{text}` is not a character constant"))?;
     let wide = !text.starts_with('\'');
 
-    let mut chars = body.chars().peekable();
+    let mut rest = body.chars().peekable();
     let mut value: u64 = 0;
     let mut count = 0;
-    while let Some(c) = chars.next() {
-        let scalar = if c == '\\' { escape(&mut chars)? } else { u64::from(c as u32) };
+    while let Some(c) = rest.next() {
+        let scalar = if c == '\\' { escape(&mut rest)? } else { u64::from(c as u32) };
         value = if count == 0 { scalar } else { (value << 8) | (scalar & 0xff) };
         count += 1;
     }

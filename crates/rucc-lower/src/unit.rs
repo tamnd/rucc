@@ -186,6 +186,9 @@ pub struct Context<'a> {
     /// built yet. So what it does here is turn down the one shape the missing pad would change the
     /// meaning of, a call made while a handler is owed, rather than build it without the pad.
     pub exceptions: bool,
+    /// Whether a tentative definition with external linkage is a common symbol, which is
+    /// `-fcommon` and the default on Darwin, rather than a zeroed object in `.bss`.
+    pub common: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -210,6 +213,7 @@ impl fmt::Debug for Context<'_> {
             .field("align", &self.align)
             .field("instrument", &self.instrument)
             .field("exceptions", &self.exceptions)
+            .field("common", &self.common)
             .finish_non_exhaustive()
     }
 }
@@ -276,6 +280,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         align,
         instrument,
         exceptions,
+        common,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -296,6 +301,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         align,
         instrument,
         exceptions,
+        common,
         read,
         module,
         diagnostics: Vec::new(),
@@ -345,6 +351,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) instrument: bool,
     /// Whether an exception may unwind through the unit. See [`Context::exceptions`].
     pub(crate) exceptions: bool,
+    /// Whether a tentative definition is a common symbol. See [`Context::common`].
+    common: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
@@ -663,6 +671,17 @@ impl Unit<'_> {
         global.visibility = self.seen(decl, state != Definition::Declared);
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
+        // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
+        // with every other one of the same name, and with a real definition if there is one. Only
+        // the plain case is: a thread-local one has to be a copy per thread, and a weak or internal
+        // one is not the linker's to merge.
+        if self.common
+            && state == Definition::Tentative
+            && global.linkage == IrLinkage::External
+            && global.tls.is_none()
+        {
+            global.linkage = IrLinkage::Common;
+        }
         global.init = match state {
             // `extern int x;` and nothing else names an object another translation unit
             // defines. The global is here so that a reference to it has something to resolve
@@ -1795,8 +1814,7 @@ impl Unit<'_> {
         // sees, so it is read before anything else here: a program that renames a name has said
         // what the symbol is, and the numbering below is for the ones that have not.
         if let Some(label) = node.asm_label {
-            let spelling: String =
-                tast[label].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+            let spelling = assembler_name(tast, self.target, label);
             return self.names.intern(&spelling);
         }
         if node.linkage != Linkage::None {
@@ -1895,3 +1913,22 @@ fn take_run(bytes: &mut BTreeMap<u64, u8>, start: u64) -> Option<Vec<u8>> {
     }
     Some(run)
 }
+
+/// The symbol an assembler name stands for, spelled the way every other name in the module is.
+///
+/// An `asm` label is the name the object file holds, underscore and all, and every other symbol
+/// here is the name C spells, which the listing and the object writer decorate for Mach-O on the
+/// way out. So on Mach-O a label's own underscore comes off here and goes back on there, which is
+/// how Apple's `FILE *fopen(...) __asm("_fopen")` stays `_fopen` rather than becoming `__fopen`.
+/// A Mach-O label with no underscore names a symbol no C name decorates to, and is left alone.
+fn assembler_name(tast: &Tast, target: &TargetInfo, id: StrId) -> String {
+    let spelled: String =
+        tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+    if target.object_format == ObjectFormat::MachO
+        && let Some(bare) = spelled.strip_prefix('_')
+    {
+        return bare.to_string();
+    }
+    spelled
+}
+

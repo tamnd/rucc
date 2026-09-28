@@ -376,6 +376,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     } else {
                         crate::shapes::Meaning::default()
                     };
+                    let common = sess.common();
                     let mut lowered = rucc_lower::lower(
                         crate::phase::source_name(name),
                         rucc_lower::Context {
@@ -409,6 +410,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             align: opts.align_functions,
                             instrument: opts.instrument_functions,
                             exceptions: opts.exceptions,
+                            common,
                             read: &mut read,
                         },
                     );
