@@ -23,6 +23,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Debug info for a variable that takes over another's value works out dominance from one dominator tree per function instead of two walks of the whole function for each block an assignment starts in. On jtckdint's `test.c` at `-O2` this is about 4% of the instructions the build runs.
 - `rucc --version` prints two more lines under `rucc 0.11.15`, saying that rucc is a compiler for the GNU C dialect of GCC 16 from the Free Software Foundation. Meson takes its GCC path only when it finds those words, and it stopped every meson build with "Unknown compiler" before this. The first line is unchanged, and it is still the only one our harnesses read (#1987).
 - `-dumpversion` prints the major number of the GCC release rucc claims, `16` by default, and `-dumpfullversion` prints all three, `16.0.0`. Both follow `-fgnuc-version=`. They used to print rucc's own version, which a build script comparing it with a GCC release reads as a GCC from before anything it needs (#1987).
+- A 64 bit division or remainder by a constant is now a high multiply and shifts at `-O2`, the way gcc writes it, where it used to be a `div` unless the divisor was a power of two. The IR has `umulh` and `smulh` for this, lowered to the one operand `mulq` and `imulq` on x86-64 and to `umulh` and `smulh` on AArch64 (#1938).
 
 ### Fixed
 

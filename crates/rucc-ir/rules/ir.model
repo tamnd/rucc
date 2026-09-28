@@ -106,6 +106,8 @@
 (semantics (urem.i16 l r) (bvurem l r))
 (semantics (urem.i32 l r) (bvurem l r))
 (semantics (urem.i64 l r) (bvurem l r))
+(semantics (umulh.i64 l r) (extract 127 64 (bvmul (zero_extend 64 128 l) (zero_extend 64 128 r))))
+(semantics (smulh.i64 l r) (extract 127 64 (bvmul (sign_extend 64 128 l) (sign_extend 64 128 r))))
 
 ;; Shifts. The IR takes the count modulo the width it is shifting, which is a decision
 ;; rather than an accident: C leaves a wider count undefined, `spec/08-ir.md` has no poison

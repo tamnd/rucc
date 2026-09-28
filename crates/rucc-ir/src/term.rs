@@ -905,6 +905,15 @@ fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
         };
         return Some(names[at]);
     }
+    // A high multiply is only ever the width of a register, which is where a division by a
+    // constant asks for one, so it has one name rather than four.
+    if matches!(opcode, Opcode::UMulHigh | Opcode::SMulHigh) {
+        return match (opcode, slot(ty)) {
+            (Opcode::UMulHigh, Some(3)) => Some("umulh.i64"),
+            (Opcode::SMulHigh, Some(3)) => Some("smulh.i64"),
+            _ => None,
+        };
+    }
     let names: &[&'static str; 4] = match opcode {
         Opcode::Add => &["add.i8", "add.i16", "add.i32", "add.i64"],
         Opcode::Sub => &["sub.i8", "sub.i16", "sub.i32", "sub.i64"],

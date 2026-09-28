@@ -586,6 +586,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("imul_wide_16", &[spell("imulw", &MULTIPLIER_16)]),
     ("imul_wide_32", &[spell("imull", &MULTIPLIER_32)]),
     ("imul_wide_64", &[spell("imulq", &MULTIPLIER_64)]),
+    ("mul_high_64", &[spell("mulq", &MULTIPLIER_64)]),
+    ("imul_high_64", &[spell("imulq", &MULTIPLIER_64)]),
     // Division and remainder, signed and unsigned. The four widening instructions have no operands
     // at all: each of them reads one fixed register and writes another, and the opcode carries
     // both of those as operands so that the allocator leaves them alone.
@@ -1477,6 +1479,11 @@ pub fn machine(mnemonic: &str, args: &[Shape]) -> Option<&'static str> {
         if !names_every_operand(name, only.args) {
             continue;
         }
+        // The high half on its own is the multiply that keeps both halves under another name,
+        // and a template that writes `mulq` is given both, since only the back end asks for one.
+        if crate::x86_64::insts::form(name) == Some(crate::x86_64::insts::Form::MulHigh) {
+            continue;
+        }
         if answer.replace(name).is_some() {
             return None;
         }
@@ -1794,6 +1801,7 @@ mod tests {
                 || matches!(
                     form,
                     Form::MulWide
+                        | Form::MulHigh
                         | Form::DivWide
                         | Form::DivQuo
                         | Form::DivRem

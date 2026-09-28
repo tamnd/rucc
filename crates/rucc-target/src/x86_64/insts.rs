@@ -48,8 +48,8 @@ use Form::{
     ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
     CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
-    Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulWide, Nop, Pop, PopX87,
-    Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
+    Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop, Pop,
+    PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
     ShiftCl, ShiftRi, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
     StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
     TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
@@ -308,6 +308,14 @@ pub enum Form {
     /// both definitions happen after both sources have been read, which is what an ordinary
     /// definition means, and it is what lets the multiplier sit in `rdx` and still be read.
     MulWide,
+    /// The high half of a product on its own, which is [`Form::MulWide`] read for `rdx` alone.
+    ///
+    /// The same instruction, and what differs is which half is the answer. The high half is the
+    /// first definition and the low half, written over `rax`, is the second, which is the shape
+    /// [`Form::DivRem`] has for the same reason: the program asked for one half and the other is
+    /// lost on the way. A rule selects this one, for a division by a constant, where nothing
+    /// selects the one that keeps both.
+    MulHigh,
     /// The quotient of a division, which comes back in `rax` and destroys `rdx` on the way.
     DivQuo,
     /// The remainder of a division, which comes back in `rdx` and destroys `rax` on the way.
@@ -985,6 +993,14 @@ static MUL_WIDE: [OperandDesc; 4] = [
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR),
 ];
+// The same instruction with the high half first, since that is the answer, and the low half
+// second as a register it destroys. Neither is early, for the reason the one above is not.
+static MUL_HIGH: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RDX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR),
+];
 // The dividend is in `rax` and the divisor is anywhere else. A division produces both answers
 // and this opcode is one of them, so the register the other one lands in is written here as
 // well, and it is written early: the sign extension that fills it runs before the division
@@ -1207,6 +1223,7 @@ impl Form {
             StrStoreRep | StrScanRep => &STR_STORE_REP,
             StrLoad => &STR_LOAD,
             MulWide => &MUL_WIDE,
+            MulHigh => &MUL_HIGH,
             DivQuo => &DIV_QUO,
             DivRem => &DIV_REM,
             DivWide => &DIV_WIDE,
@@ -1649,6 +1666,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("imul_wide_16", MulWide),
     ("imul_wide_32", MulWide),
     ("imul_wide_64", MulWide),
+    // The same two at sixty four bits read for the high half alone, which a division by a
+    // constant multiplies for.
+    ("mul_high_64", MulHigh),
+    ("imul_high_64", MulHigh),
     // Division and remainder, signed and unsigned.
     ("idiv_quo_8", DivQuo),
     ("idiv_quo_16", DivQuo),
@@ -2474,7 +2495,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 740);
+        assert_eq!(described, 742);
     }
 
     #[test]

@@ -188,6 +188,16 @@
       (a64.mul_rr_64 x y)
       (spec (= (bvmul x y) (result))))
 
+;; The high half of a product, which is what a division by a constant multiplies for.
+
+(rule (lower (umulh.i64 (value.i64 x) (value.i64 y)))
+      (a64.umulh_rr_64 x y)
+      (spec (= (extract 127 64 (bvmul (zero_extend 64 128 x) (zero_extend 64 128 y))) (result))))
+
+(rule (lower (smulh.i64 (value.i64 x) (value.i64 y)))
+      (a64.smulh_rr_64 x y)
+      (spec (= (extract 127 64 (bvmul (sign_extend 64 128 x) (sign_extend 64 128 y))) (result))))
+
 
 ;; The three bitwise operations at one bit, which take zeros and ones to zeros and ones.
 

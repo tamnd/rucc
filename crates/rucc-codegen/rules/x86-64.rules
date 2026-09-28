@@ -164,6 +164,17 @@
       (x64.imul_rr_64 x y)
       (spec (= (bvmul x y) (result))))
 
+;; The high half of a product, which is what a division by a constant multiplies for. It is the
+;; one operand `mulq` or `imulq`, with the low half written over `rax` and left there.
+
+(rule (lower (umulh.i64 (value.i64 x) (value.i64 y)))
+      (x64.mul_high_64 x y)
+      (spec (= (extract 127 64 (bvmul (zero_extend 64 128 x) (zero_extend 64 128 y))) (result))))
+
+(rule (lower (smulh.i64 (value.i64 x) (value.i64 y)))
+      (x64.imul_high_64 x y)
+      (spec (= (extract 127 64 (bvmul (sign_extend 64 128 x) (sign_extend 64 128 y))) (result))))
+
 ;; Arithmetic, register with immediate. At sixty four bits the machine holds the immediate
 ;; in thirty two and sign extends it, so the guard on those rules is the constant saying it
 ;; is one of the constants that survives that, which is a thing to test and not a range to
