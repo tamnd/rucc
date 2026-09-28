@@ -1,0 +1,7 @@
+ctor 101
+ctor 200
+ctor plain
+main
+dtor plain
+dtor 200
+dtor 101
