@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.18
+
 ### Added
 
 - `__builtin_cpu_init`, `__builtin_cpu_supports` and `__builtin_cpu_is` on x86-64, lowered the way gcc 16 lowers them. The first is a call to libgcc's `__cpu_indicator_init`, and the other two read the `__cpu_model` and `__cpu_features2` words libgcc fills in before `main`, so the answer is a load and an `and` or a compare rather than a call. All 116 feature names gcc 16 takes are there, the `x86-64-v2` to `x86-64-v4` level names among them, and the 72 processor names, each checked against gcc 16's output. The name has to be a string literal and an unknown one is an error, as in gcc, and on any other target the three are refused. This is the other half of the pattern that picks a function built with `__attribute__((target("sse4.2")))` at run time, and configure scripts probe for it.
