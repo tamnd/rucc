@@ -231,10 +231,7 @@ pub fn insts(
         let mut run: Vec<Inst> = Vec::new();
         let last = was.last().copied();
         for &inst in &was {
-            if Some(inst) == last
-                || pinned.contains(&inst)
-                || known.of(func, inst).barrier
-            {
+            if Some(inst) == last || pinned.contains(&inst) || known.of(func, inst).barrier {
                 done.runs += usize::from(order(func, &run, &mut known, accurate, &mut now));
                 run.clear();
                 now.push(inst);
