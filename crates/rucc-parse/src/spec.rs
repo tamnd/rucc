@@ -54,6 +54,13 @@ fn builtin_keyword(word: Keyword) -> Option<BuiltinSet> {
         Keyword::Complex => BuiltinSet::COMPLEX,
         Keyword::Imaginary => BuiltinSet::IMAGINARY,
         Keyword::Int128 => BuiltinSet::INT128,
+        // Microsoft's names, which mean what clang makes of them: `unsigned __int8` is
+        // `unsigned char` and `__int64 int` is `long long int`. `__int64` is one `long` here
+        // and the second is added where this is read.
+        Keyword::Int8 => BuiltinSet::CHAR,
+        Keyword::Int16 => BuiltinSet::SHORT,
+        Keyword::Int32 => BuiltinSet::INT,
+        Keyword::Int64 => BuiltinSet::LONG,
         // gcc's two are typedefs of `__int128` and of `unsigned __int128`, so each one
         // carries its own signedness rather than waiting for a `signed` or an `unsigned`
         // beside it. That also makes `unsigned __int128_t` the contradiction it is.
@@ -510,7 +517,11 @@ impl Parser<'_> {
                 self.two_types(span);
                 return true;
             }
-            match builtin.add(set) {
+            let added = match word {
+                Keyword::Int64 => builtin.add(set).and_then(|once| once.add(set)),
+                _ => builtin.add(set),
+            };
+            match added {
                 Ok(next) => *builtin = next,
                 Err(BuiltinError::Duplicate) => {
                     self.error("E0406", format!("duplicate `{}`", word.as_str()), span);
