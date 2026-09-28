@@ -9,6 +9,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `tests/exec/windows` gains `wide.c`, a `wmain` program built with `-municode` that checks a character outside the basic plane is two UTF-16 units, and `environ.c`, which reads `environ` and `_timezone` from the C runtime DLL with no `dllimport` in the source. A program there can name its own compile flags on a `/* flags: */` line (#2068).
 - `__attribute__((destructor))` works on COFF targets. rucc writes a small constructor at the destructor's priority that hands the function to `atexit`, so destructors run after `main` in the reverse of their priority order, the same as MinGW GCC. `tests/exec/windows/ctor.c` checks the order against GCC's output (#2068).
 
+### Fixed
+
+- The predefined macros for Apple targets match clang for Apple. `int64_t` and the least and fast sixty four bit types are `long long`, as the SDK's `<sys/_types/_int64_t.h>` writes them, so a freestanding `stdint.h` no longer declares an `int64_t` that the SDK then redefines as a different type, and `INT64_C` gets `LL`. `__unix__`, `__unix`, `unix` and `__STDC_ISO_10646__` are no longer defined. On arm64, `__BIGGEST_ALIGNMENT__` is 8 because `long double` is a `double` there, and `__GCC_DESTRUCTIVE_SIZE` is 128.
+
 ## 0.12.2
 
 The 0.12.0 and 0.12.1 tags were never published. The release checks refused both because of a let chain in the driver, which needs a newer Rust than the workspace promises. 0.12.2 is the first release with their changes, so the two sections below are part of this release too.
