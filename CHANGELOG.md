@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A `switch` whose labels are written in runs one above another, `case 10: case 11: return 1;`, is now a range check and a load from a table of its answers, as gcc 16 makes it. Every label but the last in a run went through a block that only jumps, and that made the arm look reached from outside the `switch`, so the whole `switch` stayed a jump table or a chain of comparisons (#728).
 - The x86-64 scheduler asks the target about each opcode once per function instead of once per instruction. Every question was a string match against the target's tables, and on jtckdint's `test.c` at `-O2` the scheduler's lookups were about a twentieth of the build. The build drops from 35.2 to 32.8 seconds of CPU time.
 - The range analysis licm makes for each loop reads the loop tree licm already has, where it used to build its own for the whole function the first time a loop counter came up, so a function with thousands of loops built thousands of them. On jtckdint's main this takes about 4s off `-O2` (#1957).
 - Loop invariant code motion walks only the loop it is working on, in reverse postorder, where it used to walk every block in the function and skip the ones outside the loop. On jtckdint's main, with thousands of loops, this takes about 4s off `-O2` (#1957).
