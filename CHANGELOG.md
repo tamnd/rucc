@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Debug info for a variable that takes over another's value works out dominance from one dominator tree per function instead of two walks of the whole function for each block an assignment starts in. On jtckdint's `test.c` at `-O2` this is about 4% of the instructions the build runs.
+
 ## 0.11.15
 
 ### Added

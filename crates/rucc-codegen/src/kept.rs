@@ -69,8 +69,6 @@
 //! frame address is not a constant there, which is what `crate::frame` says about a local in the
 //! same function.
 
-use std::collections::HashMap;
-
 use rucc_mir::{Block, Func, Inst, Kept, Reg, Where};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
@@ -120,17 +118,17 @@ pub fn of(
     }
     // A declaration that took a value another one already held, from the instruction the
     // assignment became onward. An instruction something took out since is nowhere to start from.
-    let mut under: HashMap<Block, Vec<bool>> = HashMap::new();
+    let mut tree: Option<Tree> = None;
     for &(decl, reg, first) in &func.starts {
         let Some(block) = func.block_of(first) else { continue };
         let Some(at) = place(func, allocation, frame, reg) else { continue };
         let Some(area) = allocation.live.area(reg) else { continue };
-        let dominated = under.entry(block).or_insert_with(|| dominated(func, block));
+        let tree = tree.get_or_insert_with(|| Tree::of(func));
         for piece in area.pieces() {
             for run in line.reached(piece) {
                 let stretch = if run.block == block {
                     run.stretch_from(piece, first)
-                } else if dominated[run.block.index()] && !other(func, decl, reg, run, piece) {
+                } else if tree.strictly(block, run.block) && !other(func, decl, reg, run, piece) {
                     run.stretch(piece)
                 } else {
                     None
@@ -154,37 +152,133 @@ fn place(func: &Func, allocation: &Allocation, frame: &Frame, reg: Reg) -> Optio
     }
 }
 
-/// Which blocks every path from the entry to them goes through `from` on, by block number.
+/// A function's dominator tree, numbered so that whether one block dominates another is two
+/// comparisons.
 ///
-/// A block is one of them when the entry reaches it and stops reaching it once `from` is taken
-/// away, which is the definition read straight off rather than a dominator tree, since the question
-/// is asked of a handful of blocks and a tree would answer it for all of them. `from` itself is
-/// not, because what holds in it holds from part of the way through and is asked separately.
-fn dominated(func: &Func, from: Block) -> Vec<bool> {
-    let reach = |skip: Option<Block>| {
-        let mut seen = vec![false; func.block_count()];
-        let mut stack: Vec<Block> =
-            func.entry().filter(|&entry| Some(entry) != skip).into_iter().collect();
-        for &block in &stack {
-            seen[block.index()] = true;
-        }
-        while let Some(block) = stack.pop() {
-            for call in &func[block].succs {
-                if Some(call.block) != skip && !seen[call.block.index()] {
-                    seen[call.block.index()] = true;
-                    stack.push(call.block);
+/// Built once for the function. What this did before was read the definition straight off for
+/// each block an assignment started in: walk every block the entry reaches, then walk them again
+/// with that block taken away. That is two walks of the whole function per block, and a function
+/// with tens of thousands of blocks has thousands of them.
+struct Tree {
+    /// When a depth first walk of the tree gets to each block and when it leaves it, or `None` for
+    /// a block the entry does not reach.
+    span: Vec<Option<(usize, usize)>>,
+}
+
+impl Tree {
+    /// The tree of every block the entry reaches, by the iteration Cooper, Harvey and Kennedy
+    /// describe in "A Simple, Fast Dominance Algorithm", over the blocks in reverse postorder.
+    fn of(func: &Func) -> Self {
+        let count = func.block_count();
+        let mut order: Vec<Block> = Vec::new();
+        if let Some(entry) = func.entry() {
+            let mut seen = vec![false; count];
+            seen[entry.index()] = true;
+            let mut stack: Vec<(Block, usize)> = vec![(entry, 0)];
+            while let Some(top) = stack.last_mut() {
+                let (block, next) = *top;
+                if let Some(call) = func[block].succs.get(next) {
+                    top.1 += 1;
+                    if !seen[call.block.index()] {
+                        seen[call.block.index()] = true;
+                        stack.push((call.block, 0));
+                    }
+                } else {
+                    order.push(block);
+                    stack.pop();
                 }
             }
         }
-        seen
-    };
-    let all = reach(None);
-    let around = reach(Some(from));
-    all.iter()
-        .zip(&around)
-        .enumerate()
-        .map(|(index, (&all, &around))| all && !around && index != from.index())
-        .collect()
+        order.reverse();
+        let mut rank = vec![usize::MAX; count];
+        for (at, &block) in order.iter().enumerate() {
+            rank[block.index()] = at;
+        }
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); order.len()];
+        for (at, &block) in order.iter().enumerate() {
+            for call in &func[block].succs {
+                preds[rank[call.block.index()]].push(at);
+            }
+        }
+
+        // Each block's immediate dominator, by its place in the order. The entry is its own, and a
+        // block none of whose predecessors has one yet waits for a later round.
+        let mut idom = vec![usize::MAX; order.len()];
+        if let Some(entry) = idom.first_mut() {
+            *entry = 0;
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for at in 1..order.len() {
+                let mut new = usize::MAX;
+                for &pred in &preds[at] {
+                    if idom[pred] == usize::MAX {
+                        continue;
+                    }
+                    new = if new == usize::MAX { pred } else { meet(&idom, pred, new) };
+                }
+                if idom[at] != new {
+                    idom[at] = new;
+                    changed = true;
+                }
+            }
+        }
+
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); order.len()];
+        for (at, &parent) in idom.iter().enumerate().skip(1) {
+            children[parent].push(at);
+        }
+        let mut span = vec![None; count];
+        let mut enter = vec![0; order.len()];
+        let mut clock = 0;
+        let mut stack: Vec<(usize, usize)> =
+            if order.is_empty() { Vec::new() } else { vec![(0, 0)] };
+        while let Some(top) = stack.last_mut() {
+            let (node, next) = *top;
+            if next == 0 {
+                enter[node] = clock;
+                clock += 1;
+            }
+            if let Some(&child) = children[node].get(next) {
+                top.1 += 1;
+                stack.push((child, 0));
+            } else {
+                span[order[node].index()] = Some((enter[node], clock));
+                clock += 1;
+                stack.pop();
+            }
+        }
+        Self { span }
+    }
+
+    /// Whether every path from the entry to `below` goes through `above`, and they are two blocks.
+    ///
+    /// `above` itself is not, because what holds in it holds from part of the way through and is
+    /// asked separately. A block the entry does not reach is dominated by nothing and dominates
+    /// nothing.
+    fn strictly(&self, above: Block, below: Block) -> bool {
+        match (self.span[above.index()], self.span[below.index()]) {
+            (Some((in_above, out_above)), Some((in_below, out_below))) => {
+                in_above < in_below && out_below < out_above
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The nearest block that dominates both, by place in reverse postorder, which is where the two
+/// walks up the tree meet.
+fn meet(idom: &[usize], mut one: usize, mut other: usize) -> usize {
+    while one != other {
+        while one > other {
+            one = idom[one];
+        }
+        while other > one {
+            other = idom[other];
+        }
+    }
+    one
 }
 
 /// Whether a piece of a register's live range that comes into a run's block from the blocks before
