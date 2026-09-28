@@ -4,6 +4,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.11.15
+
 ### Added
 
 - `-fno-inline-functions-called-once` turns off inlining the one call to a `static` function called once and leaves the `inline` hint and `always_inline` as they are, and `-finline-functions-called-once` turns it back on. Both used to be accepted and ignored. A call more than 6 loops deep is now left a call, which is gcc's `max-inline-functions-called-once-loop-depth`, and `-fopt-info-missed` says why (#1966).
