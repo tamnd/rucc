@@ -88,6 +88,7 @@
 //! are better fixed than cached around.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use rucc_ir::{Block, BlockCall, Def, Flags, Func, Inst, InstData, MemOrder, Opcode, Type, Value};
 
@@ -535,6 +536,41 @@ pub struct Walk<'a> {
     alias: Alias<'a>,
     limit: u32,
     counts: Counts,
+    /// The versions the walk under way has been to. Emptied for each walk rather than made again,
+    /// so the room it grew to is used again.
+    seen: Seen,
+}
+
+/// A set of versions of memory, hashed by multiplying the index rather than by SipHash.
+///
+/// A walk starts one of these for every load it is asked about and puts every version it passes
+/// into it, and on jtckdint's `test.c` hashing them was more than a percent of the build. A value
+/// is a small dense number that nobody outside picks, so there is nothing for SipHash to defend
+/// against.
+type Seen = HashSet<Value, BuildHasherDefault<Spread>>;
+
+/// Spreads a value's index over the whole word, the high bits being the ones the table reads.
+#[derive(Debug, Default)]
+struct Spread(u64);
+
+impl Hasher for Spread {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, word: u32) {
+        self.write_u64(u64::from(word));
+    }
+
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
 }
 
 impl<'a> Walk<'a> {
@@ -553,6 +589,7 @@ impl<'a> Walk<'a> {
             alias: Alias::with(func, outside, options),
             limit,
             counts: Counts::default(),
+            seen: Seen::default(),
         }
     }
 
@@ -608,8 +645,10 @@ impl<'a> Walk<'a> {
         };
         self.counts.walks += 1;
         let mut budget = self.limit;
-        let mut seen = HashSet::new();
+        let mut seen = std::mem::take(&mut self.seen);
+        seen.clear();
         let answer = self.back(reference, version, &mut budget, &mut seen, translate);
+        self.seen = seen;
         // Nothing new on any path back is nothing that wrote it, which is the same answer as
         // reaching the start of the chain and is only reachable through a cycle of parameters.
         answer.unwrap_or(Clobber::NoClobber)
@@ -625,7 +664,7 @@ impl<'a> Walk<'a> {
         reference: Access,
         version: Value,
         budget: &mut u32,
-        seen: &mut HashSet<Value>,
+        seen: &mut Seen,
         translate: &mut dyn FnMut(&Access, Inst) -> Step,
     ) -> Option<Clobber> {
         if !seen.insert(version) {
@@ -637,11 +676,15 @@ impl<'a> Walk<'a> {
             // that only one predecessor made.
             Def::Param { block, index } => {
                 let mut answer = None;
-                for pred in self.cfg.predecessors(block).to_vec() {
-                    let Some(terminator) = self.func.terminator(pred) else {
+                let func = self.func;
+                // By place rather than by copying the list out, since the walk below needs the
+                // walker and a phi is the step it takes most often.
+                for at in 0..self.cfg.predecessors(block).len() {
+                    let pred = self.cfg.predecessors(block)[at];
+                    let Some(terminator) = func.terminator(pred) else {
                         continue;
                     };
-                    for call in self.func.successors(terminator).collect::<Vec<_>>() {
+                    for call in func.successors(terminator) {
                         if call.block != block {
                             continue;
                         }
@@ -684,7 +727,7 @@ impl<'a> Walk<'a> {
                         Step::Retry(next) => {
                             self.counts.rewritten += 1;
                             let before = self.func.mem_in(inst)?;
-                            let mut fresh = HashSet::new();
+                            let mut fresh = Seen::default();
                             return self.back(next, before, budget, &mut fresh, translate);
                         }
                     },
