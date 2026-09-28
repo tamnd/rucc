@@ -32,8 +32,9 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, AttrSet, DataList, Datum, FpContract, Func, Global, Imm, Linkage as IrLinkage, Meta,
-    Module, Reloc, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
+    Alias, AliasKind, AttrSet, DataList, Datum, FpContract, Func, Global, Imm,
+    Linkage as IrLinkage, Meta, Module, Reloc, SymbolRef, TlsModel, Type,
+    Visibility as IrVisibility,
 };
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
@@ -851,9 +852,24 @@ impl Unit<'_> {
     /// one. A name the file also defines keeps its own definition, which is the rule everything
     /// else here follows and is what gcc's output shows for a `.set` written above a definition of
     /// the same name.
+    ///
+    /// A name made by `.symver` is bound the way the name it stands for is, which is what gas
+    /// does, since no directive can speak about a name spelled with an `@` in it.
     fn equated(&mut self, set: &directives::Set, span: Span) {
         let name = self.names.intern(&set.name);
-        let target = self.names.intern(&set.target);
+        let mut target = self.names.intern(&set.target);
+        // A target that is itself an alias stands for what that one stands for. xz gives a version
+        // to a name it declared with the alias attribute, and every alias the attributes made was
+        // added before the first of these, so the chain is already there to follow. The count
+        // bounds a cycle, which the attributes refused where they were written.
+        for _ in 0..self.module.aliases().count() {
+            match self.module.lookup(target) {
+                Some(SymbolRef::Alias(id)) if self.module[id].kind == AliasKind::Alias => {
+                    target = self.module[id].target;
+                }
+                _ => break,
+            }
+        }
         if self.no_address(name, target, span) {
             return;
         }
@@ -871,6 +887,15 @@ impl Unit<'_> {
         let mut alias = Alias::new(name, target);
         alias.linkage = set.linkage;
         alias.visibility = set.visibility;
+        if set.versioned {
+            (alias.linkage, alias.visibility) = match self.module.lookup(target) {
+                Some(SymbolRef::Func(id)) => (self.module[id].linkage, self.module[id].visibility),
+                Some(SymbolRef::Global(id)) => {
+                    (self.module[id].linkage, self.module[id].visibility)
+                }
+                _ => (set.linkage, set.visibility),
+            };
+        }
         self.module.add_alias_over(alias);
     }
 

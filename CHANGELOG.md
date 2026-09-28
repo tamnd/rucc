@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - A call in tail position becomes the epilogue and a jump at `-O2`, `-O3`, `-Os` and `-Oz` on x86-64, as gcc does, and `-foptimize-sibling-calls` and `-fno-optimize-sibling-calls` turn it on and off at any level. A chain of calls like that now runs in the same stack however long it is, which is what a state machine written as functions calling each other needs. The call has to be direct, give back exactly what the caller gives back, and pass every argument in a register. The whole function is turned down when it has a local in its frame, reads its own variable arguments, or calls `setjmp`, `vfork` or anything else that comes back twice, so no pointer into the frame can be live when it is given back. `cargo xtask tail` runs every shape against gcc at every level and walks ten million calls between two functions in a one megabyte stack (#365).
+- `.symver` in an `asm` at file scope gives a name a second one with its version in the spelling, as gas does, bound the way the first name is. `@@@` is written as `@@`, since the name is always defined here. A `.set` or `.symver` of a name declared with the alias attribute now reaches what that alias stands for. xz's liblzma keeps its old symbol versions this way and did not build.
 
 ### Changed
 

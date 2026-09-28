@@ -457,8 +457,16 @@ impl Directives {
     /// only be a second chance to disagree. Nothing opens a section first, because the symbol is
     /// an entry in a table rather than a byte of anything, and no `.size` closes it for the same
     /// reason.
+    ///
+    /// A name with an `@` in it is a symbol version, which gas will not take in `.set` or
+    /// `.globl`. It is written back as the `.symver` it came from, which binds it the way the
+    /// name it stands for is bound.
     pub fn alias(self, out: &mut String, alias: &Alias) {
         let symbol = self.symbol();
+        if alias.name.contains('@') {
+            let _ = writeln!(out, "\t.symver\t{symbol}{},{symbol}{}", alias.target, alias.name);
+            return;
+        }
         match alias.binding {
             Binding::Global => {
                 let _ = writeln!(out, "\t.globl\t{symbol}{}", alias.name);

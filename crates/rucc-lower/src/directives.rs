@@ -185,6 +185,9 @@ pub(crate) struct Set {
     pub linkage: Linkage,
     /// How far outside a shared library that name reaches.
     pub visibility: Visibility,
+    /// Whether this came from a `.symver`, whose new name is bound the way the name it stands for
+    /// is rather than the way the directives said, since none of them can name it.
+    pub versioned: bool,
 }
 
 /// Reads a template and gives back the globals it defines, in the order it defined them.
@@ -296,8 +299,9 @@ struct Assembler<'a> {
     /// one is worked out from. Beside the list rather than in a [`Piece`] because it is the
     /// reader's own bookkeeping and says nothing about the global itself.
     starts: Vec<u64>,
-    /// The names a `.set` equated to another name, in the order they were written.
-    sets: Vec<(String, String)>,
+    /// The names a `.set` or a `.symver` equated to another name, in the order they were
+    /// written, and whether it was a `.symver`.
+    sets: Vec<(String, String, bool)>,
     /// The one being filled in.
     open: Option<Open>,
     /// Where every label of this block is.
@@ -433,6 +437,7 @@ impl<'a> Assembler<'a> {
             // real assembly is written with one and refusing it would refuse the whole file.
             ".type" | ".ident" | ".file" | ".cfi_sections" => {}
             ".set" | ".equ" => self.equate(operands)?,
+            ".symver" => self.symver(operands)?,
             ".size" => self.size(operands)?,
             ".balign" | ".align" => self.align(operands, false)?,
             ".p2align" => self.align(operands, true)?,
@@ -507,7 +512,35 @@ impl<'a> Assembler<'a> {
         if !is_a_name(thing) {
             return Err(unsupported(format!("a '.set' of '{name}' to '{thing}'")));
         }
-        self.sets.push((name.to_owned(), thing.to_owned()));
+        self.sets.push((name.to_owned(), thing.to_owned(), false));
+        Ok(())
+    }
+
+    /// `.symver name, name@version`, which gives a name a second one with a version on it.
+    ///
+    /// What gas does with one is add a symbol spelled with the `@` in it at the first name's
+    /// address, and the linker reads the version off the spelling when a version script builds a
+    /// shared library. That is an alias under a name no C program can write, so it goes where a
+    /// `.set` goes. `@@@` is `@@` when the name is defined in the file, and an alias is only ever
+    /// of a name that is, so it is written as `@@`. xz's liblzma keeps its old symbol versions
+    /// this way when the compiler has no `symver` attribute.
+    fn symver(&mut self, operands: &str) -> Result<(), Failed> {
+        let parts = split(operands);
+        let [name, versioned] = parts.as_slice() else {
+            return Err(unsupported(
+                "a '.symver' that is not a name and a versioned name".to_owned(),
+            ));
+        };
+        let (name, versioned) = (name.trim(), versioned.trim());
+        let (bare, version) = versioned.split_once('@').unwrap_or((versioned, ""));
+        let (at, node) = match version.strip_prefix("@@").or_else(|| version.strip_prefix('@')) {
+            Some(node) => ("@@", node),
+            None => ("@", version),
+        };
+        if !is_a_name(name) || !is_a_name(bare) || !is_a_name(node) {
+            return Err(unsupported(format!("a '.symver' of '{name}' to '{versioned}'")));
+        }
+        self.sets.push((format!("{bare}{at}{node}"), name.to_owned(), true));
         Ok(())
     }
 
@@ -783,11 +816,12 @@ impl<'a> Assembler<'a> {
         let sets = self
             .sets
             .iter()
-            .map(|(name, target)| Set {
+            .map(|(name, target, versioned)| Set {
                 name: name.clone(),
                 target: target.clone(),
                 linkage: self.linkage.get(name).copied().unwrap_or(Linkage::Internal),
                 visibility: self.visibility.get(name).copied().unwrap_or(Visibility::Default),
+                versioned: *versioned,
             })
             .collect();
         Ok(Assembled { pieces: self.pieces, sets })
@@ -1505,12 +1539,14 @@ gSize:
                     target: "base".to_owned(),
                     linkage: Linkage::Weak,
                     visibility: Visibility::Default,
+                    versioned: false,
                 },
                 Set {
                     name: "two".to_owned(),
                     target: "base".to_owned(),
                     linkage: Linkage::Internal,
                     visibility: Visibility::Default,
+                    versioned: false,
                 },
             ]
         );
@@ -1533,6 +1569,27 @@ gSize:
             (".set n\n", "a '.set' that is not a name and a thing"),
         ];
         for (template, want) in cases {
+            let failed = read(template).expect_err(template);
+            assert_eq!(failed, Failed::Unsupported(want.to_owned()), "{template}");
+        }
+    }
+
+    /// `.symver` is a second name spelled with its version, and `@@@` is written as `@@`.
+    #[test]
+    fn a_symver_is_a_second_name_with_the_version_in_its_spelling() {
+        let template = ".symver f_522, f@XZ_5.2.2\n.symver f_52, f@@XZ_5.2\n.symver g, g@@@V1\n";
+        let sets = all_of(template).expect("read").sets;
+        let names: Vec<_> =
+            sets.iter().map(|set| (set.name.as_str(), set.target.as_str())).collect();
+        assert_eq!(names, [("f@XZ_5.2.2", "f_522"), ("f@@XZ_5.2", "f_52"), ("g@@V1", "g")]);
+        assert!(sets.iter().all(|set| set.versioned));
+
+        for (template, want) in [
+            (".symver f\n", "a '.symver' that is not a name and a versioned name"),
+            (".symver f, g@V, local\n", "a '.symver' that is not a name and a versioned name"),
+            (".symver f, g@\n", "a '.symver' of 'f' to 'g@'"),
+            (".symver f, 1@V\n", "a '.symver' of 'f' to '1@V'"),
+        ] {
             let failed = read(template).expect_err(template);
             assert_eq!(failed, Failed::Unsupported(want.to_owned()), "{template}");
         }
