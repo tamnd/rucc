@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- When the spill phase sends a value to memory, it takes the value off the pressure counts one piece of its live area at a time over a slice, rather than looking up each point with a bounds check, so the compiler can vectorize the loop. On jtckdint's `test.c` at `-O2`, with #2107 in, the build runs 69.83G instructions instead of 82.56G, with the same assembly (#2110).
 - The spill phase ahead of the register allocator only clears the values that have gone out of its list of open values at a point that is still over after the spills already chosen, which is the only place the list is read. It used to walk the whole list at every point that started out over. On jtckdint's `test.c` at `-O2` the build runs 82.55G instructions instead of 98.72G, with the same assembly (#2107).
 
 ## 0.12.3
