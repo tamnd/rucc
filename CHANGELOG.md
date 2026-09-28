@@ -22,6 +22,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A `-W` flag gets the answer gcc 16 gives. A name gcc knows is taken, and one it does not, such as clang's `-Wcast-function-type-strict` or `-Wunused-command-line-argument`, is refused, so meson and autoconf probes no longer add clang-only warnings to a build. `-Wno-` of any name is still taken, as in gcc, and `-Werror=` of a name gcc does not know is refused with gcc's message. `-fpch-deps` and `-fno-pch-deps` are taken and do nothing, since there are no precompiled headers (#1988).
 - Induction variable optimization gathers what reads each value once per function and looks only at the readers of a loop's counter when deciding whether it can count down, instead of walking the whole function once for every loop. On jtckdint's `test.c` at `-O2` the build runs about 9% fewer instructions and 7% fewer cycles, and the code it emits is unchanged.
 - Instruction selection counts which values a block's instructions fold away in a map of that block's own, instead of zeroing a counter for every value in the function once per block. On jtckdint's `test.c` at `-O2` the build runs about 2% fewer instructions and cycles, and the code it emits is unchanged.
 - The x86-64 encoder finds the rows for a mnemonic by hashing it instead of walking all 1115 rows of the encoding table for every instruction it emits. On jtckdint's `test.c` at `-O2` the build runs about 6% fewer instructions.
