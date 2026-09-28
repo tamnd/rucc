@@ -4254,6 +4254,15 @@ impl<'a> Lowering<'a> {
         }
         // An output tied to an input is one register, which the definition says by reusing the
         // use, or by both being fixed to the same one when the output was pinned.
+        //
+        // A reused register is kept from every other input already, since the allocator counts the
+        // output as taken from where the instruction reads. So `+&` asks for nothing more than `+`,
+        // and saying it as an early write as well costs a register: the allocator only hands an
+        // output the register of the input it reuses when the output starts at the instruction, and
+        // an early one starts a point sooner, so it gets one of its own and a copy in front. Eleven
+        // operands written that way in xz's range decoder need seventeen registers and run out. The
+        // one case where `&` still means something is an input reading the same value as the one
+        // tied, which would be in the same register and read after the output was written.
         let first_use = defs.len() + written.len();
         for (output, operand) in list.iter().enumerate() {
             let Some(def) = def_of[output] else { continue };
@@ -4268,6 +4277,14 @@ impl<'a> Lowering<'a> {
                 _ => {
                     let at = u8::try_from(first_use + read).map_err(|_| refused())?;
                     defs[def].constraint = Constraint::Reuse(at);
+                    let source = uses[read].reg;
+                    let shared = uses
+                        .iter()
+                        .enumerate()
+                        .any(|(other, operand)| other != read && operand.reg == source);
+                    if defs[def].role == Role::EarlyDef && !shared {
+                        defs[def].role = Role::Def;
+                    }
                 }
             }
         }
