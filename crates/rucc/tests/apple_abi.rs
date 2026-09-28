@@ -93,3 +93,13 @@ fn a_narrow_integer_crosses_a_call_as_itself_on_linux() {
         assert!(!found.iter().any(|line| line.starts_with("uxt") || line.starts_with("sxt")));
     }
 }
+
+/// A function says how to unwind through it in the same directives as on Linux, which Apple's
+/// assembler and the one here both turn into the DWARF table ld64 reads. Without one, a C++
+/// exception thrown by clang's code stops the program at the first function of ours it meets.
+#[test]
+fn a_darwin_function_says_how_to_unwind_through_it() {
+    let asm = listing("unwind", NARROW, DARWIN, "-O2");
+    assert_eq!(asm.matches(".cfi_startproc").count(), 4, "{asm}");
+    assert_eq!(asm.matches(".cfi_endproc").count(), 4, "{asm}");
+}

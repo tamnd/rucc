@@ -65,7 +65,7 @@
 //! write rather than something not written yet.
 //!
 //! Mach-O is written for AArch64 from a file of assembly, which is the way every unit for that
-//! machine reaches an object. See [`macho`](crate::macho) for what the format answers differently.
+//! machine reaches an object. See the `macho` module for what the format answers differently.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.

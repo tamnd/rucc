@@ -149,9 +149,10 @@ fn listing(
         arch,
         names,
         directives,
-        // Nothing outside ELF reads one of these, and the directives for the other two formats are
-        // not the same ones, so a request for a table there is a request for nothing.
-        unwind: unwind && directives == Directives::Elf,
+        // Apple's assembler reads the same directives gas does and so does the reader here, which
+        // makes the DWARF table ld64 turns into its own. COFF's are other directives, so a request
+        // for a table there is a request for nothing.
+        unwind: unwind && directives != Directives::Coff,
         out: String::new(),
         labels: Vec::new(),
         sections,
@@ -272,7 +273,15 @@ impl Writer<'_> {
         // gcc's spelling, which is what the unwind writer puts in the object as well. See
         // `crate::unwind`. The calls with a pad are named on either side below, since the table
         // says where they are by label.
-        let pads: HashMap<Inst, Block> = func.landings.iter().copied().collect();
+        //
+        // Only on ELF, since both are spelled in ELF's terms: the routine through a slot gcc's
+        // runtime fills in and the table in ELF's section for it. A Mach-O function is unwound
+        // through without either. See `crate::unwind::table`.
+        let pads: HashMap<Inst, Block> = if self.directives == Directives::Elf {
+            func.landings.iter().copied().collect()
+        } else {
+            HashMap::new()
+        };
         let local = self.directives.local();
         if unwind && !pads.is_empty() {
             let _ = writeln!(self.out, "\t.cfi_personality 0x9b,{}", rucc_ir::PERSONALITY_REF);
