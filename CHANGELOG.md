@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `__builtin_bswap16`, `32` and `64` and the bit counting builtins (`clz`, `ctz`, `popcount`, `parity`, `ffs` and `clrsb` in each width) of a constant are constants, so they work in a static initializer and in `_Static_assert` the way they do in gcc. `static const unsigned x = __builtin_bswap32(0x11223344u);` was refused with `initializer element is not constant`. `clz` and `ctz` of zero fold to the width, which is what gcc folds them to (#1988).
 - A `ret` or a jump written in an `asm` template is no longer moved by the scheduler at `-O2`. A naked function whose body was `movl $42, %eax; ret` came out with the `ret` first. Branches and returns now stop the scheduler the way calls do (#2037).
 
 ## 0.11.16

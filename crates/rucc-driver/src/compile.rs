@@ -2316,6 +2316,27 @@ decl #0 x : int object external static defined
         assert!(text.contains("decl #1 c : int"), "{text}");
     }
 
+    /// The byte swaps and the bit counts of a constant are constants, which is how gcc has them, and
+    /// every number here was read off gcc 16 on x86-64. `__builtin_clz(0)` and `__builtin_ctzll(0)`
+    /// are undefined at run time and gcc folds them to the width.
+    #[test]
+    fn the_byte_swaps_and_the_bit_counts_of_a_constant_are_constants() {
+        tast(concat!(
+            "static const unsigned magic = __builtin_bswap32(0x11223344u);\n",
+            "_Static_assert(__builtin_bswap16(0x1234) == 0x3412, \"16\");\n",
+            "_Static_assert(__builtin_bswap32(0x11223344u) == 0x44332211u, \"32\");\n",
+            "_Static_assert(__builtin_bswap64(0x0102030405060708ull) == 0x0807060504030201ull, \"64\");\n",
+            "_Static_assert(__builtin_popcountll(-1ll) == 64 && __builtin_popcount(-1) == 32, \"ones\");\n",
+            "_Static_assert(__builtin_parity(7) == 1 && __builtin_parity(3) == 0, \"parity\");\n",
+            "_Static_assert(__builtin_ffs(0) == 0 && __builtin_ffs(8) == 4, \"ffs\");\n",
+            "_Static_assert(__builtin_clrsb(0) == 31 && __builtin_clrsb(-1) == 31, \"clrsb\");\n",
+            "_Static_assert(__builtin_clrsbl(1) == 62, \"clrsbl\");\n",
+            "_Static_assert(__builtin_clz(1) == 31 && __builtin_clzl(1) == 63, \"clz\");\n",
+            "_Static_assert(__builtin_ctzll(1ull << 40) == 40, \"ctz\");\n",
+            "_Static_assert(__builtin_clz(0) == 32 && __builtin_ctzll(0) == 64, \"zero\");\n",
+        ));
+    }
+
     /// Every number in these two tests was read off gcc 16 on x86-64 under `-std=gnu23`
     /// rather than reasoned about, which is why they are written as assertions the program
     /// makes about itself: a compilation with no messages is every one of them holding.

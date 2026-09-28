@@ -84,7 +84,7 @@ use rucc_types::{
 };
 
 use crate::decl::{DeclFlags, DeclId, StorageDuration};
-use crate::expr::{Classify, Conversion, ExprId, ExprKind, ExprList, OverflowOp, Sign};
+use crate::expr::{BitCount, Classify, Conversion, ExprId, ExprKind, ExprList, OverflowOp, Sign};
 use crate::tast::{Address, Base, Const, Tast};
 
 /// Why an expression is not a constant.
@@ -223,6 +223,8 @@ impl<'a> Eval<'a> {
             ExprKind::FpClassify { value, answers } => self.fpclassify(expr, value, answers),
             ExprKind::Sign { op, lhs, rhs } => self.sign(expr, op, lhs, rhs),
             ExprKind::Overflow { op, args, stores: false, .. } => self.overflows(expr, op, args),
+            ExprKind::ByteSwap { operand } => self.byte_swap(expr, operand),
+            ExprKind::BitCount { operand, count } => self.bit_count(expr, operand, count),
             // `__builtin_constant_p` of something that is not a constant yet. Where a constant is
             // needed, which is the only place this is asked, the answer is no, and gcc gives the
             // same one: `__builtin_choose_expr (__builtin_constant_p (n), a, b)` is `b`.
@@ -373,6 +375,64 @@ impl<'a> Eval<'a> {
             }
         };
         Ok(Const::Float(left.with_sign(sign)))
+    }
+
+    /// `__builtin_bswap16`, `32` and `64` of a constant.
+    ///
+    /// gcc folds these in its front end, and glibc's `htonl` and `htobe32` are written as them, so
+    /// a table of network constants at file scope is one of these in a static initializer. The
+    /// width is the node's, which is the unsigned type the prototype converted the operand to.
+    fn byte_swap(&mut self, expr: ExprId, operand: ExprId) -> Result<Const, NotConstant> {
+        let Const::Int(value) = self.eval(operand)? else {
+            return Err(self.stop(expr));
+        };
+        let bits = self.size_of(self.tast[expr].ty) * 8;
+        if !matches!(bits, 16 | 32 | 64) {
+            return Err(self.stop(expr));
+        }
+        let swapped = ((value as u128) & low(bits)).swap_bytes() >> (128 - bits);
+        Ok(Const::Int(swapped as i128))
+    }
+
+    /// The bit counting builtins of a constant, at the width of the operand.
+    ///
+    /// `__builtin_clz` and `__builtin_ctz` of zero are undefined when the program runs, and gcc
+    /// folds them to the width when it does not, which is what this does too, since a constant
+    /// that folded to one thing here and to another in gcc is a program that differs between them.
+    fn bit_count(
+        &mut self,
+        expr: ExprId,
+        operand: ExprId,
+        count: BitCount,
+    ) -> Result<Const, NotConstant> {
+        let Const::Int(value) = self.eval(operand)? else {
+            return Err(self.stop(expr));
+        };
+        let bits = self.size_of(self.tast[operand].ty) * 8;
+        if bits == 0 || bits > 64 {
+            return Err(self.stop(expr));
+        }
+        let value = (value as u128) & low(bits);
+        let width = u32::try_from(bits).expect("at most 64");
+        let leading = |value: u128| value.leading_zeros() - (128 - width);
+        let answer = match count {
+            BitCount::Leading => leading(value),
+            BitCount::Trailing => value.trailing_zeros().min(width),
+            BitCount::Ones => value.count_ones(),
+            BitCount::Parity => value.count_ones() & 1,
+            BitCount::FirstSet => {
+                if value == 0 {
+                    0
+                } else {
+                    value.trailing_zeros() + 1
+                }
+            }
+            BitCount::RedundantSign => {
+                let negative = value >> (bits - 1) & 1 == 1;
+                leading(if negative { !value & low(bits) } else { value }) - 1
+            }
+        };
+        Ok(Const::Int(i128::from(answer)))
     }
 
     /// Whether `__builtin_add_overflow_p` and its two siblings would overflow, for constants.
@@ -1493,6 +1553,11 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
         // width it is written in.
         Const::Address(_) | Const::Apart { .. } => false,
     }
+}
+
+/// The low `bits` bits set, for a width of 1 to 64.
+fn low(bits: u64) -> u128 {
+    (1u128 << bits) - 1
 }
 
 #[cfg(test)]
