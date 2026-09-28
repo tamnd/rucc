@@ -1,0 +1,15 @@
+a size 8 align 4
+b size 8 align 4
+c size 8 align 4
+d size 2 align 1
+e size 8 align 4
+f size 16 align 8
+g size 4 align 2
+h size 24 align 8
+i size 7 align 1
+j size 8 align 4
+a.y at 4
+d.y at 1
+f.y at 8
+i.z at 5
+g -200 255

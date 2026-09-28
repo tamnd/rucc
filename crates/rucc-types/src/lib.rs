@@ -1068,6 +1068,20 @@ mod tests {
         let itanium = lay_out(&types, RecordKind::Struct, &between);
         assert_eq!(itanium.layout, Layout::new(8, 4));
         assert_eq!(offsets(&itanium), [0, 32, 32, 40]);
+
+        // And after a unit narrower than its own type it rounds to its type's alignment and
+        // raises the record's, which is what gcc on mingw-w64 prints for this one.
+        let int_ = types.int(IntKind::Int);
+        let narrow = [
+            bits(&mut interner, "a", char_, 1),
+            unnamed_bits(int_, 0),
+            bits(&mut interner, "b", char_, 1),
+        ];
+        for target in [windows(), target("x86_64-pc-windows-gnu")] {
+            let ms = lay_out_on(&target, &types, RecordKind::Struct, &narrow);
+            assert_eq!(ms.layout, Layout::new(8, 4));
+            assert_eq!(offsets(&ms), [0, 32, 32]);
+        }
     }
 
     #[test]

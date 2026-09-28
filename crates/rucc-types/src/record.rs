@@ -782,10 +782,13 @@ impl Builder {
     /// alignment, so it keeps working inside a `packed` record or under `#pragma pack`, which is
     /// the whole reason a program writes one.
     ///
-    /// Under Microsoft's rule it closes the open allocation unit and does nothing else, so with no
-    /// unit open it does nothing at all. That is a visible difference rather than a restatement:
-    /// `struct { char c; unsigned :0; }` is four bytes under the first rule and one byte under the
-    /// second, because there the member before it was not a bit-field and there was no run to end.
+    /// Under Microsoft's rule, with no unit open it does nothing at all. That is a visible
+    /// difference rather than a restatement: `struct { char c; unsigned :0; }` is four bytes under
+    /// the first rule and one byte under the second, because there the member before it was not a
+    /// bit-field and there was no run to end. With a unit open it closes it and then rounds to its
+    /// own type's alignment, lowered by packing, and raises the record's alignment to that, which
+    /// makes `struct { char a:1; int :0; char b:1; }` eight bytes aligned to four with gcc's
+    /// `-mms-bitfields` and with MSVC alike. Closing the unit and stopping there made it two.
     fn zero_width(
         &mut self,
         target: &TargetInfo,
@@ -807,7 +810,16 @@ impl Builder {
                     self.align = self.align.max(natural.max(1));
                 }
             }
-            BitFieldStyle::Microsoft => self.close_unit(),
+            BitFieldStyle::Microsoft => {
+                let after_bit_field = self.unit.is_some();
+                self.close_unit();
+                if after_bit_field && self.kind == RecordKind::Struct {
+                    let align = self.member_align(decl, natural.max(1));
+                    self.at = round_up(self.at, u128::from(align) * 8)?;
+                    self.bits = self.bits.max(self.at);
+                    self.align = self.align.max(align);
+                }
+            }
         }
         self.push(decl, self.at, Some(0), natural.max(1))
     }
