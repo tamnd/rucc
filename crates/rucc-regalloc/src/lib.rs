@@ -24,6 +24,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-regalloc/0.11.19")]
 
 pub mod assign;
+pub mod backtrack;
 pub mod check;
 pub mod live;
 pub mod moves;
@@ -90,10 +91,41 @@ pub struct Allocation {
 /// and nothing that says where, and finding the function it was about in a file the size of the
 /// SQLite amalgamation means bisecting by hand.
 pub fn run(func: &mut rucc_mir::Func, env: &assign::Env, called: &str, verify: bool) -> Allocation {
+    run_with(func, env, called, verify, Allocator::Single)
+}
+
+/// Which of the two allocators decides where the values go.
+///
+/// The rewrite, the checks and the moves are the same for both, since each hands back an
+/// [`assign::Assignment`] and nothing after the decision asks which one made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Allocator {
+    /// The single pass of [`assign`], which is what `-O0` asks for.
+    #[default]
+    Single,
+    /// The allocator of [`backtrack`], which weighs what each value costs to keep in memory.
+    Backtracking,
+}
+
+/// Allocates registers for a function with the allocator asked for, rewriting it as it goes.
+///
+/// # Panics
+///
+/// As [`run`].
+pub fn run_with(
+    func: &mut rucc_mir::Func,
+    env: &assign::Env,
+    called: &str,
+    verify: bool,
+    allocator: Allocator,
+) -> Allocation {
     let checking = verify || cfg!(debug_assertions);
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
-    let mut assignment = assign::assign(func, &order, &live, env);
+    let mut assignment = match allocator {
+        Allocator::Single => assign::assign(func, &order, &live, env),
+        Allocator::Backtracking => backtrack::assign(func, &order, &live, env),
+    };
     // An answer that went over the second source of an instruction that reads its sources either
     // way round. Swapping them makes it an ordinary reuse of the first, so the checker, the trace
     // and the rewrite read it as one. Liveness does not care which way round two uses are.

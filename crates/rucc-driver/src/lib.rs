@@ -2045,6 +2045,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     }
                 };
             }
+            _ if arg.starts_with("-Zregalloc=") => {
+                opts.backtracking = match &arg["-Zregalloc=".len()..] {
+                    "backtracking" => Some(true),
+                    "single" => Some(false),
+                    _ => return Err(err("-Zregalloc= takes backtracking or single")),
+                };
+            }
             _ if arg.starts_with("-Zswitch=") => {
                 let shape = &arg["-Zswitch=".len()..];
                 if rucc_codegen::switch::Force::named(shape).is_none() {
@@ -3944,6 +3951,18 @@ mod tests {
         assert_eq!(plain.register_pressure, None, "nothing is measured unless it was asked for");
 
         assert!(parse_args(&args(&["-Zregister-pressure=", "a.c"])).is_err(), "no file named");
+    }
+
+    /// Which register allocator runs, asked for by name, and left to the level when it is not.
+    #[test]
+    fn the_register_allocator_is_asked_for_by_name() {
+        let (opts, _) = compile(&["-c", "-O2", "-Zregalloc=backtracking", "a.c"]);
+        assert_eq!(opts.backtracking, Some(true));
+        let (opts, _) = compile(&["-c", "-O2", "-Zregalloc=single", "a.c"]);
+        assert_eq!(opts.backtracking, Some(false));
+        let (plain, _) = compile(&["-c", "-O2", "a.c"]);
+        assert_eq!(plain.backtracking, None, "the level decides unless it was asked for");
+        assert!(parse_args(&args(&["-Zregalloc=graph", "a.c"])).is_err(), "not an allocator");
     }
 
     /// The third one, which says what the pre-selection lowering group did.

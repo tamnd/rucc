@@ -57,6 +57,7 @@ use crate::split;
 use crate::tail;
 use crate::usage::{StackUsage, Usage};
 use crate::weights;
+pub use rucc_regalloc::Allocator;
 
 /// Everything about a machine that compiling a function for it needs.
 ///
@@ -313,6 +314,9 @@ pub struct Flags {
     /// Whether the register allocator runs its own checks on a build that has assertions compiled
     /// out, which `-Zverify-each` asks for. See [`rucc_regalloc::run`].
     pub verify: bool,
+    /// Which register allocator decides where the values go, which `-Zregalloc=` says. See
+    /// [`rucc_regalloc::Allocator`].
+    pub allocator: Allocator,
     /// Whether the level asked for small code or for fast code.
     ///
     /// The level itself lives in `rucc-session`, which is above this crate, so what arrives here is
@@ -352,6 +356,7 @@ impl Default for Flags {
             align_loops: false,
             accurate: None,
             verify: false,
+            allocator: Allocator::Single,
             goal: Goal::Speed,
             switch: None,
             sibling: false,
@@ -637,8 +642,13 @@ pub fn compile_recording(
     // because every pass in between that rewrites an instruction would have to carry the mark.
     commuting(&mut func, machine.shapes, names);
 
+    // The single pass allocator in a function that can be come back into. A value live across the
+    // call that comes back has to be read by the second arrival from memory the first arm did not
+    // write, and the backtracking allocator is free to leave it in a register the first arm writes.
+    let allocator = if alone { Allocator::Single } else { flags.allocator };
     let called = names.resolve(func.name).to_owned();
-    let allocation = rucc_regalloc::run(&mut func, &machine.env, &called, flags.verify);
+    let allocation =
+        rucc_regalloc::run_with(&mut func, &machine.env, &called, flags.verify, allocator);
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing

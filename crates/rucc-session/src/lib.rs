@@ -1953,6 +1953,11 @@ pub struct Options {
     /// in this compiler is, every one of them says so, and this is how a person measuring the cost
     /// of that can compile the same program both ways.
     pub cycle_accurate_model: Option<bool>,
+    /// Whether the backtracking register allocator decides where the values go rather than the
+    /// single pass one, from `-Zregalloc=backtracking` and `-Zregalloc=single`.
+    ///
+    /// `None` is a command line that said neither, and then the level decides.
+    pub backtracking: Option<bool>,
     /// Whether two things in a frame that are never both wanted may be the same bytes, from
     /// `-fstack-reuse=`.
     ///
@@ -2405,6 +2410,7 @@ impl Options {
             sibling_calls: None,
             align_loops: None,
             cycle_accurate_model: None,
+            backtracking: None,
             stack_reuse: None,
             protector: Protector::default(),
             stack_clash: false,

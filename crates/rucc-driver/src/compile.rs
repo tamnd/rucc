@@ -938,6 +938,14 @@ fn generate(
         // The same flag that turns the IR verifier on in a release build, since what it says is
         // that this run should check itself and the back end has checks of its own.
         verify: opts.verify_each,
+        // The backtracking allocator whenever the optimizer runs, and the single pass one at `-O0`,
+        // which is what section 39.7 keeps it for. `-Zregalloc=` picks either at any level. See
+        // `rucc_regalloc::backtrack` for what the backtracking one does differently.
+        allocator: if opts.backtracking.unwrap_or_else(|| opts.opt_level.runs_optimizer()) {
+            pipeline::Allocator::Backtracking
+        } else {
+            pipeline::Allocator::Single
+        },
         // What the level asked for. The back end had no way to know until now, which is
         // tamnd/rucc#741: `-Os` picked a shorter list of middle end passes and then compiled the
         // result exactly as `-O2` would have. The level is asked whether it optimizes for size
