@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `#undef` of a name that starts with `__STDC_` is allowed, as gcc allows it. Only `defined` is refused. gnulib's config.h undefines `__STDC_WANT_LIB_EXT1__`, so diffutils, grep and gzip did not build.
+- `-x` takes its language joined as well as separate, so `-xc` works as it does in gcc. busybox and toybox probe the compiler with it.
+- `__builtin_add_overflow_p`, `__builtin_sub_overflow_p` and `__builtin_mul_overflow_p` of two constants are integer constant expressions, as they are in gcc. gnulib's intprops asserts about them with `static_assert`, so sed's gnulib tests did not build.
+
 ## 0.11.13
 
 ### Added

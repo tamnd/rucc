@@ -84,7 +84,7 @@ use rucc_types::{
 };
 
 use crate::decl::{DeclFlags, DeclId, StorageDuration};
-use crate::expr::{Classify, Conversion, ExprId, ExprKind, ExprList, Sign};
+use crate::expr::{Classify, Conversion, ExprId, ExprKind, ExprList, OverflowOp, Sign};
 use crate::tast::{Address, Base, Const, Tast};
 
 /// Why an expression is not a constant.
@@ -222,6 +222,7 @@ impl<'a> Eval<'a> {
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
             ExprKind::FpClassify { value, answers } => self.fpclassify(expr, value, answers),
             ExprKind::Sign { op, lhs, rhs } => self.sign(expr, op, lhs, rhs),
+            ExprKind::Overflow { op, args, stores: false, .. } => self.overflows(expr, op, args),
             // `__builtin_constant_p` of something that is not a constant yet. Where a constant is
             // needed, which is the only place this is asked, the answer is no, and gcc gives the
             // same one: `__builtin_choose_expr (__builtin_constant_p (n), a, b)` is `b`.
@@ -372,6 +373,49 @@ impl<'a> Eval<'a> {
             }
         };
         Ok(Const::Float(left.with_sign(sign)))
+    }
+
+    /// Whether `__builtin_add_overflow_p` and its two siblings would overflow, for constants.
+    ///
+    /// gcc folds these to an integer constant expression when the first two operands are, which
+    /// is the reason the `_p` spellings exist: gnulib's intprops builds its overflow checks on
+    /// them and asserts about them with `static_assert`. The third operand only names the type
+    /// and is never evaluated, so only its type is asked. The spellings that store the result are
+    /// not constants, since they write through a pointer. The exact result is worked out in
+    /// [`i128`], and an operand or a result that does not fit there is left to the program.
+    fn overflows(
+        &mut self,
+        expr: ExprId,
+        op: OverflowOp,
+        args: ExprList,
+    ) -> Result<Const, NotConstant> {
+        let [lhs, rhs, dest] = self.tast[args][..] else {
+            return Err(self.stop(expr));
+        };
+        let (Const::Int(left), Const::Int(right)) = (self.eval(lhs)?, self.eval(rhs)?) else {
+            return Err(self.stop(expr));
+        };
+        let exact = |ty: TypeId, value: i128| {
+            // An unsigned hundred and twenty eight bit value past the signed range is stored with
+            // its top bit set and would read as negative here.
+            let info = self.int_shape(ty)?;
+            (info.signed || info.width < 128 || value >= 0).then_some(value)
+        };
+        let (Some(left), Some(right)) =
+            (exact(self.tast[lhs].ty, left), exact(self.tast[rhs].ty, right))
+        else {
+            return Err(self.stop(expr));
+        };
+        let value = match op {
+            OverflowOp::Add => left.checked_add(right),
+            OverflowOp::Sub => left.checked_sub(right),
+            OverflowOp::Mul => left.checked_mul(right),
+        };
+        let (Some(value), Some(info)) = (value, self.int_shape(self.tast[dest].ty)) else {
+            return Err(self.stop(expr));
+        };
+        let fits = info.wrap(value) == value && (info.signed || info.width < 128 || value >= 0);
+        Ok(Const::Int(i128::from(!fits)))
     }
 
     /// A prefix operator applied to a folded operand.
