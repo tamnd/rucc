@@ -32,6 +32,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-base/0.11.14")]
 
 mod decimal;
+pub mod dfp;
 pub mod float;
 pub mod index;
 pub mod intern;
