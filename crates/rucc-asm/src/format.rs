@@ -137,15 +137,7 @@ impl Directives {
             Some(byte) => writeln!(out, "\t.p2align\t{power}, {byte:#x}"),
             None => writeln!(out, "\t.p2align\t{power}"),
         };
-        match binding {
-            Binding::Global => {
-                let _ = writeln!(out, "\t.globl\t{symbol}{name}");
-            }
-            Binding::Weak => {
-                let _ = writeln!(out, "\t.weak\t{symbol}{name}");
-            }
-            Binding::Local => {}
-        }
+        self.bind(out, name, binding);
         self.seen(out, name, binding, visibility);
         match self {
             Directives::Elf => {
@@ -351,7 +343,10 @@ impl Directives {
             (_, Place::Merged) => {
                 let comm = if var.binding == Binding::Local { ".lcomm" } else { ".comm" };
                 let name = &var.name;
-                let _ = writeln!(out, "\t{comm}\t{symbol}{name},{},{}", var.size, var.align);
+                // Apple's assembler takes the alignment as a power of two and gas as a count of
+                // bytes, which are the same number only for one byte.
+                let boundary = if self == Directives::MachO { u64::from(align) } else { var.align };
+                let _ = writeln!(out, "\t{comm}\t{symbol}{name},{},{boundary}", var.size);
                 return false;
             }
             // Apple's `.tbss` is `.zerofill` for the per thread image, and the name a program uses is
@@ -430,6 +425,12 @@ impl Directives {
             Binding::Global => {
                 let _ = writeln!(out, "\t.globl\t{symbol}{name}");
             }
+            // Apple's assembler reads `.weak` as nothing it knows. A weak definition there is an
+            // external name with a second directive saying another object may beat it.
+            Binding::Weak if self == Directives::MachO => {
+                let _ = writeln!(out, "\t.globl\t{symbol}{name}");
+                let _ = writeln!(out, "\t.weak_definition\t{symbol}{name}");
+            }
             Binding::Weak => {
                 let _ = writeln!(out, "\t.weak\t{symbol}{name}");
             }
@@ -467,15 +468,7 @@ impl Directives {
             let _ = writeln!(out, "\t.symver\t{symbol}{},{symbol}{}", alias.target, alias.name);
             return;
         }
-        match alias.binding {
-            Binding::Global => {
-                let _ = writeln!(out, "\t.globl\t{symbol}{}", alias.name);
-            }
-            Binding::Weak => {
-                let _ = writeln!(out, "\t.weak\t{symbol}{}", alias.name);
-            }
-            Binding::Local => {}
-        }
+        self.bind(out, &alias.name, alias.binding);
         self.seen(out, &alias.name, alias.binding, alias.visibility);
         let _ = writeln!(out, "\t.set\t{symbol}{},{symbol}{}", alias.name, alias.target);
     }
@@ -491,8 +484,11 @@ impl Directives {
     /// After everything else, which is also where gcc writes it. Nothing turns on the position,
     /// since a directive about a name is not a byte of any section, but a listing somebody
     /// compares against gcc's is easier to compare when the two put things in the same order.
+    ///
+    /// Apple's assembler has a directive of its own for the reference, `.weak_reference`.
     pub fn absent(self, out: &mut String, name: &str) {
-        let _ = writeln!(out, "\t.weak\t{}{name}", self.symbol());
+        let weak = if self == Directives::MachO { ".weak_reference" } else { ".weak" };
+        let _ = writeln!(out, "\t{weak}\t{}{name}", self.symbol());
     }
 
     /// What is said once, after every function.
@@ -593,6 +589,34 @@ mod tests {
         let mut close = String::new();
         Directives::MachO.close(&mut close, "main");
         assert_eq!(close, "");
+    }
+
+    /// What clang writes for the same declarations with `-target arm64-apple-macos`, and what
+    /// Apple's assembler takes: it has no `.weak`, and a byte count in `.comm` would be read as
+    /// a power of two and ask for a boundary of 2^8.
+    #[test]
+    fn a_mach_o_listing_says_weak_and_common_the_way_apple_does() {
+        let mut out = String::new();
+        Directives::MachO.open(&mut out, "f", 4, None, Binding::Weak, Visibility::Default, "");
+        assert!(out.contains("\t.globl\t_f\n\t.weak_definition\t_f\n"), "{out}");
+        let mut absent = String::new();
+        Directives::MachO.absent(&mut absent, "g");
+        assert_eq!(absent, "\t.weak_reference\t_g\n");
+        let var = Variable {
+            name: "shared".to_owned(),
+            size: 16,
+            align: 8,
+            place: Place::Merged,
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            pieces: Vec::new(),
+        };
+        let mut apple = String::new();
+        Directives::MachO.variable(&mut apple, &var, Sections::default());
+        assert_eq!(apple, "\t.comm\t_shared,16,3\n");
+        let mut elf = String::new();
+        Directives::Elf.variable(&mut elf, &var, Sections::default());
+        assert_eq!(elf, "\t.comm\tshared,16,8\n");
     }
 
     #[test]
