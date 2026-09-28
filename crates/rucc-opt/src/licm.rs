@@ -545,7 +545,17 @@ impl Job<'_> {
         stats: &mut Stats,
     ) -> Vec<Inst> {
         let header = self.loops.header(id);
-        let inside: HashSet<Block> = self.loops.blocks(id).iter().copied().collect();
+        // The loop's own blocks in reverse postorder, which is the order the walk below needs.
+        // Sorted out of the loop rather than filtered out of the function's order, because the
+        // second is a walk of every block in the function for every loop, and jtckdint's main has
+        // thousands of loops in 22000 blocks.
+        let mut walk: Vec<(u32, Block)> = self
+            .loops
+            .blocks(id)
+            .iter()
+            .filter_map(|&block| Some((self.cfg.rank(block)?, block)))
+            .collect();
+        walk.sort_unstable();
         // A loop with a way out has its post-dominance answered against edges the program has.
         // One without does not, so it is declined rather than decided on an invented edge.
         let spins = self.loops.blocks(id).iter().any(|block| self.invented.contains(block));
@@ -612,10 +622,7 @@ impl Job<'_> {
         // round the loop runs its blocks in and a block seen later cannot run earlier.
         let mut reaching = !spins;
 
-        for block in self.cfg.reverse_postorder() {
-            if !inside.contains(&block) {
-                continue;
-            }
+        for (_, block) in walk {
             let entered = self.post.post_dominates(block, header);
             for inst in func.insts(block) {
                 // Both halves are needed and neither implies the other. The block being one the
