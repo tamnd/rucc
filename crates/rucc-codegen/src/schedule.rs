@@ -162,7 +162,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use rucc_base::Interner;
+use rucc_base::{Interner, Symbol};
 use rucc_mir::{Block, Func, Inst, Reg, Role};
 use rucc_target::{FlagInsts, MachineInsts, RegClass, Timing, TimingInsts, Unit};
 
@@ -221,6 +221,7 @@ pub fn insts(
 ) -> Scheduled {
     let blocks: Vec<Block> = func.blocks().collect();
     let mut done = Scheduled::default();
+    let mut known = Known { timing, machine, flags, names, seen: HashMap::new() };
     for block in blocks {
         let was: Vec<Inst> = func.insts(block).collect();
         if was.len() < 3 {
@@ -230,21 +231,15 @@ pub fn insts(
         let mut run: Vec<Inst> = Vec::new();
         let last = was.last().copied();
         for &inst in &was {
-            if Some(inst) == last
-                || pinned.contains(&inst)
-                || barrier(func, inst, timing, machine, names)
-            {
-                done.runs += usize::from(order(
-                    func, &run, timing, machine, flags, names, accurate, &mut now,
-                ));
+            if Some(inst) == last || pinned.contains(&inst) || known.of(func, inst).barrier {
+                done.runs += usize::from(order(func, &run, &mut known, accurate, &mut now));
                 run.clear();
                 now.push(inst);
             } else {
                 run.push(inst);
             }
         }
-        done.runs +=
-            usize::from(order(func, &run, timing, machine, flags, names, accurate, &mut now));
+        done.runs += usize::from(order(func, &run, &mut known, accurate, &mut now));
         let moved = was.iter().zip(&now).filter(|(before, after)| before != after).count();
         if moved == 0 {
             continue;
@@ -260,33 +255,68 @@ pub fn insts(
     done
 }
 
-/// Whether nothing may be moved across that instruction.
+/// What the target says about one opcode, which is the same for every instruction spelled that
+/// way.
 ///
-/// See the module comment. The four answers are a call, a name the target does not have, a name the
-/// target has and the timing model does not cover, and an instruction carrying a frame rule.
-fn barrier(
-    func: &Func,
-    inst: Inst,
-    timing: &TimingInsts,
-    machine: &MachineInsts,
-    names: &Interner,
-) -> bool {
-    let name = names.resolve(func[inst].opcode.name());
-    machine.calls(name)
-        || !machine.has(name)
-        || timing.of(name).is_none_or(|timing| timing.unit == Unit::Fixed)
-        || func.cfi_after(inst).next().is_some()
+/// Every one of these is a lookup by the opcode's name, and a target's tables are matches on
+/// strings, so asking them for each instruction compared its name against a few hundred others
+/// each time. This pass asked seven such questions of every instruction, and on jtckdint's main,
+/// with 190000 of them, the comparing came to a twentieth of the `-O2` build.
+#[derive(Debug, Clone, Copy)]
+struct Facts {
+    /// Whether the name alone makes it a barrier. A frame rule after it is about the instruction
+    /// rather than the name, so [`Known::of`] asks that one each time.
+    barrier: bool,
+    /// What it costs, which a barrier by name has none of.
+    timing: Option<Timing>,
+    reads_flags: bool,
+    writes_flags: bool,
+    touches_mem: bool,
+}
+
+/// The target's tables, and what they have said so far, by opcode.
+struct Known<'a> {
+    timing: &'a TimingInsts,
+    machine: &'a MachineInsts,
+    flags: &'a FlagInsts,
+    names: &'a Interner,
+    seen: HashMap<Symbol, Facts>,
+}
+
+impl Known<'_> {
+    /// What the target says about this instruction's opcode, and whether nothing may be moved
+    /// across the instruction.
+    ///
+    /// See the module comment. The four barriers are a call, a name the target does not have, a
+    /// name the target has and the timing model does not cover, and an instruction carrying a frame
+    /// rule.
+    fn of(&mut self, func: &Func, inst: Inst) -> Facts {
+        let symbol = func[inst].opcode.name();
+        let (timing, machine, flags, names) = (self.timing, self.machine, self.flags, self.names);
+        let mut facts = *self.seen.entry(symbol).or_insert_with(|| {
+            let name = names.resolve(symbol);
+            let bare = name.strip_prefix(flags.prefix).unwrap_or(name);
+            let cost = timing.of(name);
+            Facts {
+                barrier: machine.calls(name)
+                    || !machine.has(name)
+                    || cost.is_none_or(|cost| cost.unit == Unit::Fixed),
+                timing: cost,
+                reads_flags: flags.reads(bare).is_some(),
+                writes_flags: (flags.writes)(bare),
+                touches_mem: machine.touches_mem(name),
+            }
+        });
+        facts.barrier = facts.barrier || func.cfi_after(inst).next().is_some();
+        facts
+    }
 }
 
 /// Chooses an order for one run and appends it, saying whether there was anything to choose.
-#[allow(clippy::too_many_arguments)]
 fn order(
     func: &Func,
     run: &[Inst],
-    timing: &TimingInsts,
-    machine: &MachineInsts,
-    flags: &FlagInsts,
-    names: &Interner,
+    known: &mut Known<'_>,
     accurate: bool,
     into: &mut Vec<Inst>,
 ) -> bool {
@@ -294,8 +324,8 @@ fn order(
         into.extend_from_slice(run);
         return false;
     }
-    let nodes = graph(func, run, timing, machine, flags, names);
-    into.extend(list(&nodes, timing, accurate).into_iter().map(|at| run[at]));
+    let nodes = graph(func, run, known);
+    into.extend(list(&nodes, known.timing, accurate).into_iter().map(|at| run[at]));
     true
 }
 
@@ -322,20 +352,10 @@ struct Node {
 }
 
 /// Builds the dependence graph of one run.
-fn graph(
-    func: &Func,
-    run: &[Inst],
-    timing: &TimingInsts,
-    machine: &MachineInsts,
-    flags: &FlagInsts,
-    names: &Interner,
-) -> Vec<Node> {
-    let costs: Vec<Timing> = run
-        .iter()
-        .map(|&inst| {
-            timing.of(names.resolve(func[inst].opcode.name())).expect("a barrier otherwise")
-        })
-        .collect();
+fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Vec<Node> {
+    let facts: Vec<Facts> = run.iter().map(|&inst| known.of(func, inst)).collect();
+    let costs: Vec<Timing> =
+        facts.iter().map(|facts| facts.timing.expect("a barrier otherwise")).collect();
     let mut nodes: Vec<Node> = costs
         .iter()
         .map(|&timing| Node { timing, succs: Vec::new(), preds: 0, height: 0, growth: 0 })
@@ -351,8 +371,7 @@ fn graph(
     let mut touched: Option<usize> = None;
 
     for (at, &inst) in run.iter().enumerate() {
-        let name = names.resolve(func[inst].opcode.name());
-        let bare = name.strip_prefix(flags.prefix).unwrap_or(name);
+        let facts = facts[at];
 
         // Reads before writes, because an instruction whose destination is one of its own sources
         // is on both lists and the write it does is not one its own read has to wait for.
@@ -365,7 +384,7 @@ fn graph(
                 read.entry(place).or_default().push(at);
             }
         }
-        if flags.reads(bare).is_some() {
+        if facts.reads_flags {
             if let Some(before) = wrote_flags {
                 edge(&mut nodes, before, at, costs[before].latency);
             }
@@ -384,7 +403,7 @@ fn graph(
                 }
             }
         }
-        if (flags.writes)(bare) {
+        if facts.writes_flags {
             if let Some(before) = wrote_flags.replace(at) {
                 edge(&mut nodes, before, at, after(&costs, before));
             }
@@ -396,7 +415,7 @@ fn graph(
         }
 
         // Memory and addresses, which are one chain. See the module comment.
-        if machine.touches_mem(name) || func[inst].mem.is_some() {
+        if facts.touches_mem || func[inst].mem.is_some() {
             if let Some(before) = touched.replace(at) {
                 edge(&mut nodes, before, at, 0);
             }
