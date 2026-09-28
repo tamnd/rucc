@@ -90,7 +90,7 @@ pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&
 }
 
 /// Whether control can come back into this function a second time from one call, through a
-/// `__builtin_setjmp` or a call to one of [`TWICE`] or to a function declared `returns_twice`.
+/// `__builtin_setjmp` or a call to one of `TWICE` or to a function declared `returns_twice`.
 ///
 /// The frame of such a function is laid out with nothing sharing anything. A value computed before
 /// the `setjmp` and read after the `longjmp` is live across the call on the arm that reads it, and
