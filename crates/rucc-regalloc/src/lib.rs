@@ -12,10 +12,14 @@
 //! that decision true in the function is in [`rewrite`], and [`run`] is the two of them together,
 //! which is the whole of the `-O0` allocator. [`check`] reads an assignment back and says whether
 //! it is one the machine can run, which [`run`] asserts on in debug and CI builds and which the
-//! backtracking allocator in M4 will be held to the same way. [`trace`] asks the other half of the
-//! question, which is whether the rewrite wrote that decision down without losing a value on the
-//! way: it follows every value from the instruction that wrote it to the instructions that read
-//! it, through the moves, and [`run`] asserts on it in the same builds.
+//! backtracking allocator is held to the same way. [`trace`] asks the other half of the question,
+//! which is whether the rewrite wrote that decision down without losing a value on the way: it
+//! follows every value from the instruction that wrote it to the instructions that read it,
+//! through the moves, and [`run`] asserts on it in the same builds.
+//!
+//! The allocator the optimizer uses is in [`backtrack`]. [`pressure`] counts, at every point, the
+//! values that want a register against the registers there are, and [`spill`] reads that to pick
+//! which values go to memory before [`backtrack`] places the rest.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -29,7 +33,9 @@ pub mod check;
 pub mod live;
 pub mod moves;
 pub mod order;
+pub mod pressure;
 pub mod rewrite;
+pub mod spill;
 pub mod trace;
 
 /// What allocating a function produced.

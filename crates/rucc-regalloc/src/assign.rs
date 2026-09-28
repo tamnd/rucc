@@ -165,6 +165,11 @@ impl Env {
         self.classes.get(usize::from(class.number())).map_or(&[], |class| &class.order)
     }
 
+    /// The registers it may hand out, by class number, empty for a class it says nothing about.
+    pub(crate) fn offered(&self) -> impl Iterator<Item = &[PhysReg]> + '_ {
+        self.classes.iter().map(|class| class.order.as_slice())
+    }
+
     /// The registers held back in a class for reading a spilled value into.
     #[must_use]
     pub fn scratch(&self, class: RegClass) -> &[PhysReg] {
@@ -503,6 +508,12 @@ impl Blocks {
     ) -> bool {
         self.over(class, at, range)
             .any(|one| one.by != Some(reg) && (want == Want::Clear || area.covers(one.point)))
+    }
+
+    /// Every register an instruction takes for itself where no value may be in it, with the class
+    /// and the point, sorted by class, then by register, then by point.
+    pub(crate) fn taken(&self) -> impl Iterator<Item = (RegClass, PhysReg, Point)> + '_ {
+        self.all.iter().filter(|one| one.by.is_none()).map(|one| (one.class, one.at, one.point))
     }
 
     /// The constraints on one register of one class at the points an interval covers.
