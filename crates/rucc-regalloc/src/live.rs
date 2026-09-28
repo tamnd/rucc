@@ -467,9 +467,8 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
 ///
 /// What is actually true of the answer is that a block is live in a handful of values and not in
 /// the other two hundred thousand, so the numbers themselves are smaller than the bits. They are
-/// kept in order, which is what makes asking whether a block writes a value a binary search rather
-/// than a walk of the row, and it is the order a register number sorts in rather than any order of
-/// the program. tamnd/rucc#1072.
+/// kept in the order a register number sorts in rather than any order of the program.
+/// tamnd/rucc#1072.
 #[derive(Debug, Clone)]
 struct Rows {
     rows: Vec<Vec<u32>>,
