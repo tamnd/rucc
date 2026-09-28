@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- `-mxsave` is taken for a whole unit and defines `__XSAVE__`, as with gcc 16, since `_xgetbv` now ships. `-march=x86-64-v3` defines it too. `xsaveopt`, `xsavec` and `xsaves` are still refused, since their intrinsics do not ship yet (#1988).
+
 ## 0.11.17
 
 ### Added

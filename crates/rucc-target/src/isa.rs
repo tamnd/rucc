@@ -81,7 +81,7 @@ pub static FEATURES: &[Row] = &[
     named("sse4a", &["sse3"]),
     named("3dnow", &["mmx"]),
     named("3dnowa", &["3dnow"]),
-    named("xsave", &[]),
+    yes("xsave", &[]),
     named("xsaveopt", &["xsave"]),
     named("xsavec", &["xsave"]),
     named("xsaves", &["xsave"]),
@@ -751,6 +751,13 @@ mod tests {
     }
 
     #[test]
+    fn xsave_is_honoured_and_the_names_built_over_it_are_not_yet() {
+        assert_eq!(macros(&["xsave"]), said(&["FXSR", "MMX", "SSE", "SSE2", "XSAVE"]));
+        assert!(Feature::named("xsave").unwrap().honoured());
+        assert!(!Feature::named("xsaveopt").unwrap().honoured());
+    }
+
+    #[test]
     fn the_count_and_the_checksum_follow_sse4_2_unless_they_were_mentioned() {
         let mut base = said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT"]);
         base.sort();
@@ -786,6 +793,7 @@ mod tests {
         got.sort();
         let want = said(&[
             "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32",
+            "XSAVE",
         ]);
         assert_eq!(got, want);
         let v3 = Isa::level("x86-64-v3").unwrap();

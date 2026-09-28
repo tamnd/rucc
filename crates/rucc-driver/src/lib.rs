@@ -6383,6 +6383,7 @@ mod tests {
         assert!(has(&["-msse4"], "sse4.2") && !has(&["-msse4", "-mno-sse4"], "sse4.1"));
         assert!(has(&["-mpopcnt"], "popcnt") && !has(&["-mpopcnt"], "sse3"));
         assert!(has(&["-mcrc32"], "crc32"));
+        assert!(has(&["-mxsave"], "xsave") && !has(&["-mxsave", "-mno-xsave"], "xsave"));
         assert!(!has(&["-msse4.2", "-mno-popcnt"], "popcnt"));
         // A processor supplies what no flag spoke for, whichever order they came in.
         assert!(has(&["-march=x86-64-v2"], "sse4.2"));
