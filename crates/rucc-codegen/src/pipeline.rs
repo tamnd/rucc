@@ -54,6 +54,7 @@ use crate::select::{self, Selector};
 use crate::shorten;
 use crate::slots::{self, Slots};
 use crate::split;
+use crate::tail;
 use crate::weights;
 
 /// Everything about a machine that compiling a function for it needs.
@@ -325,6 +326,9 @@ pub struct Flags {
     /// The shape `-Zswitch=` forces on every `switch`, which is `None` unless somebody is
     /// measuring what each shape costs. See [`crate::switch::Force`].
     pub switch: Option<crate::switch::Force>,
+    /// Whether a call in tail position becomes a jump, which `-foptimize-sibling-calls` asks for
+    /// and `-O2` and `-Os` turn on. See [`crate::tail`].
+    pub sibling: bool,
 }
 
 impl Default for Flags {
@@ -349,6 +353,7 @@ impl Default for Flags {
             verify: false,
             goal: Goal::Speed,
             switch: None,
+            sibling: false,
         }
     }
 }
@@ -444,6 +449,12 @@ pub fn compile_recording(
     // the frame below rather than being one more thing in it. Read here rather than beside the rest
     // of the layout because the refusal a few lines down is the earliest thing that asks.
     let naked = source.attrs.set.contains(ir::AttrSet::NAKED);
+    // Last thing before selection, because a `tail_call` ends its block and every lowering above
+    // is written against blocks that end the way the middle end left them. Only on a machine that
+    // can jump to a name, since the call stays a call on one that cannot.
+    if flags.sibling && machine.insts.away.is_some() {
+        tail::mark(source, names);
+    }
     let lowered = lower::func(source, names, machine.selector, machine.conv, elsewhere)?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
@@ -759,6 +770,11 @@ pub fn compile_recording(
         func.heads = layout::heads(&func);
     }
 
+    // After everything that edits instructions, because a call is the one instruction all of them
+    // leave alone and a jump out of the function is one some of them would not know about. Nothing
+    // before this sees anything but a call, a return and an epilogue, which is right on its own.
+    tail::jumps(&mut func, &stack.tails, machine.insts, names);
+
     // Last of all, because a stretch is named by the instructions at either end of it and every
     // pass above is free to take an instruction out or move one. The frame is wanted here as well
     // as above, since a value the allocator spilled is in the frame over its stretch rather than in
@@ -1072,6 +1088,52 @@ mod tests {
         assert!(text.contains("$rbx = x64.pop_64"), "{text}");
         assert!(text.contains("x64.call $rdi($rdi), @g"), "{text}");
         assert!(!text.contains('%'), "{text}");
+    }
+
+    /// `int f(int a, ...) { return g(a, ...); }` with that many arguments, compiled with sibling
+    /// calls on or off, as the machine code that comes out.
+    fn tail(count: usize, sibling: bool) -> String {
+        let i32 = Type::int(32);
+        let params = vec![i32; count];
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&params).with_returns(&[i32]);
+        let mut source = Func::new(names.intern("f"), signature.clone());
+        let block = source.create_block();
+        let args: Vec<_> = params.iter().map(|&ty| source.append_param(block, ty)).collect();
+        let sig = source.add_signature(signature);
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &args);
+        let got = source[call].first_result.expect("an integer comes back");
+        Builder::new(&mut source, block).ret(&[got]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let flags = Flags { sibling, ..Flags::default() };
+        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+            .expect("every instruction has a rule");
+        mir::print_func(&out, &names, &REGS)
+    }
+
+    /// A call whose answer is the answer ends in a jump to it once the frame is given back, and
+    /// only when the flag says so.
+    #[test]
+    fn a_call_in_tail_position_is_a_jump_when_asked_for() {
+        let text = tail(2, true);
+        assert!(text.contains("x64.jmp_away @g"), "{text}");
+        assert!(!text.contains("x64.call"), "{text}");
+        assert!(!text.contains("x64.ret"), "{text}");
+
+        let text = tail(2, false);
+        assert!(text.contains("x64.call"), "{text}");
+        assert!(text.contains("x64.ret"), "{text}");
+    }
+
+    /// Eight arguments are two more than there are registers for, so two go in the argument area
+    /// at the bottom of this frame, and the call has to be made while the frame is still there.
+    #[test]
+    fn a_call_that_needs_the_argument_area_stays_a_call() {
+        let text = tail(8, true);
+        assert!(text.contains("x64.call"), "{text}");
+        assert!(!text.contains("x64.jmp_away"), "{text}");
     }
 
     #[test]

@@ -382,6 +382,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             },
                             align: opts.align_functions,
                             instrument: opts.instrument_functions,
+                            exceptions: opts.exceptions,
                             read: &mut read,
                         },
                     );
@@ -876,6 +877,8 @@ fn generate(
         goal: Goal::for_size(opts.opt_level.is_size()),
         // Only when somebody is measuring, and checked when the arguments were parsed.
         switch: opts.switch_shape.as_deref().and_then(rucc_codegen::switch::Force::named),
+        // On from `-O2` and at `-Os`, which is where gcc turns `-foptimize-sibling-calls` on.
+        sibling: opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls()),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one
@@ -4844,6 +4847,31 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.instrument_functions = false;
         let result = run(&opts, source);
         assert!(!result.text().contains("call @__cyg_profile"), "off unless asked for");
+    }
+
+    /// Under `-fexceptions` a `cleanup` handler is owed a call on an unwind as well, and nothing
+    /// here builds the landing pad that would make it. So a call inside a handler's scope is
+    /// turned down by name, a handler with no call in its scope is left alone, and without the
+    /// flag the same source compiles as it always did.
+    #[test]
+    fn a_call_an_unwind_would_leave_a_cleanup_behind_is_refused_under_exceptions() {
+        let source = concat!(
+            "void done(int *p);\n",
+            "void work(void);\n",
+            "void calls(void) { int x __attribute__((cleanup(done))) = 1; work(); }\n",
+            "int quiet(int y) { int x __attribute__((cleanup(done))) = y; return x + 1; }\n",
+            "void after(void) { { int x __attribute__((cleanup(done))) = 1; } work(); }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+
+        opts.exceptions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("landing pad"), "{:?}", result.messages);
+        assert!(result.messages[0].contains(":3:"), "the call in calls: {:?}", result.messages);
     }
 
     /// `return;` from a function that promised a value, which only C89 lets through and which

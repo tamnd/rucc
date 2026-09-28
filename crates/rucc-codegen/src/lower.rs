@@ -101,9 +101,9 @@ use crate::varargs;
 
 /// The instruction a template's `jmp` to a name outside it becomes.
 ///
-/// Not in [`x86_64::FRAME`] with the other opcodes this file names, because a frame never writes
-/// one: the only function it appears in has no prologue and no epilogue for the frame to write
-/// anything into.
+/// The same instruction [`x86_64::FRAME`] names for the end of a tail call, named here as well
+/// because what reaches this one is a template in a function with no prologue and no epilogue,
+/// which is nothing to do with the frame.
 /// See [`x86_64::Step::Away`].
 const AWAY: &str = "jmp_away";
 
@@ -797,6 +797,9 @@ pub struct Stack {
     /// stack pointer, and a frame that did not keep the first of them has nothing in it saying
     /// where the caller's frame is for the epilogue to find after control has come back.
     pub saves_place: bool,
+    /// The calls a `tail_call` became that [`crate::tail::jumps`] may turn into a jump, which is
+    /// the ones that passed everything in registers.
+    pub tails: Vec<crate::tail::Tail>,
 }
 
 impl Stack {
@@ -1259,6 +1262,13 @@ impl<'a> Lowering<'a> {
                     self.called(inst)?;
                     continue;
                 }
+                // A call and the return behind it, which is what `crate::tail::mark` made it out
+                // of, and both are built the way they would have been. What makes it a jump is
+                // written at the very end, once the epilogue is there to jump from.
+                Opcode::TailCall => {
+                    self.tail_called(inst)?;
+                    continue;
+                }
                 // Built from the frame rather than matched, for the same shape of reason a call
                 // is built from the convention: what a rule replaces a term with is instructions,
                 // and what an `alloca` needs first is bytes, which the rule language has no way
@@ -1398,7 +1408,8 @@ impl<'a> Lowering<'a> {
                         || self.sret().is_some()
                         || self.gives_back_x87(inst) =>
                 {
-                    self.returned(inst)?;
+                    let values = self.source[self.source[inst].args].to_vec();
+                    self.returned(inst, values)?;
                     continue;
                 }
                 // A cast between a pointer and an integer of the same width, which on this
@@ -1471,6 +1482,10 @@ impl<'a> Lowering<'a> {
                     if !std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
                         return Err(self.unsupported(inst));
                     }
+                    if self.touches_x87(inst) {
+                        self.x87_assembly(inst)?;
+                        continue;
+                    }
                     self.assembly(inst)?;
                     continue;
                 }
@@ -1531,7 +1546,7 @@ impl<'a> Lowering<'a> {
     /// behind it, and everything after that is the same: where each argument goes, where the value
     /// comes back and which registers are gone across it are the convention's answers and the
     /// convention does not ask what is being called.
-    fn called(&mut self, inst: Inst) -> Result<(), Unsupported> {
+    fn called(&mut self, inst: Inst) -> Result<u32, Unsupported> {
         let data = &self.source[inst];
         let Extra::Call(info) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[info];
@@ -1599,10 +1614,31 @@ impl<'a> Lowering<'a> {
                 let into = self.through(into);
                 self.x87_at("fstp_t", span, into);
             }
-            return Ok(());
+            return Ok(made.outgoing);
         }
         for (result, &reg) in results.into_iter().zip(&made.results) {
             self.regs[result.index()] = Some(reg);
+        }
+        Ok(made.outgoing)
+    }
+
+    /// One `tail_call`, as the call and a return of what it gave back.
+    ///
+    /// The call is written down for [`crate::tail::jumps`] when it can be made after the frame is
+    /// gone. That is when it put nothing in the argument area, which is the bottom of this frame,
+    /// and when the answer comes back in registers, since one on the x87 stack is taken off and put
+    /// back by instructions after the call. A call that is not written down stays a call and a
+    /// return, which is what the IR said before `crate::tail::mark` read it.
+    fn tail_called(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let outgoing = self.called(inst)?;
+        let block = self.at.expect("a block is being filled");
+        let call = self.out.insts(block).last().expect("the call just built");
+        let values: Vec<Value> = self.source[inst].results().collect();
+        let x87 = self.x87_values(&values);
+        self.returned(inst, values)?;
+        if outgoing == 0 && !x87 && self.sret().is_none() {
+            let returns = self.out.insts(block).skip_while(|&at| at != call).skip(1).collect();
+            self.stack.tails.push(crate::tail::Tail { call, returns });
         }
         Ok(())
     }
@@ -1643,13 +1679,16 @@ impl<'a> Lowering<'a> {
     /// make leaves no half of one behind.
     /// Whether what a `return` gives back goes back on the x87 stack, per [`abi::back_on_x87`].
     fn gives_back_x87(&self, inst: Inst) -> bool {
-        let values = &self.source[self.source[inst].args];
+        self.x87_values(&self.source[self.source[inst].args])
+    }
+
+    /// Whether those values go back on the x87 stack, per [`abi::back_on_x87`].
+    fn x87_values(&self, values: &[Value]) -> bool {
         let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
         abi::back_on_x87(&types)
     }
 
-    fn returned(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
+    fn returned(&mut self, inst: Inst, values: Vec<Value>) -> Result<(), Unsupported> {
         let (mut ints, mut floats) = (0usize, 0usize);
         let mut parts = Vec::with_capacity(values.len() + 1);
         // An eighty bit value goes back on the x87 stack, which is where the convention says it is
@@ -1659,7 +1698,7 @@ impl<'a> Lowering<'a> {
         // for. What comes after is the epilogue, which gives the frame back and touches nothing in
         // the unit. A complex one loads its imaginary half first so that the real half ends up on
         // top of it, in `st(0)`, with the imaginary half under it in `st(1)`.
-        if self.gives_back_x87(inst) && self.sret().is_none() {
+        if self.x87_values(&values) && self.sret().is_none() {
             let span = self.source.span(inst);
             for &value in values.iter().rev() {
                 let from = self.x87_slot(value);
@@ -3810,7 +3849,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[asm];
-        if !self.source[info.targets].is_empty() {
+        if self.jumps_from_text(inst) {
             return Err(Unsupported::Assembly { inst, refused: Written::Goto });
         }
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
@@ -4853,6 +4892,145 @@ impl<'a> Lowering<'a> {
         aarch64::named(name.strip_prefix('%').unwrap_or(name))
     }
 
+    /// An `asm` statement whose operands are `long double` values on the x87 stack.
+    ///
+    /// `t` is the top of the stack and `u` is the register under it, and those two letters, or a
+    /// number tying an input to an output in one of them, are the only places taken here. That is
+    /// what glibc's old `<bits/mathinline.h>` writes, `fpatan` with `=t`, `0` and `u` and `st(1)`
+    /// in the clobber list, and it is gcc-torture `execute/990413-2.c`.
+    ///
+    /// The group is the shape every other one in [`Self::x87`] has. The inputs are pushed from the
+    /// deepest up, so the `t` one is pushed last and ends up on top, then the template runs, then
+    /// the outputs are popped into their slots from the top down. That leaves the stack as empty
+    /// as it was found only when the template popped every input it was handed and pushed every
+    /// output it says it leaves, and gcc's rule for these statements says when that is: an input
+    /// tied to an output or named in the clobber list is one the template pops. So a statement
+    /// with an input it leaves behind is refused, as is one with an operand anywhere other than
+    /// `st(0)` and `st(1)`, since nothing here would know what to do with the stack after it.
+    fn x87_assembly(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
+        let info = self.source[asm];
+        if !self.source[info.targets].is_empty() {
+            return Err(Unsupported::Assembly { inst, refused: Written::Goto });
+        }
+        let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let constraints = self.names.resolve(info.constraints).to_string();
+        let results: Vec<Value> = data.results().collect();
+        let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
+            .ok_or_else(refused)?;
+        let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
+
+        // Where on the stack each operand is, as a depth from the top.
+        let letters: Vec<&str> = constraints.split(',').collect();
+        let mut depths = Vec::with_capacity(list.len());
+        for (operand, letter) in list.iter().zip(&letters) {
+            let value = operand.result.or(operand.value).ok_or_else(refused)?;
+            if operand.memory || !on_x87(self.source[value].ty) {
+                return Err(refused());
+            }
+            let depth = match operand.tied {
+                Some(output) => *depths.get(output).ok_or_else(refused)?,
+                None => match letter.trim_start_matches(['=', '+', '&']) {
+                    "t" => 0,
+                    "u" => 1,
+                    _ => return Err(refused()),
+                },
+            };
+            depths.push(depth);
+        }
+
+        // Which depths the clobber list says the template pops.
+        let clobbers = self.names.resolve(info.clobbers).to_string();
+        let mut popped = [false; 2];
+        for entry in clobbers.split(',') {
+            let entry = entry.trim().trim_matches('"');
+            let entry = entry.strip_prefix('%').unwrap_or(entry);
+            match entry {
+                "" | "memory" | "cc" | "flags" => {}
+                "st" | "st(0)" => popped[0] = true,
+                "st(1)" => popped[1] = true,
+                _ => return Err(Unsupported::Assembly { inst, refused: Written::Clobber }),
+            }
+        }
+
+        // The inputs, one per depth and from the top down with no gap, and each one popped.
+        let mut inputs: Vec<Option<Value>> = vec![None; 2];
+        let mut outputs: Vec<Option<Value>> = vec![None; 2];
+        for (index, operand) in list.iter().enumerate() {
+            let depth = depths[index];
+            if let Some(result) = operand.result {
+                if outputs[depth].replace(result).is_some() {
+                    return Err(refused());
+                }
+            }
+            let Some(value) = operand.value else { continue };
+            // An output written `+` is an input tied to itself.
+            let consumed = operand.result.is_some() || operand.tied.is_some() || popped[depth];
+            if !consumed {
+                return Err(refused());
+            }
+            if inputs[depth].replace(value).is_some() {
+                return Err(refused());
+            }
+        }
+        let gapless =
+            |held: &[Option<Value>]| held.iter().skip_while(|it| it.is_some()).all(Option::is_none);
+        if !gapless(&inputs) || !gapless(&outputs) {
+            return Err(refused());
+        }
+
+        // The text, with an operand spelled as the register it is in.
+        let template = self.names.resolve(info.template).to_string();
+        let mut text = String::with_capacity(template.len());
+        let mut chars = template.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                text.push(c);
+                continue;
+            }
+            match chars.peek().copied() {
+                Some('%') => {
+                    chars.next();
+                    text.push('%');
+                }
+                Some('=') => {
+                    chars.next();
+                    text.push_str(&inst.index().to_string());
+                }
+                Some(digit) if digit.is_ascii_digit() => {
+                    chars.next();
+                    if chars.peek().is_some_and(char::is_ascii_digit) {
+                        return Err(refused());
+                    }
+                    let index = digit.to_digit(10).map_or(usize::MAX, |it| it as usize);
+                    match depths.get(index).ok_or_else(refused)? {
+                        0 => text.push_str("%st"),
+                        depth => text.push_str(&format!("%st({depth})")),
+                    }
+                }
+                _ => return Err(refused()),
+            }
+        }
+
+        let span = self.source.span(inst);
+        for value in inputs.iter().rev().flatten() {
+            let from = self.x87_slot(*value);
+            let from = self.through(from);
+            self.x87_at("fld_t", span, from);
+        }
+        let symbol = self.names.intern(&text);
+        let opcode = self.named(x86_64::TEMPLATE);
+        let block = self.at.expect("a block is being filled");
+        self.out.build(block, opcode).at(span).symbol(symbol).finish();
+        for value in outputs.iter().flatten() {
+            let into = self.x87_slot(*value);
+            let into = self.through(into);
+            self.x87_at("fstp_t", span, into);
+        }
+        Ok(())
+    }
+
     /// An `asm` statement on AArch64, which is kept as text whatever is in it.
     ///
     /// Nothing reads AArch64 assembly back into instructions yet, so every template goes the way
@@ -4864,7 +5042,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[asm];
-        if !self.source[info.targets].is_empty() {
+        if self.jumps_from_text(inst) {
             return Err(Unsupported::Assembly { inst, refused: Written::Goto });
         }
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
@@ -5287,6 +5465,20 @@ impl<'a> Lowering<'a> {
     /// anything in this crate does and is why it is remembered before a single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
+        // An `asm goto` whose template has nothing in it can only fall through, since there is no
+        // instruction in it to jump with, so the only edge the machine block gets is the first
+        // one. The labels it names are still arms in the IR, which is what kept the passes above
+        // from assuming anything about the way into them, and here they are blocks nothing jumps
+        // to, the same as a label no `goto` names. One that does have instructions was refused by
+        // [`Self::jumps_from_text`] before this.
+        if self.source[term].opcode == Opcode::InlineAsm {
+            let Some(call) = self.source.successors(term).next() else { return Ok(()) };
+            let args: Vec<Value> = self.source[call.args].to_vec();
+            let regs =
+                args.into_iter().map(|value| self.reg_of(value)).collect::<Result<_, _>>()?;
+            *self.out.succs_mut(out) = vec![mir::BlockCall::with(self.out_block(call.block), regs)];
+            return Ok(());
+        }
         let leaves =
             matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch);
         let branch = if leaves { self.out.terminator(out) } else { None };
@@ -5318,6 +5510,21 @@ impl<'a> Lowering<'a> {
         }
         *self.out.succs_mut(out) = succs;
         Ok(())
+    }
+
+    /// Whether an `asm goto` has instructions in its template, which is what it would jump with.
+    ///
+    /// One with an empty template is what a program writes to tell the optimizer that control may
+    /// arrive at a label without saying how, and the torture suite has several of them. It never
+    /// jumps, so it is written as the statement it would be without its labels and a fall through
+    /// into its first arm. See [`Self::edges`]. One with anything in it needs the labels it names
+    /// written into the text and an edge for each of them the allocator knows about, and that is
+    /// still refused.
+    fn jumps_from_text(&self, inst: Inst) -> bool {
+        let Extra::Asm(asm) = self.source[inst].extra else { return false };
+        let info = self.source[asm];
+        !self.source[info.targets].is_empty()
+            && !self.names.resolve(info.template).trim().is_empty()
     }
 
     /// The machine IR block an IR block became.

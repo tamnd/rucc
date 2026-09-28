@@ -7715,6 +7715,24 @@ impl<'u> Body<'_, 'u> {
         self.call_into(callee, args, None, span)
     }
 
+    /// Turns down a call an exception could unwind out of while a scope owes a handler.
+    ///
+    /// Under `-fexceptions` the handler is owed a call on the way out whichever way the scope is
+    /// left, and an unwind is the way nothing here has a landing pad for. Building the call anyway
+    /// would be a unit that compiles and then skips the handler exactly when a thread is cancelled
+    /// or a C++ exception passes through, so it is refused where it is written. A handler with no
+    /// call in its scope is left alone, because nothing can unwind out of a scope that calls
+    /// nothing.
+    fn unwinds_past_a_cleanup(&mut self, span: Span) {
+        if self.unit.exceptions && self.owes_anything() {
+            self.unsupported(
+                "a landing pad to run a cleanup handler when an exception unwinds through a call \
+                 in its scope under -fexceptions",
+                span,
+            );
+        }
+    }
+
     /// A call, direct when the callee is a function and indirect when it is a pointer.
     ///
     /// `into` is where a return value that is an object goes, which the caller of this knows and
@@ -7743,6 +7761,7 @@ impl<'u> Body<'_, 'u> {
         if self.missing_builtin(callee, span) {
             return None;
         }
+        self.unwinds_past_a_cleanup(span);
         let tast = self.tast();
         let ty = tast[callee].ty;
         let count = tast[args].len();

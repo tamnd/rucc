@@ -41,10 +41,11 @@ mod safety;
 mod sides;
 mod size;
 mod stubs;
+mod tail;
 mod unwind;
 mod wide;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{fmt, fs, io};
@@ -85,6 +86,8 @@ tasks:
   wide              compile 128-bit arithmetic with both compilers, run both, compare
   quad              compile binary128 arithmetic with both compilers, run both, compare
   divide            compile divisions by constants with both compilers, run both, compare
+  tail              compile calls in tail position with both compilers, run both, compare,
+                    and walk a deep chain of them at -O2 in a one megabyte stack
   repeatable        compile tests/repeatable several times over and compare the runs
   safety            compile, link and run tests/safety, and hold each program to its verdict
   accounting        build tests/safety twice at -O2, with elimination and without, and compare
@@ -144,6 +147,7 @@ fn main() -> ExitCode {
         Some("wide") => wide::wide(),
         Some("quad") => quad::quad(),
         Some("divide") => divide::divide(),
+        Some("tail") => tail::tail(),
         Some("repeatable") => repeatable::repeatable(),
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),
@@ -296,7 +300,11 @@ fn read_crates(root: &Path) -> Result<Vec<Crate>> {
 }
 
 fn read_crate(manifest: &Path) -> Result<Crate> {
-    let text = fs::read_to_string(manifest)?;
+    parse_crate(manifest, &fs::read_to_string(manifest)?)
+}
+
+/// The same, from the text of a manifest, so that a committed one can be read as well.
+fn parse_crate(manifest: &Path, text: &str) -> Result<Crate> {
     let mut name = None;
     let mut deps = Vec::new();
     let mut in_deps = false;
@@ -1082,17 +1090,51 @@ fn stale_lock(root: &Path) -> Result<Vec<String>> {
         return Ok(Vec::new());
     };
     let want = want.as_str();
-    let members: HashSet<String> = read_crates(root)?.into_iter().map(|c| c.name).collect();
+    let crates = read_crates(root)?;
+    let members: HashSet<String> = crates.iter().map(|c| c.name.clone()).collect();
     let mut problems = Vec::new();
     let mut name = String::new();
+    let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut in_deps = false;
     for (n, line) in text.lines().enumerate() {
         let value =
             |prefix: &str| line.strip_prefix(prefix).map(|v| v.trim_matches('"').to_owned());
-        if let Some(found) = value("name = ") {
+        if in_deps {
+            if line.starts_with(']') {
+                in_deps = false;
+            } else {
+                let dep = line.trim().trim_end_matches(',').trim_matches('"');
+                let dep = dep.split(' ').next().unwrap_or(dep);
+                edges.entry(name.clone()).or_default().insert(dep.to_owned());
+            }
+        } else if let Some(found) = value("name = ") {
             name = found;
         } else if let Some(at) = value("version = ") {
             if members.contains(&name) && at != want {
                 problems.push(format!("Cargo.lock:{}: {name} is {at} and not {want}", n + 1));
+            }
+        } else if line == "dependencies = [" {
+            in_deps = true;
+        }
+    }
+    // A dependency between two members that the lockfile does not have, which `--locked` refuses
+    // in the same words as a stale version. It happened when `rucc-session` took `rucc-tuple` and
+    // the gate, which does not pass `--locked`, rewrote the file on the disk and passed. The
+    // committed manifest for the same reason as the committed lockfile.
+    for krate in &crates {
+        let Ok(path) = krate.manifest.strip_prefix(root) else {
+            continue;
+        };
+        let Some(manifest) = committed(root, &path.to_string_lossy()) else {
+            continue;
+        };
+        let has = edges.get(&krate.name);
+        for dep in parse_crate(&krate.manifest, &manifest)?.deps {
+            if members.contains(&dep.name) && !has.is_some_and(|h| h.contains(&dep.name)) {
+                problems.push(format!(
+                    "Cargo.lock: {} depends on {} and the lockfile does not say so",
+                    krate.name, dep.name
+                ));
             }
         }
     }

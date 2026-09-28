@@ -89,6 +89,15 @@ impl OptLevel {
     pub const fn schedules(self) -> bool {
         !matches!(self, OptLevel::O0 | OptLevel::O1)
     }
+
+    /// Whether a call in tail position becomes a jump.
+    ///
+    /// `-O2` and above and the two size levels, which is where gcc turns
+    /// `-foptimize-sibling-calls` on. Not at `-O1`, where gcc leaves it off so that a backtrace
+    /// still shows every function the program went through.
+    pub const fn sibling_calls(self) -> bool {
+        !matches!(self, OptLevel::O0 | OptLevel::O1)
+    }
 }
 
 impl fmt::Display for OptLevel {
@@ -1888,6 +1897,13 @@ pub struct Options {
     /// `spec/optimizer/38-scheduling-and-layout.md` section 38.6 decides on one scheduler and puts
     /// it after allocation, and section 38.8 owes the measurement that would justify a second.
     pub schedule_insns: Option<bool>,
+    /// Whether a call in tail position becomes a jump, from `-foptimize-sibling-calls` and
+    /// `-fno-optimize-sibling-calls`.
+    ///
+    /// `None` is a command line that said neither, and then the level decides: on from `-O2` and at
+    /// `-Os`, which is where gcc turns it on. Three way rather than a `bool` for the reason
+    /// `reorder_blocks` above is.
+    pub sibling_calls: Option<bool>,
     /// Whether a hot loop that fits in a 64 byte line is padded so that it does not cross one,
     /// when that costs at most 31 bytes, from `-falign-loops` and `-fno-align-loops`.
     ///
@@ -2027,6 +2043,20 @@ pub struct Options {
     /// The rest of the `-ffast-math` family, from the flag itself and from each member spelled on
     /// its own. See [`Math`].
     pub math: Math,
+    /// Whether an exception may unwind through the code this unit produces, from `-fexceptions`
+    /// and `-fno-exceptions`, and from `-fnon-call-exceptions` when neither of those was written.
+    ///
+    /// Off, which is gcc's default for C. What it changes in C is small: `__EXCEPTIONS` is defined,
+    /// which is what glibc's `pthread_cleanup_push` reads to choose a `cleanup` attribute over its
+    /// `setjmp` spelling, and a `cleanup` handler is owed a call when an unwind passes through its
+    /// scope as well as when the scope is left the ordinary way. The tables an unwinder reads to get
+    /// through a frame at all are [`Options::unwind_tables`] and are there either way.
+    pub exceptions: bool,
+    /// Whether an instruction that is not a call may raise an exception, from
+    /// `-fnon-call-exceptions`. It turns [`Options::exceptions`] on unless `-fno-exceptions` was
+    /// written, which is gcc's rule, and it is kept apart because it is a second promise about
+    /// which instructions a handler covers rather than a second way of saying the first one.
+    pub non_call_exceptions: bool,
     /// What a path is rewritten by before it is written into the output, from the
     /// `-f*-prefix-map=` family.
     ///
@@ -2318,6 +2348,7 @@ impl Options {
             red_zone: true,
             reorder_blocks: None,
             schedule_insns: None,
+            sibling_calls: None,
             align_loops: None,
             cycle_accurate_model: None,
             stack_reuse: None,
@@ -2335,6 +2366,8 @@ impl Options {
             fp_contract: Contract::Off,
             trapping_math: true,
             math: Math::default(),
+            exceptions: false,
+            non_call_exceptions: false,
             prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
             warnings: true,

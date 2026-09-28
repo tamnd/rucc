@@ -182,14 +182,17 @@ fn the_last_answer_to_the_signed_question_is_the_one_that_counts() {
 ///
 /// The IR above says which routine was chosen and this says the choice survived to the text the
 /// assembler reads, which is the half that matters to the linker: the name has to be the one
-/// libgcc defines, and rucc links libgcc already.
+/// libgcc defines, and rucc links libgcc already. A function that returns what the routine gave
+/// back reaches it with a jump at O2, as gcc does, and a jump names the routine the same way.
 #[test]
 fn the_name_the_runtime_uses_is_the_name_that_is_written_out() {
     let text = run("asm", &["-O2", "-S"], &["-ftrapv"], EACH);
     for routine in ["__addvsi3", "__subvsi3", "__mulvsi3", "__negvsi2"] {
         assert!(
-            text.lines()
-                .any(|line| line.trim_start().starts_with("call") && line.contains(routine)),
+            text.lines().any(|line| {
+                let line = line.trim_start();
+                (line.starts_with("call") || line.starts_with("jmp")) && line.contains(routine)
+            }),
             "{routine} is not called in:\n{text}"
         );
     }

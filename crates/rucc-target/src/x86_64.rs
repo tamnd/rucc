@@ -211,6 +211,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     ret: "ret",
     differ: "cmp_set_ne_64",
     above: "cmp_set_a_64",
+    away: Some("jmp_away"),
     call: "call",
     probe: Some(PROBE),
     landing: Some("endbr64"),
