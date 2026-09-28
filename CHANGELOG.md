@@ -19,6 +19,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The register allocator's liveness lays its per block lists out end to end once the fixpoint is done, where it used to grow a list per block one value at a time. On a function of 22000 blocks with thousands of values live across most of it that takes 7 to 11% of the cycles off the whole `-O2` build, with the same output.
 - Under `-fexceptions` a call inside the scope of a `cleanup` handler can be inlined now, where the inliner used to leave it a call. Every call in the copied body gets the caller's landing pad, including the `_Unwind_Resume` at the end of the callee's own pads, so an unwind runs the callee's handlers and then the caller's. Handlers run by `pthread_exit` and `pthread_cancel` from inside a body inlined two levels deep print the same order as gcc 16 from `-O0` to `-O3` and `-Os` (#1951).
 
+### Fixed
+
+- A `#if`, `#ifdef`, `#elif`, `#else` or `#endif` line inside the arguments of a function-like macro is taken and the arguments go on being collected after it, as with gcc, where it used to end the run and report "unterminated macro argument list". toybox writes each command's globals as `GLOBALS(...)` with conditionals inside and now builds.
+
 ## 0.11.19
 
 ### Added
