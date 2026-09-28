@@ -69,6 +69,15 @@
 //! its label goes to the default down the default edge, and for a table it is a hole like any
 //! other. Until tamnd/rucc#1932 one case like that made the arms differ and kept the whole `switch`.
 //!
+//! Labels written one above another, `case 10: case 11: case 12: return 1;`, reach their arm
+//! through blocks that only jump. The front end gives every label a block, and the blocks for `10`
+//! and `11` hold nothing but a jump to the next one, so the arm under `12` is reached from two of
+//! them as well as from the `switch`. That is not an arm something else reaches. A case edge is
+//! followed through such blocks to where it arrives, and the blocks it went through go with the
+//! arms as long as nothing but the `switch` and each other reaches them. `simplify-cfg` would take
+//! them out, but it runs after this does. Until tamnd/rucc#728 a run of labels like that kept the
+//! whole `switch`, which is gcc's `CSWTCH` table for a character classifier.
+//!
 //! The answers are `a * label + b` at every label, checked at every label rather than fitted to two
 //! of them and believed. The check is done in the answer's own width with wrapping, because that is
 //! what the arithmetic this writes will do, and the arithmetic is written with no flags on it so
@@ -414,22 +423,30 @@ fn plan(
     if arms.len() != labels.len() || arms.len() < LABELS {
         return Err(TOO_FEW);
     }
-    // A case that goes where the default goes is the default's. The block it went through, if it
-    // went through one and nothing else reaches it, goes with the arms.
+    // A case edge is followed through the blocks that only jump on to where it arrives, which is
+    // its arm or the default. A case that goes where the default goes is the default's. The blocks
+    // it went through that nothing but the `switch` and each other reach go with the arms, and a
+    // case whose arm is behind one that something else reaches has a shared arm.
+    let switch = func.block_of(inst).ok_or(ARMS_DIFFER)?;
+    let mut walks = Vec::with_capacity(arms.len());
+    for &call in arms {
+        walks.push(walk(func, call, default).ok_or(ARM_IS_SHARED)?);
+    }
+    let passed =
+        settle(cfg, switch, walks.iter().flat_map(|(_, through)| through.clone()).collect());
     let mut defaulted = Vec::new();
     let mut gone = Vec::new();
     let mut kept = Vec::with_capacity(arms.len());
     let mut kept_labels = Vec::with_capacity(labels.len());
-    for (at, (&call, &label)) in arms.iter().zip(&labels).enumerate() {
-        match defaults(func, call, default) {
-            Some(through) => {
-                defaulted.push(at);
-                gone.extend(through.filter(|&block| cfg.predecessors(block).len() == 1));
-            }
-            None => {
-                kept.push(call);
-                kept_labels.push(label);
-            }
+    for (at, ((end, through), &label)) in walks.iter().zip(&labels).enumerate() {
+        gone.extend(through.iter().copied().filter(|block| passed.contains(block)));
+        if there(func, *end, default) {
+            defaulted.push(at);
+        } else if through.iter().all(|block| passed.contains(block)) {
+            kept.push(*end);
+            kept_labels.push(label);
+        } else {
+            return Err(ARM_IS_SHARED);
         }
     }
     let (arms, labels) = (&kept[..], kept_labels);
@@ -463,7 +480,8 @@ fn plan(
         if !call.args.is_empty() {
             return Err(ARM_DOES_WORK);
         }
-        if cfg.predecessors(call.block).len() != 1 {
+        let outside = |from: &Block| *from != switch && !passed.contains(from);
+        if cfg.predecessors(call.block).iter().any(outside) {
             return Err(ARM_IS_SHARED);
         }
         // And a block an image holds the address of is shared whatever the graph says, because what
@@ -541,24 +559,57 @@ fn plan(
     })
 }
 
-/// Whether a case goes where the default goes, and the block it went through to get there if it
-/// went through one.
+/// Whether a case edge goes where the default goes, which is its block with its values.
+fn there(func: &Func, call: BlockCall, default: BlockCall) -> bool {
+    call.block == default.block && func[call.args] == func[default.args]
+}
+
+/// Where a case edge arrives once it has gone through every block that only jumps on, and the
+/// blocks it went through, in order.
 ///
-/// Where the default goes is its block with its values. A block gone through is one that holds
-/// nothing but a jump there, and that nothing takes the address of.
-fn defaults(func: &Func, call: BlockCall, default: BlockCall) -> Option<Option<Block>> {
-    let there =
-        |call: BlockCall| call.block == default.block && func[call.args] == func[default.args];
-    if there(call) {
-        return Some(None);
+/// A block is gone through when it holds nothing but a jump, is handed nothing, has no name an
+/// image could take the address of, and is not the default's. `None` is a case that goes round a
+/// ring of such blocks forever and never arrives anywhere.
+fn walk(func: &Func, call: BlockCall, default: BlockCall) -> Option<(BlockCall, Vec<Block>)> {
+    let mut at = call;
+    let mut through = Vec::new();
+    loop {
+        if at.block == default.block || !at.args.is_empty() || func.block_name(at.block).is_some() {
+            return Some((at, through));
+        }
+        let Some(last) = func.terminator(at.block) else { return Some((at, through)) };
+        if func.insts(at.block).count() != 1 || func[last].opcode != Opcode::Jump {
+            return Some((at, through));
+        }
+        let Some(next) = func.successors(last).next() else { return Some((at, through)) };
+        if through.contains(&at.block) {
+            return None;
+        }
+        through.push(at.block);
+        at = next;
     }
-    if !call.args.is_empty() || call.block == default.block || func.block_name(call.block).is_some()
-    {
-        return None;
+}
+
+/// Which of the blocks gone through are reached from nowhere but the `switch` and each other, which
+/// are the ones nothing reaches once the case edges stop going through them.
+///
+/// A block something else reaches stays, and then so does every block below it, since the block
+/// that stays still jumps there. So this is a fixed point rather than one look at each block.
+fn settle(cfg: &Cfg, switch: Block, mut through: HashSet<Block>) -> HashSet<Block> {
+    loop {
+        let outside = |from: &Block| *from != switch && !through.contains(from);
+        let stays: Vec<Block> = through
+            .iter()
+            .copied()
+            .filter(|&block| cfg.predecessors(block).iter().any(outside))
+            .collect();
+        if stays.is_empty() {
+            return through;
+        }
+        for block in stays {
+            through.remove(&block);
+        }
     }
-    let last = func.terminator(call.block)?;
-    let only = func.insts(call.block).count() == 1 && func[last].opcode == Opcode::Jump;
-    (only && func.successors(last).next().is_some_and(there)).then_some(Some(call.block))
 }
 
 /// What the default gives in the answer's place, when that is all it does differently from an arm.
@@ -1046,6 +1097,42 @@ mod tests {
         func
     }
 
+    /// A function like [`returning`] at 32 bits where each answer is given by a run of labels
+    /// written one above another, `case 10: case 11: return 1;`.
+    ///
+    /// The front end gives every label but the last in a run a block of its own that only jumps to
+    /// the next label's, and the last label's block is the arm.
+    fn runs(runs: &[(&[i128], i128)]) -> Func {
+        let ty = i32();
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let head = func.create_block();
+        let value = func.append_param(head, ty);
+        let default = func.create_block();
+        let mut build = Builder::new(&mut func, default);
+        let it = build.iconst(ty, 999);
+        build.ret(&[it]);
+        let mut cases = Vec::new();
+        for &(labels, answer) in runs {
+            let arm = func.create_block();
+            let mut build = Builder::new(&mut func, arm);
+            let it = build.iconst(ty, answer);
+            build.ret(&[it]);
+            let (&last, rest) = labels.split_last().expect("a run has a label");
+            let mut next = arm;
+            let mut run = vec![(last, arm)];
+            for &label in rest.iter().rev() {
+                let block = func.create_block();
+                Builder::new(&mut func, block).jump(next, &[]);
+                run.push((label, block));
+                next = block;
+            }
+            cases.extend(run.into_iter().rev());
+        }
+        Builder::new(&mut func, head).switch(value, default, &cases);
+        func
+    }
+
     /// The labels the `switch` still has, in the order it has them.
     fn labels(func: &Func) -> Vec<i128> {
         let head = func.entry().expect("a function with blocks in it");
@@ -1450,6 +1537,53 @@ mod tests {
         for label in 0..4 {
             assert_eq!(answer(&func, arm, label), label + 1);
         }
+    }
+
+    /// The shape of tamnd/rucc#728's `switch-runs`: runs of labels written one above another, each
+    /// run giving one answer. Every label but the last in a run reaches the arm through blocks that
+    /// only jump, and those go with the arms.
+    #[test]
+    fn labels_written_one_above_another_reach_their_arm_through_the_blocks_between() {
+        let mut func = runs(&[(&[10, 11, 12], 1), (&[13, 14, 15], 2), (&[16, 17], 7)]);
+        let (stats, tables) = tabled(&mut func);
+        assert!(fired(&stats));
+        assert_eq!(tables[0].cells, [1, 1, 1, 2, 2, 2, 7, 7]);
+        assert_eq!(func.blocks().count(), 3, "the head, the default and the load");
+        let arm = arm(&func);
+        for (label, answer) in [(10, 1), (11, 1), (12, 1), (13, 2), (15, 2), (16, 7), (17, 7)] {
+            assert_eq!(looked_up(&func, arm, label, &tables), answer);
+        }
+    }
+
+    /// A block between that something else reaches is not one this may take away, and neither is
+    /// the arm below it.
+    #[test]
+    fn a_block_between_that_something_else_reaches_keeps_the_switch() {
+        let mut func = runs(&[(&[0, 1, 2], 1), (&[3, 4, 5], 2), (&[6, 7], 3)]);
+        let default = Block::from_usize(1);
+        let between = Block::from_usize(cases(&func)[0]);
+        let term = func.terminator(default).expect("the default returns");
+        func.remove_inst(term);
+        Builder::new(&mut func, default).jump(between, &[]);
+        let (stats, _) = tabled(&mut func);
+        assert!(!fired(&stats));
+    }
+
+    /// A case two blocks above `default:` goes through both on its way there and is the default's,
+    /// and both blocks go.
+    #[test]
+    fn a_case_that_falls_through_two_blocks_into_the_default_is_the_defaults() {
+        let mut func = falling(&[0, 1, 2, 3], &[1, 2, 3, 4], &[4], true);
+        let default = Block::from_usize(1);
+        let through = Block::from_usize(cases(&func)[4]);
+        let below = func.create_block();
+        Builder::new(&mut func, below).jump(default, &[]);
+        let term = func.terminator(through).expect("it jumps");
+        func.remove_inst(term);
+        Builder::new(&mut func, through).jump(below, &[]);
+        assert!(fired(&convert(&mut func)));
+        assert_eq!(labels(&func), [0, 1, 2, 3]);
+        assert_eq!(func.blocks().count(), 3, "the head, the default and the arithmetic");
     }
 
     /// Between two labels a case that falls into the default is a hole, and the default only
