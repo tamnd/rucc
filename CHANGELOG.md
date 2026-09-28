@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The register allocator's liveness marks the blocks that write each value before following it back through the graph, instead of searching the block's list of written values at every edge. On jtckdint's `test.c` at `-O2` the build takes about 5% fewer cycles, and the code it emits is unchanged.
 - Scalar evolution keeps its answers in one table per loop. Settling what a loop's exit test holds used to empty that loop's answers by walking every answer for every loop, once per loop. On jtckdint's `test.c` at `-O2` the build takes about 6% fewer cycles.
 - The optimizer's liveness works out what each block reads and writes once, and only revisits a block when something it branches to changed. It used to allocate two function-wide sets and walk every instruction of every block on every round. On jtckdint's `test.c` at `-O2` the build runs 7.6% fewer instructions and takes a third fewer page faults.
 - Debug info for a variable that takes over another's value works out dominance from one dominator tree per function instead of two walks of the whole function for each block an assignment starts in. On jtckdint's `test.c` at `-O2` this is about 4% of the instructions the build runs.
