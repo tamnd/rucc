@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - Every release archive carries `librucc_builtins.a` for each cross target whose runtime this compiler can build today, under `lib/rucc/<target>/` beside the binary, and the driver looks there. A user who unpacks a release on Linux or macOS and runs `rucc --fetch x86_64-windows-gnu` can now link a Windows program with nothing but `--target`, where the link used to stop and ask for a `cargo xtask builtins` from a source checkout. The release also gains a job that does exactly that with the Linux archive and checks the result is a PE32+ executable (#2066).
+- A link line too long for the host goes to the linker in a response file, with only `-m` and its value left on the command line. On Windows that is anything over about 30000 characters, which is a few hundred objects in a deep build directory, and elsewhere anything over 256 KiB. The file is quoted the way the linker will read it, which for lld on a Windows host is the Windows way and otherwise the GNU way (#2067).
 - `-mwindows`, `-mconsole` and `-municode` for Windows targets, as mingw gcc has them. `-mwindows` links a GUI program, with the `windows` subsystem and `gdi32` and `comdlg32` on the line, `-mconsole` puts it back, and `-municode` starts the program at `wmain` or `wWinMain` and defines `UNICODE`. `-mthreads` is accepted and does nothing, as it does with mingw-w64's gcc (#2067).
 
 ### Changed
@@ -20,9 +21,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-g` for a Windows target warns once and writes the object without debug information, where it used to stop with internal error E0652. Build systems pass `-g` by default, so their first compile no longer fails. This lasts until the COFF writer has DWARF sections (#2066).
 - The register allocator's liveness lays its per block lists out end to end once the fixpoint is done, where it used to grow a list per block one value at a time. On a function of 22000 blocks with thousands of values live across most of it that takes 7 to 11% of the cycles off the whole `-O2` build, with the same output.
 - Under `-fexceptions` a call inside the scope of a `cleanup` handler can be inlined now, where the inliner used to leave it a call. Every call in the copied body gets the caller's landing pad, including the `_Unwind_Resume` at the end of the callee's own pads, so an unwind runs the callee's handlers and then the caller's. Handlers run by `pthread_exit` and `pthread_cancel` from inside a body inlined two levels deep print the same order as gcc 16 from `-O0` to `-O3` and `-Os` (#1951).
-
-### Changed
-
 - The register allocator is the backtracking one whenever the optimizer runs. It places the longest lived values first, lets a heavier value evict a lighter one, spills a value that has been evicted too often, and moves an answer next to the sources it is tied to once everything is placed. It also runs the single pass allocator and keeps whichever of the two answers costs less, so no function gets worse by the allocator's own count. On SQLite at `-O2` it writes 3.8% fewer instructions and 14.8% fewer reloads. `-O0` keeps the single pass allocator, and so does a function that calls `setjmp` or anything else that returns twice. `-Zregalloc=single` and `-Zregalloc=backtracking` pick either at any level.
 
 ### Fixed
