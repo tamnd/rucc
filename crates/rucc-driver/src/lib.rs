@@ -590,6 +590,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-c" => opts.emit = EmitKind::Object,
             "-S" => opts.emit = EmitKind::Asm,
             "-E" => opts.emit = EmitKind::Preprocessed,
+            "-fsyntax-only" => opts.emit = EmitKind::SyntaxOnly,
             "-g" => opts.debug_info = true,
             // GCC's own levels of how much debug information to write. Zero is none and every
             // other number is some, and this compiler has one amount, so the numbers above zero
@@ -6380,6 +6381,27 @@ mod tests {
         // And the `-o` went to the file the rule replaced, which is left empty rather than
         // absent because a makefile that named it as a target will look for it.
         assert_eq!(std::fs::read(tree.path("a.i")).expect("the output should exist"), b"");
+    }
+
+    #[test]
+    fn syntax_only_checks_the_file_and_writes_nothing() {
+        // What meson's `has_header_symbol` probe does: compile with `-fsyntax-only` and read the
+        // exit status. A good file passes and leaves no output behind, a bad one fails.
+        let tree = TempTree::new(
+            "syntax-only",
+            &[
+                ("good.c", "int f(int x) { return x + 1; }\n"),
+                ("bad.c", "int f(void) { return y; }\n"),
+            ],
+        );
+        let (opts, _) = compile(&["-fsyntax-only", "a.c"]);
+        assert_eq!(opts.emit, EmitKind::SyntaxOnly);
+
+        let out = tree.path("good.o");
+        assert_eq!(run(&args(&["-fsyntax-only", "-o", &out, &tree.path("good.c")])), 0);
+        assert!(!std::path::Path::new(&out).exists(), "-fsyntax-only wrote {out}");
+        assert!(!std::path::Path::new(&tree.path("good.s")).exists());
+        assert_ne!(run(&args(&["-fsyntax-only", &tree.path("bad.c")])), 0);
     }
 
     #[test]
