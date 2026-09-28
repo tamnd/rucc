@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `rucc_base::dfp` converts the text of a decimal floating constant to the bits of `_Decimal32`, `_Decimal64` or `_Decimal128` in the BID encoding gcc uses on x86-64 and AArch64, rounding to nearest with ties to even and keeping the exponent the text wrote, and reads the bits back. Nothing calls it yet. It is the first part of #207.
 
+### Changed
+
+- The x86-64 and AArch64 targets find an opcode's description by hashing its name instead of walking the table. Passes ask the target about every instruction by name, and on x86-64 each question compared the name against up to 730 others. On jtckdint's `test.c` at `-O2` the build drops from 35.3 to 30.5 seconds of CPU time.
+
 ## 0.11.14
 
 ### Added

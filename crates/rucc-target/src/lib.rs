@@ -52,6 +52,7 @@ mod branch;
 mod flags;
 mod frame;
 mod machine;
+mod named;
 mod operand;
 mod regs;
 mod short;

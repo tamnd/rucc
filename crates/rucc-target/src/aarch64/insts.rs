@@ -31,6 +31,10 @@
 //! are one opcode until the layout folds a branch into the comparison in front of it, and the
 //! allocator never sees the condition state.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use crate::named;
 use crate::aarch64::{FPR, GPR, v, x};
 use crate::machine::Address as Amode;
 use crate::operand::{Constraint, OperandDesc};
@@ -795,7 +799,8 @@ pub const TEMPLATE: &str = "template";
 /// `a64.add_rr_32`.
 #[must_use]
 pub fn form(name: &str) -> Option<Form> {
-    INSTS.iter().find(|(known, _)| *known == name).map(|&(_, form)| form)
+    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(INSTS));
+    AT.get(name).map(|&at| INSTS[at].1)
 }
 
 /// Every address constructor the AArch64 rule set can write, and what its arguments are.
