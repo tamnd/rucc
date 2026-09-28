@@ -800,16 +800,9 @@ mod tests {
     /// would be deleting a correct account of the machine to make a list shorter, and putting them
     /// back is then a second thing to get right rather than a line of a rule file.
     const NARROW: &[&str] = &[
-        // Three of the two address forms against an immediate. The `narrow` pass does write the
-        // shape, since `char c = a | 1;` narrows to a byte `or` against a byte constant, and no
-        // rule selects these yet: the constant goes into a register and the register with
-        // register rule takes it. Their `add`, `sub` and `and` siblings do have rules and are
-        // reached by the bitfield lowering, so this is six rules missing rather than a shape
-        // nothing writes.
-        "or_ri_8",
-        "or_ri_16",
-        "xor_ri_8",
-        "xor_ri_16",
+        // The multiply against an immediate at the narrow widths. The `narrow` pass writes the
+        // shape, since `char c = a * 3;` narrows to a byte multiply by a byte constant, and the
+        // constant goes into a register and the register with register rule takes it.
         "imul_ri_8",
         "imul_ri_16",
         // The shifts by a value, whose count is in `cl` whatever the width being shifted is. The
@@ -949,25 +942,19 @@ mod tests {
         assert_eq!(LABELS, [x86_64::BRANCH.indirect]);
     }
 
-    /// The rows of the constant table that take nothing yet are exactly the narrow ones waiting on
-    /// the width narrowing, so the day `NARROW` shrinks is the day this says so.
+    /// Every row of the constant table is an instruction some rule selects.
     ///
     /// `crate::combine::BUMPS` has a row per instruction this machine has, which is the whole five
-    /// operations at the whole four widths. Four of those instructions arrive out of a rule that is
-    /// not written yet, so four of the rows sit there taking nothing. That is a fact worth holding
-    /// rather than a thing to notice again later.
+    /// operations at the whole four widths. The narrow inclusive and exclusive or were the last
+    /// four to take nothing, and came back with the width narrowing in `tamnd/rucc#375`, so a row
+    /// that takes nothing now is a rule that went missing.
     #[test]
-    fn the_constant_runs_that_take_nothing_are_the_ones_no_rule_selects_yet() {
+    fn every_constant_run_is_one_a_rule_selects() {
         let written = heads();
-        let mut waiting = Vec::new();
         for bump in crate::combine::BUMPS {
-            if !written.contains(&format!("{PREFIX}{}", bump.from).as_str()) {
-                waiting.push(bump.from);
-            }
-        }
-        assert_eq!(waiting, ["or_ri_8", "or_ri_16", "xor_ri_8", "xor_ri_16"]);
-        for from in waiting {
-            assert!(NARROW.contains(&from), "{from} is unselected and is not on the list");
+            let head = format!("{PREFIX}{}", bump.from);
+            assert!(written.contains(&head.as_str()), "no rule selects {}", bump.from);
+            assert!(!NARROW.contains(&bump.from), "{} is still on the list", bump.from);
         }
     }
 
