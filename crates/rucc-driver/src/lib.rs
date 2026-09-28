@@ -288,7 +288,7 @@ options:
   --offline              never download anything, which a compilation never does anyway
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
-  -save-temps[=cwd|obj], -time   keep the .i and the .s, say how long each step took
+  -save-temps[=cwd|obj], -fstack-usage, -time   keep the .i and .s, write a .su, time each step
   --target=<triple>      generate code for <triple>, which a name like <triple>-rucc also does
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
                          safety-summary, type-granules
@@ -740,6 +740,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-save-temps=") => {
                 opts.save_temps = arg["-save-temps=".len()..].parse().map_err(err)?;
             }
+            // A `.su` beside every file compiled, one line per function saying how much stack it
+            // takes. Where the file goes is the plan's business, see `Job::stack_usage`.
+            "-fstack-usage" => opts.stack_usage = true,
+            "-fno-stack-usage" => opts.stack_usage = false,
             // How long each step took. A misspelling of this is worth rejecting rather than
             // ignoring, since a run that says nothing looks like a compilation that took no time.
             "-time" => opts.time = true,
@@ -963,6 +967,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-o" => {
                 output = Some(args.get(i).ok_or_else(|| err("-o requires an argument"))?.clone());
                 i += 1;
+            }
+            // What the files kept beside an output are named after, which is `-save-temps` and
+            // `-fstack-usage` so far. gcc takes each of the three in the separated form only, and
+            // its driver passes them to every compilation it runs, so a build that copied a
+            // command line out of gcc's `-v` has them. See `phase::aux_base` for what they do.
+            "-dumpbase" | "-dumpbase-ext" | "-dumpdir" => {
+                let value =
+                    args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?.clone();
+                i += 1;
+                match arg {
+                    "-dumpbase" => opts.dump_base = Some(value),
+                    "-dumpbase-ext" => opts.dump_base_ext = Some(value),
+                    _ => opts.dump_dir = Some(value),
+                }
             }
             // The flags that take a directory only in the separated form. GCC spells them
             // this way and nothing writes `-iquotedir`, so accepting the joined form would
@@ -3001,6 +3019,9 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         // Before the failure below, because a compilation that stopped in the back end is exactly
         // the one whose preprocessed source somebody wants to look at.
         failed |= !write_temps(job, &result.temps, &mut stderr);
+        // Before it as well, because gcc leaves an empty report for a file that did not compile
+        // and a build that looks for one beside every object should find one.
+        failed |= !write_stack_usage(job, &result.stack_usage, &mut stderr);
         if result.failed() {
             failed = true;
             continue;
@@ -3158,6 +3179,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 let _ = writeln!(stderr, "{message}");
             }
             failed |= !write_temps(job, &result.temps, &mut stderr);
+            failed |= !write_stack_usage(job, &result.stack_usage, &mut stderr);
             if result.failed() {
                 failed = true;
                 continue;
@@ -3322,6 +3344,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
                 let _ = writeln!(stderr, "{message}");
             }
             failed |= !write_temps(plan_job, &result.temps, &mut stderr);
+            failed |= !write_stack_usage(plan_job, &result.stack_usage, &mut stderr);
             if result.failed() {
                 failed = true;
                 continue;
@@ -3545,6 +3568,20 @@ fn write_temps(job: &Job, temps: &Temps, stderr: &mut impl std::io::Write) -> bo
         }
     }
     ok
+}
+
+/// Writes the `.su` file `-fstack-usage` asked for, where the plan said it goes.
+///
+/// Written even when it is empty, because gcc writes an empty `.su` for a file with no functions,
+/// for `-fsyntax-only` and for a file that did not compile, and a tool that looks for one beside
+/// every object should find one.
+fn write_stack_usage(job: &Job, text: &str, stderr: &mut impl std::io::Write) -> bool {
+    let Some(path) = &job.stack_usage else { return true };
+    if let Err(e) = std::fs::write(path, text) {
+        let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+        return false;
+    }
+    true
 }
 
 /// Appends the file's line to the `-frucc-trace` file, when there is one.
@@ -6716,6 +6753,130 @@ mod tests {
         assert!(!std::path::Path::new(&out).exists(), "-fsyntax-only wrote {out}");
         assert!(!std::path::Path::new(&tree.path("good.s")).exists());
         assert_ne!(run(&args(&["-fsyntax-only", &tree.path("bad.c")])), 0);
+    }
+
+    /// Where `-fstack-usage` puts each job's report, one entry per job, for a command line.
+    fn stack_usage_files(line: &[&str]) -> Vec<Option<String>> {
+        let mut words = vec![LINUX, "-fstack-usage"];
+        words.extend_from_slice(line);
+        let (_, plan) = compile(&words);
+        plan.jobs.iter().map(|job| job.stack_usage.clone()).collect()
+    }
+
+    #[test]
+    fn a_stack_usage_file_is_named_the_way_gcc_names_it() {
+        // Every row was run through gcc 16 with the same command line, and the name is the one it
+        // wrote. `rpg frames` finds gcc's file and this compiler's by the same rule, so a name that
+        // differs is a function that goes missing from the comparison.
+        let cases: &[(&[&str], &[Option<&str>])] = &[
+            (&["-c", "sub/a.c"], &[Some("a.su")]),
+            (&["-c", "sub/a.c", "-o", "out/x.o"], &[Some("out/x.su")]),
+            (&["-c", "sub/a.c", "b.c"], &[Some("a.su"), Some("b.su")]),
+            (&["-S", "sub/a.c", "-o", "out/y.s"], &[Some("out/y.su")]),
+            (&["-S", "sub/a.c", "-o", "-"], &[Some("a.su")]),
+            (&["-E", "sub/a.c", "-o", "out/z.i"], &[None]),
+            (&["-fsyntax-only", "sub/a.c"], &[Some("a.su")]),
+            (&["-fsyntax-only", "sub/a.c", "-o", "out/x.o"], &[Some("out/x.o-a.su")]),
+            (&["sub/a.c"], &[Some("a.su")]),
+            (&["sub/a.c", "-lm"], &[Some("a.su")]),
+            (&["sub/a.c", "b.c"], &[Some("a-a.su"), Some("a-b.su")]),
+            (&["sub/a.c", "b.o"], &[Some("a-a.su"), None]),
+            (&["sub/a.c", "-o", "out/prog"], &[Some("out/prog-a.su")]),
+            (&["sub/a.c", "-o", "out/lib.so"], &[Some("out/lib.so-a.su")]),
+            (&["sub/a.c", "-o", "out/prog.exe"], &[Some("out/prog-a.su")]),
+            (&["sub/a.c", "-o", "out/prog", "-dumpbase", "zz"], &[Some("out/zz-a.su")]),
+            (&["sub/a.c", "-o", "out/prog", "-dumpdir", "dd-"], &[Some("dd-a.su")]),
+            (
+                &["sub/a.c", "b.c", "-dumpdir", "dd/", "-dumpbase", "zz"],
+                &[Some("dd/zz-a.su"), Some("dd/zz-b.su")],
+            ),
+            (&["-c", "sub/a.c", "-dumpbase", "foo", "-o", "out/w.o"], &[Some("out/foo.su")]),
+            (&["-c", "sub/a.c", "-dumpdir", "dd/", "-dumpbase", "sub/zz"], &[Some("sub/zz.su")]),
+            (&["-c", "sub/a.c", "-dumpbase", "zz.c", "-dumpbase-ext", ".c"], &[Some("zz.su")]),
+            (&["-c", "sub/a.c", "-dumpdir", "pre", "-o", "out/x.o"], &[Some("prex.su")]),
+            (&["-c", "sub/a.c", "-save-temps=cwd", "-o", "out/x.o"], &[Some("x.su")]),
+        ];
+        for (line, want) in cases {
+            let want: Vec<Option<String>> = want.iter().map(|w| w.map(str::to_owned)).collect();
+            assert_eq!(stack_usage_files(line), want, "{line:?}");
+        }
+        // Nothing at all without the flag.
+        let (_, plan) = compile(&[LINUX, "-c", "sub/a.c"]);
+        assert_eq!(plan.jobs[0].stack_usage, None);
+    }
+
+    #[test]
+    fn a_stack_usage_file_has_a_line_per_function_where_gcc_would_put_it() {
+        let tree = TempTree::new(
+            "stack-usage",
+            &[
+                ("inc/h.h", "static inline int twice(int x) { return x * 2; }\n"),
+                (
+                    "a.c",
+                    "#include \"inc/h.h\"\n\
+                     static int helper(int);\n\
+                     int grows(int n) { char v[n]; v[0] = (char)n; return v[n - 1] + twice(n); }\n\
+                     static int\n\
+                     helper(int x)\n\
+                     {\n\
+                     return x + 1;\n\
+                     }\n\
+                     int calls(int x) { return helper(x) + grows(x); }\n",
+                ),
+            ],
+        );
+        let (source, object) = (tree.path("a.c"), tree.path("a.o"));
+        assert_eq!(run(&args(&["-O0", "-fstack-usage", "-c", &source, "-o", &object])), 0);
+        let text = std::fs::read_to_string(tree.path("a.su")).expect("a.su should be written");
+
+        let line = |function: &str| {
+            let suffix = format!(":{function}");
+            let line =
+                text.lines().find(|line| line.split('\t').next().unwrap().ends_with(&suffix));
+            line.unwrap_or_else(|| panic!("no line for {function} in\n{text}"))
+        };
+        let expect = |function: &str, at: String, qualifier: &str| {
+            let fields: Vec<&str> = line(function).split('\t').collect();
+            assert_eq!(fields.len(), 3, "{text}");
+            assert_eq!(fields[0], format!("{at}:{function}"), "{text}");
+            let bytes: u32 = fields[1].parse().expect("the bytes should be a number");
+            assert!(bytes >= 8 && bytes % 8 == 0, "{function} takes {bytes} bytes");
+            assert_eq!(fields[2], qualifier, "{text}");
+        };
+        // A variable length array makes the frame grow while the function runs.
+        expect("grows", format!("{source}:3:5"), "dynamic");
+        // The definition rather than the declaration above it, and the line the name is on
+        // rather than the one the type is on.
+        expect("helper", format!("{source}:5:1"), "static");
+        expect("calls", format!("{source}:9:5"), "static");
+        // A function from a header is reported against the header.
+        expect("twice", format!("{}:1:19", tree.path("inc/h.h")), "static");
+        assert_eq!(text.lines().count(), 4, "{text}");
+    }
+
+    #[test]
+    fn a_stack_usage_file_is_empty_when_there_is_nothing_to_report_and_absent_under_dash_e() {
+        let tree = TempTree::new(
+            "stack-usage-empty",
+            &[
+                ("good.c", "int f(int x) { return x + 1; }\n"),
+                ("bad.c", "int f(void) { return y; }\n"),
+            ],
+        );
+        let good = tree.path("good.c");
+        // gcc writes an empty file for a check that compiles nothing and for a file that failed,
+        // and a build that looks for one beside every object finds one.
+        assert_eq!(
+            run(&args(&["-fstack-usage", "-fsyntax-only", &good, "-o", &tree.path("x")])),
+            0
+        );
+        assert_eq!(std::fs::read_to_string(tree.path("x-good.su")).unwrap(), "");
+        let bad = tree.path("bad.c");
+        assert_ne!(run(&args(&["-fstack-usage", "-c", &bad, "-o", &tree.path("bad.o")])), 0);
+        assert_eq!(std::fs::read_to_string(tree.path("bad.su")).unwrap(), "");
+        // And none under `-E`, which never reaches a function.
+        assert_eq!(run(&args(&["-fstack-usage", "-E", &good, "-o", &tree.path("e.i")])), 0);
+        assert!(!std::path::Path::new(&tree.path("e.su")).exists());
     }
 
     #[test]

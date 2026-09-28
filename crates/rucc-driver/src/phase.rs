@@ -321,6 +321,14 @@ pub struct Job {
     /// step whose result the compilation would have thrown away. `-E -save-temps` is the second
     /// of those, since the preprocessed text is the output and is already being written.
     pub aux_base: Option<String>,
+    /// Where `-fstack-usage` writes this job's report, or `None` when it was not asked for or the
+    /// job does not compile C.
+    ///
+    /// gcc's auxiliary base name with `.su` on the end, the same name `-save-temps` builds its
+    /// files from: `-c a.c -o out/x.o` writes `out/x.su`, a bare `-c sub/a.c` writes `a.su` in the
+    /// working directory, and `a.c` linked into `out/prog` writes `out/prog-a.su`. The rest of the
+    /// rules are on `aux_base` in this file.
+    pub stack_usage: Option<String>,
 }
 
 impl Job {
@@ -477,28 +485,69 @@ fn stem(path: &str) -> &str {
     file_part(without_extension(path))
 }
 
-/// The name the files `-save-temps` keeps are built from, without the suffix that says which
-/// one it is.
+/// The name the files `-save-temps` and `-fstack-usage` keep beside an output are built from,
+/// without the suffix that says which one it is.
 ///
 /// GCC calls this the auxiliary base name, and it is the name of the file the compilation
-/// produces with the extension taken off: `-c a.c -o out/a.o` keeps `out/a.i` and `out/a.s`. A
-/// command line that links has one output for however many inputs, so the input's own name goes
-/// on the end and `a.c` under `-o out/prog` becomes `out/prog-a`. `-save-temps=cwd` is the same
-/// name with the directory taken off, which is the only thing the two spellings disagree about.
+/// produces with the extension taken off: `-c a.c -o out/a.o` keeps `out/a.i`, `out/a.s` and
+/// `out/a.su`. A command line that links has one output for however many inputs, so the input's
+/// own name goes on the end and `a.c` under `-o out/prog` becomes `out/prog-a`. The output keeps
+/// its extension there, since it is not the name of an object, and only an `.exe` comes off, so
+/// `-o lib.so` gives `lib.so-a`. A link with no `-o` and one input has nothing to tell apart and
+/// uses the input's name alone, and with more than one it uses `a-`, from `a.out`.
+/// `-save-temps=cwd` is the same name with the directory taken off, which is the only thing the
+/// two spellings disagree about.
 ///
-/// `collecting` is that one output, which is the link and the archive both. The archive always has
-/// an `-o`, so the default below is the link's.
-fn aux_base(opts: &Options, input: &str, output: Option<&str>, collecting: bool) -> String {
-    let named = match output {
-        Some(o) => without_extension(o),
-        // No `-o`, so the job worked its own name out, and a worked out name has no directory in
-        // it: the object of `sub/a.c` is `a.o` in the working directory, so what is kept beside
-        // it is in the working directory too.
-        None if collecting => stem(default_exe(opts)),
-        None => stem(input),
+/// `-dumpdir` replaces everything in front of the input's name, or of the output's in a compile
+/// that names one, and is a directory when it ends in a slash and the start of a name when it
+/// does not. `-dumpbase` replaces the name, still with the input's on the end when linking, and
+/// keeps the directory of the output or of `-dumpdir` unless it has one of its own.
+/// `-dumpbase-ext` is taken off the end of `-dumpbase`. Every case here was measured against gcc
+/// 16.
+///
+/// `collecting` is that one output, which is the link and the archive both, and `alone` is
+/// whether the command line has a single input. `output` is `None` for an `-o -`, which names no
+/// file.
+fn aux_base(
+    opts: &Options,
+    input: &str,
+    output: Option<&str>,
+    collecting: bool,
+    alone: bool,
+) -> String {
+    let own = stem(input);
+    let named = if let Some(base) = opts.dump_base.as_deref() {
+        let ext = opts.dump_base_ext.as_deref().filter(|ext| !ext.is_empty());
+        let stripped = ext.and_then(|ext| base.strip_suffix(ext)).filter(|b| !b.is_empty());
+        let base = stripped.unwrap_or(base);
+        let base = if collecting { format!("{base}-{own}") } else { base.to_owned() };
+        if base.contains(['/', '\\']) {
+            base
+        } else {
+            let dir = opts.dump_dir.as_deref().unwrap_or_else(|| output.map_or("", directory));
+            format!("{dir}{base}")
+        }
+    } else if let Some(dir) = &opts.dump_dir {
+        let name = match output {
+            Some(o) if !collecting => file_part(without_extension(o)),
+            _ => own,
+        };
+        format!("{dir}{name}")
+    } else if collecting {
+        match output {
+            Some(o) => format!("{}-{own}", o.strip_suffix(".exe").unwrap_or(o)),
+            None if alone => own.to_owned(),
+            None => format!("{}-{own}", stem(default_exe(opts))),
+        }
+    } else {
+        output.map_or(own, without_extension).to_owned()
     };
-    let named = if opts.save_temps == SaveTemps::Cwd { file_part(named) } else { named };
-    if collecting { format!("{named}-{}", stem(input)) } else { named.to_owned() }
+    if opts.save_temps == SaveTemps::Cwd { file_part(&named).to_owned() } else { named }
+}
+
+/// The directory part of a path with the slash that ends it, or nothing when there is none.
+fn directory(path: &str) -> &str {
+    path.rfind(['/', '\\']).map_or("", |i| &path[..=i])
 }
 
 /// The suffix a phase's output carries, for this target.
@@ -600,6 +649,11 @@ impl Plan {
             return Err(plan_err("cannot specify -o with multiple inputs when not linking"));
         }
 
+        // Whether there is one input, which decides whether the files kept beside a link's output
+        // need the input's name on them to tell them apart. A library or a word for the linker is
+        // not an input here and an object is, which is how gcc counts.
+        let alone = inputs.iter().filter(|input| input.role == Role::File).count() == 1;
+
         let mut notes = Vec::new();
         let mut jobs = Vec::with_capacity(inputs.len());
         let mut link_inputs = Vec::new();
@@ -664,6 +718,7 @@ impl Plan {
                     phases: Vec::new(),
                     output: Output::File(input.path.clone()),
                     aux_base: None,
+                    stack_usage: None,
                 });
                 continue;
             }
@@ -685,6 +740,7 @@ impl Plan {
                     phases,
                     output: Output::File(input.path.clone()),
                     aux_base: None,
+                    stack_usage: None,
                 });
                 continue;
             };
@@ -693,7 +749,7 @@ impl Plan {
             // what it writes. Everything past it does: the text and, once there is a back end
             // step after it, the assembly.
             let aux = (opts.save_temps.wanted() && final_phase > Phase::Preprocess)
-                .then(|| aux_base(opts, &input.path, output, collecting));
+                .then(|| aux_base(opts, &input.path, output, collecting, alone));
             let out = if final_phase == Phase::Link || archiving {
                 // The job stops at the object, and the step below takes it from here. Under
                 // `-save-temps` the object is one of the files being kept, so it is written where
@@ -751,7 +807,34 @@ impl Plan {
                     suffix_for(Phase::Assemble, opts)
                 ));
             }
-            jobs.push(Job { input: input.path.clone(), kind, phases, output: out, aux_base: aux });
+            // Only for a job that compiles C, since the numbers are the frames the back end laid
+            // out. An input of assembly has no compile phase and an input of IR is only ever
+            // printed back, so neither has a frame to report, and gcc writes nothing under `-E`.
+            // `-fsyntax-only` gets a file with nothing in it, which is what gcc gives it, named
+            // the way a link's would be since nothing on the command line said to stop at an
+            // object.
+            let syntax = opts.emit == EmitKind::SyntaxOnly;
+            let backed = syntax
+                || matches!(
+                    opts.emit,
+                    EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable
+                );
+            let stack_usage = (opts.stack_usage
+                && backed
+                && kind != InputKind::Ir
+                && phases.contains(&Phase::Compile))
+            .then(|| {
+                let named = output.filter(|o| *o != "-");
+                format!("{}.su", aux_base(opts, &input.path, named, collecting || syntax, alone))
+            });
+            jobs.push(Job {
+                input: input.path.clone(),
+                kind,
+                phases,
+                output: out,
+                aux_base: aux,
+                stack_usage,
+            });
         }
 
         let link = linking.then(|| LinkJob {
@@ -1232,9 +1315,17 @@ mod tests {
         assert_eq!(kept(&p, 0), vec!["o/p-t.i", "o/p-t.s"]);
         assert_eq!(kept(&p, 1), vec!["o/p-u.i", "o/p-u.s"]);
         // With no `-o` the executable is `a.out`, and the `a` of it is what the files are named
-        // from, which is where `a-t.i` comes from on a command line nobody wrote an `a` on.
-        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], None);
+        // from, which is where `a-t.i` comes from on a command line nobody wrote an `a` on. With
+        // one input there is nothing to tell apart and gcc uses the input's name alone.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c", "u.c"], None);
         assert_eq!(kept(&p, 0), vec!["a-t.i", "a-t.s"]);
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], None);
+        assert_eq!(kept(&p, 0), vec!["t.i", "t.s"]);
+        // The executable's name is not an object's, so it keeps its extension, all but `.exe`.
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], Some("o/p.so"));
+        assert_eq!(kept(&p, 0), vec!["o/p.so-t.i", "o/p.so-t.s"]);
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["t.c"], Some("o/p.exe"));
+        assert_eq!(kept(&p, 0), vec!["o/p-t.i", "o/p-t.s"]);
     }
 
     #[test]
@@ -1294,7 +1385,7 @@ mod tests {
     fn the_rendering_names_the_files_that_will_be_kept() {
         // `-###` is what will happen, and under `-save-temps` two more files being written is
         // part of that. It is also the only way to see the names without running a compilation.
-        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["a.c"], None);
+        let p = keeping(SaveTemps::Object, EmitKind::Executable, &["a.c", "b.c"], None);
         let text = p.render();
         assert!(text.contains("a.c: keeping a-a.i, a-a.s"), "{text}");
         assert!(!plan(&linux(), &["a.c"], None).render().contains("keeping"));

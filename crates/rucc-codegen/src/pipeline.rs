@@ -55,6 +55,7 @@ use crate::shorten;
 use crate::slots::{self, Slots};
 use crate::split;
 use crate::tail;
+use crate::usage::{StackUsage, Usage};
 use crate::weights;
 
 /// Everything about a machine that compiling a function for it needs.
@@ -385,15 +386,20 @@ pub fn compile(
     elsewhere: &Elsewhere,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
-    let (mut fired, mut pressure, mut lowerings) =
-        (Fired::new(), Pressure::new(), Lowerings::new());
+    let (mut fired, mut pressure, mut lowerings, mut stack) =
+        (Fired::new(), Pressure::new(), Lowerings::new(), StackUsage::new());
     compile_recording(
         source,
         names,
         machine,
         elsewhere,
         flags,
-        &mut Recording { fired: &mut fired, pressure: &mut pressure, lowerings: &mut lowerings },
+        &mut Recording {
+            fired: &mut fired,
+            pressure: &mut pressure,
+            lowerings: &mut lowerings,
+            stack: &mut stack,
+        },
     )
 }
 
@@ -410,6 +416,8 @@ pub struct Recording<'a> {
     pub pressure: &'a mut Pressure,
     /// What the pre-selection lowering group did, for `-Zlowering`.
     pub lowerings: &'a mut Lowerings,
+    /// How much stack each function takes, for `-fstack-usage`.
+    pub stack: &'a mut StackUsage,
 }
 
 /// The same compilation, with what it did along the way recorded.
@@ -653,6 +661,16 @@ pub fn compile_recording(
     if naked && frame.size() > 0 {
         return Err(Unsupported::Naked { bytes: frame.size() });
     }
+    // Here because the frame is settled and nothing after this changes how big it is. The name is
+    // the one the source spelled, since that is what gcc's report says and what a person reading
+    // it looks for, and a renamed function is the one place it differs from the symbol.
+    recording.stack.record(Usage {
+        name: names.resolve(source.spelled.unwrap_or(source.name)).to_owned(),
+        named: source.named,
+        declared: source.declared,
+        bytes: frame.usage(),
+        dynamic: frame.grows(),
+    });
 
     // Here because this is where the two halves of the answer are both in hand: which local is
     // which declaration came down from selection, and where a local is was settled a line ago.
@@ -1012,6 +1030,7 @@ mod tests {
             &mut Recording {
                 fired: &mut Fired::new(),
                 pressure: &mut Pressure::new(),
+                stack: &mut StackUsage::new(),
                 lowerings: &mut lowerings,
             },
         )
@@ -1051,6 +1070,7 @@ mod tests {
             &mut Recording {
                 fired: &mut fired,
                 pressure: &mut Pressure::new(),
+                stack: &mut StackUsage::new(),
                 lowerings: &mut Lowerings::asked(true),
             },
         )
@@ -1080,6 +1100,7 @@ mod tests {
             &mut Recording {
                 fired: &mut fired,
                 pressure: &mut Pressure::new(),
+                stack: &mut StackUsage::new(),
                 lowerings: &mut Lowerings::asked(true),
             },
         )

@@ -19,6 +19,7 @@ use rucc_codegen::elsewhere::Elsewhere;
 use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pipeline::{self, Machine, Recording};
 use rucc_codegen::pressure::Pressure;
+use rucc_codegen::usage::StackUsage;
 use rucc_cost::Goal;
 use rucc_diag::{Diagnostic, Severity, SourceMap, Span};
 use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
@@ -126,6 +127,13 @@ pub struct Compiled {
     pub temps: Temps,
     /// Where the time went, phase by phase and pass by pass, for `-frucc-trace`.
     pub timing: crate::trace::Timing,
+    /// The `.su` file `-fstack-usage` asked for, already rendered, one line per function.
+    ///
+    /// Rendered here rather than handed back as rows, because a row points at the source through
+    /// a span and the map that turns a span into a file, a line and a column is this compilation's
+    /// and is gone once it returns. Empty when the flag was not given and for every compilation
+    /// that stopped before the back end.
+    pub stack_usage: String,
 }
 
 /// The intermediate text a compilation went through, kept when `-save-temps` asked for it.
@@ -188,6 +196,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // The same, and the other thing the back end is asked to record about itself.
     let mut pressure = Pressure::new();
     let mut lowerings = Lowerings::asked(opts.lowering_dump.is_some());
+    // And the frames it laid out, for `-fstack-usage`. Recorded whether or not the flag was given,
+    // since a row per function is nothing next to compiling the function, and written only if it
+    // was.
+    let mut stack = StackUsage::new();
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
     let mut remarks = String::new();
@@ -472,6 +484,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                         fired: &mut fired,
                                         pressure: &mut pressure,
                                         lowerings: &mut lowerings,
+                                        stack: &mut stack,
                                     },
                                     &mut temps.assembly,
                                     Origin { map: &sess.sources, name, meaning: &meaning },
@@ -525,6 +538,13 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // A tree built from a file that did not compile is not a tree anything should read.
         artifact = Artifact::Nothing;
     }
+    // Before the session goes, since the map that says where each function is goes with it. A
+    // file that did not compile gets an empty report, which is what gcc leaves for one.
+    let stack_usage = if opts.stack_usage && errors == 0 {
+        su_file(&stack, &sess.sources, crate::phase::source_name(name))
+    } else {
+        String::new()
+    };
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
     clock.passes(passes);
@@ -541,6 +561,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         deps,
         temps,
         timing,
+        stack_usage,
     }
 }
 
@@ -606,6 +627,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         deps: Vec::new(),
         temps: Temps::default(),
         timing: crate::trace::Timing::default(),
+        stack_usage: String::new(),
     }
 }
 
@@ -1752,6 +1774,23 @@ fn internal(message: &str) -> Diagnostic {
         .note("this is a bug in rucc rather than in the program, please report it", Span::DUMMY)
 }
 
+/// Every function's line, in the order they were compiled.
+///
+/// A function whose name has no place in the source, which only the tests and the IR reader
+/// build, is reported against the file being compiled at line and column zero rather than left
+/// out, since a report that is missing a function is one that reads as that function using
+/// nothing.
+fn su_file(stack: &StackUsage, sources: &SourceMap, file: &str) -> String {
+    let mut out = String::new();
+    for row in stack.rows() {
+        let span = row.span();
+        let at = (!span.is_dummy()).then(|| sources.presumed(span.lo)).flatten();
+        let (name, line, column) = at.map_or((file, 0, 0), |at| (at.name, at.line, at.column));
+        out.push_str(&row.line(name, line, column));
+    }
+    out
+}
+
 /// A result that is nothing but one message, for the failures that happen before there is
 /// anything to compile.
 fn failure(message: String) -> Compiled {
@@ -1767,6 +1806,7 @@ fn failure(message: String) -> Compiled {
         deps: Vec::new(),
         temps: Temps::default(),
         timing: crate::trace::Timing::default(),
+        stack_usage: String::new(),
     }
 }
 

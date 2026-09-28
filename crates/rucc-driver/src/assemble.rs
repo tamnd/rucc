@@ -98,5 +98,6 @@ fn done(
         deps,
         temps,
         timing: crate::trace::Timing::default(),
+        stack_usage: String::new(),
     }
 }

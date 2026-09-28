@@ -2268,6 +2268,22 @@ pub struct Options {
     pub deps: Deps,
     /// Whether the intermediate files are kept, from `-save-temps`.
     pub save_temps: SaveTemps,
+    /// Whether each compiled file gets a `.su` beside its output saying how much stack each of its
+    /// functions takes, from `-fstack-usage`.
+    ///
+    /// gcc's flag and gcc's file, one line per function. What the number counts is on
+    /// `rucc_codegen::frame::Frame::usage`. It is counted the way gcc counts, and it is the size of
+    /// rucc's frame rather than gcc's, which is the point: the two files side by side say which
+    /// functions one compiler gives more stack than the other does.
+    pub stack_usage: bool,
+    /// What the files kept beside an output are named after, from `-dumpbase`, in place of the
+    /// name the output or the input would have given them.
+    pub dump_base: Option<String>,
+    /// The extension `-dumpbase-ext` says to take off the end of [`Options::dump_base`].
+    pub dump_base_ext: Option<String>,
+    /// What goes in front of the name of every file kept beside an output, from `-dumpdir`. A
+    /// directory when it ends in a slash and the start of a name otherwise, which is gcc's rule.
+    pub dump_dir: Option<String>,
     /// Whether each step says how long it took, from `-time`.
     pub time: bool,
     /// What `-f<pass>` and `-fno-<pass>` said about an optimizer pass, in the order the command
@@ -2439,6 +2455,10 @@ impl Options {
             dumps: Dumps::default(),
             deps: Deps::default(),
             save_temps: SaveTemps::default(),
+            stack_usage: false,
+            dump_base: None,
+            dump_base_ext: None,
+            dump_dir: None,
             time: false,
             passes: Vec::new(),
             pass_fuel: Vec::new(),
