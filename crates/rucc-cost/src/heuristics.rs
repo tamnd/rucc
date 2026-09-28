@@ -310,6 +310,20 @@ pub const INLINE_CALLED_ONCE_INSNS: u32 = 4000;
 /// left alone however small the body is.
 pub const INLINE_CALLED_ONCE_LOOP_DEPTH: u32 = 6;
 
+/// How much larger than its own locals a caller's frame may grow by inlining, in percent, per
+/// section 33.6.
+///
+/// GCC's `large-stack-frame-growth`, which is a thousand, so a frame may become eleven times what
+/// the caller asked for itself. A call that is `always_inline` is inlined whatever this says.
+pub const INLINE_FRAME_GROWTH: u32 = 1000;
+
+/// The frame size below which inlining never counts as growing the frame too much, in bytes, per
+/// section 33.6.
+///
+/// GCC's `large-stack-frame`. A caller with almost no locals of its own would otherwise be refused
+/// a helper with a few, since eleven times nothing is nothing.
+pub const INLINE_LARGE_FRAME: u32 = 256;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -835,6 +849,22 @@ pub const ALL: &[Constant] = &[
         unit: "loops",
         document: "33.1",
         gcc: "max-inline-functions-called-once-loop-depth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_FRAME_GROWTH",
+        value: 1000,
+        unit: "percent",
+        document: "33.6",
+        gcc: "large-stack-frame-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_LARGE_FRAME",
+        value: 256,
+        unit: "bytes",
+        document: "33.6",
+        gcc: "large-stack-frame",
         provenance: Provenance::Gcc,
     },
     Constant {
