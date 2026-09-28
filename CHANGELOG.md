@@ -21,6 +21,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `__builtin_signbit` and `__builtin_isnormal` of a `__float128` compile rather than failing on a bitcast to a 128 bit integer that no rule lowers. The sign is read from the top two bytes of the value in memory, as it already was for `long double` on x86-64.
 
+### Changed
+
+- The x86-64 and AArch64 targets find an opcode's description by hashing its name instead of walking the table. Passes ask the target about every instruction by name, and on x86-64 each question compared the name against up to 730 others. On jtckdint's `test.c` at `-O2` the build drops from 35.3 to 30.5 seconds of CPU time.
+
 ## 0.11.14
 
 ### Added

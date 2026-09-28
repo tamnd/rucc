@@ -24,10 +24,14 @@
 //! reads an allocated 31 as the stack pointer, since the zero register is not one the allocator
 //! hands out, and the encoder refuses the stack pointer where the machine has no way to say it.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
 use crate::aarch64::read::system_field;
+use crate::named;
 
 use Arg::{
     At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Near, Page,
@@ -957,7 +961,8 @@ static TEXT: &[(&str, &[Written])] = &[
 /// not an instruction, which are two different answers.
 #[must_use]
 pub fn written(name: &str) -> Option<&'static [Written]> {
-    TEXT.iter().find(|(known, _)| *known == name).map(|&(_, insts)| insts)
+    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(TEXT));
+    AT.get(name).map(|&at| TEXT[at].1)
 }
 
 /// How many bits of the operand at that index the opcode of that name names, or `None` for all

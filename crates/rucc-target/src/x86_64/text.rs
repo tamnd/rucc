@@ -39,6 +39,10 @@
 //! because the machine has no two-operand multiply narrower than that and the low eight bits of a
 //! product depend on nothing but the low eight bits of what went into it.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use crate::named;
 use crate::operand::Constraint;
 use crate::regs::PhysReg;
 
@@ -1376,7 +1380,8 @@ static TEXT: &[(&str, &[Written])] = &[
 /// The name is written the way the machine IR holds it, so `add_rr_32` rather than `x64.add_rr_32`.
 #[must_use]
 pub fn written(name: &str) -> Option<&'static [Written]> {
-    TEXT.iter().find(|(known, _)| *known == name).map(|&(_, insts)| insts)
+    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(TEXT));
+    AT.get(name).map(|&at| TEXT[at].1)
 }
 
 /// Which general purpose register that name is, and how much of it the name says.

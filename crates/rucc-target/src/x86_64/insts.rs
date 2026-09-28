@@ -35,7 +35,11 @@
 //! and the allocator never sees one. That is a deliberate constraint on the rule set rather
 //! than a simplification of the machine.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 pub use crate::machine::Address;
+use crate::named;
 use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
@@ -2408,7 +2412,8 @@ pub static INSTS: &[(&str, Form)] = &[
 /// not part of the opcode.
 #[must_use]
 pub fn form(name: &str) -> Option<Form> {
-    INSTS.iter().find(|(known, _)| *known == name).map(|&(_, form)| form)
+    static AT: LazyLock<HashMap<&str, usize>> = LazyLock::new(|| named::index(INSTS));
+    AT.get(name).map(|&at| INSTS[at].1)
 }
 
 /// Every address constructor the x86-64 rule set can write, and what its arguments are.
