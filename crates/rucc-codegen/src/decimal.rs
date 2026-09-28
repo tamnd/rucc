@@ -12,7 +12,7 @@
 //! regular: the operation, then `sd`, `dd` or `td` for the decimal width, then the other format's
 //! letters where there is one, then the operand count for arithmetic and comparisons. The one part
 //! that is not a pattern is which conversions libgcc calls `extend` and which `trunc`, and
-//! [`across`] spells that out.
+//! `across` spells that out.
 //!
 //! What is not done here is left to the steps after it. A negation or a constant at thirty two or
 //! sixty four bits is the sign bit and the bits, which [`crate::expand::floats`] already does by

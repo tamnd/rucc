@@ -431,7 +431,7 @@ pub struct Evex {
     pub map: Map,
     /// The wide bit, which here says whether the elements are four bytes or eight.
     pub w: bool,
-    /// The argument that goes in the `vvvv` field, as for [`Vex`].
+    /// The argument that goes in the `vvvv` field, as for `Vex`.
     pub vvvv: Option<u8>,
     /// What a one byte displacement is counted in.
     pub tuple: Tuple,
