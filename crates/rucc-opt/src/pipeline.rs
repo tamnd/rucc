@@ -835,7 +835,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         OptLevel::O3 => Some(heuristics::INLINE_INSNS_SINGLE_O3),
         _ => Some(heuristics::INLINE_INSNS_SINGLE),
     };
-    for (id, stats) in inline::run(module, limit) {
+    // `-fno-inline-functions-called-once` turns the called once half off alone. It is not a pass,
+    // so the toggle only ever means this and never adds or removes anything from the list.
+    let once = opts.wants(inline::ONCE);
+    for (id, stats) in inline::run(module, limit, once) {
         if opts.verify {
             if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
                 let func = names.resolve(module[id].name);

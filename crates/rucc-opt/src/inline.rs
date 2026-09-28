@@ -67,8 +67,10 @@
 //! A `static` helper called from one loop is the shape
 //! this is for, and it is everywhere in C, which is tamnd/rucc#1932. Reaching it any other way is a
 //! second call site, a tail call, its address taken by an instruction or written into an image, or
-//! an alias naming it. `used`, `noinline`, `optnone` and `naked` each keep it a call. `-fno-inline`
-//! turns this off with the declared half, which is what gcc does.
+//! an alias naming it. `used`, `noinline`, `optnone` and `naked` each keep it a call. So does a call
+//! more than `max-inline-functions-called-once-loop-depth` loops deep, which is 6, as it does in
+//! gcc. `-fno-inline` turns this off with the declared half, which is what gcc does, and
+//! `-fno-inline-functions-called-once` turns it off alone.
 //!
 //! A body that takes the address of one of its own labels is copied with the label, so each copy
 //! has an address of its own, which is what gcc does and what `990208-1.c` checks. A body that
@@ -78,7 +80,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rucc_base::Symbol;
-use rucc_cost::heuristics::INLINE_CALLED_ONCE_INSNS;
+use rucc_cost::heuristics::{INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
     Float, Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
@@ -87,10 +89,17 @@ use rucc_ir::{
 use rucc_tuple::{Arch, Os};
 
 use crate::Stats;
+use crate::cfg::Cfg;
+use crate::dom::Dominators;
+use crate::loops::Loops;
 
 /// What the step calls itself in a remark, and the name `-fno-inline` turns the declared half off
 /// by.
 pub const NAME: &str = "inline";
+
+/// What `-finline-functions-called-once` and its `-fno-` form toggle, which is the called once half
+/// of this step alone. Not the name of a pass.
+pub const ONCE: &str = "inline-functions-called-once";
 
 const INLINED: &str = "always_inline call inlined";
 
@@ -137,6 +146,8 @@ pub enum InlineFailure {
     Alloca,
     /// The body is larger than a callee declared `inline` is allowed to be.
     TooLarge,
+    /// The call is inside more loops than a function called once may be inlined into.
+    TooDeep,
 }
 
 impl InlineFailure {
@@ -155,6 +166,7 @@ impl InlineFailure {
             Self::Pack => "always_inline call not inlined: va_arg_pack cannot be forwarded",
             Self::Alloca => "always_inline call not inlined: callee calls alloca",
             Self::TooLarge => "always_inline call not inlined: callee too large",
+            Self::TooDeep => "always_inline call not inlined: call inside too many loops",
         }
     }
 
@@ -173,6 +185,7 @@ impl InlineFailure {
             Self::Pack => "inline call not inlined: va_arg_pack cannot be forwarded",
             Self::Alloca => "inline call not inlined: callee calls alloca",
             Self::TooLarge => "inline call not inlined: callee too large",
+            Self::TooDeep => "inline call not inlined: call inside too many loops",
         }
     }
 
@@ -199,18 +212,21 @@ impl InlineFailure {
             }
             Self::Alloca => "call to a function called once not inlined: callee calls alloca",
             Self::TooLarge => "call to a function called once not inlined: callee too large",
+            Self::TooDeep => {
+                "call to a function called once not inlined: call inside too many loops"
+            }
         }
     }
 }
 
 /// Inlines every call to an `always_inline` function that can be, and with a `limit` every call to
-/// a function declared `inline` whose body is no larger than that and the one call to a `static`
-/// function called once, and says what it did where.
+/// a function declared `inline` whose body is no larger than that and, when `once` says so, the one
+/// call to a `static` function called once, and says what it did where.
 ///
 /// Then turns every function still holding a `va_arg_pack` into a declaration. See the module
 /// documentation for why that is the right thing to do with one.
-pub fn run(module: &mut Module, limit: Option<u32>) -> Vec<(FuncId, Stats)> {
-    let once = if limit.is_some() { called_once(module) } else { HashSet::new() };
+pub fn run(module: &mut Module, limit: Option<u32>, once: bool) -> Vec<(FuncId, Stats)> {
+    let once = if limit.is_some() && once { called_once(module) } else { HashSet::new() };
     let wanted: HashMap<Symbol, (FuncId, Kind)> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
@@ -342,23 +358,41 @@ fn settle(
     // one the callee's own settling already had its chance at. A function that asked not to be
     // optimized is left with its calls, except for the ones that are a promise.
     let optnone = module[id].attrs.set.contains(AttrSet::OPTNONE);
-    let calls: Vec<(Inst, FuncId, Kind)> = {
+    let calls: Vec<(Block, Inst, FuncId, Kind)> = {
         let func = &module[id];
         func.blocks()
-            .flat_map(|block| func.insts(block))
-            .filter_map(|inst| {
+            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
+            .filter_map(|(block, inst)| {
                 let Extra::Call(info) = func[inst].extra else { return None };
                 if func[inst].opcode != Opcode::Call {
                     return None;
                 }
                 let callee = func[info].callee?;
                 let &(callee, kind) = how.wanted.get(&callee)?;
-                (kind == Kind::Always || !optnone).then_some((inst, callee, kind))
+                (kind == Kind::Always || !optnone).then_some((block, inst, callee, kind))
             })
             .collect()
     };
+    // The calls to a function called once that are too many loops deep, found before anything is
+    // spliced in, since a splice splits the block the call was in. Counted as gcc counts, so a
+    // block in one loop is one deep, which is one more than `Loops::depth` says.
+    let deep: HashSet<Inst> = if calls.iter().any(|&(.., kind)| kind == Kind::Once) {
+        let func = &module[id];
+        let cfg = Cfg::new(func);
+        let loops = Loops::new(&cfg, &Dominators::new(&cfg));
+        let depth = |block| loops.innermost(block).map_or(0, |inner| loops.depth(inner) + 1);
+        calls
+            .iter()
+            .filter(|&&(block, _, _, kind)| {
+                kind == Kind::Once && depth(block) > INLINE_CALLED_ONCE_LOOP_DEPTH
+            })
+            .map(|&(_, inst, ..)| inst)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let mut stats = Stats::new();
-    for (call, callee, kind) in calls {
+    for (_, call, callee, kind) in calls {
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
             Kind::Hinted => failure.hint(),
@@ -366,6 +400,10 @@ fn settle(
         };
         if callee == id || state.get(&callee) == Some(&State::Settling) {
             stats.missed(why(InlineFailure::Recursive));
+            continue;
+        }
+        if deep.contains(&call) {
+            stats.missed(why(InlineFailure::TooDeep));
             continue;
         }
         settle(module, callee, how, state, done);
@@ -1084,14 +1122,19 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
     }
 
     fn inlined_under(body: &str, limit: Option<u32>) -> String {
+        inlined_with(body, limit, true).0
+    }
+
+    /// The same, with the called once half on or off, and with what the step said about it.
+    fn inlined_with(body: &str, limit: Option<u32>, once: bool) -> (String, String) {
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        run(&mut module, limit);
+        let said = format!("{:?}", run(&mut module, limit, once));
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
-        rucc_ir::print(&module, &names)
+        (rucc_ir::print(&module, &names), said)
     }
 
     /// The body goes where the call was, its return becomes a jump, and its local goes to the
@@ -1285,6 +1328,50 @@ block0(%0: i32):
         assert_ne!(taken, ONCE);
         let out = inlined_under(&taken, Some(70));
         assert!(out.contains("call @scale"), "{out}");
+    }
+
+    /// `ONCE` with the one call `depth` loops deep in `g`. Each header enters the next loop in or
+    /// goes back round the one around it, and the block with the call goes back round the
+    /// innermost, so the call is inside every one of them.
+    fn nested(depth: usize) -> String {
+        let scale = &ONCE[..ONCE.find("func @g").expect("g is there")];
+        let (body, out) = (depth + 1, depth + 2);
+        let mut g = String::from(
+            "func @g(i32, i1) -> i32, linkage(external) {\nblock0(%0: i32, %1: i1):\n    jump block1\n",
+        );
+        for header in 1..=depth {
+            let back = if header == 1 { out } else { header - 1 };
+            g += &format!("block{header}:\n    br_if %1, block{}, block{back}\n", header + 1);
+        }
+        g += &format!(
+            "block{body}:\n    %2 = call @scale(%0) : (i32) -> i32\n    jump block{depth}\n"
+        );
+        g += &format!("block{out}:\n    return %0\n}}\n");
+        format!("{scale}{g}")
+    }
+
+    /// gcc's `max-inline-functions-called-once-loop-depth` is 6, so a call six loops deep is
+    /// inlined and one seven deep is not, with a remark that says why.
+    #[test]
+    fn a_static_function_called_once_is_inlined_no_more_than_six_loops_deep() {
+        let (out, said) = inlined_with(&nested(6), Some(70), true);
+        assert!(!out.contains("call @scale"), "{out}");
+        assert!(!said.contains("too many loops"), "{said}");
+        let (out, said) = inlined_with(&nested(7), Some(70), true);
+        assert!(out.contains("call @scale"), "{out}");
+        assert!(said.contains("call inside too many loops"), "{said}");
+    }
+
+    /// `-fno-inline-functions-called-once` keeps the call that would otherwise go, and leaves the
+    /// function declared `inline` to the limit that governs it.
+    #[test]
+    fn the_called_once_half_can_be_turned_off_alone() {
+        let (out, _) = inlined_with(ONCE, Some(70), false);
+        assert!(out.contains("call @scale"), "{out}");
+        let hinted = ONCE.replace("linkage(internal) {", "linkage(internal), attrs(inline_hint) {");
+        assert_ne!(hinted, ONCE);
+        let (out, _) = inlined_with(&hinted, Some(70), false);
+        assert!(!out.contains("call @scale"), "{out}");
     }
 
     /// `noinline` is kept whoever calls it how often.
