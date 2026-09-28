@@ -76,6 +76,11 @@ pub enum Kind {
     Imm,
     /// Somewhere else in the program, which is what a jump and a call are given.
     Dest,
+    /// One of the eight mask registers AVX-512 added, `k0` to `k7`.
+    ///
+    /// Its own kind because `kmovq` moves between one of these and a general purpose register,
+    /// and a lookup that could not tell the two apart would have no way to pick the direction.
+    Mask,
     /// A position on the x87 stack, which is a depth rather than a register.
     ///
     /// Its own kind for the reason [`Kind::Vec`] is: it is what picks a row, and a row it picked
@@ -349,6 +354,118 @@ pub struct Vex {
     pub long: bool,
 }
 
+/// How much of a vector register an instruction works on, which is what its name says.
+///
+/// `xmm3`, `ymm3` and `zmm3` are one register named three ways: the low sixteen bytes, the low
+/// thirty two and all sixty four. An EVEX encoded instruction has no opcode per length, the
+/// length is two bits of the prefix, so the name an operand is written with is what those two
+/// bits are read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Length {
+    /// Sixteen bytes, `xmm`.
+    Xmm,
+    /// Thirty two bytes, `ymm`.
+    Ymm,
+    /// Sixty four bytes, `zmm`.
+    Zmm,
+}
+
+impl Length {
+    /// The two bits an EVEX prefix says it with, `L'L`.
+    const fn bits(self) -> u8 {
+        match self {
+            Length::Xmm => 0,
+            Length::Ymm => 1,
+            Length::Zmm => 2,
+        }
+    }
+
+    /// How many bytes that is.
+    #[must_use]
+    pub const fn bytes(self) -> u8 {
+        match self {
+            Length::Xmm => 16,
+            Length::Ymm => 32,
+            Length::Zmm => 64,
+        }
+    }
+
+    /// The letter a register of this length starts with.
+    #[must_use]
+    pub const fn letter(self) -> char {
+        match self {
+            Length::Xmm => 'x',
+            Length::Ymm => 'y',
+            Length::Zmm => 'z',
+        }
+    }
+}
+
+/// How much memory an EVEX encoded instruction reaches, which is what its one byte displacement
+/// is counted in.
+///
+/// EVEX scales a one byte displacement by the size of the access, so `64(%rax)` under a load of
+/// a whole `zmm` register is the byte `01` rather than `40`. A displacement that is not a whole
+/// number of accesses, or is too many of them for a byte, takes the four byte form, which is not
+/// scaled. The manual calls this the tuple type and has a dozen of them, and these two are the
+/// ones the rows here need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tuple {
+    /// The whole vector, as long as the instruction's registers say it is.
+    Full,
+    /// That many bytes whatever the length, which is a sixteen byte lane pulled out of a vector or
+    /// broadcast across one.
+    Fixed(u8),
+}
+
+/// What a row needs to say to be EVEX encoded, which is how AVX-512 is written.
+///
+/// EVEX is VEX grown to four bytes. The extra room holds a fifth bit for every register number,
+/// which is what reaches `zmm16` to `zmm31`, two bits of length where VEX had one, and the mask
+/// register and zeroing bit that `{%k1}{z}` writes. The mandatory prefix is the row's [`Size`], the
+/// same as for a VEX row, and the wide bit is here instead, because an AVX-512 instruction over
+/// vectors has no general purpose register for the size to describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evex {
+    /// Which opcode table the row's opcode is in.
+    pub map: Map,
+    /// The wide bit, which here says whether the elements are four bytes or eight.
+    pub w: bool,
+    /// The argument that goes in the `vvvv` field, as for [`Vex`].
+    pub vvvv: Option<u8>,
+    /// What a one byte displacement is counted in.
+    pub tuple: Tuple,
+    /// Whether the instruction also has a VEX form, and the wide bit that form is written with.
+    ///
+    /// gas writes the VEX form of an instruction that has one whenever nothing about the operands
+    /// needs EVEX, which is a register numbered sixteen or above, a whole `zmm` or a mask. The
+    /// bytes have to match, and the VEX form is also the one a processor without AVX-512 can run.
+    pub vex: Option<bool>,
+}
+
+impl Evex {
+    /// A row in that table with that wide bit, reaching a whole vector, with no third register and
+    /// no VEX form.
+    const fn new(map: Map, w: bool) -> Evex {
+        Evex { map, w, vvvv: None, tuple: Tuple::Full, vex: None }
+    }
+
+    /// The same with the argument at that index in `vvvv`.
+    const fn third(self, at: u8) -> Evex {
+        Evex { vvvv: Some(at), ..self }
+    }
+
+    /// The same reaching that many bytes whatever the length.
+    const fn fixed(self, bytes: u8) -> Evex {
+        Evex { tuple: Tuple::Fixed(bytes), ..self }
+    }
+
+    /// The same with a VEX form written with that wide bit.
+    const fn or_vex(self, w: bool) -> Evex {
+        Evex { vex: Some(w), ..self }
+    }
+}
+
 /// One instruction of the machine, as a processor reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Encoding {
@@ -378,6 +495,10 @@ pub struct Encoding {
     ///
     /// [`None`] for every row written the legacy way, which is all of them but the three shifts.
     pub vex: Option<Vex>,
+    /// Whether the instruction is EVEX encoded, and what the prefix has to say if it is.
+    ///
+    /// [`None`] for everything but the AVX-512 rows at the end of the table.
+    pub evex: Option<Evex>,
 }
 
 /// One row of the table below, for an instruction that carries no immediate or that carries one
@@ -390,7 +511,18 @@ const fn bytes(
     fields: Fields,
     imm: ImmSize,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits: Fits::Any, size, opcode, fields, imm, wait: false, vex: None }
+    Encoding {
+        mnemonic,
+        args,
+        fits: Fits::Any,
+        size,
+        opcode,
+        fields,
+        imm,
+        wait: false,
+        vex: None,
+        evex: None,
+    }
 }
 
 /// One row for a VEX encoded instruction, which is where the third register operand goes.
@@ -417,6 +549,7 @@ const fn third(
         imm: NO_IMM,
         wait: false,
         vex: Some(Vex { map, vvvv: Some(vvvv), long: false }),
+        evex: None,
     }
 }
 
@@ -431,7 +564,7 @@ const fn takes(
     fields: Fields,
     imm: ImmSize,
 ) -> Encoding {
-    Encoding { mnemonic, args, fits, size, opcode, fields, imm, wait: false, vex: None }
+    Encoding { mnemonic, args, fits, size, opcode, fields, imm, wait: false, vex: None, evex: None }
 }
 
 /// One row for an x87 instruction written with `fwait` in front of it.
@@ -458,6 +591,57 @@ const fn waits(
         imm: NO_IMM,
         wait: true,
         vex: None,
+        evex: None,
+    }
+}
+
+/// One row for a VEX encoded instruction with no third register, which is `kmovq`.
+const fn vexed(
+    mnemonic: &'static str,
+    args: &'static [Kind],
+    size: Size,
+    opcode: &'static [u8],
+    fields: Fields,
+) -> Encoding {
+    Encoding {
+        mnemonic,
+        args,
+        fits: Fits::Any,
+        size,
+        opcode,
+        fields,
+        imm: NO_IMM,
+        wait: false,
+        vex: Some(Vex { map: Map::Escape, vvvv: None, long: false }),
+        evex: None,
+    }
+}
+
+/// One row for an EVEX encoded instruction.
+///
+/// The size is only the mandatory prefix, since the wide bit is on the [`Evex`]. An instruction
+/// whose first argument is an immediate carries it as one byte, which every AVX-512 instruction
+/// with an immediate does.
+const fn evex(
+    mnemonic: &'static str,
+    args: &'static [Kind],
+    size: Size,
+    opcode: &'static [u8],
+    fields: Fields,
+    evex: Evex,
+) -> Encoding {
+    let imm = matches!(args.first(), Some(Kind::Imm));
+    Encoding {
+        mnemonic,
+        args,
+        fits: if imm { Fits::Byte } else { Fits::Any },
+        size,
+        opcode,
+        fields,
+        imm: if imm { ImmSize::Ib } else { NO_IMM },
+        wait: false,
+        vex: None,
+        evex: Some(evex),
     }
 }
 
@@ -513,6 +697,15 @@ static IVR: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Reg];
 static IVV: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Vec];
 // A lane of a vector register stored to memory, which is where `pextrd` may write.
 static IVM: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Mem];
+/// The three and four argument shapes of the AVX-512 rows, which read two vectors, or a vector
+/// and an address, and write a third vector.
+static VVV: [Kind; 3] = [Kind::Vec, Kind::Vec, Kind::Vec];
+static MVV: [Kind; 3] = [Kind::Mem, Kind::Vec, Kind::Vec];
+static IVVV: [Kind; 4] = [Kind::Imm, Kind::Vec, Kind::Vec, Kind::Vec];
+static IMVV: [Kind; 4] = [Kind::Imm, Kind::Mem, Kind::Vec, Kind::Vec];
+/// A general purpose register and a mask register, in the two directions `kmovq` goes.
+static RK: [Kind; 2] = [Kind::Reg, Kind::Mask];
+static KR: [Kind; 2] = [Kind::Mask, Kind::Reg];
 // The x87 stack positions, which are one argument or two and are never anything else. There is no
 // row here mixing one with a register or with an address, because no instruction on this machine
 // names a stack position and a register in the same breath.
@@ -2233,6 +2426,124 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fldz", &NO_ARGS, Long, &[0xD9, 0xEE], NO_MODRM, NO_IMM),
     bytes("fnstsw", &R, Long, &[0xDF, 0xE0], NO_MODRM, NO_IMM),
     bytes("fnstsw", &M, Long, &[0xDD], ext(0, 7), NO_IMM),
+    // AVX-512, which is only what the intrinsics in the runtime headers write. Each row's size is
+    // the mandatory prefix and the wide bit is on the `Evex`, since the two are separate bits in
+    // the prefix and the element size is what the wide bit says here. A row that also has a VEX
+    // form says so, and is written that way when nothing about the operands needs EVEX, which is
+    // what gas does.
+    evex("vmovdqu64", &VV, Single, &[0x6F], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovdqu64", &MV, Single, &[0x6F], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovdqu64", &VM, Single, &[0x7F], pair(1, 0), Evex::new(Map::Escape, true)),
+    evex("vmovdqa64", &VV, Word, &[0x6F], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovdqa64", &MV, Word, &[0x6F], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovdqa64", &VM, Word, &[0x7F], pair(1, 0), Evex::new(Map::Escape, true)),
+    evex("vmovdqu8", &VV, Double, &[0x6F], pair(0, 1), Evex::new(Map::Escape, false)),
+    evex("vmovdqu8", &MV, Double, &[0x6F], pair(0, 1), Evex::new(Map::Escape, false)),
+    evex("vmovdqu8", &VM, Double, &[0x7F], pair(1, 0), Evex::new(Map::Escape, false)),
+    evex(
+        "vpaddq",
+        &VVV,
+        Word,
+        &[0xD4],
+        pair(0, 2),
+        Evex::new(Map::Escape, true).third(1).or_vex(false),
+    ),
+    evex(
+        "vpaddq",
+        &MVV,
+        Word,
+        &[0xD4],
+        pair(0, 2),
+        Evex::new(Map::Escape, true).third(1).or_vex(false),
+    ),
+    evex("vpandq", &VVV, Word, &[0xDB], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vpandq", &MVV, Word, &[0xDB], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vpxorq", &VVV, Word, &[0xEF], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vpxorq", &MVV, Word, &[0xEF], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vpternlogq", &IVVV, Word, &[0x25], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("vpternlogq", &IMVV, Word, &[0x25], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("vpopcntq", &VV, Word, &[0x55], pair(0, 1), Evex::new(Map::Escape38, true)),
+    evex("vpopcntq", &MV, Word, &[0x55], pair(0, 1), Evex::new(Map::Escape38, true)),
+    evex(
+        "vpclmulqdq",
+        &IVVV,
+        Word,
+        &[0x44],
+        pair(1, 3),
+        Evex::new(Map::Escape3A, false).third(2).or_vex(false),
+    ),
+    evex(
+        "vpclmulqdq",
+        &IMVV,
+        Word,
+        &[0x44],
+        pair(1, 3),
+        Evex::new(Map::Escape3A, false).third(2).or_vex(false),
+    ),
+    evex(
+        "vextracti32x4",
+        &IVV,
+        Word,
+        &[0x39],
+        pair(2, 1),
+        Evex::new(Map::Escape3A, false).fixed(16),
+    ),
+    evex(
+        "vextracti32x4",
+        &IVM,
+        Word,
+        &[0x39],
+        pair(2, 1),
+        Evex::new(Map::Escape3A, false).fixed(16),
+    ),
+    evex(
+        "vextracti64x4",
+        &IVV,
+        Word,
+        &[0x3B],
+        pair(2, 1),
+        Evex::new(Map::Escape3A, true).fixed(32),
+    ),
+    evex(
+        "vextracti64x4",
+        &IVM,
+        Word,
+        &[0x3B],
+        pair(2, 1),
+        Evex::new(Map::Escape3A, true).fixed(32),
+    ),
+    evex(
+        "vbroadcasti32x4",
+        &MV,
+        Word,
+        &[0x5A],
+        pair(0, 1),
+        Evex::new(Map::Escape38, false).fixed(16),
+    ),
+    evex("vpbroadcastb", &RV, Word, &[0x7A], pair(0, 1), Evex::new(Map::Escape38, false)),
+    evex("vshufi64x2", &IVVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("vshufi64x2", &IMVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("vpshufd", &IVV, Word, &[0x70], pair(1, 2), Evex::new(Map::Escape, false).or_vex(false)),
+    evex("vpshufd", &IMV, Word, &[0x70], pair(1, 2), Evex::new(Map::Escape, false).or_vex(false)),
+    evex(
+        "vmovq",
+        &VR,
+        Word,
+        &[0x7E],
+        pair(1, 0),
+        Evex::new(Map::Escape, true).fixed(8).or_vex(true),
+    ),
+    evex(
+        "vmovq",
+        &RV,
+        Word,
+        &[0x6E],
+        pair(0, 1),
+        Evex::new(Map::Escape, true).fixed(8).or_vex(true),
+    ),
+    // The mask registers are VEX encoded, since moving one needs nothing EVEX adds.
+    vexed("kmovq", &RK, DoubleQuad, &[0x92], pair(0, 1)),
+    vexed("kmovq", &KR, DoubleQuad, &[0x93], pair(0, 1)),
 ];
 
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
@@ -2315,6 +2626,15 @@ pub enum Value {
     /// that works on the low four bytes of a vector register is a different opcode rather than the
     /// same opcode at another width, which is what `movss` and `movsd` are.
     Xmm(PhysReg),
+    /// A vector register by number and by the length it is named at, which is what an AVX-512
+    /// instruction names.
+    ///
+    /// Separate from [`Value::Xmm`] because the register allocator only hands out the sixteen
+    /// registers SSE has, and these reach the thirty two AVX-512 has, at three lengths. Only the
+    /// EVEX rows take one, and `xmm0` to `xmm15` written as [`Value::Xmm`] mean the same there.
+    Vector(u8, Length),
+    /// One of the mask registers, `k0` to `k7`.
+    Mask(u8),
     /// The byte above the low byte of one of the first four registers, which on this machine is
     /// only ever `ah`.
     ///
@@ -2341,7 +2661,8 @@ impl Value {
     pub fn kind(self) -> Kind {
         match self {
             Value::Reg(_, _) | Value::High(_) => Kind::Reg,
-            Value::Xmm(_) => Kind::Vec,
+            Value::Xmm(_) | Value::Vector(_, _) => Kind::Vec,
+            Value::Mask(_) => Kind::Mask,
             Value::Mem(_) => Kind::Mem,
             Value::Imm(_) => Kind::Imm,
             Value::Dest => Kind::Dest,
@@ -2407,6 +2728,11 @@ pub enum Error {
         /// Which argument it was.
         at: u8,
     },
+    /// A mask on an instruction that is not EVEX encoded, which has nowhere to put one.
+    Mask {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -2426,6 +2752,7 @@ impl fmt::Display for Error {
             Error::Argument { mnemonic, at } => {
                 write!(f, "argument {at} of {mnemonic} is not what its encoding expects")
             }
+            Error::Mask { mnemonic } => write!(f, "{mnemonic} cannot take a mask"),
         }
     }
 }
@@ -2454,6 +2781,35 @@ const REX_B: u8 = 0b0001;
 /// it does encode that was handed something the machine cannot express. All of them are bugs
 /// rather than anything a program could ask for. See [`Error`].
 pub fn encode(mnemonic: &str, values: &[Value], out: &mut Vec<u8>) -> Result<Holes, Error> {
+    encode_masked(mnemonic, values, Opmask::default(), out)
+}
+
+/// The mask an AVX-512 instruction writes its result under, which is what `{%k1}{z}` after its
+/// destination says.
+///
+/// `k0` is no mask at all, which is why the default is it: an instruction written without one has
+/// zero in the field, and no instruction can be masked by `k0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Opmask {
+    /// Which mask register, `k1` to `k7`, or zero for none.
+    pub k: u8,
+    /// Whether the elements the mask leaves out are zeroed rather than left as they were, which
+    /// is `{z}`.
+    pub zero: bool,
+}
+
+/// [`encode`] with a mask on the instruction.
+///
+/// # Errors
+///
+/// What [`encode`] returns, and [`Error::Mask`] for a mask on an instruction that is not EVEX
+/// encoded.
+pub fn encode_masked(
+    mnemonic: &str,
+    values: &[Value],
+    mask: Opmask,
+    out: &mut Vec<u8>,
+) -> Result<Holes, Error> {
     let args: Vec<Kind> = values.iter().map(|value| value.kind()).collect();
     let imm = values
         .iter()
@@ -2472,7 +2828,24 @@ pub fn encode(mnemonic: &str, values: &[Value], out: &mut Vec<u8>) -> Result<Hol
             Error::Unwritten { mnemonic: mnemonic.to_owned(), args }
         });
     };
-    Writer { row, values, rex: 0, forced: false, banned: false }.write(out, imm)
+    if mask != Opmask::default() && row.evex.is_none() {
+        return Err(Error::Mask { mnemonic: mnemonic.to_owned() });
+    }
+    let mut writer = Writer {
+        row,
+        values,
+        rex: 0,
+        high: 0,
+        forced: false,
+        banned: false,
+        evex: None,
+        scale: 1,
+        length: Length::Xmm,
+    };
+    if let Some(evex) = row.evex {
+        writer.choose(evex, mask);
+    }
+    writer.write(out, imm, mask)
 }
 
 /// One instruction being written out.
@@ -2486,14 +2859,47 @@ struct Writer<'a> {
     forced: bool,
     /// Whether one may not be written at all, which is what naming `ah` asks for.
     banned: bool,
+    /// The fifth bits of the register numbers, which only an EVEX prefix has room for. `REX_R` is
+    /// the register beside the addressing byte and `REX_B` the one it addresses.
+    high: u8,
+    /// What the prefix says, when the instruction is being written EVEX encoded rather than in its
+    /// VEX form.
+    evex: Option<Evex>,
+    /// What a one byte displacement is counted in, which is one except under EVEX.
+    scale: i32,
+    /// The widest vector the instruction names, which is the length it works at.
+    length: Length,
 }
 
 impl Writer<'_> {
+    /// Whether a row that is EVEX encoded is written that way or in its VEX form.
+    ///
+    /// The VEX form is what gas writes whenever the row has one and nothing needs EVEX, which is a
+    /// mask, a whole `zmm`, or a register numbered sixteen or above.
+    fn choose(&mut self, evex: Evex, mask: Opmask) {
+        let mut high = false;
+        for value in self.values {
+            if let Value::Vector(number, length) = *value {
+                self.length = self.length.max(length);
+                high |= number >= 16;
+            }
+        }
+        let plain = mask == Opmask::default() && !high && self.length != Length::Zmm;
+        if evex.vex.is_some() && plain {
+            return;
+        }
+        self.evex = Some(evex);
+        self.scale = i32::from(match evex.tuple {
+            Tuple::Full => self.length.bytes(),
+            Tuple::Fixed(bytes) => bytes,
+        });
+    }
+
     /// The whole instruction: what the arguments come to, then the bytes in the order they go in.
     ///
     /// The addressing byte and everything behind it are worked out before anything is written,
     /// because they are what says whether there is a REX byte and the REX byte goes in front.
-    fn write(mut self, out: &mut Vec<u8>, imm: i64) -> Result<Holes, Error> {
+    fn write(mut self, out: &mut Vec<u8>, imm: i64, mask: Opmask) -> Result<Holes, Error> {
         let mut tail = Vec::new();
         let mut holes = Holes::default();
         let mut plus = 0;
@@ -2516,7 +2922,24 @@ impl Writer<'_> {
         // bytes that also carry an operand. Everything from the opcode onwards is the same, so the
         // segment override is written first, the prefix goes where the REX byte would have, and the
         // tail and the immediate fall through to the shared code below.
-        if let Some(vex) = self.row.vex {
+        // An EVEX row written in its VEX form is a VEX row with the wide bit the row says that form
+        // has, and the length its registers are named at.
+        let vex = match self.row.evex {
+            Some(evex) if self.evex.is_none() => evex.vex.map(|wide| {
+                (Vex { map: evex.map, vvvv: evex.vvvv, long: self.length == Length::Ymm }, wide)
+            }),
+            _ => self.row.vex.map(|vex| (vex, self.row.size.wide())),
+        };
+        if let Some(evex) = self.evex {
+            if let Some(prefix) = self.segment() {
+                out.push(prefix);
+            }
+            let vvvv = match evex.vvvv {
+                Some(at) => self.vvvv(at)?,
+                None => 0,
+            };
+            self.evex_prefix(evex, vvvv, mask, out);
+        } else if let Some((vex, wide)) = vex {
             if let Some(prefix) = self.segment() {
                 out.push(prefix);
             }
@@ -2524,7 +2947,7 @@ impl Writer<'_> {
                 Some(at) => self.vvvv(at)?,
                 None => 0,
             };
-            self.prefix(vex, vvvv, out);
+            self.prefix(vex, wide, vvvv, out);
         } else {
             self.legacy(out);
         }
@@ -2570,17 +2993,8 @@ impl Writer<'_> {
     /// say zero for the wide bit and for the two extension bits other than `R`, so a row outside
     /// the first table, or one on a wide operand, or one naming a register numbered eight or above
     /// in the addressing byte's base or index, is three bytes and there is nothing to choose.
-    fn prefix(&self, vex: Vex, vvvv: u8, out: &mut Vec<u8>) {
-        let wide = self.row.size.wide();
-        // `pp`, which is the mandatory prefix as a number rather than as a byte. The same three
-        // bytes a legacy row would have written, in the order the manual numbers them.
-        let pp = match self.row.size.prefix() {
-            None => 0,
-            Some(0x66) => 1,
-            Some(0xF3) => 2,
-            Some(0xF2) => 3,
-            Some(_) => unreachable!("a size writes one of those three bytes or none"),
-        };
+    fn prefix(&self, vex: Vex, wide: bool, vvvv: u8, out: &mut Vec<u8>) {
+        let pp = self.pp();
         let tail = ((!vvvv & 0xF) << 3) | (u8::from(vex.long) << 2) | pp;
         let short = !wide && vex.map == Map::Escape && self.rex & (REX_X | REX_B) == 0;
         if short {
@@ -2596,6 +3010,45 @@ impl Writer<'_> {
                 | vex.map.bits(),
         );
         out.push((u8::from(wide) << 7) | tail);
+    }
+
+    /// `pp`, which is the mandatory prefix as a number rather than as a byte. The same three bytes
+    /// a legacy row would have written, in the order the manual numbers them.
+    fn pp(&self) -> u8 {
+        match self.row.size.prefix() {
+            None => 0,
+            Some(0x66) => 1,
+            Some(0xF3) => 2,
+            Some(0xF2) => 3,
+            Some(_) => unreachable!("a size writes one of those three bytes or none"),
+        }
+    }
+
+    /// The four bytes an EVEX encoded instruction carries in front of its opcode.
+    ///
+    /// `62`, then three bytes. The first is the VEX three byte form's second byte with the fifth
+    /// bit of the register beside the addressing byte squeezed in, the second is the VEX form's
+    /// third byte with a bit that is always set, and the third is new: zeroing, the length, the
+    /// fifth bit of `vvvv` and the mask. Everything that names a register is written inverted, as
+    /// in VEX. The fifth bit of a register the addressing byte addresses goes where the top of an
+    /// index would, since a register has no index.
+    fn evex_prefix(&self, evex: Evex, vvvv: u8, mask: Opmask, out: &mut Vec<u8>) {
+        let x = self.rex & REX_X != 0 || self.high & REX_B != 0;
+        out.push(0x62);
+        out.push(
+            (u8::from(self.rex & REX_R == 0) << 7)
+                | (u8::from(!x) << 6)
+                | (u8::from(self.rex & REX_B == 0) << 5)
+                | (u8::from(self.high & REX_R == 0) << 4)
+                | evex.map.bits(),
+        );
+        out.push((u8::from(evex.w) << 7) | ((!vvvv & 0xF) << 3) | 0b100 | self.pp());
+        out.push(
+            (u8::from(mask.zero) << 7)
+                | (self.length.bits() << 5)
+                | (u8::from(vvvv & 0x10 == 0) << 3)
+                | (mask.k & 7),
+        );
     }
 
     /// The prefixes and the REX byte a legacy encoded instruction carries in front of its opcode.
@@ -2666,6 +3119,20 @@ impl Writer<'_> {
                 }
                 Ok(number & 7)
             }
+            // The same on a row that is EVEX encoded, with a fifth bit that only the EVEX prefix
+            // has room for. A row that is not has nowhere to say a length either.
+            Some(&Value::Vector(number, _))
+                if self.row.evex.is_some() && (number < 16 || self.evex.is_some()) =>
+            {
+                if number & 8 != 0 {
+                    self.rex |= bit;
+                }
+                if number & 16 != 0 {
+                    self.high |= bit;
+                }
+                Ok(number & 7)
+            }
+            Some(&Value::Mask(number)) if number < 8 => Ok(number),
             // `ah` is `al` plus four, and so are the other three, which is also why only the
             // first four registers have one.
             Some(&Value::High(reg)) if reg.number() < 4 => {
@@ -2685,6 +3152,7 @@ impl Writer<'_> {
     fn vvvv(&self, at: u8) -> Result<u8, Error> {
         match self.values.get(usize::from(at)) {
             Some(&Value::Reg(reg, _)) | Some(&Value::Xmm(reg)) => Ok(reg.number()),
+            Some(&Value::Vector(number, _)) if number < 32 => Ok(number),
             _ => Err(Error::Argument { mnemonic: self.row.mnemonic.to_owned(), at }),
         }
     }
@@ -2764,7 +3232,9 @@ impl Writer<'_> {
             Some(base) => {
                 if addr.disp == 0 && base != 5 {
                     0
-                } else if i8::try_from(addr.disp).is_ok() {
+                } else if addr.disp % self.scale == 0
+                    && i8::try_from(addr.disp / self.scale).is_ok()
+                {
                     1
                 } else {
                     2
@@ -2780,7 +3250,8 @@ impl Writer<'_> {
         match mode {
             0 if base.is_none() => out.extend_from_slice(&addr.disp.to_le_bytes()),
             0 => {}
-            1 => out.push(addr.disp as u8),
+            // Counted in accesses under EVEX, and `scale` is one otherwise.
+            1 => out.push((addr.disp / self.scale) as u8),
             _ => out.extend_from_slice(&addr.disp.to_le_bytes()),
         }
         Ok(())
@@ -2830,7 +3301,7 @@ mod tests {
     use super::*;
     use crate::x86_64::text::written;
     use crate::x86_64::{
-        INSTS, R8, R9, R10, R12, R13, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, xmm,
+        INSTS, R8, R9, R10, R11, R12, R13, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, xmm,
     };
 
     /// The bytes of that instruction, as a string a person can compare with a disassembler's.
@@ -3776,5 +4247,150 @@ mod tests {
         let mut out = Vec::new();
         nops(13, &mut out);
         assert_eq!(out[11..], [0x66, 0x90], "eleven bytes and then two");
+    }
+
+    /// A vector register named at a length, which is what the AVX-512 rows take.
+    fn z(number: u8) -> Value {
+        Value::Vector(number, Length::Zmm)
+    }
+
+    fn y(number: u8) -> Value {
+        Value::Vector(number, Length::Ymm)
+    }
+
+    fn x(number: u8) -> Value {
+        Value::Vector(number, Length::Xmm)
+    }
+
+    /// An address that is a register and a displacement.
+    fn at(base: PhysReg, disp: i32) -> Value {
+        Value::Mem(Addr { base: Some(base), scale: 1, disp, ..Addr::default() })
+    }
+
+    // Every expected string in the tests below is what GNU as writes for the instruction in
+    // the message beside it.
+
+    #[test]
+    fn an_avx512_instruction_is_the_four_byte_prefix_and_then_what_a_vex_one_would_be() {
+        assert_eq!(hex("vmovdqu64", &[at(RDI, 0), z(16)]), "62 e1 fe 48 6f 07");
+        assert_eq!(hex("vmovdqu64", &[z(16), at(RAX, 0)]), "62 e1 fe 48 7f 00");
+        assert_eq!(hex("vmovdqu64", &[z(16), z(17)]), "62 a1 fe 48 6f c8");
+        assert_eq!(hex("vmovdqu64", &[z(0), z(1)]), "62 f1 fe 48 6f c8");
+        assert_eq!(hex("vmovdqu64", &[z(8), z(25)]), "62 41 fe 48 6f c8");
+        assert_eq!(hex("vmovdqu64", &[at(R12, 0), z(9)]), "62 51 fe 48 6f 0c 24");
+        assert_eq!(hex("vmovdqa64", &[z(17), z(18)]), "62 a1 fd 48 6f d1");
+        assert_eq!(hex("vmovdqa64", &[x(17), x(18)]), "62 a1 fd 08 6f d1");
+        assert_eq!(hex("vmovdqa64", &[Value::Xmm(xmm(1)), x(18)]), "62 e1 fd 08 6f d1");
+        assert_eq!(hex("vpaddq", &[z(16), z(17), z(18)]), "62 a1 f5 40 d4 d0");
+        assert_eq!(hex("vpaddq", &[z(29), z(30), z(31)]), "62 01 8d 40 d4 fd");
+        assert_eq!(hex("vpxorq", &[z(16), z(16), z(16)]), "62 a1 fd 40 ef c0");
+        assert_eq!(
+            hex("vpternlogq", &[Value::Imm(0x96), z(16), z(17), z(18)]),
+            "62 a3 f5 40 25 d0 96"
+        );
+        assert_eq!(hex("vpopcntq", &[z(1), z(2)]), "62 f2 fd 48 55 d1");
+        assert_eq!(
+            hex("vpclmulqdq", &[Value::Imm(0x11), z(1), z(2), z(3)]),
+            "62 f3 6d 48 44 d9 11"
+        );
+        assert_eq!(hex("vextracti32x4", &[Value::Imm(1), z(16), x(17)]), "62 a3 7d 48 39 c1 01");
+        assert_eq!(hex("vextracti32x4", &[Value::Imm(1), y(16), x(17)]), "62 a3 7d 28 39 c1 01");
+        assert_eq!(hex("vextracti64x4", &[Value::Imm(1), z(16), y(17)]), "62 a3 fd 48 3b c1 01");
+        assert_eq!(hex("vpbroadcastb", &[long(R10), z(31)]), "62 42 7d 48 7a fa");
+        assert_eq!(
+            hex("vshufi64x2", &[Value::Imm(0x4e), z(16), z(16), z(17)]),
+            "62 a3 fd 40 43 c8 4e"
+        );
+        assert_eq!(hex("vpshufd", &[Value::Imm(0x4e), x(16), x(17)]), "62 a1 7d 08 70 c8 4e");
+        assert_eq!(hex("vmovq", &[x(31), quad(R11)]), "62 41 fd 08 7e fb");
+        assert_eq!(hex("vmovq", &[quad(RAX), x(16)]), "62 e1 fd 08 6e c0");
+    }
+
+    #[test]
+    fn a_one_byte_displacement_under_avx512_is_counted_in_whole_accesses() {
+        assert_eq!(hex("vmovdqu64", &[at(RDI, 64), z(17)]), "62 e1 fe 48 6f 4f 01");
+        assert_eq!(hex("vmovdqu64", &[at(RSP, -128), z(31)]), "62 61 fe 48 6f 7c 24 fe");
+        assert_eq!(hex("vmovdqu64", &[at(RDI, 100), z(16)]), "62 e1 fe 48 6f 87 64 00 00 00");
+        assert_eq!(hex("vmovdqu64", &[at(RDI, 0x2000), z(16)]), "62 e1 fe 48 6f 87 00 20 00 00");
+        assert_eq!(hex("vmovdqu64", &[at(RAX, 16), x(17)]), "62 e1 fe 08 6f 48 01");
+        assert_eq!(hex("vmovdqu64", &[y(16), at(RAX, 32)]), "62 e1 fe 28 7f 40 01");
+        assert_eq!(hex("vpaddq", &[at(RAX, 128), z(17), z(18)]), "62 e1 f5 40 d4 50 02");
+        let scaled = Value::Mem(Addr {
+            base: Some(RSP),
+            index: Some(RCX),
+            scale: 8,
+            disp: 64,
+            ..Addr::default()
+        });
+        assert_eq!(hex("vmovdqu64", &[z(20), scaled]), "62 e1 fe 48 7f 64 cc 01");
+        // A sixteen byte lane is counted in sixteen bytes whatever the length.
+        assert_eq!(hex("vbroadcasti32x4", &[at(RAX, 32), z(16)]), "62 e2 7d 48 5a 40 02");
+        assert_eq!(hex("vbroadcasti32x4", &[at(RAX, 16), y(16)]), "62 e2 7d 28 5a 40 01");
+        assert_eq!(
+            hex("vextracti32x4", &[Value::Imm(2), z(16), at(RAX, 32)]),
+            "62 e3 7d 48 39 40 02 02"
+        );
+        assert_eq!(
+            hex("vpternlogq", &[Value::Imm(0x96), at(RAX, 64), z(17), z(18)]),
+            "62 e3 f5 40 25 50 01 96"
+        );
+    }
+
+    #[test]
+    fn an_instruction_with_a_vex_form_is_written_that_way_unless_something_needs_evex() {
+        assert_eq!(hex("vpaddq", &[x(1), x(2), x(3)]), "c5 e9 d4 d9");
+        assert_eq!(hex("vpaddq", &[y(9), y(10), y(11)]), "c4 41 2d d4 d9");
+        assert_eq!(hex("vpaddq", &[at(RAX, 0), y(2), y(3)]), "c5 ed d4 18");
+        assert_eq!(hex("vpaddq", &[z(1), z(2), z(3)]), "62 f1 ed 48 d4 d9");
+        assert_eq!(hex("vpaddq", &[x(16), x(17), x(18)]), "62 a1 f5 00 d4 d0");
+        assert_eq!(hex("vpclmulqdq", &[Value::Imm(0), x(1), x(2), x(3)]), "c4 e3 69 44 d9 00");
+        assert_eq!(hex("vpclmulqdq", &[Value::Imm(0), y(1), y(2), y(3)]), "c4 e3 6d 44 d9 00");
+        assert_eq!(
+            hex("vpclmulqdq", &[Value::Imm(0), x(16), x(17), x(18)]),
+            "62 a3 75 00 44 d0 00"
+        );
+        assert_eq!(hex("vpshufd", &[Value::Imm(0x4e), x(1), x(2)]), "c5 f9 70 d1 4e");
+        assert_eq!(hex("vmovq", &[x(1), quad(RAX)]), "c4 e1 f9 7e c8");
+        assert_eq!(hex("vmovq", &[quad(RAX), x(1)]), "c4 e1 f9 6e c8");
+        // vpternlogq has no VEX form, so it is EVEX at every length.
+        assert_eq!(
+            hex("vpternlogq", &[Value::Imm(0x96), x(1), x(2), x(3)]),
+            "62 f3 ed 08 25 d9 96"
+        );
+    }
+
+    #[test]
+    fn a_mask_and_zeroing_go_in_the_last_byte_of_the_prefix() {
+        let masked = |mask: Opmask, values: &[Value]| {
+            let mut out = Vec::new();
+            encode_masked("vmovdqu8", values, mask, &mut out).expect("vmovdqu8 takes a mask");
+            out.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+        };
+        let index =
+            Value::Mem(Addr { base: Some(R9), index: Some(R10), scale: 1, ..Addr::default() });
+        assert_eq!(masked(Opmask { k: 1, zero: true }, &[at(RBX, 0), z(16)]), "62 e1 7f c9 6f 03");
+        assert_eq!(masked(Opmask { k: 7, zero: true }, &[index, z(30)]), "62 01 7f cf 6f 34 11");
+        assert_eq!(masked(Opmask { k: 1, zero: false }, &[at(RBX, 0), z(16)]), "62 e1 7f 49 6f 03");
+        assert_eq!(masked(Opmask::default(), &[z(16), at(RBX, 0)]), "62 e1 7f 48 7f 03");
+        assert_eq!(masked(Opmask { k: 2, zero: false }, &[z(16), at(RBX, 0)]), "62 e1 7f 4a 7f 03");
+        let mut out = Vec::new();
+        let error =
+            encode_masked("addq", &[quad(RAX), quad(RBX)], Opmask { k: 1, zero: false }, &mut out);
+        assert!(matches!(error, Err(Error::Mask { .. })), "{error:?}");
+    }
+
+    #[test]
+    fn a_mask_register_moves_to_and_from_a_general_purpose_one_vex_encoded() {
+        assert_eq!(hex("kmovq", &[quad(RAX), Value::Mask(1)]), "c4 e1 fb 92 c8");
+        assert_eq!(hex("kmovq", &[quad(R13), Value::Mask(7)]), "c4 c1 fb 92 fd");
+        assert_eq!(hex("kmovq", &[Value::Mask(1), quad(RAX)]), "c4 e1 fb 93 c1");
+        assert_eq!(hex("kmovq", &[Value::Mask(3), quad(R9)]), "c4 61 fb 93 cb");
+    }
+
+    #[test]
+    fn a_register_past_fifteen_is_refused_by_a_row_that_cannot_name_it() {
+        let mut out = Vec::new();
+        let error = encode("addss", &[x(16), Value::Xmm(xmm(1))], &mut out);
+        assert!(matches!(error, Err(Error::Argument { .. })), "{error:?}");
     }
 }
