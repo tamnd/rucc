@@ -709,13 +709,17 @@ struct Test {
 /// Demand driven and memoized, per section 7.8, because the cost of scalar evolution is a
 /// function of how many distinct values get asked about rather than of the size of the function.
 /// The cache holds one loop's worth of answers per loop and the whole thing is thrown away when
-/// anything about the loops changes, which per document 04.4 is any pass that touches one.
+/// anything about the loops changes, which per document 04.4 is any pass that touches one. It is
+/// kept as one table per loop rather than one table keyed by both, because `Scev::holds` empties a
+/// loop's answers once for every loop, and picking them out of a single table was a walk over the
+/// answers for every loop each time. In a function of two thousand loops that walk was most of
+/// what the analysis cost.
 #[derive(Debug)]
 pub struct Scev<'a> {
     func: &'a Func,
     cfg: &'a Cfg,
     loops: &'a Loops,
-    known: HashMap<(LoopId, Value), Evolution>,
+    known: HashMap<LoopId, HashMap<Value, Evolution>>,
     held: HashMap<LoopId, Option<Chrec>>,
 }
 
@@ -739,7 +743,7 @@ impl<'a> Scev<'a> {
 
     /// How this value changes, with the loop's own facts already settled.
     fn at(&mut self, id: LoopId, value: Value) -> Evolution {
-        if let Some(&known) = self.known.get(&(id, value)) {
+        if let Some(&known) = self.known.get(&id).and_then(|answers| answers.get(&value)) {
             return known;
         }
         // Unknown while the answer is being worked out, so the cycle from a header parameter back
@@ -747,9 +751,9 @@ impl<'a> Scev<'a> {
         // the parameter again gets unknown and the shape it was matching fails, which is the
         // right answer for a value defined in terms of itself through arithmetic this does not
         // describe.
-        self.known.insert((id, value), Evolution::Unknown);
+        self.known.entry(id).or_default().insert(value, Evolution::Unknown);
         let found = self.compute(id, value);
-        self.known.insert((id, value), found);
+        self.known.entry(id).or_default().insert(value, found);
         found
     }
 
@@ -791,7 +795,7 @@ impl<'a> Scev<'a> {
             (test.each && bounded_by_its_test(test.pred, step)).then_some(test.chrec)
         });
         self.held.insert(id, found);
-        self.known.retain(|&(of, _), _| of != id);
+        self.known.remove(&id);
         found
     }
 
