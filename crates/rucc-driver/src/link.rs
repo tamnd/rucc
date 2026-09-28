@@ -53,12 +53,15 @@
 //!
 //! # What is not here yet
 //!
-//! Darwin, and Windows in Microsoft's ABI. `ld64` wants a platform version load command and a
-//! different set of default libraries, and `lld-link` wants a `/`-style command line and an import
-//! library set out of an SDK nobody may redistribute. Each arrives with the target that needs it,
-//! and a cross link to either is refused by name rather than approximated. A mingw-w64 target does
-//! have a line, because PE in that environment is written in the GNU style and the import libraries
-//! for it are ours to produce.
+//! Windows in Microsoft's ABI. `lld-link` wants a `/`-style command line and an import library set
+//! out of an SDK nobody may redistribute, and a link to it is refused by name rather than
+//! approximated. A mingw-w64 target does have a line, because PE in that environment is written in
+//! the GNU style and the import libraries for it are ours to produce.
+//!
+//! Darwin has a line of its own, [`darwin_line`], and it is the same line on a Mac and anywhere
+//! else. Everything it links against is in the SDK, which is found the way the header search finds
+//! it, so a machine that is not a Mac links for one exactly when somebody has named an SDK with
+//! `-isysroot` or `SDKROOT` and there is an `ld64.lld` to hand it to.
 //!
 //! The headers are the other half of a cross compile and [`crate::library::header_dirs`] is where
 //! they are decided. It asks [`cross_sysroot`] the same question this file asks it, which is the
@@ -161,6 +164,12 @@ pub struct LinkOptions {
     /// later link, so it takes no startup files, no libraries and nothing about how it will be
     /// loaded, which is what gcc leaves off the line when it sees the flag.
     pub relocatable: bool,
+    /// The deployment target on an Apple platform, from `-mmacosx-version-min=` and its friends or
+    /// from the tuple, which `ld64` is told in `-platform_version` and checks every object against.
+    ///
+    /// [`None`] is the platform's default, the same one the object writer puts in
+    /// `LC_BUILD_VERSION`, so that the two agree when neither was told anything.
+    pub os_version: Option<rucc_tuple::Version>,
 }
 
 impl LinkOptions {
@@ -368,6 +377,12 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     if let Some(named) = &opts.use_ld {
         // A name rather than a path, so `-fuse-ld=mold` finds a `mold` that is not `ld.mold`.
         return vec![format!("ld.{named}"), named.clone()];
+    }
+    // Apple's `ld` and lld's Mach-O flavour, and nothing from the list below. mold and `ld.lld` write
+    // ELF, and a Mac with Homebrew's llvm on its `PATH` has an `ld.lld` that would take the line and
+    // fail on its first flag.
+    if target.os == Os::Darwin {
+        return vec!["ld".to_owned(), "ld64.lld".to_owned()];
     }
     if cross_sysroot(target, opts).is_some() {
         let mut names = cross_order(target);
@@ -674,6 +689,11 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     if opts.relocatable {
         return relocatable_line(target, opts, &[], "a.out").map(drop);
     }
+    // Whether there is an SDK, which is the one thing a Darwin link can be missing that is worth
+    // saying before everything has been compiled.
+    if target.os == Os::Darwin {
+        return darwin_line(target, opts, &[], "a.out").map(drop);
+    }
     let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
     // Whether there is a line for this target and mode at all, asked with our own runtime left off
     // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
@@ -862,7 +882,7 @@ fn spellings(path: &Path, exts: &[String]) -> Vec<PathBuf> {
 
 /// Whether a name is one of the spellings lld is installed under.
 fn is_lld(name: &str) -> bool {
-    matches!(name, "ld.lld" | "lld" | "lld-link")
+    matches!(name, "ld.lld" | "ld64.lld" | "lld" | "lld-link")
 }
 
 /// Where lld is installed without being on `PATH`, newest first where a version is in the name.
@@ -1027,6 +1047,9 @@ pub fn line(
     if opts.relocatable {
         return relocatable_line(target, opts, items, output);
     }
+    if target.os == Os::Darwin {
+        return darwin_line(target, opts, items, output);
+    }
     if let Some(sysroot) = cross_sysroot(target, opts) {
         return cross_line(target, opts, items, output, &sysroot);
     }
@@ -1167,6 +1190,22 @@ fn relocatable_line(
     items: &[Item],
     output: &str,
 ) -> Result<Vec<String>, Error> {
+    if target.os == Os::Darwin {
+        // `ld64` joins objects with `-r` too, and needs only to be told the architecture, since
+        // nothing from the SDK goes into an object that is still going to be linked.
+        let mut args = vec![
+            "-r".to_owned(),
+            "-arch".to_owned(),
+            darwin_arch(target)?.to_owned(),
+            "-o".to_owned(),
+            output.to_owned(),
+        ];
+        for dir in &opts.search {
+            args.push(format!("-L{}", dir.display()));
+        }
+        push_items(&mut args, items);
+        return Ok(args);
+    }
     if target.os != Os::Linux {
         return Err(Error::Target { triple: target.to_string() });
     }
@@ -1191,6 +1230,147 @@ fn relocatable_line(
         }
     }
     Ok(args)
+}
+
+/// The line `ld64` takes, which is Apple's `ld` or lld's Mach-O flavour.
+///
+/// Shorter than the ELF one, because the SDK carries everything a program starts with. There are no
+/// start files to find: `libSystem` has the C library, the startup code and the runtime in it, and
+/// `dyld` calls `main` itself. What the linker has to be told is the architecture, the platform with
+/// the oldest release the program runs on and the SDK it was built against, and where the SDK is,
+/// which `-syslibroot` puts in front of every library it looks for.
+///
+/// `-pie` and `-no-pie` are not passed on. Every arm64 program on a Mac is position independent and
+/// `ld64` rejects `-no_pie` there, so the flag has nothing to change. `-static` is refused, because
+/// Apple ships no static C library and a static executable is a kernel's business.
+///
+/// # Errors
+///
+/// [`Error::Cross`] when there is no SDK to link against, or for a static link, or an architecture
+/// that has no Mach-O name.
+pub fn darwin_line(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
+    let arch = darwin_arch(target)?;
+    if opts.is_static && !opts.shared {
+        return Err(Error::Cross {
+            why: "there is no static C library for Apple platforms, so -static cannot make a \
+                  program for one"
+                .to_owned(),
+        });
+    }
+    let Some(sdk) = crate::library::sdk(opts.sysroot.as_deref()) else {
+        return Err(Error::Cross {
+            why: format!(
+                "no SDK was found to link {} against. Install the command line tools with \
+                 `xcode-select --install`, or name one with -isysroot <dir> or SDKROOT",
+                target_tuple(target, opts).to_canonical_string()
+            ),
+        });
+    };
+    let tuple = target_tuple(target, opts);
+    let (platform, default) = match (tuple.os(), tuple.env()) {
+        (rucc_tuple::Os::IOs, rucc_tuple::Env::Simulator) => ("ios-simulator", "14.0"),
+        (rucc_tuple::Os::IOs, rucc_tuple::Env::MacAbi) => ("mac-catalyst", "14.0"),
+        (rucc_tuple::Os::IOs, _) => ("ios", "14.0"),
+        _ => ("macos", "11.0"),
+    };
+    let minimum = opts
+        .os_version
+        .or_else(|| tuple.os_version())
+        .map_or_else(|| default.to_owned(), |version| version.to_string());
+    // What the SDK says it is, which `ld64` records so the loader can tell which behaviours the
+    // program was built to expect. The deployment target when the SDK does not say, which is the
+    // answer that asks for no behaviour newer than the program claims to run on.
+    let version = sdk_version(&sdk).unwrap_or_else(|| minimum.clone());
+
+    let mut args = vec![
+        "-arch".to_owned(),
+        arch.to_owned(),
+        "-platform_version".to_owned(),
+        platform.to_owned(),
+        minimum,
+        version,
+        "-syslibroot".to_owned(),
+        sdk.display().to_string(),
+        "-o".to_owned(),
+        output.to_owned(),
+    ];
+    if opts.shared {
+        args.push("-dylib".to_owned());
+    }
+    if opts.export_dynamic {
+        args.push("-export_dynamic".to_owned());
+    }
+    if opts.strip {
+        // The debug map and the local symbols, which between them are what `-s` leaves out of an
+        // ELF program. `ld64` has no one flag for it.
+        args.push("-S".to_owned());
+        args.push("-x".to_owned());
+    }
+    for dir in &opts.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    push_items(&mut args, items);
+    if opts.wants_runtime() && !opts.no_builtins_lib {
+        if let Some(ours) = builtins_archive(target, &opts.prefixes) {
+            args.push(ours.display().to_string());
+        }
+    }
+    if opts.wants_defaultlibs() {
+        args.push("-lSystem".to_owned());
+    }
+    Ok(args)
+}
+
+/// What `ld64` calls the architecture, which is not what the triple does.
+fn darwin_arch(target: Triple) -> Result<&'static str, Error> {
+    match target.arch {
+        Arch::Aarch64 => Ok("arm64"),
+        Arch::X86_64 => Ok("x86_64"),
+        _ => Err(Error::Target { triple: target.to_string() }),
+    }
+}
+
+/// The version an SDK says it is, from the `SDKSettings.json` every SDK since Xcode 7 has at its
+/// root, or from its directory name, which is `MacOSX15.2.sdk` when it is not the unversioned link.
+///
+/// Read by hand rather than parsed, because the one field wanted is a quoted string at the top
+/// level and a JSON parser would be a dependency for one line.
+fn sdk_version(sdk: &Path) -> Option<String> {
+    let valid = |text: &str| {
+        !text.is_empty()
+            && text
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if let Ok(text) = fs::read_to_string(sdk.join("SDKSettings.json")) {
+        if let Some(at) = text.find("\"Version\"") {
+            let rest = &text[at + "\"Version\"".len()..];
+            let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+            let version = &rest[..rest.find('"')?];
+            if valid(version) {
+                return Some(version.to_owned());
+            }
+        }
+    }
+    let name = sdk.file_name()?.to_str()?.strip_suffix(".sdk")?;
+    let version = name.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    valid(version).then(|| version.to_owned())
+}
+
+/// The objects, libraries and linker words, in the order they were written.
+fn push_items(args: &mut Vec<String>, items: &[Item]) {
+    for item in items {
+        match item {
+            Item::File(path) => args.push(path.clone()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
 }
 
 /// The startup file the C library brings, or `None` for a link that calls nothing.
@@ -1816,14 +1996,106 @@ mod tests {
 
     #[test]
     fn a_platform_with_no_link_line_is_said_so_rather_than_linked_wrongly() {
-        for triple in [
-            Triple::new(Arch::X86_64, Os::Darwin, Env::Gnu),
-            Triple::new(Arch::X86_64, Os::Windows, Env::Msvc),
-        ] {
-            let error = line(triple, &LinkOptions::default(), &one("a.o"), "a.out")
-                .expect_err("no line for it");
-            assert!(matches!(error, Error::Target { .. }), "{error:?}");
+        let triple = Triple::new(Arch::X86_64, Os::Windows, Env::Msvc);
+        let error = line(triple, &LinkOptions::default(), &one("a.o"), "a.out")
+            .expect_err("no line for it");
+        assert!(matches!(error, Error::Target { .. }), "{error:?}");
+    }
+
+    /// A made up SDK with the one file the line reads out of it, so that nothing about this machine
+    /// decides what the line says.
+    fn an_sdk(name: &str, settings: Option<&str>) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("rucc-sdk-{}-{}", std::process::id(), name.replace('.', "-")))
+            .join(name);
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        if let Some(settings) = settings {
+            fs::write(dir.join("SDKSettings.json"), settings).expect("a settings file");
         }
+        dir
+    }
+
+    fn mac() -> Triple {
+        Triple::new(Arch::Aarch64, Os::Darwin, Env::None)
+    }
+
+    #[test]
+    fn a_mac_link_names_the_platform_the_sdk_and_libsystem() {
+        let sdk = an_sdk(
+            "MacOSX.sdk",
+            Some(
+                "{\"CanonicalName\": \"macosx15.2\", \"Version\" : \"15.2\", \"MaximumDeploymentTarget\": \"15.2.99\"}",
+            ),
+        );
+        let opts = LinkOptions {
+            sysroot: Some(sdk.clone()),
+            search: vec![PathBuf::from("/opt/mine")],
+            no_builtins_lib: true,
+            ..LinkOptions::default()
+        };
+        let items = vec![Item::File("a.o".to_owned()), Item::Library("m".to_owned())];
+        let args = line(mac(), &opts, &items, "a.out").expect("a line");
+        let sdk = sdk.display().to_string();
+        let want: Vec<&str> = vec![
+            "-arch",
+            "arm64",
+            "-platform_version",
+            "macos",
+            "11.0",
+            "15.2",
+            "-syslibroot",
+            &sdk,
+            "-o",
+            "a.out",
+            "-L/opt/mine",
+            "a.o",
+            "-lm",
+            "-lSystem",
+        ];
+        assert_eq!(args, want);
+
+        // The deployment target from the command line, and a shared library.
+        let opts =
+            LinkOptions { os_version: Some(rucc_tuple::Version::new(13, 4)), shared: true, ..opts };
+        let args = line(mac(), &opts, &one("a.o"), "liba.dylib").expect("a line");
+        assert_eq!(args[3..6], ["macos", "13.4", "15.2"]);
+        assert!(args.contains(&"-dylib".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.contains("pie")), "{args:?}");
+    }
+
+    #[test]
+    fn the_sdk_version_comes_from_its_name_when_it_has_no_settings() {
+        let sdk = an_sdk("MacOSX14.5.sdk", None);
+        let opts =
+            LinkOptions { sysroot: Some(sdk), no_builtins_lib: true, ..LinkOptions::default() };
+        let args = line(mac(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert_eq!(args[3..6], ["macos", "11.0", "14.5"]);
+        // And the deployment target when neither says anything.
+        let sdk = an_sdk("Somewhere", None);
+        let opts = LinkOptions {
+            sysroot: Some(sdk),
+            os_version: Some(rucc_tuple::Version::major(12)),
+            ..opts
+        };
+        let args = line(mac(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert_eq!(args[3..6], ["macos", "12", "12"]);
+    }
+
+    #[test]
+    fn a_mac_link_looks_for_a_mach_o_linker_and_nothing_else() {
+        assert_eq!(order(mac(), &LinkOptions::default()), ["ld", "ld64.lld"]);
+    }
+
+    #[test]
+    fn a_static_mac_program_is_refused_and_a_relocatable_one_is_not() {
+        let sdk = an_sdk("MacOSX.sdk", None);
+        let opts = LinkOptions { sysroot: Some(sdk), is_static: true, ..LinkOptions::default() };
+        let error = line(mac(), &opts, &one("a.o"), "a.out").expect_err("no static line");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("-static"), "{why}");
+        let args = relocatable_line(mac(), &LinkOptions::default(), &one("a.o"), "b.o")
+            .expect("ld64 takes -r");
+        assert_eq!(args, ["-r", "-arch", "arm64", "-o", "b.o", "a.o"]);
     }
 
     #[test]

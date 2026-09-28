@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- rucc links programs and shared libraries for Apple targets. It runs Apple's `ld`, or `ld64.lld`, with `-platform_version` taken from the deployment target and the SDK's own version, and `-syslibroot` pointing at the SDK the header search already finds through `-isysroot`, `SDKROOT` or `xcrun`. `-r` works there too.
+
 ### Changed
 
 - The Windows release of `rucc.exe` carries its C runtime inside it, so it starts on a Windows machine that has never had the Visual C++ redistributable installed. 0.11.14 imported `VCRUNTIME140.dll` and did not. The release now checks the import table of what it built and fails if a C runtime DLL is in it. There is also a release for Windows on Arm, `aarch64-pc-windows-msvc`, built on a Windows 11 Arm runner (#2067).

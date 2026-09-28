@@ -394,7 +394,7 @@ pub fn header_dirs(
 /// `xcrun` is a program rather than a path because the answer moves with the Xcode that is
 /// selected and asking is the only way to be told which one that is, and it is third rather
 /// than first because it costs a process and the two before it are free.
-fn sdk(sysroot: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn sdk(sysroot: Option<&Path>) -> Option<PathBuf> {
     if let Some(root) = sysroot {
         return Some(root.to_path_buf());
     }
