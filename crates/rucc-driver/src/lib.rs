@@ -1142,6 +1142,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // error: it is a thing said to a linker that is not going to run.
             "-static" => link.is_static = true,
             "-shared" => link.shared = true,
+            "-r" => link.relocatable = true,
             "-pie" => link.pie = Some(true),
             "-no-pie" | "-nopie" => link.pie = Some(false),
             "-nostdlib" => link.no_stdlib = true,
