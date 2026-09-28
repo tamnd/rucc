@@ -7032,6 +7032,82 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         each_spill_slot_written_once(&across(declared, "save_here"));
     }
 
+    /// A value set before `setjmp` and read after the `longjmp` keeps its slot to itself, at `-O0`
+    /// and at `-O2`.
+    ///
+    /// The reduction in tamnd/rucc#2035, which glibc's `<setjmp.h>` turns into a call to
+    /// `_setjmp`. `v` is dead on the arm that runs first, so that arm's own values were given its
+    /// slot and the handler printed `v + 1`. The handler reads `v` from a slot, and nothing between
+    /// the `setjmp` and the call that jumps back writes that slot.
+    #[test]
+    fn a_value_live_across_setjmp_shares_its_slot_with_nothing_in_the_first_arm() {
+        let source = concat!(
+            "typedef long jmp_buf[25];\n",
+            "int _setjmp(jmp_buf);\n",
+            "void longjmp(jmp_buf, int) __attribute__((noreturn));\n",
+            "int printf(const char *, ...);\n",
+            "static jmp_buf *stack;\n",
+            "static volatile long long sink;\n",
+            "static int cells[64];\n",
+            "static volatile int seed_in = 3;\n",
+            "static void work(void) { longjmp(*stack, 1); }\n",
+            "int main(void) {\n",
+            "  int seed = seed_in;\n",
+            "  int v = seed * 2;\n",
+            "  jmp_buf buf;\n",
+            "  if (_setjmp(buf) == 0) {\n",
+            "    stack = &buf;\n",
+            "    int *p = &cells[seed + 3];\n",
+            "    int a = v + 8;\n",
+            "    int b = seed * 2005;\n",
+            "    int *q = &cells[v + 1];\n",
+            "    work();\n",
+            "    sink = *p + a + b + *q;\n",
+            "  } else {\n",
+            "    printf(\"%d\\n\", v);\n",
+            "  }\n",
+            "  return 0;\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+            let text = result.text();
+            let body = text.split_once("\nmain:\n").expect("the function").1;
+            let lines: Vec<&str> = body.lines().map(str::trim).collect();
+            let save = lines.iter().position(|l| *l == "call\t_setjmp").expect("the save");
+            let jump = lines[save..]
+                .iter()
+                .position(|l| *l == "call\twork" || *l == "call\tlongjmp")
+                .map(|at| save + at)
+                .unwrap_or_else(|| panic!("the call that jumps back at {level:?}:\n{text}"));
+            let printf = lines.iter().position(|l| *l == "call\tprintf").expect("the handler");
+            // The load that hands `v` to `printf` as its second argument.
+            let slot = lines[jump..printf]
+                .iter()
+                .rev()
+                .find_map(|l| l.strip_suffix(", %rsi").or_else(|| l.strip_suffix(", %esi")))
+                .and_then(|l| l.split_once('\t'))
+                .map(|(_, place)| place)
+                .filter(|place| place.ends_with("(%rsp)") || place.ends_with("(%rbp)"))
+                .unwrap_or_else(|| panic!("the handler reads v from a slot at {level:?}:\n{text}"));
+            let writes = |l: &&str| {
+                !l.starts_with("cmp") && !l.starts_with("test") && l.ends_with(&format!(", {slot}"))
+            };
+            assert!(
+                lines[..save].iter().any(writes),
+                "{slot} is written before the save at {level:?}:\n{text}"
+            );
+            assert!(
+                !lines[save..jump].iter().any(writes),
+                "{slot} is written again before the jump at {level:?}:\n{text}"
+            );
+        }
+    }
+
     /// Five values live across a call to `save`, declared by `declared`, and five more that die
     /// before the jump back, which is enough to spill on x86-64.
     fn across(declared: &str, save: &str) -> String {
