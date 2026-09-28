@@ -899,6 +899,19 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mov_mr_bit", &[spell("movb", &[Reg(0, Byte), Mem])]),
     // One cell of a jump table, which is a signed distance from the table to an arm.
     ("movsxd_rm_32_64", &[spell("movslq", &[Mem, Reg(0, Quad)])]),
+    // A narrower value read and widened on the way in. A zero widening to sixty four bits is
+    // written as the one to thirty two, since writing the low half of a register clears the high
+    // half and the shorter encoding has no prefix byte, which is also what GCC writes.
+    ("movzx_rm_8_16", &[spell("movzbw", &[Mem, Reg(0, Word)])]),
+    ("movzx_rm_8_32", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
+    ("movzx_rm_8_64", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
+    ("movzx_rm_16_32", &[spell("movzwl", &[Mem, Reg(0, Long)])]),
+    ("movzx_rm_16_64", &[spell("movzwl", &[Mem, Reg(0, Long)])]),
+    ("movsx_rm_8_16", &[spell("movsbw", &[Mem, Reg(0, Word)])]),
+    ("movsx_rm_8_32", &[spell("movsbl", &[Mem, Reg(0, Long)])]),
+    ("movsx_rm_8_64", &[spell("movsbq", &[Mem, Reg(0, Quad)])]),
+    ("movsx_rm_16_32", &[spell("movswl", &[Mem, Reg(0, Long)])]),
+    ("movsx_rm_16_64", &[spell("movswq", &[Mem, Reg(0, Quad)])]),
     // The three that are not instructions. A return value, an argument and the condition a block
     // leaves on are each one register and one claim about it, and the claim is for the allocator.
     ("ret_val_8", &[]),

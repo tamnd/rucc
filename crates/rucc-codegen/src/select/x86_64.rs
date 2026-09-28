@@ -844,7 +844,9 @@ mod tests {
         let swapped = crate::combine::FOLDS.iter().filter_map(|fold| fold.swapped);
         let stores = crate::combine::UPDATES.iter().map(|update| update.into);
         let constants = crate::combine::BUMPS.iter().map(|bump| bump.into);
-        loads.chain(swapped).chain(stores).chain(constants).collect()
+        // And the load that widens on the way in, which only a load that a widening reads becomes.
+        let widened = crate::combine::WIDENINGS.iter().map(|fold| fold.into);
+        loads.chain(swapped).chain(stores).chain(constants).chain(widened).collect()
     }
 
     #[test]

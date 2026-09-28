@@ -508,6 +508,22 @@
            (sign_extend 32 64
                         (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
                                 (select (mem) (bvadd a 1)) (select (mem) a))))
+;; A narrower value read and widened on the way in, which the machine combine pass writes when the
+;; only reader of a narrow load is one of the widenings. Nothing selects them.
+(semantics (x64.movzx_rm_8_16 a) (zero_extend 8 16 (select (mem) a)))
+(semantics (x64.movzx_rm_8_32 a) (zero_extend 8 32 (select (mem) a)))
+(semantics (x64.movzx_rm_8_64 a) (zero_extend 8 64 (select (mem) a)))
+(semantics (x64.movzx_rm_16_32 a)
+           (zero_extend 16 32 (concat (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movzx_rm_16_64 a)
+           (zero_extend 16 64 (concat (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movsx_rm_8_16 a) (sign_extend 8 16 (select (mem) a)))
+(semantics (x64.movsx_rm_8_32 a) (sign_extend 8 32 (select (mem) a)))
+(semantics (x64.movsx_rm_8_64 a) (sign_extend 8 64 (select (mem) a)))
+(semantics (x64.movsx_rm_16_32 a)
+           (sign_extend 16 32 (concat (select (mem) (bvadd a 1)) (select (mem) a))))
+(semantics (x64.movsx_rm_16_64 a)
+           (sign_extend 16 64 (concat (select (mem) (bvadd a 1)) (select (mem) a))))
 (semantics (x64.mov_mr_bit a v) (store (mem) a (zero_extend 1 8 v)))
 (semantics (x64.movss_rm a)
            (float_from_bits 32

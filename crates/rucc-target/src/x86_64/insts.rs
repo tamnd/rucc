@@ -1965,6 +1965,19 @@ pub static INSTS: &[(&str, Form)] = &[
     // whole address and so is widened with its sign on the way in. Only the lowering of a dense
     // `switch` writes it.
     ("movsxd_rm_32_64", Load),
+    // Reading a narrower value and widening it on the way in, which is what a load becomes when
+    // the only thing reading it is one of the widenings above. The machine combine pass writes these
+    // and the one above, and nothing selects them.
+    ("movzx_rm_8_16", Load),
+    ("movzx_rm_8_32", Load),
+    ("movzx_rm_8_64", Load),
+    ("movzx_rm_16_32", Load),
+    ("movzx_rm_16_64", Load),
+    ("movsx_rm_8_16", Load),
+    ("movsx_rm_8_32", Load),
+    ("movsx_rm_8_64", Load),
+    ("movsx_rm_16_32", Load),
+    ("movsx_rm_16_64", Load),
     // Putting the value a function gives back where the caller looks for it, which is as much of
     // a return as a lowering rule decides.
     ("ret_val_8", RetVal),
@@ -2461,7 +2474,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 730);
+        assert_eq!(described, 740);
     }
 
     #[test]
