@@ -13,39 +13,12 @@
 //! defend against, and SipHash over the name was still over a percent of jtckdint's build once
 //! the walk was gone.
 
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::BuildHasherDefault;
 
-/// A table from each name to what is known about it, hashed with [`Words`].
-pub(crate) type Names<T> = HashMap<&'static str, T, BuildHasherDefault<Words>>;
+use rucc_base::hash::Map;
 
-/// Hashes a name eight bytes at a time, with a rotate, an exclusive or and a multiply for each.
-#[derive(Debug, Default)]
-pub(crate) struct Words(u64);
-
-impl Words {
-    fn mix(&mut self, word: u64) {
-        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
-}
-
-impl Hasher for Words {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for chunk in bytes.chunks(8) {
-            let mut word = [0; 8];
-            word[..chunk.len()].copy_from_slice(chunk);
-            self.mix(u64::from_le_bytes(word));
-        }
-    }
-
-    fn write_u8(&mut self, byte: u8) {
-        self.mix(u64::from(byte));
-    }
-}
+/// A table from each name to what is known about it, hashed with [`rucc_base::hash::Mix`].
+pub(crate) type Names<T> = Map<&'static str, T>;
 
 /// Where each name in that table is.
 ///
