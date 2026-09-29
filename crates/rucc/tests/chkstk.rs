@@ -194,3 +194,71 @@ fn a_system_v_target_takes_its_frame_in_one_subtraction_as_it_always_did() {
     assert!(!text.contains("chkstk"), "{text}");
     assert!(text.contains("subq\t$100008, %rsp"), "{text}");
 }
+
+/// The names an object of COFF defines and offers to other objects, read out of its symbol table.
+///
+/// Just enough of the format to answer that: the header says where the table is and how long, each
+/// entry is eighteen bytes, and a name longer than eight bytes is an offset into the strings that
+/// follow the table. An entry offers its name when its storage class is external and its section
+/// number is one of the file's own.
+fn offered(object: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| {
+        u32::from_le_bytes([object[at], object[at + 1], object[at + 2], object[at + 3]]) as usize
+    };
+    let table = u32_at(8);
+    let count = u32_at(12);
+    let strings = table + count * 18;
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < count {
+        let entry = table + index * 18;
+        let raw = &object[entry..entry + 8];
+        let name = if raw[..4] == [0; 4] {
+            let from = strings + u32_at(entry + 4);
+            let len = object[from..].iter().position(|&b| b == 0).expect("a terminated name");
+            String::from_utf8_lossy(&object[from..from + len]).into_owned()
+        } else {
+            let len = raw.iter().position(|&b| b == 0).unwrap_or(8);
+            String::from_utf8_lossy(&raw[..len]).into_owned()
+        };
+        let section = i16::from_le_bytes([object[entry + 12], object[entry + 13]]);
+        let class = object[entry + 16];
+        if class == 2 && section > 0 {
+            names.push(name);
+        }
+        index += 1 + usize::from(object[entry + 17]);
+    }
+    names
+}
+
+/// The routine a large frame calls is in our own runtime under the name each runtime gives it.
+///
+/// `runtime/builtins/chkstk.S` is one file for both Windows runtimes, and which of the two it
+/// assembles to is up to the macros of the row: `__chkstk` where `_MSC_VER` is defined and mingw's
+/// `___chkstk_ms` everywhere else. Each object offers the one name its row's prologues call and not
+/// the other, since an msvc program linking mingw's routine would still be missing its own.
+#[test]
+fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime/builtins/chkstk.S");
+    for (target, wanted, other) in
+        [(MSVC, "__chkstk", "___chkstk_ms"), (MINGW, "___chkstk_ms", "__chkstk")]
+    {
+        let dir = std::env::temp_dir().join(format!("rucc-chkstk-{}-{target}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+        let out = dir.join("chkstk.o");
+        let run = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .arg(format!("--target={target}"))
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(run.status.success(), "{target}: {}", String::from_utf8_lossy(&run.stderr));
+        let object = std::fs::read(&out).expect("the object was written");
+        let _ = std::fs::remove_dir_all(&dir);
+        let names = offered(&object);
+        assert!(names.iter().any(|name| name == wanted), "{target}: {names:?}");
+        assert!(!names.iter().any(|name| name == other), "{target}: {names:?}");
+    }
+}
