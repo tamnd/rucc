@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.15.0
+
+The end of M6: AArch64 as a second target and macOS as a second host (#7). A value wider than eight bytes is no longer kept in `v8` to `v15` across a call on AArch64, where a callee preserves only their low half. A prologue there saves `d8` to `d15` instead of the whole registers. On the Windows side, a DLL names its entry point for lld, and `cleanup` handlers work under `-fexceptions` on AArch64 Linux.
+
 ### Added
 
 - Under `-fexceptions` a `cleanup` handler works on AArch64 Linux, where it used to be refused. A handler run by `pthread_exit` or `pthread_cancel` inside its scope runs, the same as with gcc, at every optimization level and through `-S`.
