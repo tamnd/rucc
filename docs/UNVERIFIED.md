@@ -6,8 +6,16 @@ Every rule in the rule set carries a bitvector claim and `rucc-verify` discharge
 
 A rule the solver refutes is not here, and neither is a rule it gives up on that carries no reason. Neither of those enters the rule set at all, so there is no list for them to be on.
 
-One rule is on this list.
+7 rules are on this list.
 
+## `crates/rucc-codegen/rules/aarch64.rules`
+
+- `(srem.i32 (value.i32 x) (value.i32 y))`, proved at 4 and 8 bits: a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once
+- `(srem.i64 (value.i64 x) (value.i64 y))`, proved at 4 and 8 bits: a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once
+- `(urem.i32 (value.i32 x) (value.i32 y))`, proved at 4 and 8 bits: a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once
+- `(urem.i64 (value.i64 x) (value.i64 y))`, proved at 4 and 8 bits: a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once
+- `(urem.i16 (value.i16 x) (value.i16 y))`, proved at 4 and 8 bits: a remainder multiplies the quotient back by the divisor, and no solver settles that at sixteen bits, while the same rule over bytes is settled at its own width
+- `(srem.i16 (value.i16 x) (value.i16 y))`, proved at 4 and 8 bits: a remainder multiplies the quotient back by the divisor, and no solver settles that at sixteen bits, while the same rule over bytes is settled at its own width
 ## `crates/rucc-codegen/rules/x86-64.rules`
 
 - `(mul.i64 (value.i64 x) (iconst.i64 k))` when `(= k (sign_extend 32 64 (extract 31 0 k)))`, proved at 4 and 8 bits: a multiply of two unknowns at sixty four bits is out of reach, and what this rule turns on is the immediate rather than the multiply
