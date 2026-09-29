@@ -63,24 +63,28 @@ struct Declarator {
     /// it is not a test of the first character, since `(*)[3]` starts with the same bracket a
     /// parameter list does.
     glued: bool,
+    /// Whether the calling convention of the function this declarator is about to meet has been
+    /// written already, which a pointer does inside its own parentheses because that is where gcc
+    /// puts it: `int (__attribute__((ms_abi)) *)(int)`.
+    convention_written: bool,
 }
 
 impl Declarator {
     /// The empty declarator, which is what a type name has.
     fn nothing() -> Declarator {
-        Declarator { text: String::new(), glued: false }
+        Declarator { text: String::new(), glued: false, convention_written: false }
     }
 
     /// A declarator that is a name, or a piece of one that has a `*` in it.
     fn of(text: String) -> Declarator {
-        Declarator { text, glued: false }
+        Declarator { text, glued: false, convention_written: false }
     }
 
     /// The declarator with a suffix written after it, which keeps it against the type when there
     /// was nothing in front of the suffix to separate them.
     fn suffixed(self, suffix: &str) -> Declarator {
         let glued = self.glued || self.text.is_empty();
-        Declarator { text: self.text + suffix, glued }
+        Declarator { text: self.text + suffix, glued, convention_written: false }
     }
 }
 
@@ -168,10 +172,22 @@ impl Speller<'_> {
         // read as an array of pointers or a function returning one. The sugar of a typedef
         // stops the recursion before this can matter, which is why `A *` needs nothing when
         // `A` is an array.
-        if matches!(self.types.kind(pointee), TypeKind::Array { .. } | TypeKind::Function(_)) {
-            declarator = format!("({declarator})");
+        let mut convention_written = false;
+        match self.types.kind(pointee) {
+            TypeKind::Array { .. } => declarator = format!("({declarator})"),
+            // A function of a convention the target does not call its own says so in front of
+            // the `*`, which is the one place gcc writes it in a type name.
+            TypeKind::Function(function) => {
+                let attribute = self.types.signature(function).convention.attribute();
+                declarator = match attribute {
+                    Some(name) => format!("(__attribute__(({name})) {declarator})"),
+                    None => format!("({declarator})"),
+                };
+                convention_written = true;
+            }
+            _ => {}
         }
-        self.declaration(pointee, Declarator::of(declarator))
+        self.declaration(pointee, Declarator { convention_written, ..Declarator::of(declarator) })
     }
 
     /// An array, whose qualifiers have a spelling only inside the brackets.
@@ -215,6 +231,15 @@ impl Speller<'_> {
             suffix.push_str("void");
         }
         suffix.push(')');
+        // The convention in front of the name when no pointer has written it already, which is
+        // `int __attribute__((ms_abi)) f(int)` and is what gcc prints for a declaration.
+        let inner = match signature.convention.attribute() {
+            Some(name) if !inner.convention_written => {
+                let text = format!("__attribute__(({name})) {}", inner.text);
+                Declarator::of(text)
+            }
+            _ => inner,
+        };
         self.declaration(signature.ret, inner.suffixed(&suffix))
     }
 
@@ -308,13 +333,42 @@ mod tests {
         let (mut types, mut names) = fixture();
         let int = types.int(IntKind::Int);
         let char_type = types.int(IntKind::Char);
-        let signature =
-            FunctionType { ret: int, params: vec![char_type], variadic: false, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: vec![char_type],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = types.function(signature);
         let pointer = types.pointer(function);
         let array = types.array(pointer, ArrayLen::Fixed(3));
         let f = names.intern("f");
         assert_eq!(declare(&types, &names, array, f), "int (*f[3])(char)");
+    }
+
+    /// gcc 13's spelling of the pointer, which is what its `incompatible pointer type` warning
+    /// prints, and the target's own convention is not written at all.
+    #[test]
+    fn a_foreign_convention_is_written_where_gcc_writes_it() {
+        let (mut types, mut names) = fixture();
+        let int = types.int(IntKind::Int);
+        let ms = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Ms,
+        };
+        let native = FunctionType { convention: rucc_target::Convention::Target, ..ms.clone() };
+        let ms = types.function(ms);
+        let native = types.function(native);
+        assert_ne!(ms, native, "the convention is part of the type");
+        let to_ms = types.pointer(ms);
+        let f = names.intern("f");
+        assert_eq!(spell(&types, &names, to_ms), "int (__attribute__((ms_abi)) *)(int)");
+        assert_eq!(declare(&types, &names, ms, f), "int __attribute__((ms_abi)) f(int)");
+        assert_eq!(declare(&types, &names, native, f), "int f(int)");
     }
 
     #[test]
@@ -333,8 +387,13 @@ mod tests {
         let int = types.int(IntKind::Int);
         let array = types.array(int, ArrayLen::Fixed(4));
         let nested = types.array(array, ArrayLen::Fixed(2));
-        let takes_an_int =
-            FunctionType { ret: int, params: vec![int], variadic: false, prototyped: true };
+        let takes_an_int = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = types.function(takes_an_int.clone());
         let to_int = types.pointer(int);
         let gives_a_pointer = types.function(FunctionType { ret: to_int, ..takes_an_int });
@@ -372,9 +431,20 @@ mod tests {
     fn a_prototype_with_no_parameters_is_not_a_function_without_one() {
         let (mut types, names) = fixture();
         let int = types.int(IntKind::Int);
-        let prototyped =
-            FunctionType { ret: int, params: Vec::new(), variadic: false, prototyped: true };
-        let old = FunctionType { ret: int, params: Vec::new(), variadic: false, prototyped: false };
+        let prototyped = FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
+        let old = FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+        };
         let prototyped = types.function(prototyped);
         let old = types.function(old);
         let prototyped = types.pointer(prototyped);
@@ -388,8 +458,13 @@ mod tests {
         let (mut types, names) = fixture();
         let int = types.int(IntKind::Int);
         let char_type = types.int(IntKind::Char);
-        let signature =
-            FunctionType { ret: int, params: vec![char_type], variadic: true, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: vec![char_type],
+            variadic: true,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = types.function(signature);
         let pointer = types.pointer(function);
         assert_eq!(spell(&types, &names, pointer), "int (*)(char, ...)");

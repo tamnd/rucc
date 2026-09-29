@@ -94,7 +94,7 @@ use rucc_ir::{
     Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred,
     MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
 };
-use rucc_target::{AbiDescription, CallRegs, Places, Variadic, Where};
+use rucc_target::{AbiDescription, CallRegs, Convention, Places, Variadic, Where};
 
 use crate::capability;
 use crate::expand;
@@ -307,6 +307,7 @@ fn can_split(
     // not, and on Apple's AArch64 it does too, because everything past the `...` goes in memory.
     if matches!(data.opcode, Opcode::Call | Opcode::CallIndirect) {
         let Some((site, variadic)) = site(func, inst) else { return false };
+        let Some(conv) = conv.under(site.convention) else { return false };
         let in_memory = conv.abi.variadic == Variadic::AlwaysMemory;
         if variadic && (conv.shared_positions || in_memory || plan(&site, conv).is_none()) {
             return false;
@@ -396,7 +397,13 @@ enum Slot {
 /// A return value is not asked about. What comes back comes back in the registers a return uses,
 /// which is a sequence of its own with two in it on this convention, and a signature wanting more
 /// than it has is refused by name in [`crate::lower`] already.
+///
+/// `conv` is the convention of the function being split, and the signature is laid out under the
+/// convention it names itself, found through it: a function of one convention calls functions of
+/// the other, and each call is laid out the way its callee reads it. A convention the platform
+/// does not have is no layout at all, and the function is left alone.
 fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
+    let conv = conv.under(signature.convention)?;
     let word = Param::new(half());
     let mut places = Places::new(conv);
     let mut meant: Vec<(Slot, Param, Where)> = Vec::new();
@@ -583,7 +590,9 @@ fn rewrite(
     forward: &mut HashMap<Value, Value>,
     inst: Inst,
 ) {
-    let abi = conv.abi;
+    // The runtime's routines are ordinary functions of the platform, whatever convention the
+    // function calling them was written in, so a call to one is shaped by the platform's own.
+    let abi = conv.under(Convention::Target).unwrap_or(conv).abi;
     let data = func[inst];
     let produces = data.results().any(|value| is_wide(func[value].ty));
     let takes = func[data.args].iter().any(|&value| is_wide(func[value].ty));
@@ -931,7 +940,8 @@ fn runtime(
         Answer::Packed(format) => vec![Type::float(format)],
     };
     let returns = answers.iter().map(|&ty| Param::new(ty)).collect();
-    let signature = func.add_signature(Signature { params, returns, variadic: false });
+    // The platform's own convention, as the routine is an ordinary function of the platform.
+    let signature = func.add_signature(Signature { params, returns, ..Signature::new() });
     let callee = Some(names.intern(routine));
     let varargs = func.push_abis(&[]);
     let extra = Extra::Call(func.add_call(CallInfo { callee, signature, varargs }));
@@ -1405,6 +1415,7 @@ fn split_signature(signature: &Signature) -> Signature {
         params: split(&signature.params),
         returns: split(&signature.returns),
         variadic: signature.variadic,
+        convention: signature.convention,
     }
 }
 

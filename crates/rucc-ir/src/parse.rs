@@ -35,7 +35,7 @@ use std::fmt;
 use rucc_base::float::Format;
 use rucc_base::{Idx, Interner, Symbol};
 use rucc_diag::Span;
-use rucc_target::{Slot, TargetInfo};
+use rucc_target::{Convention, Slot, TargetInfo};
 use rucc_tuple::TargetTuple;
 
 use crate::attrs::{AttrSet, Attrs, FpContract};
@@ -502,8 +502,14 @@ impl<'a, 'n> Parser<'a, 'n> {
 
     /// The parameter and result types, in parentheses and after an arrow.
     fn signature(&mut self) -> Result<Signature, ParseError> {
-        self.expect("(")?;
         let mut signature = Signature::new();
+        // The word the printer writes in front of a signature of the other convention.
+        if self.eat("ms_abi") {
+            signature.convention = Convention::Ms;
+        } else if self.eat("sysv_abi") {
+            signature.convention = Convention::Sysv;
+        }
+        self.expect("(")?;
         if !self.eat(")") {
             loop {
                 if self.eat("...") {

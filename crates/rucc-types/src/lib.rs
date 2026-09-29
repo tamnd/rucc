@@ -570,7 +570,13 @@ mod tests {
         let int = types.int(IntKind::Int);
         let long = types.int(IntKind::Long);
         let make = |types: &mut Types, params: Vec<TypeId>, variadic| {
-            types.function(FunctionType { ret: int, params, variadic, prototyped: true })
+            types.function(FunctionType {
+                ret: int,
+                params,
+                variadic,
+                prototyped: true,
+                convention: rucc_target::Convention::Target,
+            })
         };
         let a = make(&mut types, vec![int, long], false);
         let b = make(&mut types, vec![int, long], false);
@@ -590,12 +596,14 @@ mod tests {
             params: vec![name],
             variadic: false,
             prototyped: true,
+            convention: rucc_target::Convention::Target,
         });
         let plain = types.function(FunctionType {
             ret: int,
             params: vec![int],
             variadic: false,
             prototyped: true,
+            convention: rucc_target::Convention::Target,
         });
         assert_ne!(sugar, plain);
         assert_eq!(types.canonical(sugar), plain);
@@ -853,6 +861,7 @@ mod tests {
             params: Vec::new(),
             variadic: false,
             prototyped: true,
+            convention: rucc_target::Convention::Target,
         });
         assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
         let pointer_to_function = types.pointer(function);
@@ -1692,13 +1701,25 @@ mod tests {
     /// A prototype returning `void`.
     fn prototype(types: &mut Types, params: Vec<TypeId>, variadic: bool) -> TypeId {
         let ret = types.void();
-        types.function(FunctionType { ret, params, variadic, prototyped: true })
+        types.function(FunctionType {
+            ret,
+            params,
+            variadic,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        })
     }
 
     /// `void f()` as it means before C23: a declaration that says nothing about the parameters.
     fn old_style(types: &mut Types) -> TypeId {
         let ret = types.void();
-        types.function(FunctionType { ret, params: Vec::new(), variadic: false, prototyped: false })
+        types.function(FunctionType {
+            ret,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+        })
     }
 
     /// A complete record with the given tag and members.
@@ -1871,8 +1892,45 @@ mod tests {
             params: Vec::new(),
             variadic: false,
             prototyped: false,
+            convention: rucc_target::Convention::Target,
         });
         assert!(!compatible(&types, returns_int, takes_int));
+    }
+
+    /// gcc's rule: a function of one convention and a function of the other are never
+    /// compatible, however alike the rest of the two types is, and the composite of two that do
+    /// agree keeps the convention.
+    #[test]
+    fn two_conventions_are_two_incompatible_types() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let signature = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Ms,
+        };
+        let native = types.function(FunctionType {
+            convention: rucc_target::Convention::Target,
+            ..signature.clone()
+        });
+        let ms = types.function(signature);
+        let old_ms = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Ms,
+        });
+        assert!(!compatible(&types, native, ms));
+        let (to_native, to_ms) = (types.pointer(native), types.pointer(ms));
+        assert!(!compatible(&types, to_native, to_ms));
+        assert!(compatible(&types, ms, old_ms));
+        let merged = composite(&mut types, old_ms, ms).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert_eq!(types.signature(id).convention, rucc_target::Convention::Ms);
+        assert!(types.signature(id).prototyped);
     }
 
     #[test]

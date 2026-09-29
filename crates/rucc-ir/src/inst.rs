@@ -15,7 +15,7 @@
 
 use rucc_base::{Idx, IdxRange, Symbol};
 
-use rucc_target::Slot;
+use rucc_target::{Convention, Slot};
 
 use crate::{
     ExtraKind, Flags, FloatPred, IntPred, MemOrder, Opcode, Owner, PrefetchHint, RmwOp,
@@ -740,6 +740,13 @@ pub struct Signature {
     pub returns: Vec<Param>,
     /// Whether it takes arguments beyond the ones named.
     pub variadic: bool,
+    /// The calling convention a call with this signature and a function with it use, which is
+    /// the target's own unless `ms_abi` or `sysv_abi` asked for the other one on x86-64.
+    ///
+    /// It is on the signature rather than on the function because a call through a pointer has
+    /// no function to read it off, only the signature it names, and a call is where the
+    /// convention matters as much as a body is.
+    pub convention: Convention,
 }
 
 impl Signature {

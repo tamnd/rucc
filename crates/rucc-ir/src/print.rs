@@ -425,6 +425,12 @@ impl<'a> Printer<'a> {
 
     /// The parameter and result types of a function or a call, with what the ABI asks of each.
     fn signature(&mut self, signature: &Signature) {
+        // The convention in front of the parameters and only when it is not the target's own,
+        // so every signature that never met the attribute prints as it always has.
+        if let Some(name) = signature.convention.attribute() {
+            self.out.push_str(name);
+            self.out.push(' ');
+        }
         self.out.push('(');
         for (index, param) in signature.params.iter().enumerate() {
             if index > 0 {

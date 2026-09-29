@@ -1171,6 +1171,7 @@ pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use rucc_target::Convention;
     use rucc_target::x86_64::{REGS, SYSV, WIN64};
 
     use super::*;
@@ -1761,6 +1762,62 @@ mod tests {
             Missing::TooBig.why(),
             "is more bytes than a count of them can be written down as"
         );
+    }
+
+    /// An `ms_abi` function on Linux takes its arguments the Windows way: four in registers from
+    /// `rcx`, and the fifth above the 32 bytes of shadow space.
+    #[test]
+    fn an_ms_abi_function_on_linux_takes_its_arguments_the_windows_way() {
+        let ms = SYSV.under(Convention::Ms).expect("Linux has the Windows convention too");
+        let (text, up) = arrive(&[Type::int(64); 7], ms);
+        assert_eq!(up, [32, 40, 48]);
+        assert!(text.contains("%0:gpr($rcx) = x64.arg_val_64"), "{text}");
+        assert_eq!(text.matches("x64.arg_val_64").count(), 4, "{text}");
+    }
+
+    /// A `sysv_abi` function on Windows takes six in registers from `rdi`, and the seventh at the
+    /// bottom of the argument area with no shadow space under it.
+    #[test]
+    fn a_sysv_abi_function_on_windows_takes_its_arguments_the_system_v_way() {
+        let sysv = WIN64.under(Convention::Sysv).expect("Windows has the System V convention too");
+        let (text, up) = arrive(&[Type::int(64); 7], sysv);
+        assert_eq!(up, [0]);
+        assert!(text.contains("%0:gpr($rdi) = x64.arg_val_64"), "{text}");
+        assert_eq!(text.matches("x64.arg_val_64").count(), 6, "{text}");
+    }
+
+    /// A call to an `ms_abi` function from Linux leaves the callee its shadow space, and does not
+    /// count `rsi`, `rdi` or the upper vector registers as destroyed, since the callee keeps them.
+    #[test]
+    fn a_call_to_an_ms_abi_function_keeps_what_the_callee_keeps() {
+        let ms = SYSV.under(Convention::Ms).expect("Linux has the Windows convention too");
+        let i64 = Type::int(64);
+        let (_, func, made) = make(&[i64, i64], &[i64], false, ms);
+        assert_eq!(made.expect("two integers fit in registers").outgoing, 32);
+        let (written, read) = operands(&func);
+        assert_eq!(read, ["rcx", "rdx"]);
+        for kept in ["rsi", "rdi", "xmm6", "xmm15"] {
+            assert!(!written.contains(&kept.to_string()), "{kept} survives the call");
+        }
+        assert!(written.contains(&"xmm5".to_string()), "{written:?}");
+    }
+
+    /// A call to a `sysv_abi` function from Windows is the other way round: no shadow space, the
+    /// arguments from `rdi`, and `rsi`, `rdi` and every vector register destroyed, which is what
+    /// makes the calling Windows function save the ones it owes its own caller.
+    #[test]
+    fn a_call_to_a_sysv_abi_function_destroys_what_windows_would_keep() {
+        let sysv = WIN64.under(Convention::Sysv).expect("Windows has the System V convention too");
+        let i64 = Type::int(64);
+        let (_, func, made) = make(&[i64, i64], &[i64], false, sysv);
+        assert_eq!(made.expect("two integers fit in registers").outgoing, 0);
+        let (written, read) = operands(&func);
+        assert_eq!(read, ["rdi", "rsi"]);
+        for destroyed in ["xmm6", "xmm15"] {
+            assert!(written.contains(&destroyed.to_string()), "{destroyed}: {written:?}");
+        }
+        // `rsi` is named by an argument and so is not repeated as a clobber, and `rdi` likewise.
+        assert!(!written.contains(&"rbx".to_string()), "{written:?}");
     }
 
     /// The other convention runs out three arguments earlier and starts its argument area above the

@@ -103,6 +103,11 @@ pub struct LineDirective {
 /// translation unit and the definitions a header makes are visible after it.
 #[derive(Debug, Default)]
 pub struct Preprocessor {
+    /// Whether the target has a second calling convention for `ms_abi` or `sysv_abi` to pick,
+    /// which is x86-64 alone. The table answers for the attributes as this compiler has them, and
+    /// on any other target gcc warns that they are ignored, so `__has_attribute` answers nought
+    /// for them there. Set by [`Preprocessor::predefine`], which is where the target arrives.
+    second_convention: bool,
     macros: MacroTable,
     /// What a character constant in `#if` comes to, which the target decides and
     /// [`Preprocessor::predefine`] learns.
@@ -212,6 +217,7 @@ impl Preprocessor {
         opts: &Predef,
         cx: &mut Context<'_>,
     ) -> Result<(), SourceMapFull> {
+        self.second_convention = target.tuple.arch().as_str() == "x86_64";
         let names = Names::new(cx.interner);
         self.chars = cond::Chars::of(target);
         let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
@@ -1233,6 +1239,14 @@ impl Preprocessor {
                     return 0;
                 };
                 match kind {
+                    // The two conventions are attributes of x86-64 only, however the table
+                    // answers, since gcc ignores both anywhere else.
+                    Kind::Attribute
+                        if !self.second_convention
+                            && matches!(rucc_gnu::unarmour(name), "ms_abi" | "sysv_abi") =>
+                    {
+                        0
+                    }
                     Kind::Attribute => rucc_gnu::has_attribute(name),
                     Kind::CAttribute => rucc_gnu::has_c_attribute(name),
                     Kind::Builtin => rucc_gnu::has_builtin(name),
@@ -2981,6 +2995,22 @@ mod tests {
         let src = "#if defined(__has_include) && defined __has_builtin\nyes\n#endif\n";
         assert_eq!(clean(src), "yes");
         assert_eq!(clean("#ifdef __has_attribute\nyes\n#endif\n"), "yes");
+    }
+
+    /// The two conventions are there on x86-64 and not anywhere else, whatever the table says,
+    /// since gcc ignores both on every other target.
+    #[test]
+    fn the_calling_convention_attributes_are_there_on_x86_64_alone() {
+        let asked = "__has_attribute(ms_abi) __has_attribute(__sysv_abi__)\n";
+        for (triple, answer) in [
+            ("x86_64-unknown-linux-gnu", "1 1"),
+            ("x86_64-w64-windows-gnu", "1 1"),
+            ("aarch64-unknown-linux-gnu", "0 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
     }
 
     #[test]

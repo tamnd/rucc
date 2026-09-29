@@ -4175,7 +4175,11 @@ impl<'u> Body<'_, 'u> {
             return;
         };
         let params = [part; 4];
-        let plan = match abi::plan(self.types(), self.target(), ty, &params, &params, false) {
+        // The runtime's routine is an ordinary function of the platform, so it is called in the
+        // platform's own convention whatever the function calling it was written in.
+        let native = rucc_target::Convention::Target;
+        let plan = match abi::plan(self.types(), self.target(), native, ty, &params, &params, false)
+        {
             Ok(plan) => plan,
             Err(what) => {
                 self.unsupported(what, span);

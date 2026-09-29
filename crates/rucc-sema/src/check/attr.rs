@@ -42,10 +42,10 @@ use rucc_ast::{AlignSpec, AttrArg, AttrList};
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::Encoding;
-use rucc_target::{Isa, Target, TargetInfo};
+use rucc_target::{Convention, Isa, Target, TargetInfo};
 use rucc_types::{
-    FloatKind, IntKind, TypeId, TypeKind, float_format, int_width, integer_info, is_arithmetic,
-    is_complex, is_real_floating, layout,
+    FloatKind, FunctionId, FunctionType, IntKind, TypeId, TypeKind, float_format, int_width,
+    integer_info, is_arithmetic, is_complex, is_real_floating, layout,
 };
 
 use crate::check::Checker;
@@ -879,6 +879,176 @@ impl Checker<'_> {
     pub(in crate::check) fn retyped(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
         let ty = self.moded(ty, attrs);
         self.vectorized(ty, attrs)
+    }
+
+    /// The type a declaration's own attribute list declares once the calling convention it names
+    /// is applied, and the type as written where it names none.
+    ///
+    /// gcc reads `ms_abi` and `sysv_abi` as attributes of a function type, and a list written on a
+    /// declaration hands one to the type it declares. That is the function itself when a function
+    /// is declared, and the function pointed at when a pointer to one is, one level down and no
+    /// further, which is gcc's rule for a function type attribute that lands on a pointer. Anything
+    /// else has no convention to take and is warned about in gcc's words.
+    ///
+    /// The other conventions a compiler for 32-bit x86 knows, `stdcall` and its relatives, are
+    /// read here too, so that none of them is dropped without a word. On Windows gcc accepts them
+    /// and does nothing, since a 64-bit Windows program has one convention and the headers write
+    /// these on every declaration for the sake of the 32-bit build. Anywhere else gcc says they are
+    /// ignored, and so does this.
+    pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        match self.convention_in(attrs) {
+            Some((convention, name, span)) => self.with_convention(ty, convention, &name, span),
+            None => ty,
+        }
+    }
+
+    /// The type a pointer's attributes make of what it points at, which is where
+    /// `EFI_STATUS (EFIAPI *F)(...)` puts the convention.
+    ///
+    /// The pointer has not been made yet when this is asked, so `pointee` is the function itself
+    /// and the one level down that [`Self::convened`] allows for is already taken.
+    pub(in crate::check) fn convened_pointee(
+        &mut self,
+        pointee: TypeId,
+        attrs: AttrList,
+    ) -> TypeId {
+        let Some((convention, name, span)) = self.convention_in(attrs) else { return pointee };
+        if let TypeKind::Function(function) = self.types.kind(self.types.canonical(pointee)) {
+            return self.function_under(function, convention);
+        }
+        self.not_a_function(&name, span);
+        pointee
+    }
+
+    /// The convention an attribute list names, with the name that named it and where, after
+    /// saying whatever there is to say about the convention attributes in it.
+    ///
+    /// Three things are said. `ms_abi` or `sysv_abi` on a target other than x86-64 is ignored with
+    /// a warning, since there is no second convention there to pick. One of each in the same list
+    /// is refused, as gcc refuses it, because a function cannot be both. And `stdcall`, `cdecl`,
+    /// `fastcall`, `thiscall`, `regparm` and `vectorcall` are ignored with a warning anywhere but
+    /// Windows. The same name twice is the one convention asked for twice, which is no conflict.
+    fn convention_in(&mut self, attrs: AttrList) -> Option<(Convention, String, Span)> {
+        let written = self.ast[attrs].to_vec();
+        let tuple = self.cx.target.tuple;
+        let windows = tuple.os().as_str() == "windows";
+        // Where gcc says the 32-bit Windows conventions are ignored. On 32-bit x86 they mean
+        // something and on Windows gcc accepts them without a word, and neither is this.
+        let foreign_to_them = tuple.arch().as_str() == "x86_64" && !windows;
+        let mut asked: Option<(Convention, String, Span)> = None;
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            let name = rucc_gnu::unarmour(self.text(attr.name)).to_owned();
+            match name.as_str() {
+                "ms_abi" | "sysv_abi" => {
+                    let Some(convention) = Convention::asked(tuple, &name) else {
+                        let what = format!("'{name}' attribute ignored");
+                        let note = "only x86-64 has a second calling convention to pick";
+                        let dropped = Diagnostic::warning(what, attr.span).with_code("E0703");
+                        self.report(dropped.note(note, attr.span));
+                        continue;
+                    };
+                    match &asked {
+                        Some((_, first, _)) if *first != name => {
+                            let what = "'ms_abi' and 'sysv_abi' attributes are not compatible";
+                            let refused = Diagnostic::error(what.to_string(), attr.span);
+                            self.report(refused.with_code("E0740"));
+                        }
+                        Some(_) => {}
+                        None => asked = Some((convention, name, attr.span)),
+                    }
+                }
+                "stdcall" | "cdecl" | "fastcall" | "thiscall" | "regparm" | "vectorcall"
+                    if foreign_to_them =>
+                {
+                    let what = format!("'{name}' attribute ignored");
+                    let note = "the attribute names a calling convention of 32-bit x86, which \
+                                x86-64 outside Windows does not have";
+                    let dropped = Diagnostic::warning(what, attr.span).with_code("E0703");
+                    self.report(dropped.note(note, attr.span));
+                }
+                _ => {}
+            }
+        }
+        asked
+    }
+
+    /// The type with its function, or the function it points at, given that convention.
+    fn with_convention(
+        &mut self,
+        ty: TypeId,
+        convention: Convention,
+        name: &str,
+        span: Span,
+    ) -> TypeId {
+        let canonical = self.types.canonical(ty);
+        match self.types.kind(canonical) {
+            // Already the convention asked for, which is every `sysv_abi` on Linux, so the type is
+            // left as written and a diagnostic still prints the typedef the program used.
+            TypeKind::Function(function)
+                if self.types.signature(function).convention == convention =>
+            {
+                ty
+            }
+            TypeKind::Function(function) => self.function_under(function, convention),
+            TypeKind::Pointer(pointee) => {
+                let pointee = self.types.canonical(pointee);
+                let TypeKind::Function(function) = self.types.kind(pointee) else {
+                    self.not_a_function(name, span);
+                    return ty;
+                };
+                let quals = self.types.quals(canonical);
+                let function = self.function_under(function, convention);
+                let pointer = self.types.pointer(function);
+                self.types.qualified(pointer, quals)
+            }
+            _ => {
+                self.not_a_function(name, span);
+                ty
+            }
+        }
+    }
+
+    /// Refuses the definition of a variadic function in the convention the target does not call
+    /// its own.
+    ///
+    /// Calling one is fine and is done. Defining one is not here yet: its body would need the
+    /// other platform's `va_list`, which is a plain pointer on Windows and a structure of four
+    /// fields everywhere else, and `va_start` and `va_arg` in it would have to build and walk the
+    /// other one of the two, with `__builtin_ms_va_list` and its relatives for a program to name
+    /// it. gcc has all of that, and until this compiler does a definition is refused in words that
+    /// name the attribute rather than compiled with the wrong list.
+    pub(in crate::check) fn foreign_variadic(&mut self, ty: TypeId, span: Span) {
+        let TypeKind::Function(function) = self.types.kind(self.types.canonical(ty)) else {
+            return;
+        };
+        let signature = self.types.signature(function);
+        let Some(name) = signature.convention.attribute() else { return };
+        if !signature.variadic {
+            return;
+        }
+        let what = format!(
+            "defining a variadic function with '__attribute__(({name}))' is not supported on \
+             this target"
+        );
+        let note = "calling one is supported, and so is defining one without the attribute or \
+                    without the '...'";
+        let refused = Diagnostic::error(what, span).with_code("E0741");
+        self.report(refused.note(note, span));
+    }
+
+    /// The same function type under another convention.
+    fn function_under(&mut self, function: FunctionId, convention: Convention) -> TypeId {
+        let signature = FunctionType { convention, ..self.types.signature(function).clone() };
+        self.types.function(signature)
+    }
+
+    /// gcc's warning for a convention written on something that is not a function.
+    fn not_a_function(&mut self, name: &str, span: Span) {
+        let what = format!("'{name}' attribute only applies to function types");
+        self.report(Diagnostic::warning(what, span).with_code("E0703"));
     }
 
     /// The type a `mode` in an attribute list asks for, and the type as written where there is no

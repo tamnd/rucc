@@ -354,6 +354,24 @@ tests = ["rucc-sema::naked_written_as_the_attribute_is_kept", "rucc-driver::a_na
 notes = "Nothing is written around the body. No prologue, so no register the convention preserves is put away and no bytes are taken, which is what micropython's `nlr_push` needs: its first instruction reads the return address out of `(%rsp)` and a push in front of it would have moved the address somewhere else. No epilogue, so the `ret` a function usually ends with is not written either, and falling off the end becomes the `ud2` gcc puts in the same place. The stack protector is left out of one whatever the command line asked, since the canary is a word the prologue writes and the check at the end reads back. A naked function whose frame comes out with any bytes in it is refused rather than given offsets into a frame nothing set up, and so is one with a variable length array in it."
 
 [[feature]]
+name = "ms_abi"
+kind = "attribute"
+gcc_version = "4.4"
+status = "implemented"
+used_by = ["edk2", "gnu-efi", "wine"]
+tests = ["rucc-types::two_conventions_are_two_incompatible_types", "rucc-pp::the_calling_convention_attributes_are_there_on_x86_64_alone", "rucc/tests/conventions.rs", "tests/exec/linux/ms_abi.c"]
+notes = "A function of the Windows x64 convention on an x86-64 target that is not Windows, which is what `EFIAPI` is on Linux. It is part of the function type, as it is to gcc: written in the specifiers, after the declarator or beside the star of a pointer, and kept through a typedef, so `typedef EFI_STATUS (EFIAPI *F)(...)` is a pointer to an `ms_abi` function. A declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer. On Windows it names the target's own convention and changes nothing. A call and a definition use the Windows registers, shadow space and preserved set, and a function of the one calling a function of the other keeps what the callee does not. Calling a variadic one works. Defining one is refused with `E0741`, since its body would need the Windows `va_list`. On a target other than x86-64 it is ignored with a warning and `__has_attribute` answers nought."
+
+[[feature]]
+name = "sysv_abi"
+kind = "attribute"
+gcc_version = "4.4"
+status = "implemented"
+used_by = ["wine"]
+tests = ["rucc-types::two_conventions_are_two_incompatible_types", "rucc-pp::the_calling_convention_attributes_are_there_on_x86_64_alone", "rucc/tests/conventions.rs", "tests/exec/windows/sysv_abi.c"]
+notes = "The mirror of `ms_abi`: a function of the System V convention on Windows, read and kept the same way. On x86-64 targets other than Windows it names the target's own convention and changes nothing. Writing it with `ms_abi` on the same declaration is refused with `E0740`, in gcc's words. A variadic definition is refused with `E0741`. The unwind record is still written for one, which gcc leaves out, since a function of either convention on Windows is unwound by the same reader."
+
+[[feature]]
 name = "mode"
 kind = "attribute"
 gcc_version = "2.0"

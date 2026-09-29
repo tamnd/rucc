@@ -10,6 +10,7 @@
 use std::num::NonZeroU32;
 
 use rucc_base::Symbol;
+use rucc_target::Convention;
 
 use crate::TypeId;
 
@@ -571,4 +572,13 @@ pub struct FunctionType {
     /// and in what the composite type of a redeclaration is. The dialect decides which
     /// meaning `()` gets, and this records the decision rather than repeating it.
     pub prototyped: bool,
+    /// Which calling convention a call to it and its own body use.
+    ///
+    /// Part of the type because gcc makes it part of the type: a pointer to an `ms_abi` function
+    /// and a pointer to an ordinary one are pointers to different types on Linux, and a function
+    /// declared once each way has conflicting types. [`Convention::Target`] is the target's own
+    /// whichever attribute named it, so `ms_abi` on Windows changes nothing about a type and
+    /// neither does `sysv_abi` anywhere else, and a type that never met an attribute is the same
+    /// type as one that met the attribute naming the target's convention.
+    pub convention: Convention,
 }

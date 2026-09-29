@@ -87,7 +87,8 @@ use rucc_ir::{
 use rucc_mir as mir;
 use rucc_target::template::{template_name, template_reg};
 use rucc_target::{
-    Address, CallRegs, Constraint, OperandDesc, PhysReg, RegClass, Role, VaList, Variadic,
+    Address, CallRegs, Constraint, Convention, OperandDesc, PhysReg, RegClass, Role, VaList,
+    Variadic,
 };
 use rucc_target::{aarch64, x86_64};
 
@@ -549,6 +550,10 @@ pub enum Unsupported {
 pub enum Unported {
     /// The thread pointer on Apple's platforms, which keep it somewhere other than Linux does.
     Thread,
+    /// A call in a convention the platform has no registers for, which the front end never asks
+    /// for since it reads `ms_abi` and `sysv_abi` on x86-64 alone, and is refused rather than
+    /// made in the wrong one if something else ever does.
+    Convention,
 }
 
 impl Unported {
@@ -557,6 +562,9 @@ impl Unported {
     pub fn why(self) -> &'static str {
         match self {
             Unported::Thread => "the thread pointer is not written for this platform yet",
+            Unported::Convention => {
+                "this calls a function of a calling convention this platform does not have"
+            }
         }
     }
 }
@@ -1672,7 +1680,16 @@ impl<'a> Lowering<'a> {
             named: named.len(),
             at: self.source.span(inst),
         };
-        let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
+        // The callee's convention and not this function's, since the two differ when either was
+        // written `ms_abi` or `sysv_abi`: where the arguments go, what the callee leaves alone and
+        // how much room it is owed above the return address are all the callee's to say, and a
+        // function of one convention calls functions of the other.
+        let called = self.source[info.signature].convention;
+        let conv = self
+            .conv
+            .under(called)
+            .ok_or(Unsupported::Unported { inst: Some(inst), what: Unported::Convention })?;
+        let made = abi::call(&mut self.out, block, &what, conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         if self.source.unwinds_to_pad(inst) {
             let call = self.out.insts(block).last().expect("the call just built");
@@ -4990,8 +5007,11 @@ impl<'a> Lowering<'a> {
     ///
     /// A register is asked about with its file, since the two files are numbered from nought alike
     /// and a question about `v8` alone would find an output pinned to `x8`.
+    ///
+    /// The platform's own convention, whatever this function was written in, since what an `asm`
+    /// statement calls is an ordinary function of the platform.
     fn lost(&self, list: &[AsmOperand<'_>]) -> Vec<(PhysReg, RegClass, Option<usize>)> {
-        let conv = self.conv;
+        let conv = self.conv.under(Convention::Target).unwrap_or(self.conv);
         let ints = conv.int_order.iter().filter(|&&reg| !conv.preserves_int(reg));
         let sses = conv.sse_order.iter().filter(|&&reg| !conv.preserves_sse(reg));
         let written = |reg, class| {
@@ -5942,6 +5962,14 @@ impl<'a> Lowering<'a> {
         if applies {
             self.save_arguments(out, &arrived);
         }
+        // A variadic function of the convention the platform does not call its own has no list
+        // this can start. Its `va_list` would have to be the other platform's, which is a type C
+        // has no name for here, and the front end refuses a definition with `...` in it for that
+        // reason. What is left is an old style definition, which is variadic to a caller and has
+        // no `...` for a `va_start` to follow, so nothing is set up and a `va_start` that reached
+        // here all the same would be refused rather than read the wrong list.
+        let foreign = self.source.signature().convention != Convention::Target;
+        let variadic = variadic && !foreign;
         if let (true, Some(area)) = (variadic && !in_memory, area) {
             self.save_area(out, &arrived, area);
         } else if variadic {

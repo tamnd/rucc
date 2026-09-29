@@ -1358,6 +1358,7 @@ impl Unit<'_> {
         };
         let signature = self.types.signature(id);
         let ret = signature.ret;
+        let convention = signature.convention;
         // A function declared without a prototype takes what it is given, which is what a
         // signature with no parameters and no end to them says. C23 removed these and this is
         // what `int f();` means in every dialect before it.
@@ -1376,7 +1377,7 @@ impl Unit<'_> {
             signature.params.clone()
         };
 
-        match abi::plan(self.types, self.target, ret, &params, actual, variadic) {
+        match abi::plan(self.types, self.target, convention, ret, &params, actual, variadic) {
             Ok(plan) => Some(plan),
             Err(what) => {
                 self.unsupported(what, span);

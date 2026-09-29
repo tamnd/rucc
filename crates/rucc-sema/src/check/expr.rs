@@ -307,6 +307,7 @@ impl Checker<'_> {
                     params: Vec::new(),
                     variadic: false,
                     prototyped: false,
+                    convention: rucc_target::Convention::Target,
                 })
             }
         };
@@ -2736,8 +2737,13 @@ mod tests {
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
         let long = c.types.int(IntKind::Long);
-        let signature =
-            FunctionType { ret: int, params: vec![long], variadic: false, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: vec![long],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
         let id = c.check_expr(call);
@@ -2761,8 +2767,13 @@ mod tests {
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
         let float = c.types.float(FloatKind::Float);
-        let signature =
-            FunctionType { ret: int, params: vec![int], variadic: true, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: true,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
         c.declare_object(x, float, Span::DUMMY);
@@ -2796,8 +2807,13 @@ mod tests {
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
-        let signature =
-            FunctionType { ret: int, params: vec![int], variadic: false, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
         c.check_expr(call);
