@@ -3,7 +3,7 @@
 #
 # usage: tests/qemu/run.sh <rucc> <triple>
 #
-# The fixtures are the ones `cargo xtask wide`, `divide` and `tail` hold against the system compiler
+# The first fixtures are the ones `cargo xtask wide`, `divide` and `tail` hold against the system compiler
 # on this machine. Each prints what it computed rather than anything about the machine it computed
 # it on, so gcc for the target is the reference, run under the same emulator, and every level rucc
 # builds at has to print the same thing. A failure seen only here leaves qemu a suspect as well as
@@ -59,5 +59,47 @@ for fixture in wide/arithmetic.c divide/constants.c tail/calls.c; do
 	done
 done
 
-printf '%s: %d ran, %d failed\n' "$triple" "$passed" "$failed"
+# The signature corpus from `cargo xtask abi-signatures`, which is where the calling convention is
+# checked rather than the arithmetic. The caller and the callee are each built by rucc and by gcc,
+# and every pairing is linked and run, so a pairing that fails is the two compilers disagreeing
+# about where an argument or a return value goes: AAPCS64's registers, its homogeneous float
+# aggregates, the hidden result pointer in x8, a composite copied to memory when it is larger than
+# sixteen bytes, and the variadic list. report.c holds the counter and the one call to printf, and
+# gcc builds it for every pairing so a failure is never about it.
+abi=$here/tests/abi-signatures
+"$triple-gcc" -O2 -c -o "$out/report.o" "$abi/report.c"
+for side in caller callee; do
+	"$triple-gcc" -O2 -c -o "$out/$side-gcc.o" "$abi/$side.c"
+	for level in 0 2; do
+		if ! $rucc --target="$triple" -O$level -c -o "$out/$side-rucc-O$level.o" "$abi/$side.c" \
+			2>"$out/build.log"; then
+			printf 'abi %-6s -O%s  did not build\n' "$side" "$level"
+			sed 's/^/    /' "$out/build.log"
+			failed=$((failed + 1))
+		fi
+	done
+done
+for caller in gcc rucc-O0 rucc-O2; do
+	for callee in gcc rucc-O0 rucc-O2; do
+		[ "$caller" = gcc ] && [ "$callee" = gcc ] && continue
+		pairing="caller $caller, callee $callee"
+		binary=$out/abi-$caller-$callee
+		[ -f "$out/caller-$caller.o" ] && [ -f "$out/callee-$callee.o" ] || continue
+		if ! "$triple-gcc" -o "$binary" "$out/caller-$caller.o" "$out/callee-$callee.o" \
+			"$out/report.o" 2>"$out/build.log"; then
+			printf 'abi %s  did not link\n' "$pairing"
+			sed 's/^/    /' "$out/build.log"
+			failed=$((failed + 1))
+		elif "$qemu" "$binary" >"$binary.txt" 2>&1; then
+			printf 'abi %s  ok\n' "$pairing"
+			passed=$((passed + 1))
+		else
+			printf 'abi %s  disagreed\n' "$pairing"
+			head -20 "$binary.txt" | sed 's/^/    /'
+			failed=$((failed + 1))
+		fi
+	done
+done
+
+printf '%s: %d ran, %d failed\n' "$triple" "$((passed + failed))" "$failed"
 [ "$failed" -eq 0 ]
