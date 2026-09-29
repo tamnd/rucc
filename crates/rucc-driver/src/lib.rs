@@ -244,7 +244,7 @@ options:
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
   -std=<dialect>         c89 through c2y, and the gnu spellings
-  -fgnuc-version=<v>     the GCC release to claim, default 16.0.0
+  -fgnuc-version=<v> -fms-compatibility-version=<v>   the GCC (16.0.0) or MSVC (19.40) to claim
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z, fast
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
@@ -1089,6 +1089,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-fgnuc-version=") => {
                 let v = &arg["-fgnuc-version=".len()..];
                 opts.gnuc = v.parse().map_err(err)?;
+                opts.gnuc_given = true;
+            }
+            // The MSVC release an MSVC row claims, which is `_MSC_VER` and nothing else here.
+            _ if arg.starts_with("-fms-compatibility-version=") => {
+                let v = &arg["-fms-compatibility-version=".len()..];
+                opts.msc = v.parse().map_err(err)?;
             }
             // spec/13-gnu-compat.md section 13.3 promises this flag an error that says why rather
             // than the unknown option one, because a build reaching for it is asking for a feature
@@ -5452,6 +5458,13 @@ mod tests {
         // patchlevel and a harness that pastes that back has to be understood.
         let (opts, _) = compile(&["-fgnuc-version=15", "a.c"]);
         assert_eq!(opts.gnuc, GnucVersion { major: 15, minor: 0, patch: 0 });
+
+        assert!(opts.gnuc_given, "a version that was written down is one that was given");
+        assert!(!compile(&["a.c"]).0.gnuc_given);
+
+        let (opts, _) = compile(&["-fms-compatibility-version=19.29.30133", "a.c"]);
+        assert_eq!(opts.msc.msc_ver(), 1929);
+        assert_eq!(opts.msc.msc_full_ver(), 192_930_133);
 
         let (opts, _) = compile(&["-fgnuc-version=13.2", "a.c"]);
         assert_eq!(opts.gnuc, GnucVersion { major: 13, minor: 2, patch: 0 });

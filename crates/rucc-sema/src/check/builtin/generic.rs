@@ -247,6 +247,12 @@ impl Checker<'_> {
         if !spelled.starts_with("__") {
             return None;
         }
+        // MSVC's intrinsics, which the SDK's `intrin.h` declares and which are the intrinsics all
+        // the same, so they come before the question of whether the program declared the name. In
+        // `check/builtin/msvc.rs`, which says why they are only names on an MSVC row.
+        if let Some(answer) = self.msvc_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // A program that declared the name itself gets what it declared, whichever family the
         // name would otherwise have been in. A declaration this compiler made for the program is
         // not one of those, or the first call to a builtin would decide what the second means.

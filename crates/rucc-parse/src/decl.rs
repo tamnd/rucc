@@ -198,7 +198,7 @@ impl Parser<'_> {
         if self.cursor.at_punct(Punct::LBrace) {
             return true;
         }
-        if self.cursor.at_keyword(Keyword::Attribute) {
+        if self.at_keyword_attribute() {
             return false;
         }
         self.declares_a_function(declarator) && self.at_decl_specs()

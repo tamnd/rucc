@@ -191,7 +191,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // building this after the expansion would mean building it after `char` had been seen.
     let mut keywords = Keywords::new(&mut sess.interner, opts.std, opts.gnu_extensions);
     if sess.target.tuple.os() == rucc_tuple::Os::Windows {
-        keywords = keywords.windows();
+        keywords = if sess.target.tuple.env() == rucc_tuple::Env::Msvc {
+            keywords.msvc(&mut sess.interner)
+        } else {
+            keywords.windows()
+        };
     }
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     // Filled in by the back end when there is one, and empty for every kind that stops before it.
