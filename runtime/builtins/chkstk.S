@@ -94,4 +94,34 @@ ___chkstk_ms:
 	.section	.drectve,"yni"
 	.ascii	" -exclude-symbols:___chkstk_ms"
 
+#elif defined(__aarch64__) && defined(_WIN32)
+
+/* The ARM64 routine, which has Microsoft's name and contract on both environments, and is what
+ * compiler-rt ships for llvm-mingw. The size arrives in `x15` counted in units of sixteen bytes,
+ * because the caller follows the call with `sub sp, sp, x15, lsl #4`, and `x15` has to come back
+ * unchanged for that. `x16` and `x17` are the routine's to destroy, since the convention already
+ * lets a veneer between caller and callee do the same, and nothing else is touched. The link
+ * register is the caller's to have saved before the call, which its prologue did.
+ *
+ * The walk is compiler-rt's: one load a page, starting a page below the stack pointer the caller
+ * has, until the pages cover the size. A load into `xzr` is enough to fault a guard page in and
+ * changes no register. */
+
+	.text
+	.globl	__chkstk
+	.p2align	2
+__chkstk:
+	lsl	x16, x15, #4
+	mov	x17, sp
+.Lpage_a64:
+	sub	x17, x17, #0x1000
+	subs	x16, x16, #0x1000
+	ldr	xzr, [x17]
+	b.gt	.Lpage_a64
+	ret
+
+/* Kept out of the export table of a DLL for the same reason as `___chkstk_ms` above. */
+	.section	.drectve,"yni"
+	.ascii	" -exclude-symbols:__chkstk"
+
 #endif
