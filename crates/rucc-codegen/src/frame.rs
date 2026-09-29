@@ -104,11 +104,16 @@
 //! offsets are counted from, and a frame that grows needs no adjustment at all where the other
 //! order needs the whole frame and every push taken off. [`Frame::late`] is what says which it is.
 //!
-//! The realigned frame is the one that cannot have it whatever the platform says. There the
-//! prologue forces the alignment after the pushes, which leaves the pushes at a distance from the
-//! body's stack pointer that is not a constant, so a pointer established after all that gives the
-//! record nothing to count them from. Such a frame keeps the early order and is the one shape on
-//! Windows that still has no record, which is `tamnd/rucc#1422`.
+//! A realigned frame takes the late order too, the way clang lays one out for Windows. The early
+//! order forces the alignment after the pushes and before the frame, which leaves the pushes at a
+//! distance from the body's stack pointer that is not a constant, and the record has nothing to
+//! count them from. So the prologue does everything the record describes first, the pushes, the
+//! frame, the pointer and the vector saves, and only then rounds the stack pointer down. The record
+//! counts from the frame pointer and never sees the rounding. The body counts from the rounded
+//! stack pointer, and the epilogue puts the stack pointer back from the frame pointer before it
+//! does anything else. The vector saves go at the top of such a frame rather than the bottom,
+//! since the body's view of the frame moves down by up to the alignment and must not reach them.
+//! This was `tamnd/rucc#1422`.
 
 use rucc_mir::Func;
 use rucc_regalloc::Allocation;
@@ -286,10 +291,8 @@ impl Frame {
         let mut top = 0;
         let mut align = word;
         let mut saved_sse = Vec::with_capacity(vectors.len());
-        for reg in vectors {
+        if !vectors.is_empty() {
             align = align.max(vector);
-            saved_sse.push(Save { reg, at: offset(top) });
-            top += vector;
         }
 
         // A frame that grows hands out the bytes above the outgoing area, and what makes that
@@ -313,6 +316,20 @@ impl Frame {
                 &apart
             }
         };
+        // Normally they go at the bottom. In a frame that realigns with the pointer established
+        // late they go at the top instead, because the prologue stores them before it forces the
+        // alignment and the body counts from the stack pointer after it, which is anywhere up to
+        // the alignment lower. With the saves above everything the body reaches, the two never
+        // meet whichever way the rounding went. See `Late` above.
+        let wanted = plan.cells().iter().map(|cell| cell.align).max().unwrap_or(0);
+        let last = conv.late_frame_pointer && align.max(wanted) > conv.stack_align;
+        if !last {
+            for &reg in &vectors {
+                saved_sse.push(Save { reg, at: offset(top) });
+                top += vector;
+            }
+        }
+
         let mut cells = Vec::with_capacity(plan.cells().len());
         let mut order: Vec<usize> = (0..plan.cells().len()).collect();
         // Widest alignment first, so that placing each one straight after the last never leaves a
@@ -358,6 +375,13 @@ impl Frame {
             canary = Some(offset(top));
             top += word;
         }
+        if last {
+            top = top.next_multiple_of(vector);
+            for &reg in &vectors {
+                saved_sse.push(Save { reg, at: offset(top) });
+                top += vector;
+            }
+        }
 
         // A call reads its stack arguments from the stack pointer upward, so the outgoing area is
         // at the bottom of the frame and its size is what shifts everything else.
@@ -393,9 +417,9 @@ impl Frame {
             || realign.is_some()
             || layout.grows
             || (!layout.leaf && conv.link.is_some());
-        // Where in the prologue the pointer is established, which is the platform's answer except
-        // in the one frame that has an answer of its own. See `Late` above.
-        let late = conv.late_frame_pointer && realign.is_none();
+        // Where in the prologue the pointer is established, which is the platform's answer. See
+        // `Late` above.
+        let late = conv.late_frame_pointer;
 
         // Where the stack pointer sits once the prologue has finished pushing: one return address
         // short of aligned when the function starts, and one push further off for every push. The
@@ -417,13 +441,14 @@ impl Frame {
         let size = match realign {
             _ if free => 0,
             // Once the prologue has forced the alignment, keeping the frame a multiple of it keeps
-            // everything in the frame aligned too.
-            Some(to) => body.next_multiple_of(to),
+            // everything in the frame aligned too. A late pointer forces it after the frame is
+            // taken, so the frame itself only has to land where any other frame does.
+            Some(to) if !late => body.next_multiple_of(to),
             // A leaf owes nobody an aligned stack pointer, so it takes exactly what it uses.
             None if layout.leaf && align <= word && !aligned => body,
             // The smallest frame that lands the stack pointer back on a multiple of the alignment
             // given where the pushes left it.
-            None => body + (after + conv.stack_align - body % conv.stack_align) % conv.stack_align,
+            _ => body + (after + conv.stack_align - body % conv.stack_align) % conv.stack_align,
         };
 
         // With the stack pointer left where it was, the areas are the same areas in the same order
@@ -471,7 +496,7 @@ impl Frame {
                 // A pointer established late holds what the body's stack pointer holds, so the
                 // caller's stack is the whole frame and every push above it, which is the same
                 // number a frame with no pointer counts from the stack pointer.
-                () if late && layout.grows => {
+                () if late && (layout.grows || realign.is_some()) => {
                     Incoming::from_frame(offset(size + push * pushed + conv.return_address))
                 }
                 // The prologue saves the frame pointer before it does anything else and points it
@@ -635,8 +660,8 @@ impl Frame {
     }
 
     /// Whether the prologue points the frame pointer at the frame after taking it rather than
-    /// before, which is [`rucc_target::CallRegs::late_frame_pointer`] and the one frame that cannot
-    /// have it whatever the platform says. See `Late` in the module documentation.
+    /// before, which is [`rucc_target::CallRegs::late_frame_pointer`]. See `Late` in the module
+    /// documentation.
     #[must_use]
     pub fn late(&self) -> bool {
         self.late
@@ -1112,20 +1137,23 @@ mod tests {
     }
 
     #[test]
-    fn a_realigned_frame_on_windows_keeps_the_early_order_it_has_no_choice_about() {
+    fn a_realigned_frame_on_windows_takes_the_late_order_and_rounds_after_it() {
         let (func, allocation) = pressure(&WIN64, 2, 4);
         let locals = [Local { size: 64, align: 32 }];
         let base = Layout::new(&WIN64, REGS);
         let frame = Frame::of(&func, &allocation, &Layout { locals: &locals, ..base });
 
-        // Forcing the alignment leaves the pushes at no constant distance from anything, so the
-        // pointer has to go up before the mask and the platform's answer does not apply. Such a
-        // frame is described by nothing and the assembler refuses it by name, which is
-        // `tamnd/rucc#1422`.
+        // The pointer goes up after the frame as it does in any other frame here, and the rounding
+        // comes after that, so the record describes the frame and never sees the rounding. The
+        // caller's stack is the whole frame above the pointer, the pushes and the return address,
+        // since the pointer holds where the stack pointer was before it was rounded.
         assert_eq!(frame.realign(), Some(32));
         assert!(frame.frame_pointer());
-        assert!(!frame.late());
-        assert_eq!(frame.incoming(), Incoming::from_frame(16));
+        assert!(frame.late());
+        let pushes = 8 * (1 + u32::try_from(frame.saved_int().len()).unwrap()) + 8;
+        assert_eq!(frame.incoming(), Incoming::from_frame(offset(frame.size() + pushes)));
+        assert_eq!((frame.size() + pushes) % 16, 0);
+        assert!(frame.local(0).unwrap() % 32 == 0);
     }
 
     #[test]

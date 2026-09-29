@@ -713,8 +713,8 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Described, Error
             // from, and the frame it takes afterwards has no row at all, since from there on the
             // rules are counted from the pointer and the stack pointer moving no longer changes
             // them. A record without the frame in it is a record that unwinds to the wrong place, so
-            // it is refused instead. A realigned frame is the one that still arrives here, which is
-            // `tamnd/rucc#1422`.
+            // it is refused instead. Nothing this compiler writes for Windows arrives here any more,
+            // since a realigned frame takes the late order too, so this is the backstop.
             [(_, CfiOp::DefCfaRegister(_))] => {
                 let why = "a frame pointer established before the frame is taken";
                 return Err(frame(func, why.to_owned()));

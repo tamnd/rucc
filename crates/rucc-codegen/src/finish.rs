@@ -654,7 +654,7 @@ impl Writer<'_> {
             }
             self.saved(inst, int, reg, -below);
         }
-        if let Some(to) = frame.realign() {
+        if let Some(to) = frame.realign().filter(|_| !frame.late()) {
             // Nothing is written for this and nothing can be. After it the stack pointer is a
             // rounded-down version of where it was rather than a fixed distance from it, which is
             // exactly what a rule cannot say. It is also why a frame that realigns is a frame
@@ -692,9 +692,9 @@ impl Writer<'_> {
             // at all and the rule is left out rather than guessed. On SysV that costs nothing, since
             // it preserves no vector register for a prologue to save. On Windows it would be a save
             // with no row, and what stops that reaching an object file is that a realigned frame
-            // there keeps the early order and is refused whole by the unwind writer, which is
-            // `tamnd/rucc#1422`.
-            if frame.realign().is_none() {
+            // there takes the late order, where the saves happen before the alignment is forced
+            // and `below` is still the constant. See `Late` in [`crate::frame`].
+            if frame.realign().is_none() || frame.late() {
                 let above = if frame.grows() && !frame.late() {
                     push + offset(self.conv.return_address)
                 } else {
@@ -702,6 +702,13 @@ impl Writer<'_> {
                 };
                 self.saved(inst, sse, save.reg, save.at - above);
             }
+        }
+        // The alignment a late frame forces, once everything the record describes is done. No row,
+        // for the reason the early order has none, and none is needed: the address is counted from
+        // the frame pointer by now. The body counts from the stack pointer this leaves.
+        if let Some(to) = frame.realign().filter(|_| frame.late()) {
+            let and = self.opcode(self.insts.align);
+            out.push(self.arith(and, -i64::from(to)));
         }
         // Before the canary and after the frame, which is where gcc puts it. The hook reads the
         // frame pointer to find out who called this function, so it has to run once there is one,
@@ -1155,10 +1162,17 @@ impl Writer<'_> {
             + offset(push) * self.pushes(frame)
             + offset(frame.size());
         let from_sp = !frame.frame_pointer();
+        // A late frame that forced its alignment has the stack pointer somewhere below where the
+        // prologue left it, and the frame pointer holds where that was. Putting it back first makes
+        // the rest of this the epilogue of any other late frame.
+        if frame.late() && frame.realign().is_some() {
+            let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
+            out.push(self.two(mov, sp, fp));
+        }
         for save in frame.saved_sse() {
             let inst = self.load(sse, save.reg, save.at);
             out.push(inst);
-            if frame.realign().is_none() {
+            if frame.realign().is_none() || frame.late() {
                 self.restored(inst, sse, save.reg);
             }
         }
@@ -2071,6 +2085,38 @@ mod tests {
                 "x64.mov_mr_64 $rsi, [$rsp + 32]",
                 "$rsi = x64.mov_rm_64 [$rsp + 32]",
                 "$rsp = x64.lea_64 [$rbp + 48]",
+                "$rsi = x64.pop_64",
+                "$rbx = x64.pop_64",
+                "$rbp = x64.pop_64",
+                "x64.ret",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_realigned_windows_frame_forces_the_alignment_after_the_prologue() {
+        let (mut func, allocation, mut names) = pressure(&WIN64, 9, 8);
+        let locals = [Local { size: 64, align: 32 }];
+        let base = Layout::new(&WIN64, REGS);
+        let layout = Layout { leaf: false, locals: &locals, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+
+        // The late order the record can describe, and the rounding after all of it, which is
+        // clang's shape for the same frame. The epilogue puts the stack pointer back from the frame
+        // pointer before it does anything else, and from there it is any other late epilogue.
+        assert_eq!(
+            added(&lines),
+            [
+                "x64.push_64 $rbp",
+                "x64.push_64 $rbx",
+                "x64.push_64 $rsi",
+                "$rsp = x64.sub_ri_64 $rsp, 112",
+                "$rbp = x64.mov_rr_64 $rsp",
+                "$rsp = x64.and_ri_64 $rsp, -32",
+                "x64.mov_mr_64 $rsi, [$rsp + 96]",
+                "$rsi = x64.mov_rm_64 [$rsp + 96]",
+                "$rsp = x64.mov_rr_64 $rbp",
+                "$rsp = x64.lea_64 [$rbp + 112]",
                 "$rsi = x64.pop_64",
                 "$rbx = x64.pop_64",
                 "$rbp = x64.pop_64",
