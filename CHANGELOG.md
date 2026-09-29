@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- Thread-local variables on AArch64 Windows, found from the TEB in x18 through `_tls_index` and the thread's array of `.tls` copies with the `:secrel_hi12:` and `:secrel_lo12:` relocations, the same instructions clang writes. (#2071)
 - A file-scope `register T *x asm("x18")` on AArch64 is read as the register, which is how mingw-w64's `winnt.h` declares the TEB for `NtCurrentTeb`, and `tests/exec/windows/x18.sh` checks that nothing rung 0 compiles for Windows on ARM64 writes x18 or w18. Any other global register variable is still refused. (#2071)
 
 ### Fixed

@@ -94,6 +94,34 @@ pub struct Symbols {
     /// How a Windows thread finds its copy of a thread-local variable, where this machine has
     /// been taught. See [`Indexed`].
     pub indexed: Option<Indexed>,
+    /// The same on a machine that keeps the TEB in a register rather than a segment, which is
+    /// AArch64. See [`Teb`].
+    pub teb: Option<Teb>,
+}
+
+/// The instructions a thread-local variable is reached with on Windows on AArch64.
+///
+/// The same walk as [`Indexed`], from the TEB Windows keeps in `x18` rather than in a segment,
+/// and the six instructions clang writes for it.
+///
+/// ```text
+/// adrp x8, _tls_index
+/// ldr  w8, [x8, :lo12:_tls_index]
+/// ldr  x9, [x18, #88]
+/// ldr  x8, [x9, x8, lsl #3]
+/// add  x8, x8, :secrel_hi12:x, lsl #12
+/// add  x0, x8, :secrel_lo12:x
+/// ```
+#[derive(Debug)]
+pub struct Teb {
+    /// The first two, which read `_tls_index`, carrying it as its symbol.
+    pub index: &'static str,
+    /// The third, which reads the array out of the TEB.
+    pub array: &'static str,
+    /// The rest, which read this thread's block out of the array with the index and add the
+    /// variable's offset in its section, carrying the variable as its symbol. It takes the array
+    /// and the index as its two sources, in that order.
+    pub block: &'static str,
 }
 
 /// The instructions a thread-local variable is reached with on Windows.

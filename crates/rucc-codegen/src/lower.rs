@@ -2974,6 +2974,9 @@ impl<'a> Lowering<'a> {
         symbol: Symbol,
         result: Value,
     ) -> Result<(), Unsupported> {
+        if let Some(teb) = self.selector.symbols.teb.as_ref() {
+            return self.thread_from_teb(inst, teb, symbol, result);
+        }
         let Some(indexed) = self.selector.symbols.indexed.as_ref() else {
             return Err(Unsupported::Unported { inst: Some(inst), what: Unported::Thread });
         };
@@ -3000,6 +3003,41 @@ impl<'a> Lowering<'a> {
         let add = self.named(indexed.add);
         let mem = mir::Mem::section(mir::Operand::read(copy, gpr), symbol);
         self.out.build(block, add).at(span).def(reg, gpr).mem(mem).finish();
+        Ok(())
+    }
+
+    /// [`Self::thread_indexed`] on AArch64, where the TEB is in `x18`. See [`crate::select::Teb`]
+    /// for the instructions, which are the ones clang writes.
+    fn thread_from_teb(
+        &mut self,
+        inst: Inst,
+        teb: &crate::select::Teb,
+        symbol: Symbol,
+        result: Value,
+    ) -> Result<(), Unsupported> {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+
+        let slot = self.out.new_vreg(gpr);
+        let tls_index = self.names.intern("_tls_index");
+        let index = self.named(teb.index);
+        self.out.build(block, index).at(span).def(slot, gpr).symbol(tls_index).finish();
+
+        let array = self.out.new_vreg(gpr);
+        let load = self.named(teb.array);
+        self.out.build(block, load).at(span).def(array, gpr).finish();
+
+        let reg = self.new_reg(result);
+        let add = self.named(teb.block);
+        self.out
+            .build(block, add)
+            .at(span)
+            .operand(mir::Operand::write(reg, gpr))
+            .operand(mir::Operand::read(array, gpr))
+            .operand(mir::Operand::read(slot, gpr))
+            .symbol(symbol)
+            .finish();
         Ok(())
     }
 

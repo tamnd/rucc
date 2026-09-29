@@ -27,6 +27,7 @@ pub static SELECTOR: super::Selector = super::Selector {
         thread: super::Reach::Own("gottprel_64"),
         pointer: super::Pointer::Own("thread_64"),
         indexed: None,
+        teb: Some(super::Teb { index: "ldr_sym_32", array: "teb_64", block: "secrel_64" }),
     },
     jumps: &super::Jumps {
         near: "adr_64",

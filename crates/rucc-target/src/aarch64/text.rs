@@ -33,8 +33,9 @@ use crate::aarch64::read::system_field;
 use crate::named;
 
 use Arg::{
-    At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, Mem, Near, Page,
-    Pop, Push, Reg, Symbol, Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
+    At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Mem, Near,
+    Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Teb, Thread, Through, TlsPage,
+    TlsSlot, TprelHi, TprelLo, Vector,
 };
 use Scalar::{D, Q, S};
 use Width::{W, X};
@@ -89,6 +90,19 @@ pub enum Arg {
     TprelHi,
     /// The low twelve bits of the same offset.
     TprelLo,
+    /// The instruction's symbol, read from the page in the register the operand at that index
+    /// was given, which is a load from a symbol this image defines.
+    LowSlot(u8),
+    /// That many bytes into the thread's TEB, which Windows keeps in `x18`.
+    Teb(u8),
+    /// The word the register of the first index was given plus eight times the register of the
+    /// second, which is a slot in an array of pointers.
+    Scaled(u8, u8),
+    /// Bits twelve to twenty three of the offset of the instruction's symbol in its section,
+    /// which is how far a Windows thread-local variable is into the thread's copy of `.tls`.
+    SecrelHi,
+    /// The low twelve bits of the same offset.
+    SecrelLo,
     /// The register that holds the thread pointer.
     Thread,
     /// Sixteen bytes below the stack pointer, moving the stack pointer there first.
@@ -479,6 +493,20 @@ static TEXT: &[(&str, &[Written])] = &[
         &[spell("adrp", &[Reg(0, X), TlsPage]), spell("ldr", &[Reg(0, X), TlsSlot(0)])],
     ),
     ("thread_64", &[spell("mrs", &[Reg(0, X), Thread])]),
+    // Windows. A thread-local variable is in this thread's copy of the image's `.tls` section, the
+    // copy is the slot `_tls_index` names in the array the TEB holds at 88, and the variable is as
+    // far into the copy as it is into the section. The three are the six instructions clang
+    // writes, split where a register is handed from one to the next.
+    ("ldr_sym_32", &[spell("adrp", &[Reg(0, X), Page]), spell("ldr", &[Reg(0, W), LowSlot(0)])]),
+    ("teb_64", &[spell("ldr", &[Reg(0, X), Teb(88)])]),
+    (
+        "secrel_64",
+        &[
+            spell("ldr", &[Reg(0, X), Scaled(1, 2)]),
+            spell("add", &[Reg(0, X), Reg(0, X), SecrelHi, Arg::Shift(Shift::Lsl, 12)]),
+            spell("add", &[Reg(0, X), Reg(0, X), SecrelLo]),
+        ],
+    ),
     (
         "tls_64",
         &[
@@ -983,7 +1011,8 @@ pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
         for arg in inst.args {
             let bits = match *arg {
                 Reg(at, width) if at == operand => width.bits(),
-                GotSlot(at) | TlsSlot(at) | At(at) if at == operand => 64,
+                GotSlot(at) | TlsSlot(at) | LowSlot(at) | At(at) if at == operand => 64,
+                Scaled(base, index) if base == operand || index == operand => 64,
                 Fp(at, _) | Vector(at) if at == operand => return None,
                 _ => continue,
             };
@@ -1068,6 +1097,21 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         }),
         TprelHi => Value::Symbol(Operator::TprelHi12),
         TprelLo => Value::Symbol(Operator::TprelLo12Nc),
+        LowSlot(at) => Value::Mem(Addr {
+            base: reg(at)?,
+            offset: Offset::Symbol(Operator::Lo12),
+            mode: Mode::Offset,
+        }),
+        Teb(at) => {
+            Value::Mem(Addr { base: 18, offset: Offset::Imm(i64::from(at)), mode: Mode::Offset })
+        }
+        Scaled(base, index) => Value::Mem(Addr {
+            base: reg(base)?,
+            offset: Offset::Reg { reg: reg(index)?, extend: Extend::Uxtx, amount: Some(3) },
+            mode: Mode::Offset,
+        }),
+        SecrelHi => Value::Symbol(Operator::SecrelHi12),
+        SecrelLo => Value::Symbol(Operator::SecrelLo12),
         Thread => Value::System(TPIDR_EL0),
         Push => Value::Mem(Addr { base: 31, offset: Offset::Imm(-16), mode: Mode::Pre }),
         Pop => Value::Mem(Addr { base: 31, offset: Offset::Imm(16), mode: Mode::Post }),
@@ -1102,7 +1146,14 @@ mod tests {
             for inst in written(name).unwrap() {
                 for arg in inst.args {
                     let (at, class) = match *arg {
-                        Reg(at, _) | GotSlot(at) | TlsSlot(at) | At(at) => (at, GPR),
+                        Reg(at, _) | GotSlot(at) | TlsSlot(at) | LowSlot(at) | At(at) => (at, GPR),
+                        Scaled(base, index) => {
+                            for at in [base, index] {
+                                let operand = operands.get(usize::from(at));
+                                assert_eq!(operand.map(|op| op.class), Some(GPR), "{name} {at}");
+                            }
+                            continue;
+                        }
                         Fp(at, _) | Vector(at) => (at, FPR),
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
@@ -1207,6 +1258,16 @@ mod tests {
             ["adrp x0, :gottprel:s", "ldr x0, [x0, :gottprel_lo12:s]"]
         );
         assert_eq!(listing("thread_64", &with), ["mrs x0, tpidr_el0"]);
+        assert_eq!(listing("ldr_sym_32", &with), ["adrp x0, s", "ldr w0, [x0, :lo12:s]"]);
+        assert_eq!(listing("teb_64", &with), ["ldr x0, [x18, #88]"]);
+        assert_eq!(
+            listing("secrel_64", &with),
+            [
+                "ldr x0, [x1, x2, lsl #3]",
+                "add x0, x0, :secrel_hi12:s, lsl #12",
+                "add x0, x0, :secrel_lo12:s"
+            ]
+        );
         assert_eq!(
             listing("tls_64", &with),
             [
