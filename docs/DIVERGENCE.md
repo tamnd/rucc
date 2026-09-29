@@ -17,6 +17,7 @@ Each entry says what was run, on what, and what the difference was. A divergence
 | rucc's own suite | x86-64 Linux hardware, in CI | the compiler works on the one target it emits code for |
 | `cargo xtask abi-differential`, four builds | x86-64 Linux hardware, in CI | rucc and the reference agree about the calling convention there |
 | `cargo xtask abi-differential`, four builds | x86-64 under qemu, in a container, on an arm64 developer machine | the same, and this is where the emulator was measured |
+| `cargo xtask abi-differential --target x86_64-windows-gnu`, nine builds | under Wine on x86-64 Linux, and natively on a `windows-2025` runner, in CI | rucc and MinGW GCC agree about the Microsoft x64 convention, and the native run is the one that settles anything Wine might be hiding |
 | `bin/run-corpus` in tamnd/rucc-cross | four musl rows under qemu, and the runner's own row on hardware | the reference and the emulator agree about the corpus there |
 | `bin/run-abi-signatures` in tamnd/rucc-cross | the same rows | the signature corpus is a program that runs, on those architectures |
 

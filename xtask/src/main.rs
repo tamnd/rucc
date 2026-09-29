@@ -67,7 +67,8 @@ tasks:
   abi-signatures    regenerate tests/abi-signatures, or check it with --check
   link-lines        regenerate tests/link-lines from rucc-sysroot, or check it with --check
   provenance        regenerate PROVENANCE from the tables, or check it with --check
-  abi-differential  compile the signature corpus with both compilers in both directions and run it
+  abi-differential  compile the signature corpus with both compilers in both directions and run it,
+                    for this machine or for --target x86_64-windows-gnu against MinGW GCC
   builtins          compile the C runtime support routines into a static library for a target
   builtins-diff     hold the C runtime routines against the Rust reference over the same cases
   builtins-bench    time the four block routines against the C library's own
@@ -128,7 +129,9 @@ fn main() -> ExitCode {
         Some("link-lines") => link_lines(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("provenance") => provenance(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-signatures") => abi_signatures(&std::env::args().skip(2).collect::<Vec<_>>()),
-        Some("abi-differential") => differential::differential(),
+        Some("abi-differential") => {
+            differential::differential(&std::env::args().skip(2).collect::<Vec<_>>())
+        }
         Some("builtins") => builtins(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("builtins-diff") => builtins_diff::builtins_diff(),
         Some("builtins-bench") => {

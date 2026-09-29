@@ -379,11 +379,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.2
-      - name: install lld 19 and wine
+      - name: install lld 19, wine and MinGW GCC
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
-          sudo apt-get install -y lld-19 wine64
+          sudo apt-get install -y lld-19 wine64 gcc-mingw-w64-x86-64
           /usr/lib/wine/wine64 --version
+          x86_64-w64-mingw32-gcc --version | head -1
       - name: build rucc, the sysroot and the runtime
         run: |
           cargo build --release --bin rucc
@@ -394,6 +395,13 @@ jobs:
           WINEDEBUG: -all
           WINEPREFIX: ${{ runner.temp }}/wine
         run: tests/exec/windows/run.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" /usr/lib/wine/wine64
+      # Layer 6 of spec/cross-compile/14-testing.md for this row: the signature corpus with rucc
+      # on one side of every call and MinGW GCC on the other, both ways round, run under Wine.
+      - name: the differential abi against MinGW GCC
+        env:
+          WINEDEBUG: -all
+          WINEPREFIX: ${{ runner.temp }}/wine
+        run: cargo xtask abi-differential --target x86_64-windows-gnu
       - name: hash the objects
         run: tests/exec/windows/objects.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" > objects-linux.txt
       - uses: actions/upload-artifact@v7.0.1
@@ -456,6 +464,7 @@ jobs:
           path: objects-windows.txt
           retention-days: 7
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: MINGW64
           update: false
@@ -463,6 +472,16 @@ jobs:
       - name: run tests/exec/windows with MinGW GCC
         shell: msys2 {0}
         run: tests/exec/windows/run.sh gcc
+      # The same differential the wine job runs, with nothing between the programs and Windows.
+      # MSYS2's gcc is named outright, and its bin directory goes on the end of PATH rather than
+      # the front, because the compiler's own programs load their DLLs from there and nothing in it
+      # should stand in for what the runner already has.
+      - name: the differential abi against MinGW GCC
+        env:
+          RUCC_ABI_CC: ${{ steps.msys2.outputs.msys2-location }}\mingw64\bin\gcc.exe
+        run: |
+          PATH="$PATH:$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
+          cargo xtask abi-differential --target x86_64-windows-gnu
 
   # rucc on Windows and rucc on Linux have to write the same object for the same source and
   # target. The two jobs above each hash what they wrote and this compares the lists.
