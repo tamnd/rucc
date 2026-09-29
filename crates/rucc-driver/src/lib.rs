@@ -1096,6 +1096,32 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let v = &arg["-fms-compatibility-version=".len()..];
                 opts.msc = v.parse().map_err(err)?;
             }
+            // Which of Microsoft's C runtimes an MSVC row links against, in clang's spelling of
+            // `cl.exe`'s `/MT` and `/MD`. The headers are told through `_DLL` and the link through
+            // the libraries it names, so it is both a compile flag and a link one. The two debug
+            // runtimes are refused by name rather than taken as the release ones, since what they
+            // link is a different set of libraries and a program that asked for one wants its
+            // checks.
+            _ if arg.starts_with("-fms-runtime-lib=") => {
+                let dll = match &arg["-fms-runtime-lib=".len()..] {
+                    "static" => false,
+                    "dll" => true,
+                    debug @ ("static_dbg" | "dll_dbg") => {
+                        return Err(err(format!(
+                            "-fms-runtime-lib={debug} asks for Microsoft's debug C runtime, which \
+                             this compiler does not link against yet. static and dll are the two \
+                             it has"
+                        )));
+                    }
+                    other => {
+                        return Err(err(format!(
+                            "-fms-runtime-lib= takes static or dll, and `{other}` is neither"
+                        )));
+                    }
+                };
+                opts.ms_dll_runtime = dll;
+                link.crt = if dll { rucc_sysroot::Crt::Dll } else { rucc_sysroot::Crt::Static };
+            }
             // spec/13-gnu-compat.md section 13.3 promises this flag an error that says why rather
             // than the unknown option one, because a build reaching for it is asking for a feature
             // and deserves to be told it is not coming rather than told the spelling is wrong.
@@ -5440,6 +5466,22 @@ mod tests {
         // `-dumpversion` is a different flag that happens to start the same way, and it is read
         // as itself rather than as a dump of nothing.
         assert_eq!(printed(&["-dumpversion", "a.c"]), "16");
+    }
+
+    #[test]
+    fn the_msvc_runtime_is_a_compile_flag_and_a_link_one() {
+        let (link, _) = linking(&["a.c"]);
+        assert_eq!(link.crt, rucc_sysroot::Crt::Static);
+        let (link, _) = linking(&["-fms-runtime-lib=dll", "a.c"]);
+        assert_eq!(link.crt, rucc_sysroot::Crt::Dll);
+        let (opts, _) = compile(&["-fms-runtime-lib=dll", "-c", "a.c"]);
+        assert!(opts.ms_dll_runtime);
+        let (opts, _) = compile(&["-fms-runtime-lib=dll", "-fms-runtime-lib=static", "-c", "a.c"]);
+        assert!(!opts.ms_dll_runtime, "the last one wins");
+        let e = parse_args(&args(&["-fms-runtime-lib=dll_dbg", "a.c"])).unwrap_err();
+        assert!(e.message.contains("debug"), "{}", e.message);
+        let e = parse_args(&args(&["-fms-runtime-lib=shared", "a.c"])).unwrap_err();
+        assert!(e.message.contains("static or dll"), "{}", e.message);
     }
 
     #[test]

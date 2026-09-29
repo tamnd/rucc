@@ -133,6 +133,29 @@ pub fn libc(target: TargetTuple) -> Libc {
     }
 }
 
+/// Which of Microsoft's two C runtimes a program in the MSVC environment is linked against.
+///
+/// `cl.exe` spells the choice `/MT` and `/MD`, and here it is `-fms-runtime-lib=static` and
+/// `-fms-runtime-lib=dll`, which is clang's spelling. Two sets of libraries and two macros: the
+/// headers read `_MT` for both and `_DLL` only for the second, and that is how a header knows its
+/// functions are imported from a DLL rather than linked into the program.
+///
+/// The static one is the default, which is the opposite of `cl.exe`, and the reason is the machine
+/// the program is copied to. The universal CRT is part of Windows 10 and later, but the Visual C++
+/// runtime is not: `vcruntime140.dll` arrives with the redistributable, and a program linked `/MD`
+/// on a machine that never installed it does not start. A program linked `/MT` carries both and
+/// starts anywhere, which is what the mingw-w64 rows give without being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Crt {
+    /// `/MT`: `libcmt.lib`, `libucrt.lib` and `libvcruntime.lib`, all three linked into the
+    /// program.
+    #[default]
+    Static,
+    /// `/MD`: `msvcrt.lib`, `ucrt.lib` and `vcruntime.lib`, which are import libraries for
+    /// `ucrtbase.dll` and `vcruntime140.dll` with the startup code in the first of them.
+    Dll,
+}
+
 /// Our own runtime library, which every one of the three lines below carries.
 ///
 /// Named once because three callers ask about it by name: the line that puts it on,
@@ -190,6 +213,9 @@ impl LinkLine {
             Libc::None => LinkLine::freestanding(builtins),
             Libc::Archive => LinkLine::musl(sysroot, mode, builtins),
             Libc::Stub => LinkLine::glibc(sysroot, mode, builtins),
+            Libc::Import if sysroot.target().env() == Env::Msvc => {
+                LinkLine::msvc(Crt::Static, builtins)
+            }
             Libc::Import => LinkLine::mingw(sysroot, mode, builtins),
         }
     }
@@ -342,6 +368,36 @@ impl LinkLine {
         let mut libraries: Vec<PathBuf> = theirs.iter().map(|name| lib.join(name)).collect();
         libraries.extend(ours(builtins));
         LinkLine { start: vec![lib.join(start)], libraries, end: Vec::new() }
+    }
+
+    /// The line for a program in Microsoft's environment, linked against the CRT `crt` names.
+    ///
+    /// No start file, because the one Microsoft ships is not a file of its own. `mainCRTStartup` is
+    /// a member of `libcmt.lib`, or of `msvcrt.lib` for the other runtime, and the linker picks it
+    /// as the entry point because the program defines `main`, so the start of the program is left
+    /// to the CRT the way `cl.exe` leaves it. The mode is not a parameter for the same reason: a
+    /// DLL is started by `_DllMainCRTStartup`, which is in the same libraries.
+    ///
+    /// Names rather than paths, which is where this differs from every other line here. The tree
+    /// keeps the CRT in `crt/lib` and the SDK's libraries in two directories of `sdk/lib`, and
+    /// [`crate::argv`] names those directories to the linker, which is how `lld-link` and
+    /// `link.exe` both look for a library and how a `-L` of the user's own gets in front of ours.
+    ///
+    /// `kernel32.lib` because the CRT calls into it and says so only in a directive, and
+    /// `oldnames.lib` because it is what makes `open` and `strdup` mean `_open` and `_strdup`,
+    /// which a C program written for anything but Windows calls by the old names. Ours goes last,
+    /// the same as on the mingw-w64 line, so that the CRT answers for everything it has.
+    #[must_use]
+    pub fn msvc(crt: Crt, builtins: Option<&Path>) -> Self {
+        let theirs = match crt {
+            Crt::Static => ["libcmt.lib", "libucrt.lib", "libvcruntime.lib"],
+            Crt::Dll => ["msvcrt.lib", "ucrt.lib", "vcruntime.lib"],
+        };
+        let mut libraries: Vec<PathBuf> = theirs.iter().map(PathBuf::from).collect();
+        libraries.push(PathBuf::from("kernel32.lib"));
+        libraries.push(PathBuf::from("oldnames.lib"));
+        libraries.extend(ours(builtins));
+        LinkLine { start: Vec::new(), libraries, end: Vec::new() }
     }
 
     /// Every input, in the order they reach the linker, with the caller's objects in the middle.

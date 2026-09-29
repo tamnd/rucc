@@ -43,20 +43,13 @@ use rucc_sysroot::msvc::Chip;
 /// surface of the kit. See this module's note for the two that are not here.
 const PARTS: [&str; 3] = ["ucrt", "um", "shared"];
 
-/// How the tree spells an architecture in a directory name.
+/// How the tree spells an architecture in a directory name, which is [`Chip::in_tree`].
 ///
-/// LLVM's names rather than Microsoft's, because that is what `xwin` produces and the tree is the
-/// one it produces. So a target that was fetched with `xwin` and one that was fetched with this
-/// both answer to the same `--sysroot`, and the `x64` in Microsoft's own package names stays in
-/// the packages where a person reading a manifest would go looking for it.
+/// A function here as well, because this module is the one place that knows the tree's shape and
+/// its callers ask it rather than the chip.
 #[must_use]
 pub const fn in_tree(chip: Chip) -> &'static str {
-    match chip {
-        Chip::X86 => "x86",
-        Chip::X64 => "x86_64",
-        Chip::Arm => "aarch",
-        Chip::Arm64 => "aarch64",
-    }
+    chip.in_tree()
 }
 
 /// Where a member of a Visual C++ package goes, or [`None`] for one the tree does not want.

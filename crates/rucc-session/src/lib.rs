@@ -2307,6 +2307,12 @@ pub struct Options {
     pub gnuc_given: bool,
     /// The MSVC release claimed on an MSVC row, from `-fms-compatibility-version=`.
     pub msc: MscVersion,
+    /// Whether an MSVC row is built against the C runtime in a DLL, which is
+    /// `-fms-runtime-lib=dll` and `cl.exe`'s `/MD`, rather than the static one, which is `/MT`.
+    ///
+    /// The headers are told through `_DLL`, which is how they know to declare the runtime's
+    /// functions as imported, and the link is told which three libraries to name.
+    pub ms_dll_runtime: bool,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
     /// Whether a call to a C library function written under its own plain name may be taken to
@@ -2534,6 +2540,7 @@ impl Options {
             gnuc: GnucVersion::default(),
             gnuc_given: false,
             msc: MscVersion::default(),
+            ms_dll_runtime: false,
             hosted: true,
             builtins: true,
             no_builtin: Vec::new(),

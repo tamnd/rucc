@@ -150,6 +150,22 @@ impl Chip {
             Chip::Arm64 => "arm64",
         }
     }
+
+    /// How the tree `--sysroot` reads spells it in a directory name.
+    ///
+    /// LLVM's names rather than Microsoft's, because that is what `xwin` produces and the tree is
+    /// the one it produces. So a target that was fetched with `xwin` and one that was fetched with
+    /// this both answer to the same `--sysroot`, and the `x64` in Microsoft's own package names
+    /// stays in the packages where a person reading a manifest would go looking for it.
+    #[must_use]
+    pub const fn in_tree(self) -> &'static str {
+        match self {
+            Chip::X86 => "x86",
+            Chip::X64 => "x86_64",
+            Chip::Arm => "aarch",
+            Chip::Arm64 => "aarch64",
+        }
+    }
 }
 
 /// What the channel manifest says, which is the entry point and nothing else.

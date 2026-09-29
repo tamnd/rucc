@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use rucc_sysroot::argv::{Invocation, argv};
 use rucc_sysroot::link::{glibc_loader, libc, loader, musl_loader};
-use rucc_sysroot::{Libc, LinkLine, LinkMode, Sysroot};
+use rucc_sysroot::{Crt, Libc, LinkLine, LinkMode, Sysroot};
 use rucc_tuple::TargetTuple;
 
 /// The target with this spelling.
@@ -214,6 +214,30 @@ fn a_windows_line_is_one_start_file_and_a_set_of_libraries_rather_than_one() {
             "libkernel32.a",
             "librucc_builtins.a",
         ]
+    );
+}
+
+#[test]
+fn an_msvc_line_is_the_crt_the_program_asked_for_with_no_start_file_of_its_own() {
+    // `mainCRTStartup` is a member of the CRT's library rather than a file beside it, so the start
+    // is empty and the libraries are the whole of it. `/MT` unless the caller says otherwise.
+    let line =
+        LinkLine::for_target(&sysroot("x86_64-windows-msvc"), LinkMode::Dynamic, Some(&builtins()));
+    assert!(line.start.is_empty() && line.end.is_empty());
+    let statically = [
+        "libcmt.lib",
+        "libucrt.lib",
+        "libvcruntime.lib",
+        "kernel32.lib",
+        "oldnames.lib",
+        "librucc_builtins.a",
+    ];
+    assert_eq!(names(&line.libraries), statically);
+    assert_eq!(LinkLine::msvc(Crt::Static, Some(&builtins())), line);
+    let dll = LinkLine::msvc(Crt::Dll, None);
+    assert_eq!(
+        names(&dll.libraries),
+        ["msvcrt.lib", "ucrt.lib", "vcruntime.lib", "kernel32.lib", "oldnames.lib"]
     );
 }
 

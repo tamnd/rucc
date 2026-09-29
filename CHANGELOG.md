@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The builtins archive for the `*-windows-msvc` rows has `__chkstk`, the stack probe codegen already calls there for a frame over a page, next to `___chkstk_ms` in the mingw archive. It touches each page from the stack pointer down by `rax` bytes, keeps every register but `r10` and `r11`, and leaves `rsp` alone, as Microsoft's does, so a program linked with `-nostdlib` has one too.
+- The `x86_64-windows-msvc` and `aarch64-windows-msvc` rows link with `lld-link`, or `link.exe` when that is what is installed, against the tree `--sysroot` names, which is what `rucc --fetch-msvc-sdk` lays out. The C runtime is linked statically by default (`libcmt.lib`, `libucrt.lib` and `libvcruntime.lib`), since `vcruntime140.dll` is not part of Windows, and `-fms-runtime-lib=dll` picks the DLL one (`msvcrt.lib`, `ucrt.lib` and `vcruntime.lib`) as in clang. `_MT` is predefined on these rows and `_DLL` with the DLL runtime. A program is a console one with the CRT's `mainCRTStartup` as its entry, `-mwindows` makes it a GUI one, and `-shared` makes a DLL. The debug runtimes are refused for now. `tests/link-lines` records the lines.
 
 ### Changed
 
