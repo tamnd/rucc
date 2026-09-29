@@ -373,7 +373,8 @@ block1:
 
 block2:
     unreachable_hint
-    unreachable
+    %4 = iconst.i32 0
+    return %4
 }
 
 func @promised_early(i32) -> i32, linkage(external) {

@@ -6255,6 +6255,20 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call\tg") && !text.contains("jmp\tg"), "{text}");
     }
 
+    /// Falling off the end of a function that returns a value comes back to the caller, since C
+    /// only makes it undefined to use the value. `execute/20020404-1.c` calls two such functions
+    /// for what they do and lost everything after the first of them at `-O2`.
+    #[test]
+    fn a_call_to_a_function_that_falls_off_its_end_comes_back() {
+        let text = optimized(concat!(
+            "int calls;\n",
+            "__attribute__((noinline)) static int no_answer(int x) { calls += x; }\n",
+            "void after(void);\n",
+            "void f(void) { no_answer(1); after(); }\n",
+        ));
+        assert!(text.contains("call\tafter") || text.contains("jmp\tafter"), "{text}");
+    }
+
     /// A library builtin is the library function of the same name, and the call says so.
     ///
     /// A program writes `__builtin_strlen` rather than `strlen` to reach the function the C
@@ -9081,7 +9095,9 @@ block2(%7: i1):
     fn falling_off_the_end_returns_zero_from_main_and_nothing_from_a_void_function() {
         assert!(body("int main(void) { }\n").contains("iconst.i32 0\n    return"));
         assert_eq!(body("void f(void) { }\n"), "block0:\n    return\n");
-        assert!(body("int f(void) { }\n").contains("unreachable"));
+        // Any other function comes back as well, with a zero, since only using the value is
+        // undefined and a call made for what it does has to return to its caller.
+        assert!(body("int f(void) { }\n").contains("iconst.i32 0\n    return"));
     }
 
     #[test]

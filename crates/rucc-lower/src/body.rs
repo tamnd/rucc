@@ -2995,20 +2995,17 @@ impl<'u> Body<'_, 'u> {
             self.at = None;
             return;
         }
-        let name = self.tast()[decl].name;
-        let main = name.is_some_and(|name| self.unit.names.resolve(name) == "main");
-        if main {
-            // 5.1.2.2.3: reaching the closing brace of `main` returns zero.
-            let ty = self.func.signature().returns[0].ty;
-            let zero = self.build(span).iconst(ty, 0);
-            self.leave_hook(span);
-            self.build(span).ret(&[zero]);
-            self.at = None;
-            return;
-        }
-        // Falling off the end of a function that returns something and then using the value is
-        // undefined, so there is nothing to return and nothing to invent.
-        self.build(span).unreachable();
+        // Falling off the end of a function that returns something is not undefined in C, only
+        // using the value is (6.9.1p12), so the call has to come back. What it gives back is
+        // zero, since there is nothing else to give. An `unreachable` here used to tell the
+        // optimizer that no call to it ever returns, and `execute/20020404-1.c`, which calls
+        // two such functions for what they do and ignores what they give, lost everything
+        // after the first of them, the `exit (0)` included. For `main` zero is what 5.1.2.2.3
+        // asks for as well.
+        let returns: Vec<Type> = self.func.signature().returns.iter().map(|ret| ret.ty).collect();
+        let values: Vec<Value> = returns.into_iter().map(|ty| self.poison(ty, span)).collect();
+        self.leave_hook(span);
+        self.build(span).ret(&values);
         self.at = None;
     }
 
