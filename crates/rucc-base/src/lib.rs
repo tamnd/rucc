@@ -34,6 +34,7 @@
 mod decimal;
 pub mod dfp;
 pub mod float;
+pub mod hash;
 pub mod index;
 pub mod intern;
 pub mod rules;

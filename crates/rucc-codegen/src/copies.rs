@@ -145,9 +145,8 @@
 //!
 //! Nothing crosses a block, on either half.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir::{Block, Func, Inst, Opcode, Reg};
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::Edit;
@@ -269,10 +268,11 @@ fn copy(
 /// one.
 #[derive(Debug, Default)]
 struct Holds {
-    /// What is in each place, by the class it is a place of and the place itself. A class is in
-    /// the key because a register is a number inside its class and a slot is a slot of one, so
-    /// number four of one file and number four of another are two places.
-    what: HashMap<(u8, Place), u32>,
+    /// What is in each place, by the class it is a place of and the place itself, hashed with
+    /// [`rucc_base::hash::Mix`] because this is asked about every register every instruction
+    /// writes. A class is in the key because a register is a number inside its class and a slot
+    /// is a slot of one, so number four of one file and number four of another are two places.
+    what: Map<(u8, Place), u32>,
     /// How many values have been named, so the next one is a number no other place holds.
     named: u32,
 }
@@ -289,8 +289,8 @@ impl Holds {
     /// than one does.
     ///
     /// Lowest numbered rather than whichever the map hands back first, because the map is a hash
-    /// map and which entry comes out of one first is a fact about addresses. Reading it would make
-    /// the assembly of one input differ between two runs of the compiler.
+    /// map and which entry comes out of one first is a fact about the hash rather than the input.
+    /// Reading it would tie the assembly to how the map happens to hash.
     fn register(&self, class: RegClass, place: Place) -> Option<PhysReg> {
         let value = *self.what.get(&(class.number(), place))?;
         self.what

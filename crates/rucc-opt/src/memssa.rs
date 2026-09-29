@@ -88,8 +88,8 @@
 //! are better fixed than cached around.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
 
+use rucc_base::hash::Set;
 use rucc_ir::{Block, BlockCall, Def, Flags, Func, Inst, InstData, MemOrder, Opcode, Type, Value};
 
 use crate::alias::{Access, Alias, Answer, Options};
@@ -541,37 +541,13 @@ pub struct Walk<'a> {
     seen: Seen,
 }
 
-/// A set of versions of memory, hashed by multiplying the index rather than by SipHash.
+/// A set of versions of memory, hashed with [`rucc_base::hash::Mix`] rather than SipHash.
 ///
 /// A walk starts one of these for every load it is asked about and puts every version it passes
 /// into it, and on jtckdint's `test.c` hashing them was more than a percent of the build. A value
 /// is a small dense number that nobody outside picks, so there is nothing for SipHash to defend
 /// against.
-type Seen = HashSet<Value, BuildHasherDefault<Spread>>;
-
-/// Spreads a value's index over the whole word, the high bits being the ones the table reads.
-#[derive(Debug, Default)]
-struct Spread(u64);
-
-impl Hasher for Spread {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.write_u64(u64::from(byte));
-        }
-    }
-
-    fn write_u32(&mut self, word: u32) {
-        self.write_u64(u64::from(word));
-    }
-
-    fn write_u64(&mut self, word: u64) {
-        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
-}
+type Seen = Set<Value>;
 
 impl<'a> Walk<'a> {
     /// A walk over this function, with GCC's budget.
