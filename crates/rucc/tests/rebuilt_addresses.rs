@@ -145,9 +145,8 @@ fn slot_of<'a>(line: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
 /// needs: the last operand on x86-64 and the first on AArch64, for anything that writes one.
 fn written(line: &str) -> Option<&str> {
     let (op, operands) = line.split_once(' ')?;
-    let mut operands = operands.split(", ");
     if line.contains('%') {
-        let last = operands.next_back()?;
+        let last = operands.rsplit(", ").next()?;
         let reads = ["cmp", "test", "push", "call", "j"].iter().any(|kind| op.starts_with(kind));
         return (last.starts_with('%') && !reads).then_some(last);
     }
@@ -155,7 +154,7 @@ fn written(line: &str) -> Option<&str> {
     if reads.iter().any(|kind| op.starts_with(kind)) {
         return None;
     }
-    operands.next()
+    operands.split(", ").next()
 }
 
 /// The frame slots an address was stored into and later read back out of, which is what a spilled
