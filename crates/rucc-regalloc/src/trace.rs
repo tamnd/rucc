@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use rucc_mir::{Block, Func, Inst, Operand, Param, Reg, Role};
+use rucc_mir::{Block, Constraint, Func, Inst, Operand, Param, Reg, Role};
 use rucc_target::RegClass;
 
 use crate::assign::{Assignment, Place};
@@ -339,6 +339,13 @@ fn body(
         for (operand, place) in was.iter().zip(now.iter()) {
             let Some(at) = landed(place) else { continue };
             if !operand.role.is_def() {
+                continue;
+            }
+            // A write of only the top of the register leaves a value that fits under it where it
+            // was, which is what a call does to `v8` on AArch64 and a `double` in it.
+            let held = state.get(&spot(operand.class, at)).and_then(|&held| func.width(held));
+            let under = |above| held.is_some_and(|width| width <= above);
+            if matches!(operand.constraint, Constraint::Above(above) if under(above)) {
                 continue;
             }
             state.insert(spot(operand.class, at), operand.reg);

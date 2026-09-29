@@ -11,12 +11,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The record of which instruction each of the register allocator's moves became is kept by instruction number rather than in a hash map, since the pass that takes out moves that change nothing asks about every instruction in the function. On jtckdint's `test.c` at `-O2` the build runs 58.74G instructions instead of 58.94G, with the same assembly (#2153).
+- An aarch64 prologue saves only the low 64 bits of `v8` to `v15`, with `str d8`, since that is all a caller may rely on, as gcc and clang do. It used to save all 16 bytes of each, so a function that saves all eight takes 64 bytes fewer of stack.
 - Choosing which values go to memory before registers are handed out finds the values live at each crowded point once, in the walk that already clears out the ones that have ended, rather than walking every open value again for each one sent to memory. On jtckdint's `test.c` at `-O2` the build runs 58.94G instructions instead of 59.29G, with the same assembly (#2149).
 
 ### Fixed
 
 - A DLL linked for a windows-gnu target names its entry point with `-e`, as gcc does, `DllMainCRTStartup` or `_DllMainCRTStartup@12` on i686. lld 19 and older do not choose it for a MinGW DLL and looked for MSVC's `_DllMainCRTStartup` instead, so `-shared` failed with that name undefined (#2069).
 - The assembler keeps what `.cfi_personality` and `.cfi_lsda` say, where it used to pass over both, so a function gcc compiled with a `cleanup` under `-fexceptions` and rucc assembled from the listing ran none of its handlers on an unwind. It also reads `.uleb128` and `.sleb128`, which the call site table is written in.
+- A `long double` or a 128-bit vector that lives across a call on aarch64 is no longer kept in `v8` to `v15`. AAPCS64, and Apple's variant of it, only has a function keep the low 64 bits of those registers, and gcc and clang restore them with `ldr d8`, which clears the top half, so a quad `long double` held there came back as something else, most often 0. A call now writes the top eight bytes of each of those registers as far as the register allocator is concerned, the target says how many bytes a call keeps, and each virtual register knows how wide its value is, so an 8-byte `double` still stays in `v8` across a call and a 16-byte value goes to a register or slot a call leaves alone. `tests/qemu/preserved` calls a gcc-built function that uses `v8` to `v15` between the uses of four `long double`s and four vectors and checks them against gcc's output (#7).
 
 ## 0.14.1
 

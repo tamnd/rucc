@@ -309,6 +309,13 @@ fn instructions(
                     if mine || value.class != operand.class {
                         continue;
                     }
+                    // A write of only the top of the register, which a value that fits under it
+                    // survives. See [`Constraint::Above`].
+                    let width = func.width(value.reg);
+                    let under = |above| width.is_some_and(|width| width <= above);
+                    if matches!(operand.constraint, Constraint::Above(above) if under(above)) {
+                        continue;
+                    }
                     // The interval around a value covers blocks the value never reaches, so what
                     // decides this is the area inside it, which says whether the value is live at
                     // this point rather than whether the point is between its ends.
@@ -397,6 +404,33 @@ mod tests {
         let order = Order::of(func);
         let live = Live::of(func, &order);
         (order, live)
+    }
+
+    /// A value in `rcx` over an instruction that writes `rcx` from its eighth byte up.
+    fn under_the_top(width: u32) -> Vec<String> {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let held = func.new_vreg(GPR);
+        func.set_width(held, width);
+        func.build(block, opcode).def(held, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(Reg::physical(RCX), GPR).with(Constraint::Above(8)))
+            .finish();
+        func.build(block, opcode).uses(held, GPR).finish();
+        let (order, live) = read(&func);
+        let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(held, Place::Reg(RCX));
+        said(&func, &order, &live, &assignment)
+    }
+
+    #[test]
+    fn a_value_under_the_part_an_instruction_writes_is_not_in_its_way() {
+        assert!(under_the_top(8).is_empty(), "{:?}", under_the_top(8));
+        let wide = under_the_top(16);
+        assert!(wide.len() == 1 && wide[0].contains("%0"), "{wide:?}");
+        assert_eq!(under_the_top(0), wide);
     }
 
     #[test]

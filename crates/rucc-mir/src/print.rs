@@ -270,6 +270,9 @@ impl<'a> Printer<'a> {
             Constraint::Reuse(at) => {
                 let _ = write!(self.out, "(reuse {at})");
             }
+            Constraint::Above(bytes) => {
+                let _ = write!(self.out, "(above {bytes})");
+            }
         }
     }
 

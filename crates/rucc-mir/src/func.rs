@@ -392,6 +392,9 @@ pub struct Func {
     /// The class of each virtual register, which is what says how many there are and what the
     /// allocator may put each of them in.
     vregs: Vec<RegClass>,
+    /// How many bytes of its register each virtual register's value takes, beside [`Func::vregs`],
+    /// with nought for one nothing said, which is taken to be the whole register.
+    widths: Vec<u8>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -427,6 +430,7 @@ impl Func {
             imms: Vec::new(),
             amodes: Vec::new(),
             vregs: Vec::new(),
+            widths: Vec::new(),
             first_block: None,
             last_block: None,
         }
@@ -442,7 +446,29 @@ impl Func {
     pub fn new_vreg(&mut self, class: RegClass) -> Reg {
         let number = u32::try_from(self.vregs.len()).expect("too many virtual registers");
         self.vregs.push(class);
+        self.widths.push(0);
         Reg::virtual_reg(number)
+    }
+
+    /// Says a virtual register's value takes only that many bytes at the bottom of its register.
+    ///
+    /// Nothing but a call reads it, on a target where a call keeps only the bottom of a register,
+    /// and there it is what lets a `double` stay in `v8` over a call that a quad `long double` has
+    /// to be taken out of. A register nobody says this of is taken to fill its register, which is
+    /// always safe. A width of nought, or one too large to say, is the same as saying nothing.
+    pub fn set_width(&mut self, reg: Reg, bytes: u32) {
+        let at = reg.number().and_then(|number| usize::try_from(number).ok());
+        if let Some(width) = at.and_then(|at| self.widths.get_mut(at)) {
+            *width = u8::try_from(bytes).unwrap_or(0);
+        }
+    }
+
+    /// How many bytes of its register a virtual register's value takes, or `None` for the whole of
+    /// it, which is the answer for a physical register and for one nothing was said of.
+    #[must_use]
+    pub fn width(&self, reg: Reg) -> Option<u8> {
+        let width = *self.widths.get(usize::try_from(reg.number()?).ok()?)?;
+        (width != 0).then_some(width)
     }
 
     /// How many virtual registers the function has, which is what the allocator sizes itself
@@ -1183,6 +1209,20 @@ mod tests {
             .build(block, Opcode::new(names.intern("x64.add")))
             .uses(reg, class())
             .def(reg, class());
+    }
+
+    #[test]
+    fn a_register_fills_its_register_until_something_says_otherwise() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let reg = func.new_vreg(class());
+        assert_eq!(func.width(reg), None);
+        func.set_width(reg, 8);
+        assert_eq!(func.width(reg), Some(8));
+        // Nought, and a width no register has, are both saying nothing.
+        func.set_width(reg, 300);
+        assert_eq!(func.width(reg), None);
+        assert_eq!(func.width(Reg::physical(PhysReg::new(0))), None);
     }
 
     #[test]

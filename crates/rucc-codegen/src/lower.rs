@@ -1274,6 +1274,7 @@ impl<'a> Lowering<'a> {
                 // pointer here and the bytes it points at are copied below.
                 let ty = self.source[param].ty;
                 let reg = self.out.append_param(out, self.class_of(ty));
+                self.sized(reg, ty);
                 self.regs[param.index()] = Some(reg);
                 if on_x87(ty) {
                     arriving.push((param, reg));
@@ -1714,6 +1715,7 @@ impl<'a> Lowering<'a> {
             return Ok(made.outgoing);
         }
         for (result, &reg) in results.into_iter().zip(&made.results) {
+            self.sized(reg, self.source[result].ty);
             self.regs[result.index()] = Some(reg);
         }
         Ok(made.outgoing)
@@ -6689,13 +6691,23 @@ impl<'a> Lowering<'a> {
         if let Some(reg) = self.regs[value.index()] {
             return reg;
         }
-        let reg = self.out.new_vreg(self.class_of(self.source[value].ty));
+        let ty = self.source[value].ty;
+        let reg = self.out.new_vreg(self.class_of(ty));
+        self.sized(reg, ty);
         self.regs[value.index()] = Some(reg);
         let source = self.source;
         for decl in source.value_decls(value) {
             self.out.named.push((decl, reg));
         }
         reg
+    }
+
+    /// Says how much of its register a value of that type takes, when the register is a vector
+    /// one, which is what lets a call that keeps only the bottom of one keep the value in it.
+    fn sized(&mut self, reg: mir::Reg, ty: Type) {
+        if crate::term::in_vector_file(ty) {
+            self.out.set_width(reg, abi::float_bytes(ty));
+        }
     }
 
     fn unsupported(&self, inst: Inst) -> Unsupported {

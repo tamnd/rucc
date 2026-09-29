@@ -344,6 +344,14 @@ pub struct CallRegs {
     pub int_saved: &'static [PhysReg],
     /// The vector registers a call leaves alone, which is none of them on SysV.
     pub sse_saved: &'static [PhysReg],
+    /// How many bytes of each of [`CallRegs::sse_saved`] a call leaves alone, counted from the
+    /// bottom, when that is not the whole register.
+    ///
+    /// Eight on AArch64, where a callee gives back `d8` to `d15` and not the top half of `v8` to
+    /// `v15`, so a value wider than a `double` is not kept by a call in any vector register. Nothing
+    /// on Windows, which gives back the whole of `xmm6` to `xmm15`, and on SysV, which gives back
+    /// none of them.
+    pub sse_kept: Option<u8>,
     /// The general purpose registers the allocator may hand out, in the order it prefers them.
     ///
     /// The stack pointer is never in this list, and neither is the frame pointer, which a
@@ -855,6 +863,7 @@ mod tests {
             x87_returns: &NONE,
             int_saved: &NONE,
             sse_saved: &NONE,
+            sse_kept: None,
             int_order: &INT,
             sse_order: &SSE,
             stack_pointer: PhysReg::new(4),

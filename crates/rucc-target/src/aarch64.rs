@@ -57,7 +57,7 @@ pub use crate::aarch64::write::{Spelling, cond_name, write};
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
-use crate::frame::{ClassMoves, FrameInsts, Pair, Probe};
+use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
@@ -206,6 +206,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     push: "push_64",
     pop: "pop_64",
     pair: Some(Pair { push: "push_pair_64", pop: "pop_pair_64" }),
+    kept: Some(Kept { load: "ldr_f64", store: "str_f64" }),
     add: "add_ri_64",
     sub: "sub_ri_64",
     grow: "sub_rr_64",
@@ -667,10 +668,10 @@ static NO_X87: [PhysReg; 0] = [];
 // x86-64.
 static INT_SAVED: [PhysReg; 10] =
     [x(19), x(20), x(21), x(22), x(23), x(24), x(25), x(26), x(27), x(28)];
-// Only the low sixty four bits of these are preserved, which is `d8` to `d15`. A prologue here still
-// saves all sixteen bytes of each, because the allocator treats the whole register as preserved and
-// will keep a quad `long double` in one across a call. Saving `d8` alone would be the saving the
-// ABI asks for once the allocator knows a call takes the top half of these, which it does not yet.
+// Only the low sixty four bits of these are preserved, which is `d8` to `d15`, and that is what
+// `sse_kept` below says. The allocator keeps nothing wider than a `double` in one across a call, so
+// a prologue saves the eight bytes of each the callee has to give back and no more, which is the
+// save gcc and clang make.
 static FP_SAVED: [PhysReg; 8] = [v(8), v(9), v(10), v(11), v(12), v(13), v(14), v(15)];
 
 // The ones a call destroys first, so a value that does not live across one costs no save, then the
@@ -775,6 +776,7 @@ const fn aapcs64(
         x87_returns: &NO_X87,
         int_saved: &INT_SAVED,
         sse_saved: &FP_SAVED,
+        sse_kept: Some(8),
         int_order: &INT_ORDER,
         sse_order: &FP_ORDER,
         stack_pointer: SP,

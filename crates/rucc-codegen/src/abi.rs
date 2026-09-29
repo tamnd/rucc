@@ -365,6 +365,9 @@ pub fn entry(
     for (index, &(ty, at, _)) in where_from.iter().enumerate() {
         let class = class_of(ty, conv);
         let reg = out.new_vreg(class);
+        if class == conv.sse_class {
+            out.set_width(reg, float_bytes(ty));
+        }
         arrived.regs.push(reg);
         let Where::Reg(arrived_in) = at else { continue };
         let head = (insts.arg)(ty).ok_or((index, Missing::Width))?;
@@ -871,8 +874,16 @@ pub fn call(
     }
     let named = spoken_for(conv.sse_class);
     for &reg in conv.sse_order {
-        if !conv.preserves_sse(reg) && !named.contains(&reg) {
-            operands.push(mir::Operand::write(mir::Reg::physical(reg), conv.sse_class));
+        if named.contains(&reg) {
+            continue;
+        }
+        // One the convention keeps only the bottom of is written above that, which leaves a value
+        // narrow enough to fit where it is and takes the register from anything wider.
+        let clobber = mir::Operand::write(mir::Reg::physical(reg), conv.sse_class);
+        match conv.sse_kept {
+            _ if !conv.preserves_sse(reg) => operands.push(clobber),
+            Some(kept) => operands.push(clobber.with(Constraint::Above(kept))),
+            None => {}
         }
     }
     // The address in front of the arguments, because a call through one is written with the
