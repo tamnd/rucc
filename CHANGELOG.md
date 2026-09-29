@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.16.1
+
+The W4 release on crates.io. The v0.16.0 tag stopped at the release gate and published nothing, because two let chains had come in with the AArch64 Windows work, and the workspace still builds with Rust 1.85. This release takes them out (#2215) and carries what else has landed since: the Windows ARM64 calling convention, unwind tables for compiled AArch64 Windows functions, and a fix for `setjmp` on x86_64-windows-gnu.
+
 ### Added
 
 - An AArch64 Windows function whose frame is larger than a page calls `__chkstk` in its prologue as clang does, with the size in `x15` in units of sixteen bytes and a `sub sp, sp, x15, lsl #4` after the call. (#2216)
