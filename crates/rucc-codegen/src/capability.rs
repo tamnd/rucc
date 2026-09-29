@@ -138,6 +138,7 @@ pub static HAND: &[(Opcode, &str)] = &[
     // The one thing on this machine that no ordinary instruction can work out, which is why it
     // is built here rather than matched: `%fs` is not a register a rule could name.
     (Opcode::ThreadPointer, "`crate::lower`, as the load through `%fs` at zero that reads it"),
+    (Opcode::SpEntry, "`crate::lower`, as an address in the caller's argument area"),
     (
         Opcode::ApplyArgs,
         "`crate::lower`, as the block the prologue saved the argument registers in",

@@ -1037,7 +1037,11 @@ impl<'a> Verifier<'a> {
                     self.error(format!("splat produces a vector and this one produces {}", res(0)));
                 }
             }
-            Opcode::GlobalAddr | Opcode::StackSave | Opcode::ThreadPointer | Opcode::ApplyArgs => {
+            Opcode::GlobalAddr
+            | Opcode::StackSave
+            | Opcode::ThreadPointer
+            | Opcode::SpEntry
+            | Opcode::ApplyArgs => {
                 if results == 1 && !res(0).is_ptr() {
                     self.error(format!(
                         "{} produces a pointer and this one produces {}",

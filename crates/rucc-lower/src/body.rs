@@ -5172,6 +5172,9 @@ impl<'u> Body<'_, 'u> {
             ExprKind::ThreadPointer => {
                 Some(self.build(span).value(InstData::new(Opcode::ThreadPointer), Type::PTR))
             }
+            ExprKind::SpEntry => {
+                Some(self.build(span).value(InstData::new(Opcode::SpEntry), Type::PTR))
+            }
             // One word of what libgcc found out about the processor, read where libgcc keeps it and
             // tested. The object is declared on the way, so that a unit that never wrote a
             // declaration of it still hands the linker a name to resolve against libgcc.a.
@@ -8565,6 +8568,7 @@ impl Scan<'_> {
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
+            | ExprKind::SpEntry
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {

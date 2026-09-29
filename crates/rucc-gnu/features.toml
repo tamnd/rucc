@@ -1103,6 +1103,16 @@ tests = ["rucc-driver::the_address_of_this_thread_s_own_storage_is_read_out_of_t
 notes = "The address of the block of storage the running thread has, which on x86-64 is one instruction, movq %fs:0. The signature is kept because the call is checked against it, and the node is put in its place after that in check/builtin/thread.rs. What a program does with the answer is its own business, since the layout of what is behind the pointer is the C library's and not the compiler's, which is why an allocator that keeps a cache per thread writes this rather than a thread-local of its own."
 
 [[feature]]
+name = "__builtin_sponentry"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+signature = "void *(void)"
+used_by = ["mingw-w64"]
+tests = ["rucc-driver::sponentry_is_the_stack_pointer_the_function_was_entered_with"]
+notes = "A clang builtin that gcc never had, AArch64 only. mingw-w64 defines setjmp on ARM64 Windows as _setjmp(buf, __builtin_sponentry()), so no header that includes setjmp.h compiles for that target without it. The answer is where the caller's arguments on the stack start, so it is lowered as the address of the first incoming stack argument and finished when the frame is laid out. Asking for it on another target is refused in check/builtin/entry.rs, as clang refuses it."
+
+[[feature]]
 name = "__builtin_cpu_init"
 kind = "builtin"
 gcc_version = "4.8"

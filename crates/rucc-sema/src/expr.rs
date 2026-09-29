@@ -477,6 +477,11 @@ pub enum ExprKind {
     /// about the machine the program is running on rather than anything computed from the program,
     /// and on x86-64 it is one instruction. See `check/builtin/thread.rs`.
     ThreadPointer,
+    /// `__builtin_sponentry()`, the stack pointer the running function was entered with.
+    ///
+    /// Only AArch64 has it. It is a node for the same reason the one above is, and what it answers
+    /// is where the caller's arguments on the stack begin. See `check/builtin/entry.rs`.
+    SpEntry,
     /// `__builtin_cpu_supports("name")` and `__builtin_cpu_is("name")`, one word of what libgcc
     /// found out about the processor, tested.
     ///

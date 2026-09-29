@@ -767,6 +767,11 @@ impl Checker<'_> {
         if let Some(value) = self.thread_pointer_builtin(function, signature.ret, span) {
             return value;
         }
+        // Where the stack pointer was when this function was entered, for the ARM64 Windows
+        // `setjmp`. In `check/builtin/entry.rs`.
+        if let Some(value) = self.sponentry_builtin(function, signature.ret, span) {
+            return value;
+        }
         // The absolute value family, whose plain names are the C library's and whose meaning the
         // compiler is allowed to know. In `check/builtin/abs.rs`, with why the declaration is
         // looked at as well as the name.

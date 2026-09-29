@@ -66,6 +66,7 @@ mod complex;
 mod constant;
 mod count;
 mod cpu;
+mod entry;
 mod expect;
 mod frame;
 mod generic;
