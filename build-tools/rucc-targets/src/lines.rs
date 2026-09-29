@@ -24,10 +24,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rucc_sysroot::argv::{Invocation, Item, argv, emulation, pe_machine};
+use rucc_sysroot::argv::{Invocation, Item, argv, emulation, link_machine, pe_machine};
 use rucc_sysroot::link::loader;
-use rucc_sysroot::{LinkMode, Sysroot};
-use rucc_tuple::{TARGETS, TargetTuple};
+use rucc_sysroot::{Crt, LinkMode, Sysroot};
+use rucc_tuple::{Env, ObjectFormat, TARGETS, TargetTuple};
 
 use crate::CACHE;
 
@@ -39,6 +39,13 @@ const DIR: &str = "tests/link-lines";
 /// Beside the compiler on a real machine, which is a path per machine, so the files say so in one
 /// word instead. The same reason [`CACHE`] is a placeholder.
 const BUILTINS_DIR: &str = "<builtins>";
+
+/// The placeholder an MSVC row's tree is named under.
+///
+/// Not the cache, because the tree `--fetch-msvc-sdk` lays out is under a directory named for the
+/// versions of the CRT and the SDK it fetched, and a link for one of these rows is against the
+/// tree the person names with `--sysroot`. Which one that is, is theirs to say.
+const MSVC_SYSROOT: &str = "<sysroot>";
 
 /// The modes, in the order they are recorded.
 ///
@@ -117,14 +124,22 @@ pub(crate) fn run(root: &Path, mode: Mode) -> ExitCode {
 
 /// The recorded file for one target.
 fn render(target: TargetTuple) -> String {
-    let sysroot = Sysroot::in_cache(Path::new(CACHE), target);
+    let microsoft = target.object_format() == ObjectFormat::Coff && target.env() == Env::Msvc;
+    let sysroot = if microsoft {
+        Sysroot::at(PathBuf::from(MSVC_SYSROOT), target)
+    } else {
+        Sysroot::in_cache(Path::new(CACHE), target)
+    };
     let mut out = String::new();
 
     let _ = writeln!(out, "target    {}", target.to_canonical_string());
     let _ = writeln!(out, "format    {}", target.object_format().as_str());
     // The machine flag under one name for both formats, because what the row records is what goes
     // after `-m` and a reader comparing two targets wants them in the same place.
-    let machine = emulation(target).or_else(|| pe_machine(target)).unwrap_or("none");
+    let machine = emulation(target)
+        .or_else(|| pe_machine(target))
+        .or_else(|| link_machine(target))
+        .unwrap_or("none");
     let _ = writeln!(out, "emulation {machine}");
     let _ = writeln!(out, "loader    {}", loader(target).unwrap_or("none"));
     let _ = writeln!(out, "sysroot   {}", sysroot.root().display());
@@ -139,12 +154,17 @@ fn render(target: TargetTuple) -> String {
     // whichever of those it was here would be a file that is out of date everywhere else. It is on
     // the line rather than left off so that a reader can see where it lands among the libraries.
     let builtins = PathBuf::from(BUILTINS_DIR).join(rucc_sysroot::link::BUILTINS);
-    for (mode, name) in MODES {
+    // And for an MSVC row, the program again against the other C runtime, since which one is a
+    // choice of the same weight as the mode and the line is different for it.
+    let other = microsoft.then_some((LinkMode::Dynamic, "dynamic -fms-runtime-lib=dll", Crt::Dll));
+    let modes = MODES.iter().map(|(mode, name)| (*mode, *name, Crt::Static)).chain(other);
+    for (mode, name, crt) in modes {
         let options = Invocation {
             inputs: &inputs,
             output: Some(Path::new("main")),
-            mode: *mode,
+            mode,
             builtins: Some(&builtins),
+            crt,
             ..Invocation::default()
         };
         let _ = writeln!(out);

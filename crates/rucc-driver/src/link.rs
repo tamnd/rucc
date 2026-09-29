@@ -51,12 +51,14 @@
 //! files installed, where `/usr/lib/aarch64-linux-gnu` really does hold an AArch64 `crt1.o`.
 //! `--sysroot=/` takes the line above, and then every directory it decides is that machine's again.
 //!
-//! # What is not here yet
+//! # Windows in Microsoft's environment
 //!
-//! Windows in Microsoft's ABI. `lld-link` wants a `/`-style command line and an import library set
-//! out of an SDK nobody may redistribute, and a link to it is refused by name rather than
-//! approximated. A mingw-w64 target does have a line, because PE in that environment is written in
-//! the GNU style and the import libraries for it are ours to produce.
+//! `lld-link` takes a line of its own, which [`rucc_sysroot::argv`] writes as it writes the others,
+//! and the libraries on it come out of a tree nobody may redistribute. `--fetch-msvc-sdk` lays that
+//! tree out once the person asking has accepted Microsoft's licence and says which `--sysroot` to
+//! pass, so the tree is always one somebody named, and [`msvc_sysroot`] is the one place that says
+//! so. A mingw-w64 target links against the cache like every other cross target, because PE in
+//! that environment is written in the GNU style and the import libraries for it are ours.
 //!
 //! Darwin has a line of its own, [`darwin_line`], and it is the same line on a Mac and anywhere
 //! else. Everything it links against is in the SDK, which is found the way the header search finds
@@ -75,7 +77,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rucc_sysroot::layout::{Kernel, Sysroot};
-use rucc_sysroot::{LinkMode, argv};
+use rucc_sysroot::{Chip, Crt, LinkMode, argv};
 use rucc_target::{Arch, Env, Os, Triple};
 use rucc_tuple::TargetTuple;
 
@@ -129,6 +131,8 @@ pub struct LinkOptions {
     pub gui: bool,
     /// `-municode`, which only a Windows line reads.
     pub unicode: bool,
+    /// `-fms-runtime-lib=`, which is `/MT` or `/MD` and which only an MSVC line reads.
+    pub crt: Crt,
     /// `-fno-builtins-lib`, which leaves our own runtime off the line so that the machine's
     /// libgcc answers for everything instead.
     pub no_builtins_lib: bool,
@@ -384,6 +388,12 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     if target.os == Os::Darwin {
         return vec!["ld".to_owned(), "ld64.lld".to_owned()];
     }
+    // The two linkers that read Microsoft's line, on every host. `ld.lld` is the same program as
+    // `lld-link`, and which line it reads is decided by the name it was started under, so the name
+    // is the whole of the choice.
+    if is_msvc(target) {
+        return vec!["lld-link".to_owned(), "link.exe".to_owned()];
+    }
     if cross_sysroot(target, opts).is_some() {
         let mut names = cross_order(target);
         // The mingw-w64 sysroot this release fetches has import libraries that GNU ld cannot link
@@ -408,6 +418,37 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
             "lld".to_owned(),
             "ld".to_owned(),
         ],
+    }
+}
+
+/// Whether this is a Windows target in Microsoft's environment, which is linked by `lld-link`.
+fn is_msvc(target: Triple) -> bool {
+    (target.os, target.env) == (Os::Windows, Env::Msvc)
+}
+
+/// The tree an MSVC link is against, which is always the one `--sysroot` named.
+///
+/// Never the cache, because the cache holds what a release of this compiler pins and nothing for
+/// this environment ever will be: `spec/cross-compile/13-distribution.md` section 13.4. What
+/// `--fetch-msvc-sdk` lays out is under a directory named for the versions it fetched, and it ends
+/// by printing the `--sysroot` to pass, so a link with no `--sysroot` is one where that has not
+/// happened yet and the answer is to say what to run.
+///
+/// # Errors
+///
+/// [`Error::Cross`] when no `--sysroot` was given.
+fn msvc_sysroot(target: Triple, opts: &LinkOptions) -> Result<Sysroot, Error> {
+    let tuple = target_tuple(target, opts);
+    match &opts.sysroot {
+        Some(root) => Ok(Sysroot::at(root.clone(), tuple)),
+        None => Err(Error::Cross {
+            why: format!(
+                "a link for {tuple} is against Microsoft's C runtime and the Windows SDK, which \
+                 this compiler may not ship. `rucc --fetch-msvc-sdk {tuple}` gets them once you \
+                 accept Microsoft's licence and prints the --sysroot=<dir> to pass",
+                tuple = tuple.to_canonical_string()
+            ),
+        }),
     }
 }
 
@@ -667,6 +708,7 @@ fn cross_line(
         strip: opts.strip,
         gui: opts.gui,
         unicode: opts.unicode,
+        crt: opts.crt,
     };
     argv::argv(target.tuple(), sysroot, &invocation)
         .map_err(|why| Error::Cross { why: why.to_string() })
@@ -697,6 +739,9 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     if target.os == Os::Darwin {
         return darwin_line(target, opts, &[], "a.out").map(drop);
     }
+    if is_msvc(target) {
+        return msvc_preflight(target, opts);
+    }
     let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
     // Whether there is a line for this target and mode at all, asked with our own runtime left off
     // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
@@ -717,6 +762,34 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     // And now the whole line, which is the sysroot's files plus ours, so that a missing runtime is
     // said here rather than by the linker after everything has been compiled.
     cross_line(target, opts, &[], "a.out", &sysroot)?;
+    Ok(())
+}
+
+/// [`preflight`] for Microsoft's environment, which is the same three questions about a tree
+/// somebody named rather than one in the cache.
+///
+/// Whether the tree is one is asked of the CRT's directory for this architecture, because that is
+/// the one every line needs and the one a tree fetched for another architecture does not have.
+fn msvc_preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    let sysroot = msvc_sysroot(target, opts)?;
+    let shape = LinkOptions { no_builtins_lib: true, ..opts.clone() };
+    cross_line(target, &shape, &[], "a.exe", &sysroot)?;
+    let tuple = target_tuple(target, opts);
+    if let Some(chip) = Chip::of(tuple) {
+        let crt = sysroot.root().join("crt").join("lib").join(chip.in_tree());
+        if !crt.is_dir() {
+            return Err(Error::Cross {
+                why: format!(
+                    "{} has no {}, so it is not a tree for {tuple} to link against. `rucc \
+                     --fetch-msvc-sdk {tuple}` lays one out and prints where",
+                    sysroot.root().display(),
+                    crt.display(),
+                    tuple = tuple.to_canonical_string()
+                ),
+            });
+        }
+    }
+    cross_line(target, opts, &[], "a.exe", &sysroot)?;
     Ok(())
 }
 
@@ -1052,6 +1125,9 @@ pub fn line(
     }
     if target.os == Os::Darwin {
         return darwin_line(target, opts, items, output);
+    }
+    if is_msvc(target) {
+        return cross_line(target, opts, items, output, &msvc_sysroot(target, opts)?);
     }
     if let Some(sysroot) = cross_sysroot(target, opts) {
         return cross_line(target, opts, items, output, &sysroot);
@@ -1747,10 +1823,17 @@ fn split_for_file(args: &[String]) -> (Vec<String>, Vec<String>) {
 /// ordinary character unless it comes before a quote.
 ///
 /// lld does on a Windows host, both its ELF driver and its MinGW one, and the MinGW one has no
-/// option to say otherwise. GNU ld reads the GNU way on every host, MSYS2's included.
+/// option to say otherwise. `lld-link` is the same program and reads the same way, and Microsoft's
+/// `link.exe` only runs on Windows and has never read any other. GNU ld reads the GNU way on every
+/// host, MSYS2's included.
 fn windows_quoting(linker: &Linker) -> bool {
     let file = linker.path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
-    cfg!(windows) && (is_lld(&linker.name) || file.starts_with("ld.lld") || file.starts_with("lld"))
+    let microsoft = linker.name == "link.exe" || file.eq_ignore_ascii_case("link");
+    cfg!(windows)
+        && (is_lld(&linker.name)
+            || file.starts_with("ld.lld")
+            || file.starts_with("lld")
+            || microsoft)
 }
 
 /// The words of a response file, one to a line, quoted so that the linker reads them back as
@@ -1997,7 +2080,7 @@ mod tests {
 
     #[test]
     fn a_platform_with_no_link_line_is_said_so_rather_than_linked_wrongly() {
-        let triple = Triple::new(Arch::X86_64, Os::Windows, Env::Msvc);
+        let triple = Triple::new(Arch::X86_64, Os::None, Env::None);
         let error = line(triple, &LinkOptions::default(), &one("a.o"), "a.out")
             .expect_err("no line for it");
         assert!(matches!(error, Error::Target { .. }), "{error:?}");
@@ -2324,15 +2407,51 @@ mod tests {
 
     #[test]
     fn a_target_whose_linker_wants_a_different_line_is_refused_by_name() {
-        for target in [
-            Triple::new(Arch::Aarch64, Os::Darwin, Env::None),
-            Triple::new(Arch::X86_64, Os::Windows, Env::Msvc),
-        ] {
-            let error = cross_line(target, &cached(), &one("a.o"), "a.out", &a_sysroot(target))
-                .expect_err("no line for that format");
-            let Error::Cross { why } = &error else { panic!("{error:?}") };
-            assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
-        }
+        let target = Triple::new(Arch::Aarch64, Os::Darwin, Env::None);
+        let error = cross_line(target, &cached(), &one("a.o"), "a.out", &a_sysroot(target))
+            .expect_err("no line for that format");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
+    }
+
+    #[test]
+    fn an_msvc_link_is_against_the_tree_sysroot_names_and_says_what_to_run_without_one() {
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Msvc);
+        // Not the cache, even with one to look in, because nothing of ours is ever there for it.
+        let error = line(target, &cached(), &one("a.obj"), "a.exe").expect_err("no tree named");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("--fetch-msvc-sdk x86_64-windows-msvc"), "{why}");
+
+        let tree = PathBuf::from("/trees/msvc");
+        let named = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        let args = line(target, &named, &one("a.obj"), "a.exe").expect("a line");
+        let crt = format!("-libpath:{}", tree.join("crt/lib").join("x86_64").display());
+        assert!(args.contains(&crt), "{args:?}");
+        assert!(args.contains(&"-out:a.exe".to_owned()), "{args:?}");
+        assert!(args.contains(&"libcmt.lib".to_owned()), "{args:?}");
+        assert!(args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        let dll = LinkOptions { crt: Crt::Dll, ..named };
+        let args = line(target, &dll, &one("a.obj"), "a.exe").expect("a line");
+        assert!(args.contains(&"msvcrt.lib".to_owned()), "{args:?}");
+        assert!(!args.contains(&"libcmt.lib".to_owned()), "{args:?}");
+
+        // And the linker that reads that line, whether or not there is a cache.
+        assert_eq!(order(target, &cached()).first().map(String::as_str), Some("lld-link"));
+        assert_eq!(order(target, &LinkOptions::default())[0], "lld-link");
+    }
+
+    #[test]
+    fn an_msvc_tree_without_the_crt_for_this_architecture_is_said_before_anything_is_compiled() {
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Msvc);
+        let tree = std::env::temp_dir().join(format!("rucc-msvc-tree-{}", std::process::id()));
+        fs::create_dir_all(tree.join("crt/lib/aarch64")).expect("a temporary directory");
+        let named = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        let error = preflight(target, &named).expect_err("a tree for the other architecture");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("--fetch-msvc-sdk"), "{why}");
+        fs::create_dir_all(tree.join("crt/lib/x86_64")).expect("the right one");
+        preflight(target, &named).expect("a tree for this one");
+        let _ = fs::remove_dir_all(&tree);
     }
 
     #[test]

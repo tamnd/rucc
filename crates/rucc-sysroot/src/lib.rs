@@ -138,7 +138,7 @@ pub use artifact::{
 };
 pub use distribution::Arrival;
 pub use layout::{BUNDLED_GLIBC, GlibcSkew, Kernel, Sysroot, bundled_glibc_minor};
-pub use link::{Libc, LinkLine, LinkMode, libc};
+pub use link::{Crt, Libc, LinkLine, LinkMode, libc};
 pub use manifest::{
     Input, KernelFile, KernelManifest, Licence, Manifest, ManifestError, Provenance,
 };

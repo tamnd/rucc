@@ -1,20 +1,125 @@
 target    x86_64-windows-msvc
 format    coff
-emulation none
+emulation x64
 loader    none
-sysroot   <cache>/sysroots/x86_64-windows-msvc
+sysroot   <sysroot>
 
 [static]
-  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
+  -out:main
+  -nologo
+  -machine:x64
+  -subsystem:console
+  -dynamicbase
+  -nxcompat
+  -highentropyva
+  -Brepro
+  -libpath:<sysroot>/crt/lib/x86_64
+  -libpath:<sysroot>/sdk/lib/ucrt/x86_64
+  -libpath:<sysroot>/sdk/lib/um/x86_64
+  main.o
+  libcmt.lib
+  libucrt.lib
+  libvcruntime.lib
+  kernel32.lib
+  oldnames.lib
+  <builtins>/librucc_builtins.a
 
 [static-pie]
-  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
+  -out:main
+  -nologo
+  -machine:x64
+  -subsystem:console
+  -dynamicbase
+  -nxcompat
+  -highentropyva
+  -Brepro
+  -libpath:<sysroot>/crt/lib/x86_64
+  -libpath:<sysroot>/sdk/lib/ucrt/x86_64
+  -libpath:<sysroot>/sdk/lib/um/x86_64
+  main.o
+  libcmt.lib
+  libucrt.lib
+  libvcruntime.lib
+  kernel32.lib
+  oldnames.lib
+  <builtins>/librucc_builtins.a
 
 [dynamic]
-  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
+  -out:main
+  -nologo
+  -machine:x64
+  -subsystem:console
+  -dynamicbase
+  -nxcompat
+  -highentropyva
+  -Brepro
+  -libpath:<sysroot>/crt/lib/x86_64
+  -libpath:<sysroot>/sdk/lib/ucrt/x86_64
+  -libpath:<sysroot>/sdk/lib/um/x86_64
+  main.o
+  libcmt.lib
+  libucrt.lib
+  libvcruntime.lib
+  kernel32.lib
+  oldnames.lib
+  <builtins>/librucc_builtins.a
 
 [dynamic-no-pie]
-  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
+  -out:main
+  -nologo
+  -machine:x64
+  -subsystem:console
+  -dynamicbase
+  -nxcompat
+  -highentropyva
+  -Brepro
+  -libpath:<sysroot>/crt/lib/x86_64
+  -libpath:<sysroot>/sdk/lib/ucrt/x86_64
+  -libpath:<sysroot>/sdk/lib/um/x86_64
+  main.o
+  libcmt.lib
+  libucrt.lib
+  libvcruntime.lib
+  kernel32.lib
+  oldnames.lib
+  <builtins>/librucc_builtins.a
 
 [shared]
-  refused: there is no cross link line for x86_64-windows-msvc, because it is Microsoft's ABI: the linker for it takes a different command line and the import libraries a program there links against come from the Windows SDK, which cannot be redistributed. Build for the mingw-w64 environment instead, which needs nothing installed, or pass --sysroot=<dir> naming an SDK you have
+  -out:main
+  -nologo
+  -machine:x64
+  -dll
+  -dynamicbase
+  -nxcompat
+  -highentropyva
+  -Brepro
+  -libpath:<sysroot>/crt/lib/x86_64
+  -libpath:<sysroot>/sdk/lib/ucrt/x86_64
+  -libpath:<sysroot>/sdk/lib/um/x86_64
+  main.o
+  libcmt.lib
+  libucrt.lib
+  libvcruntime.lib
+  kernel32.lib
+  oldnames.lib
+  <builtins>/librucc_builtins.a
+
+[dynamic -fms-runtime-lib=dll]
+  -out:main
+  -nologo
+  -machine:x64
+  -subsystem:console
+  -dynamicbase
+  -nxcompat
+  -highentropyva
+  -Brepro
+  -libpath:<sysroot>/crt/lib/x86_64
+  -libpath:<sysroot>/sdk/lib/ucrt/x86_64
+  -libpath:<sysroot>/sdk/lib/um/x86_64
+  main.o
+  msvcrt.lib
+  ucrt.lib
+  vcruntime.lib
+  kernel32.lib
+  oldnames.lib
+  <builtins>/librucc_builtins.a

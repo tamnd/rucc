@@ -115,6 +115,8 @@ pub struct Predef {
     pub gnuc_given: bool,
     /// The MSVC release an MSVC row claims, which is `_MSC_VER` and `_MSC_FULL_VER`.
     pub msc: MscVersion,
+    /// Whether an MSVC row's C runtime is the DLL one, which defines `_DLL` beside `_MT`.
+    pub ms_dll_runtime: bool,
     /// `-fms-extensions` and `-fno-ms-extensions`, with the target deciding when neither was
     /// written. On an MSVC row it decides `_MSC_EXTENSIONS`.
     pub ms_extensions: Option<bool>,
@@ -159,6 +161,7 @@ impl Predef {
             gnuc: GnucVersion::default(),
             gnuc_given: false,
             msc: MscVersion::default(),
+            ms_dll_runtime: false,
             ms_extensions: None,
             opt_level: OptLevel::O0,
             hosted: true,
@@ -189,6 +192,7 @@ impl Predef {
             gnuc: opts.gnuc,
             gnuc_given: opts.gnuc_given,
             msc: opts.msc,
+            ms_dll_runtime: opts.ms_dll_runtime,
             ms_extensions: opts.ms_extensions,
             opt_level: opts.opt_level,
             hosted: opts.hosted,
@@ -816,8 +820,8 @@ fn windows_spellings(d: &mut Defs, opts: &Predef) {
 /// items that no GNU attribute spells. `__SEH__` is gcc's and says the exception tables are
 /// there, which on this row they are not.
 ///
-/// `_MT` and `_DLL` are left to the runtime being chosen, which is the driver's business once
-/// it links against one, and `_M_IX86` waits on a 32-bit row.
+/// `_MT` and `_DLL` follow the runtime `-fms-runtime-lib=` chose, and `_M_IX86` waits on a
+/// 32-bit row.
 fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
     d.flag("_WIN32");
     if target.pointer_width == 64 {
@@ -837,6 +841,11 @@ fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
     d.set("_MSC_FULL_VER", &opts.msc.msc_full_ver().to_string());
     d.flag("_MSC_BUILD");
     d.flag_if(opts.ms_extensions.unwrap_or(true), "_MSC_EXTENSIONS");
+    // Which C runtime the program is linked against. `_MT` says the runtime is the thread safe
+    // one, which every runtime since Visual Studio 2005 is, so it is defined for both. `_DLL` says
+    // it is in a DLL, and it is what makes the headers declare its functions as imported.
+    d.flag("_MT");
+    d.flag_if(opts.ms_dll_runtime, "_DLL");
     // The widest integer the compiler has, which is what Microsoft's headers ask instead of
     // asking about `long long`.
     d.set("_INTEGRAL_MAX_BITS", "64");
@@ -2454,6 +2463,24 @@ mod tests {
         assert!(has(&set, "#define _MSC_FULL_VER 192930133"));
         assert!(has(&set, "#define __GNUC__ 16"), "-fgnuc-version= puts it back, as in clang");
         assert!(!set.contains("_MSC_EXTENSIONS"));
+    }
+
+    #[test]
+    fn the_c_runtime_an_msvc_row_links_against_is_in_two_macros() {
+        // `/MT` by default, which is `_MT` alone, and `/MD` adds `_DLL`, which is what the
+        // headers read to declare the runtime's functions as imported.
+        let target = TargetInfo::new("x86_64-pc-windows-msvc".parse().expect("a triple"));
+        let statically = built_in(&target, &Predef::new());
+        assert!(has(&statically, "#define _MT 1"));
+        assert!(!statically.contains("#define _DLL "));
+        let opts = Predef { ms_dll_runtime: true, ..Predef::new() };
+        let dll = built_in(&target, &opts);
+        assert!(has(&dll, "#define _MT 1"));
+        assert!(has(&dll, "#define _DLL 1"));
+        // And neither on the mingw-w64 row, whose runtime is not chosen this way.
+        let gnu =
+            built_in(&TargetInfo::new("x86_64-pc-windows-gnu".parse().expect("a triple")), &opts);
+        assert!(!gnu.contains("#define _MT ") && !gnu.contains("#define _DLL "));
     }
 
     #[test]

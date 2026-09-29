@@ -26,18 +26,22 @@
 //! flag that none of the three linkers has, so the mode that means it is spelled out here as the
 //! three flags a linker does understand.
 //!
-//! # The two formats that have a line
+//! # The formats that have a line
 //!
 //! ELF, and PE in mingw-w64's environment. Both are written in the GNU style, which is the same
 //! syntax for the inputs and a different set of flags, so they share everything below that is about
 //! what has to be linked and differ in what is about the image. The PE line is GNU ld's PE port and
 //! `ld.lld` in its MinGW mode, which read each other's arguments for exactly this reason.
 //!
-//! Mach-O and the MSVC ABI are refused rather than approximated. `ld64` wants a platform version
-//! load command and a `-syslibroot`, `lld-link` wants `/MACHINE:` and a `/DEFAULTLIB:` set out of an
-//! SDK that cannot be redistributed, and neither is a different spelling of what is below.
-//! [`Unsupported`] says which by name, which is a better answer than a line that looks plausible and
-//! produces nothing that runs.
+//! PE in Microsoft's environment has a line of its own, [`msvc`], because `lld-link` and
+//! `link.exe` take a different command line rather than a different set of flags. Its libraries
+//! come out of a tree `--fetch-msvc-sdk` lays out once the person asking has accepted Microsoft's
+//! licence, which is the one sysroot here that is not ours to produce, so the line names the tree's
+//! directories and the libraries by name and leaves the finding to the linker.
+//!
+//! Mach-O is refused rather than approximated. `ld64` wants a platform version load command and a
+//! `-syslibroot`, which is not a different spelling of what is below. [`Unsupported`] says so by
+//! name, which is a better answer than a line that looks plausible and produces nothing that runs.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -45,7 +49,8 @@ use std::path::{Path, PathBuf};
 use rucc_tuple::{Arch, DataModel, Endian, Env, ObjectFormat, TargetTuple};
 
 use crate::layout::Sysroot;
-use crate::link::{BUILTINS, Libc, LinkLine, LinkMode, libc, loader};
+use crate::link::{BUILTINS, Crt, Libc, LinkLine, LinkMode, libc, loader};
+use crate::msvc::Chip;
 
 /// One input to the link, in the position the user wrote it.
 ///
@@ -116,6 +121,8 @@ pub struct Invocation<'a> {
     /// `-municode`, which starts a Windows program at `wmain` or `wWinMain` through `crt2u.o`
     /// instead of `crt2.o`. Nothing for a DLL or on any other target.
     pub unicode: bool,
+    /// `-fms-runtime-lib=`, which is `/MT` or `/MD`. Only a line for the MSVC environment reads it.
+    pub crt: Crt,
 }
 
 /// A target, or a combination of a target and a mode, that has no line here.
@@ -134,14 +141,13 @@ pub enum Unsupported {
         /// Its object format, in the spelling `--print-config` uses.
         format: &'static str,
     },
-    /// A Windows target in Microsoft's ABI rather than mingw-w64's.
+    /// A Windows target in Microsoft's ABI whose architecture Microsoft ships no C library for.
     ///
-    /// Refused for two reasons and the second one is the one that matters. `lld-link` takes a
-    /// different command line rather than a different set of flags: `/MACHINE:`, `/SUBSYSTEM:`,
-    /// `/DEFAULTLIB:` and a response file, which is its own work. And the import libraries a program
-    /// in that ABI links against come from the Windows SDK and the universal CRT, which
-    /// `spec/cross-compile/08-sysroots.md` section 8.6 says cannot be redistributed, so there is
-    /// nothing to produce on this side and a user has to point at an installed one themselves.
+    /// ARM64EC, which is the one row this is. It is tier 4 in
+    /// `spec/cross-compile/04-target-matrix.md`, nothing in this compiler emits code for it, and
+    /// what the installer manifest has for it is a few kilobytes of thunks rather than a CRT, so
+    /// [`Chip::of`] has no answer for it and there are no directories to name. x86-64 and AArch64
+    /// in the same environment have a line, which is [`msvc`].
     MsvcAbi {
         /// The target that was asked for.
         target: String,
@@ -183,11 +189,9 @@ impl fmt::Display for Unsupported {
             ),
             Unsupported::MsvcAbi { target } => write!(
                 f,
-                "there is no cross link line for {target}, because it is Microsoft's ABI: the \
-                 linker for it takes a different command line and the import libraries a program \
-                 there links against come from the Windows SDK, which cannot be redistributed. \
-                 Build for the mingw-w64 environment instead, which needs nothing installed, or \
-                 pass --sysroot=<dir> naming an SDK you have"
+                "there is no link line for {target}, because Microsoft ships no C runtime for that \
+                 architecture to link it against. x86_64-windows-msvc and aarch64-windows-msvc \
+                 have one, and the mingw-w64 environment needs nothing installed"
             ),
             Unsupported::Machine { target } => write!(
                 f,
@@ -230,7 +234,7 @@ impl std::error::Error for Unsupported {}
 /// # Errors
 ///
 /// [`Unsupported::Format`] for a target whose object format is neither ELF nor PE,
-/// [`Unsupported::MsvcAbi`] for a Windows target in Microsoft's ABI,
+/// [`Unsupported::MsvcAbi`] for a Windows target in Microsoft's ABI with no CRT to link against,
 /// [`Unsupported::Machine`] for a PE target with no machine type, and
 /// [`Unsupported::StaticStub`] for a static link against a libc that is a stub.
 pub fn argv(
@@ -241,10 +245,10 @@ pub fn argv(
     let format = target.object_format();
     match format {
         ObjectFormat::Elf => elf(target, sysroot, options),
-        // mingw-w64 rather than every COFF target, because the MSVC ABI is a different linker with a
-        // different argument syntax and an import library set we are not allowed to ship.
+        // mingw-w64 in the GNU style and Microsoft's environment in its own, because the MSVC ABI
+        // is linked by a different linker with a different argument syntax.
         ObjectFormat::Coff if target.env() == Env::Gnu => coff(target, sysroot, options),
-        ObjectFormat::Coff => Err(Unsupported::MsvcAbi { target: target.to_canonical_string() }),
+        ObjectFormat::Coff => msvc(target, sysroot, options),
         _ => Err(Unsupported::Format {
             target: target.to_canonical_string(),
             format: format.as_str(),
@@ -354,6 +358,111 @@ fn coff(
 
     args.extend(body(sysroot, options));
     Ok(args)
+}
+
+/// The line for a program in Microsoft's environment, which is `lld-link`'s and `link.exe`'s.
+///
+/// Every option starts with a dash rather than a slash. Both linkers take either, and a slash is
+/// what Microsoft's documentation writes, but on a host where an absolute path starts with a slash
+/// `/out:` and `/home/me/main.obj` are the same shape, and a dash is how clang writes this line
+/// for the same reason.
+///
+/// Where it differs from the mingw-w64 line, item by item:
+///
+/// - The machine is `-machine:`, in Microsoft's names, rather than a GNU emulation.
+/// - The libraries are found on `-libpath:` rather than named by path, which is [`LinkLine::msvc`].
+///   The tree is `xwin`'s shape: the CRT in `crt/lib/<arch>`, and the universal CRT and the Win32
+///   import libraries in `sdk/lib/ucrt/<arch>` and `sdk/lib/um/<arch>`.
+/// - There is no start file and no entry point. The CRT has both, `mainCRTStartup` in `libcmt.lib`
+///   or `msvcrt.lib`, and the linker picks it because the program defines `main`, or `wmain` for
+///   `wmainCRTStartup`, which is why `-municode` changes nothing here.
+/// - The five modes are two lines: a program and a DLL. `-static` is about the C runtime on the
+///   other two formats and here that is `-fms-runtime-lib=`, which is [`Invocation::crt`], so the
+///   four program modes are one line here.
+/// - `-Brepro` is the reproducibility flag, which leaves the header's timestamp as a hash of the
+///   output rather than the second it was linked, and is the `--no-insert-timestamp` of this
+///   linker. The stack reservation is left at Microsoft's megabyte, which is what `cl.exe` gives.
+///
+/// `-nodefaultlibs` also writes `-nodefaultlib`, because an object built by `cl.exe` names its CRT
+/// in a directive, and leaving the CRT off the line would otherwise put it back. `-nostartfiles`
+/// changes nothing, since there is no start file to leave off that is not also the C runtime.
+/// Neither `-rdynamic` nor `-s` has anything to say: a PE image exports what its export table
+/// names, and this line writes no symbol table to strip.
+fn msvc(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    let (Some(chip), Some(machine)) = (Chip::of(target), link_machine(target)) else {
+        return Err(Unsupported::MsvcAbi { target: target.to_canonical_string() });
+    };
+
+    let mut args = Vec::new();
+    if let Some(path) = options.output {
+        args.push(format!("-out:{}", path.display()));
+    }
+    args.push("-nologo".to_owned());
+    args.push(format!("-machine:{machine}"));
+    if options.mode == LinkMode::Shared {
+        args.push("-dll".to_owned());
+    } else {
+        args.push(format!("-subsystem:{}", if options.gui { "windows" } else { "console" }));
+    }
+    args.push("-dynamicbase".to_owned());
+    args.push("-nxcompat".to_owned());
+    if target.pointer_width() == 64 {
+        args.push("-highentropyva".to_owned());
+    }
+    args.push("-Brepro".to_owned());
+    if options.no_defaultlibs {
+        args.push("-nodefaultlib".to_owned());
+    }
+
+    for dir in options.search {
+        args.push(format!("-libpath:{}", dir.display()));
+    }
+    let arch = chip.in_tree();
+    for dir in ["crt/lib", "sdk/lib/ucrt", "sdk/lib/um"] {
+        args.push(format!("-libpath:{}", sysroot.root().join(dir).join(arch).display()));
+    }
+
+    for input in options.inputs {
+        match input {
+            Item::File(path) => args.push(path.display().to_string()),
+            // What clang makes of `-lfoo` for this environment, which is the library's own name
+            // with the extension every Windows library has.
+            Item::Library(name) if name.to_ascii_lowercase().ends_with(".lib") => {
+                args.push(name.clone());
+            }
+            Item::Library(name) => args.push(format!("{name}.lib")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+
+    if !options.no_defaultlibs {
+        let line = LinkLine::msvc(options.crt, options.builtins);
+        args.extend(shown(&libraries(&line, options)));
+    }
+    Ok(args)
+}
+
+/// Which machine `lld-link` is to write for, in the name `-machine:` knows it by.
+///
+/// Microsoft's names, which are neither the architecture's nor GNU ld's. [`None`] for a target that
+/// is not in Microsoft's environment, whose linker reads [`pe_machine`] instead.
+#[must_use]
+pub fn link_machine(target: TargetTuple) -> Option<&'static str> {
+    if target.object_format() != ObjectFormat::Coff || target.env() != Env::Msvc {
+        return None;
+    }
+    Some(match target.arch() {
+        Arch::X86_64 => "x64",
+        Arch::X86 => "x86",
+        Arch::Aarch64 => "arm64",
+        Arch::Arm64Ec => "arm64ec",
+        Arch::Arm => "arm",
+        _ => return None,
+    })
 }
 
 /// `-o`, or nothing, which is what a caller testing a line wants.
@@ -641,9 +750,9 @@ mod tests {
 
     use rucc_tuple::TargetTuple;
 
-    use super::{Invocation, Item, Unsupported, argv, emulation, pe_machine};
+    use super::{Invocation, Item, Unsupported, argv, emulation, link_machine, pe_machine};
     use crate::layout::Sysroot;
-    use crate::link::LinkMode;
+    use crate::link::{Crt, LinkMode};
 
     fn target(spelling: &str) -> TargetTuple {
         spelling.parse().expect("a tuple the table knows")
@@ -789,16 +898,96 @@ mod tests {
     }
 
     #[test]
-    fn the_msvc_abi_is_refused_on_its_own_grounds_and_the_way_out_is_in_the_message() {
-        // Not the format, because mingw-w64 has a line and is the same format. What is missing is an
-        // SDK nobody may redistribute and a linker with a different command line, and the two are
-        // different kinds of missing, so the message names the environment that needs neither.
-        for spelling in ["x86_64-windows-msvc", "aarch64-windows-msvc", "arm64ec-windows-msvc"] {
-            let options = Invocation { mode: LinkMode::Dynamic, ..Invocation::default() };
-            let error = argv(target(spelling), &sysroot(spelling), &options).expect_err("refused");
-            assert!(matches!(error, Unsupported::MsvcAbi { .. }), "{spelling} {error:?}");
-            assert!(error.to_string().contains("mingw-w64"), "{spelling} {error}");
+    fn an_msvc_line_is_lld_link_s_with_the_static_crt_unless_asked_otherwise() {
+        let args = line("x86_64-windows-msvc", LinkMode::Dynamic);
+        let at = |what: &str| {
+            args.iter().position(|arg| arg.ends_with(what)).unwrap_or_else(|| panic!("{what}"))
+        };
+        for flag in ["-out:main", "-machine:x64", "-subsystem:console", "-Brepro"] {
+            assert!(args.contains(&flag.to_owned()), "{flag} in {args:?}");
         }
+        // No entry point, because the CRT has one and the linker picks it from `main`.
+        assert!(!args.iter().any(|arg| arg.starts_with("-entry")), "{args:?}");
+        // The three directories of the tree, for this architecture.
+        let root = sysroot("x86_64-windows-msvc").root().to_path_buf();
+        for dir in ["crt/lib", "sdk/lib/ucrt", "sdk/lib/um"] {
+            let flag = format!("-libpath:{}", root.join(dir).join("x86_64").display());
+            assert!(args.contains(&flag), "{flag} in {args:?}");
+        }
+        // `/MT`, which is the default, and then ours after everything Microsoft's has.
+        assert!(at("main.o") < at("libcmt.lib"), "{args:?}");
+        assert!(at("libcmt.lib") < at("libucrt.lib"), "{args:?}");
+        assert!(at("libucrt.lib") < at("libvcruntime.lib"), "{args:?}");
+        assert!(at("oldnames.lib") < at("librucc_builtins.a"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "msvcrt.lib"), "{args:?}");
+        // And nothing in the GNU style, which this linker would take for an input file.
+        assert!(!args.iter().any(|arg| arg.starts_with("--") || arg == "-o"), "{args:?}");
+    }
+
+    #[test]
+    fn the_dll_runtime_is_the_other_three_libraries() {
+        let one = [Item::File(Path::new("main.obj").to_path_buf())];
+        let options = Invocation {
+            inputs: &one,
+            mode: LinkMode::Dynamic,
+            crt: Crt::Dll,
+            ..Invocation::default()
+        };
+        let spelling = "aarch64-windows-msvc";
+        let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+        assert!(args.contains(&"-machine:arm64".to_owned()), "{args:?}");
+        for name in ["msvcrt.lib", "ucrt.lib", "vcruntime.lib", "kernel32.lib"] {
+            assert!(args.contains(&name.to_owned()), "{name} in {args:?}");
+        }
+        for name in ["libcmt.lib", "libucrt.lib", "libvcruntime.lib"] {
+            assert!(!args.contains(&name.to_owned()), "{name} in {args:?}");
+        }
+        assert!(args.iter().any(|arg| arg.ends_with("aarch64")), "{args:?}");
+    }
+
+    #[test]
+    fn an_msvc_dll_is_one_flag_and_takes_its_entry_from_the_crt_too() {
+        let args = line("x86_64-windows-msvc", LinkMode::Shared);
+        assert!(args.contains(&"-dll".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.starts_with("-subsystem")), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.starts_with("-entry")), "{args:?}");
+        // The four program modes are one line, because none of them changes anything here.
+        let program = line("x86_64-windows-msvc", LinkMode::Dynamic);
+        for mode in [LinkMode::Static, LinkMode::StaticPie, LinkMode::DynamicNoPie] {
+            assert_eq!(line("x86_64-windows-msvc", mode), program, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_msvc_library_is_named_the_way_windows_names_one_and_nodefaultlibs_means_all_of_them() {
+        let inputs = [
+            Item::File(Path::new("main.obj").to_path_buf()),
+            Item::Library("user32".to_owned()),
+            Item::Library("gdi32.lib".to_owned()),
+        ];
+        let options = Invocation {
+            inputs: &inputs,
+            no_defaultlibs: true,
+            gui: true,
+            ..Invocation::default()
+        };
+        let spelling = "x86_64-windows-msvc";
+        let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+        assert!(args.contains(&"user32.lib".to_owned()), "{args:?}");
+        assert!(args.contains(&"gdi32.lib".to_owned()), "{args:?}");
+        assert!(args.contains(&"-subsystem:windows".to_owned()), "{args:?}");
+        // The flag too, so that a directive in somebody's object cannot put the CRT back.
+        assert!(args.contains(&"-nodefaultlib".to_owned()), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.ends_with("libcmt.lib")), "{args:?}");
+    }
+
+    #[test]
+    fn arm64ec_is_refused_because_there_is_no_crt_for_it_to_link_against() {
+        let spelling = "arm64ec-windows-msvc";
+        let options = Invocation { mode: LinkMode::Dynamic, ..Invocation::default() };
+        let error = argv(target(spelling), &sysroot(spelling), &options).expect_err("refused");
+        assert!(matches!(error, Unsupported::MsvcAbi { .. }), "{error:?}");
+        assert!(error.to_string().contains("mingw-w64"), "{error}");
     }
 
     #[test]
@@ -993,6 +1182,10 @@ mod tests {
         assert_eq!(pe_machine(target("x86_64-linux-gnu")), None);
         assert_eq!(pe_machine(target("x86_64-windows-msvc")), None);
         assert_eq!(emulation(target("x86_64-windows-gnu")), None);
+        // Which is the other table, and the other way round.
+        assert_eq!(link_machine(target("x86_64-windows-msvc")), Some("x64"));
+        assert_eq!(link_machine(target("aarch64-windows-msvc")), Some("arm64"));
+        assert_eq!(link_machine(target("x86_64-windows-gnu")), None);
     }
 
     #[test]
