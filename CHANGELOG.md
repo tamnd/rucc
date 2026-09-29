@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `__has_builtin(__builtin_sponentry)` is no on every target but AArch64, where it is the only place the builtin works, as with clang. #2198 made it yes everywhere, so mingw-w64's `<setjmp.h>` on x86_64-windows-gnu called `_setjmp(buf, __builtin_sponentry())`, which sema refused, and every program that used `setjmp` there failed to compile.
 - `__builtin_ia32_rdtsc` and `__builtin_ia32_rdtscp` write `rdtsc` and `rdtscp` where the call was, as gcc does, with `edx` and `eax` put together into the counter and `ecx` stored through the pointer for `rdtscp`. They were calls to two routines only `librucc_builtins.a` defines, so an object rucc compiled and gcc linked, or that a gcc-built program loaded with `dlopen`, had two undefined names. The routines are gone from the archive. On a target other than x86-64 either builtin is now an error where it is written, rather than a call to a name nothing defines (#2191).
 
 ## 0.16.0
