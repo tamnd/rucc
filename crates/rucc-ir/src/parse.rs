@@ -238,6 +238,12 @@ impl<'a, 'n> Parser<'a, 'n> {
                 break;
             }
             match self.peek_word() {
+                "module" if self.at("module option ") => {
+                    self.expect("module option ")?;
+                    let text = self.quoted_str()?;
+                    self.end_of_line()?;
+                    module.add_linker_option(text);
+                }
                 "module" => {
                     self.expect("module asm ")?;
                     let text = self.quoted_str()?;
@@ -1952,6 +1958,21 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
         let text = format!(
             "{HEADER}
 module asm \"f: ret\\0a.ascii \\\"x\\\"\"
+"
+        );
+        assert_eq!(round_trip(&text), text);
+    }
+
+    /// An option for the linker from `#pragma comment`, after the file scope `asm` it is printed
+    /// behind, which both come back as they were.
+    #[test]
+    fn a_linker_option_comes_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+module asm \"nop\"
+
+module option \"/DEFAULTLIB:ws2_32.lib\"
+module option \"/include:x\"
 "
         );
         assert_eq!(round_trip(&text), text);

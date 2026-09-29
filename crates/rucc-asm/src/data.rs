@@ -316,6 +316,10 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
     // declaration is left out, because what is offered has to be here to offer: clang says
     // nothing about one either. See `rucc_object::Offer`.
     if format == ObjectFormat::Coff {
+        // What `#pragma comment` asks for, ahead of the names, which is where clang puts it.
+        for option in module.linker_options() {
+            out.exports.push(Export { name: option.clone(), kind: Offer::Verbatim });
+        }
         let offer = |dll: Dll, visibility: ir::Visibility, linkage: Linkage, variable: bool| {
             if dll == Dll::Export {
                 Some(if variable { Offer::Variable } else { Offer::Function })

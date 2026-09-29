@@ -67,6 +67,9 @@ pub struct Parsed {
     pub ast: Ast,
     /// What went wrong, in the order it was found.
     pub diagnostics: Vec<Diagnostic>,
+    /// What the unit's `#pragma comment` lines ask the linker for, in the order they were
+    /// written.
+    pub comments: Vec<crate::Comment>,
 }
 
 impl Parsed {
@@ -93,6 +96,8 @@ pub struct Parser<'a> {
     too_deep: bool,
     /// The `#pragma pack` lines read so far, which is in `pack.rs` with the code that reads them.
     pub(crate) packs: crate::pack::Packs,
+    /// What the `#pragma comment` lines read so far ask for.
+    pub(crate) comments: Vec<crate::Comment>,
 }
 
 impl<'a> Parser<'a> {
@@ -113,13 +118,14 @@ impl<'a> Parser<'a> {
             depth: 0,
             too_deep: false,
             packs: crate::pack::Packs::default(),
+            comments: Vec::new(),
         }
     }
 
     /// The tree and the diagnostics, once the parse is over.
     #[must_use]
     pub fn finish(self) -> Parsed {
-        Parsed { ast: self.ast, diagnostics: self.errors.finish() }
+        Parsed { ast: self.ast, diagnostics: self.errors.finish(), comments: self.comments }
     }
 
     /// Reports an error at `span`.

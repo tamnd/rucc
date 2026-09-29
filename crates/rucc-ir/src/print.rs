@@ -148,6 +148,14 @@ impl<'a> Printer<'a> {
                 self.out.push('\n');
             }
         }
+        if !module.linker_options().is_empty() {
+            self.out.push('\n');
+            for option in module.linker_options() {
+                self.out.push_str("module option ");
+                self.string(option.as_bytes());
+                self.out.push('\n');
+            }
+        }
 
         if module.globals().next().is_some() {
             self.out.push('\n');

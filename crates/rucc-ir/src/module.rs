@@ -649,6 +649,10 @@ pub struct Module {
     /// with an instruction in it, kept as the text it was written as. See
     /// [`Module::add_file_asm`].
     file_asm: Vec<String>,
+
+    /// What the unit asks the linker for, as the options a COFF linker reads out of `.drectve`.
+    /// See [`Module::add_linker_option`].
+    linker_options: Vec<String>,
 }
 
 impl Module {
@@ -669,6 +673,7 @@ impl Module {
             relocs: Vec::new(),
             symbols: HashMap::new(),
             file_asm: Vec::new(),
+            linker_options: Vec::new(),
         }
     }
 
@@ -687,6 +692,19 @@ impl Module {
     #[must_use]
     pub fn file_asms(&self) -> &[String] {
         &self.file_asm
+    }
+
+    /// Keeps an option for the linker, written the way the linker reads it, such as
+    /// `/DEFAULTLIB:ws2_32.lib` for `#pragma comment(lib, "ws2_32")`. The object writer puts it in
+    /// `.drectve` on COFF, which is the only format with somewhere to put it.
+    pub fn add_linker_option(&mut self, option: String) {
+        self.linker_options.push(option);
+    }
+
+    /// The options kept by [`Module::add_linker_option`], in the order they were added.
+    #[must_use]
+    pub fn linker_options(&self) -> &[String] {
+        &self.linker_options
     }
 
     // Symbols.

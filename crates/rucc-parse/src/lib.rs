@@ -68,6 +68,7 @@ pub mod parser;
 pub mod recover;
 pub mod scope;
 
+mod comment;
 mod decl;
 mod declarator;
 mod expr;
@@ -76,6 +77,7 @@ mod pack;
 mod spec;
 mod stmt;
 
+pub use crate::comment::Comment;
 pub use crate::cursor::{Cursor, MAX_LOOKAHEAD, Mark};
 pub use crate::parser::{Context, MAX_NESTING, Parsed, Parser};
 pub use crate::recover::{Poison, push_about, skip_past_declaration, skip_to_statement_end};
