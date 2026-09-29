@@ -482,6 +482,19 @@ pub enum ExprKind {
     /// Only AArch64 has it. It is a node for the same reason the one above is, and what it answers
     /// is where the caller's arguments on the stack begin. See `check/builtin/entry.rs`.
     SpEntry,
+    /// `__builtin_ia32_rdtsc()` and `__builtin_ia32_rdtscp(aux)`, the processor's time stamp
+    /// counter.
+    ///
+    /// A node rather than a call for the reason the one above is, and because a call is what these
+    /// used to be and an object holding one needed a library only rucc has. What it becomes is the
+    /// instruction and the two halves of its answer put together. The object `rdtscp` stores the
+    /// processor's `TSC_AUX` into is the place the pointer points at, already dereferenced, and
+    /// `rdtsc` has none. See `check/builtin/tsc.rs`.
+    TimeStamp {
+        /// Where `rdtscp` stores `ecx`, as an lvalue of type `unsigned int`, and nothing for
+        /// `rdtsc`.
+        aux: Option<ExprId>,
+    },
     /// `__builtin_cpu_supports("name")` and `__builtin_cpu_is("name")`, one word of what libgcc
     /// found out about the processor, tested.
     ///

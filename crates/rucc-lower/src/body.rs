@@ -2354,6 +2354,39 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// `rdtsc`, or `rdtscp` with `ecx` written into `aux`, and the counter they leave in `edx` and
+    /// `eax` put together into one value of type `into`, the high half from `edx`.
+    ///
+    /// The instruction is an `asm` statement the program did not write, volatile so that two reads
+    /// stay two and neither moves, with the registers named by constraint letters as the program
+    /// would have named them. It is written as its bytes, `0f 31` and `0f 01 f9`, the way programs
+    /// write `xgetbv`, so that the listing is one every assembler takes and rucc's own reads it
+    /// the way it reads any other byte out of a template. What matters is that the instruction is
+    /// in the object: a call to a routine that is the instruction needs a library that defines
+    /// it, and an object gcc links or `dlopen` loads has none (tamnd/rucc#2191).
+    fn time_stamp(&mut self, aux: Option<Place>, into: Type, span: Span) -> Value {
+        let (template, constraints, outputs) = match aux {
+            None => (".byte 0x0f, 0x31", "=a,=d", 2),
+            Some(_) => (".byte 0x0f, 0x01, 0xf9", "=a,=d,=c", 3),
+        };
+        let results = [Type::int(32); 3];
+        let info = AsmInfo {
+            template: self.unit.names.intern(template),
+            constraints: self.unit.names.intern(constraints),
+            clobbers: self.unit.names.intern(""),
+            targets: rucc_ir::BlockCallList::EMPTY,
+        };
+        let inst = self.build(span).inline_asm(info, &[], &results[..outputs], Flags::VOLATILE);
+        let produced: Vec<Value> = self.func[inst].results().collect();
+        if let Some(place) = aux {
+            self.write(place, produced[2], span);
+        }
+        let low = self.build(span).unary(Opcode::ZExt, produced[0], into);
+        let high = self.build(span).unary(Opcode::ZExt, produced[1], into);
+        let high = self.shift(Opcode::Shl, high, 32, span);
+        self.build(span).binary(Opcode::Or, high, low, Flags::NONE)
+    }
+
     /// The machine register an operand of an assembly statement is kept in, for an operand that
     /// names a local declared to be in one.
     ///
@@ -5174,6 +5207,14 @@ impl<'u> Body<'_, 'u> {
             }
             ExprKind::SpEntry => {
                 Some(self.build(span).value(InstData::new(Opcode::SpEntry), Type::PTR))
+            }
+            // The time stamp counter, which is one instruction written here. The object `rdtscp`
+            // stores into is found first, since the pointer is an argument and gcc reads its
+            // arguments before the instruction runs.
+            ExprKind::TimeStamp { aux } => {
+                let aux = aux.map(|aux| self.place(aux));
+                let into = self.value_type(ty, span);
+                Some(self.time_stamp(aux, into, span))
             }
             // One word of what libgcc found out about the processor, read where libgcc keeps it and
             // tested. The object is declared on the way, so that a unit that never wrote a
@@ -8569,6 +8610,7 @@ impl Scan<'_> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::TimeStamp { aux: None }
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
@@ -8589,6 +8631,7 @@ impl Scan<'_> {
             ExprKind::Member { base, .. }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ObjectSize { address: base, .. }
+            | ExprKind::TimeStamp { aux: Some(base) }
             | ExprKind::ConstantP { value: base } => {
                 self.expr(base);
             }

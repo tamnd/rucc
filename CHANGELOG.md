@@ -9,6 +9,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The builtins archive has `__chkstk` for AArch64 Windows, the stack probe with Microsoft's contract: the size in `x15` in units of sixteen bytes, `x16` and `x17` destroyed and nothing else. It assembles to the same bytes as compiler-rt's. (#2199)
 - `__builtin_sponentry` on AArch64, the stack pointer the function was entered with, which the mingw-w64 `setjmp` passes to `_setjmp` on ARM64 Windows. clang writes the same address. On other targets the call is refused, as clang refuses it. (#2198)
 
+### Fixed
+
+- `__builtin_ia32_rdtsc` and `__builtin_ia32_rdtscp` write `rdtsc` and `rdtscp` where the call was, as gcc does, with `edx` and `eax` put together into the counter and `ecx` stored through the pointer for `rdtscp`. They were calls to two routines only `librucc_builtins.a` defines, so an object rucc compiled and gcc linked, or that a gcc-built program loaded with `dlopen`, had two undefined names. The routines are gone from the archive. On a target other than x86-64 either builtin is now an error where it is written, rather than a call to a name nothing defines (#2191).
+
 ## 0.16.0
 
 The W4 release, for the MSVC environment on Windows. `x86_64-windows-msvc` is tier 3: `rucc --fetch x86_64-windows-msvc` downloads the CRT and the Windows SDK from Microsoft, programs link with lld-link against the static CRT by default, and the ABI differential against cl.exe is clean. Most of that shipped in 0.15.3 already. This release adds the last fix W4 needed, for dllimport data from the static CRT, along with `rucc --dlltool` from W3 and the first AArch64 Windows pieces from W5.
