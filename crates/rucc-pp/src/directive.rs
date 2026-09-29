@@ -104,6 +104,9 @@ pub struct LineDirective {
 #[derive(Debug, Default)]
 pub struct Preprocessor {
     macros: MacroTable,
+    /// What a character constant in `#if` comes to, which the target decides and
+    /// [`Preprocessor::predefine`] learns.
+    chars: cond::Chars,
     expander: Expander,
     diagnostics: Vec<Diagnostic>,
     conds: Vec<Cond>,
@@ -210,6 +213,7 @@ impl Preprocessor {
         cx: &mut Context<'_>,
     ) -> Result<(), SourceMapFull> {
         let names = Names::new(cx.interner);
+        self.chars = cond::Chars::of(target);
         let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
         // The macros that cannot be written as a `#define` line, because what they stand for
         // depends on where they are used. They go in after the generated file and before the
@@ -882,12 +886,12 @@ impl Preprocessor {
         at: Span,
         cx: &mut Context<'_>,
     ) -> Option<embed::Params> {
-        let Preprocessor { expander, macros, diagnostics, .. } = self;
+        let Preprocessor { expander, macros, diagnostics, chars, .. } = self;
         let sources = &mut *cx.sources;
         let mut expand = |toks: Vec<Tok>, interner: &mut Interner| {
             expander.expand_toks(toks, macros, interner, sources)
         };
-        let params = embed::parse(line, at, cx.interner, diagnostics, &mut expand);
+        let params = embed::parse(line, at, cx.interner, diagnostics, &mut expand, *chars);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         params
     }
@@ -1086,7 +1090,7 @@ impl Preprocessor {
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         let line = self.resolve_defined(line, cx.interner, names);
         let line = self.resolve_has(line, cx, names, Pass::Rest);
-        cond::evaluate(&line, cx.interner, &mut self.diagnostics, hash)
+        cond::evaluate(&line, cx.interner, &mut self.diagnostics, hash, self.chars)
     }
 
     /// Replaces `__has_include(<x.h>)` and the rest of the family with what they answer.
@@ -2273,6 +2277,28 @@ mod tests {
     fn character_constants_evaluate() {
         assert_eq!(clean("#if 'A' == 65\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if '\\n' == 10\nyes\n#endif\n"), "yes");
+    }
+
+    #[test]
+    fn a_character_constant_has_the_sign_the_target_gives_char() {
+        // `#if '\xff' < 0` is how a header asks whether plain `char` is signed, and the answer
+        // is the target's. AArch64 Linux makes it unsigned and makes `wchar_t` unsigned too,
+        // while Apple arm64 keeps both signed the way x86-64 does.
+        let src = "#if '\\xff' < 0\nsigned\n#else\nunsigned\n#endif\n\
+                   #if L'\\xffffffff' < 0\nwsigned\n#else\nwunsigned\n#endif\n";
+        for (triple, want) in [
+            ("x86_64-unknown-linux-gnu", "signed wsigned"),
+            ("aarch64-unknown-linux-gnu", "unsigned wunsigned"),
+            ("aarch64-apple-darwin", "signed wsigned"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(src), want, "{triple}");
+        }
+        // `u8`, `u` and `U` constants are unsigned types on every target.
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        assert_eq!(run.go("#if u'\\xffff' > 0 && U'\\xffffffff' > 0\nyes\n#endif\n"), "yes");
     }
 
     #[test]

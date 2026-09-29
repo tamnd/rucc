@@ -95,8 +95,7 @@ use rucc_ir::{
     Float, Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
     Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
-use rucc_target::Isa;
-use rucc_tuple::{Arch, Os};
+use rucc_target::{Isa, TargetInfo};
 
 use crate::Stats;
 use crate::cfg::Cfg;
@@ -778,10 +777,12 @@ enum Convention {
 }
 
 impl Convention {
+    /// Read off the ABI description the target's registers are the other half of, so that a
+    /// target that takes one of these two conventions gets the answer without being named here.
     fn of(module: &Module) -> Self {
-        match (module.tuple.arch(), module.tuple.os()) {
-            (Arch::X86_64, Os::Windows) => Self::Slots,
-            (Arch::X86_64, _) => Self::SysV,
+        match TargetInfo::for_tuple(module.tuple).call_regs.map(|regs| regs.abi) {
+            Some(abi) if std::ptr::eq(abi, &rucc_abi::abis::WIN64) => Self::Slots,
+            Some(abi) if std::ptr::eq(abi, &rucc_abi::abis::SYSV_AMD64) => Self::SysV,
             _ => Self::Other,
         }
     }

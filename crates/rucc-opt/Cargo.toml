@@ -18,16 +18,18 @@ workspace = true
 # All of lower rank than 9, per spec/18-package-layout.md section 18.2. `rucc-session` is here
 # for the optimization level and nothing else, since the level is what selects a pipeline.
 # `rucc-cost` is where every threshold a pass consults has to come from, per section 40.12, and
-# this crate is its first caller. `rucc-tuple` is for the one pass that has to know the calling
-# convention, which is the inliner forwarding the anonymous arguments of a call. `rucc-target` is
-# for the set of x86-64 extensions the inliner compares a caller and a callee by.
+# this crate is its first caller. `rucc-abi` is for the one pass that has to know the calling
+# convention, which is the inliner forwarding the anonymous arguments of a call, and it asks which
+# description the target's registers point at rather than which machine it is. `rucc-target` is
+# for that link, for the set of x86-64 extensions the inliner compares a caller and a callee by,
+# and for what the switch conversion may put in a table.
 [dependencies]
+rucc-abi = { workspace = true }
 rucc-base = { workspace = true }
 rucc-cost = { workspace = true }
 rucc-ir = { workspace = true }
 rucc-session = { workspace = true }
 rucc-target = { workspace = true }
-rucc-tuple = { workspace = true }
 
 # The rule compiler, which turns `rules/*.rules` into the table `src/rules` includes. A build
 # dependency and never an ordinary one, per spec/18-package-layout.md section 18.2: it is build

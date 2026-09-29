@@ -376,6 +376,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     } else {
                         crate::shapes::Meaning::default()
                     };
+                    let common = sess.common();
                     let mut lowered = rucc_lower::lower(
                         crate::phase::source_name(name),
                         rucc_lower::Context {
@@ -409,6 +410,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             align: opts.align_functions,
                             instrument: opts.instrument_functions,
                             exceptions: opts.exceptions,
+                            common,
                             read: &mut read,
                         },
                     );
@@ -3821,6 +3823,9 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
+        // A tentative definition is common on Darwin unless told otherwise, and this is about the
+        // one that is not.
+        opts.common = Some(false);
         let source = "extern int ext;\n\
                       int g[4];\n\
                       int f(int i) { return g[i] + ext; }\n";

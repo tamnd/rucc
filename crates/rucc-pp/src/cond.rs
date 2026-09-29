@@ -17,6 +17,7 @@
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{PpTokenKind, Punct};
+use rucc_target::TargetInfo;
 
 use crate::token::Tok;
 
@@ -62,8 +63,45 @@ pub(crate) fn evaluate(
     interner: &Interner,
     diagnostics: &mut Vec<Diagnostic>,
     line: Span,
+    chars: Chars,
 ) -> bool {
-    run(tokens, interner, diagnostics, line, "#if").is_some_and(Val::is_true)
+    run(tokens, interner, diagnostics, line, "#if", chars).is_some_and(Val::is_true)
+}
+
+/// What the target makes of a character constant's value, which is the one thing in a
+/// preprocessor expression that depends on the target.
+///
+/// `'\xff'` is a `char` converted to `int`, so it is minus one where plain `char` is signed
+/// and two hundred and fifty five where it is not, and `#if '\xff' < 0` is how a header asks
+/// which. x86-64 and Apple arm64 say signed, and AArch64 Linux says unsigned. `L'\xffffffff'`
+/// is the same question asked of `wchar_t`, which is signed on x86-64 Linux and on Apple, and
+/// unsigned on AArch64 Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Chars {
+    /// Whether plain `char` is signed.
+    pub(crate) signed: bool,
+    /// Whether `wchar_t` is signed.
+    pub(crate) wide_signed: bool,
+    /// How many bits `wchar_t` has.
+    pub(crate) wide_width: u32,
+}
+
+impl Chars {
+    /// The answer for a target.
+    pub(crate) fn of(target: &TargetInfo) -> Chars {
+        Chars {
+            signed: target.char_is_signed,
+            wide_signed: target.wchar_is_signed,
+            wide_width: target.wchar_width,
+        }
+    }
+}
+
+impl Default for Chars {
+    /// x86-64 Linux, which is what a preprocessor nobody gave a target to has always assumed.
+    fn default() -> Chars {
+        Chars { signed: true, wide_signed: true, wide_width: 32 }
+    }
 }
 
 /// Evaluates a constant expression and returns what it came to.
@@ -79,9 +117,10 @@ pub(crate) fn value(
     diagnostics: &mut Vec<Diagnostic>,
     line: Span,
     what: &str,
+    chars: Chars,
 ) -> Option<i64> {
     let before = diagnostics.len();
-    let value = run(tokens, interner, diagnostics, line, what)?;
+    let value = run(tokens, interner, diagnostics, line, what, chars)?;
     if diagnostics.len() != before { None } else { Some(value.as_signed()) }
 }
 
@@ -92,6 +131,7 @@ fn run(
     diagnostics: &mut Vec<Diagnostic>,
     line: Span,
     what: &str,
+    chars: Chars,
 ) -> Option<Val> {
     if tokens.is_empty() {
         diagnostics.push(
@@ -99,7 +139,7 @@ fn run(
         );
         return None;
     }
-    let mut eval = Eval { tokens, at: 0, interner, diagnostics, line };
+    let mut eval = Eval { tokens, at: 0, interner, diagnostics, line, chars };
     let value = eval.conditional(true);
     if eval.at < eval.tokens.len() {
         let span = eval.tokens[eval.at].report_span();
@@ -119,6 +159,7 @@ struct Eval<'a> {
     /// The whole directive line, for errors that are about something missing rather than
     /// about a token that is present.
     line: Span,
+    chars: Chars,
 }
 
 impl Eval<'_> {
@@ -269,7 +310,7 @@ impl Eval<'_> {
 
     fn char_const(&mut self, tok: Tok, live: bool) -> Val {
         let text = tok.value.map(|v| self.interner.resolve(v)).unwrap_or_default();
-        match parse_char(text) {
+        match parse_char(text, self.chars) {
             Ok(v) => v,
             Err(problem) => {
                 if live {
@@ -431,10 +472,11 @@ fn parse_integer(text: &str) -> Result<Val, String> {
 
 /// Turns a character constant into a value.
 ///
-/// A narrow character constant is `int` and signed on every target we support. A multi
-/// character constant is implementation defined and we do what GCC does, packing the
-/// characters big end first, because the only code that uses them expects that.
-fn parse_char(text: &str) -> Result<Val, String> {
+/// A narrow character constant is an `int` holding a `char`, so its sign is plain `char`'s, and
+/// an `L` one is a `wchar_t` with that type's sign. A multi character constant is
+/// implementation defined and we do what GCC does, packing the characters big end first,
+/// because the only code that uses them expects that.
+fn parse_char(text: &str, chars: Chars) -> Result<Val, String> {
     let body = text
         .trim_start_matches(['L', 'u', 'U', '8'])
         .strip_prefix('\'')
@@ -442,25 +484,30 @@ fn parse_char(text: &str) -> Result<Val, String> {
         .ok_or_else(|| format!("`{text}` is not a character constant"))?;
     let wide = !text.starts_with('\'');
 
-    let mut chars = body.chars().peekable();
+    let mut rest = body.chars().peekable();
     let mut value: u64 = 0;
     let mut count = 0;
-    while let Some(c) = chars.next() {
-        let scalar = if c == '\\' { escape(&mut chars)? } else { u64::from(c as u32) };
+    while let Some(c) = rest.next() {
+        let scalar = if c == '\\' { escape(&mut rest)? } else { u64::from(c as u32) };
         value = if count == 0 { scalar } else { (value << 8) | (scalar & 0xff) };
         count += 1;
     }
     if count == 0 {
         return Err("empty character constant".to_string());
     }
+    if text.starts_with('L') {
+        let width = chars.wide_width.clamp(8, 64);
+        let low = if width == 64 { value } else { value & ((1u64 << width) - 1) };
+        let negative = chars.wide_signed && width < 64 && low >> (width - 1) & 1 == 1;
+        let bits = if negative { low | !((1u64 << width) - 1) } else { low };
+        return Ok(Val { bits, unsigned: false });
+    }
     if wide {
         return Ok(Val { bits: value, unsigned: false });
     }
     if count == 1 {
-        // Plain `char` is signed on x86-64 Linux and unsigned on AArch64, which changes what
-        // `#if '\xff' < 0` means. The target answer belongs to `rucc-target` and arrives with
-        // the session plumbing; until then this is the x86-64 answer.
-        return Ok(Val::signed(value as u8 as i8 as i64));
+        let value = if chars.signed { value as u8 as i8 as i64 } else { i64::from(value as u8) };
+        return Ok(Val::signed(value));
     }
     Ok(Val::signed(value as u32 as i32 as i64))
 }
@@ -561,21 +608,21 @@ mod tests {
 
     #[test]
     fn character_constants_and_escapes() {
-        assert_eq!(parse_char("'a'").expect("plain").bits, 97);
-        assert_eq!(parse_char("'\\n'").expect("newline").bits, 10);
-        assert_eq!(parse_char("'\\0'").expect("nul").bits, 0);
-        assert_eq!(parse_char("'\\x41'").expect("hex").bits, 65);
-        assert_eq!(parse_char("'\\101'").expect("octal").bits, 65);
+        assert_eq!(parse_char("'a'", Chars::default()).expect("plain").bits, 97);
+        assert_eq!(parse_char("'\\n'", Chars::default()).expect("newline").bits, 10);
+        assert_eq!(parse_char("'\\0'", Chars::default()).expect("nul").bits, 0);
+        assert_eq!(parse_char("'\\x41'", Chars::default()).expect("hex").bits, 65);
+        assert_eq!(parse_char("'\\101'", Chars::default()).expect("octal").bits, 65);
     }
 
     #[test]
     fn a_narrow_character_constant_is_signed() {
-        assert_eq!(parse_char("'\\xff'").expect("high bit set").as_signed(), -1);
-        assert_eq!(parse_char("L'\\xff'").expect("wide").as_signed(), 255);
+        assert_eq!(parse_char("'\\xff'", Chars::default()).expect("high bit set").as_signed(), -1);
+        assert_eq!(parse_char("L'\\xff'", Chars::default()).expect("wide").as_signed(), 255);
     }
 
     #[test]
     fn a_multi_character_constant_packs_big_end_first() {
-        assert_eq!(parse_char("'ab'").expect("two chars").bits, (97 << 8) | 98);
+        assert_eq!(parse_char("'ab'", Chars::default()).expect("two chars").bits, (97 << 8) | 98);
     }
 }

@@ -40,7 +40,7 @@ use rucc_sema::{
     ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign,
     Stmt, StmtId, StorageDuration, Tast,
 };
-use rucc_target::{Arch, ObjectFormat, Pass, TargetInfo, Triple};
+use rucc_target::{Pass, TargetInfo};
 use rucc_types::{
     ArrayLen, Extent, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId,
     integer_info, pointee,
@@ -7880,12 +7880,10 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// Whether the output for this target can say where an unwind lands, which is x86-64 ELF.
+    /// Whether the output for this target can say where an unwind lands, which is
+    /// [`TargetInfo::landing_pads`].
     fn has_landing_pads(&self) -> bool {
-        let target = self.target();
-        target.object_format == ObjectFormat::Elf
-            && target.pointer_width == 64
-            && Triple::from_tuple(target.tuple).is_some_and(|triple| triple.arch == Arch::X86_64)
+        self.target().landing_pads
     }
 
     /// The edge an unwind takes out of the call just built, when a scope owes a handler.

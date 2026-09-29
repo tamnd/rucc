@@ -84,7 +84,6 @@
 use rucc_base::float::{Float, Format, ParseError, Status};
 use rucc_session::Std;
 use rucc_target::TargetInfo;
-use rucc_tuple::Arch;
 use rucc_types::{IntKind, int_width};
 
 use crate::remarks::Remarks;
@@ -249,10 +248,10 @@ impl FloatConstantType {
             FloatConstantType::LongDouble => target.long_double_format,
             FloatConstantType::Float16 => Format::Half,
             FloatConstantType::Float128 => Format::Quad,
-            FloatConstantType::Float64x if target.tuple.arch() == Arch::X86_64 => {
-                Format::X87Extended
-            }
-            FloatConstantType::Float64x => Format::Quad,
+            // The target says, since it is also what `_Float64x` means everywhere else and a
+            // second copy of the rule here had already missed 32-bit x86. A target with no
+            // `_Float64x` has refused the suffix before this is asked.
+            FloatConstantType::Float64x => target.float64x_format.unwrap_or(Format::Quad),
             FloatConstantType::Float80 => Format::X87Extended,
             FloatConstantType::Decimal32 => Format::Decimal32,
             FloatConstantType::Decimal64 => Format::Decimal64,
@@ -775,8 +774,10 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                 1
             }
             b'w' | b'W' => {
-                // `__float80` is the x87 format, which only x86 has.
-                if target.tuple.arch() != Arch::X86_64 {
+                // `__float80` is the x87 format, and the type exists where `long double` is that
+                // format, which is the test `__float80` itself is held to. Asking the
+                // architecture instead let `1.0w` through on a target that refuses the keyword.
+                if target.long_double_format != Format::X87Extended {
                     return Err(FloatError::UnsupportedType);
                 }
                 ty = Some(FloatConstantType::Float80);
@@ -1271,6 +1272,15 @@ mod tests {
             "the half is the one i686 has no format for"
         );
         assert!(floating("1.0f128", Std::C23, &i686).is_ok());
+        // `_Float64x` is the x87 format on i686 as it is on x86-64, which is the target's answer
+        // and was not this crate's: a copy of the rule here asked for x86-64 alone.
+        assert_eq!(FloatConstantType::Float64x.format(&i686), Format::X87Extended);
+        assert_eq!(FloatConstantType::Float64x.format(&aarch64()), Format::Quad);
+        // `1.0w` goes where `__float80` goes, which is where `long double` is the x87 format.
+        assert!(floating("1.0w", Std::C23, &i686).is_ok());
+        let msvc =
+            TargetInfo::for_tuple("x86_64-windows-msvc".parse().expect("a row in the table"));
+        assert_eq!(floating("1.0w", Std::C23, &msvc), Err(FloatError::UnsupportedType));
         // The interchange types every machine has keep working on the machine that has least.
         for text in ["1.0f32", "1.0f64", "1.0f32x"] {
             assert!(floating(text, Std::C23, &arm).is_ok(), "{text} on armv7");

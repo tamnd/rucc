@@ -54,7 +54,7 @@
 
 use rucc_ir::Opcode;
 
-use crate::coverage::{GAPS, NAMES};
+use crate::coverage::{GAPS, names};
 use crate::lowering::Step;
 use crate::select::Table;
 
@@ -473,7 +473,7 @@ pub fn rows(table: &Table) -> Vec<Row> {
             rule: patterns.contains(&name),
             lowering: lowering(opcode),
             libcall: None,
-            nothing: NAMES
+            nothing: names(table)
                 .iter()
                 .find(|&&(at, ..)| at == name)
                 .map(|&(_, why, issue)| (why, issue)),

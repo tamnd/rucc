@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `-g` works for Windows targets. The COFF writer now puts the DWARF sections in the object, the way mingw-w64 gcc does, with an offset from one debug section into another written as `IMAGE_REL_AMD64_SECREL` and an address in the code as `IMAGE_REL_AMD64_ADDR64`. The warning that `-g` was ignored for COFF is gone. gdb on Linux reads a program built this way for line numbers, types and variable addresses.
+- `-fcommon` is accepted, and it is the default for Darwin targets as it is for Apple's clang. A file scope `int g;` with no initializer is a common symbol there, so two files that each write one link on a Mac the way they do with clang. `-fno-common` turns it off, and every other target keeps `-fno-common` as its default, which is gcc's since 10.
 
 ### Changed
 
@@ -19,6 +20,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - The scheduler no longer moves `movq %rbp, %rsp` above the body's own accesses to the frame. That move is the epilogue of a frame that uses a frame pointer and saves no other register, which covers a realigned frame such as a leaf with a `__m512i` local and a frame grown by `alloca` or a variable length array. The move names no memory, so at `-O2` it could go ahead of stores that reached the frame through another register, and they then wrote below the stack pointer outside the red zone, where a signal handler can overwrite them. An instruction that writes the stack pointer is now ordered against memory like a load or a store.
+- A name given with `__asm__` on a Mach-O target is the name in the object file, as it is with clang. `FILE *fopen(...) __asm("_fopen")`, which is how the macOS headers name the variants of a function, was written as `__fopen` and did not link.
+- aarch64 divides and takes the remainder of an 8 or 16 bit integer. It widens both operands first, with a zero or sign extension that matches the operation, instead of giving up on the instruction. Every aarch64 rule is now checked for coverage the way the x86-64 rules were, which is how this was found.
+- A character constant in `#if` has the sign plain `char` has on the target, so `#if '\xff' < 0` is false on aarch64 Linux, where `char` is unsigned, and an `L` constant has `wchar_t`'s width and sign. The same is true of the values `#embed` counts with.
+- The `w` and `f64x` suffixes on a floating constant give the target's formats: `f64x` is quad precision on aarch64 Linux, where `long double` is, and `w` is refused where there is no x87 format to give it.
+- Landing pads, 4-byte relative jump tables and the inliner's reading of the calling convention are decided by the target description rather than by a test of the architecture, so a target that has none of them is not given one because its name looked like x86-64.
 
 ## 0.12.3
 

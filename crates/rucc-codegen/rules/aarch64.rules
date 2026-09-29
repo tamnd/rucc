@@ -8,8 +8,8 @@
 ;; eight or sixteen bits lives in the low end of a thirty two bit register and what is above it
 ;; means nothing. The arithmetic whose low bits do not depend on the high ones takes the thirty two
 ;; bit instruction at those widths, and the verifier holds it to the bits the IR term has. The
-;; rest, which is right shifts, division and comparisons, has no rule below thirty two bits yet,
-;; since each of those has to widen first and that is two instructions.
+;; rest, which is right shifts, division and comparisons, widens first, so each of those is more
+;; than one instruction at those widths.
 ;;
 ;; A machine term inside another one is an instruction of its own, built first into a register of its
 ;; own, which is how a remainder is written: the division, then a multiply subtract that takes the
@@ -318,19 +318,70 @@
 
 (rule (lower (srem.i32 (value.i32 x) (value.i32 y)))
       (a64.msub_rrr_32 (a64.sdiv_rr_32 x y) y x)
-      (spec (= (bvsrem x y) (result))))
+      (spec (= (bvsrem x y) (result)))
+      (bounded "a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once"))
 
 (rule (lower (srem.i64 (value.i64 x) (value.i64 y)))
       (a64.msub_rrr_64 (a64.sdiv_rr_64 x y) y x)
-      (spec (= (bvsrem x y) (result))))
+      (spec (= (bvsrem x y) (result)))
+      (bounded "a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once"))
 
 (rule (lower (urem.i32 (value.i32 x) (value.i32 y)))
       (a64.msub_rrr_32 (a64.udiv_rr_32 x y) y x)
-      (spec (= (bvurem x y) (result))))
+      (spec (= (bvurem x y) (result)))
+      (bounded "a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once"))
 
 (rule (lower (urem.i64 (value.i64 x) (value.i64 y)))
       (a64.msub_rrr_64 (a64.udiv_rr_64 x y) y x)
+      (spec (= (bvurem x y) (result)))
+      (bounded "a remainder multiplies the quotient back by the divisor, and that is a multiply of two unknowns no solver settles at thirty two bits or more, while the same rule at eight bits is settled at once"))
+
+;; A division of bytes or halves, which the width narrowing pass writes when both operands were
+;; widened from the same narrow type. There is no divide narrower than thirty two bits, and the
+;; bits above a narrow value in its register mean nothing, so each operand is widened the way the
+;; division reads it, divided at thirty two bits, and the low end of the quotient is the answer.
+;; That is the same quotient: a zero extension divides as the narrow unsigned value does, and a
+;; sign extension divides as the narrow signed one does, including the most negative value over
+;; minus one, whose thirty two bit quotient is the narrow one with its sign bit cleared and has
+;; the same low bits. A remainder is the multiply subtract over the same widened operands.
+
+(rule (lower (udiv.i8 (value.i8 x) (value.i8 y)))
+      (a64.low_8 (a64.udiv_rr_32 (a64.uxtb_32 x) (a64.uxtb_32 y)))
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (sdiv.i8 (value.i8 x) (value.i8 y)))
+      (a64.low_8 (a64.sdiv_rr_32 (a64.sxtb_32 x) (a64.sxtb_32 y)))
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (urem.i8 (value.i8 x) (value.i8 y)))
+      (a64.low_8 (a64.msub_rrr_32 (a64.udiv_rr_32 (a64.uxtb_32 x) (a64.uxtb_32 y))
+                                  (a64.uxtb_32 y) (a64.uxtb_32 x)))
       (spec (= (bvurem x y) (result))))
+
+(rule (lower (srem.i8 (value.i8 x) (value.i8 y)))
+      (a64.low_8 (a64.msub_rrr_32 (a64.sdiv_rr_32 (a64.sxtb_32 x) (a64.sxtb_32 y))
+                                  (a64.sxtb_32 y) (a64.sxtb_32 x)))
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (udiv.i16 (value.i16 x) (value.i16 y)))
+      (a64.low_16 (a64.udiv_rr_32 (a64.uxth_32 x) (a64.uxth_32 y)))
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (sdiv.i16 (value.i16 x) (value.i16 y)))
+      (a64.low_16 (a64.sdiv_rr_32 (a64.sxth_32 x) (a64.sxth_32 y)))
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (urem.i16 (value.i16 x) (value.i16 y)))
+      (a64.low_16 (a64.msub_rrr_32 (a64.udiv_rr_32 (a64.uxth_32 x) (a64.uxth_32 y))
+                                   (a64.uxth_32 y) (a64.uxth_32 x)))
+      (spec (= (bvurem x y) (result)))
+      (bounded "a remainder multiplies the quotient back by the divisor, and no solver settles that at sixteen bits, while the same rule over bytes is settled at its own width"))
+
+(rule (lower (srem.i16 (value.i16 x) (value.i16 y)))
+      (a64.low_16 (a64.msub_rrr_32 (a64.sdiv_rr_32 (a64.sxth_32 x) (a64.sxth_32 y))
+                                   (a64.sxth_32 y) (a64.sxth_32 x)))
+      (spec (= (bvsrem x y) (result)))
+      (bounded "a remainder multiplies the quotient back by the divisor, and no solver settles that at sixteen bits, while the same rule over bytes is settled at its own width"))
 
 
 ;; Shifts by a constant. A left shift keeps its low bits whatever is above them, so it is the one
