@@ -33,6 +33,7 @@ The M6 release, published at last. The tags for 0.15.0 and 0.15.1 both stopped a
 
 ### Fixed
 
+- `setjmp` on the `x86_64-windows-msvc` row passes the calling frame to the C runtime's `_setjmp`, as cl.exe, clang and mingw-w64 do. Microsoft's `<setjmp.h>` calls it with one argument and `longjmp` unwound to whatever RDX held, so on Windows every program that used `longjmp` died, though Wine ran them. rucc ships a `<setjmp.h>` that wraps Microsoft's, and `jmpbuf`, `longjmp` and `realign` in `tests/exec/windows` pass on the windows-2025 runner.
 - `__pragma(...)`, Microsoft's form of `_Pragma` that takes tokens rather than a string, is read on the msvc rows and wherever `-fms-extensions` is given, as in clang. `vcruntime.h` opens every C header with `__pragma(pack(push, 8))`, so no `<stdio.h>` from the MSVC CRT preprocessed.
 - Under Microsoft's extensions a flexible array member may be the only member of a struct or a member of a union, as with cl.exe and clang. `<winioctl.h>` has one in a union, so `<windows.h>` did not compile on the msvc rows.
 - `--fetch` and `--fetch-msvc-sdk` link each header name the SDK includes with capitals, such as `SpecStrings.h` and `DriverSpecs.h`, to the lowercase file Microsoft ships, as xwin does, so the headers are found on a file system that minds case. They also install the SDK's OneCoreUap headers, which hold `winapifamily.h`, `sdkddkver.h` and `minwindef.h`.

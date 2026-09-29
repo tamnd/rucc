@@ -53,6 +53,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("nmmintrin.h", include_str!("../runtime/include/nmmintrin.h")),
     ("pmmintrin.h", include_str!("../runtime/include/pmmintrin.h")),
     ("popcntintrin.h", include_str!("../runtime/include/popcntintrin.h")),
+    ("setjmp.h", include_str!("../runtime/include/setjmp.h")),
     ("smmintrin.h", include_str!("../runtime/include/smmintrin.h")),
     ("stdalign.h", include_str!("../runtime/include/stdalign.h")),
     ("stdarg.h", include_str!("../runtime/include/stdarg.h")),
