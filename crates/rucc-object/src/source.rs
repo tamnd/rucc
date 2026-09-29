@@ -28,7 +28,7 @@
 //! calls the things in it.
 
 use object::write::{Object as Writer, Relocation, Symbol, SymbolSection};
-use object::{Architecture, Endianness, RelocationFlags, SectionKind, SymbolFlags, elf};
+use object::{Architecture, Endianness, RelocationFlags, SectionKind, SymbolFlags, elf, pe};
 use rucc_target::aarch64::Fixup;
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
@@ -52,6 +52,65 @@ pub struct Part {
     pub shape: Shape,
     /// Every place in it that names something, counted from the start of the section.
     pub relocs: Vec<Reloc>,
+    /// The COMDAT it is, on COFF, where `.section name,"flags",discard,symbol` makes a section one
+    /// the linker keeps a single copy of out of every object that has one about the same symbol.
+    /// [`None`] for every other section and on every other format.
+    pub group: Option<Group>,
+}
+
+/// A COFF section the linker keeps one copy of, which is what the third and fourth operands of
+/// `.section` say on that format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    /// The name the group is about, which the file defines in the section.
+    pub symbol: String,
+    /// Which copy the linker keeps.
+    pub keep: Keep,
+}
+
+/// How the linker picks the copy of a [`Group`] it keeps, in the words gas and llvm-mc take for
+/// each of COFF's selection numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// `one_only`: there must be only one, and two is an error.
+    One,
+    /// `discard`: any one, and the rest are dropped. What a `.refptr.` pointer is.
+    Any,
+    /// `same_size`: any one, and two of different sizes are an error.
+    SameSize,
+    /// `same_contents`: any one, and two with different bytes are an error.
+    SameContents,
+    /// `largest`: the biggest one.
+    Largest,
+    /// `newest`: the newest one, which no toolchain writes and link.exe does not implement.
+    Newest,
+}
+
+impl Keep {
+    /// The word for it, as `.section` spells it.
+    #[must_use]
+    pub fn of(word: &str) -> Option<Keep> {
+        Some(match word {
+            "one_only" => Keep::One,
+            "discard" => Keep::Any,
+            "same_size" => Keep::SameSize,
+            "same_contents" => Keep::SameContents,
+            "largest" => Keep::Largest,
+            "newest" => Keep::Newest,
+            _ => return None,
+        })
+    }
+
+    pub(crate) const fn kind(self) -> object::ComdatKind {
+        match self {
+            Keep::One => object::ComdatKind::NoDuplicates,
+            Keep::Any => object::ComdatKind::Any,
+            Keep::SameSize => object::ComdatKind::SameSize,
+            Keep::SameContents => object::ComdatKind::ExactMatch,
+            Keep::Largest => object::ComdatKind::Largest,
+            Keep::Newest => object::ComdatKind::Newest,
+        }
+    }
 }
 
 /// What a section is, which on ELF is a handful of flag letters and a type.
@@ -87,6 +146,10 @@ pub struct Shape {
     /// which is what [`Shape::mach`] works out. Zero on the other two formats, where the fields
     /// above are the whole answer, and zero is also an ordinary Mach-O section with nothing said.
     pub mach: u32,
+    /// The characteristics of a COFF section whose `.section` gave COFF's own letters, which is
+    /// what [`Shape::coff`] works out. Zero when it gave none, and then the writer works them out
+    /// from the name and the kind, as it does for a section this compiler made.
+    pub coff: u32,
 }
 
 impl Shape {
@@ -172,6 +235,97 @@ impl Shape {
             thread,
             bits: !crate::macho::zero_filled(mach),
             mach,
+            ..Shape::default()
+        })
+    }
+
+    /// What a COFF section is, from the letters after its name in `.section`.
+    ///
+    /// COFF's letters are not ELF's, and `d`, `r` and `n` mean nothing to ELF at all. These are
+    /// read the way llvm-mc reads them, which is also how gas reads them: `x` is code, `d` is data,
+    /// `b` is zero filled, `r` takes away writing and `w` gives it back, `n` is a section the
+    /// linker drops, `i` holds options for the linker, `y` is not readable, `D` may be discarded,
+    /// `s` is shared, and `a` is taken and means nothing. A section with no letters at all is
+    /// readable and writable data. `.drectve,"yni"` is the one a DLL's exports are said in.
+    ///
+    /// # Errors
+    ///
+    /// A letter that is not one of those, as the letter.
+    pub fn coff(letters: &str) -> Result<Shape, char> {
+        let (mut code, mut data, mut zero, mut drop, mut info) =
+            (false, false, false, false, false);
+        let (mut read, mut write, mut shared, mut discard) = (true, true, false, false);
+        let mut writable = false;
+        for letter in letters.chars() {
+            match letter {
+                'a' => {}
+                'b' => zero = true,
+                'd' => {
+                    data = true;
+                    write = true;
+                }
+                'n' => drop = true,
+                'D' => discard = true,
+                'r' => {
+                    writable = false;
+                    write = false;
+                    data |= !code;
+                }
+                's' => {
+                    shared = true;
+                    data = true;
+                    write = true;
+                }
+                'w' => {
+                    write = true;
+                    writable = true;
+                }
+                'x' => {
+                    code = true;
+                    write &= writable;
+                }
+                'y' => {
+                    read = false;
+                    write = false;
+                }
+                'i' => info = true,
+                other => return Err(other),
+            }
+        }
+        let mut flags = 0;
+        if code {
+            flags |= pe::IMAGE_SCN_CNT_CODE.0 | pe::IMAGE_SCN_MEM_EXECUTE.0;
+        }
+        if data {
+            flags |= pe::IMAGE_SCN_CNT_INITIALIZED_DATA.0;
+        }
+        if zero && !data {
+            flags |= pe::IMAGE_SCN_CNT_UNINITIALIZED_DATA.0;
+        }
+        if drop {
+            flags |= pe::IMAGE_SCN_LNK_REMOVE.0;
+        }
+        if read {
+            flags |= pe::IMAGE_SCN_MEM_READ.0;
+        }
+        if write {
+            flags |= pe::IMAGE_SCN_MEM_WRITE.0;
+        }
+        if discard {
+            flags |= pe::IMAGE_SCN_MEM_DISCARDABLE.0;
+        }
+        if shared {
+            flags |= pe::IMAGE_SCN_MEM_SHARED.0;
+        }
+        if info {
+            flags |= pe::IMAGE_SCN_LNK_INFO.0;
+        }
+        Ok(Shape {
+            alloc: !drop && !info,
+            write,
+            exec: code,
+            bits: !(zero && !data),
+            coff: flags,
             ..Shape::default()
         })
     }
@@ -389,6 +543,12 @@ pub fn assembled_described(
         } else {
             obj.append_section_bss(id, part.size, align);
         }
+        // A COMDAT's section symbol comes before the symbol the group is about, which is the
+        // order the COFF writer wants the two in, so it is asked for here and not left to the
+        // first relocation that happens to need it.
+        if part.group.is_some() {
+            obj.section_symbol(id);
+        }
         made.push(id);
     }
 
@@ -451,6 +611,22 @@ pub fn assembled_described(
             }
         }
         symbols.insert(name.name.clone(), id);
+    }
+
+    for (part, id) in input.parts.iter().zip(&made) {
+        let Some(group) = &part.group else { continue };
+        let Some(&symbol) = symbols.get(&group.symbol) else {
+            let why = format!(
+                "section '{}' is a COMDAT about '{}', which the file does not define",
+                part.name, group.symbol
+            );
+            return Err(Error::Refused { why });
+        };
+        obj.add_comdat(object::write::Comdat {
+            kind: group.keep.kind(),
+            symbol,
+            sections: vec![*id],
+        });
     }
 
     for (part, id) in input.parts.iter().zip(&made) {
@@ -632,7 +808,7 @@ mod tests {
     use super::*;
 
     use object::read::elf::{FileHeader as _, Sym as _};
-    use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use object::read::{Object as _, ObjectComdat as _, ObjectSection as _, ObjectSymbol as _};
     use object::{RelocationFlags, SectionFlags};
     use rucc_target::{Arch as TargetArch, Env, Os, Triple};
 
@@ -657,6 +833,7 @@ mod tests {
             align: 1,
             shape: Shape::of(name),
             relocs: Vec::new(),
+            group: None,
         }
     }
 
@@ -1095,6 +1272,45 @@ mod tests {
     }
 
     #[test]
+    fn a_coff_section_keeps_the_letters_it_was_given_and_its_comdat() {
+        // `.section .drectve,"yni"` in chkstk.S, and the `.refptr.` pointers mingw-w64 wants one
+        // copy of across every object that has one.
+        let drectve = Part {
+            shape: Shape::coff("yni").expect("the letters"),
+            ..part(".drectve", b" -exclude-symbols:f".to_vec())
+        };
+        let refptr = Part {
+            shape: Shape::coff("dr").expect("the letters"),
+            group: Some(Group { symbol: ".refptr.x".to_owned(), keep: Keep::Any }),
+            ..part(".rdata$.refptr.x", vec![0; 8])
+        };
+        let input = Assembled {
+            parts: vec![refptr, drectve],
+            names: vec![at(".refptr.x", 0, Sort::Object, Binding::Global)],
+            subsections: false,
+        };
+        let bytes = assembled(&input, &windows()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let flags = |name: &str| match file.section_by_name(name).expect("the section").flags() {
+            SectionFlags::Coff { characteristics } => characteristics.0,
+            other => panic!("{other:?}"),
+        };
+        let removed = pe::IMAGE_SCN_LNK_REMOVE.0 | pe::IMAGE_SCN_LNK_INFO.0;
+        assert_eq!(flags(".drectve") & removed, removed);
+        assert_eq!(flags(".drectve") & (pe::IMAGE_SCN_MEM_READ.0 | pe::IMAGE_SCN_MEM_WRITE.0), 0);
+        let refptr = flags(".rdata$.refptr.x");
+        assert_ne!(refptr & pe::IMAGE_SCN_LNK_COMDAT.0, 0, "not a COMDAT");
+        assert_eq!(refptr & pe::IMAGE_SCN_MEM_WRITE.0, 0, "`r` did not take writing away");
+        let comdat = file.comdats().next().expect("the COMDAT");
+        assert_eq!(comdat.kind(), object::ComdatKind::Any);
+        assert_eq!(file.symbol_by_index(comdat.symbol()).unwrap().name(), Ok(".refptr.x"));
+
+        // And one about a name the file never defines is refused rather than written broken.
+        let input = Assembled { names: Vec::new(), ..input };
+        assert!(assembled(&input, &windows()).is_err());
+    }
+
+    #[test]
     fn a_global_label_with_no_type_under_it_is_still_offered_on_coff() {
         // The case a `.globl` and a label is, which is most of what a hand written file says. On
         // ELF that is `STT_NOTYPE` and the binding is a separate field, so the name is global
@@ -1155,9 +1371,7 @@ mod tests {
         assert_eq!(at, 2);
         assert_eq!(
             reloc.flags(),
-            RelocationFlags::Coff {
-                typ: object::pe::RelocationType(object::pe::IMAGE_REL_AMD64_REL32.0 + 4)
-            }
+            RelocationFlags::Coff { typ: pe::RelocationType(pe::IMAGE_REL_AMD64_REL32.0 + 4) }
         );
     }
 }

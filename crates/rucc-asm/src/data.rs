@@ -42,7 +42,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
 use rucc_ir::{AliasKind, Datum, Dll, GlobalId, Linkage, Module, SymbolRef};
 use rucc_object::{
-    Alias, Apart, Binding, Data, Export, Object, Place, Reference, Reloc, Visibility,
+    Alias, Apart, Binding, Data, Export, Object, Offer, Place, Reference, Reloc, Visibility,
 };
 use rucc_target::ObjectFormat;
 
@@ -311,20 +311,36 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
         }
     }
     out.file_asm = module.file_asms().to_vec();
-    // What `dllexport` asks for, which only a COFF object has a way to say. A declaration is left
-    // out, because what is offered has to be here to offer: clang says nothing about one either.
+    // What `dllexport` asks for, which only a COFF object has a way to say, and what a hidden
+    // definition asks for there, which is to be left out of a DLL that exports everything. A
+    // declaration is left out, because what is offered has to be here to offer: clang says
+    // nothing about one either. See `rucc_object::Offer`.
     if format == ObjectFormat::Coff {
+        let offer = |dll: Dll, visibility: ir::Visibility, linkage: Linkage, variable: bool| {
+            if dll == Dll::Export {
+                Some(if variable { Offer::Variable } else { Offer::Function })
+            } else if visibility == ir::Visibility::Hidden && linkage != Linkage::Internal {
+                Some(Offer::Hidden)
+            } else {
+                None
+            }
+        };
         for id in module.funcs() {
             let func = &module[id];
-            if !func.is_declaration() && func.dll == Dll::Export {
-                out.exports.push(Export { name: names.resolve(func.name).to_owned(), data: false });
+            if func.is_declaration() {
+                continue;
+            }
+            if let Some(kind) = offer(func.dll, func.visibility, func.linkage, false) {
+                out.exports.push(Export { name: names.resolve(func.name).to_owned(), kind });
             }
         }
         for id in module.globals() {
             let global = &module[id];
-            if !global.is_declaration() && global.dll == Dll::Export {
-                let name = names.resolve(global.name).to_owned();
-                out.exports.push(Export { name, data: true });
+            if global.is_declaration() {
+                continue;
+            }
+            if let Some(kind) = offer(global.dll, global.visibility, global.linkage, true) {
+                out.exports.push(Export { name: names.resolve(global.name).to_owned(), kind });
             }
         }
     }

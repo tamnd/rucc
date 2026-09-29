@@ -349,9 +349,10 @@ pub struct Data {
     pub exports: Vec<Export>,
 }
 
-/// One name the DLL this file is linked into offers to others, which is `dllexport`.
+/// One name the DLL this file is linked into offers to others, which is `dllexport`, or one it
+/// is told to keep to itself, which is a hidden definition.
 ///
-/// What a COFF object says it with is an option for the linker, ` -export:name`, in a section
+/// What a COFF object says either with is an option for the linker, ` -export:name`, in a section
 /// called `.drectve` that holds nothing but options and that the linker reads and then drops. A
 /// variable is ` -export:name,data`, which keeps the import library from writing a stub under the
 /// plain name for it, since a jump is no use to somebody reading a variable. The list is in the
@@ -361,8 +362,23 @@ pub struct Data {
 pub struct Export {
     /// The name as the linker sees it.
     pub name: String,
-    /// Whether it is a variable rather than a function.
-    pub data: bool,
+    /// What the linker is told about it.
+    pub kind: Offer,
+}
+
+/// What an [`Export`] tells the linker about its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    /// A function other DLLs may call.
+    Function,
+    /// A variable other DLLs may read.
+    Variable,
+    /// A name that is left out when the linker exports every name a DLL defines, which is what it
+    /// does for a DLL with no `dllexport` and no `.def` file. `-exclude-symbols:name`, which clang
+    /// writes for a hidden definition on a mingw-w64 target and which both lld and GNU ld read.
+    /// gcc ignores hidden visibility there. This is how the runtime routines of our own that a
+    /// DLL links in stay out of its export table, the way libgcc's do by being named libgcc.
+    Hidden,
 }
 
 impl Export {
@@ -370,8 +386,11 @@ impl Export {
     /// the one before.
     #[must_use]
     pub fn option(&self) -> String {
-        let data = if self.data { ",data" } else { "" };
-        format!(" -export:{}{data}", self.name)
+        match self.kind {
+            Offer::Function => format!(" -export:{}", self.name),
+            Offer::Variable => format!(" -export:{},data", self.name),
+            Offer::Hidden => format!(" -exclude-symbols:{}", self.name),
+        }
     }
 }
 

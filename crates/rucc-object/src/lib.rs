@@ -83,11 +83,12 @@ mod source;
 pub use crate::file::{Error, defines, write};
 pub use crate::section::{
     Alias, Apart, Array, Binding, Chunk, Data, EXCEPT_TABLE, Export, Extent, FUNC_ALIGN, Info,
-    Marker, Object, Output, Patch, Place, Property, Reference, Reloc, Sections, Site, Table, Text,
-    Unwind, Visibility,
+    Marker, Object, Offer, Output, Patch, Place, Property, Reference, Reloc, Sections, Site, Table,
+    Text, Unwind, Visibility,
 };
 pub use crate::source::{
-    Assembled, Held, Name, Part, Shape, Sort, assembled, assembled_defines, assembled_described,
+    Assembled, Group, Held, Keep, Name, Part, Shape, Sort, assembled, assembled_defines,
+    assembled_described,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

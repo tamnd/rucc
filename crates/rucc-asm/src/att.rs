@@ -1740,12 +1740,13 @@ mod tests {
     }
 
     /// What clang writes for `dllexport`: every name as a linker option in `.drectve`, the
-    /// functions first, and a variable marked as data.
+    /// functions first, and a variable marked as data. A hidden definition is an option there too.
     #[test]
     fn a_name_offered_to_other_dlls_is_an_option_in_the_directive_section() {
         let exports = vec![
-            rucc_object::Export { name: "offered".to_owned(), data: false },
-            rucc_object::Export { name: "count".to_owned(), data: true },
+            rucc_object::Export { name: "offered".to_owned(), kind: rucc_object::Offer::Function },
+            rucc_object::Export { name: "count".to_owned(), kind: rucc_object::Offer::Variable },
+            rucc_object::Export { name: "kept".to_owned(), kind: rucc_object::Offer::Hidden },
         ];
         let names = Interner::new();
         let text = print(
@@ -1759,7 +1760,7 @@ mod tests {
         )
         .expect("a machine with a writer");
         let expected = "\t.section\t.drectve,\"yni\"\n\t.ascii\t\" -export:offered\"\n\
-                        \t.ascii\t\" -export:count,data\"\n";
+                        \t.ascii\t\" -export:count,data\"\n\t.ascii\t\" -exclude-symbols:kept\"\n";
         assert!(text.contains(expected), "{text}");
         let none = data(Vec::new(), Os::Windows);
         assert!(!none.contains(".drectve"), "{none}");

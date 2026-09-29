@@ -1399,6 +1399,10 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
         // type based layer alone, which `crates/rucc-sema/src/decl.rs` and the alias pass settle
         // in one place.
         .args(["-ffreestanding", "-fno-builtin", "-fno-strict-aliasing", "-O2"])
+        // Hidden on Windows so that a DLL which exports every name it defines leaves these out,
+        // which the compiler says with `-exclude-symbols:` in each object. libgcc gets the same
+        // from the linker knowing its name, and this archive's name is not on that list.
+        .args(target.contains("windows").then_some("-fvisibility=hidden"))
         .args(["--emit=archive", "-o"])
         .arg(&writing)
         .args(&sources)

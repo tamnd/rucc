@@ -1,0 +1,9 @@
+twice 42 big 2
+add 5 counter 40
+counter 42
+loaded 1 1
+plain twice exported
+plain ___chkstk_ms not exported
+listed add exported
+listed counter exported
+listed unlisted not exported
