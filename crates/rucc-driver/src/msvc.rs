@@ -519,6 +519,9 @@ fn aliases(_root: &Path) -> Result<usize, CliError> {
 }
 
 /// The directories of the tree an include is looked for in, in the order the search takes them.
+///
+/// Only [`spellings`] reads them, and it only runs where names are case sensitive.
+#[cfg(unix)]
 const INCLUDES: [&str; 4] =
     ["crt/include", "sdk/include/ucrt", "sdk/include/um", "sdk/include/shared"];
 
