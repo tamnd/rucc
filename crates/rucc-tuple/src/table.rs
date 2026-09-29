@@ -299,10 +299,10 @@ pub const TARGETS: &[TargetEntry] = &[
     },
     TargetEntry {
         tuple: "x86_64-windows-msvc",
-        tier: Tier::Recognized,
+        tier: Tier::InProgress,
         planned: Tier::SupportedWithEvidence,
         host: Host::Yes,
-        note: "needs a fetched SDK, so the ABI is ours and the dialect is not",
+        note: "rucc --fetch brings the CRT and SDK from Microsoft, and cl.exe is the ABI reference",
     },
     TargetEntry {
         tuple: "aarch64-windows-gnu",
