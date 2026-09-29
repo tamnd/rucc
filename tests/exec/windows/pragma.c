@@ -1,3 +1,4 @@
+/* gcc flags: -lws2_32 */
 // A program that asks for ws2_32 with #pragma comment and not on the command line, which only
 // links if the pragma reached the linker through .drectve. gcc ignores the pragma, so pragma.out
 // was written by hand from what the program prints when it links.
