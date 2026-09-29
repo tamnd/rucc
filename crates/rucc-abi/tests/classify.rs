@@ -286,9 +286,10 @@ fn sysv_gives_an_int128_no_register_rather_than_half_of_one() {
 }
 
 #[test]
-fn an_aggregate_of_no_size_travels_nowhere_on_every_abi() {
+fn an_aggregate_of_no_size_travels_nowhere_on_every_abi_but_win64() {
+    // Windows x64 passes one as an address, see the test about it below.
     let shape = Shape { size: 0, align: 1, pieces: &[], complex: false };
-    for mut call in [sysv(), aapcs(), win64(), riscv(), DARWIN_ARM64.call()] {
+    for mut call in [sysv(), aapcs(), riscv(), DARWIN_ARM64.call()] {
         assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Ignore);
         assert_eq!(call.returns(&Arg::Aggregate(shape)), Pass::Ignore);
         assert_eq!(call.returns(&Arg::Void), Pass::Ignore);
@@ -494,6 +495,17 @@ fn win64_passes_any_other_size_as_an_address() {
     let members = pieces(&[int(8), int(8), int(8)]);
     assert_eq!(win64().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
     assert_eq!(win64().returns(&Arg::Aggregate(record(&members))), Pass::Reference);
+}
+
+#[test]
+fn win64_passes_an_aggregate_of_no_size_as_an_address_and_returns_nothing() {
+    // Size zero is not one of the four either, so it goes the way three bytes goes and uses up a
+    // position, which is what mingw's gcc does. Coming back it is nothing.
+    let empty = record(&[]);
+    let mut call = win64();
+    assert_eq!(call.argument(&Arg::Aggregate(empty)), Pass::Reference);
+    assert_eq!(call.integer_left(), 3);
+    assert_eq!(win64().returns(&Arg::Aggregate(empty)), Pass::Ignore);
 }
 
 #[test]
