@@ -294,16 +294,12 @@ mod tests {
 
     /// Nearly every one of them is the name with the prefix taken off, which is the rule GCC
     /// documents. The field is written out anyway, so this is what checks the two agree. The
-    /// exceptions are `__builtin_cpu_init`, which GCC turns into a call to the libgcc function
-    /// that fills in the CPU model, and the two time stamp counter reads, which GCC writes in
-    /// place and which are calls here to routines in our own builtins archive.
+    /// one exception is `__builtin_cpu_init`, which GCC turns into a call to the libgcc function
+    /// that fills in the CPU model. No row may name a function only rucc's own builtins archive
+    /// defines, since an object calling one would not link anywhere else (#2191).
     #[test]
     fn the_library_function_is_the_name_without_the_prefix() {
-        const OTHER_NAMES: &[(&str, &str)] = &[
-            ("__builtin_cpu_init", "__cpu_indicator_init"),
-            ("__builtin_ia32_rdtsc", "__rucc_ia32_rdtsc"),
-            ("__builtin_ia32_rdtscp", "__rucc_ia32_rdtscp"),
-        ];
+        const OTHER_NAMES: &[(&str, &str)] = &[("__builtin_cpu_init", "__cpu_indicator_init")];
         for feature in FEATURES {
             if feature.library.is_empty() {
                 continue;
@@ -313,6 +309,11 @@ mod tests {
                 None => feature.name.strip_prefix("__builtin_"),
             };
             assert_eq!(expected, Some(feature.library), "{} names something else", feature.name);
+            assert!(
+                !feature.library.starts_with("__rucc_"),
+                "{} needs rucc's archive",
+                feature.name
+            );
         }
     }
 

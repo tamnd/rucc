@@ -772,6 +772,12 @@ impl Checker<'_> {
         if let Some(value) = self.sponentry_builtin(function, signature.ret, span) {
             return value;
         }
+        // The time stamp counter, which is one instruction written where the call was and not a
+        // call to anything. In `check/builtin/tsc.rs`, with why an object that reads it has to
+        // carry the instruction itself.
+        if let Some(value) = self.time_stamp_builtin(function, &args, signature.ret, span) {
+            return value;
+        }
         // The absolute value family, whose plain names are the C library's and whose meaning the
         // compiler is allowed to know. In `check/builtin/abs.rs`, with why the declaration is
         // looked at as well as the name.

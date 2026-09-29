@@ -554,6 +554,8 @@ impl<'a> Printer<'a> {
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
             ExprKind::SpEntry => "sp-entry".to_owned(),
+            ExprKind::TimeStamp { aux: Some(_) } => "time-stamp aux".to_owned(),
+            ExprKind::TimeStamp { aux: None } => "time-stamp".to_owned(),
             ExprKind::CpuModel { object, word, test } => {
                 let asked = match test {
                     CpuTest::Bit(bit) => format!("bit {bit}"),
@@ -586,6 +588,7 @@ impl<'a> Printer<'a> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::TimeStamp { aux: None }
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
@@ -599,6 +602,7 @@ impl<'a> Printer<'a> {
             ExprKind::Member { base, .. }
             | ExprKind::Alloca { size: base }
             | ExprKind::Jump { buffer: base, .. }
+            | ExprKind::TimeStamp { aux: Some(base) }
             | ExprKind::Cast(base)
             | ExprKind::VaArg { list: base }
             | ExprKind::VaStart { list: base }

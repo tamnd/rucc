@@ -3129,10 +3129,11 @@ used_by = []
 tests = ["rucc-driver::the_three_x86_fences_are_the_barrier_the_strongest_ordering_gives"]
 notes = "A fence over both, which is what the full barrier already is, so this is the one of the three that is exact."
 
-# The time stamp counter. gcc writes the instruction in place, and here each is a call to a routine
-# in librucc_builtins.a that is the instruction and a return, since there is no node yet that names
-# an instruction from the front end. The counter takes tens of cycles to read, so the call is a
-# small part of it. Postgres 19 reads it in instr_time.h on every x86-64 build, with no header.
+# The time stamp counter. gcc writes the instruction in place and so does rucc, as its bytes in an
+# asm statement the lowering writes, so an object that reads the counter needs no library. These
+# were calls into librucc_builtins.a once, which left two undefined names in every object gcc linked
+# or dlopen loaded (#2191). Postgres 19 reads it in instr_time.h on every x86-64 build, with no
+# header.
 
 [[feature]]
 name = "__builtin_ia32_rdtsc"
@@ -3140,10 +3141,9 @@ kind = "builtin"
 gcc_version = "4.5"
 status = "implemented"
 signature = "unsigned long long(void)"
-library = "__rucc_ia32_rdtsc"
 used_by = ["postgres"]
-tests = ["rucc-driver::the_time_stamp_counter_is_a_call_into_the_builtins_archive"]
-notes = "The counter, with edx in the high half and eax in the low half, which is what gcc answers. A call to __rucc_ia32_rdtsc in runtime/builtins/tsc.c."
+tests = ["rucc-driver::the_time_stamp_counter_is_the_instruction_in_place"]
+notes = "The counter, with edx in the high half and eax in the low half, which is what gcc answers. The signature is kept because the call is checked against it, and the node is put in its place after that in check/builtin/tsc.rs. Refused on every target but x86-64."
 
 [[feature]]
 name = "__builtin_ia32_rdtscp"
@@ -3151,10 +3151,9 @@ kind = "builtin"
 gcc_version = "4.5"
 status = "implemented"
 signature = "unsigned long long(unsigned int *)"
-library = "__rucc_ia32_rdtscp"
 used_by = ["postgres"]
-tests = ["rucc-driver::the_time_stamp_counter_is_a_call_into_the_builtins_archive"]
-notes = "The counter as rdtsc gives it, waiting for earlier instructions first, with the processor's TSC_AUX stored through the pointer. A call to __rucc_ia32_rdtscp in runtime/builtins/tsc.c."
+tests = ["rucc-driver::the_time_stamp_counter_is_the_instruction_in_place"]
+notes = "The counter as rdtsc gives it, waiting for earlier instructions first, with the processor's TSC_AUX stored through the pointer. In place as rdtsc is, in check/builtin/tsc.rs."
 
 [[feature]]
 name = "__sync_fetch_and_add"

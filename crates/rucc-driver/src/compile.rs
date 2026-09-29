@@ -5118,17 +5118,41 @@ decl #0 x : int object external static defined
         assert!(!text.contains("__builtin_cpu_init"), "{text}");
     }
 
-    /// The two time stamp counter reads are calls into `librucc_builtins.a`, whose routines are
-    /// the instruction, and the names the program wrote do not reach the object file.
+    /// The two time stamp counter reads are the instruction where the call was, as gcc writes
+    /// them, and not a call to anything. An object that called a routine in `librucc_builtins.a`
+    /// for them did not link under gcc and did not load into a program gcc linked (#2191), so the
+    /// object is checked as well as the listing: the instruction's bytes are in it and no name
+    /// for either builtin or for the old routines is.
     #[test]
-    fn the_time_stamp_counter_is_a_call_into_the_builtins_archive() {
-        let text = asm("unsigned long long f(void) { return __builtin_ia32_rdtsc(); }\n");
-        assert!(text.contains("\tcall\t__rucc_ia32_rdtsc"), "{text}");
-        assert!(!text.contains("__builtin_ia32_rdtsc"), "{text}");
-        let text =
-            asm("unsigned long long f(unsigned int *aux) { return __builtin_ia32_rdtscp(aux); }\n");
-        assert!(text.contains("\tcall\t__rucc_ia32_rdtscp"), "{text}");
-        assert!(!text.contains("__builtin_ia32_rdtscp"), "{text}");
+    fn the_time_stamp_counter_is_the_instruction_in_place() {
+        let rdtsc = "unsigned long long f(void) { return __builtin_ia32_rdtsc(); }\n";
+        let rdtscp =
+            "unsigned long long f(unsigned int *aux) { return __builtin_ia32_rdtscp(aux); }\n";
+        for (source, bytes) in [(rdtsc, "0x0f, 0x31"), (rdtscp, "0x0f, 0x01, 0xf9")] {
+            let text = asm(source);
+            assert!(text.contains(&format!("\t.byte\t{bytes}\n")), "{text}");
+            assert!(!text.contains("\tcall\t"), "{text}");
+            assert!(!text.contains("rdtsc"), "{text}");
+        }
+        // `rdtscp` leaves the processor's number in `ecx`, and that is what goes through the
+        // pointer, as a four byte store.
+        let text = asm(rdtscp);
+        assert!(text.contains("%ecx"), "{text}");
+
+        for (source, bytes) in [(rdtsc, &[0x0f, 0x31][..]), (rdtscp, &[0x0f, 0x01, 0xf9][..])] {
+            let object = obj(source);
+            assert!(object.windows(bytes.len()).any(|w| w == bytes), "{bytes:02x?}");
+            assert!(!object.windows(9).any(|w| w == b"__rucc_ia"), "an undefined name");
+            assert!(!object.windows(5).any(|w| w == b"rdtsc"), "an undefined name");
+        }
+
+        // Anywhere else there is no instruction to write and nothing to call, so it is refused
+        // where it is written rather than left to fail at the link.
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let said = run(&opts, rdtsc).messages.join("\n");
+        assert!(said.contains("only available on x86-64"), "{said}");
     }
 
     /// `__builtin_cpu_supports` is a load of the word the feature's bit is in and an `and` with

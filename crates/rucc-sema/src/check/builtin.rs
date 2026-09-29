@@ -81,6 +81,7 @@ mod sign;
 mod size;
 mod thread;
 mod trap;
+mod tsc;
 mod unreachable;
 
 /// The name in the object file for a function declared under this spelling, when the two are
