@@ -225,7 +225,8 @@ fn a_call_with_twelve_strings_holds_none_of_them_across_the_call() {
             .filter(|line| line.contains(".Lstr"))
             .filter_map(|line| address_into(line))
             .collect();
-        assert_eq!(strings.len(), 24, "{level}\n{text}");
+        // Twelve strings and the format in each arm.
+        assert_eq!(strings.len(), 26, "{level}\n{text}");
         assert!(strings.iter().all(|into| passing.contains(into)), "{level}\n{text}");
         let pushed = lines.iter().filter(|line| line.starts_with("push")).count();
         let most = if level == "-O0" { 2 } else { 1 };
