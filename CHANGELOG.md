@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An array of a typedef that asked for an alignment with `__attribute__((aligned(n)))` is as aligned as the typedef, as with gcc. It used to take the alignment of the type behind the typedef, so mingw-w64's `jmp_buf`, an array of a sixteen byte struct that a typedef aligns to sixteen, was aligned to eight, and msvcrt's `setjmp` faulted storing the vector registers into one that landed off a multiple of sixteen. That was cJSON's tests under Wine. The same held for `_Alignof`, member offsets and globals on every target. `tests/exec/windows/jmpbuf.c` (#2069).
 - A `pure` or `const` function whose value comes back through memory, such as a large struct anywhere or a `_Complex double` or `long double` on Windows x64, is no longer taken to write nothing. The value is a store through the pointer the caller hands it, and at `-O2` a call whose value was read was deleted and the value read from memory nothing had written, which is `execute/20050121-1.c` and `execute/20070614-1.c` on the windows-gnu row (#2069).
 - `tests/exec/windows/dll.c` reaches `_wctype` through dllimport instead of `__argc` and `_environ`, which UCRT exports only as functions (#2069).
+- A `?:` or `if` whose condition takes a `__builtin_constant_p` the optimizer has still to answer is no longer decided in the front end, where the answer is no. At `-O2` the optimizer answers yes for a variable it has seen set to a constant, as gcc does, and `execute/builtin-constant.c` took the wrong arm (#2069).
 
 ## 0.15.1
 

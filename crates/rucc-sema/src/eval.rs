@@ -111,6 +111,7 @@ pub struct Eval<'a> {
     names: &'a Interner,
     diagnostics: Vec<Diagnostic>,
     addressed: bool,
+    deferred: bool,
     literals: bool,
 }
 
@@ -130,6 +131,7 @@ impl<'a> Eval<'a> {
             names,
             diagnostics: Vec::new(),
             addressed: false,
+            deferred: false,
             literals: false,
         }
     }
@@ -146,6 +148,17 @@ impl<'a> Eval<'a> {
     #[must_use]
     pub fn addressed(&self) -> bool {
         self.addressed
+    }
+
+    /// Whether the folding took a `__builtin_constant_p` the optimizer has still to answer as no.
+    ///
+    /// Which is the answer a constant expression gets, and not the one the program gets at `-O2`,
+    /// where `int n = sizeof (int);` makes `__builtin_constant_p (n)` one. A caller deciding
+    /// which arm of a condition to build is not in a place a constant is needed, so it asks this
+    /// and leaves the condition to the optimizer when the answer is yes.
+    #[must_use]
+    pub fn deferred(&self) -> bool {
+        self.deferred
     }
 
     /// The value of an expression.
@@ -228,7 +241,10 @@ impl<'a> Eval<'a> {
             // `__builtin_constant_p` of something that is not a constant yet. Where a constant is
             // needed, which is the only place this is asked, the answer is no, and gcc gives the
             // same one: `__builtin_choose_expr (__builtin_constant_p (n), a, b)` is `b`.
-            ExprKind::ConstantP { .. } => Ok(Const::Int(0)),
+            ExprKind::ConstantP { .. } => {
+                self.deferred = true;
+                Ok(Const::Int(0))
+            }
             ExprKind::Cast(operand) => self.convert(expr, operand),
             ExprKind::Convert {
                 kind: Conversion::Arithmetic | Conversion::Bool | Conversion::Pointer,
