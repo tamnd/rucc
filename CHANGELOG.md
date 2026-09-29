@@ -4,9 +4,18 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-shared` builds a DLL for x86-64 Windows that a program links against and loads. `tests/exec/windows/dll/` builds two DLLs, one that exports everything and one with a `.def` file, links a program against both through the import libraries lld writes, and checks the calls, a `dllimport` variable, a constructor in the DLL and which names `GetProcAddress` finds, against mingw-w64 gcc's output. The Windows test script now runs any directory with a `main.c` in it that way (#2068).
+- A hidden definition on a Windows target becomes a ` -exclude-symbols:name` option in `.drectve`, which is what clang writes, so lld leaves it out of a DLL it is exporting everything from. The compiler runtime's archive is built with `-fvisibility=hidden` for Windows, and `___chkstk_ms` says the same for itself, so a DLL no longer exports the runtime along with the program's own functions.
+
 ### Changed
 
 - An aarch64 prologue saves `x19` to `x28` two to a push with `stp`, and the epilogue restores them with `ldp`, as gcc and clang do. It used to push each one alone, and since a push on this machine moves the stack pointer sixteen bytes to keep it aligned, half of every one was wasted. A function that saves all ten takes 80 bytes fewer of stack and five fewer instructions at each end.
+
+### Fixed
+
+- A file of assembly for a Windows target, or a C file with `asm` at file scope, may give `.section` COFF's own flag letters and a COMDAT selection and symbol, as in `.section .drectve,"yni"` and `.section .rdata$.refptr.x,"dr",discard,.refptr.x`. The letters used to be read as ELF's and most of them were refused, so the compiler runtime did not build, and a listing with the `.refptr.` sections the compiler writes for itself could not go through the assembler. They are now read the way llvm-mc and gas read them, and the section is written as a COMDAT of the kind asked for.
 
 ## 0.13.0
 

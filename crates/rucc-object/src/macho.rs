@@ -479,6 +479,7 @@ mod tests {
             align: 8,
             shape: Shape::mach(segment, section, None, &[]).unwrap(),
             relocs: Vec::new(),
+            group: None,
         }
     }
 

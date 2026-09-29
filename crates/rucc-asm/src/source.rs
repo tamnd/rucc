@@ -32,7 +32,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use rucc_mir::CfiOp;
 use rucc_object::{
-    Array, Assembled, Binding, Extent, Held, Name, Part, Reference, Reloc, Shape, Sort, Visibility,
+    Array, Assembled, Binding, Extent, Group, Held, Keep, Name, Part, Reference, Reloc, Shape,
+    Sort, Visibility,
 };
 use rucc_target::aarch64::{self, AAPCS64};
 use rucc_target::x86_64::{SYSV, gpr_named, nops};
@@ -97,7 +98,8 @@ pub fn read_as(text: &str, arch: Arch, format: ObjectFormat) -> Result<Assembled
     loop {
         let aarch64 = arch == Arch::Aarch64;
         let macho = format == ObjectFormat::MachO;
-        let mut reader = Reader { long: long.clone(), aarch64, macho, ..Reader::default() };
+        let coff = format == ObjectFormat::Coff;
+        let mut reader = Reader { long: long.clone(), aarch64, macho, coff, ..Reader::default() };
         reader.run(text)?;
         match reader.finish()? {
             Ok(done) => return Ok(done),
@@ -238,6 +240,8 @@ struct Reader {
     aarch64: bool,
     /// Whether the file is for Mach-O, where a section is named by its segment as well.
     macho: bool,
+    /// Whether the file is for COFF, whose `.section` flags are letters of their own.
+    coff: bool,
     /// Whether the file said `.subsections_via_symbols`, which tells the linker it may take the
     /// file apart at every name.
     subsections: bool,
@@ -914,6 +918,9 @@ impl Reader {
         // No flags means the name decides, which is what makes `.section .text` the same section as
         // `.text` rather than an unallocated one that happens to share its name.
         let mut shape = Shape::of(&name);
+        if self.coff {
+            return self.coff_section(&name, shape, args);
+        }
         let (mut merge, mut strings) = (false, false);
         if let Some(flags) = args.get(1) {
             let letters = unquoted(flags.trim());
@@ -965,6 +972,30 @@ impl Reader {
             shape.strings = strings;
         }
         self.section(&name, shape);
+        Ok(())
+    }
+
+    /// `.section name[, "flags"[, selection, symbol]]`, on COFF, where the letters are COFF's and
+    /// the last two make the section a COMDAT. See [`Shape::coff`] for the letters.
+    fn coff_section(&mut self, name: &str, named: Shape, args: &[String]) -> Result<(), Trouble> {
+        let shape = match args.get(1) {
+            Some(flags) => Shape::coff(&unquoted(flags.trim())).map_err(|letter| {
+                self.bad(&format!("'{letter}' is not a COFF section flag this compiler knows"))
+            })?,
+            None => named,
+        };
+        let group = match (args.get(2), args.get(3)) {
+            (None, _) => None,
+            (Some(word), Some(symbol)) => {
+                let word = word.trim();
+                let Some(keep) = Keep::of(word) else {
+                    return Err(self.bad(&format!("'{word}' is not a COMDAT selection")));
+                };
+                Some(Group { symbol: unquoted(symbol.trim()), keep })
+            }
+            (Some(_), None) => return Err(self.bad("a COMDAT section with no symbol")),
+        };
+        self.section_in(name, shape, group);
         Ok(())
     }
 
@@ -1078,7 +1109,18 @@ impl Reader {
     /// `.text` says the same thing gas already worked out, and a file that really does contradict
     /// itself is one gas warns about and keeps the first answer for.
     fn section(&mut self, name: &str, shape: Shape) {
-        if let Some(&at) = self.named.get(name) {
+        self.section_in(name, shape, None);
+    }
+
+    /// The same, for a section that may be a COFF COMDAT. Two COMDATs of one name about two
+    /// different symbols are two sections, which is the point of them: every function gets a
+    /// `.text` of its own that the linker may drop.
+    fn section_in(&mut self, name: &str, shape: Shape, group: Option<Group>) {
+        let key = match &group {
+            Some(group) => format!("{name}\0{}", group.symbol),
+            None => name.to_owned(),
+        };
+        if let Some(&at) = self.named.get(&key) {
             self.go(at);
             return;
         }
@@ -1090,8 +1132,9 @@ impl Reader {
             align: 1,
             shape,
             relocs: Vec::new(),
+            group,
         });
-        self.named.insert(name.to_owned(), at);
+        self.named.insert(key, at);
         self.go(at);
     }
 
@@ -1606,6 +1649,7 @@ impl Reader {
             align: 8,
             shape,
             relocs: table.relocs,
+            group: None,
         });
     }
 
@@ -3705,5 +3749,51 @@ _tls$tlv$init:
         assert!(why.why.contains("outside"), "{why}");
         let why = refused("\t.cfi_startproc\n\tret\n");
         assert!(why.why.contains("never ended"), "{why}");
+    }
+
+    /// COFF's own section letters, and the two operands after them that make a section a COMDAT.
+    /// Two sections of one name about two symbols stay two sections, and `.drectve,"yni"` is the
+    /// linker's options, neither read nor written by the program.
+    #[test]
+    fn coff_sections_take_their_own_letters_and_comdats() {
+        let text = "\t.section\t.text,\"xr\",one_only,f
+f:
+\tret
+\t.section\t.text,\"xr\",one_only,g
+g:
+\tret
+\t.section\t.rdata$.refptr.x,\"dr\",discard,.refptr.x
+.refptr.x:
+\t.quad\tx
+\t.section\t.drectve,\"yni\"
+\t.ascii\t\" -exclude-symbols:f\"
+";
+        let done = match read_as(text, Arch::X86_64, ObjectFormat::Coff) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let parts: Vec<_> = done
+            .parts
+            .iter()
+            .map(|part| {
+                (part.name.as_str(), part.group.as_ref().map(|group| group.symbol.as_str()))
+            })
+            .collect();
+        assert!(parts.contains(&(".text", Some("f"))), "{parts:?}");
+        assert!(parts.contains(&(".text", Some("g"))), "{parts:?}");
+        assert!(parts.contains(&(".rdata$.refptr.x", Some(".refptr.x"))), "{parts:?}");
+        let refptr = done.parts.iter().find(|part| part.name == ".rdata$.refptr.x").unwrap();
+        assert_eq!(refptr.group.as_ref().unwrap().keep, Keep::Any);
+        // IMAGE_SCN_CNT_INITIALIZED_DATA and IMAGE_SCN_MEM_READ.
+        assert_eq!(refptr.shape.coff, 0x40 | 0x4000_0000);
+        let drectve = done.parts.iter().find(|part| part.name == ".drectve").unwrap();
+        assert_eq!(drectve.bytes, b" -exclude-symbols:f");
+        // IMAGE_SCN_LNK_REMOVE and IMAGE_SCN_LNK_INFO.
+        assert_eq!(drectve.shape.coff, 0x800 | 0x200);
+        let why = match read_as("\t.section .x,\"q\"\n", Arch::X86_64, ObjectFormat::Coff) {
+            Ok(_) => panic!("'q' is not a letter"),
+            Err(trouble) => trouble.why,
+        };
+        assert!(why.contains("'q'"), "{why}");
     }
 }

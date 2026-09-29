@@ -53,4 +53,11 @@ ___chkstk_ms:
 	popq	%rcx
 	ret
 
+/* Kept out of the export table of a DLL that exports every name it defines, which is a DLL with no
+   dllexport and no .def file. The linker leaves libgcc's copy out because of the archive's name,
+   and ours has a different name, so it says so itself. This is what the compiler writes for a
+   hidden definition in C, and the rest of this directory is built hidden on Windows. */
+	.section	.drectve,"yni"
+	.ascii	" -exclude-symbols:___chkstk_ms"
+
 #endif

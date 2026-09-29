@@ -172,7 +172,9 @@ impl Flavour {
             Flavour::Elf => {
                 Some(SectionFlags::Elf { sh_type: shape.sh_type(), sh_flags: shape.sh_flags() })
             }
-            Flavour::Coff => None,
+            Flavour::Coff => (shape.coff != 0).then_some(SectionFlags::Coff {
+                characteristics: object::pe::SectionFlags(shape.coff),
+            }),
             Flavour::MachO => Some(SectionFlags::MachO {
                 flags: object::macho::SectionFlags(shape.mach),
                 reserved2: 0,
@@ -1162,7 +1164,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, Triple};
 
     use crate::elf::PATCHABLE;
-    use crate::section::{Chunk, Extent, Marker, Patch, Reloc};
+    use crate::section::{Chunk, Extent, Marker, Offer, Patch, Reloc};
 
     /// A linux x86-64 target, which is the only one this writes.
     fn target() -> TargetInfo {
@@ -2657,13 +2659,15 @@ mod tests {
         assert_eq!(reloc.flags(), RelocationFlags::Coff { typ: pe::IMAGE_REL_AMD64_ADDR64 });
     }
 
-    /// What `dllexport` asks for is an option to the linker, one per name, in the order clang
-    /// writes them and in the section COFF keeps options in, which the linker drops afterwards.
+    /// What `dllexport` and a hidden definition ask for is an option to the linker, one per name,
+    /// in the order clang writes them and in the section COFF keeps options in, which the linker
+    /// drops afterwards.
     #[test]
     fn a_name_offered_to_other_dlls_is_an_option_to_the_linker() {
         let exports = vec![
-            Export { name: "offered".to_owned(), data: false },
-            Export { name: "count".to_owned(), data: true },
+            Export { name: "offered".to_owned(), kind: Offer::Function },
+            Export { name: "count".to_owned(), kind: Offer::Variable },
+            Export { name: "kept".to_owned(), kind: Offer::Hidden },
         ];
         let data = Data { exports, ..Data::default() };
         let bytes =
@@ -2671,7 +2675,10 @@ mod tests {
                 .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".drectve").expect("the options section");
-        assert_eq!(section.data().expect("the options"), b" -export:offered -export:count,data");
+        assert_eq!(
+            section.data().expect("the options"),
+            b" -export:offered -export:count,data -exclude-symbols:kept"
+        );
         let SectionFlags::Coff { characteristics } = section.flags() else {
             panic!("a COFF section has COFF flags");
         };

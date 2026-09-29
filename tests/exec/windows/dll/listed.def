@@ -1,0 +1,4 @@
+LIBRARY listed.dll
+EXPORTS
+    add
+    counter DATA
