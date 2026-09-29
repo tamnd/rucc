@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.15.2
+
+The M6 release, published at last. The tags for 0.15.0 and 0.15.1 both stopped at the release gate and published nothing: 0.15.0 on a `Cargo.lock` entry, 0.15.1 on a documentation link to a private item. This release fixes that link, builds the windows-gnu sysroots for the UCRT with winpthreads in them, and brings in fixes for aligned typedef arrays and `pure` functions returning through memory.
+
 ### Added
 
 - The windows-gnu sysroots carry winpthreads, built static from the same mingw-w64 14.0.0, so `-pthread` and `-lpthread` link and the program needs no `libwinpthread-1.dll`. `tests/exec/windows/pthread.c` checks threads, a mutex, a condition variable, `pthread_once` and thread-specific keys, and that the program does not import winpthreads (#2069).

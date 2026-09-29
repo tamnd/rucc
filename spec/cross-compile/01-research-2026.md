@@ -25,7 +25,7 @@ Note where "libc cross-compilable" sits: tier 2, not tier 1. Zig treats *having 
 
 Also in 0.16: a new ELF linker implementation, import library generation from `.def` files without LLVM, BE8 object files for big-endian ARM on ARMv6+, and fixes to big-endian *host* support, a reminder that "cross" has two ends and the host end is where the bugs are least expected.
 
-0.15.1 is where the BSD work landed: FreeBSD 14+ and NetBSD 10.1+ cross compilation via stub libraries "similar to how glibc is handled", with all system and libc headers provided, plus glibc 2.42 and permission to link native glibc statically.
+0.15.2 is where the BSD work landed: FreeBSD 14+ and NetBSD 10.1+ cross compilation via stub libraries "similar to how glibc is handled", with all system and libc headers provided, plus glibc 2.42 and permission to link native glibc statically.
 
 **The glibc trick, in detail**, because document 09 rebuilds it. From [`lib/libc/glibc/README.md`](https://github.com/ziglang/zig/blob/master/lib/libc/glibc/README.md):
 

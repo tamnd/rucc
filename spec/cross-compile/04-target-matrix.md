@@ -78,7 +78,7 @@ Rows are `(arch, os, env)`; the three support columns are document 02.3's three 
 
 | target | today | → | runs rucc | notes |
 |---|---|---|---|---|
-| `x86_64-freebsd`, `aarch64-freebsd` | 4 | 2 | later | stub libraries, as zig 0.15.1 does; FreeBSD 14+ |
+| `x86_64-freebsd`, `aarch64-freebsd` | 4 | 2 | later | stub libraries, as zig 0.15.2 does; FreeBSD 14+ |
 | `x86_64-netbsd`, `aarch64-netbsd` | 4 | 3 | no | NetBSD 10.1+ |
 | `x86_64-openbsd` | 4 | 3 | no | dynamic libc only; zig 0.16 added this and it took a release |
 | `x86_64-illumos` | 4 | 4 | no | recognized; open, therefore admissible, therefore not excluded on principle |
