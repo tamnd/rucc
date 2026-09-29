@@ -318,6 +318,14 @@ extern int look(const int *at) __attribute__((pure));
 
 int asks_both(int a, const int *at) { return weigh(a) + look(at); }
 
+// A symbol declared under its own name first and then again under the name the source calls it
+// by, which is how mingw-w64's `<stdio.h>` writes `fprintf`. The function keeps the second name as
+// the one it was spelled, since that is the name the library call folds know it by.
+extern int renamed_puts(const char *);
+extern int puts(const char *) __asm__("renamed_puts");
+
+void says_hello(void) { puts("hello"); }
+
 // Except where the value comes back through memory. The callee returns it by storing through the
 // pointer it was handed, so a promise to write nothing would have the store forgotten and the call
 // deleted, and neither attribute travels.
