@@ -101,6 +101,32 @@ fn a_name_offered_to_other_dlls_is_an_option_for_the_linker() {
     assert!(!plain.contains(".drectve"), "{plain}");
 }
 
+/// On Microsoft's side a variable read through `__imp_` is also named to the linker, so that
+/// `lld-link` keeps the static C runtime's definition when it answers the pointer with one of its
+/// own, which is tamnd/rucc#2182. A function is not, and neither is a variable nothing reads, and
+/// the MinGW side says nothing, since GNU ld does not read these options.
+#[test]
+fn a_variable_imported_on_msvc_is_kept_by_name() {
+    let source = "\
+__declspec(dllimport) unsigned long GetCurrentProcessId(void);
+__declspec(dllimport) extern const unsigned short _wctype[];
+__declspec(dllimport) extern int unread;
+int use(int i) { return (int)GetCurrentProcessId() + _wctype[i]; }
+";
+    for opt in ["-O0", "-O2"] {
+        let (ok, out, said) = run("keep", &["--target=x86_64-windows-msvc", opt, "-S"], source);
+        assert!(ok, "{said}");
+        let text = String::from_utf8(out).expect("a listing is text");
+        let options = "\t.section\t.drectve,\"yni\"\n\
+                       \t.ascii\t\" /INCLUDE:_wctype /ALTERNATENAME:_wctype=__imp__wctype\"\n";
+        assert!(text.contains(options), "{opt}: {text}");
+        assert!(!text.contains("INCLUDE:GetCurrentProcessId"), "{opt}: {text}");
+        assert!(!text.contains("INCLUDE:unread"), "{opt}: {text}");
+        let gnu = listing("keep-gnu", opt, source);
+        assert!(!gnu.contains("INCLUDE"), "{opt}: {gnu}");
+    }
+}
+
 /// A COFF object, read just far enough to find its sections by name.
 struct Coff {
     bytes: Vec<u8>,

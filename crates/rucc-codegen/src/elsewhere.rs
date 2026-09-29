@@ -277,7 +277,25 @@ impl Elsewhere {
     /// either, since it names the variable and so asks the link to find a definition of it.
     #[must_use]
     pub fn referred(&self, module: &Module) -> Vec<Symbol> {
-        if self.referred.is_empty() {
+        Self::read(module, &self.referred)
+    }
+
+    /// The variables a declaration said are in a DLL and that some function here still takes the
+    /// address of, in the order the module has them, which are the ones read through
+    /// [`Slot::Imported`].
+    ///
+    /// Asked once the functions have been compiled, for the reason [`Self::referred`] is. The
+    /// driver hands these to the linker by name on Microsoft's side, which is tamnd/rucc#2182:
+    /// when the static C runtime defines such a variable, `lld-link` makes the pointer itself and
+    /// then throws the variable away as unreferenced, so the pointer holds the image base.
+    #[must_use]
+    pub fn imported_variables(&self, module: &Module) -> Vec<Symbol> {
+        Self::read(module, &self.imported)
+    }
+
+    /// The variables among `names` whose address some function here takes.
+    fn read(module: &Module, names: &HashSet<Symbol>) -> Vec<Symbol> {
+        if names.is_empty() {
             return Vec::new();
         }
         let mut read = HashSet::new();
@@ -295,7 +313,7 @@ impl Elsewhere {
         module
             .globals()
             .map(|id| module[id].name)
-            .filter(|name| self.referred.contains(name) && read.contains(name))
+            .filter(|name| names.contains(name) && read.contains(name))
             .collect()
     }
 

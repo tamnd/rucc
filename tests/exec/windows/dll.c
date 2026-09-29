@@ -1,4 +1,3 @@
-/* not on msvc: a dllimport of the static CRT's _wctype reads the image base, tamnd/rucc#2182 */
 /* Names reached through the pointer the loader fills in, which is dllimport, a variable only
  * declared reached through a pointer of this file's own that the linker fills in, and a name this
  * program offers through dllexport and looks up again by name. */

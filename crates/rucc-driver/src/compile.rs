@@ -1091,6 +1091,14 @@ fn generate(
                 let target = names.resolve(name).to_owned();
                 (Slot::Referred.name(&target), target)
             }));
+            if target.tuple.env() == rucc_tuple::Env::Msvc {
+                globals.keep_imported(
+                    elsewhere
+                        .imported_variables(module)
+                        .into_iter()
+                        .map(|name| names.resolve(name).to_owned()),
+                );
+            }
             (globals, rucc_asm::aliases(module, names).map_err(refused)?)
         }
         _ => (rucc_asm::Globals::default(), Vec::new()),
