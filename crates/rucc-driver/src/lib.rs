@@ -3843,7 +3843,8 @@ mod tests {
             args(&["x.o", "-o", "my prog", "-Wl,--as-needed", "-lm", "@no-such-file"])
         );
         let itself = dir.join("itself.rsp");
-        std::fs::write(&itself, format!("@{}", itself.display())).unwrap();
+        let named = itself.display().to_string().replace('\\', "\\\\");
+        std::fs::write(&itself, format!("@{named}")).unwrap();
         let looped = response_files(&args(&[&format!("@{}", itself.display())]));
         assert!(looped.is_err(), "a file that names itself should be refused");
         std::fs::remove_dir_all(&dir).unwrap();
