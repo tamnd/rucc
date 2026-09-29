@@ -24,12 +24,12 @@ target	x86_64-macos	wall	apple-sdk
 target	aarch64-ios	wall	apple-sdk
 target	aarch64-ios-simulator	wall	apple-sdk
 target	aarch64-ios-macabi	wall	apple-sdk
-target	x86_64-windows-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-x86_64-windows-gnu.tar.gz	2f1e34ea0ad3e1ae8be08c054c61030e0a916053e194916f4045e08dcfd69545
+target	x86_64-windows-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-29/rucc-sysroot-x86_64-windows-gnu.tar.gz	9f3919c9bee5447380a9746759439e051087b2364084447d6481fb9425c93758
 target	x86_64-windows-msvc	wall	microsoft-sdk
-target	aarch64-windows-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-aarch64-windows-gnu.tar.gz	cc6be4263b09a475895d9054bb4b096d837010b7e5ed25ebc8934accccd5258e
+target	aarch64-windows-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-29/rucc-sysroot-aarch64-windows-gnu.tar.gz	b304bbbe1a11eaf9b41f9be810c27a3cf4965699872e71e2b703a59941db7aaf
 target	aarch64-windows-msvc	wall	microsoft-sdk
 target	arm64ec-windows-msvc	wall	microsoft-sdk
-target	i686-windows-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-21/rucc-sysroot-i686-windows-gnu.tar.gz	296de7554f57d308c00b405c145eb314886e1e28ff8507aa6e7b34e7e4def7f1
+target	i686-windows-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-29/rucc-sysroot-i686-windows-gnu.tar.gz	cea70fbedd27aa9cdc08c335105714747919f09f72b8f33ec5d49c659b3526b1
 target	x86_64-freebsd	unpublished
 target	aarch64-freebsd	unpublished
 target	x86_64-netbsd	unpublished

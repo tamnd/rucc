@@ -674,9 +674,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             if triple.arch == Arch::X86_64 && target.pointer_width == 64 {
                 d.flag("__SEH__");
             }
-            // Which C runtime the headers are configured for. The sysroot this compiler fetches
-            // is built `--with-default-msvcrt=msvcrt` to match the link line, which names
-            // `libmsvcrt.a`, and gcc defines this for the same tree.
+            // The family of C runtimes mingw-w64 targets, which is Microsoft's whichever DLL it
+            // is, so gcc defines this for a UCRT toolchain as well as a msvcrt one. Which of the
+            // two the headers are for is not a predefine: the sysroot's `_mingw.h` sets
+            // `__MSVCRT_VERSION__` to what it was configured with, 0xE00 in the UCRT sysroot this
+            // compiler fetches and 0x600 in the `-msvcrt` one, and defines `_UCRT` from that, the
+            // same as it does under gcc.
             d.flag("__MSVCRT__");
             // The widest integer the compiler has, which is what Microsoft's headers ask
             // instead of asking about `long long`.
