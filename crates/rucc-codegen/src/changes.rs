@@ -79,8 +79,6 @@
 //! [`Changes::carry`] is that, and like a plan it is by value: what the edge would carry rather
 //! than what to do to what it carries.
 
-use std::collections::HashMap;
-
 use rucc_base::{Interner, Symbol};
 use rucc_mir::{self as mir, Role};
 use rucc_target::MachineInsts;
@@ -170,11 +168,13 @@ pub enum Refusal {
 ///
 /// A virtual register is counted by its number in a list rather than in a map, since the numbers
 /// run from nought with no gaps and this is asked about every operand of every function. The few
-/// physical registers an instruction names before allocation go in the map.
+/// physical registers an instruction names before allocation are counted the same way by their
+/// number, which is one byte. They used to go in a map, and hashing one was most of what counting
+/// it cost.
 #[derive(Debug, Clone, Default)]
 pub struct Reads {
     virtuals: Vec<usize>,
-    physical: HashMap<mir::Reg, usize>,
+    physical: Vec<usize>,
 }
 
 impl Reads {
@@ -182,7 +182,7 @@ impl Reads {
     /// are.
     #[must_use]
     pub fn of(func: &mir::Func) -> Self {
-        let mut reads = Self { virtuals: vec![0; func.vregs()], physical: HashMap::new() };
+        let mut reads = Self { virtuals: vec![0; func.vregs()], physical: Vec::new() };
         for block in func.blocks() {
             for inst in func.insts(block) {
                 for operand in &func[func[inst].operands] {
@@ -205,7 +205,7 @@ impl Reads {
     pub fn count(&self, reg: mir::Reg) -> usize {
         match reg.number() {
             Some(number) => self.virtuals.get(number as usize).copied().unwrap_or(0),
-            None => self.physical.get(&reg).copied().unwrap_or(0),
+            None => self.physical.get(physical(reg)).copied().unwrap_or(0),
         }
     }
 
@@ -219,7 +219,13 @@ impl Reads {
                 }
                 self.virtuals[number] += 1;
             }
-            None => *self.physical.entry(reg).or_insert(0) += 1,
+            None => {
+                let number = physical(reg);
+                if number >= self.physical.len() {
+                    self.physical.resize(number + 1, 0);
+                }
+                self.physical[number] += 1;
+            }
         }
     }
 
@@ -227,12 +233,17 @@ impl Reads {
     fn lost(&mut self, reg: mir::Reg) {
         let count = match reg.number() {
             Some(number) => self.virtuals.get_mut(number as usize),
-            None => self.physical.get_mut(&reg),
+            None => self.physical.get_mut(physical(reg)),
         };
         if let Some(count) = count {
             *count = count.saturating_sub(1);
         }
     }
+}
+
+/// The number of a physical register, which is where [`Reads`] counts it.
+fn physical(reg: mir::Reg) -> usize {
+    reg.phys().map_or(0, |phys| usize::from(phys.number()))
 }
 
 /// What one instruction in a set would have done to it.
