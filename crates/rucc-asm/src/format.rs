@@ -309,6 +309,17 @@ impl Directives {
             (Directives::Coff, Place::Named(name)) => {
                 let _ = writeln!(out, "\t.section\t{name},\"dw\"");
             }
+            // A section of its own for every pointer, named after it, which is how clang and gcc
+            // both write one. `discard` makes it a COMDAT the linker keeps any one copy of, and
+            // the symbol the group is about is the pointer itself. See [`Place::Pointer`].
+            (Directives::Coff, Place::Pointer) => {
+                let _ = writeln!(out, "\t.section\t.rdata${name},\"dr\",discard,{name}");
+            }
+            // Nothing but COFF is ever handed one, and the section a read only address would be
+            // in anywhere else is at least the section that would hold it.
+            (Directives::Elf, Place::Pointer) => {
+                out.push_str("\t.section\t.data.rel.ro,\"aw\",@progbits\n");
+            }
             (Directives::MachO, Place::ReadOnly) => out.push_str("\t.section\t__TEXT,__const\n"),
             // Mach-O has the same problem and the same answer under a different name. A section in
             // `__TEXT` is never writable, so a constant holding an address goes in `__DATA,__const`

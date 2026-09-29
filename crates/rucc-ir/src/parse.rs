@@ -45,7 +45,7 @@ use crate::inst::{
     MetaNode, Param, PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
 };
 use crate::module::{
-    Alias, AliasKind, DataLayout, Datum, Global, Linkage, Module, Reloc, TlsModel, Visibility,
+    Alias, AliasKind, DataLayout, Datum, Dll, Global, Linkage, Module, Reloc, TlsModel, Visibility,
 };
 use crate::{
     Bounds, Extra, ExtraKind, FORMAT_VERSION, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode,
@@ -322,6 +322,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                     global.visibility =
                         self.parenthesised(Visibility::from_name, "a visibility")?;
                 }
+                "dll" => global.dll = self.parenthesised(Dll::from_name, "a DLL storage")?,
                 "tls" => {
                     global.tls =
                         Some(self.parenthesised(TlsModel::from_name, "a thread-local model")?);
@@ -472,6 +473,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "visibility" => {
                     func.visibility = self.parenthesised(Visibility::from_name, "a visibility")?;
                 }
+                "dll" => func.dll = self.parenthesised(Dll::from_name, "a DLL storage")?,
                 "attrs" => func.attrs = self.attrs()?,
                 "section" => func.section = Some(self.symbol_from_string()?),
                 "spelled" => func.spelled = Some(self.symbol_from_string()?),
@@ -1947,6 +1949,29 @@ module asm \"f: ret\\0a.ascii \\\"x\\\"\"
 "
         );
         assert_eq!(round_trip(&text), text);
+    }
+
+    /// A name in another DLL and one offered to others, on a variable and on a function, which is
+    /// the one attribute only a COFF target reads and which is written only where it was said.
+    #[test]
+    fn what_a_name_says_about_its_dll_comes_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+global @_fmode : bytes 4, align 4, linkage(external), dll(import)
+global @count : i32 = 1, align 4, linkage(external), dll(export)
+
+func @GetCurrentProcessId() -> i32, linkage(external), dll(import);
+
+func @offered() -> i32, linkage(external), dll(export) {{
+block0:
+    %0 = iconst.i32 1
+    return %0
+}}
+"
+        );
+        assert_eq!(round_trip(&text), text);
+        let wrong = text.replacen("dll(import)", "dll(both)", 1);
+        assert!(error(&wrong).contains("`both` is not a DLL storage"), "{}", error(&wrong));
     }
 
     #[test]

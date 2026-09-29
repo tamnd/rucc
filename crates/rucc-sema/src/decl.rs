@@ -326,6 +326,27 @@ impl DeclFlags {
     /// its warning.
     pub const HOT: Self = Self(1 << 13);
 
+    /// `__declspec(dllimport)` or `__attribute__((dllimport))` was written on a declaration of
+    /// this name, which says it is defined in another DLL.
+    ///
+    /// Only Windows has a use for it. A program there reaches a name in another DLL through a
+    /// pointer the loader fills in, called `__imp_` and the name, and this bit is what has code
+    /// load that pointer and go through it rather than name the thing itself. A function works
+    /// without it, since the import library has a stub under the plain name that jumps through the
+    /// same pointer, but a variable has no such stub. Merged the way [`Self::WEAK`] is, since the
+    /// header that declares the name is where it is written, and dropped again where the unit
+    /// defines the name after all, which is what gcc and clang both do.
+    pub const DLLIMPORT: Self = Self(1 << 14);
+
+    /// `__declspec(dllexport)` or `__attribute__((dllexport))` was written on a declaration of
+    /// this name, which asks that the DLL this unit is linked into offer it to others.
+    ///
+    /// What that takes is a line in the object's `.drectve` section, which is where a COFF object
+    /// passes options to the linker, naming the definition. It only means something on a
+    /// definition, and a name that is only declared here is not exported by this unit. Merged the
+    /// way [`Self::DLLIMPORT`] is. A name with both is exported, since the definition is here.
+    pub const DLLEXPORT: Self = Self(1 << 15);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

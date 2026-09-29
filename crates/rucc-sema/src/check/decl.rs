@@ -96,6 +96,9 @@ struct Declared {
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::COLD`] and
     /// [`DeclFlags::HOT`] and nothing else.
     inlining: DeclFlags,
+    /// Whether this declaration said the name is in another DLL or is offered to others by this
+    /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.
+    dll: DeclFlags,
     /// What this declaration promised a call to it does, from `const` and `pure`.
     effects: Effects,
     /// Where this declaration asked for the function to go in the run-up to `main` and the
@@ -328,6 +331,10 @@ impl Checker<'_> {
             inlining: self
                 .inlining(specs.attrs)
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
+            // The specifiers only, for the reason `noreturn` above reads them only. What a
+            // definition says here is almost always `dllexport`, and `__declspec` is written in
+            // front of the declaration, which is where the specifiers are.
+            dll: self.dll(specs.attrs),
             // The specifiers only, for the reason `noreturn` above reads them only, and read
             // on a definition at all because a promise made over a body is still a promise.
             // The analysis that reads the body keeps its own answer somewhere else, so the two
@@ -688,6 +695,9 @@ impl Checker<'_> {
             // Both places, for the reason `noreturn` above reads both.
             inlining: (self.inlining(specs.attrs) | self.inlining(item.attrs))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
+            // Both places, for the reason `noreturn` above reads both. `__declspec` is written
+            // in front and the attribute spelling is as often written after the declarator.
+            dll: self.dll(specs.attrs) | self.dll(item.attrs),
             // Both places, for the reason `noreturn` above reads both. A header writing
             // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
             // one writing `int look(const int *) __attribute__((pure));` puts it after the
@@ -1329,6 +1339,9 @@ impl Checker<'_> {
         // rule: a prototype that says `always_inline` and a definition that does not is a
         // function gcc inlines.
         flags |= declared.inlining;
+        // One declaration saying it is enough, for the reason `weak` below is under that rule:
+        // the header says where the name lives and the file that defines it need not repeat it.
+        flags |= declared.dll;
         // One declaration of a name saying it is enough, which is the rule `retained` above
         // is under and is there for the same reason: a library writes the attribute once, in
         // the header, and the file that defines the name writes an ordinary definition. gcc
@@ -1603,7 +1616,8 @@ impl Checker<'_> {
                 .with(DeclFlags::NAKED, declared.naked)
                 .with(DeclFlags::RETURNS_TWICE, declared.twice)
                 .with(DeclFlags::WEAK, declared.weak.is_some())
-                | declared.inlining,
+                | declared.inlining
+                | declared.dll,
             asm_label: declared.asm_label,
             register: declared.register,
             alias: declared.alias,
@@ -2706,6 +2720,28 @@ mod tests {
             assert_eq!(
                 dump(&c, id),
                 format!("decl #0 report : int(void) function external declared {word}\n")
+            );
+            assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        }
+    }
+
+    #[test]
+    fn dllimport_and_dllexport_written_as_attributes_are_kept() {
+        // Armoured and not, since `__declspec(dllimport)` in a mingw-w64 header is a macro for the
+        // plain spelling and a program writing the attribute itself often armours it.
+        for (spelling, word) in [("__dllimport__", "dllimport"), ("dllexport", "dllexport")] {
+            let mut f = Fixture::new();
+            let mut specs = f.int_specs();
+            specs.attrs = f.attribute(spelling);
+            let decl = f.var(specs, "shared", &[function()], None);
+
+            let mut c = f.checker();
+            let list = c.check_decl(decl);
+            let id = only(&c, list);
+
+            assert_eq!(
+                dump(&c, id),
+                format!("decl #0 shared : int(void) function external declared {word}\n")
             );
             assert!(c.errors.is_empty(), "got {:?}", messages(&c));
         }

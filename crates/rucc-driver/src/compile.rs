@@ -15,7 +15,7 @@ use std::path::Path;
 
 use rucc_base::{Interner, Symbol};
 use rucc_codegen::coverage::Fired;
-use rucc_codegen::elsewhere::Elsewhere;
+use rucc_codegen::elsewhere::{Elsewhere, Slot};
 use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pipeline::{self, Machine, Recording};
 use rucc_codegen::pressure::Pressure;
@@ -1045,10 +1045,19 @@ fn generate(
     // The second names go the same way and for the same reason, and they are neither a function
     // nor a variable: an alias is an entry in the symbol table and no bytes of anything.
     let (globals, aliases) = match opts.emit {
-        EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable => (
-            rucc_asm::globals(module, names, target.object_format).map_err(refused)?,
-            rucc_asm::aliases(module, names).map_err(refused)?,
-        ),
+        EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable => {
+            let mut globals =
+                rucc_asm::globals(module, names, target.object_format).map_err(refused)?;
+            // The pointer each variable this file reads and only declares is reached through on
+            // COFF, which is a variable of this file's all the same. Asked for after the loop
+            // rather than before it, because the loop is what optimized the functions, and a read
+            // the optimizer took out is a pointer nobody would load.
+            globals.pointers(elsewhere.referred(module).into_iter().map(|name| {
+                let target = names.resolve(name).to_owned();
+                (Slot::Referred.name(&target), target)
+            }));
+            (globals, rucc_asm::aliases(module, names).map_err(refused)?)
+        }
         _ => (rucc_asm::Globals::default(), Vec::new()),
     };
     // A failure in either of the last two is a bug here rather than a program this compiler is

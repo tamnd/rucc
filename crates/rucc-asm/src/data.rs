@@ -40,8 +40,10 @@
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
-use rucc_ir::{AliasKind, Datum, GlobalId, Linkage, Module, SymbolRef};
-use rucc_object::{Alias, Apart, Binding, Data, Object, Place, Reference, Reloc, Visibility};
+use rucc_ir::{AliasKind, Datum, Dll, GlobalId, Linkage, Module, SymbolRef};
+use rucc_object::{
+    Alias, Apart, Binding, Data, Export, Object, Place, Reference, Reloc, Visibility,
+};
 use rucc_target::ObjectFormat;
 
 use crate::Error;
@@ -77,9 +79,37 @@ pub struct Globals {
     /// template defines, which is why the driver asks [`Globals::kept`] beside
     /// [`crate::kept`].
     pub file_asm: Vec<String>,
+    /// Every name this file offers to other DLLs, which is `dllexport` on a definition: the
+    /// functions first and then the variables, each in the order the module held them, which is
+    /// the order clang writes them in. COFF only, and empty on every other format, since nothing
+    /// else has anywhere to say it. See [`rucc_object::Export`].
+    pub exports: Vec<Export>,
 }
 
 impl Globals {
+    /// Adds a pointer to each variable this file reads and only declares, given as the pointer's
+    /// name and the variable's.
+    ///
+    /// Each is eight bytes holding the variable's address, in a read only section of its own that
+    /// the linker keeps one copy of, and is known by a name every object that reads the same
+    /// variable gives its own copy. The code reads the variable's address out of the pointer
+    /// rather than writing it into an instruction, which is what lets the variable turn out to be
+    /// in a DLL: the runtime then writes the address it was loaded at into the pointer. See
+    /// `rucc_codegen::elsewhere::Slot::Referred`, which decides which variables need one.
+    pub fn pointers(&mut self, list: impl IntoIterator<Item = (String, String)>) {
+        for (name, target) in list {
+            self.vars.push(Variable {
+                name,
+                size: 8,
+                align: 8,
+                place: Place::Pointer,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+                pieces: vec![Piece::Addr { symbol: target, addend: 0, bytes: 8 }],
+            });
+        }
+    }
+
     /// Whether anything here has to be read by the assembler, which today is an `asm` at file
     /// scope with an instruction in it.
     #[must_use]
@@ -171,7 +201,8 @@ impl Globals {
     /// which is what makes a program with a large zeroed array a small file.
     #[must_use]
     pub fn image(&self) -> Data {
-        let mut data = Data { weak: self.weak.clone(), ..Data::default() };
+        let mut data =
+            Data { weak: self.weak.clone(), exports: self.exports.clone(), ..Data::default() };
         for var in &self.vars {
             let mut object = Object {
                 name: var.name.clone(),
@@ -280,6 +311,23 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
         }
     }
     out.file_asm = module.file_asms().to_vec();
+    // What `dllexport` asks for, which only a COFF object has a way to say. A declaration is left
+    // out, because what is offered has to be here to offer: clang says nothing about one either.
+    if format == ObjectFormat::Coff {
+        for id in module.funcs() {
+            let func = &module[id];
+            if !func.is_declaration() && func.dll == Dll::Export {
+                out.exports.push(Export { name: names.resolve(func.name).to_owned(), data: false });
+            }
+        }
+        for id in module.globals() {
+            let global = &module[id];
+            if !global.is_declaration() && global.dll == Dll::Export {
+                let name = names.resolve(global.name).to_owned();
+                out.exports.push(Export { name, data: true });
+            }
+        }
+    }
     Ok(out)
 }
 

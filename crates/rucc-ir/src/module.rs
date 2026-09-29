@@ -167,6 +167,47 @@ impl Visibility {
     }
 }
 
+/// Whether a name is in another DLL, or is offered to other DLLs by this one.
+///
+/// Only a COFF target reads it, and it is orthogonal to [`Linkage`] and [`Visibility`] the way
+/// those two are to each other. `__declspec(dllimport)` and `__declspec(dllexport)`, which are the
+/// GNU attributes of the same names written the way Windows headers write them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Dll {
+    /// Neither, which is what every name on every other format is.
+    #[default]
+    Default,
+    /// Defined in another DLL and reached through the pointer the loader fills in for it, which
+    /// the import library names `__imp_` and the name. Only on a declaration.
+    Import,
+    /// Offered to other DLLs by the one this unit is linked into, which is a line in the object's
+    /// `.drectve` section. Only on a definition.
+    Export,
+}
+
+impl Dll {
+    /// The spelling in the textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Import => "import",
+            Self::Export => "export",
+        }
+    }
+
+    /// The storage that spelling names.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|dll| dll.name() == name)
+    }
+
+    /// Every one, in declaration order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [Self::Default, Self::Import, Self::Export].into_iter()
+    }
+}
+
 /// Which link the module is being compiled for.
 ///
 /// Everything this compiler writes is position independent, so this is not about whether there are
@@ -346,6 +387,9 @@ pub struct Global {
     pub linkage: Linkage,
     /// How the dynamic linker sees it.
     pub visibility: Visibility,
+    /// Whether it is in another DLL or offered to others by this one, which only a COFF target
+    /// reads.
+    pub dll: Dll,
     /// The model to reach it by if it is thread-local, and `None` if it is not.
     pub tls: Option<TlsModel>,
     /// Whether writing through a pointer to it is undefined, which is what puts it in
@@ -368,6 +412,7 @@ impl Global {
             align,
             linkage: Linkage::External,
             visibility: Visibility::Default,
+            dll: Dll::Default,
             tls: None,
             constant: false,
             section: None,
