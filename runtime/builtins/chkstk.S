@@ -23,7 +23,41 @@
  * adds an arm below rather than a build rule.
  */
 
-#if defined(__x86_64__) && defined(_WIN32)
+#if defined(__x86_64__) && defined(_WIN32) && defined(_MSC_VER)
+
+/* Microsoft's routine, for the msvc rows, where the compiler calls `__chkstk` rather than mingw's
+ * name. The contract is Microsoft's rather than mingw's: the size arrives in `rax` the same way and
+ * the stack pointer is left where it was, but `r10` and `r11` are the routine's to destroy, so it
+ * walks with those two and pushes nothing. A caller that keeps a value in either across the call
+ * is one Microsoft's own `chkstk.obj` would break as well.
+ *
+ * The CRT libraries have a copy of this too, and the two answer alike, so it does not matter
+ * which one a link picks. Ours is here so that a program linked with `-nostdlib`, or against a
+ * CRT that is not Microsoft's, still has one. */
+
+	.text
+	.globl	__chkstk
+	.type	__chkstk, @function
+__chkstk:
+	/* Where the frame starts, which is the stack pointer the caller had before the call. Only
+	   the return address is above the stack pointer here, since nothing was pushed. */
+	leaq	8(%rsp), %r10
+	movq	%rax, %r11
+	cmpq	$0x1000, %r11
+	jb	.Lmsvc_rest
+.Lmsvc_page:
+	subq	$0x1000, %r10
+	/* The same touch as below: an or of zero writes back what was there. */
+	orq	$0x0, (%r10)
+	subq	$0x1000, %r11
+	cmpq	$0x1000, %r11
+	ja	.Lmsvc_page
+.Lmsvc_rest:
+	subq	%r11, %r10
+	orq	$0x0, (%r10)
+	ret
+
+#elif defined(__x86_64__) && defined(_WIN32)
 
 	.text
 	.globl	___chkstk_ms
