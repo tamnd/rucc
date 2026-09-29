@@ -49,7 +49,7 @@ mod ty;
 mod verify;
 
 pub use asm::{AsmOperand, AsmOperands, AsmRole};
-pub use attrs::{AttrSet, Attrs, FpContract};
+pub use attrs::{AttrSet, Attrs, FpContract, twice_by_name};
 pub use facts::{Bounds, Facts};
 pub use flags::{Flags, MemOrder, Owner, PrefetchHint, RmwOp, StorageClass};
 pub use func::{Builder, Counts, Func, Start};

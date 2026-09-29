@@ -40,17 +40,6 @@ use rucc_target::{FrameInsts, RegClass};
 
 use crate::elsewhere::Elsewhere;
 
-/// The functions a call to which comes back more than once, which is what `setjmp` is and what
-/// gcc's `special_function_p` lists. A name with underscores in front of it is the same function.
-///
-/// Control coming back into the caller a second time needs the caller's frame, so a caller that
-/// makes one of these calls anywhere makes no tail call at all.
-///
-/// A function declared with `__attribute__((returns_twice))` is one as well, whatever it is called,
-/// and [`Elsewhere::twice`] is where that is asked. The list is still here for a program that
-/// declares `setjmp` itself without the attribute, which gcc also allows.
-const TWICE: &[&str] = &["setjmp", "sigsetjmp", "savectx", "vfork", "getcontext"];
-
 /// One call [`crate::lower`] built for a `tail_call`, and the pseudos that leave its answer where
 /// the caller's answer goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +51,10 @@ pub struct Tail {
 }
 
 /// Why no call in this function can be made in tail position, or `None` when one can.
+///
+/// Control coming back into the caller a second time needs the caller's frame, so a caller that
+/// calls something that comes back twice anywhere makes no tail call at all. Which calls those are
+/// is [`comes_back`]'s rule, and the inliner asks the same one of a callee.
 #[must_use]
 pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&'static str> {
     if func.attrs.set.contains(AttrSet::NAKED) {
@@ -90,7 +83,8 @@ pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&
 }
 
 /// Whether control can come back into this function a second time from one call, through a
-/// `__builtin_setjmp` or a call to one of `TWICE` or to a function declared `returns_twice`.
+/// `__builtin_setjmp` or a call to one of the names [`rucc_ir::twice_by_name`] knows or to a
+/// function declared `returns_twice`.
 ///
 /// The frame of such a function is laid out with nothing sharing anything. A value computed before
 /// the `setjmp` and read after the `longjmp` is live across the call on the arm that reads it, and
@@ -111,11 +105,12 @@ pub fn comes_back(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> bool 
     })
 }
 
-/// Whether that call is to one of [`TWICE`] or to a function declared to be like them.
+/// Whether that call is to one of the names [`rucc_ir::twice_by_name`] knows or to a function
+/// declared to be like them.
 fn twice(func: &Func, inst: Inst, names: &Interner, elsewhere: &Elsewhere) -> bool {
     let Extra::Call(info) = func[inst].extra else { return false };
     let Some(callee) = func[info].callee else { return false };
-    elsewhere.twice(callee) || TWICE.contains(&names.resolve(callee).trim_start_matches('_'))
+    elsewhere.twice(callee) || rucc_ir::twice_by_name(names.resolve(callee))
 }
 
 /// Turns every call in tail position into a `tail_call`, unless [`refusal`] has a reason not to,

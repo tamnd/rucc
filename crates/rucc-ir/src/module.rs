@@ -30,10 +30,11 @@ use std::fmt;
 use std::ops::{Index, IndexMut};
 
 use rucc_base::float::Format;
-use rucc_base::{Idx, IdxRange, Symbol};
+use rucc_base::{Idx, IdxRange, Interner, Symbol};
 use rucc_target::TargetInfo;
 use rucc_tuple::TargetTuple;
 
+use crate::attrs::{AttrSet, twice_by_name};
 use crate::func::Func;
 #[cfg(test)]
 use crate::inst::TbaaNode;
@@ -774,6 +775,15 @@ impl Module {
     #[must_use]
     pub fn lookup(&self, name: Symbol) -> Option<SymbolRef> {
         self.symbols.get(&name).copied()
+    }
+
+    /// Whether a call to that name may come back more than once, because this module declares it
+    /// `returns_twice` or because it is one of the names [`crate::twice_by_name`] knows.
+    #[must_use]
+    pub fn returns_twice(&self, name: Symbol, names: &Interner) -> bool {
+        let declared = matches!(self.lookup(name), Some(SymbolRef::Func(id))
+            if self[id].attrs.set.contains(AttrSet::RETURNS_TWICE));
+        declared || twice_by_name(names.resolve(name))
     }
 
     /// Every function, in the order they were added.
