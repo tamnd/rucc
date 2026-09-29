@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.15.1
+
+0.15.0 as it was meant to ship. Its tag stopped at the release gate because `Cargo.lock` did not record that `rucc-opt` depends on `rucc-abi`, so nothing was published. This release records it, and brings in `__chkstk` for the windows-msvc builtins, unwind directives in Windows listings, and faster liveness lists.
+
 ### Added
 
 - The builtins archive for the `*-windows-msvc` rows has `__chkstk`, the stack probe codegen already calls there for a frame over a page, next to `___chkstk_ms` in the mingw archive. It touches each page from the stack pointer down by `rax` bytes, keeps every register but `r10` and `r11`, and leaves `rsp` alone, as Microsoft's does, so a program linked with `-nostdlib` has one too.
