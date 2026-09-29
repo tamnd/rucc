@@ -209,6 +209,8 @@ pub static FRAME: FrameInsts = FrameInsts {
     add: "add_ri_64",
     sub: "sub_ri_64",
     grow: "sub_rr_64",
+    scaled: None,
+    insert: None,
     align: "and_ri_64",
     imm: "mov_ri_64",
     lea: "lea_64",
@@ -1301,6 +1303,7 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     // profiler on this platform expects: the word the pointer names is the caller's copy of it, so
     // the frames are a chain that can be walked without a table.
     late_frame_pointer: false,
+    unwind_codes: false,
     vector_count: Some(RAX),
     red_zone: 128,
     shadow: 0,
@@ -1355,7 +1358,7 @@ static WIN64_INT_ORDER: [PhysReg; 14] =
 /// which is the whole point of a calling convention.
 pub static WIN64: CallRegs = CallRegs {
     conventions: Conventions(&WIN64_CONVENTIONS),
-    ..win64(Chkstk { name: "__chkstk", size: RAX })
+    ..win64(Chkstk { name: "__chkstk", size: RAX, shift: 0 })
 };
 
 /// The same convention where the GNU runtime provides the routine rather than Microsoft's.
@@ -1366,7 +1369,7 @@ pub static WIN64: CallRegs = CallRegs {
 /// it, which is why nothing but the name changes here.
 pub static MINGW64: CallRegs = CallRegs {
     conventions: Conventions(&MINGW64_CONVENTIONS),
-    ..win64(Chkstk { name: "___chkstk_ms", size: RAX })
+    ..win64(Chkstk { name: "___chkstk_ms", size: RAX, shift: 0 })
 };
 
 /// The two conventions a function on Windows under Microsoft's runtime may have: its own, and the
@@ -1382,13 +1385,13 @@ static MINGW64_CONVENTIONS: [(Convention, &CallRegs); 2] =
 /// A function written `__attribute__((sysv_abi))` on Windows under Microsoft's runtime.
 pub static SYSV_ON_WIN64: CallRegs = CallRegs {
     conventions: Conventions(&WIN64_CONVENTIONS),
-    ..sysv_on_windows(Chkstk { name: "__chkstk", size: RAX })
+    ..sysv_on_windows(Chkstk { name: "__chkstk", size: RAX, shift: 0 })
 };
 
 /// A function written `__attribute__((sysv_abi))` on Windows under the GNU runtime.
 pub static SYSV_ON_MINGW64: CallRegs = CallRegs {
     conventions: Conventions(&MINGW64_CONVENTIONS),
-    ..sysv_on_windows(Chkstk { name: "___chkstk_ms", size: RAX })
+    ..sysv_on_windows(Chkstk { name: "___chkstk_ms", size: RAX, shift: 0 })
 };
 
 /// The SysV convention on Windows, given the routine the runtime in question provides.
@@ -1439,6 +1442,7 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         // After the frame here, because the unwind record this platform reads cannot describe the
         // other order. See [`CallRegs::late_frame_pointer`].
         late_frame_pointer: true,
+        unwind_codes: false,
         vector_count: None,
         red_zone: 0,
         shadow: 32,

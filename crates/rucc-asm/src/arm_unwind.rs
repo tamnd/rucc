@@ -69,11 +69,11 @@ pub(crate) fn plan(func: &str, lines: &[Line], end: Option<usize>) -> Result<Pla
 
     // The prologue, one code an instruction, with what `x15` was given kept for the subtraction
     // that takes a frame reached through `__chkstk`.
-    let count = end.map_or(0, |end| lines.iter().take_while(|line| line.place <= end).count());
+    let mut count = end.map_or(0, |end| lines.iter().take_while(|line| line.place <= end).count());
     let mut codes = Vec::with_capacity(count);
-    let mut x15 = 0u32;
+    let mut track = Track::default();
     for (at, inst) in parsed.iter().enumerate().take(count) {
-        let code = match prologue(inst, &mut x15) {
+        let code = match prologue(inst, &mut track) {
             Some(code) => code,
             // A register the caller wants back, put away in a way no code says, such as a pair of
             // registers that are not next to each other. A `nop` would leave it unrestored.
@@ -93,12 +93,43 @@ pub(crate) fn plan(func: &str, lines: &[Line], end: Option<usize>) -> Result<Pla
                     );
                     return Err(frame(func, why));
                 }
+                track.depth = None;
                 Code::Nop
             }
             None => Code::Nop,
         };
+        track.moved(code);
         codes.push(code);
     }
+
+    // If the body moves the stack pointer, unwinding from there has to start by putting it back
+    // from the frame pointer, so nothing may come after the frame pointer code but `nop`s. What
+    // only takes more of the stack can be left to the body instead, where the frame pointer code
+    // undoes it along with everything else, which is how clang writes the same frame.
+    let mut ends = epilogues(&parsed, lines, count);
+    if let Some(at) = body_moves(&parsed, count, &ends) {
+        let fp = codes.iter().rposition(|code| matches!(code, Code::SetFp | Code::AddFp(_)));
+        let tail = |fp: usize| {
+            codes[fp + 1..].iter().all(|code| matches!(code, Code::Nop | Code::Alloc(_)))
+        };
+        match fp {
+            Some(fp) if codes[fp + 1..].iter().all(|code| *code == Code::Nop) => {}
+            Some(fp) if tail(fp) => {
+                count = fp + 1;
+                codes.truncate(count);
+                ends = epilogues(&parsed, lines, count);
+            }
+            _ => {
+                let why = format!(
+                    "a body that moves the stack pointer with `{}` after a prologue that does not end \
+                     by setting the frame pointer",
+                    lines[at].text
+                );
+                return Err(frame(func, why));
+            }
+        }
+    }
+
     for (at, code) in codes.iter().enumerate() {
         check(func, *code)?;
         plan.after[at].push(code.to_string());
@@ -107,49 +138,63 @@ pub(crate) fn plan(func: &str, lines: &[Line], end: Option<usize>) -> Result<Pla
         plan.after[count - 1].push("\t.seh_endprologue".to_owned());
         plan.empty = false;
     }
-
-    // The epilogues, each ending at the instruction that leaves the function.
-    let mut ends = Vec::new();
-    for (at, inst) in parsed.iter().enumerate().skip(count) {
-        if count == 0 || !inst.leaves() {
-            continue;
-        }
-        let Some(start) = epilogue_start(&parsed, lines, count, at) else {
-            continue;
-        };
+    for range in ends {
         let scope: Vec<Code> =
-            parsed[start..at].iter().map(|inst| epilogue(inst).unwrap_or(Code::Nop)).collect();
-        for code in &scope {
+            parsed[range.clone()].iter().map(|inst| epilogue(inst).unwrap_or(Code::Nop)).collect();
+        plan.before[range.start].push("\t.seh_startepilogue".to_owned());
+        for (at, code) in range.clone().zip(&scope) {
             check(func, *code)?;
+            plan.after[at].push(code.to_string());
         }
-        plan.before[start].push("\t.seh_startepilogue".to_owned());
-        for (offset, code) in scope.iter().enumerate() {
-            plan.after[start + offset].push(code.to_string());
-        }
-        plan.after[at - 1].push("\t.seh_endepilogue".to_owned());
-        ends.push(start..at);
-    }
-
-    // The body, which is everything that is neither. If anything in it moves the stack pointer,
-    // unwinding from there has to start by putting it back from the frame pointer.
-    let body = |at: usize| at >= count && !ends.iter().any(|range| range.contains(&at));
-    let moved = parsed.iter().enumerate().find(|&(at, inst)| body(at) && inst.writes_sp());
-    if let Some((at, _)) = moved {
-        let settled =
-            match codes.iter().rposition(|code| matches!(code, Code::SetFp | Code::AddFp(_))) {
-                Some(fp) => codes[fp + 1..].iter().all(|code| *code == Code::Nop),
-                None => false,
-            };
-        if !settled {
-            let why = format!(
-                "a body that moves the stack pointer with `{}` after a prologue that does not end \
-                 by setting the frame pointer",
-                lines[at].text
-            );
-            return Err(frame(func, why));
-        }
+        plan.after[range.end - 1].push("\t.seh_endepilogue".to_owned());
     }
     Ok(plan)
+}
+
+/// Each epilogue after a prologue of that many instructions, as the instructions it is, which end
+/// in front of the one that leaves the function.
+fn epilogues(parsed: &[Inst], lines: &[Line], count: usize) -> Vec<std::ops::Range<usize>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let leaves = parsed.iter().enumerate().skip(count).filter(|(_, inst)| inst.leaves());
+    leaves.filter_map(|(at, _)| Some(epilogue_start(parsed, lines, count, at)?..at)).collect()
+}
+
+/// The first instruction of the body that moves the stack pointer, the body being everything
+/// that is neither the prologue nor an epilogue.
+fn body_moves(parsed: &[Inst], count: usize, ends: &[std::ops::Range<usize>]) -> Option<usize> {
+    let body = |at: usize| at >= count && !ends.iter().any(|range| range.contains(&at));
+    (0..parsed.len()).find(|&at| body(at) && parsed[at].writes_sp())
+}
+
+/// What the prologue has done so far that a later instruction's code depends on.
+#[derive(Debug, Clone, Copy, Default)]
+struct Track {
+    /// What `x15` was given, for the subtraction after `__chkstk`.
+    x15: u32,
+    /// How far the stack pointer is below the frame pointer, once the frame pointer is set and for
+    /// as long as every move of the stack pointer is by a constant. A save addressed from the frame
+    /// pointer is described from the stack pointer, which is what the codes count from.
+    depth: Option<u32>,
+}
+
+impl Track {
+    /// Counts in what a code did to the stack pointer.
+    fn moved(&mut self, code: Code) {
+        self.depth = match code {
+            Code::SetFp => Some(0),
+            Code::AddFp(by) => Some(by),
+            Code::Alloc(by)
+            | Code::R19R20X(by)
+            | Code::FplrX(by)
+            | Code::RegpX(_, by)
+            | Code::RegX(_, by)
+            | Code::FregpX(_, by)
+            | Code::FregX(_, by) => self.depth.and_then(|depth| depth.checked_add(by)),
+            _ => self.depth,
+        };
+    }
 }
 
 /// The last code that is not a `nop`.
@@ -194,8 +239,25 @@ fn epilogue_start(parsed: &[Inst], lines: &[Line], floor: usize, at: usize) -> O
 }
 
 /// The code an instruction of a prologue is, or `None` for one that is not a code of its own.
-fn prologue(inst: &Inst, x15: &mut u32) -> Option<Code> {
+fn prologue(inst: &Inst, track: &mut Track) -> Option<Code> {
     let ops: Vec<&str> = inst.ops.iter().map(String::as_str).collect();
+    let depth = track.depth;
+    let x15 = &mut track.x15;
+    // A save addressed from the frame pointer, as the stack pointer's distance to the same slot.
+    let fp_mem = |mem: &str| -> Option<u32> {
+        let inside = mem.strip_prefix("[x29,")?.strip_suffix(']')?;
+        let below = u32::try_from(-number(inside.trim())?).ok()?;
+        depth?.checked_sub(below)
+    };
+    if let ("stp" | "str", [regs @ .., mem]) = (inst.mnemonic.as_str(), ops.as_slice()) {
+        if let Some(at) = fp_mem(mem) {
+            return match regs {
+                [a, b] => save_pair(a, b, at, false),
+                [a] => save_one(a, at, false),
+                _ => None,
+            };
+        }
+    }
     match (inst.mnemonic.as_str(), ops.as_slice()) {
         ("stp", [a, b, mem]) => {
             let (at, pre) = sp_mem(mem)?;
@@ -405,7 +467,9 @@ impl Inst {
     /// Whether this is a store onto the stack of a register a call leaves alone, which is
     /// `x19` to `x30` and `d8` to `d15`.
     fn saves(&self) -> bool {
-        if !self.mnemonic.starts_with("st") || !self.ops.iter().any(|op| op.starts_with("[sp")) {
+        if !self.mnemonic.starts_with("st")
+            || !self.ops.iter().any(|op| op.starts_with("[sp") || op.starts_with("[x29"))
+        {
             return false;
         }
         self.ops.iter().take_while(|op| !op.starts_with('[')).any(|op| match reg(op) {
@@ -615,5 +679,65 @@ mod tests {
         assert_eq!(save_pair("x19", "x20", 16, true), Some(Code::RegpX(19, 16)));
         let text = ["stp x29, x30, [sp, #-16]!", "mov x29, sp", "stp x19, x21, [sp, #-16]!", "ret"];
         assert!(plan("f", &lines(&text), Some(2)).is_err());
+    }
+
+    /// A save addressed from the frame pointer is described from the stack pointer, which is what
+    /// the codes count from, and a prologue whose body grows the frame ends by saying where the
+    /// frame pointer is, so everything after it is a `nop`.
+    #[test]
+    fn a_save_from_the_frame_pointer_is_counted_from_the_stack_pointer() {
+        let got = written(
+            &[
+                "stp x29, x30, [sp, #-16]!",
+                "mov x29, sp",
+                "str x19, [sp, #-16]!",
+                "sub sp, sp, #16",
+                "str d8, [x29, #-24]",
+                "add x29, sp, #32",
+                "mov sp, x16",
+                "add sp, x29, #-16",
+                "ldr x19, [sp], #16",
+                "ldp x29, x30, [sp], #16",
+                "ret",
+            ],
+            Some(5),
+        );
+        assert_eq!(
+            got[8..13],
+            [
+                "str d8, [x29, #-24]",
+                ".seh_save_freg d8, 8",
+                "add x29, sp, #32",
+                ".seh_add_fp 32",
+                ".seh_endprologue",
+            ]
+        );
+    }
+
+    /// When the frame is too far below the frame pointer for a code to say so, the frame pointer is
+    /// said again before the frame is taken, and taking it is left to the body, as clang does.
+    #[test]
+    fn a_large_frame_in_a_growing_body_is_taken_by_the_body() {
+        let got = written(
+            &[
+                "stp x29, x30, [sp, #-16]!",
+                "mov x29, sp",
+                "str x19, [sp, #-16]!",
+                "add x29, sp, #16",
+                "mov x15, #313",
+                "bl __chkstk",
+                "sub sp, sp, x15, lsl #4",
+                "mov sp, x16",
+                "add sp, x29, #-16",
+                "ldr x19, [sp], #16",
+                "ldp x29, x30, [sp], #16",
+                "ret",
+            ],
+            Some(6),
+        );
+        assert_eq!(
+            got[6..10],
+            ["add x29, sp, #16", ".seh_add_fp 16", ".seh_endprologue", "mov x15, #313"]
+        );
     }
 }

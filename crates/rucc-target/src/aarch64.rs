@@ -60,7 +60,7 @@ use crate::flags::{Compare, FlagInsts, Reader, Reads};
 use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
-use crate::regs::{CallRegs, ClassInfo, PhysReg, RegClass, RegFile};
+use crate::regs::{CallRegs, Chkstk, ClassInfo, PhysReg, RegClass, RegFile};
 use crate::short::ShortInsts;
 
 /// The general purpose registers.
@@ -210,6 +210,8 @@ pub static FRAME: FrameInsts = FrameInsts {
     add: "add_ri_64",
     sub: "sub_ri_64",
     grow: "sub_rr_64",
+    scaled: Some("grow_16_64"),
+    insert: Some("movk_ri_16_64"),
     align: "align_sp_64",
     imm: "mov_ri_64",
     lea: "lea_64",
@@ -768,8 +770,15 @@ pub static DARWIN: CallRegs =
 /// a variadic function through the x registers, and the sixty four bytes such a function homes
 /// them in at the top of its frame, which is [`CallRegs::home`]. A variadic function's list is then
 /// a `char *` over those and whatever the caller left in memory above them.
-pub static WINDOWS: CallRegs =
-    CallRegs { home: 64, ..aapcs64(&rucc_abi::abis::WINDOWS_ARM64, 0, crate::VaList::CharPointer) };
+///
+/// A frame larger than a page is reached with `__chkstk` first, which takes the size in `x15` in
+/// units of sixteen bytes and leaves it there for the subtraction that takes the frame.
+pub static WINDOWS: CallRegs = CallRegs {
+    home: 64,
+    chkstk: Some(Chkstk { name: "__chkstk", size: x(15), shift: 4 }),
+    unwind_codes: true,
+    ..aapcs64(&rucc_abi::abis::WINDOWS_ARM64, 0, crate::VaList::CharPointer)
+};
 
 const fn aapcs64(
     abi: &'static rucc_abi::AbiDescription,
@@ -797,6 +806,7 @@ const fn aapcs64(
         // which is the order that keeps the chain: the word it names is the caller's frame pointer
         // and the one above it is the return address.
         late_frame_pointer: false,
+        unwind_codes: false,
         // Nothing says how many vector registers a variadic call used. The callee saves all eight
         // in its prologue if it is variadic at all, which is cheaper on this machine than the
         // branch SysV spends a register on.

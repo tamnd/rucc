@@ -184,6 +184,10 @@ pub struct Convention<'a> {
     pub pad: Option<Padding>,
 }
 
+/// The furthest below the frame pointer an ARM64 Windows unwind code can say the stack pointer
+/// is, which is 255 eights.
+const MOST_ADD_FP: i32 = 2040;
+
 impl<'a> Convention<'a> {
     /// That convention, for a function with no stack protector, no probing, no landing pad, no
     /// call to a profiler and no room for a patcher, which is most of them.
@@ -674,6 +678,24 @@ impl Writer<'_> {
                 self.saved(inst, int, reg, above - below);
             }
         }
+        // Where the frame pointer is again, for an unwinder that can only get past what comes
+        // next from there. See `CallRegs::unwind_codes`. Before the stack is aligned, which moves
+        // it by an amount nothing can say, and at the end of the prologue of a body that grows the
+        // frame, unless the frame is too far below the frame pointer for the code to say that, and
+        // then here, with the rest of the prologue left to the body.
+        let pushed = push * (self.pushes(frame) - i32::from(frame.frame_pointer()));
+        let restate = self.conv.unwind_codes && frame.frame_pointer() && !frame.late();
+        let whole = pushed + offset(frame.size());
+        let grows = restate && frame.grows() && frame.realign().is_none() && whole > 0;
+        let (early, end) = match grows {
+            true if whole <= MOST_ADD_FP => (false, true),
+            true => (pushed > 0, false),
+            false => (restate && frame.realign().is_some() && pushed > 0, false),
+        };
+        if early {
+            let lea = self.opcode(self.insts.lea);
+            out.push(self.address(lea, fp, sp, pushed));
+        }
         if let Some(to) = frame.realign().filter(|_| !frame.late()) {
             // Nothing is written for this and nothing can be. After it the stack pointer is a
             // rounded-down version of where it was rather than a fixed distance from it, which is
@@ -726,6 +748,10 @@ impl Writer<'_> {
         // The alignment a late frame forces, once everything the record describes is done. No row,
         // for the reason the early order has none, and none is needed: the address is counted from
         // the frame pointer by now. The body counts from the stack pointer this leaves.
+        if end {
+            let lea = self.opcode(self.insts.lea);
+            out.push(self.address(lea, fp, sp, whole));
+        }
         if let Some(to) = frame.realign().filter(|_| frame.late()) {
             let and = self.opcode(self.insts.align);
             out.push(self.arith(and, -i64::from(to)));
@@ -886,14 +912,35 @@ impl Writer<'_> {
         let sp = Reg::physical(self.conv.stack_pointer);
         let count = Reg::physical(chkstk.size);
 
+        // ARM64 counts the size in sixteens, which the frame always is a whole number of, and
+        // takes the frame with the register shifted back by the same amount.
+        let units = size >> chkstk.shift;
         let imm = self.opcode(self.insts.imm);
-        let inst = self.func.build_loose(imm).def(count, class).imm(i64::from(size)).finish();
+        // A machine that writes a constant sixteen bits at a time writes the low half and then
+        // puts the high half in above it, which is a frame of a megabyte or more on ARM64.
+        let (low, high) = match self.insts.insert {
+            Some(insert) if units > 0xffff => (units & 0xffff, Some((insert, units >> 16))),
+            _ => (units, None),
+        };
+        let inst = self.func.build_loose(imm).def(count, class).imm(i64::from(low)).finish();
         out.push(inst);
+        if let Some((insert, high)) = high {
+            let insert = self.opcode(insert);
+            let inst = self
+                .func
+                .build_loose(insert)
+                .def(count, class)
+                .uses(count, class)
+                .imm(i64::from(high))
+                .finish();
+            out.push(inst);
+        }
         let call = self.opcode(self.insts.call);
         let symbol = self.names.intern(chkstk.name);
         let inst = self.func.build_loose(call).symbol(symbol).finish();
         out.push(inst);
-        let grow = self.opcode(self.insts.grow);
+        let scaled = self.insts.scaled.filter(|_| chkstk.shift > 0);
+        let grow = self.opcode(scaled.unwrap_or(self.insts.grow));
         let inst =
             self.func.build_loose(grow).def(sp, class).uses(sp, class).uses(count, class).finish();
         out.push(inst);

@@ -772,6 +772,8 @@ static TEXT: &[(&str, &[Written])] = &[
         &[spell("mov", &[Fixed(16, X), Reg(1, X)]), spell("and", &[Reg(0, X), Fixed(16, X), Imm])],
     ),
     ("probe_64", &[spell("str", &[Fixed(31, X), Mem])]),
+    // The frame taken after the ARM64 Windows `__chkstk`, whose size is counted in sixteens.
+    ("grow_16_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Arg::Shift(Shift::Lsl, 4)])]),
     // The locality gcc 16.2.0 picks for each: nothing kept is a streaming load into the nearest
     // cache, and one, two and three are loads kept in the third, second and first. A write is the
     // same with `pst` for `pld`.
