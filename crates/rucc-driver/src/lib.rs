@@ -2459,19 +2459,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // question cannot be answered until the whole path is known.
     opts.search.remove_duplicates();
 
-    // The COFF writer has no DWARF sections yet, and refusing `-g` stops every build system at its
-    // first compile, since they all pass it by default. So it is dropped with one warning and the
-    // object is written without debug information, which is what the program would have run as
-    // anyway. This goes when DWARF in COFF lands.
-    if opts.debug_info && opts.target.os.object_format() == ObjectFormat::Coff {
-        opts.debug_info = false;
-        notes.push(format!(
-            "-g is ignored for {}, because this compiler does not write debug information into \
-             COFF objects yet",
-            opts.target.tuple().to_canonical_string()
-        ));
-    }
-
     // The target has to be resolved before the configuration is printed, so this check comes
     // after the loop rather than at the point `--print-config` was seen.
     if print_config {
@@ -3896,16 +3883,15 @@ mod tests {
         assert_eq!(notes(&["-c", "a.c"]), Vec::<String>::new());
     }
 
-    /// `-g` for Windows is dropped with a warning rather than failing the compile, until the COFF
-    /// writer has DWARF sections to put it in.
+    /// `-g` for Windows is kept, and says nothing, now that the COFF writer has DWARF sections.
     #[test]
-    fn debug_information_for_coff_is_dropped_with_a_warning() {
-        let said = notes(&["--target=x86_64-windows-gnu", "-g", "-c", "a.c"]);
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("-g is ignored for x86_64-windows-gnu"), "{said:?}");
+    fn debug_information_for_coff_is_kept() {
+        assert_eq!(
+            notes(&["--target=x86_64-windows-gnu", "-g", "-c", "a.c"]),
+            Vec::<String>::new()
+        );
         let (opts, _) = compile(&["--target=x86_64-windows-gnu", "-g", "-c", "a.c"]);
-        assert!(!opts.debug_info);
-        assert_eq!(notes(&["--target=x86_64-linux-gnu", "-g", "-c", "a.c"]), Vec::<String>::new());
+        assert!(opts.debug_info);
     }
 
     /// A directory that is not there contributes nothing to the search path, so there is no tree to
