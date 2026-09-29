@@ -295,6 +295,15 @@ impl Parser<'_> {
     /// The `[...]` and `(...)` written after a declarator at one level.
     fn declarator_suffixes(&mut self, out: &mut Vec<Derived>) {
         loop {
+            // `[[` after a declarator is not an array but C23's attributes, which appertain to
+            // what was just declared, as in `int x [[maybe_unused]];`. The declarator ends there
+            // and whatever reads a declarator's attributes reads them, the way it reads an
+            // `__attribute__` in the same place. Postgres 19 writes this for every variable that
+            // only an assertion uses, since its `pg_attribute_unused()` is `[[maybe_unused]]` once
+            // `__STDC_VERSION__` says C23.
+            if self.at_standard_attribute() {
+                return;
+            }
             if self.cursor.at_punct(Punct::LBracket) {
                 if !self.enter() {
                     self.cursor.bump();

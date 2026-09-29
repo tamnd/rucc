@@ -550,6 +550,40 @@ fn an_attribute_after_a_declarator_does_not_start_a_definition() {
 }
 
 #[test]
+fn a_standard_attribute_after_the_name_is_the_declarations_and_not_an_array() {
+    let out = parsed("int x [[maybe_unused]];");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    let item = out.ast[declarators][0];
+    assert_eq!(item.attrs.len(), 1);
+    assert!(out.ast[out.ast[item.declarator].derived].is_empty());
+
+    let out = parsed("int y [[maybe_unused]] = 1, z [[maybe_unused]] [[gnu::unused]];");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(out.ast[declarators].len(), 2);
+    assert!(out.ast[declarators][0].init.is_some());
+    assert_eq!(out.ast[declarators][1].attrs.len(), 2);
+
+    // An array before the attribute is still an array.
+    let out = parsed("int a[4] [[maybe_unused]];");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    let item = out.ast[declarators][0];
+    assert_eq!(item.attrs.len(), 1);
+    let derived: Vec<Derived> = out.ast[out.ast[item.declarator].derived].to_vec();
+    assert!(matches!(derived[..], [Derived::Array { .. }]), "{derived:?}");
+
+    let out = parsed("void f(unsigned long size [[maybe_unused]], int n);");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    let declarator = out.ast[out.ast[declarators][0].declarator];
+    let derived: Vec<Derived> = out.ast[declarator.derived].to_vec();
+    let Derived::Function { params, .. } = derived[0] else { panic!("expected a function") };
+    assert_eq!(out.ast[params].len(), 2);
+    assert_eq!(out.ast[params][0].attrs.len(), 1);
+
+    parsed("struct s { int member [[maybe_unused]]; };");
+    parsed("void g(void) { int local [[maybe_unused]]; local = 0; }");
+}
+
+#[test]
 fn an_attribute_can_open_a_grouping_parenthesis() {
     // `int (ATTR *)(void)` is a pointer to a function, and the attribute in front of the `*` is
     // the one token that also begins a parameter declaration, so what decides the parse is the

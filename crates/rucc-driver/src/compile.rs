@@ -5003,6 +5003,19 @@ decl #0 x : int object external static defined
         assert!(!text.contains("__builtin_cpu_init"), "{text}");
     }
 
+    /// The two time stamp counter reads are calls into `librucc_builtins.a`, whose routines are
+    /// the instruction, and the names the program wrote do not reach the object file.
+    #[test]
+    fn the_time_stamp_counter_is_a_call_into_the_builtins_archive() {
+        let text = asm("unsigned long long f(void) { return __builtin_ia32_rdtsc(); }\n");
+        assert!(text.contains("\tcall\t__rucc_ia32_rdtsc"), "{text}");
+        assert!(!text.contains("__builtin_ia32_rdtsc"), "{text}");
+        let text =
+            asm("unsigned long long f(unsigned int *aux) { return __builtin_ia32_rdtscp(aux); }\n");
+        assert!(text.contains("\tcall\t__rucc_ia32_rdtscp"), "{text}");
+        assert!(!text.contains("__builtin_ia32_rdtscp"), "{text}");
+    }
+
     /// `__builtin_cpu_supports` is a load of the word the feature's bit is in and an `and` with
     /// the bit, and the answer is the bit where it stands, which is gcc 16.2.0's lowering.
     ///
