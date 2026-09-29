@@ -6090,6 +6090,24 @@ mod tests {
     }
 
     #[test]
+    fn a_mingw_link_names_its_output_the_way_mingw_gcc_does() {
+        // gcc puts `.exe` on a DLL's name as well when it has no extension, so `-shared` is not an
+        // exception, and `-c` links nothing and is. tamnd/rucc#2152.
+        let mingw = "--target=x86_64-windows-gnu";
+        let (_, plan) = linking(&[mingw, "a.c", "-o", "foo"]);
+        assert_eq!(plan.link.expect("expected a link step").output, "foo.exe");
+        let (_, plan) = linking(&[mingw, "-shared", "a.c", "-o", "x"]);
+        assert_eq!(plan.link.expect("expected a link step").output, "x.exe");
+        let (_, plan) = linking(&[mingw, "-shared", "a.c", "-o", "x.dll"]);
+        assert_eq!(plan.link.expect("expected a link step").output, "x.dll");
+        let (_, plan) = compile(&[mingw, "-c", "a.c", "-o", "x"]);
+        assert!(plan.link.is_none());
+        assert_eq!(plan.jobs[0].output, Output::File("x".into()));
+        let (_, plan) = linking(&[LINUX, "a.c", "-o", "foo"]);
+        assert_eq!(plan.link.expect("expected a link step").output, "foo");
+    }
+
+    #[test]
     fn a_comma_in_dash_wl_separates_two_arguments() {
         // The target is written down because the name of the object is derived from it, and `a.o`
         // on a Linux host is `a.obj` on a Windows one. What is under test is the splitting of the

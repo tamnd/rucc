@@ -11,7 +11,7 @@
 use std::fmt::Write as _;
 
 use rucc_session::{EmitKind, Options, SaveTemps};
-use rucc_target::Os;
+use rucc_target::{Env, Os};
 
 use crate::link::Item;
 
@@ -590,6 +590,22 @@ fn default_exe(opts: &Options) -> &'static str {
     if opts.target.os == Os::Windows { "a.exe" } else { "a.out" }
 }
 
+/// What a link writes when `-o` named `output`, which on a MinGW target is the name with `.exe`
+/// on it when its last component has no extension at all.
+///
+/// That is MinGW gcc's rule, `convert_filename` in its driver, and clang's for the same target, so
+/// `-o foo` writes `foo.exe` and `-o foo.bin` and `-o foo.` are left alone. It applies to every
+/// link, `-shared` and `-r` included, which gcc does as well. Standard output and the bit bucket
+/// are not files to name. Both slashes end a directory, which is what they do where MinGW gcc runs.
+fn exe_name(opts: &Options, output: &str) -> String {
+    let mingw = opts.target.os == Os::Windows && opts.target.env == Env::Gnu;
+    let last = &output[directory(output).len()..];
+    if !mingw || last.contains('.') || output == STDIN || output == "/dev/null" {
+        return output.to_owned();
+    }
+    format!("{output}.exe")
+}
+
 impl Plan {
     /// Builds the plan for one invocation.
     ///
@@ -839,7 +855,7 @@ impl Plan {
 
         let link = linking.then(|| LinkJob {
             inputs: link_inputs,
-            output: output.unwrap_or(default_exe(opts)).to_owned(),
+            output: output.map_or_else(|| default_exe(opts).to_owned(), |o| exe_name(opts, o)),
         });
         let archive = archiving.then(|| ArchiveJob {
             members,
@@ -1138,6 +1154,33 @@ mod tests {
         let p = plan(&o, &["a.c"], None);
         assert_eq!(p.jobs[0].output, Output::Temporary("a.obj".into()));
         assert_eq!(p.link.expect("expected a link step").output, "a.exe");
+    }
+
+    #[test]
+    fn a_mingw_link_puts_exe_on_a_name_with_no_extension() {
+        // What x86_64-w64-mingw32-gcc does with each of these, measured, and clang does the same.
+        // tamnd/rucc#2152.
+        let exe = |triple: &str, output: &str| {
+            plan(&opts(triple), &["a.c"], Some(output)).link.expect("expected a link step").output
+        };
+        let mingw = "x86_64-windows-gnu";
+        assert_eq!(exe(mingw, "foo"), "foo.exe");
+        assert_eq!(exe(mingw, "sub.d/foo"), "sub.d/foo.exe", "only the last component counts");
+        assert_eq!(exe(mingw, r"sub.d\foo"), r"sub.d\foo.exe");
+        assert_eq!(exe(mingw, "foo.exe"), "foo.exe");
+        assert_eq!(exe(mingw, "a.b"), "a.b");
+        assert_eq!(exe(mingw, "foo."), "foo.", "any dot at all is an extension to gcc");
+        assert_eq!(exe(mingw, "-"), "-");
+        assert_eq!(exe(mingw, "/dev/null"), "/dev/null");
+        // Neither MSVC's linker nor anything but Windows does this.
+        assert_eq!(exe("x86_64-pc-windows-msvc", "foo"), "foo");
+        assert_eq!(exe("x86_64-unknown-linux-gnu", "foo"), "foo");
+        // Nothing is linked, so the name is the object's or the assembly's as written.
+        for emit in [EmitKind::Object, EmitKind::Asm] {
+            let mut o = opts(mingw);
+            o.emit = emit;
+            assert_eq!(plan(&o, &["a.c"], Some("foo")).jobs[0].output, Output::File("foo".into()));
+        }
     }
 
     /// The archive is the link's shape rather than `-c`'s: one file out of however many inputs.
