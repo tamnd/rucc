@@ -1,0 +1,9 @@
+waiting 4 counter 400000
+thread 0 returned 0
+thread 1 returned 101
+thread 2 returned 202
+thread 3 returned 303
+once ran 1 time
+main key 7
+equal self 1
+imports libwinpthread no

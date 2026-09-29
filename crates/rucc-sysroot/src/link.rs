@@ -338,10 +338,21 @@ impl LinkLine {
     /// The libraries are a set rather than one file, because the C library on Windows is several
     /// DLLs and the CRT calls into the system ones. `libmingw32.a` holds the start code `crt2.o`
     /// calls, `libmoldname.a` is the layer that gives the old unprefixed spellings of the names
-    /// Microsoft deprecated, `libmingwex.a` is everything C requires that msvcrt does not have, and
+    /// Microsoft deprecated, `libmingwex.a` is everything C requires that the CRT does not have, and
     /// `libmsvcrt.a` is the import library for the CRT itself. Then the four Win32 libraries that
     /// mingw-w64's own code calls into, which are on the line for the same reason they are on gcc's:
     /// a program that uses none of them directly still reaches `kernel32` through `malloc`.
+    ///
+    /// `libmsvcrt.a` is the right name for either CRT, which is why nothing here asks the sysroot
+    /// which one it has. mingw-w64 installs it as a copy of the default runtime's import library, so
+    /// in the UCRT sysroot this compiler fetches it is `libucrt.a` and names the `api-ms-win-crt-*`
+    /// API sets, and in a `-msvcrt` sysroot it names `msvcrt.dll`. gcc's spec says `-lmsvcrt` on a
+    /// UCRT toolchain for the same reason, so the line follows the sysroot without being told.
+    ///
+    /// `-pthread` adds `-lpthread` after the objects, as on every other target, and the sysroot's
+    /// `libpthread.a` is winpthreads, built static so the program needs no `libwinpthread-1.dll`.
+    /// It is not on this line otherwise. A gcc built with the posix thread model lists it for every
+    /// program, and a program that asked for no threads has nothing to take from it.
     ///
     /// The order is the one a single pass linker needs, which is GNU ld's PE port: a library after
     /// everything that calls into it. `librucc_builtins.a` is last for the reason it is last on the

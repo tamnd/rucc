@@ -4,10 +4,19 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The windows-gnu sysroots carry winpthreads, built static from the same mingw-w64 14.0.0, so `-pthread` and `-lpthread` link and the program needs no `libwinpthread-1.dll`. `tests/exec/windows/pthread.c` checks threads, a mutex, a condition variable, `pthread_once` and thread-specific keys, and that the program does not import winpthreads (#2069).
+
+### Changed
+
+- The windows-gnu sysroots `--fetch` installs are built for the UCRT rather than msvcrt, pinned to the `sysroots-2026-09-29` release of tamnd/rucc-cross. A program now imports the `api-ms-win-crt-*` API sets, and `_mingw.h` sets `__MSVCRT_VERSION__` to 0xE00 and defines `_UCRT`, as it does for a UCRT gcc. The link line is unchanged, because the sysroot's `libmsvcrt.a` is a copy of whichever runtime it was built for. The same release has a `-msvcrt` archive of each target for anyone who needs `msvcrt.dll`, and nothing pins it (#2069).
+
 ### Fixed
 
 - An array of a typedef that asked for an alignment with `__attribute__((aligned(n)))` is as aligned as the typedef, as with gcc. It used to take the alignment of the type behind the typedef, so mingw-w64's `jmp_buf`, an array of a sixteen byte struct that a typedef aligns to sixteen, was aligned to eight, and msvcrt's `setjmp` faulted storing the vector registers into one that landed off a multiple of sixteen. That was cJSON's tests under Wine. The same held for `_Alignof`, member offsets and globals on every target. `tests/exec/windows/jmpbuf.c` (#2069).
 - A `pure` or `const` function whose value comes back through memory, such as a large struct anywhere or a `_Complex double` or `long double` on Windows x64, is no longer taken to write nothing. The value is a store through the pointer the caller hands it, and at `-O2` a call whose value was read was deleted and the value read from memory nothing had written, which is `execute/20050121-1.c` and `execute/20070614-1.c` on the windows-gnu row (#2069).
+- `tests/exec/windows/dll.c` reaches `_wctype` through dllimport instead of `__argc` and `_environ`, which UCRT exports only as functions (#2069).
 
 ## 0.15.1
 

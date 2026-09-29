@@ -1,9 +1,8 @@
 pid is not zero 1
 pid through a pointer agrees 1
-argc agrees 1
+wctype says A is upper 1
 fmode through its address agrees 1
 fmode written 8000
-environ has entries 1
 later 7
 offered found 1, says 15
 shared found 1, holds 42
