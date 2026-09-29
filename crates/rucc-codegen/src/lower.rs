@@ -6825,7 +6825,10 @@ impl<'a> Lowering<'a> {
             Opcode::IConst => Some(Rebuilt::Constant(inst)),
             Opcode::Alloca if self.source[data.args].is_empty() => Some(Rebuilt::Local(inst)),
             Opcode::GlobalAddr => match data.extra {
-                Extra::Symbol(symbol) if !self.elsewhere.thread(symbol) => {
+                Extra::Symbol(symbol)
+                    if !self.elsewhere.thread(symbol)
+                        && std::env::var_os("RUCC_REMAT_NAMES").is_some() =>
+                {
                     Some(Rebuilt::Name(inst))
                 }
                 _ => None,
@@ -6850,6 +6853,9 @@ impl<'a> Lowering<'a> {
     /// stack pointer, and the walk stops at one of those. A constant is left where it is, because
     /// some of the instructions a constant is written with write the flags as well.
     fn passed_late(&mut self, made: &[mir::Inst]) {
+        if std::env::var_os("RUCC_PASS_LATE").is_none() {
+            return;
+        }
         let sp = mir::Reg::physical(self.conv.stack_pointer);
         for &inst in made {
             let operands = &self.out[self.out[inst].operands];
