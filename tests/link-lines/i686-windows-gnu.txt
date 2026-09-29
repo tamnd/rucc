@@ -117,6 +117,8 @@ sysroot   <cache>/sysroots/i686-windows-gnu
   i386pe
   --sysroot=<cache>/sysroots/i686-windows-gnu
   -shared
+  -e
+  _DllMainCRTStartup@12
   --dynamicbase
   --nxcompat
   --no-insert-timestamp

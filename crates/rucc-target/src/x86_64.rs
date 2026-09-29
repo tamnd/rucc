@@ -1237,7 +1237,7 @@ static SSE_ORDER: [PhysReg; 16] = [
 
 /// Where a SysV AMD64 call puts things, per `spec/12-abi-and-runtime.md` section 12.2.
 ///
-/// The set itself is [`SYSV_REGISTERS`] with the list of conventions this platform has put on it,
+/// The set itself is `SYSV_REGISTERS` with the list of conventions this platform has put on it,
 /// and the list is what makes the set a platform's rather than only a convention's.
 pub static SYSV: CallRegs =
     CallRegs { conventions: Conventions(&SYSV_CONVENTIONS), ..SYSV_REGISTERS };

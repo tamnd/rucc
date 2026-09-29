@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A DLL linked for a windows-gnu target names its entry point with `-e`, as gcc does, `DllMainCRTStartup` or `_DllMainCRTStartup@12` on i686. lld 19 and older do not choose it for a MinGW DLL and looked for MSVC's `_DllMainCRTStartup` instead, so `-shared` failed with that name undefined (#2069).
+
 ## 0.14.1
 
 The first fixes from running the gcc torture tests for x86_64-windows-gnu under Wine: complex multiply and divide, an empty struct passed as an argument, and `.linkonce` in the assembler. The checked modes are refused at a Windows link.

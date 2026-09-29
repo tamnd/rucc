@@ -77,7 +77,7 @@ fn a_variable_only_declared_is_read_through_a_pointer_of_the_files_own() {
     for opt in ["-O0", "-O2"] {
         let text = listing("refptr", opt, SOURCE);
         assert!(text.contains(".refptr.away(%rip)"), "{opt}: {text}");
-        let pointer = "\t.section\t.rdata$.refptr.away,\"dr\",discard,.refptr.away\n\
+        let pointer = "\t.section\t.rdata$.refptr.away,\"dr\"\n\t.linkonce\tdiscard\n\
                        \t.globl\t.refptr.away\n\t.p2align\t3\n.refptr.away:\n\t.quad\taway\n";
         assert!(text.contains(pointer), "{opt}: {text}");
         // What clang leaves alone: a variable this file defines, whether or not other files can

@@ -121,6 +121,8 @@ sysroot   <cache>/sysroots/aarch64-windows-gnu
   arm64pe
   --sysroot=<cache>/sysroots/aarch64-windows-gnu
   -shared
+  -e
+  DllMainCRTStartup
   --dynamicbase
   --nxcompat
   --high-entropy-va
