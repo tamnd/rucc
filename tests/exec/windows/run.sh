@@ -15,6 +15,8 @@
 # One whose first lines have "flags:" in them is compiled with those flags as well, such as
 # -municode for a program that starts at wmain. "gcc flags:" go after the source and only when CC is gcc,
 # for a program that asks rucc for something gcc does not do, such as a library named in a pragma.
+# "gcc skip:" gives the reason gcc's build of that program is not run, and the program is skipped
+# when CC is gcc.
 #
 # A directory here is one program in several files. Every .c in it other than main.c is built with
 # -shared into a DLL of the same name, with the .def file of that name if there is one, and writes
@@ -91,6 +93,11 @@ for src in "$here"/*.c; do
     theirs=()
     case "${cc[0]##*/}" in
         *gcc*)
+            why=$(sed -n '1,3s|^/\* gcc skip: \(.*\) \*/$|\1|p' "$src")
+            if [ -n "$why" ]; then
+                echo "skip $name: $why"
+                continue
+            fi
             theirs=$(sed -n '1,3s|^/\* gcc flags: \(.*\) \*/$|\1|p' "$src")
             read -r -a theirs <<<"$theirs"
             ;;
