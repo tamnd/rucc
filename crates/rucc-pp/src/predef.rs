@@ -572,7 +572,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
             d.set("__ARM_ALIGN_MAX_STACK_PWR", "16");
             d.set("__ARM_SIZEOF_MINIMAL_ENUM", "4");
-            d.set("__ARM_SIZEOF_WCHAR_T", "4");
+            // The target's own `wchar_t`, which is two bytes on Windows and four everywhere else.
+            // clang for aarch64-w64-mingw32 says 2 there, and a header that sizes a buffer by it
+            // rather than by `sizeof` gets half the room it asked for when this says 4.
+            d.set("__ARM_SIZEOF_WCHAR_T", &wchar(target).size.to_string());
             d.set("__AARCH64_CMODEL_SMALL__", "1");
             // A fused multiply add is one instruction here, and glibc's `math.h` turns these
             // into `FP_FAST_FMA` and `FP_FAST_FMAF`, which a program reads to decide whether
@@ -2303,6 +2306,24 @@ mod tests {
         assert!(!x86.contains("__ARM_FEATURE_CLZ"));
         assert!(!x86.contains("__FP_FAST_FMA"));
         assert!(has(&x86, "#define __GCC_DESTRUCTIVE_SIZE 64"));
+    }
+
+    #[test]
+    fn the_arm_wchar_size_is_the_target_s_wchar_size() {
+        // The ACLE macro and `__SIZEOF_WCHAR_T__` are the same fact said twice, and on Windows
+        // both are two, which is what clang for aarch64-w64-mingw32 defines.
+        for (triple, size) in [
+            ("aarch64-unknown-linux-gnu", 4),
+            ("aarch64-apple-darwin", 4),
+            ("aarch64-pc-windows-gnu", 2),
+            ("aarch64-pc-windows-msvc", 2),
+        ] {
+            let set = set_for(triple);
+            assert!(has(&set, &format!("#define __ARM_SIZEOF_WCHAR_T {size}")), "{triple}");
+            assert!(has(&set, &format!("#define __SIZEOF_WCHAR_T__ {size}")), "{triple}");
+        }
+        // And `char` is signed on Windows on this machine, as on Apple's, and unsigned on Linux.
+        assert!(!set_for("aarch64-pc-windows-gnu").contains("__CHAR_UNSIGNED__"));
     }
 
     #[test]
