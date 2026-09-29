@@ -43,6 +43,7 @@ pub static SELECTOR: super::Selector = super::Selector {
             at: 0x58,
             add: "lea_64",
         }),
+        teb: None,
     },
     jumps: &super::Jumps {
         near: "lea_64",

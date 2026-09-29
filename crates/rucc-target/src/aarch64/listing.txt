@@ -231,6 +231,13 @@ f9400021	ldr x1, [x1, :got_lo12:s]	got_64
 90000001	adrp x1, :gottprel:s	gottprel_64
 f9400021	ldr x1, [x1, :gottprel_lo12:s]	gottprel_64
 d53bd041	mrs x1, tpidr_el0	thread_64
+90000001	adrp x1, s	ldr_sym_32
+b9400021	ldr w1, [x1, :lo12:s]	ldr_sym_32
+f9402e41	ldr x1, [x18, #88]	teb_64
+f8637841	ldr x1, [x2, x3, lsl #3]	secrel_64
+# GNU as has no :secrel_hi12: or :secrel_lo12: on ELF, so these two are llvm-mc 18 for aarch64-windows.
+91400021	add x1, x1, :secrel_hi12:s, lsl #12	secrel_64
+91000021	add x1, x1, :secrel_lo12:s	secrel_64
 d53bd041	mrs x1, tpidr_el0	tls_64
 91400021	add x1, x1, :tprel_hi12:s, lsl #12	tls_64
 91000021	add x1, x1, :tprel_lo12_nc:s	tls_64

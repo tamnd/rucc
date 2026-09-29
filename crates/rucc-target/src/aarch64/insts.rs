@@ -554,6 +554,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("got_64", Address),
     ("gottprel_64", Address),
     ("thread_64", Address),
+    // Windows thread-local variables, in the three steps `text` gives. The first and the last
+    // read memory that does not change while the thread runs, `_tls_index` and the thread's
+    // array, which is why they are not loads either.
+    ("ldr_sym_32", Address),
+    ("teb_64", Address),
+    ("secrel_64", Alu),
     ("tls_64", Address),
     // Loads, which write a whole register whatever they read.
     ("ldr_8", Load),

@@ -159,3 +159,21 @@ fn x18_is_not_written_and_no_other_register_is_kept_for_the_program() {
     let said = refused("x19", "register long g __asm__(\"x19\");\nlong f(void) { return g; }\n");
     assert!(said.contains("'g' is a global register variable"), "{said}");
 }
+
+#[test]
+fn a_thread_local_is_found_from_the_teb_in_x18() {
+    // clang's six instructions, except that it folds the last `add` into the load that follows.
+    let got = insts("tls", "__thread int v;\nint *at(void) { return &v; }\n");
+    assert_eq!(
+        got,
+        [
+            "adrp x0, _tls_index",
+            "ldr w0, [x0, :lo12:_tls_index]",
+            "ldr x1, [x18, #88]",
+            "ldr x0, [x1, x0, lsl #3]",
+            "add x0, x0, :secrel_hi12:v, lsl #12",
+            "add x0, x0, :secrel_lo12:v",
+            "ret",
+        ]
+    );
+}
