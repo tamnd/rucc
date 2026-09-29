@@ -137,6 +137,15 @@ pub struct FrameInsts {
     /// array takes. A prologue knows its number when it is written and a declaration in the body
     /// does not know it until the expression in the brackets has been worked out.
     pub grow: &'static str,
+    /// The same with the register shifted left by [`crate::Chkstk::shift`] first, for a stack
+    /// probe routine that is given the size in larger units than bytes. ARM64 Windows is the one,
+    /// where `__chkstk` counts in sixteens and the prologue takes the frame with
+    /// `sub sp, sp, x15, lsl #4`. `None` on a machine with no such routine.
+    pub scaled: Option<&'static str>,
+    /// Writes sixteen bits of a constant at bit sixteen of a register and keeps the rest, for a
+    /// machine whose [`Self::imm`] writes only sixteen bits at a time. That is AArch64's `movk`, and
+    /// the one constant a prologue writes that can need it is the size handed to `__chkstk`.
+    pub insert: Option<&'static str>,
     /// Clears the low bits of the stack pointer, which is how a prologue forces an alignment
     /// nothing else can give it.
     pub align: &'static str,

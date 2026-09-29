@@ -124,6 +124,32 @@ fn a_frame_larger_than_a_page_is_reached_by_the_routine_the_runtime_provides() {
     );
 }
 
+/// On ARM64 the size goes in `x15` counted in sixteens, and the subtraction after the call scales
+/// it back, which is what clang writes. A size too big for one move is built with a `movk`.
+#[test]
+fn an_arm64_frame_larger_than_a_page_hands_the_routine_its_size_in_sixteens() {
+    let huge = "void use(void *);\nvoid huge(void) { char b[0x1234560]; use(b); }\n";
+    for target in [ARM64_MSVC, ARM64_MINGW] {
+        let text = asm("arm", target, &[], &format!("{THREE}{}", &huge[18..]));
+        let call = |name: &str| {
+            let lines = insts(&text, name);
+            let at = lines.iter().position(|line| *line == "bl __chkstk");
+            let at = at.unwrap_or_else(|| panic!("{target} {name}: {lines:?}"));
+            assert_eq!(lines[at + 1], "sub sp, sp, x15, lsl #4", "{target} {name}: {lines:?}");
+            lines[..at]
+                .iter()
+                .filter(|line| line.contains("x15"))
+                .map(|line| (*line).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(call("onepage"), ["mov x15, #257"], "{target}");
+        let huge = call("huge");
+        assert_eq!(huge.len(), 2, "{target}: {huge:?}");
+        assert!(huge[1].starts_with("movk x15, #18, lsl #16"), "{target}: {huge:?}");
+        assert!(!insts(&text, "small").iter().any(|line| line.contains("chkstk")), "{target}");
+    }
+}
+
 /// A frame that fits in a page is taken in one subtraction, the way it is everywhere else.
 ///
 /// The far end of such a frame is the near end of the page below it, so the guard page is reached

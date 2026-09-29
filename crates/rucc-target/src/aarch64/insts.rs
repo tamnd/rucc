@@ -741,6 +741,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // read it, and a page is touched by storing the zero register to it.
     ("align_sp_64", AluI),
     ("probe_64", Probe),
+    // The frame an ARM64 Windows prologue takes after `__chkstk`, which counts it in sixteens.
+    ("grow_16_64", Alu),
     // The ones `__builtin_prefetch` asks for by how much of the data will still be wanted, named as
     // on x86-64 because the lowering that writes them is shared, and the same four for a write.
     ("prefetch_nta", Prefetch),

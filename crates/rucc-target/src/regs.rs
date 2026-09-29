@@ -281,6 +281,10 @@ pub struct Chkstk {
     pub name: &'static str,
     /// The register the size goes in, which is also the register it comes back in.
     pub size: PhysReg,
+    /// How far right the size is shifted before it goes in, which is zero on x86-64 and four on
+    /// ARM64, where the routine counts in units of sixteen bytes and the frame is taken with the
+    /// register shifted back by [`crate::FrameInsts::scaled`].
+    pub shift: u8,
 }
 
 /// Which registers a calling convention gives which job.
@@ -381,6 +385,17 @@ pub struct CallRegs {
     /// reads the table, there is no profiler's hook that reads the pointer, and gcc gives the chain
     /// up on the same functions for the same reason.
     pub late_frame_pointer: bool,
+    /// Whether every prologue has to be one the ARM64 Windows unwind codes can describe.
+    ///
+    /// Those codes are one to an instruction and restore registers from wherever the stack pointer
+    /// is, so two things the frame code does elsewhere have to change. A pair stored with one `stp`
+    /// has to be two registers in a row, since that is the only pair a code can name, so a frame
+    /// saving `x19` and `x21` saves `x20` as well. And a prologue that goes on to push registers
+    /// after pointing the frame pointer at the frame record says where the frame pointer is again,
+    /// with an `add x29, sp, #n` that changes nothing, when the stack pointer is about to move by
+    /// an amount the codes cannot say: before the stack is aligned, and at the end of a prologue
+    /// whose body grows the frame. Unwinding then starts from the frame pointer, as it has to.
+    pub unwind_codes: bool,
     /// Where a variadic call says how many vector registers it passed arguments in, when the
     /// convention makes it say.
     ///
@@ -894,6 +909,7 @@ mod tests {
             stack_pointer: PhysReg::new(4),
             frame_pointer: PhysReg::new(5),
             late_frame_pointer: false,
+            unwind_codes: false,
             vector_count: None,
             red_zone: 0,
             shadow,

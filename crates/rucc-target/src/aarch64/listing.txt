@@ -405,6 +405,7 @@ a8c10be1	ldp x1, x2, [sp], #16	pop_pair_64
 aa0203f0	mov x16, x2	align_sp_64
 92400201	and x1, x16, #1	align_sp_64
 f900093f	str xzr, [x9, #16]	probe_64
+cb031041	sub x1, x2, x3, lsl #4	grow_16_64
 f9800921	prfm pldl1strm, [x9, #16]	prefetch_nta
 f9800924	prfm pldl3keep, [x9, #16]	prefetch_t2
 f9800922	prfm pldl2keep, [x9, #16]	prefetch_t1

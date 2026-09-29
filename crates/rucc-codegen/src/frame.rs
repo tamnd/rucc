@@ -786,16 +786,39 @@ fn saved(
     let wanted = |class: RegClass, at: PhysReg| used.contains(&(class, at));
     // In the convention's order rather than the order the function happened to reach for them, so
     // that two functions saving the same registers get the same prologue.
-    let saved_int = conv
+    let kept = |at: PhysReg| !(layout.frame_pointer && at == conv.frame_pointer);
+    let mut saved_int: Vec<PhysReg> = conv
         .int_saved
         .iter()
         .copied()
         .filter(|&at| wanted(conv.int_class, at))
-        .filter(|&at| !(layout.frame_pointer && at == conv.frame_pointer))
+        .filter(|&at| kept(at))
         .collect();
+    // Each pair two registers next to each other, where the unwind codes can only name such a
+    // pair, by saving the register between two that are not. See `CallRegs::unwind_codes`.
+    if conv.unwind_codes && layout.pairs {
+        adjacent(&mut saved_int, conv.int_saved, kept);
+    }
     let saved_sse =
         conv.sse_saved.iter().copied().filter(|&at| wanted(conv.sse_class, at)).collect();
     (saved_int, saved_sse)
+}
+
+/// Makes each pair of saved registers two that are next to each other in the convention's order,
+/// by saving the one after the first of a pair that is not. `kept` says which registers may be
+/// saved at all.
+fn adjacent(saved: &mut Vec<PhysReg>, order: &[PhysReg], kept: impl Fn(PhysReg) -> bool) {
+    let next = |at: PhysReg| {
+        let place = order.iter().position(|&reg| reg == at)?;
+        order.get(place + 1).copied().filter(|&reg| kept(reg))
+    };
+    let mut first = 0;
+    while first + 1 < saved.len() {
+        if let Some(want) = next(saved[first]).filter(|&want| want != saved[first + 1]) {
+            saved.insert(first + 1, want);
+        }
+        first += 2;
+    }
 }
 
 /// How many bytes a value of a class takes on the stack.
@@ -1218,5 +1241,19 @@ mod tests {
         // A long double is eighty bits and takes sixteen bytes, because an address has to be a
         // multiple of the size of what is at it.
         assert_eq!(width(&base, REGS.class_named("x87").expect("a class")), 16);
+    }
+
+    /// A pair of saved registers that are not next to each other gets the one between, so every
+    /// pair is one an ARM64 unwind code can name, and a last register left alone stays alone.
+    #[test]
+    fn saved_pairs_are_made_adjacent() {
+        use rucc_target::aarch64::x;
+        let order: Vec<PhysReg> = (19..=29).map(x).collect();
+        let mut saved = vec![x(19), x(21), x(22), x(25), x(28)];
+        adjacent(&mut saved, &order, |reg| reg != x(29));
+        assert_eq!(saved, [x(19), x(20), x(21), x(22), x(25), x(26), x(28)]);
+        let mut saved = vec![x(26), x(28)];
+        adjacent(&mut saved, &order, |reg| reg != x(29));
+        assert_eq!(saved, [x(26), x(27), x(28)]);
     }
 }
