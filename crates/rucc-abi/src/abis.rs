@@ -208,8 +208,12 @@ pub static WIN64: AbiDescription = AbiDescription {
         Rule::new(Test::SizeOneOf(&[1, 2, 4, 8]), Travel::AsOneInteger),
         Rule::new(Test::Anything, Travel::ByReference),
     ],
+    // No rule for an empty aggregate going in, unlike coming back. Its size is not one of the
+    // four, so gcc passes it the way it passes any other size that is not, as the address of a
+    // copy, and it takes up one of the four positions. A caller that passed nothing for it would
+    // put every argument after it one position early, which is what va-arg-22 in the gcc torture
+    // tests caught. An empty aggregate coming back is nothing, as it is everywhere else.
     arguments: &[
-        Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::SizeOneOf(&[1, 2, 4, 8]), Travel::AsOneInteger),
         Rule::new(Test::Anything, Travel::ByReference),
     ],
