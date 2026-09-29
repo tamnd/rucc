@@ -413,14 +413,24 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
             meant.push((Slot::Whole(index), param, place(&mut places, param, conv)));
             continue;
         }
+        let scalars = conv.abi.scalars;
         let mut ahead = places.clone();
+        // AAPCS64 starts the pair at an even register, and a filler takes the odd one it skips.
+        let skipped = (scalars.wide_integer_starts_even && ahead.integers() % 2 == 1)
+            .then(|| ahead.integer(HALF / 8));
         if let (low @ Where::Reg(_), high @ Where::Reg(_)) =
             (ahead.integer(HALF / 8), ahead.integer(HALF / 8))
         {
             places = ahead;
+            if let Some(at) = skipped {
+                meant.push((Slot::Filler(word.ty), word, at));
+            }
             meant.push((Slot::Low(index), word, low));
             meant.push((Slot::High(index), word, high));
             continue;
+        }
+        if scalars.wide_integer_drains {
+            places.drain_integers();
         }
         let Where::Stack(at) = places.on_stack(WIDE / 8, WIDE / 8) else { return None };
         meant.push((Slot::Low(index), word, Where::Stack(at)));

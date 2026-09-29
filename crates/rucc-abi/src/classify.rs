@@ -194,7 +194,8 @@ impl Call {
     /// costs.
     fn scalar(&mut self, scalar: Scalar) -> Pass {
         let Banks { shared, integer_width, float_width, .. } = self.abi.banks;
-        let Scalars { in_memory, wide_integer_is_all_or_nothing, .. } = self.abi.scalars;
+        let scalars = self.abi.scalars;
+        let Scalars { in_memory, wide_integer_is_all_or_nothing, .. } = scalars;
         // A scalar no register holds is the address of a copy the caller made, which costs the
         // one position that address travels in and nothing else.
         if self.by_reference(scalar) {
@@ -226,6 +227,22 @@ impl Call {
             Kind::Integer if wide_integer_is_all_or_nothing => {
                 if want <= self.integer {
                     self.integer -= want;
+                }
+            }
+            Kind::Integer
+                if want > 1
+                    && (scalars.wide_integer_starts_even || scalars.wide_integer_drains) =>
+            {
+                // AAPCS64 rounds up to an even register first, and a value that does not fit
+                // after that spends every register left.
+                let used = self.abi.banks.integer - self.integer;
+                if scalars.wide_integer_starts_even && used % 2 == 1 {
+                    self.integer = self.integer.saturating_sub(1);
+                }
+                if want <= self.integer {
+                    self.integer -= want;
+                } else if scalars.wide_integer_drains {
+                    self.integer = 0;
                 }
             }
             Kind::Integer => self.integer = self.integer.saturating_sub(want),
