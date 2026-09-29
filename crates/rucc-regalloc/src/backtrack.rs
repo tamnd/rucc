@@ -44,7 +44,11 @@
 //!
 //! A two address instruction is coalesced from both ends here. The linear scan only ever meets the
 //! answer after its source, since the source is written first. Here either can be placed first, so
-//! a source looks at where the answer that reuses it went as well as the other way round.
+//! a source looks at where the answer that reuses it went as well as the other way round. That
+//! goes for the second source of an instruction that reads its sources either way round too: it
+//! can follow an answer placed before it by having the sources swapped, when the first source is
+//! wanted after the instruction and so can never be where the answer goes. A loaded value added to
+//! a base the loop reads again is that case.
 //!
 //! # When it gives up
 //!
@@ -207,6 +211,7 @@ fn placed(
     let passed = assign::passed(func);
     let received = received(func);
     let reused = reused(&reuses);
+    let seconds = seconds(&reuses);
     let costs = costs(func);
 
     let count = func.vregs();
@@ -259,6 +264,7 @@ fn placed(
                     partners.filter_map(|&other| state.reg_of(other)).collect();
                 state.hinted(value, &partners, Want::Clear)
             })
+            .or_else(|| state.swapped(value, &seconds[number]))
             .or_else(|| {
                 let mut ties = reused[number].clone();
                 let source = reuses[number].and_then(|reuse| reuse.source.number());
@@ -453,6 +459,39 @@ impl<'a> State<'a, '_> {
         None
     }
 
+    /// The register of an answer placed first that could be written over this value with its
+    /// sources swapped, and cannot be written over its first source, because that one is still
+    /// wanted after it. Asked after the hints, because the register an instruction wants the value
+    /// in saves a move as well, and following the answer would take the value away from it. The
+    /// value is one no two address instruction writes, such as a load.
+    fn swapped(&mut self, value: Value<'_>, seconds: &[usize]) -> Option<PhysReg> {
+        // A value that is itself the answer of a two address instruction is tied to its own source
+        // already, and following the answer it is read by would break that tie to save the same
+        // copy somewhere else.
+        if self.reuses[index(value.reg)].is_some() {
+            return None;
+        }
+        for &answer in seconds {
+            let (Some(at), Some(reuse)) = (self.at[answer], self.reuses[answer]) else { continue };
+            let Some(written) = self.values[answer] else { continue };
+            // An answer whose first source ends where it starts can still go over that one, which
+            // saves the same copy without swapping anything, and taking its register here would
+            // stop it moving there when the function is settled.
+            if self.commuted[answer].is_some()
+                || self.reg_of(reuse.source) == Some(at)
+                || assign::apart(self.live, written.reg, reuse.source)
+            {
+                continue;
+            }
+            self.commuted[answer] = Some(reuse.inst);
+            if self.free(value, at, Want::Allowed) {
+                return Some(at);
+            }
+            self.commuted[answer] = None;
+        }
+        None
+    }
+
     /// The register that is cheapest to take back for `value`, if any is cheaper than sending
     /// `value` to the stack.
     fn cheapest(&mut self, value: Value<'_>, order: &[PhysReg]) -> Option<PhysReg> {
@@ -629,6 +668,20 @@ fn reused(reuses: &[Option<Reuse>]) -> Vec<Vec<usize>> {
         }
     }
     reused
+}
+
+/// The answers that could be written over each value as the second source of an instruction that
+/// reads its sources either way round.
+fn seconds(reuses: &[Option<Reuse>]) -> Vec<Vec<usize>> {
+    let mut seconds = vec![Vec::new(); reuses.len()];
+    for (answer, reuse) in reuses.iter().enumerate() {
+        let Some(second) = reuse.and_then(|reuse| reuse.second) else { continue };
+        let number = second.number().and_then(|number| usize::try_from(number).ok());
+        if let Some(answers) = number.and_then(|number| seconds.get_mut(number)) {
+            answers.push(answer);
+        }
+    }
+    seconds
 }
 
 fn index(reg: Reg) -> usize {
@@ -906,6 +959,47 @@ mod tests {
         let places = places(&mut func, &env());
         assert_eq!(places[2], places[1]);
         assert_ne!(places[2], places[0]);
+    }
+
+    #[test]
+    fn an_offset_added_to_a_base_the_loop_reads_again_goes_where_the_answer_went() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let out = func.create_block();
+        let base = func.new_vreg(GPR);
+        let at = func.new_vreg(GPR);
+        let offset = func.new_vreg(GPR);
+        let target = func.new_vreg(GPR);
+        let later = func.new_vreg(GPR);
+        func.build(entry, opcode).def(base, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, opcode).def(at, GPR).finish();
+        func.build(head, opcode).def(offset, GPR).uses(base, GPR).uses(at, GPR).finish();
+        func.build(head, opcode)
+            .flags(Flags::COMMUTES)
+            .operand(Operand::write(target, GPR).with(Constraint::Reuse(1)))
+            .uses(base, GPR)
+            .uses(offset, GPR)
+            .finish();
+        func.build(head, opcode).def(later, GPR).finish();
+        func.build(head, opcode).uses(target, GPR).finish();
+        for _ in 0..4 {
+            func.build(head, opcode).finish();
+        }
+        func.build(head, opcode).uses(later, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(head), BlockCall::to(out)];
+
+        // The answer is placed before the offset, which is wanted over less of the line, and the
+        // base the loop reads again has the only register the answer could have followed. The
+        // offset is placed last and finds the register `later` has after the add free before it,
+        // which is where it went before it looked at the answer, and the answer could not then be
+        // moved to it. tamnd/rucc#2064.
+        let places = places(&mut func, &env());
+        assert_eq!(places[3], places[2]);
+        assert_ne!(places[3], places[0]);
     }
 
     #[test]
