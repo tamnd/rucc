@@ -1,0 +1,19 @@
+struct ga size 4 align 4
+struct ma size 8 align 4
+struct gb size 4 align 4
+struct mb size 8 align 4
+struct gc size 4 align 1
+struct gd size 5 align 1
+struct ge size 16 align 8
+struct gf size 5 align 1
+union gu size 4 align 4
+gt size 4 align 4
+mt size 8 align 4
+ga.y at 1
+ma.y at 4
+gb -3 11
+gb bytes 5d 00 00 00
+ge q 123456789a -5
+ge bytes 71 9a 78 56 34 12 00 00 fb ff 0f 00 00 00 00 00
+gt 9 10 11
+gt bytes a9 0b 00 00

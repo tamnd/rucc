@@ -3221,6 +3221,92 @@ decl #0 x : int object external static defined
         assert!(messages[0].contains("[E0688]"), "{messages:?}");
     }
 
+    /// `ms_struct` and `gcc_struct` choose the bit-field rule for one record, the way gcc does on
+    /// x86. `struct { unsigned m:3; char c; }` is eight bytes with the `char` at four under
+    /// Microsoft's rule and four bytes with it at one under the Itanium rule, so each attribute
+    /// gives on one target what the other target gives with no attribute at all. On AArch64 Linux
+    /// gcc does not take either and neither does this, so there the record is what it always was.
+    #[test]
+    fn ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record() {
+        let source = concat!(
+            "struct __attribute__((ms_struct)) m { unsigned x : 3; char c; };\n",
+            "struct g { unsigned x : 3; char c; } __attribute__((__gcc_struct__));\n",
+            "struct p { unsigned x : 3; char c; };\n",
+            "typedef struct { char c; int : 20; } __attribute__((gcc_struct)) u;\n",
+            "_Static_assert(sizeof(struct m) == 8 && __builtin_offsetof(struct m, c) == 4, \"m\");\n",
+            "_Static_assert(sizeof(struct g) == 4 && __builtin_offsetof(struct g, c) == 1, \"g\");\n",
+            "_Static_assert(sizeof(u) == 4 && _Alignof(u) == 1, \"u\");\n",
+        );
+        let windows = "_Static_assert(sizeof(struct p) == 8, \"p\");\n";
+        let linux = "_Static_assert(sizeof(struct p) == 4, \"p\");\n";
+
+        let mut opts = options();
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, &format!("{source}{windows}"));
+        assert_eq!(result.messages, Vec::<String>::new());
+        let result = run(&options(), &format!("{source}{linux}"));
+        assert_eq!(result.messages, Vec::<String>::new());
+
+        let mut opts = options();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let ignored = concat!(
+            "struct __attribute__((ms_struct)) m { unsigned x : 3; char c; };\n",
+            "_Static_assert(sizeof(struct m) == 4, \"m\");\n",
+        );
+        assert_eq!(run(&opts, ignored).messages, Vec::<String>::new());
+    }
+
+    /// The first of the two wins and the other is dropped with gcc's warning, in gcc's words.
+    #[test]
+    fn a_record_that_asks_for_both_rules_gets_the_first() {
+        let source = concat!(
+            "struct __attribute__((gcc_struct, ms_struct)) s { unsigned x : 3; char c; };\n",
+            "_Static_assert(sizeof(struct s) == 4, \"s\");\n",
+        );
+        assert_eq!(
+            run(&options(), source).messages,
+            ["/main.c:1:35: warning: 'ms_struct' incompatible attribute ignored [E0746]"]
+        );
+        let same = "struct __attribute__((ms_struct, ms_struct)) s { unsigned x : 3; char c; };\n";
+        assert_eq!(run(&options(), same).messages, Vec::<String>::new());
+    }
+
+    /// The format archetypes gcc knows, which on Windows include the `ms_` ones mingw-w64's
+    /// headers write through `__MINGW_PRINTF_FORMAT`. gcc on Linux does not know those and says
+    /// so, and a name no target knows is warned about everywhere.
+    #[test]
+    fn format_takes_the_archetypes_gcc_knows_on_the_target() {
+        let source = concat!(
+            "int a(const char *, ...) __attribute__((format(ms_printf, 1, 2)));\n",
+            "int b(const char *, ...) __attribute__((__format__(__gnu_printf__, 1, 2)));\n",
+            "__attribute__((format(ms_scanf, 1, 2))) int c(const char *, ...);\n",
+            "int d(const char *, ...) __attribute__((format(gnu_scanf, 1, 2)));\n",
+            "unsigned long e(char *, unsigned long, const char *, const void *)\n",
+            "    __attribute__((format(ms_strftime, 3, 0)));\n",
+            "unsigned long f(char *, unsigned long, const char *, const void *)\n",
+            "    __attribute__((format(gnu_strftime, 3, 0)));\n",
+            "int g(const char *, ...) __attribute__((format(printf, 1, 2)));\n",
+        );
+        let mut opts = options();
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+
+        let linux = run(&options(), source).messages;
+        assert_eq!(linux.len(), 3, "{linux:?}");
+        assert!(
+            linux[0]
+                .ends_with("warning: 'ms_printf' is an unrecognized format function type [E0747]"),
+            "{linux:?}"
+        );
+        assert!(linux[1].contains("'ms_scanf'"), "{linux:?}");
+        assert!(linux[2].contains("'ms_strftime'"), "{linux:?}");
+
+        let bogus = "int h(const char *, ...) __attribute__((format(bogus, 1, 2)));\n";
+        let messages = run(&opts, bogus).messages;
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].contains("'bogus' is an unrecognized format"), "{messages:?}");
+    }
+
     /// Where a bit-field goes, which packing decides and which is the part of all this that
     /// is not what the names suggest. A bit-field goes at the next free bit unless that would
     /// make it span more storage than its own type occupies, and then it moves to the next

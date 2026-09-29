@@ -21,7 +21,9 @@
 //! compiled it for. Windows runs Microsoft's bit-field allocation rather than the Itanium one, on
 //! mingw as well as on MSVC, and AAPCS64 lets an unnamed bit-field raise the record's alignment
 //! where nothing else in the table does. Both are read out of [`TargetInfo`] here rather than
-//! decided here, and `tests/abi-corpus` is where the numbers they change are written down.
+//! decided here, and `tests/abi-corpus` is where the numbers they change are written down. The
+//! first of them is also a program's to choose for one record, with `ms_struct` or `gcc_struct`,
+//! and that choice arrives in [`RecordOptions::bit_fields`].
 
 use rucc_target::{BitFieldStyle, TargetInfo};
 use rucc_tuple::Env;
@@ -125,6 +127,14 @@ pub struct RecordOptions {
     pub align: Option<u64>,
     /// The `#pragma pack` in effect, in bytes, which caps every member's alignment.
     pub pack: Option<u64>,
+    /// The bit-field rule `ms_struct` or `gcc_struct` asked for, where it is not the target's.
+    ///
+    /// `None` is the target's own rule, which is what a record without either attribute gets. The
+    /// attributes choose per record, so one translation unit can hold a record laid out by each
+    /// rule, and that is what they are for: a mingw-w64 program that shares a structure with code
+    /// built by a compiler that does not use Microsoft's rule writes `gcc_struct` on it, and a
+    /// program on x86-64 Linux that reads a structure a Windows program wrote writes `ms_struct`.
+    pub bit_fields: Option<BitFieldStyle>,
 }
 
 /// How many bytes something is, where the answer is not a number here.
@@ -387,6 +397,17 @@ struct Builder {
     base_align: u64,
     /// Where each member sits, where that is not the number in its [`Field`].
     offsets: Vec<Option<Extent>>,
+    /// Which bit-field rule this record is laid out by, the target's unless an attribute chose.
+    style: BitFieldStyle,
+    /// Whether an unnamed bit-field raises the record's alignment, which goes with the rule.
+    ///
+    /// The target's answer when the rule is the target's. When an attribute chose the other rule
+    /// the answer is the one that rule gives on x86, which is the one architecture gcc takes the
+    /// attributes on: yes under Microsoft's rule and no under the Itanium one. So on mingw
+    /// `struct { char c; int :20; } __attribute__((gcc_struct))` is four bytes aligned to one, as
+    /// it is on Linux, and the same record with `ms_struct` on Linux is eight bytes aligned to
+    /// four, as it is on mingw. Both measured with gcc 16 on x86-64 Linux and with mingw-w64 gcc.
+    unnamed_aligns: bool,
     /// How long each member of no fixed size is, which is what makes a `union` as long as it is.
     ///
     /// Only a `union` fills this, because only there is the size of the whole a question about
@@ -413,6 +434,12 @@ impl Builder {
         members: usize,
         target: &TargetInfo,
     ) -> Builder {
+        let style = options.bit_fields.unwrap_or(target.bit_field_style);
+        let unnamed_aligns = if style == target.bit_field_style {
+            target.unnamed_bit_field_aligns
+        } else {
+            style == BitFieldStyle::Microsoft
+        };
         // One byte, not zero: a record with no members at all has an alignment of one, which is
         // what both compilers report for the GNU empty structure.
         Builder {
@@ -429,6 +456,8 @@ impl Builder {
             base_align: 1,
             offsets: Vec::with_capacity(members),
             widest: Vec::new(),
+            style,
+            unnamed_aligns,
         }
     }
 
@@ -461,7 +490,7 @@ impl Builder {
         // the others.
         if let (Some(width), Some(_)) = (decl.bits, &self.base) {
             let unit = if width == 0 { member.align } else { align };
-            let loose = width != 0 && target.bit_field_style == BitFieldStyle::Itanium;
+            let loose = width != 0 && self.style == BitFieldStyle::Itanium;
             if !loose && unit > self.base_align {
                 return Err(RecordError::VariableBitField { index });
             }
@@ -638,7 +667,7 @@ impl Builder {
         if width > capacity {
             return Err(RecordError::BitFieldTooWide { index, width, capacity });
         }
-        let offset = match target.bit_field_style {
+        let offset = match self.style {
             BitFieldStyle::Itanium => self.itanium(decl, align, capacity, width)?,
             BitFieldStyle::Microsoft => self.microsoft(member, align, width)?,
         };
@@ -759,11 +788,11 @@ impl Builder {
     /// there, so this is one of the rows where the two references disagree. Section 6.9 settles it
     /// for the incumbent, which on `windows-gnu` is gcc.
     fn contributes_alignment(&self, target: &TargetInfo, named: bool) -> bool {
-        match (self.kind, target.bit_field_style) {
+        match (self.kind, self.style) {
             (RecordKind::Union, BitFieldStyle::Microsoft) if target.tuple.env() == Env::Msvc => {
                 false
             }
-            _ => named || target.unnamed_bit_field_aligns,
+            _ => named || self.unnamed_aligns,
         }
     }
 
@@ -795,7 +824,7 @@ impl Builder {
         decl: &FieldDecl,
         natural: u64,
     ) -> Result<(), RecordError> {
-        match target.bit_field_style {
+        match self.style {
             BitFieldStyle::Itanium => {
                 if self.kind == RecordKind::Struct {
                     self.at = round_up(self.at, u128::from(natural.max(1)) * 8)?;

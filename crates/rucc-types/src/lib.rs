@@ -124,7 +124,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use rucc_base::{Interner, Symbol};
-    use rucc_target::{TargetInfo, Triple};
+    use rucc_target::{BitFieldStyle, TargetInfo, Triple};
 
     use super::*;
 
@@ -1131,6 +1131,62 @@ mod tests {
     }
 
     #[test]
+    fn ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int_ = types.int(IntKind::Int);
+        let uint = types.int(IntKind::UInt);
+        let mingw = target("x86_64-pc-windows-gnu");
+        let gcc = RecordOptions { bit_fields: Some(BitFieldStyle::Itanium), ..Default::default() };
+        let ms = RecordOptions { bit_fields: Some(BitFieldStyle::Microsoft), ..Default::default() };
+        let on = |target: &TargetInfo, options: &RecordOptions, fields: &[FieldDecl]| {
+            layout_record(&types, RecordKind::Struct, fields, options, target)
+                .expect("a record every member of which has a layout")
+        };
+
+        // `gcc_struct` on mingw gives what Linux gives with no attribute, and `ms_struct` on Linux
+        // gives what mingw gives with none. Every number here is what gcc 16 on x86-64 Linux and
+        // mingw-w64 gcc print for the same source.
+        let then_member = [bits(&mut interner, "m", uint, 3), member(char_)];
+        let laid_out = on(&mingw, &gcc, &then_member);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+        let laid_out = on(&linux(), &ms, &then_member);
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // Asking for the rule the target already has changes nothing.
+        assert_eq!(
+            on(&mingw, &ms, &then_member),
+            on(&mingw, &RecordOptions::default(), &then_member)
+        );
+        assert_eq!(
+            on(&linux(), &gcc, &then_member),
+            lay_out(&types, RecordKind::Struct, &then_member)
+        );
+
+        // Whether an unnamed bit-field aligns the record goes with the rule and not the target.
+        let unnamed = [member(char_), unnamed_bits(int_, 20)];
+        assert_eq!(on(&mingw, &gcc, &unnamed).layout, Layout::new(4, 1));
+        assert_eq!(on(&linux(), &ms, &unnamed).layout, Layout::new(8, 4));
+
+        // And so does what a zero width one does, with a bit-field before it and without one.
+        let narrow = [
+            bits(&mut interner, "a", char_, 1),
+            unnamed_bits(int_, 0),
+            bits(&mut interner, "b", char_, 1),
+        ];
+        let laid_out = on(&mingw, &gcc, &narrow);
+        assert_eq!(laid_out.layout, Layout::new(5, 1));
+        assert_eq!(offsets(&laid_out), [0, 32, 32]);
+        assert_eq!(on(&linux(), &ms, &narrow).layout, Layout::new(8, 4));
+        let alone = [member(char_), unnamed_bits(uint, 0)];
+        assert_eq!(on(&mingw, &gcc, &alone).layout, Layout::new(4, 1));
+        assert_eq!(on(&linux(), &ms, &alone).layout, Layout::new(1, 1));
+    }
+
+    #[test]
     fn msvc_gives_a_unions_bit_field_storage_and_no_say_in_the_alignment() {
         let mut interner = Interner::new();
         let types = Types::new();
@@ -1251,7 +1307,7 @@ mod tests {
 
         // `packed, aligned(4)` together: the members pack and the record does not, which is
         // the combination the attribute pair exists for.
-        let options = RecordOptions { packed: true, align: Some(4), pack: None };
+        let options = RecordOptions { packed: true, align: Some(4), ..RecordOptions::default() };
         let fields = [member(char_), member(int)];
         let laid_out = layout_record(&types, RecordKind::Struct, &fields, &options, &linux())
             .expect("a packed struct with an alignment asked for");
