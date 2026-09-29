@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Under `-fexceptions` a `cleanup` handler works on AArch64 Linux, where it used to be refused. A handler run by `pthread_exit` or `pthread_cancel` inside its scope runs, the same as with gcc, at every optimization level and through `-S`.
 
+### Changed
+
+- Choosing which values go to memory before registers are handed out finds the values live at each crowded point once, in the walk that already clears out the ones that have ended, rather than walking every open value again for each one sent to memory. On jtckdint's `test.c` at `-O2` the build runs 58.94G instructions instead of 59.29G, with the same assembly (#2149).
+
 ### Fixed
 
 - A DLL linked for a windows-gnu target names its entry point with `-e`, as gcc does, `DllMainCRTStartup` or `_DllMainCRTStartup@12` on i686. lld 19 and older do not choose it for a MinGW DLL and looked for MSVC's `_DllMainCRTStartup` instead, so `-shared` failed with that name undefined (#2069).

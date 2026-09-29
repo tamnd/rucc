@@ -79,6 +79,8 @@ pub fn choose(func: &Func, live: &Live, pressure: &Pressure) -> Vec<Reg> {
         let over: Vec<_> = pressure.over(class).collect();
         // The values whose hull has begun by the point being looked at, and which have not gone.
         let mut open: Vec<usize> = Vec::new();
+        // The values already sent to memory, which the next walk over `open` takes out of it.
+        let mut gone = vec![false; candidates.len()];
         let mut next = 0;
         for point in over {
             while next < candidates.len() && candidates[next].area.hull().start <= point {
@@ -91,17 +93,28 @@ pub fn choose(func: &Func, live: &Live, pressure: &Pressure) -> Vec<Reg> {
             if pressure.excess(class, point) == 0 {
                 continue;
             }
-            open.retain(|&one| candidates[one].area.hull().end >= point);
+            // The values live here are found once, in the same walk that clears out the ones that
+            // have gone. Sending one to memory changes no other value's area, so the next to go is
+            // always the lightest of those left in this list, and the list is short next to `open`.
+            let mut here = Vec::new();
+            open.retain(|&one| {
+                let candidate = &candidates[one];
+                if gone[one] || candidate.area.hull().end < point {
+                    return false;
+                }
+                if candidate.area.covers(point) {
+                    here.push(one);
+                }
+                true
+            });
             while pressure.excess(class, point) > 0 {
-                let lightest = open
-                    .iter()
-                    .copied()
-                    .filter(|&one| candidates[one].area.covers(point))
-                    .min_by_key(|&one| {
-                        (candidates[one].weight, Reverse(candidates[one].size), one)
-                    });
-                let Some(one) = lightest else { break };
-                open.retain(|&other| other != one);
+                let lightest = (0..here.len()).min_by_key(|&at| {
+                    let one = here[at];
+                    (candidates[one].weight, Reverse(candidates[one].size), one)
+                });
+                let Some(at) = lightest else { break };
+                let one = here.swap_remove(at);
+                gone[one] = true;
                 pressure.lift(class, candidates[one].area);
                 chosen.push(candidates[one].reg);
             }
