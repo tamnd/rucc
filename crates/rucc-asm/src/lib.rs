@@ -51,6 +51,7 @@ mod format;
 mod instruction;
 mod source;
 mod unwind;
+mod xdata;
 
 pub use crate::att::{mark, mark_end, print, print_marked};
 pub use crate::bytes::{Assembled, Row, assemble};
