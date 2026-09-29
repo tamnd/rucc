@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The pass that takes out conversions whose high bits nothing reads keeps how many bits of each virtual register are read in a list indexed by the register's number rather than a hash map, since it asks about every operand on every round until nothing changes. On jtckdint's `test.c` at `-O2` the build runs 62.46G instructions instead of 62.84G, with the same assembly (#2121).
 - The register allocator finds whether a value is live at a point with a binary search over the pieces of its live area rather than a walk over all of them. On jtckdint's `test.c` at `-O2` the build runs 62.84G instructions instead of 63.24G, with the same assembly (#2120).
 - The optimizer's pressure model counts the values of each register class live at the edges of a block with one bitmap per class and a population count per word, rather than looking up the type of every live value. On jtckdint's `test.c` at `-O2`, with #2107 and #2110 in, the build runs 63.23G instructions instead of 69.83G, with the same assembly (#2114).
 - When the spill phase sends a value to memory, it takes the value off the pressure counts one piece of its live area at a time over a slice, rather than looking up each point with a bounds check, so the compiler can vectorize the loop. On jtckdint's `test.c` at `-O2`, with #2107 in, the build runs 69.83G instructions instead of 82.56G, with the same assembly (#2110).
