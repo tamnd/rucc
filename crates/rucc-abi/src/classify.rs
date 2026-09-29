@@ -35,17 +35,40 @@ pub struct Call {
     integer: u32,
     /// Floating point argument registers left.
     float: u32,
+    /// Whether this is a call to a variadic function under [`Variadic::IntegersOnly`], where every
+    /// argument is classified as though the vector registers were not there.
+    integers_only: bool,
 }
 
 impl AbiDescription {
     /// The start of one call, with every argument register still to spend.
     #[must_use]
     pub const fn call(&'static self) -> Call {
-        Call { abi: self, integer: self.banks.integer, float: self.banks.float }
+        Call {
+            abi: self,
+            integer: self.banks.integer,
+            float: self.banks.float,
+            integers_only: false,
+        }
     }
 }
 
 impl Call {
+    /// The same call, to a function whose prototype ends in `...`, which is asked before anything
+    /// else is.
+    ///
+    /// It changes nothing but under [`Variadic::IntegersOnly`], and there it changes the named
+    /// arguments as well as the ones past the `...`: a floating point scalar takes the next general
+    /// purpose register as its bits, and no rule that would put an aggregate in vector registers
+    /// is tried. The return value is not an argument and is classified as it always is.
+    #[must_use]
+    pub const fn variadic(mut self) -> Self {
+        if matches!(self.abi.variadic, Variadic::IntegersOnly) {
+            self.integers_only = true;
+        }
+        self
+    }
+
     /// The ABI this call follows.
     #[must_use]
     pub const fn abi(&self) -> &'static AbiDescription {
@@ -113,7 +136,9 @@ impl Call {
     #[must_use]
     pub fn variadic_argument(&mut self, arg: &Arg<'_>) -> Pass {
         match self.abi.variadic {
-            Variadic::SameAsFixed | Variadic::BothBanks => self.argument(arg),
+            Variadic::SameAsFixed | Variadic::BothBanks | Variadic::IntegersOnly => {
+                self.argument(arg)
+            }
             Variadic::AlwaysMemory => {
                 let shape = match arg {
                     Arg::Void => return Pass::Ignore,
@@ -124,7 +149,7 @@ impl Call {
                 // A scratch call with nothing left. Every rule that wanted a register runs
                 // short, which is exactly what "always on the stack" means, and the real banks
                 // are untouched because a variadic argument does not spend one.
-                let mut empty = Self { abi: self.abi, integer: 0, float: 0 };
+                let mut empty = Self { integer: 0, float: 0, ..self.clone() };
                 empty.apply(self.abi.arguments, &shape, false)
             }
         }
@@ -182,6 +207,12 @@ impl Call {
             return Pass::Direct;
         }
         let want = registers(scalar.size, integer_width);
+        // A floating point argument of a variadic function where only one bank is read, which is
+        // its bits in general purpose registers, a register's worth at a time.
+        if self.integers_only && scalar.is_float() {
+            self.integer = self.integer.saturating_sub(want);
+            return Pass::Pieces(integer_slots(scalar.size, integer_width));
+        }
         match scalar.kind {
             // Shared banks mean there is one sequence of positions and every value takes the
             // next one, whichever kind of register it ends up in.
@@ -206,6 +237,13 @@ impl Call {
     fn apply(&mut self, rules: &'static [Rule], shape: &Shape<'_>, returning: bool) -> Pass {
         for rule in rules {
             let Some(found) = self.matches(rule.when, shape) else { continue };
+            // A rule that found vector registers for an argument of a variadic function that may
+            // not use them, which is the homogeneous aggregate rule under
+            // [`Variadic::IntegersOnly`]. The aggregate is classified by the rules after it, as
+            // one with no floating point members would be.
+            if self.integers_only && !returning && found.iter().any(|slot| slot.is_float()) {
+                continue;
+            }
             match self.travel(rule, &found, shape, returning) {
                 Some(pass) => return pass,
                 // The rule ran short of registers and said to try the next one.

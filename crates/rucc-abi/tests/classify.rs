@@ -10,7 +10,9 @@
 //! opposite answers, and that opposition is the reason [`rucc_abi::Short`] is a field rather
 //! than a constant.
 
-use rucc_abi::abis::{AAPCS64, DARWIN_ARM64, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64};
+use rucc_abi::abis::{
+    AAPCS64, DARWIN_ARM64, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64, WINDOWS_ARM64,
+};
 use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
 
 /// An integer of this size, aligned to itself.
@@ -455,6 +457,70 @@ fn darwin_puts_every_variadic_argument_in_the_argument_area() {
     assert_eq!(call.variadic_argument(&shape), Pass::Memory);
     assert_eq!(call.float_left(), 8);
     assert_eq!(call.integer_left(), 8);
+}
+
+#[test]
+fn windows_arm64_is_aapcs64_until_there_is_a_dots() {
+    let four = pieces(&[float(Format::Single, 4); 4]);
+    let hfa = Arg::Aggregate(record(&four));
+    let double = Arg::Scalar(float(Format::Double, 8));
+    // Without a `...` a structure of four floats is s0 to s3 and a `double` is d0, as on Linux.
+    let mut call = WINDOWS_ARM64.call();
+    assert_eq!(
+        call.argument(&hfa),
+        Pass::Pieces(vec![
+            fpr(0, Format::Single),
+            fpr(4, Format::Single),
+            fpr(8, Format::Single),
+            fpr(12, Format::Single)
+        ])
+    );
+    assert_eq!(call.argument(&double), Pass::Direct);
+    assert_eq!((call.integer_left(), call.float_left()), (8, 3));
+    // With one, the same structure is sixteen bytes in x0 and x1 and the `double` is its bits in
+    // x2, whether it is named or not. This is the output of clang for aarch64-w64-mingw32.
+    let mut call = WINDOWS_ARM64.call().variadic();
+    assert_eq!(call.argument(&hfa), Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)]));
+    assert_eq!(call.variadic_argument(&double), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!((call.integer_left(), call.float_left()), (5, 8));
+    // A `float` named before the `...` is four bytes of a w register.
+    let single = Arg::Scalar(float(Format::Single, 4));
+    assert_eq!(WINDOWS_ARM64.call().variadic().argument(&single), Pass::Pieces(vec![gpr(0, 4)]));
+    // Nothing else under `variadic` changes, since no other ABI reads only the one bank.
+    for abi in [&AAPCS64, &DARWIN_ARM64, &SYSV_AMD64, &WIN64] {
+        assert_eq!(abi.call().variadic().argument(&double), Pass::Direct, "{}", abi.name);
+    }
+}
+
+#[test]
+fn windows_arm64_passes_a_large_homogeneous_aggregate_by_reference_past_a_dots() {
+    let four = pieces(&[float(Format::Double, 8); 4]);
+    let hfa = Arg::Aggregate(record(&four));
+    assert!(matches!(WINDOWS_ARM64.call().argument(&hfa), Pass::Pieces(_)));
+    let mut call = WINDOWS_ARM64.call().variadic();
+    assert_eq!(call.variadic_argument(&hfa), Pass::Reference);
+    assert_eq!(call.integer_left(), 7);
+}
+
+#[test]
+fn windows_arm64_does_not_split_a_structure_between_x7_and_the_stack() {
+    // Seven words and then sixteen bytes, which clang puts wholly on the stack, leaving x7 empty
+    // and the argument after it on the stack too.
+    let two = pieces(&[int(8), int(8)]);
+    let pair = Arg::Aggregate(record(&two));
+    let mut call = WINDOWS_ARM64.call().variadic();
+    for _ in 0..7 {
+        assert_eq!(call.variadic_argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    assert_eq!(call.variadic_argument(&pair), Pass::Memory);
+    assert_eq!(call.integer_left(), 0);
+    // The value coming back is not an argument, and a structure of four floats still comes back
+    // in s0 to s3.
+    let four = pieces(&[float(Format::Single, 4); 4]);
+    let hfa = Arg::Aggregate(record(&four));
+    assert!(
+        matches!(WINDOWS_ARM64.call().variadic().returns(&hfa), Pass::Pieces(slots) if slots.iter().all(|slot| slot.is_float()))
+    );
 }
 
 #[test]

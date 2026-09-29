@@ -1273,6 +1273,7 @@ pub static MS_ON_SYSV: CallRegs = CallRegs {
     vector_count: None,
     red_zone: 0,
     shadow: 32,
+    home: 0,
     conventions: Conventions(&SYSV_CONVENTIONS),
     ..SYSV_REGISTERS
 };
@@ -1303,6 +1304,7 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     vector_count: Some(RAX),
     red_zone: 128,
     shadow: 0,
+    home: 0,
     stack_align: 16,
     return_address: 8,
     word: 8,
@@ -1440,6 +1442,7 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         vector_count: None,
         red_zone: 0,
         shadow: 32,
+        home: 0,
         stack_align: 16,
         return_address: 8,
         word: 8,

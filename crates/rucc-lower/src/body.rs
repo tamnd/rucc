@@ -1489,7 +1489,23 @@ impl<'u> Body<'_, 'u> {
                 let types = travel.types.clone();
                 let values: Vec<Value> =
                     types.iter().map(|ty| self.func.append_param(entry, *ty)).collect();
-                if let Some(Local::Slot(slot)) = local {
+                // A scalar that arrived as the bits of something else, which is a floating point
+                // parameter of a variadic function on Windows on AArch64, in an x register.
+                if let Some(ir) = repr::value_type(self.types(), self.target(), travel.ty)
+                    .filter(|ir| ir.is_float())
+                {
+                    let value = self.joined(&values, travel, ir, span);
+                    let value = self.coerce(value, travel.ty, ty, span);
+                    match local {
+                        Some(Local::Value(var)) => self.ssa.write(var, entry, value),
+                        Some(Local::Slot(slot)) => {
+                            let info = self.access(ty);
+                            let flags = self.flags(ty);
+                            self.build(span).store(value, slot, info, flags);
+                        }
+                        None => {}
+                    }
+                } else if let Some(Local::Slot(slot)) = local {
                     self.store_slots(slot, travel, &values, span);
                 }
             }
@@ -1521,6 +1537,38 @@ impl<'u> Body<'_, 'u> {
                 }
             }
         }
+    }
+
+    /// A scalar put back together out of the registers it travelled in.
+    ///
+    /// One register of the same width is the value's own bits and a bitcast gets them back, which is
+    /// the `double` in an x register a variadic function on Windows on AArch64 is handed. Anything
+    /// else goes through memory the way an aggregate would, written as the registers and read back
+    /// as the value.
+    fn joined(&mut self, values: &[Value], travel: &Travel, ir: Type, span: Span) -> Value {
+        if let ([value], [ty]) = (values, &travel.types[..])
+            && ty.bits() == ir.bits()
+        {
+            return self.build(span).unary(Opcode::Bitcast, *value, ir);
+        }
+        let at = self.scratch(travel.size, travel.align, span);
+        self.store_slots(at, travel, values, span);
+        let info = self.access(travel.ty);
+        self.build(span).load(ir, at, info, Flags::NONE)
+    }
+
+    /// A scalar taken apart into the registers it travels in, which is [`Self::joined`] the other
+    /// way round.
+    fn split(&mut self, value: Value, travel: &Travel, span: Span) -> Vec<Value> {
+        if let [ty] = travel.types[..]
+            && ty.bits() == self.func[value].ty.bits()
+        {
+            return vec![self.build(span).unary(Opcode::Bitcast, value, ty)];
+        }
+        let at = self.scratch(travel.size, travel.align, span);
+        let info = self.access(travel.ty);
+        self.build(span).store(value, at, info, Flags::NONE);
+        self.load_slots(at, travel.align, travel, span)
     }
 
     /// Writes the registers an aggregate travelled in into the object.
@@ -8092,6 +8140,16 @@ impl<'u> Body<'_, 'u> {
                 Pass::Direct => {
                     let value = self.value(arg);
                     values.push(value);
+                }
+                // A scalar that travels as the bits of something else, which is a floating point
+                // argument of a variadic function on Windows on AArch64, in an x register.
+                Pass::Pieces(_)
+                    if repr::value_type(self.types(), self.target(), tast[arg].ty)
+                        .is_some_and(|ir| ir.is_float()) =>
+                {
+                    let value = self.value(arg);
+                    let slots = self.split(value, travel, span);
+                    values.extend(slots);
                 }
                 Pass::Pieces(_) => {
                     let place = self.place(arg);

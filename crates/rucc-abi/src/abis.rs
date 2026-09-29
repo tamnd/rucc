@@ -172,6 +172,27 @@ pub static DARWIN_ARM64: AbiDescription = AbiDescription {
     ..AAPCS64_BASE
 };
 
+/// Windows on AArch64.
+///
+/// [`AAPCS64`] in every call to a function without a `...`, and in the value coming back from any
+/// function, and one field different, which is what a `...` does. Microsoft's convention homes the
+/// eight x registers of a variadic callee directly below the arguments the caller left in memory
+/// and walks the whole run with a `char *`, so everything such a function is passed has to be in
+/// that run, the named arguments included. A `double` goes as its bits in the next x register, a
+/// structure of up to sixteen bytes goes in x registers whatever its members are, and one over
+/// sixteen bytes goes as the address of a copy, homogeneous or not. That is
+/// [`Variadic::IntegersOnly`], and it is what clang for aarch64-w64-mingw32 and Microsoft's own
+/// compiler both emit.
+///
+/// A structure that finds too few x registers left goes to the argument area and the x registers
+/// after it are spent, as the rule it shares with AAPCS64 says. Microsoft's document allows the
+/// structure to be split between x7 and the stack instead, and clang does not split it, and clang
+/// is what the rest of a mingw program was built with. The other difference people list, x18 being
+/// the thread's own register, is a fact about the register allocator and lives in `rucc-target`
+/// with the registers.
+pub static WINDOWS_ARM64: AbiDescription =
+    AbiDescription { name: "Windows arm64", variadic: Variadic::IntegersOnly, ..AAPCS64_BASE };
+
 /// Windows x64.
 ///
 /// The simplest of the five and the one with the sharpest rule: anything not exactly one, two,
@@ -406,7 +427,7 @@ pub fn for_convention(
 
 /// Every ABI described here, which is what the report and the tests iterate.
 pub static DESCRIBED: &[&AbiDescription] =
-    &[&SYSV_AMD64, &AAPCS64, &DARWIN_ARM64, &WIN64, &RISCV_LP64D, &I386_SYSV];
+    &[&SYSV_AMD64, &AAPCS64, &DARWIN_ARM64, &WINDOWS_ARM64, &WIN64, &RISCV_LP64D, &I386_SYSV];
 
 /// The ABI this target follows, and [`None`] for one whose ABI is not described yet.
 ///
@@ -427,10 +448,9 @@ pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
         (Arch::X86, Os::Windows) => return None,
         (Arch::X86, _) => &I386_SYSV,
         (Arch::Aarch64, os) if os.is_darwin() => &DARWIN_ARM64,
-        // Windows on AArch64 is AAPCS64 with different varargs and x18 reserved, per section
-        // 6.1. It is not described yet and answering AAPCS64 for it would be answering a
-        // question with the almost-right answer, which is the one thing this file must not do.
-        (Arch::Aarch64, Os::Windows) => return None,
+        // AAPCS64 with a different variadic rule, per section 6.1, and not AAPCS64 itself, which
+        // would be the almost right answer this file must not give.
+        (Arch::Aarch64, Os::Windows) => &WINDOWS_ARM64,
         (Arch::Aarch64, _) => &AAPCS64,
         (Arch::Riscv64, _) => &RISCV_LP64D,
         _ => return None,

@@ -204,6 +204,19 @@ pub enum Variadic {
     ///
     /// Windows x64, because the callee of a variadic function does not know which bank to read.
     BothBanks,
+    /// Every argument of a variadic function travels in general purpose registers and the argument
+    /// area, the named ones as well as the rest, and nothing is looked inside for floating point
+    /// members.
+    ///
+    /// Windows on AArch64. The callee homes x0 to x7 directly below the arguments the caller left
+    /// in memory and walks the lot with a `char *`, so there is only one bank it could read. A
+    /// `double` travels as its bits in the next x register, a structure of four `float`s is the
+    /// sixteen bytes of two x registers rather than four s registers, and one of four `double`s is
+    /// over sixteen bytes and so travels as the address of a copy. It reaches the named arguments
+    /// too, which is the difference from [`Variadic::BothBanks`]: `void f(double, ...)` takes its
+    /// `double` in x0, and a call through a prototype without the `...` puts it in d0. The value
+    /// that comes back is not an argument and comes back where it always does.
+    IntegersOnly,
 }
 
 /// What the bits above an integer narrower than an `int` are when it travels in a register.
