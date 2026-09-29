@@ -249,6 +249,8 @@ MIR carries the `mem` operand from the IR, per document 09, so the dependence is
 recomputed, which is a real advantage and should be used rather than rebuilding an aliasing query at
 machine level.
 
+**The scheduler gives the frame back early.** A write of the stack pointer names no memory, so the memory dependences do not see it, yet moving it up frees the frame while accesses behind it still use that frame through other registers. rucc hit this with `movq %rbp, %rsp`, the epilogue of a frame that saved no registers, which went to the top of a realigned leaf's only block and left the whole frame below the stack pointer. The rule is that an instruction writing the stack pointer is ordered against memory the same way a memory access is.
+
 **The scheduler moves an instruction across a flags definition.** Flags are a single resource with
 many definitions and short live ranges. In rucc they are an operand, so this is an ordinary
 dependence, and the failure is a target description that omitted a clobber, which is the same root
