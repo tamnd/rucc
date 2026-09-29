@@ -202,20 +202,26 @@ impl<'a> Convention<'a> {
 /// variable deletes a read the program insisted on. So what the allocator asked for is recorded as
 /// it is written, and a later pass that is only allowed to touch the allocator's own moves has the
 /// list rather than a heuristic. See [`crate::copies`], which is the one pass that reads this.
+///
+/// It is kept by instruction number rather than in a hash map, because that pass asks about every
+/// instruction in the function and the numbers are dense.
 #[derive(Debug, Default)]
-pub struct Moves(HashMap<Inst, Edit>);
+pub struct Moves(Vec<Option<Edit>>);
 
 impl Moves {
     /// What the allocator asked for at this instruction, or `None` at an instruction that is not
     /// one of its moves.
     #[must_use]
     pub fn at(&self, inst: Inst) -> Option<Edit> {
-        self.0.get(&inst).copied()
+        self.0.get(inst.index()).copied().flatten()
     }
 
     /// Records that this instruction is what that move came to.
     pub fn record(&mut self, inst: Inst, edit: Edit) {
-        self.0.insert(inst, edit);
+        if self.0.len() <= inst.index() {
+            self.0.resize(inst.index() + 1, None);
+        }
+        self.0[inst.index()] = Some(edit);
     }
 }
 

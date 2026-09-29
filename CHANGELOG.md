@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The record of which instruction each of the register allocator's moves became is kept by instruction number rather than in a hash map, since the pass that takes out moves that change nothing asks about every instruction in the function. On jtckdint's `test.c` at `-O2` the build runs 58.74G instructions instead of 58.94G, with the same assembly (#2153).
 - Choosing which values go to memory before registers are handed out finds the values live at each crowded point once, in the walk that already clears out the ones that have ended, rather than walking every open value again for each one sent to memory. On jtckdint's `test.c` at `-O2` the build runs 58.94G instructions instead of 59.29G, with the same assembly (#2149).
 
 ### Fixed
