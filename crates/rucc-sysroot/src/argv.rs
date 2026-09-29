@@ -33,7 +33,7 @@
 //! what has to be linked and differ in what is about the image. The PE line is GNU ld's PE port and
 //! `ld.lld` in its MinGW mode, which read each other's arguments for exactly this reason.
 //!
-//! PE in Microsoft's environment has a line of its own, [`msvc`], because `lld-link` and
+//! PE in Microsoft's environment has a line of its own, `msvc`, because `lld-link` and
 //! `link.exe` take a different command line rather than a different set of flags. Its libraries
 //! come out of a tree `--fetch-msvc-sdk` lays out once the person asking has accepted Microsoft's
 //! licence, which is the one sysroot here that is not ours to produce, so the line names the tree's
@@ -147,7 +147,7 @@ pub enum Unsupported {
     /// `spec/cross-compile/04-target-matrix.md`, nothing in this compiler emits code for it, and
     /// what the installer manifest has for it is a few kilobytes of thunks rather than a CRT, so
     /// [`Chip::of`] has no answer for it and there are no directories to name. x86-64 and AArch64
-    /// in the same environment have a line, which is [`msvc`].
+    /// in the same environment have a line, which is `msvc`.
     MsvcAbi {
         /// The target that was asked for.
         target: String,
