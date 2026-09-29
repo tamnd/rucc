@@ -106,6 +106,7 @@
 use crate::def::{Export, Form, Module};
 use core::fmt;
 use rucc_tuple::{Arch, ObjectFormat, TargetTuple};
+use std::collections::BTreeSet;
 
 /// Writes an import library for a target.
 ///
@@ -639,13 +640,20 @@ fn strings(names: &[&str]) -> Vec<u8> {
 /// library that is not true of archives in general: every member is named after the DLL, which is
 /// what `llvm-dlltool` does and which means a long DLL name is stored once and pointed at by all of
 /// them rather than copied per member.
+///
+/// A name two members define is in the indexes once, pointing at the first of them, which is what
+/// llvm-dlltool's indexes say. That happens when a `.def` exports one name twice with the same
+/// definition, which [`crate::def::read`] keeps for the same reason, and mingw-w64's
+/// `lib32/msvcr80d.def.in` does it with `:`. Both members are still written, as llvm-dlltool writes
+/// them, and a linker that looks the name up gets the first either way.
 fn archive(dll: &str, members: Vec<Member>) -> Result<Vec<u8>, Error> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let members: Vec<rucc_archive::Member> = members
         .into_iter()
         .map(|one| rucc_archive::Member {
             name: dll.to_owned(),
             body: one.body,
-            defines: one.defines,
+            defines: one.defines.into_iter().filter(|name| seen.insert(name.clone())).collect(),
         })
         .collect();
     rucc_archive::write(rucc_archive::Flavour::Coff, &members).map_err(Error::Archive)
@@ -941,6 +949,26 @@ renamed == realname
             }
             assert_eq!(seen, Some(offset), "the two indexes disagree about `{name}`");
         }
+    }
+
+    #[test]
+    fn a_name_exported_twice_is_indexed_once_at_its_first_member() {
+        // mingw-w64's lib32/msvcr80d.def.in exports `:` twice, and llvm-dlltool writes a member
+        // for each and indexes the name once, at the first.
+        let archive = written("LIBRARY m.dll\nEXPORTS\n: f\n: g\n", "i686-windows-gnu");
+        let members = members(&archive);
+        let first = &members[0].2;
+        let count = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
+        let names = first_names(first, count);
+        for name in ["_:", "__imp__:"] {
+            assert_eq!(names.iter().filter(|n| *n == name).count(), 1, "{name} in {names:?}");
+        }
+        let at = names.iter().position(|n| n == "_:").unwrap();
+        let offset = u32::from_be_bytes(first[4 + 4 * at..8 + 4 * at].try_into().unwrap());
+        // The descriptor, the null import and the null thunk come first, then the four records.
+        let records: Vec<usize> = members.iter().skip(5).map(|member| member.0).collect();
+        assert_eq!(records.len(), 4);
+        assert_eq!(offset as usize, records[0]);
     }
 
     /// The names in the first linker member, in its order.
