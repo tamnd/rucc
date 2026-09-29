@@ -479,8 +479,13 @@ mod tests {
     fn a_function_decays_to_a_pointer_to_itself() {
         let mut f = Fixture::new();
         let void = f.types.void();
-        let signature =
-            FunctionType { ret: void, params: Vec::new(), variadic: false, prototyped: true };
+        let signature = FunctionType {
+            ret: void,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = f.types.function(signature);
         let designator =
             f.tast.expr(Expr::new(ExprKind::Error, function, Category::Function), Span::DUMMY);

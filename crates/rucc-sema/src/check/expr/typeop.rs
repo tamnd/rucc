@@ -2111,8 +2111,13 @@ mod tests {
         let array = c.types.array(int, ArrayLen::Fixed(4));
         let atomic = c.types.atomic(int);
         let sugar = c.types.typedef(width, int);
-        let signature =
-            FunctionType { ret: int, params: Vec::new(), variadic: false, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let function = c.types.function(signature);
         let record = tagged(&mut c, tag, &[]);
         let union = union_of(&mut c, un, &[]);
@@ -2428,8 +2433,13 @@ mod tests {
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
-        let signature =
-            FunctionType { ret: int, params: Vec::new(), variadic: false, prototyped: true };
+        let signature = FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        };
         let ty = c.types.function(signature);
         c.declare_object(fname, ty, Span::DUMMY);
         let id = c.check_expr(size);

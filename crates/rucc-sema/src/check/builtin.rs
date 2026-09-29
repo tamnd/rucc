@@ -276,7 +276,13 @@ impl Checker<'_> {
             // prototype that kept the array would be one no argument could ever match.
             types.push(rucc_types::adjust_parameter(&mut self.types, ty));
         }
-        Some(self.types.function(FunctionType { ret, params: types, variadic, prototyped: true }))
+        Some(self.types.function(FunctionType {
+            ret,
+            params: types,
+            variadic,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+        }))
     }
 
     /// One type, written the way the table writes one.

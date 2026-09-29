@@ -202,6 +202,23 @@ impl Machine {
         }
     }
 
+    /// The same machine for a function written in another calling convention, which is what an
+    /// `__attribute__((ms_abi))` function on Linux or an `__attribute__((sysv_abi))` one on
+    /// Windows is compiled against. `None` when the platform has no such convention.
+    ///
+    /// Only the convention changes. The allocator's order and the scratch registers are worked out
+    /// again from it, because which registers the function owes back is the thing that differs,
+    /// and a scratch register has to be one it does not owe.
+    #[must_use]
+    pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
+        let conv = self.conv.under(convention)?;
+        if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
+            Some(Self::aarch64(conv))
+        } else {
+            Some(Self::x86_64(conv))
+        }
+    }
+
     /// The machine a target describes, or `None` when no backend in this crate covers it.
     ///
     /// [`TargetInfo`] already carries the convention, because the front end needs it to lay a
@@ -449,6 +466,20 @@ pub fn compile_recording(
     flags: Flags,
     recording: &mut Recording<'_>,
 ) -> Result<mir::Func, Unsupported> {
+    // A function the program wrote in the platform's other calling convention is compiled against
+    // that convention from the first pass to the last: its parameters arrive where it says, the
+    // registers it owes back are the ones it says, and its frame has the room it says. The calls
+    // it makes each name their own convention, so they are unaffected by this.
+    let foreign;
+    let machine = match source.signature().convention {
+        rucc_target::Convention::Target => machine,
+        convention => {
+            foreign = machine
+                .under(convention)
+                .ok_or(Unsupported::Unported { inst: None, what: lower::Unported::Convention })?;
+            &foreign
+        }
+    };
     // Everything the machine has no rule for, rewritten into things it has, as one group rather
     // than as a dozen lines here. What is in the group and what the order between its members is
     // for are both in `crate::lowering`, which is where a new lowering is added.
@@ -1768,6 +1799,32 @@ mod tests {
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.push_64 $rbp"), "{text}");
         assert!(text.contains("$rbp = x64.mov_rr_64 $rsp"), "{text}");
+    }
+
+    /// A function written in the other convention gets a machine of the same kind under that
+    /// convention, and one the platform does not have is `None` rather than the native one.
+    #[test]
+    fn a_function_of_the_other_convention_gets_the_other_machine() {
+        use rucc_target::Convention;
+        let triple = |text: &str| text.parse::<rucc_target::Triple>().expect("a triple");
+        let info = TargetInfo::new(triple("x86_64-unknown-linux-gnu"));
+        let machine = Machine::for_target(&info).expect("x86-64 is the target this crate covers");
+        let ms = machine.under(Convention::Ms).expect("Linux has the Windows convention");
+        assert!(std::ptr::eq(ms.conv, &x86_64::MS_ON_SYSV));
+        assert!(machine.under(Convention::Sysv).is_none());
+        // The Windows convention owes `xmm6` to `xmm15` back, so the vector scratch registers are
+        // two it does not owe.
+        assert!(!ms.env.scratch(ms.conv.sse_class).iter().any(|&reg| ms.conv.preserves_sse(reg)));
+
+        let info = TargetInfo::new(triple("x86_64-pc-windows-msvc"));
+        let machine = Machine::for_target(&info).expect("x86-64 is the target this crate covers");
+        let sysv = machine.under(Convention::Sysv).expect("Windows has the System V convention");
+        assert!(std::ptr::eq(sysv.conv, &x86_64::SYSV_ON_WIN64));
+        assert!(machine.under(Convention::Ms).is_none());
+
+        let info = TargetInfo::new(triple("aarch64-unknown-linux-gnu"));
+        let machine = Machine::for_target(&info).expect("aarch64 has a back end");
+        assert!(machine.under(Convention::Ms).is_none());
     }
 
     #[test]

@@ -158,7 +158,12 @@ fn functions(
     right: &FunctionType,
     assumed: &mut Vec<(RecordId, RecordId)>,
 ) -> bool {
-    if !same(types, left.ret, right.ret, assumed) {
+    // Two conventions are two types, as they are to gcc, which calls a declaration of the one
+    // after a declaration of the other conflicting and a pointer to the one assigned to a pointer
+    // to the other incompatible. Nothing about a call could go right across the difference: the
+    // arguments would be in the other registers and the callee would clobber what the caller
+    // expects it to keep.
+    if left.convention != right.convention || !same(types, left.ret, right.ret, assumed) {
         return false;
     }
     match (left.prototyped, right.prototyped) {
@@ -382,5 +387,7 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
             (params, false, false)
         }
     };
-    types.function(FunctionType { ret, params, variadic, prototyped })
+    // The two conventions are the same one, since the types would not be compatible otherwise.
+    let convention = left.convention;
+    types.function(FunctionType { ret, params, variadic, prototyped, convention })
 }

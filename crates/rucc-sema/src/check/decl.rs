@@ -271,6 +271,7 @@ impl Checker<'_> {
         } else {
             ty
         };
+        self.foreign_variadic(ty, span);
         let name = node.name?;
         let specs = self.ast[specs];
         if specs.is_typedef() {
@@ -634,6 +635,9 @@ impl Checker<'_> {
         // typedef below takes its early exit: a typedef is where either is nearly always written.
         let ty = self.retyped(ty, self.ast[specs].attrs);
         let ty = self.retyped(ty, item.attrs);
+        // `int f(int) __attribute__((ms_abi));`, where the convention is written after the
+        // declarator. The specifiers' own list was read with the declarator already.
+        let ty = self.convened(ty, item.attrs);
         let node = self.ast[item.declarator];
         // A declarator with no name in a declaration is a parse that did not work out, and the
         // parser has already said so.

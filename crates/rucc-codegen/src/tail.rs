@@ -158,7 +158,14 @@ fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
     if func[func[ret].args] != results[..] {
         return false;
     }
-    func[info.signature].returns == func.signature().returns
+    // And the two are of one convention. A jump leaves the callee to return straight to this
+    // function's caller, who restores what its own convention says the callee kept. An `ms_abi`
+    // function jumping to an ordinary one on Linux would hand back `rsi`, `rdi` and the upper
+    // vector registers as the SysV callee left them, which its caller counted on it keeping, and
+    // the arguments would be in the other registers besides. gcc makes no sibling call across
+    // the difference either.
+    let callee = &func[info.signature];
+    callee.convention == func.signature().convention && callee.returns == func.signature().returns
 }
 
 /// Turns each [`Tail`] that can be into the epilogue and a jump, and says how many it turned.
@@ -239,12 +246,23 @@ mod tests {
         names: &mut Interner,
         between: impl FnOnce(&mut Func, Block, Value) -> Value,
     ) -> Func {
+        caller_of(names, rucc_target::Convention::Target, between)
+    }
+
+    /// The same caller, with `g` declared in the convention given.
+    fn caller_of(
+        names: &mut Interner,
+        convention: rucc_target::Convention,
+        between: impl FnOnce(&mut Func, Block, Value) -> Value,
+    ) -> Func {
         let i32 = Type::int(32);
         let mut func =
             Func::new(names.intern("f"), Signature::new().with_params(&[i32]).with_returns(&[i32]));
         let block = func.create_block();
         let arg = func.append_param(block, i32);
-        let sig = func.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let mut called = Signature::new().with_params(&[i32]).with_returns(&[i32]);
+        called.convention = convention;
+        let sig = func.add_signature(called);
         let callee = names.intern("g");
         let call = Builder::new(&mut func, block).call(callee, sig, &[arg]);
         let got = func[call].first_result.expect("an integer comes back");
@@ -257,6 +275,16 @@ mod tests {
         func.blocks()
             .flat_map(|block| func.insts(block).map(|inst| func[inst].opcode).collect::<Vec<_>>())
             .collect()
+    }
+
+    /// A jump to a function of the other convention would leave the caller's caller with what
+    /// the callee did not keep, so the call stays a call.
+    #[test]
+    fn a_call_to_the_other_convention_stays_a_call() {
+        let mut names = Interner::new();
+        let mut func = caller_of(&mut names, rucc_target::Convention::Ms, |_, _, got| got);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Return]);
     }
 
     #[test]

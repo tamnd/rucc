@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-shared` builds a DLL for x86-64 Windows that a program links against and loads. `tests/exec/windows/dll/` builds two DLLs, one that exports everything and one with a `.def` file, links a program against both through the import libraries lld writes, and checks the calls, a `dllimport` variable, a constructor in the DLL and which names `GetProcAddress` finds, against mingw-w64 gcc's output. The Windows test script now runs any directory with a `main.c` in it that way (#2068).
 - A hidden definition on a Windows target becomes a ` -exclude-symbols:name` option in `.drectve`, which is what clang writes, so lld leaves it out of a DLL it is exporting everything from. The compiler runtime's archive is built with `-fvisibility=hidden` for Windows, and `___chkstk_ms` says the same for itself, so a DLL no longer exports the runtime along with the program's own functions.
+- `__attribute__((ms_abi))` and `__attribute__((sysv_abi))` are real calling conventions on x86-64. A function written `ms_abi` on Linux takes its arguments in `rcx`, `rdx`, `r8` and `r9`, is owed 32 bytes of shadow space, and keeps `rsi`, `rdi` and `xmm6` to `xmm15` for its caller, and `sysv_abi` on Windows is the System V convention the other way round. The convention is part of the function type, so it works on a definition, a declaration, a call through a pointer and a `typedef` such as UEFI's `typedef EFI_STATUS (EFIAPI *F)(...)`, and it can be written in the specifiers, after the declarator or inside a pointer declarator. Two functions of different conventions are incompatible types, as they are in gcc. Calling a variadic function of the other convention works. Defining one is refused with an error naming the attribute, since rucc has no `__builtin_ms_va_list` to read its arguments with. `__has_attribute(ms_abi)` and `__has_attribute(sysv_abi)` answer 1 on x86-64. `tests/exec/linux` is a new directory of programs run on x86-64 Linux, with its own `run.sh`, and it starts with `ms_abi.c`. `tests/exec/windows` gains `sysv_abi.c`.
 
 ### Changed
 
@@ -16,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A file of assembly for a Windows target, or a C file with `asm` at file scope, may give `.section` COFF's own flag letters and a COMDAT selection and symbol, as in `.section .drectve,"yni"` and `.section .rdata$.refptr.x,"dr",discard,.refptr.x`. The letters used to be read as ELF's and most of them were refused, so the compiler runtime did not build, and a listing with the `.refptr.` sections the compiler writes for itself could not go through the assembler. They are now read the way llvm-mc and gas read them, and the section is written as a COMDAT of the kind asked for.
+- The calling convention attributes are no longer dropped without a word. `stdcall`, `cdecl`, `fastcall`, `thiscall`, `regparm` and `vectorcall` warn that the attribute is ignored on x86-64 outside Windows, as gcc does, and `ms_abi` and `sysv_abi` warn that they are ignored on a target other than x86-64.
 
 ## 0.13.0
 

@@ -22,7 +22,9 @@
 //! wants to know the outcome reads what that pass wrote down.
 
 use rucc_ir::{Abi, Drains, Float, Param, Signature, Type};
-use rucc_target::{Arg, Call, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, TargetInfo};
+use rucc_target::{
+    Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, TargetInfo,
+};
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, float_format, layout};
 
 use crate::repr;
@@ -179,9 +181,16 @@ enum Position {
 /// which is longer than `params` for a variadic call and is empty for a definition, where the
 /// question is only about the parameters. The error is what to report, which is a message rather
 /// than a kind because there is exactly one thing every caller does with it.
+///
+/// `convention` is the callee's, which is the target's own unless its type says `ms_abi` or
+/// `sysv_abi` asked for the other one. Only where things travel changes with it: what a type is,
+/// its shape and its size, is still the target's, which is how gcc has an `ms_abi` function on
+/// Linux take a `long double` that is still the x87 format, by reference because it is sixteen
+/// bytes. The signature carries it on, so every end of the call below this reads the same one.
 pub(crate) fn plan(
     types: &Types,
     target: &TargetInfo,
+    convention: Convention,
     ret: TypeId,
     params: &[TypeId],
     actual: &[TypeId],
@@ -190,13 +199,14 @@ pub(crate) fn plan(
     // The one target this fails on is AArch64 on Windows, whose ABI is not described yet. It is
     // reported per call rather than refused once at startup because that is where the compiler
     // already has a span to point at, and because everything short of a call still works there.
-    let mut call = target.call().ok_or("calling a function on this target")?;
+    let mut call = target.call_under(convention).ok_or("calling a function on this target")?;
     let narrow = call.abi().narrow;
     let shaped = shape(types, target, ret).ok_or("returning a value of this type")?;
     let ret = travel(types, target, &mut call, &shaped, Position::Return, ret);
 
     let mut signature = Signature::new();
     signature.variadic = variadic;
+    signature.convention = convention;
     if matches!(ret.pass, Pass::Reference | Pass::Memory) {
         let (size, align) = (ret.size, ret.align);
         signature.params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align }));
@@ -580,7 +590,8 @@ mod tests {
 
         // And the answer is the same one four thousand pieces would have given, because every
         // rule that reads them is over a member count this is already past.
-        let plan = plan(&types, &target, types.void(), &[id], &[], false).expect("a plan");
+        let plan = plan(&types, &target, Convention::Target, types.void(), &[id], &[], false)
+            .expect("a plan");
         assert_eq!(plan.args[0].pass, Pass::Memory);
     }
 
@@ -591,7 +602,8 @@ mod tests {
         let int = types.int(IntKind::Int);
         let double = types.float(FloatKind::Double);
         let id = record(&mut types, &target, &[int, double]);
-        let plan = plan(&types, &target, id, &[id], &[], false).expect("a plan");
+        let plan =
+            plan(&types, &target, Convention::Target, id, &[id], &[], false).expect("a plan");
         // Sixteen bytes, an `int` in the first eightbyte and a `double` in the second, which is
         // one general purpose register and one vector register both going in and coming back.
         assert_eq!(plan.args[0].types, vec![Type::int(64), Type::float(Float::F64)]);
@@ -607,7 +619,7 @@ mod tests {
         let target = target("x86_64-unknown-linux-gnu");
         let double = types.float(FloatKind::Double);
         let id = record(&mut types, &target, &[double, double, double]);
-        let plan = plan(&types, &target, id, &[], &[], false).expect("a plan");
+        let plan = plan(&types, &target, Convention::Target, id, &[], &[], false).expect("a plan");
         assert!(plan.returns_through_memory());
         assert!(plan.signature.returns.is_empty());
         assert_eq!(plan.signature.params.len(), 1);
@@ -627,17 +639,20 @@ mod tests {
         // Six doubles leave two vector registers, and three floats need three.
         let mut params = vec![double; 6];
         params.extend([hfa, float]);
-        let planned = plan(&types, &target, void, &params, &[], false).expect("a plan");
+        let planned =
+            plan(&types, &target, Convention::Target, void, &params, &[], false).expect("a plan");
         assert_eq!(planned.signature.params[6].abi, bytes(Drains::Floats));
         // With none left to begin with there is nothing for the object to drain.
         let mut params = vec![double; 8];
         params.extend([hfa, float]);
-        let planned = plan(&types, &target, void, &params, &[], false).expect("a plan");
+        let planned =
+            plan(&types, &target, Convention::Target, void, &params, &[], false).expect("a plan");
         assert_eq!(planned.signature.params[8].abi, bytes(Drains::Nothing));
         // Seven longs leave one general purpose register, and the pair needs two.
         let mut params = vec![long; 7];
         params.extend([pair, long]);
-        let planned = plan(&types, &target, void, &params, &[], false).expect("a plan");
+        let planned =
+            plan(&types, &target, Convention::Target, void, &params, &[], false).expect("a plan");
         let drained = Abi::ByVal { size: 16, align: 8, drains: Drains::Integers };
         assert_eq!(planned.signature.params[7].abi, drained);
     }
@@ -652,7 +667,8 @@ mod tests {
         let ptr = types.pointer(types.int(IntKind::Char));
         // `int p(const char *, ...)` called as `p("", 1, v)`, where `v` is the structure. The
         // first is the parameter the prototype names and the other two are past it.
-        let plan = plan(&types, &target, int, &[ptr], &[ptr, int, big], true).expect("a plan");
+        let plan = plan(&types, &target, Convention::Target, int, &[ptr], &[ptr, int, big], true)
+            .expect("a plan");
         assert_eq!(plan.signature.params.len(), 1);
         assert_eq!(plan.args[2].pass, Pass::Memory);
         assert_eq!(
@@ -667,7 +683,8 @@ mod tests {
         let target = target("x86_64-unknown-linux-gnu");
         let int = types.int(IntKind::Int);
         let ptr = types.pointer(types.int(IntKind::Char));
-        let plan = plan(&types, &target, int, &[ptr], &[ptr, int, int], true).expect("a plan");
+        let plan = plan(&types, &target, Convention::Target, int, &[ptr], &[ptr, int, int], true)
+            .expect("a plan");
         assert!(plan.varargs.is_empty());
     }
 
@@ -677,7 +694,8 @@ mod tests {
         let target = target("x86_64-unknown-linux-gnu");
         let int = types.int(IntKind::Int);
         let id = record(&mut types, &target, &[int, int, int]);
-        let plan = plan(&types, &target, types.void(), &[id], &[], false).expect("a plan");
+        let plan = plan(&types, &target, Convention::Target, types.void(), &[id], &[], false)
+            .expect("a plan");
         // Twelve bytes in two registers, the second holding the four that are left, and the
         // load that reads them is four bytes wide and not eight.
         assert_eq!(plan.args[0].types, vec![Type::int(64), Type::int(32)]);
@@ -692,7 +710,8 @@ mod tests {
         let char_ty = types.int(IntKind::Char);
         let array = types.array(char_ty, ArrayLen::Fixed(5));
         let id = record(&mut types, &target, &[array]);
-        let plan = plan(&types, &target, types.void(), &[id], &[], false).expect("a plan");
+        let plan = plan(&types, &target, Convention::Target, types.void(), &[id], &[], false)
+            .expect("a plan");
         // Five bytes in one register, which is read eight bytes at a time, so the three bytes
         // past the object are what the walk has to go around.
         assert_eq!(plan.args[0].size, 5);
@@ -717,7 +736,8 @@ mod tests {
         let (char_ty, int, boolean) =
             (types.int(IntKind::Char), types.int(IntKind::Int), types.boolean());
         let params = [schar, uchar, short, ushort, char_ty, int, boolean];
-        let narrow = plan(&types, &darwin, uchar, &params, &[], false).expect("a plan");
+        let narrow =
+            plan(&types, &darwin, Convention::Target, uchar, &params, &[], false).expect("a plan");
         let abis: Vec<Abi> = narrow.signature.params.iter().map(|param| param.abi).collect();
         // A plain `char` is signed there, the same as on every other Apple target.
         let (s, z, p) = (Abi::Sext, Abi::Zext, Abi::Plain);
@@ -726,12 +746,14 @@ mod tests {
 
         // A one byte structure travels in a register too, and has no sign to extend by.
         let small = record(&mut types, &darwin, &[uchar]);
-        let bytes = plan(&types, &darwin, small, &[small], &[], false).expect("a plan");
+        let bytes =
+            plan(&types, &darwin, Convention::Target, small, &[small], &[], false).expect("a plan");
         assert_eq!(bytes.signature.params[0].abi, Abi::Plain);
         assert_eq!(bytes.signature.returns[0].abi, Abi::Plain);
 
         let linux = target("aarch64-unknown-linux-gnu");
-        let elsewhere = plan(&types, &linux, uchar, &params, &[], false).expect("a plan");
+        let elsewhere =
+            plan(&types, &linux, Convention::Target, uchar, &params, &[], false).expect("a plan");
         assert!(elsewhere.signature.params.iter().all(|param| param.abi == Abi::Plain));
         assert_eq!(elsewhere.signature.returns[0].abi, Abi::Plain);
     }
@@ -744,11 +766,13 @@ mod tests {
         let int = types.int(IntKind::Int);
         let pair = record(&mut types, &target, &[float, float]);
 
-        let fixed = plan(&types, &target, int, &[pair], &[pair], false).expect("a plan");
+        let fixed = plan(&types, &target, Convention::Target, int, &[pair], &[pair], false)
+            .expect("a plan");
         assert_eq!(fixed.args[0].types, vec![Type::float(Float::F32), Type::float(Float::F32)]);
 
         // The same record, one place further along a `...`, and the caller copies the bytes.
-        let variadic = plan(&types, &target, int, &[int], &[int, pair], true).expect("a plan");
+        let variadic = plan(&types, &target, Convention::Target, int, &[int], &[int, pair], true)
+            .expect("a plan");
         assert_eq!(variadic.args[1].pass, Pass::Memory);
         assert_eq!(
             variadic.varargs,
@@ -772,10 +796,12 @@ mod tests {
             let int = types.int(IntKind::Int);
             let pair = record(&mut types, &target, &[float, float]);
 
-            let fixed = plan(&types, &target, int, &[int, pair], &[int, pair], false)
-                .expect("a plan for a fixed argument");
-            let variadic = plan(&types, &target, int, &[int], &[int, pair], true)
-                .expect("a plan for a variadic one");
+            let fixed =
+                plan(&types, &target, Convention::Target, int, &[int, pair], &[int, pair], false)
+                    .expect("a plan for a fixed argument");
+            let variadic =
+                plan(&types, &target, Convention::Target, int, &[int], &[int, pair], true)
+                    .expect("a plan for a variadic one");
             assert_eq!(fixed.args[1].pass, variadic.args[1].pass, "{triple}");
             assert_eq!(fixed.args[1].types, variadic.args[1].types, "{triple}");
         }
@@ -793,7 +819,8 @@ mod tests {
         let mingw = target("x86_64-pc-windows-gnu");
         let msvc = target("x86_64-pc-windows-msvc");
         let wide = types.float(FloatKind::LongDouble);
-        let both = plan(&types, &mingw, wide, &[wide], &[], false).expect("a plan");
+        let both =
+            plan(&types, &mingw, Convention::Target, wide, &[wide], &[], false).expect("a plan");
         assert!(both.returns_through_memory());
         assert_eq!(both.ret.pass, Pass::Reference);
         assert_eq!(both.args[0].pass, Pass::Reference);
@@ -802,7 +829,8 @@ mod tests {
         assert_eq!(both.signature.params.len(), 2);
         assert_eq!(both.signature.params[0].abi, Abi::Sret { size: 16, align: 16 });
 
-        let narrow = plan(&types, &msvc, wide, &[wide], &[], false).expect("a plan");
+        let narrow =
+            plan(&types, &msvc, Convention::Target, wide, &[wide], &[], false).expect("a plan");
         assert_eq!(narrow.args[0].pass, Pass::Direct);
         assert_eq!(narrow.args[0].types, vec![Type::float(Float::F64)]);
         assert!(!narrow.returns_through_memory());
@@ -815,11 +843,52 @@ mod tests {
         let windows = target("x86_64-pc-windows-msvc");
         let long = types.int(IntKind::Long);
         let id = record(&mut types, &linux, &[long, long]);
-        let sysv = plan(&types, &linux, types.void(), &[id], &[], false).expect("a plan");
-        let win64 = plan(&types, &windows, types.void(), &[id], &[], false).expect("a plan");
+        let sysv = plan(&types, &linux, Convention::Target, types.void(), &[id], &[], false)
+            .expect("a plan");
+        let win64 = plan(&types, &windows, Convention::Target, types.void(), &[id], &[], false)
+            .expect("a plan");
         assert_eq!(sysv.args[0].types, vec![Type::int(64), Type::int(64)]);
         assert_eq!(win64.args[0].pass, Pass::Reference);
         assert_eq!(win64.args[0].types, vec![Type::PTR]);
+    }
+
+    /// A function of the other convention on each platform travels the way the other platform
+    /// has it, with the types the platform it is on gives it. On Linux under `ms_abi` a sixteen
+    /// byte structure and a `long double` go by reference, since both are sixteen bytes and
+    /// Windows passes only the sizes of an integer by value; the `long double` is still the x87
+    /// format, which is what gcc does. On Windows under `sysv_abi` the same structure goes in two
+    /// registers. And the convention is on the signature for everything below to read.
+    #[test]
+    fn a_function_of_the_other_convention_travels_the_other_platform_s_way() {
+        let mut types = Types::new();
+        let linux = target("x86_64-unknown-linux-gnu");
+        let mingw = target("x86_64-pc-windows-gnu");
+        let long = types.int(IntKind::Long);
+        let pair = record(&mut types, &linux, &[long, long]);
+        let wide = types.float(FloatKind::LongDouble);
+        let void = types.void();
+
+        let ms =
+            plan(&types, &linux, Convention::Ms, wide, &[pair, wide], &[], false).expect("a plan");
+        assert_eq!(ms.signature.convention, Convention::Ms);
+        assert!(ms.returns_through_memory(), "a long double comes back through memory");
+        assert_eq!(ms.args[0].pass, Pass::Reference);
+        assert_eq!(ms.args[1].pass, Pass::Reference);
+        assert_eq!(ms.signature.params[0].abi, Abi::Sret { size: 16, align: 16 });
+
+        let sysv =
+            plan(&types, &mingw, Convention::Sysv, void, &[pair], &[], false).expect("a plan");
+        assert_eq!(sysv.signature.convention, Convention::Sysv);
+        assert_eq!(sysv.args[0].types, vec![Type::int(64), Type::int(64)]);
+
+        let native =
+            plan(&types, &linux, Convention::Target, void, &[pair], &[], false).expect("a plan");
+        assert_eq!(native.signature.convention, Convention::Target);
+        assert_eq!(native.args[0].types, vec![Type::int(64), Type::int(64)]);
+
+        // AArch64 has no second convention, so asking for one is a plan nobody can make.
+        let arm = target("aarch64-unknown-linux-gnu");
+        assert!(plan(&types, &arm, Convention::Ms, void, &[], &[], false).is_err());
     }
 
     /// `va_arg(ap, __int128)` reads two general purpose registers on System V, which is what makes

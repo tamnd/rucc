@@ -218,7 +218,13 @@ impl Checker<'_> {
             span: if node.name.is_some() { node.name_span } else { node.span },
         };
         let base = self.specified_type(specs, subject, place);
-        self.derive(base, declarator, subject, place)
+        let ty = self.derive(base, declarator, subject, place);
+        // A calling convention in the specifiers belongs to the function the whole declarator
+        // declares, or the one it points at, rather than to the type the specifiers name: in
+        // `int __attribute__((ms_abi)) f(int)` that type is `int`. So it is read here, once the
+        // declarator is folded on, and here is every place a declarator is, which is what makes
+        // a parameter, a member and a cast see it as a declaration does.
+        self.convened(ty, self.ast[specs].attrs)
     }
 
     /// The type the specifiers alone name, qualifiers included.
@@ -805,7 +811,10 @@ impl Checker<'_> {
             // only one allowed to write `static` or a qualifier inside its brackets.
             let nearest = index == 0;
             ty = match *step {
-                Derived::Pointer { quals, .. } => {
+                Derived::Pointer { quals, attrs } => {
+                    // `EFI_STATUS (EFIAPI *F)(...)`, where the convention is written beside the
+                    // star and belongs to the function the pointer points at.
+                    let ty = self.convened_pointee(ty, attrs);
                     let pointer = self.types.pointer(ty);
                     self.qualify(pointer, quals, subject.span)
                 }
@@ -1015,7 +1024,13 @@ impl Checker<'_> {
             ParamKind::Identifiers => (Vec::new(), false),
             ParamKind::Prototype => (self.prototype(params), true),
         };
-        self.types.function(FunctionType { ret, params, variadic, prototyped })
+        self.types.function(FunctionType {
+            ret,
+            params,
+            variadic,
+            prototyped,
+            convention: rucc_target::Convention::Target,
+        })
     }
 
     /// The parameter types of a prototype, adjusted the way a parameter is.
