@@ -6359,30 +6359,36 @@ impl<'a> Lowering<'a> {
     }
 
     /// Every way this instruction can be shown to the matcher, most offered first.
-    fn plans(&self, inst: Inst, refused: &HashSet<Value>) -> Vec<Plan> {
+    ///
+    /// That is every choice of a way to show each operand, with the choice for the first operand
+    /// changing slowest. The plans are counted out rather than collected, because this is asked
+    /// for every instruction that is selected and the lists it used to build were an allocation
+    /// or two per operand.
+    fn plans(&self, inst: Inst, refused: &HashSet<Value>) -> impl Iterator<Item = Plan> {
         let args = &self.source[self.source[inst].args];
-        let mut plans = vec![PLAIN];
+        let mut ways = [[Shown::Reg; 3]; MAX_ARGS];
+        let mut counts = [1; MAX_ARGS];
         for (index, &arg) in args.iter().enumerate().take(MAX_ARGS) {
-            let mut ways = Vec::new();
+            let mut count = 0;
             if self.foldable(inst, arg, refused) {
-                ways.push(Shown::Expand);
+                ways[index][count] = Shown::Expand;
+                count += 1;
             }
             if Terms::new(self.source, inst, PLAIN).constant(arg).is_some() {
-                ways.push(Shown::Const);
+                ways[index][count] = Shown::Const;
+                count += 1;
             }
-            ways.push(Shown::Reg);
-            plans = plans
-                .into_iter()
-                .flat_map(|plan| {
-                    ways.iter().map(move |&way| {
-                        let mut next = plan;
-                        next[index] = way;
-                        next
-                    })
-                })
-                .collect();
+            ways[index][count] = Shown::Reg;
+            counts[index] = count + 1;
         }
-        plans
+        (0..counts.iter().product()).map(move |mut number: usize| {
+            let mut plan = PLAIN;
+            for index in (0..MAX_ARGS).rev() {
+                plan[index] = ways[index][number % counts[index]];
+                number /= counts[index];
+            }
+            plan
+        })
     }
 
     /// Whether an operand may be shown as the instruction that computed it.
