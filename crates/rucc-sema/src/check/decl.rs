@@ -291,6 +291,9 @@ impl Checker<'_> {
         // function is the declaration above the definition anyway, and the merge keeps it.
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, AttrList::EMPTY, ty));
         let gnu_inline = self.gnu_inlined(specs.attrs);
+        // Checked and not kept, since nothing reads a format string yet. The specifiers only, for
+        // the reason `retained` below reads them only.
+        self.format_archetypes(specs.attrs);
         let declared = Declared {
             name,
             ty,
@@ -659,6 +662,10 @@ impl Checker<'_> {
         };
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, item.attrs, ty));
         let gnu_inline = self.gnu_inlined(specs.attrs) || self.gnu_inlined(item.attrs);
+        // Checked and not kept, since nothing reads a format string yet. Both places, for the
+        // reason `retained` below reads both, and a header writes it after the declarator.
+        self.format_archetypes(specs.attrs);
+        self.format_archetypes(item.attrs);
         // One string with two readings, so one call answers both and the string is looked at once.
         let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
         let mut declared = Declared {

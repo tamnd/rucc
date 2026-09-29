@@ -155,6 +155,7 @@ impl Checker<'_> {
         // Read before the members are, because `aligned(n)` folds an expression and the members
         // are held by a borrow of the tree while they are being walked.
         let packing = self.packing(attrs);
+        let bit_fields = self.bit_field_style(attrs);
         // The tree outlives the checker's own borrows, so taking the reference out first is
         // what lets the walk below call methods that take the checker mutably.
         let ast = self.ast;
@@ -195,6 +196,7 @@ impl Checker<'_> {
             packed: packing.packed,
             align: packing.align.map(u64::from),
             pack: pack.map(u64::from),
+            bit_fields,
         };
         let laid_out = match layout_record(&self.types, kind, &decls, &options, self.cx.target) {
             Ok(laid_out) => Some(laid_out),

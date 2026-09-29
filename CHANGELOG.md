@@ -7,6 +7,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The windows-gnu sysroots carry winpthreads, built static from the same mingw-w64 14.0.0, so `-pthread` and `-lpthread` link and the program needs no `libwinpthread-1.dll`. `tests/exec/windows/pthread.c` checks threads, a mutex, a condition variable, `pthread_once` and thread-specific keys, and that the program does not import winpthreads (#2069).
+- `__attribute__((ms_struct))` and `__attribute__((gcc_struct))` choose the bit-field layout of one record, the way gcc does on x86. `gcc_struct` lays a record out by the Itanium rule that Linux uses, so on mingw-w64, where Microsoft's rule is the default, `struct { unsigned x : 3; char c; }` with `gcc_struct` is four bytes with `c` at offset one instead of eight bytes with `c` at offset four, and `ms_struct` does the opposite on x86 Linux. Whether an unnamed bit-field aligns the record goes with the rule. When both are written the first one wins and the second gets gcc's warning. They are ignored on the other architectures, as gcc ignores them, except on Windows targets.
+- `format(ms_printf, ...)`, `format(ms_scanf, ...)` and `format(ms_strftime, ...)` are known archetypes on Windows targets, and the `gnu_` ones are known everywhere, so the declarations in mingw-w64's `<stdio.h>`, which use `__MINGW_PRINTF_FORMAT`, get no warning. An archetype gcc does not know on the target gets gcc's warning that it is an unrecognized format function type, so `ms_printf` is still warned about on Linux. Darwin targets also take clang's archetypes, such as `os_log`. Format strings themselves are not checked yet.
 
 ### Changed
 

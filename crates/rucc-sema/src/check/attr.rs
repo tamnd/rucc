@@ -42,7 +42,7 @@ use rucc_ast::{AlignSpec, AttrArg, AttrList};
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::Encoding;
-use rucc_target::{Convention, Isa, Target, TargetInfo};
+use rucc_target::{BitFieldStyle, Convention, Isa, Target, TargetInfo};
 use rucc_types::{
     FloatKind, FunctionId, FunctionType, IntKind, TypeId, TypeKind, float_format, int_width,
     integer_info, is_arithmetic, is_complex, is_real_floating, layout,
@@ -83,6 +83,51 @@ const BIGGEST_ALIGNMENT: u32 = 16;
 /// the run-down after it, which is code no translation unit writes. `alias` gives a second name
 /// to a definition, and the name is in a string that nothing resolves as a use.
 const RETAINING: [&str; 5] = ["used", "retain", "constructor", "destructor", "alias"];
+
+/// The format archetypes gcc 16 knows on every target, which is what `format(archetype, ...)` may
+/// name without a warning.
+///
+/// The four plain names are the same as their `gnu_` names. The ones for gcc's own diagnostics
+/// and `asm_fprintf` are there because gcc knows them, and `NSString` because gcc knows it in C as
+/// well as in Objective-C.
+const FORMAT_ARCHETYPES: [&str; 16] = [
+    "printf",
+    "scanf",
+    "strftime",
+    "strfmon",
+    "gnu_printf",
+    "gnu_scanf",
+    "gnu_strftime",
+    "gnu_strfmon",
+    "asm_fprintf",
+    "gcc_diag",
+    "gcc_tdiag",
+    "gcc_cdiag",
+    "gcc_cxxdiag",
+    "gcc_gfc",
+    "gcc_dump_printf",
+    "NSString",
+];
+
+/// The archetypes gcc knows on Windows as well, which are the conversions msvcrt accepts.
+///
+/// There is no `ms_strfmon`, because Windows has no `strfmon`, and mingw-w64 gcc warns about one.
+const WINDOWS_ARCHETYPES: [&str; 3] = ["ms_printf", "ms_scanf", "ms_strftime"];
+
+/// The archetypes clang knows beyond gcc's, which a Darwin target takes because clang is the
+/// reference there.
+const DARWIN_ARCHETYPES: [&str; 10] = [
+    "CFString",
+    "printf0",
+    "syslog",
+    "kprintf",
+    "cmn_err",
+    "vcmn_err",
+    "zcmn_err",
+    "freebsd_kprintf",
+    "os_trace",
+    "os_log",
+];
 
 /// The highest priority the implementation's own start-up code claims, which GCC calls
 /// `MAX_RESERVED_INIT_PRIORITY`.
@@ -267,6 +312,106 @@ impl Checker<'_> {
                 self.report(Diagnostic::error(what, attr.span).with_code("E0688"));
                 None
             }
+        }
+    }
+
+    /// The bit-field rule `ms_struct` or `gcc_struct` asked a record to be laid out by.
+    ///
+    /// `ms_struct` is Microsoft's rule and `gcc_struct` is the Itanium one, which gcc calls its
+    /// own. Asking for the rule the target already has is allowed and changes nothing, so the
+    /// answer is the rule either way and the layout engine decides whether it is a change.
+    ///
+    /// Only x86 and Windows targets read them. gcc takes the pair on x86 alone, where it honours
+    /// them on Linux as well as on mingw, and warns that they are ignored everywhere else. The
+    /// Windows targets on other architectures are here because clang is their reference and
+    /// clang takes `ms_struct` on every target. Elsewhere the attribute is left alone, which is
+    /// what this compiler does with every attribute it has no use for.
+    ///
+    /// The first one written wins and a later one of the other kind is dropped with gcc's warning,
+    /// so `__attribute__((gcc_struct, ms_struct))` is `gcc_struct`. Measured with gcc 16 and with
+    /// mingw-w64 gcc, which agree. The armour and the namespace are read the way
+    /// [`Self::packing`] reads them.
+    pub(in crate::check) fn bit_field_style(&mut self, attrs: AttrList) -> Option<BitFieldStyle> {
+        let tuple = self.cx.target.tuple;
+        if !matches!(tuple.arch().as_str(), "x86_64" | "i686") && tuple.os().as_str() != "windows" {
+            return None;
+        }
+        let mut chosen = None;
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            let name = rucc_gnu::unarmour(self.text(attr.name));
+            let style = match name {
+                "ms_struct" => BitFieldStyle::Microsoft,
+                "gcc_struct" => BitFieldStyle::Itanium,
+                _ => continue,
+            };
+            match chosen {
+                None => chosen = Some(style),
+                Some(first) if first == style => {}
+                Some(_) => {
+                    let what = format!("'{name}' incompatible attribute ignored");
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0746"));
+                }
+            }
+        }
+        chosen
+    }
+
+    /// Checks the archetype each `format` attribute in a list names, and says so where gcc would
+    /// not know it.
+    ///
+    /// The archetype is the first argument, the `printf` of `format(printf, 1, 2)`, and it names
+    /// the language the format string is written in. gcc knows a set of them that depends on the
+    /// target, and a name outside that set gets its warning and nothing else. The set is what
+    /// matters here: mingw-w64's headers write `__MINGW_PRINTF_FORMAT`, which is `ms_printf` or
+    /// `gnu_printf` depending on whether the program asked for the C99 `printf`, and the same for
+    /// `scanf` and `strftime`, so a Windows program that includes `<stdio.h>` has these on every
+    /// declaration in it and must not be warned about any of them.
+    ///
+    /// The `ms_` names are the Windows ones, and are the conversions msvcrt and the UCRT accept,
+    /// such as `%I64d`. The `gnu_` names are the C99 set with GNU's additions, and `printf`,
+    /// `scanf`, `strftime` and `strfmon` are the same as their `gnu_` names on every target. gcc
+    /// on Linux does not know the `ms_` names and warns about them, which is what happens here as
+    /// well. The Darwin targets take clang's names as well as gcc's, because clang is the
+    /// reference there and Apple's headers write `os_log` and `CFString`.
+    ///
+    /// Nothing reads the format strings yet (#485 is where a warning group for them would go), so
+    /// an archetype this accepts is checked no further, and that is the same for all of them.
+    pub(in crate::check) fn format_archetypes(&mut self, attrs: AttrList) {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) != "format" {
+                continue;
+            }
+            // `format(printf, 1, 2)` keeps its first argument as an identifier. Anything else in
+            // that place is not an archetype and is not this function's to judge.
+            let Some(&AttrArg::Ident(archetype)) = self.ast[attr.args].first() else {
+                continue;
+            };
+            let name = rucc_gnu::unarmour(self.text(archetype)).to_owned();
+            if !self.knows_archetype(&name) {
+                let what = format!("'{name}' is an unrecognized format function type");
+                self.report(Diagnostic::warning(what, attr.span).with_code("E0747"));
+            }
+        }
+    }
+
+    /// Whether `name` is a format archetype gcc knows on this target, or clang on a Darwin one.
+    fn knows_archetype(&self, name: &str) -> bool {
+        let tuple = self.cx.target.tuple;
+        if FORMAT_ARCHETYPES.contains(&name) {
+            return true;
+        }
+        match tuple.os().as_str() {
+            "windows" => WINDOWS_ARCHETYPES.contains(&name),
+            _ if tuple.os().is_darwin() => DARWIN_ARCHETYPES.contains(&name),
+            _ => false,
         }
     }
 
