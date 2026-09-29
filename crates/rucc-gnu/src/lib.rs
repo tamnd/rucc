@@ -294,11 +294,16 @@ mod tests {
 
     /// Nearly every one of them is the name with the prefix taken off, which is the rule GCC
     /// documents. The field is written out anyway, so this is what checks the two agree. The
-    /// one exception is `__builtin_cpu_init`, which GCC turns into a call to the libgcc
-    /// function that fills in the CPU model.
+    /// exceptions are `__builtin_cpu_init`, which GCC turns into a call to the libgcc function
+    /// that fills in the CPU model, and the two time stamp counter reads, which GCC writes in
+    /// place and which are calls here to routines in our own builtins archive.
     #[test]
     fn the_library_function_is_the_name_without_the_prefix() {
-        const OTHER_NAMES: &[(&str, &str)] = &[("__builtin_cpu_init", "__cpu_indicator_init")];
+        const OTHER_NAMES: &[(&str, &str)] = &[
+            ("__builtin_cpu_init", "__cpu_indicator_init"),
+            ("__builtin_ia32_rdtsc", "__rucc_ia32_rdtsc"),
+            ("__builtin_ia32_rdtscp", "__rucc_ia32_rdtscp"),
+        ];
         for feature in FEATURES {
             if feature.library.is_empty() {
                 continue;

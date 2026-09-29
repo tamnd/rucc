@@ -8,11 +8,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The builtins archive for the `*-windows-msvc` rows has `__chkstk`, the stack probe codegen already calls there for a frame over a page, next to `___chkstk_ms` in the mingw archive. It touches each page from the stack pointer down by `rax` bytes, keeps every register but `r10` and `r11`, and leaves `rsp` alone, as Microsoft's does, so a program linked with `-nostdlib` has one too.
 
+- `__builtin_ia32_rdtsc` and `__builtin_ia32_rdtscp` read the time stamp counter, as calls to two routines in the x86-64 builtins archive that are the instruction and a return. Postgres 19 reads the counter with them in `instr_time.h` on every x86-64 build.
+
 ### Changed
 
 - Turning the register allocator's liveness answer into a list per block sorts it in two passes that each stay in the cache, where one pass writing to every block by turns missed on nearly every write. On jtckdint's `test.c` the time that step takes at `-O0` is down to between a fifth and a half, for about half a billion more instructions, with the same assembly (#2157).
 
 ### Fixed
+
+- A C23 attribute written after a declarator's name, as in `int x [[maybe_unused]];`, is read as the declaration's attribute rather than as the start of an array, in declarations, parameters and members. Postgres 19 writes one for every variable only an assertion uses, since its `pg_attribute_unused()` is `[[maybe_unused]]` under C23, which is rucc's default.
 
 - A windows-gnu listing asks for unwind information with `.seh_proc`, `.seh_pushreg`, `.seh_setframe`, `.seh_stackalloc`, `.seh_savexmm`, `.seh_endprologue` and `.seh_endproc`, as gcc's does, and rucc's assembler reads them and writes `.pdata` and `.xdata`. Before, only an object written directly had those rows, so a program built through `-S` that took a structured exception, such as a divide by zero under a `SIGFPE` handler, ended instead of reaching the handler. The assembler also reads `.def`, `.scl`, `.type` and `.endef`, so `rucc -c` accepts rucc's own Windows listing (#2069).
 
