@@ -201,7 +201,10 @@ fn listing(
     if !globals.exports.is_empty() {
         writer.out.push_str("\t.section\t.drectve,\"yni\"\n");
         for export in &globals.exports {
-            let _ = writeln!(writer.out, "\t.ascii\t\"{}\"", export.option());
+            // An option from `#pragma comment` may have a quote in it, round a library name
+            // with a space in it, and a backslash in a path.
+            let option = export.option().replace('\\', "\\\\").replace('"', "\\\"");
+            let _ = writeln!(writer.out, "\t.ascii\t\"{option}\"");
         }
     }
     writer.directives.end(&mut writer.out, property);

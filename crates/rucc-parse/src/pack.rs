@@ -102,11 +102,13 @@ impl Parser<'_> {
         }
     }
 
-    /// One `#pragma` line, which is ignored unless it is a `pack`.
+    /// One `#pragma` line, which is ignored unless it is a `pack` or a `comment`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
         let Some(first) = line.first() else { return };
-        if first.ident().is_none_or(|name| self.cx.interner.resolve(name) != "pack") {
-            return;
+        match first.ident().map(|name| self.cx.interner.resolve(name)) {
+            Some("pack") => {}
+            Some("comment") => return self.comment_line(&line[1..], span),
+            _ => return,
         }
         let mut rest = &line[1..];
         if !eat_punct(&mut rest, "(") {
@@ -252,7 +254,7 @@ fn is_rparen(token: &Token) -> bool {
 }
 
 /// Takes one punctuator off the front of a line, and says whether it was there.
-fn eat_punct(rest: &mut &[Token], spelling: &str) -> bool {
+pub(crate) fn eat_punct(rest: &mut &[Token], spelling: &str) -> bool {
     let found = match rest.first().map(|token| token.kind) {
         Some(TokenKind::Punct(punct)) => punct.as_str() == spelling,
         _ => false,

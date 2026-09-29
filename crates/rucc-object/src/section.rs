@@ -379,6 +379,10 @@ pub enum Offer {
     /// gcc ignores hidden visibility there. This is how the runtime routines of our own that a
     /// DLL links in stay out of its export table, the way libgcc's do by being named libgcc.
     Hidden,
+    /// Not a name at all but a whole option, which [`Export::name`] holds as the linker reads it.
+    /// What `#pragma comment(lib)` and `#pragma comment(linker)` ask for, such as
+    /// `/DEFAULTLIB:ws2_32.lib`, which goes in the same section for the same linker to read.
+    Verbatim,
 }
 
 impl Export {
@@ -390,6 +394,7 @@ impl Export {
             Offer::Function => format!(" -export:{}", self.name),
             Offer::Variable => format!(" -export:{},data", self.name),
             Offer::Hidden => format!(" -exclude-symbols:{}", self.name),
+            Offer::Verbatim => format!(" {}", self.name),
         }
     }
 }

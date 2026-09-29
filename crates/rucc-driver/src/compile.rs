@@ -295,6 +295,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     clock.lap("parse");
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
+    let comments = parsed.comments;
 
     let mut artifact = Artifact::Nothing;
     // Zero when nothing instruments, which is the truthful summary of a file built without
@@ -418,6 +419,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     // anyway: a file with one construct missing from it is more use to read
                     // than nothing at all, and the errors are what stop it being compiled.
                     clock.lap("lower");
+                    for option in linker_options(&comments, &sess.target) {
+                        lowered.module.add_linker_option(option);
+                    }
                     let failed = lowered.diagnostics.iter().any(|d| d.severity.is_fatal());
                     if !failed {
                         // The verifier runs on everything the walk builds, always. It is the
@@ -658,6 +662,33 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
 ///
 /// When the inserted checks left the module in a state the verifier refuses, which is a bug in
 /// this compiler and not in the program being compiled.
+/// What the unit's `#pragma comment` lines ask the linker for, spelled the way clang spells it,
+/// which is the same for mingw-w64 and for MSVC: lld reads `/DEFAULTLIB:` in both modes and looks
+/// for `libws2_32.a` as well as `ws2_32.lib` under mingw-w64. A library with no `.lib` or `.a` on
+/// the end gets `.lib`, and one with a space in it is quoted. Only COFF has a section to put them
+/// in, so everywhere else they are dropped, which is what clang and gcc do too.
+fn linker_options(comments: &[rucc_parse::Comment], target: &TargetInfo) -> Vec<String> {
+    if target.tuple.os().object_format() != Some(ObjectFormat::Coff) {
+        return Vec::new();
+    }
+    comments
+        .iter()
+        .map(|comment| match comment {
+            rucc_parse::Comment::Lib(lib) => {
+                let lower = lib.to_ascii_lowercase();
+                let suffix =
+                    if lower.ends_with(".lib") || lower.ends_with(".a") { "" } else { ".lib" };
+                if lib.contains(' ') {
+                    format!("/DEFAULTLIB:\"{lib}{suffix}\"")
+                } else {
+                    format!("/DEFAULTLIB:{lib}{suffix}")
+                }
+            }
+            rucc_parse::Comment::Linker(option) => option.clone(),
+        })
+        .collect()
+}
+
 fn instrument(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
@@ -4012,6 +4043,48 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Object;
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
+    /// `#pragma comment` reaches `.drectve` on Windows, spelled the way clang spells it, and in a
+    /// listing as well as in an object. A kind nothing reads is taken without a word, and on Linux
+    /// the whole thing is dropped, as it is by gcc and clang.
+    #[test]
+    fn a_pragma_comment_asks_the_windows_linker_for_a_library() {
+        let source = concat!(
+            "#pragma comment(lib, \"ws2_32\")\n",
+            "#pragma comment(lib, \"my lib\")\n",
+            "#pragma comment(lib, \"libz.a\")\n",
+            "#pragma comment(linker, \"/include:x\")\n",
+            "#pragma comment(user, \"nobody reads this\")\n",
+            "int f(void) { return 0; }\n",
+        );
+        let wanted =
+            " /DEFAULTLIB:ws2_32.lib /DEFAULTLIB:\"my lib.lib\" /DEFAULTLIB:libz.a /include:x";
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let Artifact::Object { bytes, .. } = result.artifact else { panic!("expected an object") };
+        assert!(bytes.windows(wanted.len()).any(|at| at == wanted.as_bytes()), "no options");
+
+        opts.emit = EmitKind::Asm;
+        let text = match run(&opts, source).artifact {
+            Artifact::Text(text) => text,
+            other => panic!("expected a listing, got {other:?}"),
+        };
+        assert!(text.contains("\t.ascii\t\" /DEFAULTLIB:\\\"my lib.lib\\\"\"\n"), "{text}");
+
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let Artifact::Text(text) = result.artifact else { panic!("expected a listing") };
+        assert!(!text.contains("DEFAULTLIB"), "{text}");
+
+        // And a line that says too little is a warning rather than a silent nothing.
+        let result = run(&opts, "#pragma comment(lib)\nint f(void) { return 0; }\n");
+        assert!(result.messages.iter().any(|m| m.contains("wants a string")), "{result:?}");
     }
 
     /// An opcode the rule language has no word for is named anyway, and pointed at.
