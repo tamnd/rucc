@@ -667,10 +667,10 @@ static NO_X87: [PhysReg; 0] = [];
 // x86-64.
 static INT_SAVED: [PhysReg; 10] =
     [x(19), x(20), x(21), x(22), x(23), x(24), x(25), x(26), x(27), x(28)];
-// Only the low sixty four bits of these are preserved, which is `d8` to `d15`. That is enough for
-// everything this compiler keeps in one, which is a scalar, and it is why a prologue saves eight
-// bytes of each rather than sixteen. A value that used the whole register would not survive a call
-// in any of them.
+// Only the low sixty four bits of these are preserved, which is `d8` to `d15`. A prologue here still
+// saves all sixteen bytes of each, because the allocator treats the whole register as preserved and
+// will keep a quad `long double` in one across a call. Saving `d8` alone would be the saving the
+// ABI asks for once the allocator knows a call takes the top half of these, which it does not yet.
 static FP_SAVED: [PhysReg; 8] = [v(8), v(9), v(10), v(11), v(12), v(13), v(14), v(15)];
 
 // The ones a call destroys first, so a value that does not live across one costs no save, then the

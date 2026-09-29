@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- An aarch64 prologue saves `x19` to `x28` two to a push with `stp`, and the epilogue restores them with `ldp`, as gcc and clang do. It used to push each one alone, and since a push on this machine moves the stack pointer sixteen bytes to keep it aligned, half of every one was wasted. A function that saves all ten takes 80 bytes fewer of stack and five fewer instructions at each end.
+
 ## 0.13.0
 
 The end of W1: rucc runs on Windows as a native compiler, and the programs it builds there run and pass on every commit. This release also has `-g` and realigned frames for Windows targets and more compile time work on the register allocator.

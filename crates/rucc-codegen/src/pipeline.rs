@@ -178,8 +178,6 @@ impl Machine {
     /// it reaches. That is the property a scratch register wants: nothing lives in one across
     /// anything the compiler did not write, so a move the rewriter puts in can have it. The vector
     /// file's two are picked the way the x86 ones are, which lands on `v30` and `v31`.
-    ///
-    /// Nothing selects AArch64 instructions yet, so [`Machine::for_target`] does not return this.
     #[must_use]
     pub fn aarch64(conv: &'static CallRegs) -> Self {
         let order: Vec<PhysReg> =
@@ -578,6 +576,9 @@ pub fn compile_recording(
         // wanted somewhere to keep something would be told it asked for nothing. Taking the red
         // zone away makes every local show up as bytes, and bytes are what gets refused.
         red_zone: flags.red_zone && !naked,
+        // Two registers to a push on a machine with an instruction for it, which is `stp` on
+        // AArch64, and one at a time on x86-64, which has none.
+        pairs: machine.insts.pair.is_some(),
         protect: guard.is_some(),
         naked,
         // A protected function calls the one that does not come back, on the arm where the check
