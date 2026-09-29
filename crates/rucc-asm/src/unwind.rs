@@ -72,8 +72,11 @@ const PCREL_SDATA4: u8 = 0x1b;
 /// answer, which is how the header reaches the personality routine.
 const INDIRECT_PCREL_SDATA4: u8 = 0x9b;
 
-/// A field of the call site table that is not there.
-const OMIT: u8 = 0xff;
+/// A field of the call site table that is not there, and a pointer a directive says is not there.
+pub(crate) const OMIT: u8 = 0xff;
+
+/// The bit of a pointer's encoding that says the pointer is to a pointer that holds the answer.
+const INDIRECT: u8 = 0x80;
 
 /// How the rows of a call site table spell their numbers, which is as unsigned LEB128.
 const ULEB128: u8 = 0x01;
@@ -106,6 +109,45 @@ const SHORT_REG: u16 = 63;
 /// linker fills in.
 pub(crate) type Rows = Vec<(usize, CfiOp)>;
 
+/// A personality routine and a call site table that a file of assembly named for one function,
+/// with `.cfi_personality` and `.cfi_lsda`, rather than ones this crate works out from the landing
+/// pads of a function it compiled.
+///
+/// This is how a listing says the same thing [`Extent::landings`] says, and it is what gcc writes
+/// for a function with a `cleanup` under `-fexceptions`. The call site table is then bytes the
+/// file wrote into its own section, so all a record needs is the name of where it starts, and the
+/// header needs the name of the routine. Each comes with the encoding the directive gave it, which
+/// is written into the header so the unwinder reads the pointer the way it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Named {
+    /// The routine's encoding and name.
+    pub(crate) personality: (u8, String),
+    /// Where the call site table is, when the function has one.
+    pub(crate) lsda: Option<(u8, String)>,
+}
+
+/// How many bytes a pointer in an encoding the table can write takes, which is `None` for one it
+/// cannot.
+///
+/// The low four bits are the size and the next three say what the pointer is counted from. Two of
+/// those can be written with the relocations every object already has: nothing, which is an
+/// address, and the pointer's own place, which is a distance. An address is four or eight bytes,
+/// or a whole pointer for `absptr`. A distance is four bytes, since a relocation for eight bytes
+/// of distance is not one the object writer has. The top bit, a pointer to the pointer, changes
+/// what the unwinder does with the answer and not how it is written, so it is allowed for the
+/// routine, which is the one gcc spells that way.
+pub(crate) fn pointer_size(encoding: u8, word: u8, indirect: bool) -> Option<u8> {
+    if encoding & INDIRECT != 0 && !indirect {
+        return None;
+    }
+    match (encoding & 0x70, encoding & 0x0f) {
+        (0x00, 0x00) => Some(word),
+        (0x00, 0x03 | 0x0b) | (0x10, 0x03 | 0x0b) => Some(4),
+        (0x00, 0x04 | 0x0c) => Some(8),
+        _ => None,
+    }
+}
+
 /// The whole table for one object, in whichever of the two shapes the target reads.
 ///
 /// Every function gets a record, including the ones with no rows in them. An unwinder that lands on
@@ -118,18 +160,22 @@ pub(crate) type Rows = Vec<(usize, CfiOp)>;
 ///
 /// [`Error::Frame`] for a prologue the target's table has no way to describe, which is only ever
 /// Windows. See [`Error`].
+///
+/// `named` is what a file of assembly said about each function's personality routine, one entry
+/// per function or none at all, and is only read on ELF. See [`Named`].
 pub(crate) fn table(
     funcs: &[Extent],
     rows: &[Rows],
     conv: &CallRegs,
     format: ObjectFormat,
+    named: &[Option<Named>],
 ) -> Result<Unwind, Error> {
     debug_assert_eq!(funcs.len(), rows.len(), "a record per function");
     if funcs.is_empty() {
         return Ok(Unwind::default());
     }
     match format {
-        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv)),
+        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named)),
         ObjectFormat::Coff => windows(funcs, rows, conv),
         // The same DWARF records, in `__TEXT,__eh_frame`, which ld64 reads and turns into the
         // compact table the unwinder searches, one entry per function that points back at its
@@ -147,7 +193,7 @@ pub(crate) fn table(
         ObjectFormat::MachO => {
             let bare: Vec<Extent> =
                 funcs.iter().map(|func| Extent { landings: Vec::new(), ..func.clone() }).collect();
-            Ok(dwarf(&bare, rows, conv))
+            Ok(dwarf(&bare, rows, conv, &[]))
         }
         // Nothing, because a WebAssembly module is not a stack a table would describe. A table
         // under a name its linker does not know is a section nothing ever looks at, which is worse
@@ -195,7 +241,11 @@ const DEBUG_FRAME: &str = ".debug_frame";
 /// function with one points at that header instead and says where its call site table is. The
 /// header is shared, since what it says is the same for every function, and a function with no
 /// pad keeps pointing at the plain one, which is what gas writes for the same listing.
-fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Unwind {
+///
+/// A function a file of assembly named a routine for gets a header that names that one, shared
+/// with every other function that named the same routine the same way, which is also what gas
+/// does. See [`Named`].
+fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs, named: &[Option<Named>]) -> Unwind {
     let mut table = Table::new(conv, false);
     table.header(conv);
     let plain = table.cie;
@@ -203,14 +253,31 @@ fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Unwind {
         table.personal_header(conv);
         table.cie
     });
-    for (func, rows) in funcs.iter().zip(rows) {
-        match personal.filter(|_| !func.landings.is_empty()) {
-            Some(cie) => {
+    // Each header written for a routine a file named, by the routine, the encoding it was named
+    // in and the encoding of the call site table, which are what make two headers the same.
+    let mut headers: Vec<(HeaderKey, usize)> = Vec::new();
+    for (at, (func, rows)) in funcs.iter().zip(rows).enumerate() {
+        let said = named.get(at).and_then(Option::as_ref);
+        match (personal.filter(|_| !func.landings.is_empty()), said) {
+            (Some(cie), _) => {
                 table.cie = cie;
                 let lsda = table.call_sites(func);
-                table.lsda = Some(lsda);
+                table.lsda = Some(Lsda::At(lsda));
             }
-            None => {
+            (None, Some(said)) => {
+                let (encoding, routine) = &said.personality;
+                let key = (*encoding, routine.clone(), said.lsda.as_ref().map(|(lsda, _)| *lsda));
+                table.cie = match headers.iter().find(|(seen, _)| *seen == key) {
+                    Some(&(_, cie)) => cie,
+                    None => {
+                        table.named_header(conv, said);
+                        headers.push((key, table.cie));
+                        table.cie
+                    }
+                };
+                table.lsda = said.lsda.clone().map(|(encoding, name)| Lsda::Named(encoding, name));
+            }
+            (None, None) => {
                 table.cie = plain;
                 table.lsda = None;
             }
@@ -218,6 +285,17 @@ fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Unwind {
         table.record(func, rows);
     }
     table.out
+}
+
+/// What makes two headers for named routines the same one. See [`dwarf`].
+type HeaderKey = (u8, String, Option<u8>);
+
+/// Where a record's call site table is.
+enum Lsda {
+    /// At this offset in [`EXCEPT_TABLE`], which this crate wrote.
+    At(usize),
+    /// At a name a file of assembly gave it, spelled in this encoding.
+    Named(u8, String),
 }
 
 /// The table being built, and the two facts about the target every record in it is written against.
@@ -238,9 +316,9 @@ struct Table {
     /// Whether this is the debugger's copy, which spells three things differently: what marks the
     /// header, how a record says where its header is, and how it says where its function is.
     debug: bool,
-    /// Where in [`EXCEPT_TABLE`] the call site table of the record being written is, when it has
-    /// one. See [`Table::call_sites`].
-    lsda: Option<usize>,
+    /// Where the call site table of the record being written is, when it has one. See
+    /// [`Table::call_sites`] and [`Named`].
+    lsda: Option<Lsda>,
 }
 
 impl Table {
@@ -313,6 +391,50 @@ impl Table {
         self.out.bytes.push(PCREL_SDATA4);
         self.out.bytes.push(PCREL_SDATA4);
         self.starts(conv, start);
+    }
+
+    /// The header the records of functions a file of assembly named a personality routine for
+    /// point back at.
+    ///
+    /// The same shape as [`Table::personal_header`], with the routine and the encodings the file
+    /// gave. `L` is left out when the file named no call site table, and then a record has no
+    /// pointer to one either, which is what gas writes for `.cfi_personality` on its own.
+    fn named_header(&mut self, conv: &CallRegs, said: &Named) {
+        let start = self.out.bytes.len();
+        self.cie = start;
+        let word = u8::try_from(self.align).expect("a pointer width");
+        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        self.out.bytes.push(1);
+        let augmentation: &[u8] = if said.lsda.is_some() { b"zPLR\0" } else { b"zPR\0" };
+        self.out.bytes.extend_from_slice(augmentation);
+        uleb(&mut self.out.bytes, CODE_ALIGN);
+        sleb(&mut self.out.bytes, self.slot);
+        uleb(&mut self.out.bytes, u64::from(conv.dwarf_return_address));
+        let (encoding, routine) = &said.personality;
+        let size = pointer_size(*encoding, word, true).expect("an encoding the reader checked");
+        let lsda = u64::from(said.lsda.is_some());
+        uleb(&mut self.out.bytes, 1 + u64::from(size) + lsda + 1);
+        self.out.bytes.push(*encoding);
+        self.pointer(*encoding, routine, size);
+        if let Some((encoding, _)) = &said.lsda {
+            self.out.bytes.push(*encoding);
+        }
+        self.out.bytes.push(PCREL_SDATA4);
+        self.starts(conv, start);
+    }
+
+    /// A pointer to `symbol` in `size` bytes of `encoding`, as zeroes and the relocation that
+    /// fills them in. See [`pointer_size`].
+    fn pointer(&mut self, encoding: u8, symbol: &str, size: u8) {
+        let kind = if encoding & 0x70 == 0x10 {
+            Reference::Data
+        } else {
+            Reference::Address { bytes: size }
+        };
+        let at = self.out.bytes.len();
+        self.out.relocs.push(Reloc { at, symbol: symbol.to_owned(), kind, addend: 0, after: 0 });
+        self.out.bytes.resize(at + usize::from(size), 0);
     }
 
     /// Where the call site table of one function goes, written at the end of [`EXCEPT_TABLE`], and
@@ -436,9 +558,9 @@ impl Table {
         // left for a record is a length of zero, which still has to be written because `z`
         // promised a length would be there. A function with a landing pad has four bytes, the
         // distance to its call site table, since its header said `L`.
-        match self.lsda {
+        match self.lsda.take() {
             None => uleb(&mut self.out.bytes, 0),
-            Some(lsda) => {
+            Some(Lsda::At(lsda)) => {
                 uleb(&mut self.out.bytes, 4);
                 self.out.relocs.push(Reloc {
                     at: self.out.bytes.len(),
@@ -448,6 +570,13 @@ impl Table {
                     after: 0,
                 });
                 self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+            }
+            Some(Lsda::Named(encoding, name)) => {
+                let word = u8::try_from(self.align).expect("a pointer width");
+                let size =
+                    pointer_size(encoding, word, false).expect("an encoding the reader checked");
+                uleb(&mut self.out.bytes, u64::from(size));
+                self.pointer(encoding, &name, size);
             }
         }
     }
@@ -874,7 +1003,7 @@ fn above(offset: i32) -> u64 {
 
 /// One number, seven bits at a time, low bits first, with the high bit set on every byte but the
 /// last.
-fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
+pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
     loop {
         let byte = u8::try_from(value & 0x7f).expect("seven bits");
         value >>= 7;
@@ -888,7 +1017,7 @@ fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
 
 /// The same, signed, where the last byte's sixth bit is the sign and the value is sign extended out
 /// of it rather than zero extended.
-fn sleb(bytes: &mut Vec<u8>, mut value: i64) {
+pub(crate) fn sleb(bytes: &mut Vec<u8>, mut value: i64) {
     loop {
         let byte = u8::try_from(value & 0x7f).expect("seven bits");
         value >>= 7;
@@ -931,14 +1060,14 @@ mod tests {
 
     /// The description one function's rows come out as, with the header and the padding.
     fn info(rows: Rows) -> Vec<u8> {
-        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff)
+        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff, &[])
             .expect("a prologue this can describe");
         out.info
     }
 
     /// Why a prologue was refused, for a prologue that was.
     fn refused(rows: Rows) -> String {
-        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff)
+        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff, &[])
             .expect_err("a prologue this cannot describe");
         out.to_string()
     }
@@ -1041,7 +1170,7 @@ mod tests {
     #[test]
     fn every_function_gets_a_row_of_three_places_the_linker_fills_in() {
         let funcs = [func("one", 32), func("two", 48)];
-        let out = table(&funcs, &[Vec::new(), Vec::new()], &WIN64, ObjectFormat::Coff)
+        let out = table(&funcs, &[Vec::new(), Vec::new()], &WIN64, ObjectFormat::Coff, &[])
             .expect("two leaves");
         assert_eq!(out.bytes, vec![0; 24], "three empty fields per function");
         let places: Vec<_> =
@@ -1123,7 +1252,7 @@ mod tests {
     #[test]
     fn a_format_whose_table_is_not_written_yet_gets_no_section() {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
-        let wasm = table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Wasm).expect("nothing");
+        let wasm = table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Wasm, &[]).expect("nothing");
         assert_eq!(wasm, Unwind::default());
     }
 
@@ -1132,12 +1261,12 @@ mod tests {
     #[test]
     fn a_mach_o_table_is_the_dwarf_one_without_a_personality() {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
-        let elf = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::Elf).unwrap();
-        let mach = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::MachO).unwrap();
+        let elf = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::Elf, &[]).unwrap();
+        let mach = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::MachO, &[]).unwrap();
         assert_eq!(mach, elf);
         let mut pad = func("f", 8);
         pad.landings = vec![rucc_object::Site { start: 0, len: 4, pad: 6 }];
-        let mach = table(&[pad], &rows, &SYSV, ObjectFormat::MachO).unwrap();
+        let mach = table(&[pad], &rows, &SYSV, ObjectFormat::MachO, &[]).unwrap();
         assert_eq!(mach, elf);
     }
 

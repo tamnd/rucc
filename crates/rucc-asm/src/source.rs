@@ -43,6 +43,7 @@ use rucc_tuple::Arch;
 /// What an instruction says about the place in it that names something, under a name that does not
 /// collide with the [`Sort`] an ELF symbol has.
 use crate::instruction::Sort as Reach;
+use crate::unwind::Named;
 
 /// A file this could not read, and where in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +127,9 @@ struct Sym {
     numbered: bool,
 }
 
+/// How many bytes a LEB128 number that names a label further on is given. See [`Reader::leb`].
+const LEB_ROOM: u8 = 4;
+
 /// A place in a section whose bytes are an expression that could not be worked out yet.
 #[derive(Debug, Clone)]
 struct Fixup {
@@ -149,6 +153,9 @@ struct Fixup {
     /// Which field of an AArch64 instruction these bytes are, where the answer goes into some bits
     /// of the word rather than into bytes of its own.
     field: Option<aarch64::Fixup>,
+    /// Whether these bytes are a LEB128 number, and a signed one, which is written in all of them
+    /// however few it needs. See [`Reader::leb`].
+    leb: Option<bool>,
     line: usize,
 }
 
@@ -180,6 +187,11 @@ struct Frame {
     cfa: i32,
     /// What `.cfi_remember_state` put away, for `.cfi_restore_state` to bring back.
     remembered: Vec<i32>,
+    /// What `.cfi_personality` said: the routine the unwinder calls for this frame, and how the
+    /// pointer to it is written.
+    personality: Option<(u8, String)>,
+    /// What `.cfi_lsda` said: where the call site table the routine reads is, the same way.
+    lsda: Option<(u8, String)>,
 }
 
 /// The file, as it is being read.
@@ -435,6 +447,7 @@ impl Reader {
                 branch,
                 jump,
                 field: None,
+                leb: None,
                 line: self.line,
             });
         }
@@ -484,6 +497,7 @@ impl Reader {
             branch: None,
             jump,
             field: Some(field),
+            leb: None,
             line: self.line,
         });
         Ok(())
@@ -577,9 +591,10 @@ impl Reader {
     /// What the rules say is the same [`CfiOp`] the compiler's own functions are described with,
     /// and the table is written from them by the same code, so a function read from text and the
     /// same function compiled straight to an object unwind the same way. The directives that say
-    /// something this table has no row for, a personality routine and the rest, are passed over as
-    /// they were before any of this was read, which leaves those functions described as well as a
-    /// C function needs.
+    /// something this table has no row for are passed over as they were before any of this was
+    /// read, which leaves those functions described as well as a C function needs. The personality
+    /// routine and the call site table are kept, since a function with a `cleanup` under
+    /// `-fexceptions` is not described without them. See [`crate::unwind::Named`].
     fn cfi(&mut self, word: &str, args: &[String]) -> Result<(), Trouble> {
         match word {
             "cfi_startproc" => {
@@ -599,6 +614,8 @@ impl Reader {
                     rows: Vec::new(),
                     cfa: if self.aarch64 { 0 } else { 8 },
                     remembered: Vec::new(),
+                    personality: None,
+                    lsda: None,
                 };
                 self.frame = Some(frame);
                 return Ok(());
@@ -616,7 +633,9 @@ impl Reader {
             | "cfi_rel_offset"
             | "cfi_restore"
             | "cfi_remember_state"
-            | "cfi_restore_state" => {}
+            | "cfi_restore_state"
+            | "cfi_personality"
+            | "cfi_lsda" => {}
             _ => return Ok(()),
         }
         let (here, at) = (self.here, self.at());
@@ -630,8 +649,34 @@ impl Reader {
         }
         let op = match word {
             "cfi_endproc" => {
+                if frame.lsda.is_some() && frame.personality.is_none() {
+                    return Err(bad("a '.cfi_lsda' with no '.cfi_personality' to read it"));
+                }
                 frame.len = at - frame.start;
                 self.frames.push(frame);
+                return Ok(());
+            }
+            // Passed over on Mach-O, whose table is written without either for the reason
+            // `crate::unwind::table` gives, and which spells them in encodings of its own.
+            "cfi_personality" | "cfi_lsda" if self.macho => {
+                self.frame = Some(frame);
+                return Ok(());
+            }
+            "cfi_personality" | "cfi_lsda" => {
+                let said = self.handler(word, args);
+                let said = match said {
+                    Ok(said) => said,
+                    Err(trouble) => {
+                        self.frame = Some(frame);
+                        return Err(trouble);
+                    }
+                };
+                if word == "cfi_personality" {
+                    frame.personality = said;
+                } else {
+                    frame.lsda = said;
+                }
+                self.frame = Some(frame);
                 return Ok(());
             }
             "cfi_def_cfa" => {
@@ -681,6 +726,38 @@ impl Reader {
         frame.rows.push(((at - frame.start) as usize, op));
         self.frame = Some(frame);
         Ok(())
+    }
+
+    /// The encoding and the name `.cfi_personality` or `.cfi_lsda` gave, or nothing for the
+    /// encoding that says there is none.
+    ///
+    /// The name gets an entry in the symbol table, since the unwind table reaches it through a
+    /// relocation, and an encoding the table has no way to write is refused rather than written
+    /// some other way. See [`crate::unwind::pointer_size`].
+    fn handler(&mut self, word: &str, args: &[String]) -> Result<Option<(u8, String)>, Trouble> {
+        let Some(first) = args.first() else {
+            return Err(self.bad(&format!("a '.{word}' with no encoding")));
+        };
+        let encoding = self.number(first)?;
+        let encoding = u8::try_from(encoding)
+            .map_err(|_| self.bad(&format!("{encoding} is not the encoding of a pointer")))?;
+        if encoding == crate::unwind::OMIT {
+            return Ok(None);
+        }
+        // Eight bytes of pointer, since both machines this reads are sixty four bit ones.
+        if crate::unwind::pointer_size(encoding, 8, word == "cfi_personality").is_none() {
+            return Err(self.bad(&format!(
+                "a '.{word}' in encoding {encoding:#x}, which is not one the unwind table here \
+                 can write"
+            )));
+        }
+        let [_, name] = args else {
+            return Err(self.bad(&format!("a '.{word}' wants an encoding and a name")));
+        };
+        let name = self.named(name.trim())?;
+        let sym = self.sym(&name);
+        self.relocated.insert(sym);
+        Ok(Some((encoding, name)))
     }
 
     /// A distance in a frame rule, which is a number and not negative for the end of the frame.
@@ -766,6 +843,8 @@ impl Reader {
             "long" | "int" | "4byte" => self.data(&args, 4)?,
             "quad" | "8byte" | "xword" | "dword" => self.data(&args, 8)?,
             "octa" => self.octa(&args)?,
+            "uleb128" => self.leb(&args, false)?,
+            "sleb128" => self.leb(&args, true)?,
 
             "ascii" => self.text_bytes(&args, false)?,
             "asciz" | "string" => self.text_bytes(&args, true)?,
@@ -1227,6 +1306,60 @@ impl Reader {
                 branch: None,
                 jump: false,
                 field: None,
+                leb: None,
+                line: self.line,
+            });
+        }
+        Ok(())
+    }
+
+    /// `.uleb128` and `.sleb128`, a number in as many bytes as it needs, seven bits to a byte.
+    ///
+    /// What a call site table is written in, where each number is how far one label is from
+    /// another. A number that can be worked out where it is written is written in as few bytes as
+    /// it needs, which is what gas writes. That is every label behind it in this pass, since a pass
+    /// lays out each section as it goes and one whose branches do not reach is read again from the
+    /// top. One that cannot, which is a label further on, gets four bytes, since how many it needs
+    /// is not known until the label is reached and the bytes after it have to be put somewhere
+    /// first. LEB128 allows that: every byte but the last says another follows, and the extra ones
+    /// hold zeroes. Four bytes hold twenty eight bits, which is far more than the length of a call
+    /// site table, which is the forward one gcc writes.
+    fn leb(&mut self, args: &[String], signed: bool) -> Result<(), Trouble> {
+        if args.is_empty() {
+            return Err(self.bad("a data directive with nothing after it"));
+        }
+        for arg in args {
+            let sum = self.expression(arg)?;
+            let known = self.reduce(&sum).ok().filter(|residue| residue.left.is_empty());
+            if let Some(residue) = known {
+                let mut bytes = Vec::new();
+                if signed {
+                    crate::unwind::sleb(&mut bytes, residue.constant);
+                } else {
+                    let value = u64::try_from(residue.constant).map_err(|_| {
+                        self.bad(&format!(
+                            "{} is negative and '.uleb128' is unsigned",
+                            residue.constant
+                        ))
+                    })?;
+                    crate::unwind::uleb(&mut bytes, value);
+                }
+                self.put(&bytes)?;
+                continue;
+            }
+            let (part, at) = (self.here, self.at());
+            self.put(&[0x80, 0x80, 0x80, 0x00])?;
+            self.fixups.push(Fixup {
+                part,
+                at,
+                width: LEB_ROOM,
+                sum,
+                reach: Reach::Near,
+                slot: Reference::Got,
+                branch: None,
+                jump: false,
+                field: None,
+                leb: Some(signed),
                 line: self.line,
             });
         }
@@ -1669,9 +1802,17 @@ impl Reader {
             })
             .collect();
         let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
+        let named: Vec<Option<Named>> = self
+            .frames
+            .iter()
+            .map(|frame| {
+                let personality = frame.personality.clone()?;
+                Some(Named { personality, lsda: frame.lsda.clone() })
+            })
+            .collect();
         let conv: &CallRegs = if self.aarch64 { &AAPCS64 } else { &SYSV };
         let format = if self.macho { ObjectFormat::MachO } else { ObjectFormat::Elf };
-        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format) else {
+        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format, &named) else {
             return;
         };
         for frame in &self.frames {
@@ -1858,6 +1999,10 @@ impl Reader {
                 self.field(&fixup, field)?;
                 continue;
             }
+            if let Some(signed) = fixup.leb {
+                self.padded_leb(&fixup, signed)?;
+                continue;
+            }
             let line = fixup.line;
             let bad = |why: String| Trouble { line, why };
             // A name reached through the global offset table, or through the one entry of it a
@@ -2022,6 +2167,42 @@ impl Reader {
                 addend,
                 after,
             });
+        }
+        Ok(())
+    }
+
+    /// A LEB128 number that was waiting for a label further on, written into every byte it was
+    /// given. See [`Reader::leb`].
+    ///
+    /// It has to come out as a number, since there is no relocation that writes one of these, and
+    /// that is so for the distance between two labels in the same section, which is what one is.
+    fn padded_leb(&mut self, fixup: &Fixup, signed: bool) -> Result<(), Trouble> {
+        let line = fixup.line;
+        let bad = |why: String| Trouble { line, why };
+        let residue = self.reduce(&fixup.sum).map_err(bad)?;
+        if !residue.left.is_empty() {
+            return Err(bad(
+                "a LEB128 number that is not a distance inside one section, which only the linker \
+                 could work out and no relocation writes"
+                    .to_owned(),
+            ));
+        }
+        let value = residue.constant;
+        let room = 7 * u32::from(fixup.width);
+        let fits = if signed {
+            (-(1i64 << (room - 1))..(1i64 << (room - 1))).contains(&value)
+        } else {
+            (0..(1i64 << room)).contains(&value)
+        };
+        if !fits {
+            return Err(bad(format!("{value} does not fit in {} bytes of LEB128", fixup.width)));
+        }
+        let at = fixup.at as usize;
+        let bytes = &mut self.parts[fixup.part].bytes[at..at + usize::from(fixup.width)];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let seven = u8::try_from((value >> (7 * index)) & 0x7f).expect("seven bits");
+            let more = if index + 1 < usize::from(fixup.width) { 0x80 } else { 0 };
+            *byte = seven | more;
         }
         Ok(())
     }
@@ -2891,6 +3072,62 @@ mod tests {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
+    }
+
+    /// A listing that names a personality routine and a call site table, the way gcc writes a
+    /// function with a `cleanup` under `-fexceptions`, gets a header that names the routine and
+    /// says `zPLR`, a record that points at the table, and the table with its distances worked
+    /// out. The length of the rows is a label further on, so it is written in four bytes.
+    #[test]
+    fn a_listing_that_names_a_personality_routine_keeps_it_and_its_call_site_table() {
+        let text = "\t.text
+\t.globl\tf
+f:
+\t.cfi_startproc
+\t.cfi_personality 0x9b,DW.ref.__gcc_personality_v0
+\t.cfi_lsda 0x1b,.LLSDA0
+\tpushq\t%rbx
+\t.cfi_def_cfa_offset 16
+.LEHB0:
+\tcall\tg
+.LEHE0:
+\tpopq\t%rbx
+\tret
+.L2:
+\tmovq\t%rax, %rdi
+\tcall\t_Unwind_Resume
+\t.cfi_endproc
+\t.section\t.gcc_except_table,\"a\",@progbits
+.LLSDA0:
+\t.byte\t0xff
+\t.byte\t0xff
+\t.byte\t0x1
+\t.uleb128 .LLSDACSE0-.LLSDACSB0
+.LLSDACSB0:
+\t.uleb128 .LEHB0-f
+\t.uleb128 .LEHE0-.LEHB0
+\t.uleb128 .L2-f
+\t.uleb128 0
+.LLSDACSE0:
+";
+        let done = assembled(text);
+        let table = done.parts.iter().find(|part| part.name == ".gcc_except_table").expect("one");
+        // The push is one byte, the call five, and the pop and the return one each.
+        assert_eq!(table.bytes, [0xff, 0xff, 0x01, 0x84, 0x80, 0x80, 0x00, 1, 5, 8, 0]);
+        let frame = done.parts.iter().find(|part| part.name == ".eh_frame").expect("one");
+        assert!(frame.bytes.windows(5).any(|at| at == b"zPLR\0"), "{:x?}", frame.bytes);
+        let named: Vec<&str> = frame.relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
+        assert!(named.contains(&"DW.ref.__gcc_personality_v0"), "{named:?}");
+        assert!(named.contains(&".LLSDA0"), "{named:?}");
+    }
+
+    /// A `.cfi_lsda` in an encoding the table has no way to write is refused, rather than passed
+    /// over and the function's cleanups with it.
+    #[test]
+    fn a_call_site_table_in_an_encoding_the_table_cannot_write_is_refused() {
+        let text = "f:\n\t.cfi_startproc\n\t.cfi_personality 0x9b,p\n\t.cfi_lsda 0x10,t\n\tret\n\t.cfi_endproc\n";
+        let Err(trouble) = read(text, Arch::X86_64) else { panic!("read") };
+        assert!(trouble.why.contains("encoding 0x10"), "{}", trouble.why);
     }
 
     /// The frame rules of a Mac listing make the same table as on ELF, in the section and with the
