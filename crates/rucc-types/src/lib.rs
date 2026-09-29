@@ -91,10 +91,10 @@ mod record;
 mod types;
 
 pub use crate::classify::{
-    element, is_aggregate, is_arithmetic, is_array, is_atomic, is_complete, is_complex,
-    is_floating, is_function, is_integer, is_modifiable, is_object, is_pointer, is_real,
-    is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee, pointee_as_written,
-    real_part,
+    element, element_as_written, is_aggregate, is_arithmetic, is_array, is_atomic, is_complete,
+    is_complex, is_floating, is_function, is_integer, is_modifiable, is_object, is_pointer,
+    is_real, is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee,
+    pointee_as_written, real_part,
 };
 pub use crate::compat::{adjust_parameter, compatible, composite};
 pub use crate::convert::{
@@ -535,6 +535,43 @@ mod tests {
         assert_eq!(types.align_override(plain), NonZeroU32::new(2));
         // Below the sugar there is nothing to find, since only a typedef can carry one of these.
         assert_eq!(types.align_override(int), None);
+    }
+
+    #[test]
+    fn an_array_of_an_aligned_typedef_is_as_aligned_as_the_typedef() {
+        // mingw-w64's `jmp_buf`, which is `typedef _JBTYPE jmp_buf[16]` with `_JBTYPE` a sixteen
+        // byte record that a typedef aligns to sixteen. The canonical array holds the plain
+        // record, aligned to eight, so the alignment has to come from the element as written.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let part = types.array(ull, ArrayLen::Fixed(2));
+        let float128 = record(&mut types, RecordKind::Struct, &[member(part)]);
+        let sixteen = NonZeroU32::new(16).unwrap();
+        let jbtype = types.aligned_typedef(interner.intern("_JBTYPE"), float128, sixteen);
+        let array = types.array(jbtype, ArrayLen::Fixed(16));
+        let jmp_buf = types.typedef(interner.intern("jmp_buf"), array);
+
+        for target in [linux(), windows(), target("x86_64-pc-windows-gnu")] {
+            assert_eq!(layout(&types, float128, &target), Ok(Layout::new(16, 8)));
+            assert_eq!(layout(&types, array, &target), Ok(Layout::new(256, 16)));
+            assert_eq!(layout(&types, jmp_buf, &target), Ok(Layout::new(256, 16)));
+            // Through another name for the element, and one array deeper.
+            let alias = types.typedef(interner.intern("alias_t"), jbtype);
+            let aliased = types.array(alias, ArrayLen::Fixed(16));
+            assert_eq!(layout(&types, aliased, &target), Ok(Layout::new(256, 16)));
+            let two = types.array(jmp_buf, ArrayLen::Fixed(2));
+            assert_eq!(layout(&types, two, &target), Ok(Layout::new(512, 16)));
+            // A member of the type lands at a multiple of sixteen and takes the record with it.
+            let char_ty = types.int(IntKind::Char);
+            let fields = [member(char_ty), member(jmp_buf)];
+            let laid_out = lay_out_on(&target, &types, RecordKind::Struct, &fields);
+            assert_eq!(offsets(&laid_out), [0, 128]);
+            assert_eq!(laid_out.layout, Layout::new(272, 16));
+            // And a variable length one, which has an alignment and no size.
+            let vla = types.array(jbtype, ArrayLen::Variable(VlaId(0)));
+            assert_eq!(align(&types, vla, &target), Ok(16));
+        }
     }
 
     #[test]
