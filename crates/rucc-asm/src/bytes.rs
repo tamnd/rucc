@@ -226,7 +226,7 @@ pub fn assemble(
     let mut frames = None;
     if let Some(conv) = target.call_regs {
         if unwind {
-            text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format)?;
+            text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format, &[])?;
         } else if lines {
             frames = unwind::debug_frame(&text.funcs, &rows, conv, target.object_format);
         }

@@ -1129,15 +1129,9 @@ fn generate(
             // and it is one path to get right rather than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
             if aarch64 || globals.kept() || rucc_asm::kept(&funcs, names, target) {
-                // The reader keeps the frame rows of a listing but not the personality routine or
-                // the call site tables, so a unit with a landing pad read back would unwind
-                // straight past its cleanups. Saying so beats a program that skips them.
-                if funcs.iter().any(|func| !func.landings.is_empty()) {
-                    return Err(vec![unsupported(
-                        "a cleanup that runs during an unwind, in a unit whose listing is read \
-                         back by the assembler",
-                    )]);
-                }
+                // A unit with a landing pad comes through this too. The listing names the
+                // personality routine and the call site table with `.cfi_personality` and
+                // `.cfi_lsda`, writes the table in `.gcc_except_table`, and the reader keeps both.
                 let print = if opts.debug_info { rucc_asm::print_marked } else { rucc_asm::print };
                 let listing =
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
@@ -3680,6 +3674,29 @@ decl #0 x : int object external static defined
         assert!(!has(b"rucc_row"), "a row label reached the symbol table");
     }
 
+    /// Under `-fexceptions` a `cleanup` handler on AArch64 gets its landing pad, where it used to be
+    /// refused. The object is the listing read back, so this is the reader keeping the personality
+    /// routine and the call site table the listing names.
+    #[test]
+    fn an_aarch64_object_keeps_the_landing_pads_of_its_cleanups() {
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.exceptions = true;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = concat!(
+            "void g(void);\n",
+            "void done(int *p);\n",
+            "void f(void) { int a __attribute__((cleanup(done))) = 1; g(); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let Artifact::Object { bytes, .. } = result.artifact else { panic!("an object") };
+        let has = |name: &[u8]| bytes.windows(name.len()).any(|at| at == name);
+        assert!(has(b".gcc_except_table\0"), "no call site table");
+        assert!(has(b"zPLR\0"), "no header naming the personality routine");
+        assert!(has(b"DW.ref.__gcc_personality_v0\0"));
+    }
+
     /// gcc's AArch64 vector type names are there before any header, which glibc's `<math.h>`
     /// needs, a declaration can still hide one, and on x86-64 they are ordinary identifiers.
     #[test]
@@ -5572,8 +5589,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(has(b"zR\0"), "and the plain one for the functions with no pad");
         assert!(has(b"DW.ref.__gcc_personality_v0\0"), "the pointer the header reads through");
 
+        // A Mach-O target, whose unwind table is written without either, is refused rather than
+        // given a pad the unwinder would never send it to.
         opts.emit = EmitKind::Ir;
-        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
         let result = run(&opts, source);
         assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
         assert!(result.messages[0].contains("landing pad"), "{:?}", result.messages);

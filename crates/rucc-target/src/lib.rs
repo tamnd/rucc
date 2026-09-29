@@ -600,9 +600,9 @@ pub struct TargetInfo {
     /// Whether the output says where an unwind lands, which is the language specific data area
     /// beside a function's call frame information that a cleanup under `-fexceptions` needs.
     ///
-    /// x86-64 ELF and nothing else yet. It is a claim about what this compiler writes rather than
-    /// about what the platform can do, so lowering turns down a cleanup it could not honour on the
-    /// others instead of emitting one the unwinder would skip.
+    /// ELF on x86-64 and AArch64 and nothing else yet. It is a claim about what this compiler
+    /// writes rather than about what the platform can do, so lowering turns down a cleanup it could
+    /// not honour on the others instead of emitting one the unwinder would skip.
     pub landing_pads: bool,
     /// Whether a table in read only data may hold how far a label is from the table, as a four
     /// byte relocation measured from where it is written.
@@ -856,7 +856,9 @@ impl TargetInfo {
             // day a backend emits a sixteen byte atomic is the day this stops being one number.
             lock_free_width: 64,
             object_format: ObjectFormat::from_tuple(target.object_format()),
-            landing_pads: x86_64_elf(target, layout.pointer_size),
+            landing_pads: x86_64_elf(target, layout.pointer_size)
+                || (target.arch() == tuple::Arch::Aarch64
+                    && target.object_format() == tuple::ObjectFormat::Elf),
             relative_tables: x86_64_elf(target, layout.pointer_size),
             bit_field_style: bit_field_style(target),
             unnamed_bit_field_aligns: unnamed_bit_field_aligns(target),

@@ -4,9 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Under `-fexceptions` a `cleanup` handler works on AArch64 Linux, where it used to be refused. A handler run by `pthread_exit` or `pthread_cancel` inside its scope runs, the same as with gcc, at every optimization level and through `-S`.
+
 ### Fixed
 
 - A DLL linked for a windows-gnu target names its entry point with `-e`, as gcc does, `DllMainCRTStartup` or `_DllMainCRTStartup@12` on i686. lld 19 and older do not choose it for a MinGW DLL and looked for MSVC's `_DllMainCRTStartup` instead, so `-shared` failed with that name undefined (#2069).
+- The assembler keeps what `.cfi_personality` and `.cfi_lsda` say, where it used to pass over both, so a function gcc compiled with a `cleanup` under `-fexceptions` and rucc assembled from the listing ran none of its handlers on an unwind. It also reads `.uleb128` and `.sleb128`, which the call site table is written in.
 
 ## 0.14.1
 
