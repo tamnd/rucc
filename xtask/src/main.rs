@@ -1144,7 +1144,7 @@ fn stale_lock(root: &Path) -> Result<Vec<String>> {
         }
         // And the other way: an edge the manifest has dropped, which `--locked` refuses as well.
         // `rucc-lex` and `rucc-opt` kept `rucc-tuple` in the lockfile after they stopped asking for
-        // it, and 0.15.2 got as far as `cargo publish` before anything said so.
+        // it, and 0.15.3 got as far as `cargo publish` before anything said so.
         let mut stale: Vec<&String> = has
             .into_iter()
             .flatten()
