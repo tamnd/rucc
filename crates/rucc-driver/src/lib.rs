@@ -3773,6 +3773,10 @@ pub fn run(args: &[String]) -> i32 {
             if opts.emit != EmitKind::Executable {
                 return compile_all(&opts, &plan);
             }
+            if let Some(why) = unlinkable(&opts) {
+                let _ = writeln!(std::io::stderr().lock(), "rucc: error: {why}");
+                return 1;
+            }
             link_all(&opts, &plan, &link, verbose)
         }
         Err(e) => {
@@ -3782,6 +3786,24 @@ pub fn run(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// Why a link that was asked for cannot be made, when that is known before anything is compiled.
+///
+/// The checked modes need `runtime/rucc-safe-rt` in the program, and that runtime is written
+/// against Unix: shadow memory through `mmap`, reports through a signal handler, and the maps read
+/// out of `/proc`. There is no Windows build of it, so a Windows program compiled with one used to
+/// fail at the link with a page of undefined `__rucc_check_` names. Saying so before the link
+/// is kinder until the port is done. Only the link is refused: an object or a listing built
+/// with the checks in is still what was asked for, and is what a test of the instrumentation reads.
+fn unlinkable(opts: &Options) -> Option<String> {
+    (opts.safety.instruments() && opts.target.os == rucc_target::Os::Windows).then(|| {
+        format!(
+            "-fsafety={}: the checked modes are not available on a Windows target yet, because \
+             the runtime they need has not been ported to Windows. -c still builds the object",
+            opts.safety
+        )
+    })
 }
 
 #[cfg(test)]
@@ -4822,6 +4844,20 @@ mod tests {
         let e = parse_args(&args(&["-fsafety=on", "a.c"])).unwrap_err();
         assert!(e.message.contains("is not a safety tier"), "{}", e.message);
         assert!(parse_args(&args(&["-fsafety", "a.c"])).is_err());
+    }
+
+    /// A checked mode on a Windows target is refused at the link, with a message that says why,
+    /// rather than left to fail there on names the runtime would have defined. The object is
+    /// still built, and every other target links as before.
+    #[test]
+    fn a_checked_mode_on_windows_is_refused_at_the_link_and_nowhere_else() {
+        let (opts, _) = compile(&["--target=x86_64-windows-gnu", "-fsafety=detect", "a.c"]);
+        let why = unlinkable(&opts).expect("a refusal");
+        assert!(why.contains("not available on a Windows target"), "{why}");
+        let (opts, _) = compile(&["--target=x86_64-windows-gnu", "-fsafety=off", "a.c"]);
+        assert_eq!(unlinkable(&opts), None);
+        let (opts, _) = compile(&["--target=x86_64-linux-gnu", "-fsafety=detect", "a.c"]);
+        assert_eq!(unlinkable(&opts), None);
     }
 
     #[test]

@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- `-fsafety=detect` and the other checked modes are refused when linking for a Windows target, with a message saying the runtime they need has not been ported yet. The link used to fail on the runtime's undefined `__rucc_check_` names instead. `-c`, `-S` and `--emit=ir` still build with the checks in (#2069).
+
 ## 0.14.0
 
 The end of W2: the constructs real Windows programs use. x86-64 Windows gets `dllimport`, `dllexport` and `.refptr`, DLLs built with `-shared`, `#pragma comment(lib)`, and `ms_abi` and `sysv_abi` as real calling conventions, and the assembler reads COFF section flags.
