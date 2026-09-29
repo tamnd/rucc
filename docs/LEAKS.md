@@ -20,6 +20,14 @@ A thread-local variable is reached through the selector's `Symbols` too, which n
 
 The address constructor enum moved from `rucc_target::x86_64` to `rucc_target::Address`, because the rule files for both machines use the same names for the same shapes. AArch64 lists the two it has.
 
+The leaks outside `rucc-codegen`, found by searching every pipeline crate for a test of `Arch`, `Os` or `ObjectFormat` once AArch64 compiled whole programs, moved in #2112:
+
+- `rucc-lower` gave a function landing pads when the target was x86-64 ELF with 64-bit pointers, and `rucc-opt` built switch tables of 4-byte relative offsets under the same test. Both now read `TargetInfo::landing_pads` and `TargetInfo::relative_tables`. Those are still true only for x86-64 ELF, but a new target is given them by its row in the table rather than because its name looks like x86-64.
+- The inliner in `rucc-opt` chose how to forward the anonymous arguments of a call by matching on the architecture and the operating system. It now asks which calling convention the target's registers point at, which is what the question was about.
+- `#if` and `#embed` in `rucc-pp` read a character constant as a signed `char`, x86-64's choice. They now take the sign of plain `char` from the target, and the width and sign of `wchar_t` for an `L` constant, so `#if '\xff' < 0` is false on aarch64 Linux.
+- `rucc-lex` gave `f64x` the x87 format on x86-64 and accepted `w` only there. The format now comes from `TargetInfo::float64x_format`, and `w` is accepted where `long double` is the x87 format, which includes i686 and excludes x86-64 MSVC.
+- The coverage check in `rucc-codegen`, which makes sure every IR opcode at every width is lowered by a rule or is a hole somebody wrote down, read only the x86-64 list of names a rule is written at. It now takes the names from the table it is checking, and it found that AArch64 had no lowering for 8 and 16 bit division.
+
 ## Still there
 
 These are in code that runs, not in tests. A test that builds x86-64 instructions by hand to exercise a pass is not a leak, since the pass under test only sees names.
