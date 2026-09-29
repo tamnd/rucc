@@ -599,6 +599,13 @@ pub enum Opcode {
     /// no frame to have kept: the machine holds the address in a place of its own, so this is one
     /// instruction on every target that has the builtin at all.
     ThreadPointer,
+    /// `__builtin_sponentry`, where the stack pointer was when the function was entered.
+    ///
+    /// It takes nothing and answers a pointer, and on AArch64, the one machine that has the
+    /// builtin, it is where the arguments the caller left on the stack begin. So it is one
+    /// instruction off the stack pointer, finished like a read of such an argument once the frame
+    /// is known, and there is no frame pointer to keep for it.
+    SpEntry,
     /// `__builtin_apply_args`, the address of a block holding every argument the function it is in
     /// was called with.
     ///
@@ -852,6 +859,7 @@ impl Opcode {
             Self::FrameAddress => "frame_address",
             Self::ReturnAddress => "return_address",
             Self::ThreadPointer => "thread_pointer",
+            Self::SpEntry => "sp_entry",
             Self::ApplyArgs => "apply_args",
             Self::Apply => "apply",
             Self::ObjectSize => "object_size",
@@ -1004,6 +1012,8 @@ impl Opcode {
                 // which one it is part way through a function, so two of these in one function
                 // are the same value and either may be moved to where the other is.
                 | Self::ThreadPointer
+                // Where this function was entered, which is one address for the whole of the call.
+                | Self::SpEntry
                 // A question about an address that reads nothing: the answer is a fact about where
                 // the address came from, which is the same fact wherever the question is asked.
                 | Self::ObjectSize
@@ -1584,6 +1594,7 @@ static ALL: &[Opcode] = &[
     Opcode::FrameAddress,
     Opcode::ReturnAddress,
     Opcode::ThreadPointer,
+    Opcode::SpEntry,
     Opcode::ApplyArgs,
     Opcode::Apply,
     Opcode::ObjectSize,

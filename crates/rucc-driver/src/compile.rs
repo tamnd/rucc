@@ -5016,6 +5016,26 @@ decl #0 x : int object external static defined
         assert!(!text.contains("GOTTPOFF"), "{text}");
     }
 
+    /// `__builtin_sponentry` on AArch64, which is where the caller's stack arguments begin.
+    ///
+    /// The function below saves the frame pair and nothing else, so the stack pointer it was
+    /// entered with is sixteen above the one it runs with, and that is what clang 18 writes for it
+    /// too. On x86-64 the builtin is refused, as clang refuses it.
+    #[test]
+    fn sponentry_is_the_stack_pointer_the_function_was_entered_with() {
+        let mut opts = freestanding();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let source = "void g(void *);\nvoid f(void) { g(__builtin_sponentry()); }\n";
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("add x0, sp, #16"), "{text}");
+        let result = run(&freestanding(), source);
+        assert_eq!(result.errors, 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("only available on AArch64"), "{:?}", result.messages);
+    }
+
     /// The four hints and the one thing that decides between them, which is the locality.
     ///
     /// A prefetch promises nothing, so what is checked here is the instruction rather than any

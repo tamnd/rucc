@@ -553,6 +553,7 @@ impl<'a> Printer<'a> {
             ExprKind::Unreachable => "unreachable".to_owned(),
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
+            ExprKind::SpEntry => "sp-entry".to_owned(),
             ExprKind::CpuModel { object, word, test } => {
                 let asked = match test {
                     CpuTest::Bit(bit) => format!("bit {bit}"),
@@ -584,6 +585,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Trap
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
+            | ExprKind::SpEntry
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {

@@ -1423,6 +1423,12 @@ impl<'a> Lowering<'a> {
                     self.thread_pointer(inst)?;
                     continue;
                 }
+                // Where the stack pointer was on entry, built here because it is an address in
+                // the caller's argument area, which only the frame knows the distance to.
+                Opcode::SpEntry => {
+                    self.sp_entry(inst)?;
+                    continue;
+                }
                 // What a named machine register holds, built here for the reason above written
                 // about any register rather than about one: which register it is is a string
                 // beside the instruction, and a rule matches on an opcode and a type and could
@@ -3492,6 +3498,29 @@ impl<'a> Lowering<'a> {
         let span = self.source.span(inst);
         let reg = self.new_reg(result);
         self.read_thread_pointer(block, span, reg);
+        Ok(())
+    }
+
+    /// `__builtin_sponentry`, the stack pointer this function was entered with.
+    ///
+    /// On AArch64 that is where the caller's arguments on the stack start, so it is the address
+    /// of the first of them, recorded at zero the way [`Self::overflow`] records the first one the
+    /// signature did not name and finished with the rest once the frame is laid out. Sema refuses
+    /// the builtin on every other machine, and this does too, since on x86-64 the return address
+    /// sits between the two and zero would be the wrong answer.
+    fn sp_entry(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        if !self.on_aarch64() {
+            return Err(self.unsupported(inst));
+        }
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let reg = self.new_reg(result);
+        let lea = self.named(self.selector.frame.lea);
+        let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
+        let made =
+            self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
+        self.stack.arguments.push((made, 0));
         Ok(())
     }
 

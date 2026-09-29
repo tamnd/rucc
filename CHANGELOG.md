@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `__builtin_sponentry` on AArch64, the stack pointer the function was entered with, which the mingw-w64 `setjmp` passes to `_setjmp` on ARM64 Windows. clang writes the same address. On other targets the call is refused, as clang refuses it. (#2198)
+
 ## 0.16.0
 
 The W4 release, for the MSVC environment on Windows. `x86_64-windows-msvc` is tier 3: `rucc --fetch x86_64-windows-msvc` downloads the CRT and the Windows SDK from Microsoft, programs link with lld-link against the static CRT by default, and the ABI differential against cl.exe is clean. Most of that shipped in 0.15.3 already. This release adds the last fix W4 needed, for dllimport data from the static CRT, along with `rucc --dlltool` from W3 and the first AArch64 Windows pieces from W5.
