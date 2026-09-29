@@ -63,7 +63,7 @@ mod typenames;
 pub mod x86_64;
 
 pub use crate::abi::{
-    AbiDescription, Arg, Call, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, Variadic,
+    AbiDescription, Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, Variadic,
 };
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
@@ -73,7 +73,8 @@ pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
 pub use crate::machine::{Address, MachineInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{
-    CallRegs, Chkstk, ClassInfo, Guard, PhysReg, Places, RegClass, RegFile, Segment, Trace, Where,
+    CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, Places, RegClass, RegFile, Segment,
+    Trace, Where,
 };
 pub use crate::short::{Copied, Narrowed, ShortInsts, Stepped, Tested, Zeroed};
 pub use crate::timing::{Timing, TimingInsts, Unit};

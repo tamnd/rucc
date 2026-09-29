@@ -59,8 +59,11 @@ use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
-use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Segment, Trace};
+use crate::regs::{
+    CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
+};
 use crate::short::{Copied, Narrowed, ShortInsts, Stepped, Tested, Zeroed};
+use rucc_abi::Convention;
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -1233,7 +1236,48 @@ static SSE_ORDER: [PhysReg; 16] = [
 ];
 
 /// Where a SysV AMD64 call puts things, per `spec/12-abi-and-runtime.md` section 12.2.
-pub static SYSV: CallRegs = CallRegs {
+///
+/// The set itself is [`SYSV_REGISTERS`] with the list of conventions this platform has put on it,
+/// and the list is what makes the set a platform's rather than only a convention's.
+pub static SYSV: CallRegs =
+    CallRegs { conventions: Conventions(&SYSV_CONVENTIONS), ..SYSV_REGISTERS };
+
+/// The two conventions a function on an x86-64 platform other than Windows may have: its own, and
+/// the one `__attribute__((ms_abi))` asks for.
+static SYSV_CONVENTIONS: [(Convention, &CallRegs); 2] =
+    [(Convention::Target, &SYSV), (Convention::Ms, &MS_ON_SYSV)];
+
+/// A function written `__attribute__((ms_abi))` on an x86-64 platform other than Windows.
+///
+/// Every register is where Windows puts it: the four arguments in `rcx`, `rdx`, `r8` and `r9` or
+/// the first four vector registers by position, the thirty-two bytes of shadow the caller leaves
+/// above the return address, `rsi`, `rdi` and `xmm6` to `xmm15` preserved, and no red zone, since
+/// that is Windows' rule and a function the other convention calls cannot count on the space below
+/// its stack pointer. Everything else is the platform's, because the platform is still this one:
+/// the frame pointer goes up first, the canary is at `%fs:40`, a large frame is not probed, and a
+/// `va_list` is the structure this platform's `<stdarg.h>` names. This is what gcc does with the
+/// attribute on Linux, measured rather than guessed.
+pub static MS_ON_SYSV: CallRegs = CallRegs {
+    abi: &rucc_abi::abis::WIN64,
+    int_args: &WIN64_INT_ARGS,
+    sse_args: &WIN64_SSE_ARGS,
+    shared_positions: true,
+    int_returns: &WIN64_INT_RETURNS,
+    sse_returns: &WIN64_SSE_RETURNS,
+    x87_returns: &WIN64_X87_RETURNS,
+    int_saved: &WIN64_INT_SAVED,
+    sse_saved: &WIN64_SSE_SAVED,
+    int_order: &WIN64_INT_ORDER,
+    vector_count: None,
+    red_zone: 0,
+    shadow: 32,
+    conventions: Conventions(&SYSV_CONVENTIONS),
+    ..SYSV_REGISTERS
+};
+
+/// The SysV convention with this platform's facts and no list of conventions yet, which
+/// [`SYSV`] and [`MS_ON_SYSV`] are both built from.
+const SYSV_REGISTERS: CallRegs = CallRegs {
     abi: &rucc_abi::abis::SYSV_AMD64,
     int_class: GPR,
     sse_class: XMM,
@@ -1282,6 +1326,7 @@ pub static SYSV: CallRegs = CallRegs {
     // that is the guard the kernel leaves below every stack, which is what
     // `-fstack-clash-protection` is about, and that is a flag rather than the convention.
     chkstk: None,
+    conventions: Conventions::ONLY,
 };
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
@@ -1303,7 +1348,10 @@ static WIN64_INT_ORDER: [PhysReg; 14] =
 /// Two of these rather than one, and the only thing they disagree about is what the routine in the
 /// paragraph below is called. Everything else on this platform is the same under either runtime,
 /// which is the whole point of a calling convention.
-pub static WIN64: CallRegs = win64(Chkstk { name: "__chkstk", size: RAX });
+pub static WIN64: CallRegs = CallRegs {
+    conventions: Conventions(&WIN64_CONVENTIONS),
+    ..win64(Chkstk { name: "__chkstk", size: RAX })
+};
 
 /// The same convention where the GNU runtime provides the routine rather than Microsoft's.
 ///
@@ -1311,7 +1359,58 @@ pub static WIN64: CallRegs = win64(Chkstk { name: "__chkstk", size: RAX });
 /// on this target carries no leading underscore at all, so the three in the assembly are three in
 /// the symbol. Both routines do the same thing and both leave the stack pointer where they found
 /// it, which is why nothing but the name changes here.
-pub static MINGW64: CallRegs = win64(Chkstk { name: "___chkstk_ms", size: RAX });
+pub static MINGW64: CallRegs = CallRegs {
+    conventions: Conventions(&MINGW64_CONVENTIONS),
+    ..win64(Chkstk { name: "___chkstk_ms", size: RAX })
+};
+
+/// The two conventions a function on Windows under Microsoft's runtime may have: its own, and the
+/// one `__attribute__((sysv_abi))` asks for.
+static WIN64_CONVENTIONS: [(Convention, &CallRegs); 2] =
+    [(Convention::Target, &WIN64), (Convention::Sysv, &SYSV_ON_WIN64)];
+
+/// The same two under the GNU runtime, which differ from those above only in the routine a large
+/// frame calls.
+static MINGW64_CONVENTIONS: [(Convention, &CallRegs); 2] =
+    [(Convention::Target, &MINGW64), (Convention::Sysv, &SYSV_ON_MINGW64)];
+
+/// A function written `__attribute__((sysv_abi))` on Windows under Microsoft's runtime.
+pub static SYSV_ON_WIN64: CallRegs = CallRegs {
+    conventions: Conventions(&WIN64_CONVENTIONS),
+    ..sysv_on_windows(Chkstk { name: "__chkstk", size: RAX })
+};
+
+/// A function written `__attribute__((sysv_abi))` on Windows under the GNU runtime.
+pub static SYSV_ON_MINGW64: CallRegs = CallRegs {
+    conventions: Conventions(&MINGW64_CONVENTIONS),
+    ..sysv_on_windows(Chkstk { name: "___chkstk_ms", size: RAX })
+};
+
+/// The SysV convention on Windows, given the routine the runtime in question provides.
+///
+/// Every register is where SysV puts it: six integer arguments from `rdi`, eight vector ones from
+/// `xmm0`, the count of vector registers in `al` for a variadic call, no shadow, and only `rbx`,
+/// `rbp` and `r12` to `r15` preserved, so a Windows function that calls one of these has to keep
+/// its own `rsi`, `rdi` and `xmm6` to `xmm15` somewhere the call cannot reach. Everything else is
+/// the platform's. The frame pointer goes up after the frame, since the unwind record Windows reads
+/// cannot say otherwise and a function of either convention is unwound by the same reader. A large
+/// frame is still probed, because the stack still grows one guard page at a time. There is no
+/// canary or profiling hook, as there is none for a Windows function. And no red zone: gcc does use
+/// one in a `sysv_abi` leaf here, but nothing on Windows promises that the space below the stack
+/// pointer survives, so a function of this compiler does not count on it and loses only a few
+/// bytes of frame for it.
+const fn sysv_on_windows(chkstk: Chkstk) -> CallRegs {
+    let windows = win64(chkstk);
+    CallRegs {
+        late_frame_pointer: windows.late_frame_pointer,
+        red_zone: 0,
+        list: windows.list,
+        guard: windows.guard,
+        trace: windows.trace,
+        chkstk: windows.chkstk,
+        ..SYSV_REGISTERS
+    }
+}
 
 /// The Windows convention, given the routine the runtime in question provides.
 const fn win64(chkstk: Chkstk) -> CallRegs {
@@ -1363,6 +1462,7 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         // found them. So the caller takes the frame afterwards, and takes it with a subtraction of
         // that same register rather than of the constant written a second time.
         chkstk: Some(chkstk),
+        conventions: Conventions::ONLY,
     }
 }
 
@@ -1481,6 +1581,33 @@ mod tests {
         assert_eq!((WIN64.red_zone, WIN64.shadow), (0, 32));
         assert_eq!(SYSV.vector_count, Some(RAX));
         assert_eq!(WIN64.vector_count, None);
+    }
+
+    /// The convention an attribute asks for takes its registers from the other platform and
+    /// everything else from this one, and every set on a platform can find every other.
+    #[test]
+    fn the_other_convention_is_the_other_registers_on_this_platform() {
+        let ms = SYSV.under(Convention::Ms).expect("Linux has the Windows convention");
+        assert!(std::ptr::eq(ms, &MS_ON_SYSV));
+        assert_eq!(ms.int_args, WIN64.int_args);
+        assert!(ms.preserves_int(RDI) && ms.preserves_sse(xmm(6)));
+        assert_eq!((ms.red_zone, ms.shadow, ms.vector_count), (0, 32, None));
+        assert_eq!(ms.guard, SYSV.guard, "the canary is still the platform's");
+        assert!(!ms.late_frame_pointer && ms.chkstk.is_none());
+        assert!(std::ptr::eq(ms.under(Convention::Target).unwrap(), &SYSV));
+        assert!(SYSV.under(Convention::Sysv).is_none(), "the target's own is only ever Target");
+
+        for (windows, sysv) in [(&WIN64, &SYSV_ON_WIN64), (&MINGW64, &SYSV_ON_MINGW64)] {
+            let found = windows.under(Convention::Sysv).expect("Windows has the SysV convention");
+            assert!(std::ptr::eq(found, sysv));
+            assert_eq!(sysv.int_args, SYSV.int_args);
+            assert!(!sysv.preserves_int(RDI) && !sysv.preserves_sse(xmm(6)));
+            assert_eq!((sysv.red_zone, sysv.shadow, sysv.vector_count), (0, 0, Some(RAX)));
+            assert_eq!(sysv.chkstk, windows.chkstk, "a large frame is still probed");
+            assert!(sysv.late_frame_pointer && sysv.guard.is_none());
+            assert!(std::ptr::eq(sysv.under(Convention::Target).unwrap(), windows));
+            assert!(windows.under(Convention::Ms).is_none());
+        }
     }
 
     #[test]
