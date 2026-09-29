@@ -661,7 +661,11 @@ pub fn compile_recording(
     // Only asked at all where the locals are allowed to share, since this is the whole of what says
     // whether a local may. The spill slots are laid out either way and this says nothing about
     // them.
-    let reach = (flags.reuse && !alone && std::env::var_os("RUCC_SHARE_LOCALS").is_some())
+    let apart = std::env::var("RUCC_NO_SHARE").is_ok_and(|list| {
+        let called = names.resolve(func.name);
+        list.split(',').any(|one| one == "*" || one == called)
+    });
+    let reach = (flags.reuse && !alone && !apart)
         .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
 
     // The instructions as they are now, for the locals the front end kept in values. The

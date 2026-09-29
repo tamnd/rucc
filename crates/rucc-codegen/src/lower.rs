@@ -921,6 +921,10 @@ struct Lowering<'a> {
     written: Vec<Option<(mir::Block, u32)>>,
     /// How many calls have been lowered so far, which is what [`Self::written`] counts with.
     crossed: u32,
+    /// Scratch: whether this function keeps its locals' addresses the old way.
+    keep_locals: bool,
+    /// Scratch: whether names are rebuilt.
+    remat_names: bool,
     /// How many times each IR value is read, which is what says whether an instruction may be
     /// folded into the one that reads it.
     uses: Vec<u32>,
@@ -1104,6 +1108,11 @@ impl<'a> Lowering<'a> {
                 }
             }
         }
+        let keep_locals = std::env::var("RUCC_KEEP_LOCALS").is_ok_and(|list| {
+            let called = names.resolve(name);
+            list.split(',').any(|one| one == "*" || one == called)
+        });
+        let remat_names = std::env::var_os("RUCC_KEEP_NAMES").is_none();
         let mut out = mir::Func::new(name);
         out.align = source.align;
         // Carried rather than worked out here, because where a function was declared is a fact
@@ -1118,6 +1127,8 @@ impl<'a> Lowering<'a> {
             regs: vec![None; counts.values],
             written: vec![None; counts.values],
             crossed: 0,
+            keep_locals,
+            remat_names,
             blocks: vec![None; counts.blocks],
             uses,
             at: None,
@@ -1920,6 +1931,10 @@ impl<'a> Lowering<'a> {
         // instruction, which is the whole of what tells the two apart here.
         if let Some(&size) = self.source[data.args].first() {
             return self.grow(inst, size);
+        }
+        if self.keep_locals {
+            let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+            return self.local_address(inst, result).map(|_| ());
         }
         self.local(inst).map(|_| ())
     }
@@ -6823,12 +6838,11 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         match data.opcode {
             Opcode::IConst => Some(Rebuilt::Constant(inst)),
-            Opcode::Alloca if self.source[data.args].is_empty() => Some(Rebuilt::Local(inst)),
+            Opcode::Alloca if self.source[data.args].is_empty() && !self.keep_locals => {
+                Some(Rebuilt::Local(inst))
+            }
             Opcode::GlobalAddr => match data.extra {
-                Extra::Symbol(symbol)
-                    if !self.elsewhere.thread(symbol)
-                        && std::env::var_os("RUCC_REMAT_NAMES").is_some() =>
-                {
+                Extra::Symbol(symbol) if !self.elsewhere.thread(symbol) && self.remat_names => {
                     Some(Rebuilt::Name(inst))
                 }
                 _ => None,
@@ -6853,7 +6867,7 @@ impl<'a> Lowering<'a> {
     /// stack pointer, and the walk stops at one of those. A constant is left where it is, because
     /// some of the instructions a constant is written with write the flags as well.
     fn passed_late(&mut self, made: &[mir::Inst]) {
-        if std::env::var_os("RUCC_PASS_LATE").is_none() {
+        if std::env::var_os("RUCC_NO_PASS_LATE").is_some() {
             return;
         }
         let sp = mir::Reg::physical(self.conv.stack_pointer);
