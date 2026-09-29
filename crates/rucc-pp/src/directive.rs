@@ -108,6 +108,11 @@ pub struct Preprocessor {
     /// on any other target gcc warns that they are ignored, so `__has_attribute` answers nought
     /// for them there. Set by [`Preprocessor::predefine`], which is where the target arrives.
     second_convention: bool,
+    /// Whether the target is AArch64, the only one `__builtin_sponentry` is there on. mingw-w64's
+    /// `<setjmp.h>` asks `__has_builtin` for it and passes it to `_setjmp` if the answer is yes,
+    /// and sema refuses it anywhere else, so the answer has to be no off AArch64. Set by
+    /// [`Preprocessor::predefine`].
+    aarch64: bool,
     /// Whether `__pragma(...)` is Microsoft's pragma operator here rather than an identifier,
     /// which it is where clang has Microsoft extensions on: the `*-windows-msvc` rows unless
     /// `-fno-ms-extensions` said otherwise, and any row under `-fms-extensions`. Set by
@@ -223,6 +228,7 @@ impl Preprocessor {
         cx: &mut Context<'_>,
     ) -> Result<(), SourceMapFull> {
         self.second_convention = target.tuple.arch().as_str() == "x86_64";
+        self.aarch64 = target.tuple.arch().as_str() == "aarch64";
         let msvc = Triple::from_tuple(target.tuple)
             .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
         self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
@@ -1262,6 +1268,7 @@ impl Preprocessor {
                     }
                     Kind::Attribute => rucc_gnu::has_attribute(name),
                     Kind::CAttribute => rucc_gnu::has_c_attribute(name),
+                    Kind::Builtin if !self.aarch64 && name == "__builtin_sponentry" => 0,
                     Kind::Builtin => rucc_gnu::has_builtin(name),
                     Kind::Feature => rucc_gnu::has_feature(name),
                     Kind::Extension => rucc_gnu::has_extension(name),
@@ -3165,6 +3172,23 @@ mod tests {
             ("x86_64-unknown-linux-gnu", "1 1"),
             ("x86_64-w64-windows-gnu", "1 1"),
             ("aarch64-unknown-linux-gnu", "0 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// clang has it on AArch64 alone, and mingw-w64's `<setjmp.h>` takes a yes anywhere as
+    /// leave to call `_setjmp(buf, __builtin_sponentry())`, which sema then refuses.
+    #[test]
+    fn sponentry_is_there_on_aarch64_alone() {
+        let asked = "__has_builtin(__builtin_sponentry)\n";
+        for (triple, answer) in [
+            ("aarch64-w64-windows-gnu", "1"),
+            ("aarch64-unknown-linux-gnu", "1"),
+            ("x86_64-w64-windows-gnu", "0"),
+            ("x86_64-unknown-linux-gnu", "0"),
         ] {
             let mut run = Run::new();
             run.predefine(triple, &Predef::new());
