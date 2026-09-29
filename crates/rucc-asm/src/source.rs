@@ -212,6 +212,11 @@ struct Described {
     prologue: Prologue,
     /// Whether `.seh_endprologue` has been read, after which there is nothing left to describe.
     ended: bool,
+    /// The same function's codes on AArch64, where the prologue is not all there is: every
+    /// epilogue is described as well. See [`crate::xdata`].
+    arm: crate::xdata::Proc,
+    /// The epilogue being read, between `.seh_startepilogue` and `.seh_endepilogue`.
+    epilogue: Option<crate::xdata::Epilogue>,
 }
 
 /// The file, as it is being read.
@@ -771,7 +776,17 @@ impl Reader {
             let name = args.first().map_or("", |arg| arg.trim()).to_owned();
             let prologue = Prologue::default();
             let ended = false;
-            self.described = Some(Described { part, start, len: 0, sym, name, prologue, ended });
+            self.described = Some(Described {
+                part,
+                start,
+                len: 0,
+                sym,
+                name,
+                prologue,
+                ended,
+                arm: crate::xdata::Proc::default(),
+                epilogue: None,
+            });
             return Ok(());
         }
         let (here, at) = (self.here, self.at());
@@ -780,6 +795,9 @@ impl Reader {
         };
         if described.part != here {
             return Err(self.bad("a '.seh_' directive in another section from its function"));
+        }
+        if self.aarch64 {
+            return self.seh_arm(word, args);
         }
         let offset = (at - described.start) as usize;
         let ended = described.ended;
@@ -840,6 +858,99 @@ impl Reader {
         };
         let described = self.described.as_mut().expect("checked above");
         described.prologue.codes.push((offset, code));
+        Ok(())
+    }
+
+    /// One of the directives that describe a function for the table Windows reads on AArch64.
+    ///
+    /// These are a code per instruction, for the prologue and for every epilogue. The prologue runs
+    /// from `.seh_proc` to `.seh_endprologue` and an epilogue from `.seh_startepilogue` to
+    /// `.seh_endepilogue`, and each has to be as many instructions long as it has codes, since an
+    /// unwinder stopped inside one counts its way back by them. That is the check clang makes too,
+    /// and it leaves where in the prologue each directive is written to the file.
+    fn seh_arm(&mut self, word: &str, args: &[String]) -> Result<(), Trouble> {
+        let at = self.at();
+        let described = self.described.as_mut().expect("checked by the caller");
+        let offset = (at - described.start) as usize;
+        let counted = |what: &str, bytes: usize, codes: usize| {
+            (bytes != 4 * codes).then(|| {
+                format!(
+                    "{what} {bytes} bytes long with {codes} unwind codes, and it needs one code \
+                     for each instruction, if only '.seh_nop'"
+                )
+            })
+        };
+        match word {
+            "seh_endprologue" => {
+                if described.ended {
+                    return Err(self.bad("a second '.seh_endprologue'"));
+                }
+                described.ended = true;
+                if let Some(why) = counted("a prologue", offset, described.arm.prologue.len()) {
+                    return Err(self.bad(&why));
+                }
+                return Ok(());
+            }
+            "seh_startepilogue" => {
+                if described.epilogue.is_some() {
+                    return Err(self.bad("a '.seh_startepilogue' inside another epilogue"));
+                }
+                described.ended = true;
+                described.epilogue =
+                    Some(crate::xdata::Epilogue { start: offset, codes: Vec::new() });
+                return Ok(());
+            }
+            "seh_endepilogue" => {
+                let Some(epilogue) = described.epilogue.take() else {
+                    return Err(self.bad("a '.seh_endepilogue' with no '.seh_startepilogue'"));
+                };
+                let why = counted("an epilogue", offset - epilogue.start, epilogue.codes.len());
+                described.arm.epilogues.push(epilogue);
+                return match why {
+                    Some(why) => Err(self.bad(&why)),
+                    None => Ok(()),
+                };
+            }
+            // A funclet is a piece of a function with a record of its own, which only a handler
+            // needs and nothing here writes, so the end of one is the end of the function's code.
+            "seh_endfunclet" => return Ok(()),
+            "seh_endproc" => {
+                if described.epilogue.is_some() {
+                    return Err(self.bad("a '.seh_endproc' inside an epilogue"));
+                }
+                described.len = at - described.start;
+                let described = self.described.take().expect("checked above");
+                self.prologues.push(described);
+                return Ok(());
+            }
+            "seh_handler" | "seh_handlerdata" => {
+                return Err(self.bad(&format!(
+                    "a '.{word}', which names an exception handler for the frame, and the unwind \
+                     record this writes has no handler in it"
+                )));
+            }
+            _ => {}
+        }
+        let code = match crate::xdata::Code::read(word, args) {
+            Some(Ok(code)) => code,
+            Some(Err(why)) => return Err(self.bad(&why)),
+            None => {
+                let what = format!(
+                    "'.{word}' is a directive this compiler does not know, so nothing was written \
+                     for it"
+                );
+                return Err(self.bad(&what));
+            }
+        };
+        match &mut described.epilogue {
+            Some(epilogue) => epilogue.codes.push(code),
+            None if !described.ended => described.arm.prologue.push(code),
+            None => {
+                return Err(self.bad(&format!(
+                    "a '.{word}' after '.seh_endprologue' and outside an epilogue"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -2011,9 +2122,16 @@ impl Reader {
                 landings: Vec::new(),
             })
             .collect();
-        let prologues: Vec<Prologue> =
-            self.prologues.iter().map(|described| described.prologue.clone()).collect();
-        let table = crate::unwind::seh(&funcs, &prologues).map_err(|error| {
+        let table = if self.aarch64 {
+            let procs: Vec<crate::xdata::Proc> =
+                self.prologues.iter().map(|described| described.arm.clone()).collect();
+            crate::xdata::table(&funcs, &procs)
+        } else {
+            let prologues: Vec<Prologue> =
+                self.prologues.iter().map(|described| described.prologue.clone()).collect();
+            crate::unwind::seh(&funcs, &prologues)
+        };
+        let table = table.map_err(|error| {
             let error = match error {
                 crate::Error::Frame { func, why } => {
                     let named = self.prologues.iter().find(|d| self.seh_name(d) == func);
@@ -4379,5 +4497,74 @@ g:
             Err(trouble) => trouble.why,
         };
         assert!(why.contains("after '.seh_endprologue'"), "{why}");
+    }
+
+    /// What clang writes for two AArch64 Windows functions: one whose prologue is the shape the
+    /// packed form rebuilds, which gets its description in the row and nothing in `.xdata`, and one
+    /// that returns from two places, which gets a whole description with a scope for each epilogue
+    /// pointing into the prologue's codes. The bytes are the ones clang's own assembler writes.
+    #[test]
+    fn a_prologue_said_with_aarch64_seh_directives_is_the_windows_table() {
+        let text = "\t.text\n\t.seh_proc\tcall\ncall:\n\
+                    \tstp\tx29, x30, [sp, #-16]!\n\t.seh_save_fplr_x\t16\n\
+                    \tmov\tx29, sp\n\t.seh_set_fp\n\t.seh_endprologue\n\tbl\tg\n\
+                    \t.seh_startepilogue\n\tldp\tx29, x30, [sp], #16\n\t.seh_save_fplr_x\t16\n\
+                    \t.seh_endepilogue\n\tret\n\t.seh_endfunclet\n\t.seh_endproc\n\
+                    \t.seh_proc\ttwo\ntwo:\n\
+                    \tstr\tx19, [sp, #-32]!\n\t.seh_save_reg_x\tx19, 32\n\
+                    \tstp\tx29, x30, [sp, #8]\n\t.seh_save_fplr\t8\n\
+                    \tadd\tx29, sp, #8\n\t.seh_add_fp\t8\n\t.seh_endprologue\n\
+                    \tcbz\tw0, 1f\n\
+                    \t.seh_startepilogue\n\tldp\tx29, x30, [sp, #8]\n\t.seh_save_fplr\t8\n\
+                    \tldr\tx19, [sp], #32\n\t.seh_save_reg_x\tx19, 32\n\t.seh_endepilogue\n\tret\n\
+                    1:\tbl\tg\n\
+                    \t.seh_startepilogue\n\tldp\tx29, x30, [sp, #8]\n\t.seh_save_fplr\t8\n\
+                    \tldr\tx19, [sp], #32\n\t.seh_save_reg_x\tx19, 32\n\t.seh_endepilogue\n\tret\n\
+                    \t.seh_endproc\n";
+        let done = match read_as(text, Arch::Aarch64, ObjectFormat::Coff) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let xdata = done.parts.iter().find(|part| part.name == ".xdata").unwrap();
+        // Eleven instructions, two scopes and two words of codes, then the scopes at the fourth
+        // and the eighth instruction, both starting two bytes into the codes, past the `add_fp`.
+        assert_eq!(
+            xdata.bytes,
+            [
+                0x0b, 0x00, 0x80, 0x10, 0x04, 0x00, 0x80, 0x00, 0x08, 0x00, 0x80, 0x00, 0xe2, 0x01,
+                0x41, 0xd4, 0x03, 0xe4, 0xe3, 0xe3
+            ]
+        );
+        let pdata = done.parts.iter().find(|part| part.name == ".pdata").unwrap();
+        // Five instructions, chained, a frame of sixteen bytes.
+        assert_eq!(pdata.bytes[4..8], 0x00e0_0015u32.to_le_bytes());
+        let relocs: Vec<(&str, usize)> =
+            pdata.relocs.iter().map(|reloc| (reloc.symbol.as_str(), reloc.at)).collect();
+        assert_eq!(relocs, [("call", 0), ("two", 8), ("$unwind$two", 12)]);
+        assert!(pdata.relocs.iter().all(|reloc| reloc.kind == Reference::Image));
+
+        for (text, what) in [
+            (
+                "\t.seh_proc\tf\nf:\n\tstp\tx29, x30, [sp, #-16]!\n\tmov\tx29, sp\n\
+                 \t.seh_save_fplr_x\t16\n\t.seh_endprologue\n\tret\n\t.seh_endproc\n",
+                "8 bytes long with 1 unwind codes",
+            ),
+            (
+                "\t.seh_proc\tf\nf:\n\t.seh_endprologue\n\tsub\tsp, sp, #16\n\
+                 \t.seh_stackalloc\t16\n\tret\n\t.seh_endproc\n",
+                "outside an epilogue",
+            ),
+            (
+                "\t.seh_proc\tf\nf:\n\tsub\tsp, sp, #24\n\t.seh_stackalloc\t24\n\
+                 \t.seh_endprologue\n\tret\n\t.seh_endproc\n",
+                "not a multiple of sixteen",
+            ),
+        ] {
+            let why = match read_as(text, Arch::Aarch64, ObjectFormat::Coff) {
+                Ok(_) => panic!("{text} was read"),
+                Err(trouble) => trouble.why,
+            };
+            assert!(why.contains(what), "{why}");
+        }
     }
 }
