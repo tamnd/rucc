@@ -13,7 +13,8 @@
 # A program whose first lines have "args:" in them is run with those arguments, read with the shell's
 # quoting and no wildcard expansion, from this directory so that a wildcard has something to match.
 # One whose first lines have "flags:" in them is compiled with those flags as well, such as
-# -municode for a program that starts at wmain.
+# -municode for a program that starts at wmain. "gcc flags:" go after the source and only when CC is gcc,
+# for a program that asks rucc for something gcc does not do, such as a library named in a pragma.
 #
 # A directory here is one program in several files. Every .c in it other than main.c is built with
 # -shared into a DLL of the same name, with the .def file of that name if there is one, and writes
@@ -87,6 +88,13 @@ for src in "$here"/*.c; do
     fi
     flags=$(sed -n '1,3s|^/\* flags: \(.*\) \*/$|\1|p' "$src")
     read -r -a flags <<<"$flags"
+    theirs=()
+    case "${cc[0]##*/}" in
+        *gcc*)
+            theirs=$(sed -n '1,3s|^/\* gcc flags: \(.*\) \*/$|\1|p' "$src")
+            read -r -a theirs <<<"$theirs"
+            ;;
+    esac
     opts=(-O0 -O2)
     if [ $bless = 1 ]; then
         opts=(-O2)
@@ -94,7 +102,7 @@ for src in "$here"/*.c; do
     for opt in "${opts[@]}"; do
         exe="$work/$name$opt.exe"
         ran=$((ran + 1))
-        if ! (cd "$here" && "${cc[@]}" "$opt" ${flags[@]+"${flags[@]}"} "$name.c" -o "$exe") >"$work/$name$opt.log" 2>&1; then
+        if ! (cd "$here" && "${cc[@]}" "$opt" ${flags[@]+"${flags[@]}"} "$name.c" ${theirs[@]+"${theirs[@]}"} -o "$exe") >"$work/$name$opt.log" 2>&1; then
             echo "FAIL $name $opt: did not build"
             sed 's/^/    /' "$work/$name$opt.log"
             failed=$((failed + 1))
