@@ -34,6 +34,19 @@ impl Fixture {
         Fixture { interner, keywords, target, std }
     }
 
+    /// The same on an MSVC row, where `__declspec` and the calling conventions are keywords.
+    fn msvc(std: Std) -> Fixture {
+        let mut interner = Interner::new();
+        let keywords = Keywords::new(&mut interner, std, true).msvc(&mut interner);
+        let target = TargetInfo::new("x86_64-pc-windows-msvc".parse::<Triple>().expect("a triple"));
+        Fixture { interner, keywords, target, std }
+    }
+
+    /// The names of the attributes in `list`, as written or as renamed.
+    fn attr_names(&self, out: &Parsed, list: rucc_ast::AttrList) -> Vec<String> {
+        out.ast[list].iter().map(|attr| self.interner.resolve(attr.name).to_owned()).collect()
+    }
+
     fn parse(&mut self, src: &str) -> Parsed {
         let (pp, diagnostics) = tokenize(src.as_bytes(), 0, Options::new(), &mut self.interner);
         assert!(diagnostics.is_empty(), "the scanner disliked the source: {src}");
@@ -838,4 +851,87 @@ fn the_extension_keyword_begins_a_declaration_as_well_as_an_expression() {
     let stmts = body_of(&out, out.ast[out.ast.top_level()[0]]);
     assert!(matches!(stmts[0], Stmt::Decl(_)), "a declaration");
     assert!(matches!(stmts[1], Stmt::Expr(_)), "an expression, from the same keyword");
+}
+
+/// What the parse of `src` on an MSVC row complained about.
+fn msvc_complaints(src: &str) -> Vec<String> {
+    let out = Fixture::msvc(Std::C17).parse(src);
+    out.diagnostics.iter().map(|d| d.message.clone()).collect()
+}
+
+#[test]
+fn a_declspec_becomes_the_gnu_attributes_it_means() {
+    let mut fixture = Fixture::msvc(Std::C17);
+    let out = fixture.parse(
+        "__declspec(dllimport) int __cdecl f(void);
+         __declspec(align(16) dllexport) int x;
+         int __declspec(restrict) __declspec(noalias) *g(void);",
+    );
+    assert!(!out.failed(), "{:?}", out.diagnostics);
+    let top = out.ast.top_level().to_vec();
+    let Decl::Var { specs, .. } = out.ast[top[0]] else { panic!("expected a declaration") };
+    assert_eq!(fixture.attr_names(&out, out.ast[specs].attrs), ["dllimport", "cdecl"]);
+    let Decl::Var { specs, .. } = out.ast[top[1]] else { panic!("expected a declaration") };
+    assert_eq!(fixture.attr_names(&out, out.ast[specs].attrs), ["aligned", "dllexport"]);
+    // `noalias` means nothing to a C compiler that does not make that promise, so it is gone.
+    let Decl::Var { specs, .. } = out.ast[top[2]] else { panic!("expected a declaration") };
+    assert_eq!(fixture.attr_names(&out, out.ast[specs].attrs), ["malloc"]);
+}
+
+#[test]
+fn the_msvc_specifiers_have_their_gnu_meanings() {
+    let mut fixture = Fixture::msvc(Std::C17);
+    let out = fixture.parse(
+        "__declspec(thread) int t;
+         static __forceinline int g(void) { return 0; }
+         int * __ptr64 __unaligned q;
+         void (__stdcall *p)(void);
+         typedef int (__cdecl *compare)(const void *, const void *);",
+    );
+    assert!(!out.failed(), "{:?}", out.diagnostics);
+    let top = out.ast.top_level().to_vec();
+    assert_eq!(top.len(), 5);
+    let Decl::Var { specs, .. } = out.ast[top[0]] else { panic!("expected a declaration") };
+    assert!(out.ast[specs].thread_local);
+    assert!(out.ast[out.ast[specs].attrs].is_empty());
+    let Decl::Function { specs, .. } = out.ast[top[1]] else { panic!("expected a definition") };
+    assert!(out.ast[specs].func.has(rucc_ast::FuncSpecs::INLINE));
+    assert_eq!(fixture.attr_names(&out, out.ast[specs].attrs), ["always_inline"]);
+    let Decl::Var { declarators, .. } = out.ast[top[3]] else { panic!("expected a pointer") };
+    let declarator = out.ast[out.ast[declarators][0].declarator];
+    let derived: Vec<Derived> = out.ast[declarator.derived].to_vec();
+    assert!(matches!(derived[0], Derived::Pointer { .. }), "{derived:?}");
+    assert!(matches!(derived[1], Derived::Function { .. }), "{derived:?}");
+    let Derived::Pointer { attrs, .. } = derived[0] else { panic!("expected a pointer") };
+    assert_eq!(fixture.attr_names(&out, attrs), ["stdcall"]);
+}
+
+#[test]
+fn an_unknown_declspec_is_warned_about_and_dropped() {
+    let out = Fixture::msvc(Std::C17).parse("__declspec(frobnicate) __declspec(novtable) int x;");
+    assert!(!out.failed(), "{:?}", out.diagnostics);
+    let messages: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages, ["`__declspec` attribute `frobnicate` is not supported"]);
+}
+
+#[test]
+fn structured_exception_handling_is_refused_by_name() {
+    let message =
+        "structured exception handling (`__try`) is not supported; see docs/DIVERGENCE.md";
+    for src in [
+        "void f(void) { __try { } __except (1) { } }",
+        "void f(void) { __try { } __finally { } }",
+        "void f(void) { __leave; }",
+    ] {
+        assert_eq!(msvc_complaints(src), [message], "{src}");
+    }
+}
+
+#[test]
+fn the_msvc_keywords_are_names_on_other_rows() {
+    // The mingw headers define `__declspec` and `__cdecl` as macros, and a program on Linux may
+    // use any of these as a name, so only the MSVC row takes them.
+    let out = parsed("int __declspec, __cdecl, __try, __forceinline;");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(declarators.len(), 4);
 }

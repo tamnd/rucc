@@ -210,6 +210,33 @@ pub enum Keyword {
     Int32,
     /// `__int64`, Microsoft's name for `long long`.
     Int64,
+    /// `__declspec`, Microsoft's attribute syntax, and a keyword only on an MSVC target. On a
+    /// mingw-w64 target it is a macro for `__attribute__`, as gcc has it.
+    Declspec,
+    /// `__cdecl`, which on an MSVC target is a keyword and means `__attribute__((cdecl))`.
+    Cdecl,
+    /// `__stdcall`.
+    Stdcall,
+    /// `__fastcall`.
+    Fastcall,
+    /// `__thiscall`.
+    Thiscall,
+    /// `__vectorcall`.
+    Vectorcall,
+    /// `__forceinline`, which is `inline` with `__attribute__((always_inline))` beside it.
+    ForceInline,
+    /// `__ptr32`, `__ptr64`, `__unaligned`, `__w64`, `__sptr` and `__uptr`. Qualifiers that say
+    /// something about a pointer on a target this compiler does not build for, or nothing at all
+    /// on x86-64 and AArch64, so they are one keyword the parser reads and drops.
+    MsQualifier,
+    /// `__try`, the start of a structured exception handling block, which is refused.
+    Try,
+    /// `__except`.
+    Except,
+    /// `__finally`.
+    Finally,
+    /// `__leave`.
+    Leave,
     /// `__label__`, which declares a local label in a statement expression.
     Label,
     /// `__builtin_offsetof`, which is syntax rather than a function because it takes a type.
@@ -294,9 +321,33 @@ impl Keywords {
     /// A separate step rather than a third argument to [`Keywords::new`], because every caller
     /// but the driver's is a test that does not care what the target is.
     #[must_use]
-    pub fn windows(mut self) -> Keywords {
+    pub fn windows(self) -> Keywords {
+        self.with(WINDOWS)
+    }
+
+    /// The same table with Microsoft's keywords on as well, for a compile for an MSVC target.
+    ///
+    /// That is everything [`Keywords::windows`] turns on and the rest of what clang has under
+    /// `-fms-extensions`: `__declspec`, the five calling conventions, `__forceinline`, the pointer
+    /// qualifiers and the structured exception handling words. mingw-w64's headers define most
+    /// of these as macros, so on a gnu target they stay identifiers and the macros go on working.
+    ///
+    /// The interner is taken because the parser writes some of these as the GNU attribute they
+    /// mean, `__forceinline` as `always_inline` for one, and it can only name a symbol somebody
+    /// interned. [`MSVC_ATTRIBUTE_NAMES`] are interned here, after the keyword run, so that the
+    /// run is still one run.
+    #[must_use]
+    pub fn msvc(self, interner: &mut Interner) -> Keywords {
+        for name in MSVC_ATTRIBUTE_NAMES {
+            interner.intern(name);
+        }
+        self.with(WINDOWS | MSVC)
+    }
+
+    /// Turns on every entry with one of `bits` in its mask, whatever the dialect says.
+    fn with(mut self, bits: u8) -> Keywords {
         for (slot, entry) in self.active.iter_mut().zip(KEYWORDS) {
-            if entry.dialects & WINDOWS != 0 {
+            if entry.dialects & bits != 0 {
                 *slot = Some(entry.keyword);
             }
         }
@@ -342,6 +393,25 @@ const C23: u8 = 1 << 4;
 const GNU: u8 = 1 << 5;
 /// Not a dialect but a target. See [`Keywords::windows`].
 const WINDOWS: u8 = 1 << 6;
+/// Not a dialect either, and a narrower target: Windows with Microsoft's C runtime and headers.
+/// See [`Keywords::msvc`].
+const MSVC: u8 = 1 << 7;
+
+/// The attribute names the parser writes for a Microsoft keyword, which [`Keywords::msvc`] interns.
+///
+/// `__declspec(align(8))` is `aligned(8)`, `__declspec(restrict)` is `malloc`, `__forceinline` is
+/// `always_inline`, and each calling convention keyword is the attribute of the same name. The
+/// parser looks these up rather than interning them, since it only has the interner to read.
+pub const MSVC_ATTRIBUTE_NAMES: &[&str] = &[
+    "aligned",
+    "malloc",
+    "always_inline",
+    "cdecl",
+    "stdcall",
+    "fastcall",
+    "thiscall",
+    "vectorcall",
+];
 
 /// A spelling that is a keyword in every dialect, GNU or not.
 const ALWAYS: u8 = C89 | C99 | C11 | C17 | C23 | GNU;
@@ -488,6 +558,35 @@ static KEYWORDS: &[Entry] = &[
     e("__int16", Keyword::Int16, WINDOWS),
     e("__int32", Keyword::Int32, WINDOWS),
     e("__int64", Keyword::Int64, WINDOWS),
+    // Microsoft's own, on an MSVC target only. mingw-w64's `_mingw.h` defines every one of these
+    // that it uses as a macro over the GNU spelling, so making them keywords on a gnu target would
+    // turn each of those macros into a redefinition of a keyword. The Windows SDK and the UCRT
+    // headers define none of them and expect the compiler to have them, which is what clang does
+    // under `-fms-extensions`, and the single underscore spellings are clang's too.
+    e("__declspec", Keyword::Declspec, MSVC),
+    e("_declspec", Keyword::Declspec, MSVC),
+    e("__cdecl", Keyword::Cdecl, MSVC),
+    e("_cdecl", Keyword::Cdecl, MSVC),
+    e("__stdcall", Keyword::Stdcall, MSVC),
+    e("_stdcall", Keyword::Stdcall, MSVC),
+    e("__fastcall", Keyword::Fastcall, MSVC),
+    e("_fastcall", Keyword::Fastcall, MSVC),
+    e("__thiscall", Keyword::Thiscall, MSVC),
+    e("_thiscall", Keyword::Thiscall, MSVC),
+    e("__vectorcall", Keyword::Vectorcall, MSVC),
+    e("_vectorcall", Keyword::Vectorcall, MSVC),
+    e("__forceinline", Keyword::ForceInline, MSVC),
+    e("_inline", Keyword::Inline, MSVC),
+    e("__ptr32", Keyword::MsQualifier, MSVC),
+    e("__ptr64", Keyword::MsQualifier, MSVC),
+    e("__unaligned", Keyword::MsQualifier, MSVC),
+    e("__w64", Keyword::MsQualifier, MSVC),
+    e("__sptr", Keyword::MsQualifier, MSVC),
+    e("__uptr", Keyword::MsQualifier, MSVC),
+    e("__try", Keyword::Try, MSVC),
+    e("__except", Keyword::Except, MSVC),
+    e("__finally", Keyword::Finally, MSVC),
+    e("__leave", Keyword::Leave, MSVC),
     e("__label__", Keyword::Label, ALWAYS),
     e("__real", Keyword::Real, ALWAYS),
     e("__real__", Keyword::Real, ALWAYS),
@@ -645,6 +744,35 @@ mod tests {
         assert_eq!(windows.get(interner.intern("__int8")), Some(Keyword::Int8));
         // Turning them on turns nothing else on.
         assert_eq!(windows.get(interner.intern("typeof")), None);
+    }
+
+    #[test]
+    fn the_microsoft_keywords_are_keywords_only_for_msvc() {
+        let (keywords, mut interner) = build(Std::C17, false);
+        let names = ["__declspec", "__cdecl", "__stdcall", "__forceinline", "__ptr64", "__try"];
+        let symbols: Vec<Symbol> = names.iter().map(|name| interner.intern(name)).collect();
+        // Built the same way from an empty interner, so its symbols are the same symbols.
+        let windows = build(Std::C17, false).0.windows();
+        for (name, &symbol) in names.iter().zip(&symbols) {
+            assert_eq!(keywords.get(symbol), None, "{name} on Linux");
+            assert_eq!(windows.get(symbol), None, "{name} on a gnu Windows target");
+        }
+        let msvc = keywords.msvc(&mut interner);
+        assert_eq!(msvc.get(symbols[0]), Some(Keyword::Declspec));
+        assert_eq!(msvc.get(symbols[1]), Some(Keyword::Cdecl));
+        assert_eq!(msvc.get(symbols[2]), Some(Keyword::Stdcall));
+        assert_eq!(msvc.get(symbols[3]), Some(Keyword::ForceInline));
+        assert_eq!(msvc.get(symbols[4]), Some(Keyword::MsQualifier));
+        assert_eq!(msvc.get(symbols[5]), Some(Keyword::Try));
+        // The single underscore spellings clang takes, and the integer names from `windows`.
+        assert_eq!(msvc.get(interner.intern("_cdecl")), Some(Keyword::Cdecl));
+        assert_eq!(msvc.get(interner.intern("_inline")), Some(Keyword::Inline));
+        assert_eq!(msvc.get(interner.intern("__int64")), Some(Keyword::Int64));
+        // And the names the parser writes for them are there to be found.
+        for name in MSVC_ATTRIBUTE_NAMES {
+            assert!(interner.find(name).is_some(), "{name} was not interned");
+        }
+        assert_eq!(msvc.get(interner.intern("typeof")), None);
     }
 
     #[test]

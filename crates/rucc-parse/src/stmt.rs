@@ -40,6 +40,11 @@ enum Pending {
     Default,
 }
 
+/// What `__try` and the keywords that go with it are told, which points at the page that says
+/// why.
+const SEH_UNSUPPORTED: &str =
+    "structured exception handling (`__try`) is not supported; see docs/DIVERGENCE.md";
+
 impl Parser<'_> {
     /// A `{ ... }`, which the caller has already checked for.
     pub(crate) fn compound_stmt(&mut self) -> StmtId {
@@ -155,9 +160,41 @@ impl Parser<'_> {
             Keyword::Case | Keyword::Default => self.labeled(AttrList::EMPTY, start),
             Keyword::Asm => self.asm_stmt(start),
             Keyword::Label => self.local_labels(start),
+            Keyword::Try | Keyword::Except | Keyword::Finally | Keyword::Leave => {
+                self.structured_exception(word, start)
+            }
             _ => return None,
         };
         Some(stmt)
+    }
+
+    /// `__try`, `__except`, `__finally` or `__leave`, which are refused.
+    ///
+    /// Structured exception handling needs unwind tables and funclets that the code generator
+    /// does not make, so there is no reading of it that would compile to something right. The
+    /// keywords are still keywords, so that the error names the construct rather than an
+    /// undeclared `__try`, and the blocks after them are read as statements so that each keyword
+    /// gets one refusal rather than a run of syntax errors after it.
+    fn structured_exception(&mut self, word: Keyword, start: Span) -> StmtId {
+        self.error("E0417", SEH_UNSUPPORTED, start);
+        self.cursor.bump();
+        if word == Keyword::Leave {
+            self.expect_punct(Punct::Semi);
+            return self.add_stmt(Stmt::Empty, start);
+        }
+        if word == Keyword::Except {
+            self.controlling_expr();
+        }
+        let body = self.statement();
+        if word == Keyword::Try {
+            if self.cursor.eat_keyword(Keyword::Except) {
+                self.controlling_expr();
+                self.statement();
+            } else if self.cursor.eat_keyword(Keyword::Finally) {
+                self.statement();
+            }
+        }
+        body
     }
 
     /// `if (cond) then`, with the `else` that may follow it.

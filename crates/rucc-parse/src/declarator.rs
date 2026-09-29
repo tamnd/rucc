@@ -171,7 +171,7 @@ impl Parser<'_> {
     /// Whether an attribute is written just after the `(` at the cursor.
     fn at_attribute_after_paren(&self) -> bool {
         let next = self.cursor.peek(1);
-        next.keyword() == Some(Keyword::Attribute)
+        next.keyword().is_some_and(crate::spec::attribute_keyword)
             || (next.punct() == Some(Punct::LBracket)
                 && self.cursor.peek(2).punct() == Some(Punct::LBracket))
     }
@@ -201,9 +201,14 @@ impl Parser<'_> {
     /// Steps over the attributes at the cursor without reading them.
     fn skip_attributes(&mut self) {
         loop {
-            if self.cursor.at_keyword(Keyword::Attribute) {
+            if self.cursor.at_keyword(Keyword::Attribute)
+                || self.cursor.at_keyword(Keyword::Declspec)
+            {
                 self.cursor.bump();
                 self.skip_balanced(Punct::LParen, Punct::RParen);
+            } else if self.at_keyword_attribute() {
+                // A calling convention, which is one keyword with nothing after it.
+                self.cursor.bump();
             } else if self.at_standard_attribute() {
                 // Both brackets are counted rather than one stepped over, since the run ends at
                 // the `]` that closes the outer one and stopping at the inner one would leave
@@ -279,6 +284,7 @@ impl Parser<'_> {
                 Keyword::Volatile => Quals::VOLATILE,
                 Keyword::Restrict => Quals::RESTRICT,
                 Keyword::Atomic => Quals::ATOMIC,
+                Keyword::MsQualifier => Quals::NONE,
                 _ => return quals,
             };
             self.cursor.bump();

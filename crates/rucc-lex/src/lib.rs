@@ -91,7 +91,7 @@ mod swar;
 mod token;
 
 pub use crate::convert::{Convert, Pragma, Token, TokenKind, Tokens, convert};
-pub use crate::keyword::{Keyword, Keywords};
+pub use crate::keyword::{Keyword, Keywords, MSVC_ATTRIBUTE_NAMES};
 pub use crate::lexer::{Lexer, Options, tokenize};
 pub use crate::literal::{
     CharConstant, Encoding, LiteralError, StringLiteral, character, string, strings,

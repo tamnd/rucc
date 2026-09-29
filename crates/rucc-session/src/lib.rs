@@ -1537,6 +1537,73 @@ impl FromStr for GnucVersion {
     }
 }
 
+/// The MSVC release an MSVC row claims, which is `_MSC_VER` and `_MSC_FULL_VER`.
+///
+/// 19.40 is Visual Studio 2022 17.10, which is the release the design names and the one whose
+/// SDK headers this was written against. The build number is zero unless one is given, which
+/// makes `_MSC_FULL_VER` 194000000, and that is what clang says for `-fms-compatibility-version=19.40`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MscVersion {
+    /// The compiler's major version, 19 for every release since Visual Studio 2015.
+    pub major: u32,
+    /// The minor version, which is what moves from one Visual Studio update to the next.
+    pub minor: u32,
+    /// The build number, which only `_MSC_FULL_VER` says.
+    pub build: u32,
+}
+
+impl MscVersion {
+    /// `_MSC_VER`, which is the major and minor versions run together: 1940.
+    #[must_use]
+    pub const fn msc_ver(self) -> u32 {
+        self.major * 100 + self.minor
+    }
+
+    /// `_MSC_FULL_VER`, which adds five digits of build number: 194033811 for 19.40.33811.
+    #[must_use]
+    pub const fn msc_full_ver(self) -> u64 {
+        self.major as u64 * 10_000_000 + self.minor as u64 * 100_000 + self.build as u64
+    }
+}
+
+impl Default for MscVersion {
+    fn default() -> MscVersion {
+        MscVersion { major: 19, minor: 40, build: 0 }
+    }
+}
+
+impl FromStr for MscVersion {
+    type Err = String;
+
+    /// Reads `-fms-compatibility-version=`, which is `19`, `19.40` or `19.40.33811`.
+    ///
+    /// A fourth component is taken and dropped, since clang takes one and no macro says it.
+    fn from_str(text: &str) -> Result<MscVersion, String> {
+        let fields: Vec<&str> = text.split('.').collect();
+        if fields.len() > 4 {
+            return Err(format!("`{text}` has more than four components"));
+        }
+        let field = |n: usize, what: &str| -> Result<u32, String> {
+            match fields.get(n) {
+                None => Ok(0),
+                Some(field) => {
+                    field.parse().map_err(|_| format!("`{text}` has a {what} that is not a number"))
+                }
+            }
+        };
+        let version = MscVersion {
+            major: field(0, "major")?,
+            minor: field(1, "minor")?,
+            build: field(2, "build")?,
+        };
+        field(3, "revision")?;
+        if version.minor > 99 || version.build > 99_999 {
+            return Err(format!("`{text}` does not fit in `_MSC_FULL_VER`"));
+        }
+        Ok(version)
+    }
+}
+
 /// What the `-d` family asks to be dumped alongside, or instead of, the preprocessed output.
 ///
 /// Design: `spec/04-driver-and-cli.md` section 4.4.
@@ -2232,6 +2299,14 @@ pub struct Options {
     pub data_sections: bool,
     /// The GCC release claimed, from `-fgnuc-version=`.
     pub gnuc: GnucVersion,
+    /// Whether `-fgnuc-version=` was written at all.
+    ///
+    /// An MSVC row claims no GCC release unless it was asked to, which is what clang does for
+    /// `-target x86_64-pc-windows-msvc`: the SDK headers take a path for `__GNUC__` that they
+    /// were never tested on with the MSVC runtime. The flag is the way to ask, as it is in clang.
+    pub gnuc_given: bool,
+    /// The MSVC release claimed on an MSVC row, from `-fms-compatibility-version=`.
+    pub msc: MscVersion,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
     pub hosted: bool,
     /// Whether a call to a C library function written under its own plain name may be taken to
@@ -2457,6 +2532,8 @@ impl Options {
             function_sections: false,
             data_sections: false,
             gnuc: GnucVersion::default(),
+            gnuc_given: false,
+            msc: MscVersion::default(),
             hosted: true,
             builtins: true,
             no_builtin: Vec::new(),
@@ -2657,6 +2734,20 @@ mod tests {
         assert!("".parse::<GnucVersion>().is_err());
         assert!("15.".parse::<GnucVersion>().is_err(), "a trailing dot is a typo, not a zero");
         assert!("1.2.3.4".parse::<GnucVersion>().is_err());
+    }
+
+    #[test]
+    fn an_msvc_version_reads_the_way_clang_reads_it() {
+        let read = |v: &str| v.parse::<MscVersion>().unwrap();
+        assert_eq!(MscVersion::default().msc_ver(), 1940);
+        assert_eq!(MscVersion::default().msc_full_ver(), 194_000_000);
+        assert_eq!(read("19.29").msc_ver(), 1929);
+        assert_eq!(read("19.40.33811").msc_full_ver(), 194_033_811);
+        assert_eq!(read("19.40.33811.2"), read("19.40.33811"));
+        assert_eq!(read("19"), MscVersion { major: 19, minor: 0, build: 0 });
+        assert!("".parse::<MscVersion>().is_err());
+        assert!("19.x".parse::<MscVersion>().is_err());
+        assert!("19.100".parse::<MscVersion>().is_err(), "the minor version is two digits");
     }
 
     #[test]

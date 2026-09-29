@@ -20,7 +20,7 @@
 //! is the list of promises the claim makes.
 
 use rucc_base::float::Format;
-use rucc_session::{GnucVersion, Math, OptLevel, Options, Pic, Std};
+use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
 use rucc_target::{Arch, Env, Isa, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
@@ -111,6 +111,13 @@ pub struct Predef {
     pub gnu89_inline: bool,
     /// The GCC release claimed.
     pub gnuc: GnucVersion,
+    /// Whether `-fgnuc-version=` was written, which is the only way an MSVC row claims one.
+    pub gnuc_given: bool,
+    /// The MSVC release an MSVC row claims, which is `_MSC_VER` and `_MSC_FULL_VER`.
+    pub msc: MscVersion,
+    /// `-fms-extensions` and `-fno-ms-extensions`, with the target deciding when neither was
+    /// written. On an MSVC row it decides `_MSC_EXTENSIONS`.
+    pub ms_extensions: Option<bool>,
     /// Decides `__OPTIMIZE__`, `__OPTIMIZE_SIZE__` and `__NO_INLINE__`.
     pub opt_level: OptLevel,
     /// Whether there is a standard library, which is `-ffreestanding` turned around.
@@ -150,6 +157,9 @@ impl Predef {
             gnu_extensions: true,
             gnu89_inline: false,
             gnuc: GnucVersion::default(),
+            gnuc_given: false,
+            msc: MscVersion::default(),
+            ms_extensions: None,
             opt_level: OptLevel::O0,
             hosted: true,
             pic: Pic::Executable,
@@ -177,6 +187,9 @@ impl Predef {
             gnu_extensions: opts.gnu_extensions,
             gnu89_inline: opts.gnu89_inline,
             gnuc: opts.gnuc,
+            gnuc_given: opts.gnuc_given,
+            msc: opts.msc,
+            ms_extensions: opts.ms_extensions,
             opt_level: opts.opt_level,
             hosted: opts.hosted,
             pic: opts.pic,
@@ -305,10 +318,15 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__rucc_major__", field(VERSION, 0));
     d.set("__rucc_minor__", field(VERSION, 1));
     d.set("__rucc_patchlevel__", field(VERSION, 2));
-    // The promise from section 4.5. Everything in the matrix hangs off this line.
-    d.set("__GNUC__", &opts.gnuc.major.to_string());
-    d.set("__GNUC_MINOR__", &opts.gnuc.minor.to_string());
-    d.set("__GNUC_PATCHLEVEL__", &opts.gnuc.patch.to_string());
+    // The promise from section 4.5. Everything in the matrix hangs off this line, except on an
+    // MSVC row, where the headers are Microsoft's and `__GNUC__` sends them down paths written for
+    // mingw. clang leaves it out there too, and `-fgnuc-version=` puts it back in both.
+    let gcc = opts.gnuc_given || target.tuple.env() != tuple::Env::Msvc;
+    if gcc {
+        d.set("__GNUC__", &opts.gnuc.major.to_string());
+        d.set("__GNUC_MINOR__", &opts.gnuc.minor.to_string());
+        d.set("__GNUC_PATCHLEVEL__", &opts.gnuc.patch.to_string());
+    }
     d.set("__VERSION__", &format!("\"rucc {VERSION}\""));
     // Not `__clang__`, deliberately. Section 4.5 says so, and a header that takes the Clang
     // path expects Clang's extension surface rather than GCC's.
@@ -319,8 +337,8 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // the keyword and gcc follows the dialect, so the C89 ones keep GNU's reading and every
     // dialect after them takes C's until `-fgnu89-inline` says otherwise.
     let gnu_inline = opts.gnu89_inline || opts.std == Std::C89;
-    d.flag_if(gnu_inline, "__GNUC_GNU_INLINE__");
-    d.flag_if(!gnu_inline, "__GNUC_STDC_INLINE__");
+    d.flag_if(gcc && gnu_inline, "__GNUC_GNU_INLINE__");
+    d.flag_if(gcc && !gnu_inline, "__GNUC_STDC_INLINE__");
     // The charsets a literal is converted to. Both are fixed here rather than settable, since
     // there is no `-fexec-charset` to set them with, and both are what gcc answers with none.
     // The wide one follows `wchar_t`, which is sixteen bits on Windows and thirty two
@@ -332,7 +350,7 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // a claim about this compiler so much as a number headers read: libstdc++ is not the only
     // thing that tests it, and a C header shared with a C++ one reaches it through `extern
     // "C"` guards. The value is gcc 16's.
-    d.set("__GXX_ABI_VERSION", "1021");
+    d.set_if(gcc, "__GXX_ABI_VERSION", "1021");
 }
 
 /// What the dialect flags say.
@@ -616,6 +634,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__LITTLE_ENDIAN__");
             deployment_target(d, target);
         }
+        Os::Windows if triple.env == Env::Msvc => msvc(d, target, triple.arch, opts),
         Os::Windows => {
             // Every spelling gcc has for this platform, because the mingw-w64 tree reads more
             // than one of them and a missing one is a declaration that quietly is not there.
@@ -730,24 +749,6 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     }
 }
 
-/// The five spellings a Windows header writes a calling convention and an attribute in.
-///
-/// `int __cdecl f(void);` is the second declaration in mingw-w64's `stdio.h` and it stops a parser
-/// that has never heard of `__cdecl`, which reads it as the name being declared and then finds a
-/// second one. None of the five is a keyword, though: gcc defines every one of them as a macro over
-/// the GNU spelling of the same thing, which is why they are keywords on Windows and nowhere else
-/// without anything in its lexer being told what the target is. `-dM -E` on a mingw-w64 gcc prints
-/// exactly the lines below.
-///
-/// `__declspec(x)` being the GNU spelling of its argument is the part worth saying out loud, since
-/// it means `__declspec(dllimport)` and `__attribute__((dllimport))` cannot come to mean different
-/// things: there is one attribute and two ways of writing it, and everything that reads attributes
-/// reads both.
-///
-/// On x86-64 all four conventions name the one convention the target has, so the attributes go
-/// where every attribute nothing implements goes, which is left on the declaration. On i386 they
-/// differ over who pops the arguments and the choice is written into the symbol name, which is
-/// document 06.5 and is that target's work when there is one.
 /// The deployment target, which is the oldest release of the OS the program is promised to run
 /// on. `Availability.h` reads it through `__ENVIRONMENT_OS_VERSION_MIN_REQUIRED__` and the older
 /// per platform spelling, and turns it into `__MAC_OS_X_VERSION_MIN_REQUIRED`, which the whole
@@ -773,6 +774,24 @@ fn deployment_target(d: &mut Defs, target: &TargetInfo) {
     d.set("__ENVIRONMENT_OS_VERSION_MIN_REQUIRED__", &encoded.to_string());
 }
 
+/// The five spellings a Windows header writes a calling convention and an attribute in.
+///
+/// `int __cdecl f(void);` is the second declaration in mingw-w64's `stdio.h` and it stops a parser
+/// that has never heard of `__cdecl`, which reads it as the name being declared and then finds a
+/// second one. None of the five is a keyword, though: gcc defines every one of them as a macro over
+/// the GNU spelling of the same thing, which is why they are keywords on Windows and nowhere else
+/// without anything in its lexer being told what the target is. `-dM -E` on a mingw-w64 gcc prints
+/// exactly the lines below.
+///
+/// `__declspec(x)` being the GNU spelling of its argument is the part worth saying out loud, since
+/// it means `__declspec(dllimport)` and `__attribute__((dllimport))` cannot come to mean different
+/// things: there is one attribute and two ways of writing it, and everything that reads attributes
+/// reads both.
+///
+/// On x86-64 all four conventions name the one convention the target has, so the attributes go
+/// where every attribute nothing implements goes, which is left on the declaration. On i386 they
+/// differ over who pops the arguments and the choice is written into the symbol name, which is
+/// document 06.5 and is that target's work when there is one.
 fn windows_spellings(d: &mut Defs, opts: &Predef) {
     for name in ["cdecl", "stdcall", "fastcall", "thiscall"] {
         d.set(&format!("__{name}"), &format!("__attribute__((__{name}__))"));
@@ -783,6 +802,51 @@ fn windows_spellings(d: &mut Defs, opts: &Predef) {
         }
     }
     d.set("__declspec(x)", "__attribute__((x))");
+}
+
+/// What an MSVC row says about itself, which is what clang says for `-target
+/// x86_64-pc-windows-msvc` and no more.
+///
+/// The mingw set is the thing to compare against, and most of it is missing on purpose. The
+/// `__MINGW*` pair and `__MSVCRT__` name a runtime and a header tree this row does not use, and
+/// the SDK headers take the wrong branch when they see them. The unarmoured `WIN32` and the
+/// `__WIN32__` family are gcc's, and Microsoft's own compiler defines only `_WIN32`, so a header
+/// written for it tests nothing else. The calling conventions and `__declspec` are keywords here
+/// rather than the macros [`windows_spellings`] writes, since the SDK headers use `__declspec`
+/// items that no GNU attribute spells. `__SEH__` is gcc's and says the exception tables are
+/// there, which on this row they are not.
+///
+/// `_MT` and `_DLL` are left to the runtime being chosen, which is the driver's business once
+/// it links against one, and `_M_IX86` waits on a 32-bit row.
+fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
+    d.flag("_WIN32");
+    if target.pointer_width == 64 {
+        d.flag("_WIN64");
+    }
+    // Microsoft's names for the architecture, with Microsoft's values: `_M_X64` is 100 because
+    // `_M_IX86` is a processor generation times one hundred and this was the one after.
+    match arch {
+        Arch::X86_64 => {
+            d.set("_M_X64", "100");
+            d.set("_M_AMD64", "100");
+        }
+        Arch::Aarch64 => d.flag("_M_ARM64"),
+        Arch::Riscv64 => {}
+    }
+    d.set("_MSC_VER", &opts.msc.msc_ver().to_string());
+    d.set("_MSC_FULL_VER", &opts.msc.msc_full_ver().to_string());
+    d.flag("_MSC_BUILD");
+    d.flag_if(opts.ms_extensions.unwrap_or(true), "_MSC_EXTENSIONS");
+    // The widest integer the compiler has, which is what Microsoft's headers ask instead of
+    // asking about `long long`.
+    d.set("_INTEGRAL_MAX_BITS", "64");
+    // Two promises the UCRT headers read: `char16_t` is a type the language has, and the narrow
+    // execution character set is UTF-8, which is code page 65001.
+    d.flag("_HAS_CHAR16_T_LANGUAGE_SUPPORT");
+    d.set("_MSVC_EXECUTION_CHARACTER_SET", "65001");
+    // `volatile` means what ISO says it does and not the acquire and release that MSVC gives it
+    // on x86 by default, which is `/volatile:iso` and what clang defines this for.
+    d.flag("_ISO_VOLATILE");
 }
 
 /// `__CHAR_BIT__`, the `__SIZEOF_*__` family and the alignment macros.
@@ -2318,6 +2382,78 @@ mod tests {
         for name in ["_WIN64", "__WIN64", "__WIN64__", "__MINGW64__", "__SEH__", "WIN64"] {
             assert!(!has(&windows, &format!("#define {name} 1")), "{name} on a 32 bit target");
         }
+    }
+
+    #[test]
+    fn an_msvc_row_says_what_clang_says_for_it_and_none_of_what_mingw_says() {
+        let msvc = set_for("x86_64-pc-windows-msvc");
+        for line in [
+            "#define _WIN32 1",
+            "#define _WIN64 1",
+            "#define _M_X64 100",
+            "#define _M_AMD64 100",
+            "#define _MSC_VER 1940",
+            "#define _MSC_FULL_VER 194000000",
+            "#define _MSC_BUILD 1",
+            "#define _MSC_EXTENSIONS 1",
+            "#define _INTEGRAL_MAX_BITS 64",
+            "#define __x86_64__ 1",
+        ] {
+            assert!(has(&msvc, line), "no {line}");
+        }
+        // The names that send the SDK headers down a path written for another compiler or
+        // another runtime, and the macros that would hide the keywords.
+        for name in [
+            "__GNUC__",
+            "__GNUC_MINOR__",
+            "__GNUC_STDC_INLINE__",
+            "__GXX_ABI_VERSION",
+            "__clang__",
+            "__MINGW32__",
+            "__MINGW64__",
+            "__MSVCRT__",
+            "__SEH__",
+            "WIN32",
+            "__WIN32__",
+            "__cdecl",
+            "_cdecl",
+            "__declspec(x)",
+            "_M_ARM64",
+        ] {
+            assert!(!msvc.contains(&format!("#define {name} ")), "{name} on msvc");
+        }
+    }
+
+    #[test]
+    fn the_mingw_row_keeps_its_gcc_set_beside_the_msvc_one() {
+        let gnu = set_for("x86_64-pc-windows-gnu");
+        assert!(has(&gnu, "#define __GNUC__ 16"));
+        assert!(has(&gnu, "#define __cdecl __attribute__((__cdecl__))"));
+        assert!(has(&gnu, "#define __declspec(x) __attribute__((x))"));
+        assert!(!gnu.contains("_MSC_VER"));
+        assert!(!gnu.contains("_M_X64"));
+    }
+
+    #[test]
+    fn an_msvc_row_on_arm64_names_that_architecture() {
+        let msvc = set_for("aarch64-pc-windows-msvc");
+        assert!(has(&msvc, "#define _M_ARM64 1"));
+        assert!(!msvc.contains("_M_X64"));
+        assert!(has(&msvc, "#define _WIN64 1"));
+    }
+
+    #[test]
+    fn the_msvc_version_and_the_gcc_claim_are_both_flags() {
+        let target = TargetInfo::new("x86_64-pc-windows-msvc".parse().expect("a triple"));
+        let mut opts = Predef::new();
+        opts.msc = "19.29.30133".parse().expect("a version");
+        opts.gnuc_given = true;
+        opts.ms_extensions = Some(false);
+        let set = built_in(&target, &opts);
+        assert!(has(&set, "#define _MSC_VER 1929"));
+        assert!(has(&set, "#define _MSC_FULL_VER 192930133"));
+        assert!(has(&set, "#define __GNUC__ 16"), "-fgnuc-version= puts it back, as in clang");
+        assert!(!set.contains("_MSC_EXTENSIONS"));
     }
 
     #[test]

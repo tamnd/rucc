@@ -87,8 +87,91 @@ fn qual_keyword(word: Keyword) -> Option<Quals> {
         Keyword::Const => Some(Quals::CONST),
         Keyword::Volatile => Some(Quals::VOLATILE),
         Keyword::Restrict => Some(Quals::RESTRICT),
+        // `__ptr32`, `__ptr64`, `__unaligned` and `__w64` qualify nothing a 64-bit target
+        // distinguishes, so they are read where a qualifier may be and add none.
+        Keyword::MsQualifier => Some(Quals::NONE),
         _ => None,
     }
+}
+
+/// Whether the keyword introduces an attribute, which is `__attribute__` everywhere and on the
+/// MSVC rows also `__declspec` and the calling conventions.
+///
+/// The calling conventions are attributes rather than specifiers because that is what they mean
+/// to everything after the parser: `__cdecl` is read as `__attribute__((cdecl))`, which is what
+/// the mingw headers have always spelled it as, so the two routes reach the same place.
+pub(crate) fn attribute_keyword(word: Keyword) -> bool {
+    matches!(
+        word,
+        Keyword::Attribute
+            | Keyword::Declspec
+            | Keyword::Cdecl
+            | Keyword::Stdcall
+            | Keyword::Fastcall
+            | Keyword::Thiscall
+            | Keyword::Vectorcall
+    )
+}
+
+/// The GNU attribute a calling-convention keyword means.
+fn convention_name(word: Keyword) -> Option<&'static str> {
+    Some(match word {
+        Keyword::Cdecl => "cdecl",
+        Keyword::Stdcall => "stdcall",
+        Keyword::Fastcall => "fastcall",
+        Keyword::Thiscall => "thiscall",
+        Keyword::Vectorcall => "vectorcall",
+        _ => return None,
+    })
+}
+
+/// What one `__declspec` item becomes, as the name of the attribute that carries its meaning.
+enum DeclspecItem {
+    /// Kept, under the name given, which is the written one unless GCC spells it differently.
+    Keep(&'static str),
+    /// Read and dropped without a word, because it changes nothing a C compiler for these
+    /// targets does or because what it changes is layout for C++ classes.
+    Ignore,
+}
+
+/// The `__declspec` items the SDK headers write, and what each one is here.
+///
+/// `thread` is kept as itself and turned into `_Thread_local` once the specifier list is
+/// finished, since it may be written in the attributes that lead a declaration as well as in
+/// the middle of one. An item that is not listed is warned about and dropped, which is what
+/// clang does with the ones it does not know.
+fn declspec_item(name: &str) -> Option<DeclspecItem> {
+    use DeclspecItem::{Ignore, Keep};
+    Some(match name {
+        "align" => Keep("aligned"),
+        "restrict" => Keep("malloc"),
+        "dllimport" => Keep("dllimport"),
+        "dllexport" => Keep("dllexport"),
+        "noreturn" => Keep("noreturn"),
+        "noinline" => Keep("noinline"),
+        "naked" => Keep("naked"),
+        "deprecated" => Keep("deprecated"),
+        "selectany" => Keep("selectany"),
+        "nothrow" => Keep("nothrow"),
+        "thread" => Keep("thread"),
+        "noalias"
+        | "novtable"
+        | "allocator"
+        | "safebuffers"
+        | "uuid"
+        | "code_seg"
+        | "empty_bases"
+        | "property"
+        | "spectre"
+        | "guard"
+        | "hybrid_patchable"
+        | "no_sanitize_address"
+        | "intrin_type"
+        | "jitintrinsic"
+        | "process"
+        | "appdomain" => Ignore,
+        _ => return None,
+    })
 }
 
 /// The storage class the keyword names.
@@ -145,9 +228,8 @@ fn type_keyword(word: Keyword) -> bool {
             | Keyword::Typeof
             | Keyword::TypeofUnqual
             | Keyword::BitInt
-            | Keyword::Attribute
             | Keyword::BuiltinVaList
-    )
+    ) || attribute_keyword(word)
 }
 
 impl Parser<'_> {
@@ -173,6 +255,7 @@ impl Parser<'_> {
                     || matches!(
                         word,
                         Keyword::Inline
+                            | Keyword::ForceInline
                             | Keyword::Noreturn
                             | Keyword::Alignas
                             | Keyword::ThreadLocal
@@ -214,7 +297,13 @@ impl Parser<'_> {
 
     /// Whether an attribute specifier of either syntax comes next.
     pub(crate) fn at_attribute(&self) -> bool {
-        self.cursor.at_keyword(Keyword::Attribute) || self.at_standard_attribute()
+        self.at_keyword_attribute() || self.at_standard_attribute()
+    }
+
+    /// Whether an attribute written with a keyword comes next, which is [`attribute_keyword`]'s
+    /// question about the token at the cursor.
+    pub(crate) fn at_keyword_attribute(&self) -> bool {
+        self.cursor.current().keyword().is_some_and(attribute_keyword)
     }
 
     /// Every attribute specifier written here, in either syntax, as one list.
@@ -237,8 +326,8 @@ impl Parser<'_> {
         loop {
             if self.at_standard_attribute() {
                 self.standard_attributes(out);
-            } else if self.cursor.at_keyword(Keyword::Attribute) {
-                self.gnu_attributes(out);
+            } else if self.at_keyword_attribute() {
+                self.keyword_attributes(out);
             } else {
                 return;
             }
@@ -266,6 +355,71 @@ impl Parser<'_> {
         }
         self.expect_punct(Punct::RBracket);
         self.expect_punct(Punct::RBracket);
+    }
+
+    /// The attributes one keyword introduces, whichever of the keywords it is.
+    fn keyword_attributes(&mut self, out: &mut Vec<Attribute>) {
+        let token = self.cursor.current();
+        match token.keyword() {
+            Some(Keyword::Attribute) => self.gnu_attributes(out),
+            Some(Keyword::Declspec) => self.declspec_attributes(out),
+            Some(word) => {
+                self.cursor.bump();
+                let name = convention_name(word).and_then(|name| self.cx.interner.find(name));
+                if let Some(name) = name {
+                    let args = AttrArgList::EMPTY;
+                    let syntax = AttrSyntax::Gnu;
+                    out.push(Attribute { namespace: None, name, args, syntax, span: token.span });
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// `__declspec( ... )`, whose items are separated by nothing but white space.
+    ///
+    /// Each item is read as an attribute and then renamed to the GNU attribute that means the
+    /// same thing, so that `__declspec(dllimport)` here and the mingw headers' macro for it end
+    /// up as one attribute and everything after the parser has one spelling to look for.
+    fn declspec_attributes(&mut self, out: &mut Vec<Attribute>) {
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return;
+        }
+        while !self.cursor.at_punct(Punct::RParen) && !self.cursor.is_eof() {
+            let before = self.cursor.index();
+            if let Some(attr) = self.one_attribute(AttrSyntax::Declspec) {
+                if let Some(attr) = self.declspec_meaning(attr) {
+                    out.push(attr);
+                }
+            }
+            if self.cursor.index() == before {
+                break;
+            }
+        }
+        self.expect_punct(Punct::RParen);
+    }
+
+    /// The attribute one `__declspec` item stands for, or nothing when it stands for nothing.
+    fn declspec_meaning(&mut self, mut attr: Attribute) -> Option<Attribute> {
+        let interner = self.cx.interner;
+        let written = interner.resolve(attr.name);
+        match declspec_item(written) {
+            Some(DeclspecItem::Keep(name)) => {
+                // The GCC names are interned with the keywords, and a name that is somehow not
+                // there keeps its written spelling, which the checker ignores.
+                if let Some(renamed) = self.cx.interner.find(name) {
+                    attr.name = renamed;
+                }
+                Some(attr)
+            }
+            Some(DeclspecItem::Ignore) => None,
+            None => {
+                let message = format!("`__declspec` attribute `{written}` is not supported");
+                self.warn("E0416", message, attr.span);
+                None
+            }
+        }
     }
 
     /// `__attribute__(( ... ))`.
@@ -436,8 +590,26 @@ impl Parser<'_> {
         // handed over are collected here, and assigning would drop the first of the two.
         let collected = self.ast.add_attr_list(&attrs);
         specs.attrs = self.join_attrs(collected, specs.attrs);
+        self.declspec_thread(&mut specs);
         specs.span = self.span_from(start);
         self.ast.add_specs(specs)
+    }
+
+    /// Turns `__declspec(thread)` in a finished list into `_Thread_local`, which is what it means.
+    ///
+    /// Done once the list is read rather than where the item is, because the attributes leading a
+    /// declaration are read before anybody knows a declaration is what they lead.
+    fn declspec_thread(&mut self, specs: &mut DeclSpecs) {
+        let Some(thread) = self.cx.interner.find("thread") else { return };
+        let is_thread =
+            |attr: &Attribute| attr.syntax == AttrSyntax::Declspec && attr.name == thread;
+        if !self.ast[specs.attrs].iter().any(is_thread) {
+            return;
+        }
+        let kept: Vec<_> =
+            self.ast[specs.attrs].iter().filter(|a| !is_thread(a)).copied().collect();
+        specs.attrs = self.ast.add_attr_list(&kept);
+        specs.thread_local = true;
     }
 
     /// Which of the two things the `auto` keywords in a finished list were, if there were any.
@@ -584,9 +756,21 @@ impl Parser<'_> {
                 self.cursor.bump();
                 specs.func = specs.func.with(FuncSpecs::NORETURN);
             }
-            Keyword::Attribute => {
+            // `__forceinline` is `inline` that insists, which GCC spells `always_inline`.
+            Keyword::ForceInline => {
+                self.cursor.bump();
+                specs.func = specs.func.with(FuncSpecs::INLINE);
+                if let Some(name) = self.cx.interner.find("always_inline") {
+                    let args = AttrArgList::EMPTY;
+                    let syntax = AttrSyntax::Gnu;
+                    let attr = Attribute { namespace: None, name, args, syntax, span };
+                    let list = self.ast.add_attr_list(&[attr]);
+                    specs.attrs = self.join_attrs(specs.attrs, list);
+                }
+            }
+            word if attribute_keyword(word) => {
                 let mut attrs = Vec::new();
-                self.gnu_attributes(&mut attrs);
+                self.keyword_attributes(&mut attrs);
                 let list = self.ast.add_attr_list(&attrs);
                 // Attributes in the middle of a specifier list appertain to the declaration, so
                 // a second run of them extends the first rather than replacing it. The two runs

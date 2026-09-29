@@ -71,6 +71,7 @@ mod frame;
 mod generic;
 mod jump;
 mod math;
+mod msvc;
 mod overflow;
 mod pack;
 mod prefetch;
