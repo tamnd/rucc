@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.14.1
+
+The first fixes from running the gcc torture tests for x86_64-windows-gnu under Wine: complex multiply and divide, an empty struct passed as an argument, and `.linkonce` in the assembler. The checked modes are refused at a Windows link.
+
 ### Changed
 
 - `-fsafety=detect` and the other checked modes are refused when linking for a Windows target, with a message saying the runtime they need has not been ported yet. The link used to fail on the runtime's undefined `__rucc_check_` names instead. `-c`, `-S` and `--emit=ir` still build with the checks in (#2069).
