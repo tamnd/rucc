@@ -214,7 +214,9 @@ impl Area {
 /// describes instead, which is the same three rewrites over a list of one field, and AAPCS64 gets
 /// the walk [`aapcs`] describes. Apple's AArch64 has the plain pointer, and its scalars take the
 /// same walk, but an object there is as many words as it needs rather than one, which is the
-/// memory half of the AAPCS64 walk and is `aapcs::stacked`.
+/// memory half of the AAPCS64 walk and is `aapcs::stacked`. Windows on AArch64 walks objects the
+/// same way, since its homed x registers and the caller's memory above them are one run of words
+/// and an object of up to sixteen bytes takes as many of them as it needs.
 pub fn lists(func: &mut Func, conv: &CallRegs) {
     let area = Area::of(conv);
     let word = u64::from(conv.word);
@@ -228,7 +230,7 @@ pub fn lists(func: &mut Func, conv: &CallRegs) {
             (Opcode::VaObject, VaList::SysV) => object(func, inst, area),
             (Opcode::VaObject, VaList::Aapcs) => aapcs::object(func, inst),
             (Opcode::VaObject, VaList::CharPointer)
-                if conv.abi.variadic == Variadic::AlwaysMemory =>
+                if matches!(conv.abi.variadic, Variadic::AlwaysMemory | Variadic::IntegersOnly) =>
             {
                 aapcs::stacked(func, inst);
             }

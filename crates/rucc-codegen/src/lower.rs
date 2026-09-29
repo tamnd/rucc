@@ -822,6 +822,14 @@ pub struct Stack {
     /// The calls a `tail_call` became that [`crate::tail::jumps`] may turn into a jump, which is
     /// the ones that passed everything in registers.
     pub tails: Vec<crate::tail::Tail>,
+    /// How many bytes the prologue takes above the frame record to home the argument registers
+    /// into, which is nothing except in a variadic function on Windows on AArch64.
+    ///
+    /// That convention has no shadow space the caller reserves, so the callee makes its own: the
+    /// first thing its prologue does is take sixty four bytes, which puts `x0` to `x7` directly
+    /// below the arguments the caller left on the stack and makes the whole run one list of words
+    /// a `char *` can walk. See `home` on [`rucc_target::CallRegs`].
+    pub home: u32,
 }
 
 impl Stack {
@@ -843,6 +851,7 @@ impl Stack {
             outgoing: self.calls.unwrap_or(0),
             locals: &self.locals,
             grows: self.grown_at.is_some(),
+            home: self.home,
             ..base
         }
     }
@@ -5980,12 +5989,24 @@ impl<'a> Lowering<'a> {
         // A function holding `__builtin_apply_args` asks for the same area whether it is variadic
         // or not, because what it saves is every argument register, and the area is where the
         // walk that binds them says where each one goes.
+        //
+        // Windows on AArch64 is the first kind seen from the other side. The caller reserves
+        // nothing, so the function takes the words it homes its x registers in at the top of its
+        // own frame, and from inside it that is a shadow space like Windows x64's. So the
+        // registers the parameters are bound through are [`rucc_target::CallRegs::homed`], and
+        // the prologue [`crate::finish`] writes takes the bytes before it saves anything.
         let variadic = self.source.signature().variadic;
+        let foreign = self.source.signature().convention != Convention::Target;
+        let homes = variadic && !foreign && self.conv.home > 0;
+        let conv = if homes { self.conv.homed() } else { *self.conv };
+        if homes {
+            self.stack.home = self.conv.home;
+        }
         let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory;
         let applies = self.saves_arguments();
-        let area = (variadic && !in_memory || applies).then(|| varargs::Area::of(self.conv));
+        let area = (variadic && !in_memory || applies).then(|| varargs::Area::of(&conv));
         let arrived =
-            abi::entry(&mut self.out, out, &types, self.conv, self.selector.abi, self.names, area)
+            abi::entry(&mut self.out, out, &types, &conv, self.selector.abi, self.names, area)
                 .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
         for (&param, reg) in params.iter().zip(&arrived.regs) {
             self.regs[param.index()] = Some(*reg);
@@ -5999,10 +6020,9 @@ impl<'a> Lowering<'a> {
         // reason. What is left is an old style definition, which is variadic to a caller and has
         // no `...` for a `va_start` to follow, so nothing is set up and a `va_start` that reached
         // here all the same would be refused rather than read the wrong list.
-        let foreign = self.source.signature().convention != Convention::Target;
         let variadic = variadic && !foreign;
         if let (true, Some(area)) = (variadic && !in_memory, area) {
-            self.save_area(out, &arrived, area);
+            self.save_area(out, &arrived, area, conv.shared_positions);
         } else if variadic {
             let incoming = arrived.beyond.next_multiple_of(self.conv.word);
             self.varargs = Some(Varargs::Pointer { incoming });
@@ -6042,10 +6062,21 @@ impl<'a> Lowering<'a> {
     /// fixup. There are at most four of them and none is a vector register, since a float the
     /// signature does not name arrived in a general purpose register too and that is the copy the
     /// walk reads.
-    fn save_area(&mut self, out: mir::Block, arrived: &abi::Arrived, area: varargs::Area) {
-        if self.conv.shared_positions {
+    ///
+    /// Windows on AArch64 homes its registers the same way, in an area the function takes for
+    /// itself rather than one the caller left, and `shared` is what says a function is one of these.
+    fn save_area(
+        &mut self,
+        out: mir::Block,
+        arrived: &abi::Arrived,
+        area: varargs::Area,
+        shared: bool,
+    ) {
+        if shared {
             self.varargs = Some(Varargs::Pointer { incoming: arrived.beyond });
-            let store = self.named("mov_mr_64");
+            let head =
+                (self.selector.abi.store)(Type::int(64)).expect("a store of a whole register");
+            let store = mir::Opcode::new(self.names.intern(head));
             for &(reg, class, at) in &arrived.spare {
                 let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
                 let made =

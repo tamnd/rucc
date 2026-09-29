@@ -627,6 +627,17 @@ impl Writer<'_> {
         // the first thing this function does on top of that.
         let mut below = offset(self.conv.return_address);
         let mut from_sp = true;
+        // The home area of a variadic function on Windows on AArch64, before the frame record, so
+        // that the argument registers the body stores into it end directly below the arguments the
+        // caller left on the stack. Nothing is saved into it here, which the body does, so the one
+        // row is the distance.
+        if frame.home() > 0 {
+            let sub = self.opcode(self.insts.sub);
+            let inst = self.arith(sub, i64::from(frame.home()));
+            out.push(inst);
+            below += offset(frame.home());
+            self.row(inst, CfiOp::DefCfaOffset(below));
+        }
         if frame.frame_pointer() {
             let inst = self.push_frame();
             out.push(inst);
@@ -1168,6 +1179,7 @@ impl Writer<'_> {
         let mut out = Vec::new();
         // Where the body left things, which is where every epilogue starts from.
         let mut below = offset(self.conv.return_address)
+            + offset(frame.home())
             + offset(push) * self.pushes(frame)
             + offset(frame.size());
         let from_sp = !frame.frame_pointer();
@@ -1234,7 +1246,15 @@ impl Writer<'_> {
             // The frame pointer holds the caller's value again, so the address goes back to being
             // counted from the stack pointer, which by now is at the return address.
             let number = self.dwarf(int, sp);
-            self.row(inst, CfiOp::DefCfa { reg: number, offset: offset(self.conv.return_address) });
+            let at = offset(self.conv.return_address) + offset(frame.home());
+            self.row(inst, CfiOp::DefCfa { reg: number, offset: at });
+        }
+        // And the home area last, which is the first thing the prologue took.
+        if frame.home() > 0 {
+            let add = self.opcode(self.insts.add);
+            let inst = self.arith(add, i64::from(frame.home()));
+            out.push(inst);
+            self.row(inst, CfiOp::DefCfaOffset(offset(self.conv.return_address)));
         }
         let ret = self.opcode(self.insts.ret);
         let inst = self.func.build_loose(ret).finish();

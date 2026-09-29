@@ -19,7 +19,9 @@
 //! module documentation in `src/abis.rs` records why the rest of that ABI cannot be described
 //! yet, and a demonstration that only ever ran on the easy ones would be worth less.
 
-use rucc_abi::abis::{DESCRIBED, SYSV_AMD64, WIN64, for_convention, for_target};
+use rucc_abi::abis::{
+    AAPCS64, DESCRIBED, SYSV_AMD64, WIN64, WINDOWS_ARM64, for_convention, for_target,
+};
 use rucc_abi::{
     AbiDescription, Arg, Banks, Convention, Format, Narrow, Pass, ReturnPointer, Rule, Scalar,
     Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
@@ -195,12 +197,18 @@ fn every_target_with_an_abi_gets_one_of_the_described_ones() {
 }
 
 #[test]
-fn windows_on_aarch64_gets_no_answer_rather_than_the_almost_right_one() {
-    let target = "aarch64-pc-windows-msvc".parse().expect("a row in the target table");
-    // AAPCS64 with different varargs and x18 reserved, per spec/cross-compile/06-abis.md section 6.1. Answering
-    // AAPCS64 here would be right for most programs and wrong for the ones that call `printf`,
-    // which is exactly the failure the crate exists to avoid.
-    assert!(for_target(target).is_none());
+fn windows_on_aarch64_is_its_own_description_and_not_aapcs64() {
+    // AAPCS64 with a different variadic rule, per spec/cross-compile/06-abis.md section 6.1.
+    // Answering AAPCS64 here would be right for most programs and wrong for the ones that call
+    // `printf` with a `double`, which is exactly the failure the crate exists to avoid.
+    for triple in ["aarch64-pc-windows-msvc", "aarch64-pc-windows-gnu"] {
+        let target = triple.parse().expect("a row in the target table");
+        let abi = for_target(target).expect("a described ABI");
+        assert!(std::ptr::eq(abi, &WINDOWS_ARM64), "{triple}");
+        assert_eq!(abi.variadic, Variadic::IntegersOnly);
+        assert_eq!(abi.arguments, AAPCS64.arguments);
+        assert_eq!(abi.returns, AAPCS64.returns);
+    }
 }
 
 #[test]

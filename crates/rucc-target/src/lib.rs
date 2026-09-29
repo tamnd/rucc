@@ -818,9 +818,9 @@ impl TargetInfo {
             (tuple::Arch::X86_64, tuple::Os::Windows, _) => Some(&x86_64::WIN64),
             // Apple's x86-64 follows SysV, and its divergences from it are on AArch64.
             (tuple::Arch::X86_64, _, _) => Some(&x86_64::SYSV),
-            // Windows on AArch64 reserves `x18` and passes a variadic `double` in an integer
-            // register, and `rucc_abi` has no description of it yet, so it has no registers either.
-            (tuple::Arch::Aarch64, tuple::Os::Windows, _) => None,
+            // Windows on AArch64 reserves `x18`, passes every argument of a variadic function in
+            // the x registers and homes them at the top of the callee's frame.
+            (tuple::Arch::Aarch64, tuple::Os::Windows, _) => Some(&aarch64::WINDOWS),
             (tuple::Arch::Aarch64, os, _) if os.is_darwin() => Some(&aarch64::DARWIN),
             (tuple::Arch::Aarch64, _, _) => Some(&aarch64::AAPCS64),
             _ => None,
@@ -1388,8 +1388,11 @@ mod tests {
         assert_eq!(arm.call_regs.map(|regs| regs.int_args[0]), Some(aarch64::x(0)));
         assert_eq!(arm.call_regs.map(|regs| regs.red_zone), Some(0));
         assert_eq!(of("aarch64-apple-darwin").call_regs.map(|regs| regs.red_zone), Some(128));
-        // Not described yet, and saying nothing is the answer rather than saying Linux's.
-        assert!(of("aarch64-pc-windows-msvc").call_regs.is_none());
+        // Windows on AArch64 has registers of its own rather than Linux's, both runtimes alike.
+        for triple in ["aarch64-pc-windows-msvc", "aarch64-pc-windows-gnu"] {
+            let regs = of(triple).call_regs.expect("a convention");
+            assert!(std::ptr::eq(regs, &aarch64::WINDOWS), "{triple}");
+        }
         let riscv = of("riscv64-unknown-linux-gnu");
         assert!(riscv.regs.is_empty());
         assert!(riscv.call_regs.is_none());

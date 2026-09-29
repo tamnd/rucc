@@ -759,6 +759,18 @@ pub static AAPCS64: CallRegs = aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaLis
 pub static DARWIN: CallRegs =
     aapcs64(&rucc_abi::abis::DARWIN_ARM64, 128, crate::VaList::CharPointer);
 
+/// Where a call puts things on Windows.
+///
+/// The same registers as [`AAPCS64`], `x18` included among the ones never handed out, which on
+/// Windows is an obligation rather than a choice: it holds the thread's environment block, and a
+/// function that writes it breaks the next thing that asks the system about its own thread. No red
+/// zone, as on Linux. What differs is the description, whose variadic rule sends every argument of
+/// a variadic function through the x registers, and the sixty four bytes such a function homes
+/// them in at the top of its frame, which is [`CallRegs::home`]. A variadic function's list is then
+/// a `char *` over those and whatever the caller left in memory above them.
+pub static WINDOWS: CallRegs =
+    CallRegs { home: 64, ..aapcs64(&rucc_abi::abis::WINDOWS_ARM64, 0, crate::VaList::CharPointer) };
+
 const fn aapcs64(
     abi: &'static rucc_abi::AbiDescription,
     red_zone: u32,
@@ -791,6 +803,7 @@ const fn aapcs64(
         vector_count: None,
         red_zone,
         shadow: 0,
+        home: 0,
         stack_align: 16,
         // A call leaves the return address in the link register, so it pushes nothing and the
         // stack pointer is aligned on entry, which is the thing x86-64's frame layout has to undo.
@@ -837,7 +850,7 @@ mod tests {
 
     #[test]
     fn dwarf_numbers_are_the_machine_numbers_and_the_vectors_start_at_sixty_four() {
-        for regs in [&AAPCS64, &DARWIN] {
+        for regs in [&AAPCS64, &DARWIN, &WINDOWS] {
             assert_eq!(regs.dwarf(GPR, x(0)), Some(0));
             assert_eq!(regs.dwarf(GPR, SP), Some(31));
             assert_eq!(regs.dwarf(FPR, v(8)), Some(72));
@@ -848,8 +861,10 @@ mod tests {
 
     #[test]
     fn nothing_with_a_job_is_handed_out() {
-        for reserved in [X16, X17, X18, FP, LR, SP] {
-            assert!(!AAPCS64.int_order.contains(&reserved), "{reserved:?}");
+        for regs in [&AAPCS64, &DARWIN, &WINDOWS] {
+            for reserved in [X16, X17, X18, FP, LR, SP] {
+                assert!(!regs.int_order.contains(&reserved), "{reserved:?}");
+            }
         }
         // Every register the allocator may use is either one a call destroys or one the frame
         // saves, and every one the frame saves is one it may use.
@@ -868,6 +883,20 @@ mod tests {
         assert!(std::ptr::eq(DARWIN.abi, &rucc_abi::abis::DARWIN_ARM64));
         assert_eq!(AAPCS64.int_args, DARWIN.int_args);
         assert_eq!(AAPCS64.return_address, 0);
+    }
+
+    #[test]
+    fn windows_is_aapcs64_s_registers_with_its_own_description_and_a_home_area() {
+        assert!(std::ptr::eq(WINDOWS.abi, &rucc_abi::abis::WINDOWS_ARM64));
+        assert_eq!(WINDOWS.int_order, AAPCS64.int_order);
+        assert_eq!(WINDOWS.int_args, AAPCS64.int_args);
+        assert_eq!(WINDOWS.int_saved, AAPCS64.int_saved);
+        assert_eq!((WINDOWS.red_zone, WINDOWS.shadow, WINDOWS.home), (0, 0, 64));
+        assert_eq!(WINDOWS.list, crate::VaList::CharPointer);
+        assert!(!WINDOWS.late_frame_pointer);
+        for regs in [&AAPCS64, &DARWIN] {
+            assert_eq!(regs.home, 0);
+        }
     }
 
     fn described(name: &str) -> bool {

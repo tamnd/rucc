@@ -196,10 +196,15 @@ pub(crate) fn plan(
     actual: &[TypeId],
     variadic: bool,
 ) -> Result<Plan, &'static str> {
-    // The one target this fails on is AArch64 on Windows, whose ABI is not described yet. It is
-    // reported per call rather than refused once at startup because that is where the compiler
-    // already has a span to point at, and because everything short of a call still works there.
+    // A target whose ABI is not described fails here. It is reported per call rather than refused
+    // once at startup because that is where the compiler already has a span to point at, and
+    // because everything short of a call still works there.
     let mut call = target.call_under(convention).ok_or("calling a function on this target")?;
+    // Said before anything is asked, because on Windows on AArch64 the `...` changes how the named
+    // arguments travel as well as the rest.
+    if variadic {
+        call = call.variadic();
+    }
     let narrow = call.abi().narrow;
     let shaped = shape(types, target, ret).ok_or("returning a value of this type")?;
     let ret = travel(types, target, &mut call, &shaped, Position::Return, ret);
@@ -380,7 +385,10 @@ pub(crate) fn width(slot: Slot) -> u64 {
 /// not.
 pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Slot> {
     let Some(shaped) = shape(types, target, ty) else { return Vec::new() };
-    let Some(mut call) = target.call() else { return Vec::new() };
+    // Asked as an argument of a variadic function, which it is, and which on Windows on AArch64 is
+    // what sends a structure of four `double`s by reference rather than in four vector registers.
+    let Some(call) = target.call() else { return Vec::new() };
+    let mut call = call.variadic();
     let word = u64::from(target.pointer_width / 8);
     let halves;
     let arg = match shaped {

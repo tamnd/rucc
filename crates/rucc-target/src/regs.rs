@@ -397,6 +397,15 @@ pub struct CallRegs {
     /// How many bytes a caller reserves below the call for the callee to spill its register
     /// arguments into, which is thirty two on Windows and nothing on SysV.
     pub shadow: u32,
+    /// How many bytes a variadic callee takes at the very top of its own frame, directly below the
+    /// arguments the caller left in memory, to home its argument registers in.
+    ///
+    /// Sixty four on Windows on AArch64 and nothing anywhere else. It is [`CallRegs::shadow`] with
+    /// the other party paying for it: the caller reserves nothing, and the callee's prologue takes
+    /// the bytes before it pushes anything, so that the x registers it writes there and the
+    /// arguments above them are one run of words a `char *` walks. Microsoft's compiler and clang
+    /// both lay a variadic function out this way, and the unwind record has a code for it.
+    pub home: u32,
     /// What the stack pointer has to be a multiple of at the instruction that makes a call.
     ///
     /// Sixteen on every convention here, and it is a real obligation rather than a preference,
@@ -543,6 +552,22 @@ impl CallRegs {
             None if convention == Convention::Target => Some(self),
             None => None,
         }
+    }
+
+    /// The registers as a variadic function that homes its argument registers sees them, which is
+    /// the same set on every convention but Windows on AArch64.
+    ///
+    /// There every argument of such a function, named or not, arrived in an x register or in the
+    /// caller's memory, and the function homes the x registers in the [`CallRegs::home`] bytes it
+    /// takes directly below that memory. Seen from inside, that is Windows x64 with the callee paying
+    /// for the shadow space: one run of positions, no vector file, and the arguments the caller left
+    /// in memory starting that many bytes up from the bottom of the homed words.
+    #[must_use]
+    pub fn homed(&self) -> CallRegs {
+        if self.home == 0 {
+            return *self;
+        }
+        CallRegs { shadow: self.home, shared_positions: true, sse_args: &[], ..*self }
     }
 
     /// The number DWARF gives that register, or `None` for one it has no column for.
@@ -872,6 +897,7 @@ mod tests {
             vector_count: None,
             red_zone: 0,
             shadow,
+            home: 0,
             stack_align: 16,
             return_address: 8,
             word: 8,

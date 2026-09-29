@@ -231,6 +231,13 @@ pub struct Layout<'a> {
     /// file is about arithmetic. `None` is the layout there was before that pass existed and is
     /// what `-fstack-reuse=none` asks for.
     pub share: Option<&'a Slots>,
+    /// How many bytes the prologue takes before anything else to home the argument registers into,
+    /// which is the area a variadic function on Windows on AArch64 makes for itself.
+    ///
+    /// It sits between the caller's stack and the frame record, so it moves every distance up to
+    /// the canonical frame address and none of the distances to the caller's arguments, which are
+    /// counted from the bottom of it. See [`Frame::home`].
+    pub home: u32,
 }
 
 impl<'a> Layout<'a> {
@@ -252,6 +259,7 @@ impl<'a> Layout<'a> {
             naked: false,
             pairs: false,
             share: None,
+            home: 0,
         }
     }
 }
@@ -275,6 +283,7 @@ pub struct Frame {
     naked: bool,
     pairs: bool,
     usage: u32,
+    home: u32,
 }
 
 impl Frame {
@@ -492,7 +501,7 @@ impl Frame {
         // of it is in hand. See [`Frame::usage`] for what the number is. Every push comes before
         // the prologue forces an alignment, so the pushes are what gets rounded up.
         let pushes = conv.return_address + push * pushed;
-        let usage = realign.map_or(pushes, |to| pushes.next_multiple_of(to)) + size;
+        let usage = realign.map_or(pushes, |to| pushes.next_multiple_of(to)) + size + layout.home;
 
         Self {
             saved_int,
@@ -525,6 +534,7 @@ impl Frame {
             naked: layout.naked,
             pairs: layout.pairs,
             usage,
+            home: layout.home,
         }
     }
 
@@ -676,6 +686,19 @@ impl Frame {
     #[must_use]
     pub fn naked(&self) -> bool {
         self.naked
+    }
+
+    /// How many bytes the prologue takes before it saves anything, to home the argument registers
+    /// into, which is sixty four in a variadic function on Windows on AArch64 and nothing anywhere
+    /// else.
+    ///
+    /// The distance to the caller's arguments does not include it, because those are counted from
+    /// the bottom of this area: the homed registers are the first eight words of the list and what
+    /// the caller left on the stack follows them. What it does move is the canonical frame address,
+    /// which is that many bytes further above everything the prologue saves.
+    #[must_use]
+    pub fn home(&self) -> u32 {
+        self.home
     }
 
     /// Whether the prologue points the frame pointer at the frame after taking it rather than

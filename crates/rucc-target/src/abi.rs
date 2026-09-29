@@ -47,13 +47,11 @@ impl TargetInfo {
     /// The start of one call, with every argument register still to spend, and [`None`] on a
     /// target whose ABI is not described.
     ///
-    /// The [`None`] is AArch64 on Windows and nothing else today. That ABI is AAPCS64 with a
-    /// different variadic rule and x18 reserved, per `spec/cross-compile/06-abis.md` section 6.1,
-    /// and it is not written down yet. This used to answer AAPCS64 for it, which is the almost
-    /// right answer, and an almost right ABI is the failure mode `spec/cross-compile/02-the-goal.md`
-    /// exists to rule out: everything builds, everything links, and a structure crosses a
-    /// library boundary with its members in the wrong registers. A caller that cannot compile
-    /// the call says so instead.
+    /// Every target with a backend has one. AArch64 on Windows used to be the gap, and this used to
+    /// answer AAPCS64 for it before that, which is the almost right answer: everything builds,
+    /// everything links, and a `double` passed to `printf` arrives in a register the callee never
+    /// reads. It is its own description now, and the targets left answering [`None`] are the ones
+    /// `rucc_abi::abis::for_target` says nothing about at all.
     #[must_use]
     pub fn call(&self) -> Option<Call> {
         abis::for_target(self.tuple).map(AbiDescription::call)
@@ -147,40 +145,32 @@ mod tests {
     }
 
     #[test]
-    fn aarch64_on_windows_has_no_answer_rather_than_an_almost_right_one() {
-        // The one target the compiler can name and cannot classify a call for. It is AAPCS64
-        // with a different variadic rule and x18 reserved, and until that is written down
-        // saying so is the only honest answer.
-        assert!(target("aarch64-pc-windows-msvc").call().is_none());
-        assert!(target("aarch64-unknown-linux-gnu").call().is_some());
-        assert!(target("x86_64-pc-windows-msvc").call().is_some());
+    fn aarch64_on_windows_is_its_own_abi_rather_than_an_almost_right_one() {
+        // AAPCS64 with a different variadic rule, which `variadic()` is what turns on.
+        let windows = target("aarch64-pc-windows-msvc").call().expect("a described ABI");
+        assert_eq!(windows.abi().name, "Windows arm64");
+        assert_eq!(
+            target("aarch64-unknown-linux-gnu").call().expect("AAPCS64").abi().name,
+            "AAPCS64"
+        );
     }
 
     #[test]
-    fn every_other_triple_the_compiler_accepts_can_classify_a_call() {
+    fn every_triple_the_compiler_accepts_can_classify_a_call() {
         use crate::{Arch, Env, Os};
 
         let mut described = 0;
         for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
             for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
                 for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+                    // A target with no operating system included, because a freestanding program
+                    // calls functions too.
                     let target = TargetInfo::new(Triple { arch, os, env });
-                    // AArch64 on Windows is the only gap, and it is one gap rather than a family
-                    // of them: a target with no operating system still has a calling convention,
-                    // because a freestanding program calls functions.
-                    let expected = !(arch == Arch::Aarch64 && os == Os::Windows);
-                    assert_eq!(
-                        target.call().is_some(),
-                        expected,
-                        "{arch:?} {os:?} {env:?} disagrees about whether its ABI is described"
-                    );
-                    described += usize::from(target.call().is_some());
+                    assert!(target.call().is_some(), "{arch:?} {os:?} {env:?} has no ABI");
+                    described += 1;
                 }
             }
         }
-        // Forty eight combinations the triple can hold, less the four spellings of AArch64 on
-        // Windows, which are one gap rather than four because the environment does not reach the
-        // choice of ABI on that pair.
-        assert_eq!(described, 44);
+        assert_eq!(described, 48);
     }
 }

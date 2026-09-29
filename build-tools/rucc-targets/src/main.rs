@@ -373,6 +373,8 @@ fn rules(described: &'static AbiDescription) {
             rucc_abi::Variadic::AlwaysMemory =>
                 "always in the argument area, whatever registers are left",
             rucc_abi::Variadic::BothBanks => "a floating point value travels in both banks",
+            rucc_abi::Variadic::IntegersOnly =>
+                "in the integer bank and the argument area, floats and aggregates included",
         }
     );
     println!(
