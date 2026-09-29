@@ -208,9 +208,9 @@ pub enum Error {
     /// ELF carries a little program per function and can say anything an instruction did to the
     /// frame. Windows carries a fixed list of codes instead, each one of a handful of shapes a
     /// prologue is allowed to have, and a prologue outside that list has no spelling there. The
-    /// one this compiler writes that does not fit is the frame pointer form, which establishes the
-    /// pointer before it takes the frame, so the table is refused rather than written describing a
-    /// frame of the wrong size. A build that does not want a table at all is the way past it, which
+    /// shape that does not fit is the frame pointer form that establishes the pointer before it
+    /// takes the frame, which this compiler no longer writes for Windows, and a table for it is
+    /// refused rather than written describing a frame of the wrong size. A build that does not want a table at all is the way past it, which
     /// is `-fno-asynchronous-unwind-tables -fno-unwind-tables`.
     Frame {
         /// The function it turned up in.
