@@ -72,6 +72,8 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
     scalars: Scalars {
         in_memory: Some(Format::X87Extended),
         wide_integer_is_all_or_nothing: true,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
     },
@@ -97,7 +99,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
 
 /// The shared part of [`AAPCS64`] and [`DARWIN_ARM64`].
 ///
-/// A constant rather than a second copy of the rules, so that "Darwin arm64 differs in two
+/// A constant rather than a second copy of the rules, so that "Darwin arm64 differs in three
 /// fields" is a fact the file states rather than a claim the reader has to check by diffing.
 const AAPCS64_BASE: AbiDescription = AbiDescription {
     name: "AAPCS64",
@@ -105,6 +107,8 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
     scalars: Scalars {
         in_memory: None,
         wide_integer_is_all_or_nothing: false,
+        wide_integer_starts_even: true,
+        wide_integer_drains: true,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
     },
@@ -145,8 +149,8 @@ pub static AAPCS64: AbiDescription = AAPCS64_BASE;
 
 /// Darwin arm64: macOS and iOS on AArch64.
 ///
-/// Two fields different from [`AAPCS64`], and `spec/cross-compile/06-abis.md` section 6.3 explains why those
-/// two are enough to make it a separate ABI rather than a footnote on that one.
+/// Three fields different from [`AAPCS64`], and `spec/cross-compile/06-abis.md` section 6.3 explains why the
+/// first two are enough to make it a separate ABI rather than a footnote on that one.
 ///
 /// A variadic argument is always in the argument area, whatever registers are left. That is why
 /// a variadic call here is ABI-incompatible with a non-variadic one, which means calling an
@@ -160,12 +164,16 @@ pub static AAPCS64: AbiDescription = AAPCS64_BASE;
 /// to, which is its own alignment for a homogeneous floating point aggregate and a word for
 /// anything else.
 ///
+/// An `__int128` goes in the next two x registers whatever their numbers are, where AAPCS64 starts
+/// it at an even one. clang for arm64-apple-darwin passes one after an `int` in x1 and x2.
+///
 /// The third divergence, `long double` being a `double`, is in the data layout rather than here,
 /// because it is a fact about the type and not about how a value of the type travels. The
 /// fourth, x18 being reserved, is a register allocation constraint and `spec/cross-compile/06-abis.md` section
 /// 6.7 keeps those as code.
 pub static DARWIN_ARM64: AbiDescription = AbiDescription {
     name: "Darwin arm64",
+    scalars: Scalars { wide_integer_starts_even: false, ..AAPCS64_BASE.scalars },
     variadic: Variadic::AlwaysMemory,
     stack_args: StackArgs::Packed,
     narrow: Narrow::ToInt,
@@ -221,6 +229,8 @@ pub static WIN64: AbiDescription = AbiDescription {
     scalars: Scalars {
         in_memory: None,
         wide_integer_is_all_or_nothing: false,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
         wide_is_by_reference: true,
         wide_integer_returns_in: Some(Format::Quad),
     },
@@ -269,6 +279,8 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
     scalars: Scalars {
         in_memory: None,
         wide_integer_is_all_or_nothing: false,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
     },
@@ -326,6 +338,8 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     scalars: Scalars {
         in_memory: None,
         wide_integer_is_all_or_nothing: false,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
     },

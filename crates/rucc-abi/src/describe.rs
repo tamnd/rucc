@@ -150,6 +150,18 @@ pub struct Scalars {
     /// and taking one of them would spend a register on half a value and deny it to an argument
     /// after it that could have used the whole thing.
     pub wide_integer_is_all_or_nothing: bool,
+    /// Whether an integer wider than one register that goes in registers starts at an even one.
+    ///
+    /// True on AAPCS64, whose rule C.9 rounds the next general purpose register up to an even
+    /// number for a value aligned to sixteen, so an `__int128` after one `int` is in x2 and x3 and
+    /// x1 is left empty. False on Darwin arm64, which gives it x1 and x2, and everywhere else.
+    pub wide_integer_starts_even: bool,
+    /// Whether an integer wider than one register that finds too few left spends the rest of them.
+    ///
+    /// True on AAPCS64, Darwin's included, where such a value goes in the argument area and the
+    /// registers it could not use are not given to the arguments after it. False on SysV AMD64,
+    /// where they are.
+    pub wide_integer_drains: bool,
     /// Whether a scalar of a size no register holds travels as the address of a copy the caller
     /// made, the way an aggregate of that size does.
     ///
