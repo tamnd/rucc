@@ -43,7 +43,7 @@ use rucc_tuple::Arch;
 /// What an instruction says about the place in it that names something, under a name that does not
 /// collide with the [`Sort`] an ELF symbol has.
 use crate::instruction::Sort as Reach;
-use crate::unwind::Named;
+use crate::unwind::{Named, Prologue, Seh};
 
 /// A file this could not read, and where in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +194,26 @@ struct Frame {
     lsda: Option<(u8, String)>,
 }
 
+/// One function's prologue, as `.seh_` directives said it.
+///
+/// The same codes the object writer turns a compiled function's rows into, since the directives
+/// are those codes one to a line, so a function read from text and the same function compiled
+/// straight to an object get the same record. See [`crate::unwind::Seh`].
+#[derive(Debug)]
+struct Described {
+    part: usize,
+    start: u64,
+    len: u64,
+    /// The entry the row points at, made where `.seh_proc` was written, which is where gas counts
+    /// the codes from as well.
+    sym: usize,
+    /// What `.seh_proc` called the function, for a message about it.
+    name: String,
+    prologue: Prologue,
+    /// Whether `.seh_endprologue` has been read, after which there is nothing left to describe.
+    ended: bool,
+}
+
 /// The file, as it is being read.
 #[derive(Debug, Default)]
 struct Reader {
@@ -235,6 +255,12 @@ struct Reader {
     frame: Option<Frame>,
     /// Every function that has had its frame rules read, in the order the file wrote them.
     frames: Vec<Frame>,
+    /// The function whose prologue is being read, between `.seh_proc` and `.seh_endproc`.
+    described: Option<Described>,
+    /// Every function whose prologue has been read, in the order the file wrote them.
+    prologues: Vec<Described>,
+    /// The name a COFF `.def` is about, until its `.endef`.
+    def: Option<usize>,
     /// Whether `.cfi_sections` left the unwind table out, which a file does when it wants the rules
     /// for a debugger only.
     no_unwind: bool,
@@ -728,6 +754,103 @@ impl Reader {
         Ok(())
     }
 
+    /// One of the directives that describe a prologue for the table Windows reads.
+    ///
+    /// Each is one code of the record, said after the instruction it is about, so what is kept is
+    /// the code and where that instruction ended. `.seh_endprologue` says where the prologue ends
+    /// and `.seh_endproc` where the function does. A handler for the frame is refused, since the
+    /// record this writes has no room for one.
+    fn seh(&mut self, word: &str, args: &[String]) -> Result<(), Trouble> {
+        if word == "seh_proc" {
+            if self.described.is_some() {
+                return Err(self.bad("a '.seh_proc' inside another one"));
+            }
+            let sym = self.sym(&format!("\u{1}seh{}", self.prologues.len()));
+            let (part, start) = (self.here, self.at());
+            self.syms[sym].at = Held::In { part, offset: start };
+            let name = args.first().map_or("", |arg| arg.trim()).to_owned();
+            let prologue = Prologue::default();
+            let ended = false;
+            self.described = Some(Described { part, start, len: 0, sym, name, prologue, ended });
+            return Ok(());
+        }
+        let (here, at) = (self.here, self.at());
+        let Some(described) = &self.described else {
+            return Err(self.bad(&format!("a '.{word}' outside '.seh_proc' and '.seh_endproc'")));
+        };
+        if described.part != here {
+            return Err(self.bad("a '.seh_' directive in another section from its function"));
+        }
+        let offset = (at - described.start) as usize;
+        let ended = described.ended;
+        let code = match word {
+            "seh_endprologue" | "seh_endproc" => {
+                let described = self.described.as_mut().expect("checked above");
+                if word == "seh_endprologue" {
+                    described.prologue.end = offset;
+                    described.ended = true;
+                    return Ok(());
+                }
+                // A file that never said where the prologue ends is taken to end it with its last
+                // code, which is where the object writer ends one.
+                if !described.ended {
+                    described.prologue.end = described.prologue.codes.last().map_or(0, |c| c.0);
+                }
+                described.len = at - described.start;
+                let described = self.described.take().expect("checked above");
+                self.prologues.push(described);
+                return Ok(());
+            }
+            "seh_handler" | "seh_handlerdata" => {
+                return Err(self.bad(&format!(
+                    "a '.{word}', which names an exception handler for the frame, and the unwind \
+                     record this writes has no handler in it"
+                )));
+            }
+            _ if ended => {
+                return Err(self.bad(&format!("a '.{word}' after '.seh_endprologue'")));
+            }
+            "seh_pushreg" => Seh::Push(self.seh_reg(args.first().map_or("", String::as_str))?),
+            "seh_stackalloc" => Seh::Alloc(self.number(args.first().map_or("", String::as_str))?),
+            "seh_setframe" => {
+                let [reg, offset] = self.two(args, ".seh_setframe")?;
+                Seh::Frame { reg: self.seh_reg(&reg)?, offset: self.number(&offset)? }
+            }
+            "seh_savereg" => {
+                let [reg, above] = self.two(args, ".seh_savereg")?;
+                Seh::Save { reg: self.seh_reg(&reg)?, vector: false, above: self.number(&above)? }
+            }
+            "seh_savexmm" => {
+                let [reg, above] = self.two(args, ".seh_savexmm")?;
+                let name = reg.trim().trim_start_matches('%');
+                let number = name.strip_prefix("xmm").and_then(|n| n.parse::<u8>().ok());
+                let Some(reg) = number.filter(|n| *n < 16) else {
+                    return Err(self
+                        .bad(&format!("'{}' is not a register '.seh_savexmm' saves", reg.trim())));
+                };
+                Seh::Save { reg, vector: true, above: self.number(&above)? }
+            }
+            _ => {
+                let what = format!(
+                    "'.{word}' is a directive this compiler does not know, so nothing was written \
+                     for it"
+                );
+                return Err(self.bad(&what));
+            }
+        };
+        let described = self.described.as_mut().expect("checked above");
+        described.prologue.codes.push((offset, code));
+        Ok(())
+    }
+
+    /// The machine's number for a general purpose register a `.seh_` directive names.
+    fn seh_reg(&self, text: &str) -> Result<u8, Trouble> {
+        let text = text.trim();
+        gpr_named(text.strip_prefix('%').unwrap_or(text)).map(|(reg, _)| reg.number()).ok_or_else(
+            || self.bad(&format!("'{text}' is not a register a '.seh_' directive names")),
+        )
+    }
+
     /// The encoding and the name `.cfi_personality` or `.cfi_lsda` gave, or nothing for the
     /// encoding that says there is none.
     ///
@@ -924,6 +1047,22 @@ impl Reader {
             // half, and the first half is the part a link depends on.
             "internal" => self.sight(&args, Visibility::Hidden)?,
 
+            // What COFF says about a name in its own symbol table, between `.def` and `.endef`: a
+            // storage class, which `.globl` has already said as much of as a link depends on, and
+            // a type, where thirty two is a function.
+            "def" if self.coff => {
+                let name = args.first().map_or("", |arg| arg.trim());
+                self.def = Some(self.sym(name));
+            }
+            "scl" if self.coff && self.def.is_some() => {}
+            "type" if self.coff && self.def.is_some() => {
+                let what = self.number(rest)?;
+                if what == 32 {
+                    let sym = self.def.expect("checked above");
+                    self.syms[sym].sort = Sort::Func;
+                }
+            }
+            "endef" if self.coff => self.def = None,
             "type" => self.type_directive(&args)?,
             "err" | "error" => {
                 let what = unquoted(args.first().map_or("", |arg| arg.trim()));
@@ -957,6 +1096,7 @@ impl Reader {
             "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64" | "att_syntax"
             | "intel_syntax" | "warning" => {}
             _ if word.starts_with("cfi_") => self.cfi(word, &args)?,
+            _ if word.starts_with("seh_") && self.coff => self.seh(word, &args)?,
 
             _ => {
                 let what = format!(
@@ -1709,7 +1849,11 @@ impl Reader {
         if self.frame.is_some() {
             return Err(self.bad("a '.cfi_startproc' that is never ended"));
         }
+        if self.described.is_some() {
+            return Err(self.bad("a '.seh_proc' that is never ended"));
+        }
         self.unwind_table();
+        self.seh_table()?;
         self.resolve_sets()?;
         self.resolve_sizes()?;
         let grow = self.too_far()?;
@@ -1841,6 +1985,90 @@ impl Reader {
             relocs: table.relocs,
             group: None,
         });
+    }
+
+    /// The table Windows reads, as `.seh_` directives described it: the descriptions in `.xdata`
+    /// and a row for each function in `.pdata`, which is where the object writer puts the same two.
+    ///
+    /// Written by the same code the object writer uses, from the same codes, so the only thing
+    /// that differs is how the rows name their functions: by the entry made at `.seh_proc` rather
+    /// than by the function's own name, which the linker resolves to the same address.
+    fn seh_table(&mut self) -> Result<(), Trouble> {
+        if self.prologues.is_empty() {
+            return Ok(());
+        }
+        let funcs: Vec<Extent> = self
+            .prologues
+            .iter()
+            .map(|described| Extent {
+                name: self.seh_name(described),
+                start: described.start as usize,
+                len: described.len as usize,
+                align: 1,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+                patch: None,
+                landings: Vec::new(),
+            })
+            .collect();
+        let prologues: Vec<Prologue> =
+            self.prologues.iter().map(|described| described.prologue.clone()).collect();
+        let table = crate::unwind::seh(&funcs, &prologues).map_err(|error| {
+            let error = match error {
+                crate::Error::Frame { func, why } => {
+                    let named = self.prologues.iter().find(|d| self.seh_name(d) == func);
+                    crate::Error::Frame { func: named.map_or(func, |d| d.name.clone()), why }
+                }
+                other => other,
+            };
+            self.bad(&error.to_string())
+        })?;
+        for at in 0..self.prologues.len() {
+            if self.seh_name(&self.prologues[at]) != self.prologues[at].name {
+                self.relocated.insert(self.prologues[at].sym);
+            }
+        }
+        let shape = Shape { alloc: true, bits: true, ..Shape::default() };
+        let codes = self.parts.len();
+        let size = table.info.len() as u64;
+        self.parts.push(Part {
+            name: ".xdata".to_owned(),
+            bytes: table.info,
+            size,
+            align: 4,
+            shape,
+            relocs: Vec::new(),
+            group: None,
+        });
+        // Each description's name, which a row reaches it through, and a local one, as it is in
+        // an object the compiler writes.
+        for label in table.labels {
+            let sym = self.sym(&label.name);
+            self.syms[sym].at = Held::In { part: codes, offset: label.at as u64 };
+            self.relocated.insert(sym);
+        }
+        let size = table.bytes.len() as u64;
+        self.parts.push(Part {
+            name: ".pdata".to_owned(),
+            bytes: table.bytes,
+            size,
+            align: 4,
+            shape,
+            relocs: table.relocs,
+            group: None,
+        });
+        Ok(())
+    }
+
+    /// What a row names its function by: the name `.seh_proc` gave when that name is where the
+    /// directive was, which is what the object writer names it by too, and otherwise the entry
+    /// made at the directive.
+    fn seh_name(&self, described: &Described) -> String {
+        let here = Held::In { part: described.part, offset: described.start };
+        match self.known.get(&described.name) {
+            Some(&sym) if self.syms[sym].at == here => described.name.clone(),
+            _ => self.syms[described.sym].name.clone(),
+        }
     }
 
     /// `.set` and its spellings, which may name each other and so are worked at until they stop
@@ -4108,5 +4336,48 @@ g:
             Err(trouble) => trouble.why,
         };
         assert!(why.contains("defines no symbol"), "{why}");
+    }
+
+    /// What gcc writes for a Windows function with a frame pointer, read into the same record the
+    /// object writer makes for that prologue: the codes backwards with where each instruction
+    /// ended, the frame register in the header, and a row in `.pdata` naming the function, its
+    /// length and the record.
+    #[test]
+    fn a_prologue_said_with_seh_directives_is_the_windows_table() {
+        let text = "\t.text\n\t.def\tf;\t.scl\t2;\t.type\t32;\t.endef\n\t.seh_proc\tf\nf:\n\
+                    \tpushq\t%rbp\n\t.seh_pushreg\t%rbp\n\tpushq\t%rbx\n\t.seh_pushreg\t%rbx\n\
+                    \tsubq\t$56, %rsp\n\t.seh_stackalloc\t56\n\
+                    \tmovaps\t%xmm6, 32(%rsp)\n\t.seh_savexmm\t%xmm6, 32\n\
+                    \tmovq\t%rsp, %rbp\n\t.seh_setframe\t%rbp, 0\n\t.seh_endprologue\n\
+                    \tnop\n\tmovq\t%rbp, %rsp\n\tpopq\t%rbx\n\tpopq\t%rbp\n\tret\n\t.seh_endproc\n";
+        let done = match read_as(text, Arch::X86_64, ObjectFormat::Coff) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let f = done.names.iter().find(|name| name.name == "f").unwrap();
+        assert_eq!(f.sort, Sort::Func);
+        let xdata = done.parts.iter().find(|part| part.name == ".xdata").unwrap();
+        // pushq %rbp ends at 1, pushq %rbx at 2, subq at 6, movaps at 11 and movq at 14.
+        assert_eq!(
+            xdata.bytes,
+            [1, 14, 6, 0x05, 14, 0x03, 11, 0x68, 2, 0, 6, 0x62, 2, 0x30, 1, 0x50]
+        );
+        let pdata = done.parts.iter().find(|part| part.name == ".pdata").unwrap();
+        assert_eq!(pdata.bytes.len(), 12);
+        let len = done.parts.iter().find(|part| part.name == ".text").unwrap().bytes.len() as i64;
+        let relocs: Vec<(&str, i64)> =
+            pdata.relocs.iter().map(|reloc| (reloc.symbol.as_str(), reloc.addend)).collect();
+        assert_eq!(relocs, [("f", 0), ("f", len), ("$unwind$f", 0)]);
+        assert!(pdata.relocs.iter().all(|reloc| reloc.kind == Reference::Image));
+
+        let why = match read_as(
+            "\t.seh_proc\tf\nf:\n\t.seh_endprologue\n\tpushq\t%rbx\n\t.seh_pushreg\t%rbx\n",
+            Arch::X86_64,
+            ObjectFormat::Coff,
+        ) {
+            Ok(_) => panic!("a code after the prologue ended"),
+            Err(trouble) => trouble.why,
+        };
+        assert!(why.contains("after '.seh_endprologue'"), "{why}");
     }
 }
