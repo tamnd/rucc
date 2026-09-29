@@ -304,13 +304,23 @@ impl Writer<'_> {
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
         }
-        let seh = self.prologue(func, &name)?;
-        if let Some(seh) = &seh {
+        // An ARM64 function is described from its instructions rather than from its rows, so its
+        // instructions are written out first and what goes around them worked out from that. See
+        // `crate::arm_unwind`.
+        let arm = match self.seh {
+            Some(_) if self.arch == Arch::Aarch64 => Some(self.arm_unwind(func, &name)?),
+            _ => None,
+        };
+        let seh = if arm.is_some() { None } else { self.prologue(func, &name)? };
+        if seh.is_some() || arm.is_some() {
             let _ = writeln!(self.out, "\t.seh_proc\t{name}");
-            if seh.codes.is_empty() {
-                let _ = writeln!(self.out, "\t.seh_endprologue");
-            }
         }
+        if seh.as_ref().is_some_and(|seh| seh.codes.is_empty())
+            || arm.as_ref().is_some_and(|(_, plan)| plan.empty)
+        {
+            let _ = writeln!(self.out, "\t.seh_endprologue");
+        }
+        let mut line = 0;
         let mut place = 0;
         // The personality routine and the call site table, for a function with a landing pad, in
         // gcc's spelling, which is what the unwind writer puts in the object as well. See
@@ -367,7 +377,25 @@ impl Writer<'_> {
                 if let Some((at, _)) = site {
                     let _ = writeln!(self.out, "{local}EHB{at}_{name}:");
                 }
-                self.inst(func, block, inst, &name)?;
+                match &arm {
+                    Some((texts, plan)) => {
+                        for text in texts[place].split_inclusive('\n') {
+                            if !crate::arm_unwind::machine(text) {
+                                self.out.push_str(text);
+                                continue;
+                            }
+                            for directive in &plan.before[line] {
+                                let _ = writeln!(self.out, "{directive}");
+                            }
+                            self.out.push_str(text);
+                            for directive in &plan.after[line] {
+                                let _ = writeln!(self.out, "{directive}");
+                            }
+                            line += 1;
+                        }
+                    }
+                    None => self.inst(func, block, inst, &name)?,
+                }
                 if let Some((at, pad)) = site {
                     let _ = writeln!(self.out, "{local}EHE{at}_{name}:");
                     sites.push(pad);
@@ -392,7 +420,7 @@ impl Writer<'_> {
             let _ = writeln!(self.out, "{}rucc_end{which}:", self.directives.local());
         }
         self.tables(func, &name);
-        if seh.is_some() {
+        if seh.is_some() || arm.is_some() {
             let _ = writeln!(self.out, "\t.seh_endproc");
         }
         if unwind {
@@ -430,6 +458,39 @@ impl Writer<'_> {
         }
         let codes = crate::unwind::prologue(name, &rows, conv)?;
         Ok(Some(Prologue { end: codes.last().map_or(0, |(at, _)| *at), codes }))
+    }
+
+    /// Every instruction of an ARM64 function as the listing writes it, by its place in the
+    /// function, and the `.seh_` directives that go around them.
+    ///
+    /// The prologue ends at the instruction the row keeping the body's rules is written behind,
+    /// which is where the frame code says the body starts. See `crate::arm_unwind`.
+    fn arm_unwind(
+        &self,
+        func: &Func,
+        name: &str,
+    ) -> Result<(Vec<String>, crate::arm_unwind::Plan), Error> {
+        let mut texts = Vec::new();
+        let mut lines = Vec::new();
+        let mut end = None;
+        for (index, block) in func.blocks().enumerate() {
+            for inst in func.insts(block) {
+                let place = texts.len();
+                let text = self.a64_text(func, block, inst, name)?;
+                for line in
+                    text.split_inclusive('\n').filter(|line| crate::arm_unwind::machine(line))
+                {
+                    let text = line.trim().to_owned();
+                    lines.push(crate::arm_unwind::Line { text, block: index, place });
+                }
+                if end.is_none() && func.cfi_after(inst).any(|op| op == CfiOp::RememberState) {
+                    end = Some(place);
+                }
+                texts.push(text);
+            }
+        }
+        let plan = crate::arm_unwind::plan(name, &lines, end)?;
+        Ok((texts, plan))
     }
 
     /// The instructions that do nothing which go in front of a function's own label.
@@ -560,6 +621,31 @@ impl Writer<'_> {
         }
     }
 
+    /// One ARM64 instruction as the listing writes it, which can be more than one line.
+    fn a64_text(
+        &self,
+        func: &Func,
+        block: Block,
+        inst: Inst,
+        func_name: &str,
+    ) -> Result<String, Error> {
+        let spelling = match self.directives {
+            Directives::MachO => aarch64::Spelling::Apple,
+            Directives::Elf | Directives::Coff => aarch64::Spelling::Gnu,
+        };
+        let at = a64::Context {
+            names: self.names,
+            symbol: self.directives.symbol(),
+            spelling,
+            func_name,
+        };
+        let mut line = String::new();
+        let label = |to| self.label(func_name, to);
+        let table = |at: u32| self.table(func_name, at as usize);
+        a64::inst(&mut line, &at, func, block, inst, label, table)?;
+        Ok(line)
+    }
+
     /// One instruction of the machine IR, as however many instructions of the machine it is.
     fn inst(
         &mut self,
@@ -569,20 +655,7 @@ impl Writer<'_> {
         func_name: &str,
     ) -> Result<(), Error> {
         if self.arch == Arch::Aarch64 {
-            let spelling = match self.directives {
-                Directives::MachO => aarch64::Spelling::Apple,
-                Directives::Elf | Directives::Coff => aarch64::Spelling::Gnu,
-            };
-            let at = a64::Context {
-                names: self.names,
-                symbol: self.directives.symbol(),
-                spelling,
-                func_name,
-            };
-            let mut line = String::new();
-            let label = |to| self.label(func_name, to);
-            let table = |at: u32| self.table(func_name, at as usize);
-            a64::inst(&mut line, &at, func, block, inst, label, table)?;
+            let line = self.a64_text(func, block, inst, func_name)?;
             self.out.push_str(&line);
             return Ok(());
         }

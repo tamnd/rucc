@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- An AArch64 Windows function rucc compiles is described with `.seh_` directives, so its object has `.pdata` and `.xdata` like clang's. Each instruction of the prologue and of every epilogue gets the code for that instruction, the `__chkstk` call and the subtraction after it included, and the assembler packs the record when the frame has the canonical shape. A prologue that saves a register in a way no code can describe, or a body that moves the stack pointer after a prologue that does not end by setting the frame pointer, is an error rather than a wrong table. (#2211)
 - The builtins archive has `__chkstk` for AArch64 Windows, the stack probe with Microsoft's contract: the size in `x15` in units of sixteen bytes, `x16` and `x17` destroyed and nothing else. It assembles to the same bytes as compiler-rt's. (#2199)
 - `__builtin_sponentry` on AArch64, the stack pointer the function was entered with, which the mingw-w64 `setjmp` passes to `_setjmp` on ARM64 Windows. clang writes the same address. On other targets the call is refused, as clang refuses it. (#2198)
 
