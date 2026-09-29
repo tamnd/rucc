@@ -112,10 +112,14 @@ fn the_preserved_vector_registers_are_saved_as_their_low_half() {
         let stored = |reg: &str| asm.iter().any(|line| line.starts_with(&format!("str {reg}, [")));
         let loaded = |reg: &str| asm.iter().any(|line| line.starts_with(&format!("ldr {reg}, [")));
         assert!(stored("d8") && loaded("d8"), "{target}: d8 is not saved\n{text}");
-        assert!(
-            !asm.iter().any(|line| line.starts_with("str q") || line.starts_with("ldr q")),
-            "{target}: a whole vector register saved\n{text}"
-        );
+        // A spill is still as wide as the register, so this is only about the saved ones.
+        for n in 8..16 {
+            let whole = [format!("str q{n}, ["), format!("ldr q{n}, [")];
+            assert!(
+                !asm.iter().any(|line| whole.iter().any(|one| line.starts_with(one.as_str()))),
+                "{target}: all of v{n} is saved\n{text}"
+            );
+        }
         // DWARF numbers the vector registers from 64, so `d8` is 72 and `d9` is 73, and the two
         // are a double apart.
         let at = |reg: u32| {
