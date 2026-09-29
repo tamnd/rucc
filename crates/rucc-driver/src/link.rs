@@ -56,7 +56,7 @@
 //! `lld-link` takes a line of its own, which [`rucc_sysroot::argv`] writes as it writes the others,
 //! and the libraries on it come out of a tree nobody may redistribute. `--fetch-msvc-sdk` lays that
 //! tree out once the person asking has accepted Microsoft's licence and says which `--sysroot` to
-//! pass, so the tree is always one somebody named, and [`msvc_sysroot`] is the one place that says
+//! pass, so the tree is always one somebody named, and `msvc_sysroot` is the one place that says
 //! so. A mingw-w64 target links against the cache like every other cross target, because PE in
 //! that environment is written in the GNU style and the import libraries for it are ours.
 //!
