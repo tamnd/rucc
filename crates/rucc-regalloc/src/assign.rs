@@ -308,6 +308,10 @@ struct Held<'a> {
 #[derive(Default)]
 struct Active<'a> {
     by: Vec<Vec<Held<'a>>>,
+    /// For each register, a point no value in it ends before. Values are let go of at the start of
+    /// every interval, and most of those times nothing in most registers has ended, so a register
+    /// whose values all end at or after the point is not walked at all.
+    soonest: Vec<Point>,
     /// How many values have been given a register so far.
     count: usize,
 }
@@ -322,15 +326,25 @@ impl<'a> Active<'a> {
         let slot = usize::from(at.number());
         if self.by.len() <= slot {
             self.by.resize_with(slot + 1, Vec::new);
+            self.soonest.resize(slot + 1, Point::MAX);
         }
         self.by[slot].push(Held { reg, class, range, area, at, since: self.count });
+        self.soonest[slot] = self.soonest[slot].min(range.end);
         self.count += 1;
     }
 
     /// Lets go of every value whose interval ends before a point.
+    ///
+    /// Taking a value out of a register anywhere else leaves that register's soonest end where it
+    /// was, which is still a point nothing in it ends before, so only this and [`Active::push`]
+    /// have to keep it.
     fn expire(&mut self, point: Point) {
-        for held in &mut self.by {
+        for (held, soonest) in self.by.iter_mut().zip(&mut self.soonest) {
+            if *soonest >= point {
+                continue;
+            }
             held.retain(|held| held.range.end >= point);
+            *soonest = held.iter().map(|held| held.range.end).min().unwrap_or(Point::MAX);
         }
     }
 }
