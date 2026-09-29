@@ -22,6 +22,13 @@ const MSVC: &str = "x86_64-pc-windows-msvc";
 /// The GNU one, which provides the same routine under a different name.
 const MINGW: &str = "x86_64-pc-windows-gnu";
 
+/// The ARM64 rows, where both runtimes call Microsoft's name and count the size in `x15` in units
+/// of sixteen bytes.
+const ARM64_MSVC: &str = "aarch64-pc-windows-msvc";
+
+/// The same for mingw-w64, whose ARM64 routine has the same name as Microsoft's.
+const ARM64_MINGW: &str = "aarch64-w64-windows-gnu";
+
 /// The three sizes of frame the convention has two different answers for.
 ///
 /// `small` fits in a page, `onepage` is just over one, and `many` is far enough over that a walk
@@ -233,16 +240,20 @@ fn offered(object: &[u8]) -> Vec<String> {
 
 /// The routine a large frame calls is in our own runtime under the name each runtime gives it.
 ///
-/// `runtime/builtins/chkstk.S` is one file for both Windows runtimes, and which of the two it
-/// assembles to is up to the macros of the row: `__chkstk` where `_MSC_VER` is defined and mingw's
-/// `___chkstk_ms` everywhere else. Each object offers the one name its row's prologues call and not
-/// the other, since an msvc program linking mingw's routine would still be missing its own.
+/// `runtime/builtins/chkstk.S` is one file for every Windows row, and which routine it assembles
+/// to is up to the macros of the row: on x86-64 `__chkstk` where `_MSC_VER` is defined and mingw's
+/// `___chkstk_ms` everywhere else, and on ARM64 `__chkstk` for both runtimes. Each object offers
+/// the one name its row's prologues call and not the other, since an msvc program linking mingw's
+/// routine would still be missing its own.
 #[test]
 fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime/builtins/chkstk.S");
-    for (target, wanted, other) in
-        [(MSVC, "__chkstk", "___chkstk_ms"), (MINGW, "___chkstk_ms", "__chkstk")]
-    {
+    for (target, wanted, other) in [
+        (MSVC, "__chkstk", "___chkstk_ms"),
+        (MINGW, "___chkstk_ms", "__chkstk"),
+        (ARM64_MSVC, "__chkstk", "___chkstk_ms"),
+        (ARM64_MINGW, "__chkstk", "___chkstk_ms"),
+    ] {
         let dir = std::env::temp_dir().join(format!("rucc-chkstk-{}-{target}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
         let out = dir.join("chkstk.o");
@@ -257,6 +268,11 @@ fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
         assert!(run.status.success(), "{target}: {}", String::from_utf8_lossy(&run.stderr));
         let object = std::fs::read(&out).expect("the object was written");
         let _ = std::fs::remove_dir_all(&dir);
+        // The machine the header names, which for the two ARM64 rows is the arm of the file
+        // written for them rather than an x86 one.
+        let machine = u16::from_le_bytes([object[0], object[1]]);
+        let arm = target.starts_with("aarch64");
+        assert_eq!(machine, if arm { 0xaa64 } else { 0x8664 }, "{target}");
         let names = offered(&object);
         assert!(names.iter().any(|name| name == wanted), "{target}: {names:?}");
         assert!(!names.iter().any(|name| name == other), "{target}: {names:?}");
