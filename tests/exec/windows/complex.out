@@ -1,0 +1,12 @@
+fmul       11 -2
+fdiv       -1 2
+dmul       11 -2
+ddiv       -1 2
+lmul       11 -2
+ldiv       -1 2
+inf*i      0 1
+1/0        1 1
+1/inf      0 0
+linf*i     0 1
+huge       1 0
+tiny       0 1

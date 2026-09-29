@@ -724,6 +724,7 @@ impl Reader {
             }
             "section" if self.macho => self.apple_section_directive(&args)?,
             "section" => self.section_directive(&args)?,
+            "linkonce" if self.coff => self.linkonce(rest)?,
             "zerofill" if self.macho => self.zerofill(&args, false)?,
             "tbss" if self.macho => self.zerofill(&args, true)?,
             "subsections_via_symbols" if self.macho => self.subsections = true,
@@ -999,6 +1000,23 @@ impl Reader {
         Ok(())
     }
 
+    /// `.linkonce [selection]`, on COFF, which is how gcc and gas make the section they are in a
+    /// COMDAT. `discard` when nothing is named, as in gas. The symbol the group is about is not
+    /// written, and is the first one the section defines, which [`Reader::finish`] fills in
+    /// once every label is known. That is the symbol clang names in its own spelling of the same
+    /// thing, `.section name,"dr",discard,symbol`, so the two spellings make the same object.
+    fn linkonce(&mut self, rest: &str) -> Result<(), Trouble> {
+        let word = match rest.trim() {
+            "" => "discard",
+            word => word,
+        };
+        let Some(keep) = Keep::of(word) else {
+            return Err(self.bad(&format!("'{word}' is not a COMDAT selection")));
+        };
+        self.parts[self.here].group = Some(Group { symbol: String::new(), keep });
+        Ok(())
+    }
+
     /// `.text` and the other short names Apple's assembler has for a section, on Mach-O.
     fn apple_plain(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
         if !rest.trim().is_empty() && rest.trim() != "0" {
@@ -1136,6 +1154,36 @@ impl Reader {
         });
         self.named.insert(key, at);
         self.go(at);
+    }
+
+    /// The symbol of each `.linkonce` group, which is the first name its section defines.
+    fn leaders(&mut self) -> Result<(), Trouble> {
+        for at in 0..self.parts.len() {
+            if !self.parts[at].group.as_ref().is_some_and(|group| group.symbol.is_empty()) {
+                continue;
+            }
+            let first = self
+                .syms
+                .iter()
+                .filter(|sym| !sym.numbered)
+                .filter_map(|sym| match sym.at {
+                    Held::In { part, offset } if part == at => Some((offset, &sym.name)),
+                    _ => None,
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((_, name)) = first else {
+                let what = format!(
+                    "'{}' is a .linkonce section that defines no symbol",
+                    self.parts[at].name
+                );
+                return Err(self.bad(&what));
+            };
+            let name = name.clone();
+            if let Some(group) = self.parts[at].group.as_mut() {
+                group.symbol = name;
+            }
+        }
+        Ok(())
     }
 
     /// Go to a section that exists, remembering where this came from for `.previous`.
@@ -1536,6 +1584,7 @@ impl Reader {
             return Ok(Err(grow));
         }
         self.resolve_fixups()?;
+        self.leaders()?;
         // A section the file only ever mentioned is dropped, so that a `.section` in a macro that
         // turned out to be unused does not put an empty header in the object. `.text` at the top is
         // the common case of one.
@@ -3795,5 +3844,32 @@ g:
             Err(trouble) => trouble.why,
         };
         assert!(why.contains("'q'"), "{why}");
+    }
+
+    /// gcc's spelling of a COMDAT, `.linkonce` after the `.section`, makes the same group as
+    /// clang's, about the first symbol the section defines, and a group about nothing is refused.
+    #[test]
+    fn a_linkonce_section_is_a_comdat_about_its_first_symbol() {
+        let text = "\t.section\t.rdata$.refptr.x,\"dr\"\n\t.linkonce\tdiscard\n\t.globl\t.refptr.x\n\
+                    .refptr.x:\n\t.quad\tx\n\t.section\t.text$f,\"xr\"\n\t.linkonce\tsame_size\nf:\n\tret\n";
+        let done = match read_as(text, Arch::X86_64, ObjectFormat::Coff) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let refptr = done.parts.iter().find(|part| part.name == ".rdata$.refptr.x").unwrap();
+        let group = refptr.group.as_ref().unwrap();
+        assert_eq!((group.symbol.as_str(), group.keep), (".refptr.x", Keep::Any));
+        let text = done.parts.iter().find(|part| part.name == ".text$f").unwrap();
+        let group = text.group.as_ref().unwrap();
+        assert_eq!((group.symbol.as_str(), group.keep), ("f", Keep::SameSize));
+        let why = match read_as(
+            "\t.section .y,\"dr\"\n\t.linkonce\n\t.quad 1\n",
+            Arch::X86_64,
+            ObjectFormat::Coff,
+        ) {
+            Ok(_) => panic!("a group about nothing"),
+            Err(trouble) => trouble.why,
+        };
+        assert!(why.contains("defines no symbol"), "{why}");
     }
 }

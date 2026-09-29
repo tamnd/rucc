@@ -4190,7 +4190,20 @@ impl<'u> Body<'_, 'u> {
         if plan.returns_through_memory() {
             values.push(at);
         }
-        values.extend_from_slice(halves);
+        for (index, &half) in halves.iter().enumerate() {
+            let travel = &plan.args[index];
+            match travel.pass {
+                // A `long double` on Windows, which is a scalar that goes by the address of a
+                // copy, the same as it does when the program calls a function with one.
+                Pass::Reference | Pass::Memory => {
+                    let copy = self.scratch(travel.size, travel.align, span);
+                    let info = self.access(part);
+                    self.build(span).store(half, copy, info, Flags::NONE);
+                    values.push(copy);
+                }
+                _ => values.push(half),
+            }
+        }
         let symbol = self.unit.names.intern(&routine);
         let sig = self.func.add_signature(plan.signature.clone());
         let inst = self.build(span).call_varargs(symbol, sig, &values, &[]);
