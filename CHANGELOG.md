@@ -11,7 +11,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The windows-gnu sysroots `--fetch` installs are built for the UCRT rather than msvcrt, pinned to the `sysroots-2026-09-29` release of tamnd/rucc-cross. A program now imports the `api-ms-win-crt-*` API sets, and `_mingw.h` sets `__MSVCRT_VERSION__` to 0xE00 and defines `_UCRT`, as it does for a UCRT gcc. The link line is unchanged, because the sysroot's `libmsvcrt.a` is a copy of whichever runtime it was built for. The same release has a `-msvcrt` archive of each target for anyone who needs `msvcrt.dll`, and nothing pins it (#2069).
-- The rule tables keep each head name's first sixteen bytes as a number next to the name, and finding a branch compares those numbers before it compares any names. Instruction selection no longer calls `memcmp` at every step of the search, which on jtckdint's `test.c` takes about 1.5% off `-O0` and a quarter of a billion instructions off `-O2`, with the same assembly (#2160).
 
 ### Fixed
 
@@ -19,7 +18,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A `pure` or `const` function whose value comes back through memory, such as a large struct anywhere or a `_Complex double` or `long double` on Windows x64, is no longer taken to write nothing. The value is a store through the pointer the caller hands it, and at `-O2` a call whose value was read was deleted and the value read from memory nothing had written, which is `execute/20050121-1.c` and `execute/20070614-1.c` on the windows-gnu row (#2069).
 - `tests/exec/windows/dll.c` reaches `_wctype` through dllimport instead of `__argc` and `_environ`, which UCRT exports only as functions (#2069).
 - A `?:` or `if` whose condition takes a `__builtin_constant_p` the optimizer has still to answer is no longer decided in the front end, where the answer is no. At `-O2` the optimizer answers yes for a variable it has seen set to a constant, as gcc does, and `execute/builtin-constant.c` took the wrong arm (#2069).
-- A function declared first under its assembler name and then under the name the source calls it by, as mingw-w64's `<stdio.h>` declares `__mingw_fprintf` and then `fprintf`, keeps the second name for the library call folds. Before, `fprintf (stdout, "%s", s)` and its kin were not turned into `fputs` and the like on the windows-gnu row, which `execute/builtins/fprintf.c` checks (#2069).
 
 ## 0.15.1
 

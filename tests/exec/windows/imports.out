@@ -1,2 +1,3 @@
 kernel32 yes
 one crt
+other dlls 0
