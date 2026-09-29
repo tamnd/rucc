@@ -955,3 +955,37 @@ fn a_vector_register_there_is_none_of_without_avx512_is_still_refused() {
         assert!(said.contains("no name for"), "{said}");
     }
 }
+
+#[test]
+fn eight_early_outputs_and_two_pinned_inputs_fit_with_optimisation() {
+    // libsodium's `sodium_sub` in `utils.c`, which has eight `=&r` outputs and its two pointers in
+    // `S` and `D`. With optimisation the allocator holds two registers back for itself, and the
+    // count of what was left for the operands took them as free, so it ran out and panicked. The
+    // loop after it is part of the shape, since without it nothing is spilled around the template.
+    let mut source =
+        String::from("void f(unsigned char *a, const unsigned char *b, unsigned long len) {\n");
+    source.push_str("unsigned long t1, t2, t3, t4, t5, t6, t7, t8, i, c = 0;\nif (len == 64) {\n");
+    let mut template = String::new();
+    for n in 1..=8 {
+        template.push_str(&format!("movq {}(%[in]), %[t{n}]\\n", (n - 1) * 8));
+    }
+    template.push_str("subq %[t1], (%[out])\\n");
+    for n in 2..=8 {
+        template.push_str(&format!("sbbq %[t{n}], {}(%[out])\\n", (n - 1) * 8));
+    }
+    let outputs: Vec<String> = (1..=8).map(|n| format!("[t{n}] \"=&r\" (t{n})")).collect();
+    source.push_str(&format!(
+        "__asm__ __volatile__(\"{template}\" : {} : [in] \"S\" (b), [out] \"D\" (a) \
+         : \"memory\", \"flags\", \"cc\");\nreturn;\n}}\n\
+         for (i = 0; i < len; i++) {{\n\
+         c = (unsigned long) a[i] - (unsigned long) b[i] - c;\n\
+         a[i] = (unsigned char) c;\n\
+         c = (c >> 8) & 1;\n\
+         }}\n}}\n",
+        outputs.join(", ")
+    ));
+    for level in ["-O0", "-O1", "-O2", "-Os"] {
+        let (ok, _, said) = object("sodium-sub", &source, &[level]);
+        assert!(ok, "{level}:\n{said}");
+    }
+}

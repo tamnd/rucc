@@ -2968,6 +2968,27 @@ decl #0 x : int object external static defined
     /// The size is in bytes and not in lanes, which is the part a reader gets backwards: sixteen
     /// of `int` is four lanes and sixteen of `char` is sixteen. A vector is aligned to its own
     /// size, which is what a machine that has the registers wants and what gcc gives one here.
+    /// A conditional whose arms are two vectors of the same type, with a scalar condition that
+    /// picks one of them whole. The typedef on one side and not the other does not make them two
+    /// types, and a vector against a vector of a different lane is still refused.
+    #[test]
+    fn a_conditional_with_a_vector_in_each_arm_is_that_vector() {
+        tast(concat!(
+            "typedef long long v2di __attribute__((vector_size(16)));\n",
+            "typedef long long m128i __attribute__((vector_size(16), may_alias));\n",
+            "v2di id(v2di);\n",
+            "v2di f(v2di x, v2di r, int c) { return c ? x : c > 1 ? id(x) : r; }\n",
+            "m128i g(m128i x, v2di r, int c) { return c ? x : r; }\n",
+            "_Static_assert(sizeof(1 ? (v2di){0} : (v2di){1}) == 16, \"whole\");\n",
+        ));
+        let refused = errors(concat!(
+            "typedef long long v2di __attribute__((vector_size(16)));\n",
+            "typedef int v4si __attribute__((vector_size(16)));\n",
+            "v2di f(v2di x, v4si r, int c) { return c ? x : r; }\n",
+        ));
+        assert!(refused.iter().any(|m| m.contains("type mismatch in conditional")), "{refused:?}");
+    }
+
     #[test]
     fn the_vector_size_attribute_builds_a_type_of_lanes_and_measures_it_in_bytes() {
         tast(concat!(

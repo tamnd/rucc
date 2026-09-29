@@ -4397,7 +4397,9 @@ impl<'a> Lowering<'a> {
         // writes a register it did not name is only owed what gcc would have done, which here is
         // one of the ten. So the registers taken as written without being named are handed back,
         // from the end of the convention's order, until the operands fit in what is left. One the
-        // list names or an operand is pinned to stays where it is.
+        // list names or an operand is pinned to stays where it is. What is left does not count the
+        // two scratch registers the allocator holds back, since no operand is ever given one of
+        // those, and counting them left two outputs short above -O0 with nothing to carry them.
         let fixed_to: Vec<PhysReg> = defs
             .iter()
             .chain(&uses)
@@ -4408,11 +4410,17 @@ impl<'a> Lowering<'a> {
             .collect();
         let wanted = defs.iter().chain(&uses).count() - fixed_to.len();
         let int = self.conv.int_class;
+        let held: &[PhysReg] =
+            if a64 { &crate::pipeline::AARCH64_SCRATCH } else { &crate::pipeline::SCRATCH };
         let free = |clobbered: &[(PhysReg, RegClass)]| {
             self.conv
                 .int_order
                 .iter()
-                .filter(|&&reg| !fixed_to.contains(&reg) && !clobbered.contains(&(reg, int)))
+                .filter(|&&reg| {
+                    !held.contains(&reg)
+                        && !fixed_to.contains(&reg)
+                        && !clobbered.contains(&(reg, int))
+                })
                 .count()
         };
         while free(&clobbered) < wanted {
@@ -8683,8 +8691,11 @@ mod tests {
     /// A template kept as text with more outputs than the convention keeps registers across a call
     /// gets back as many of the registers a call may write as it needs, from the end of the order,
     /// and keeps the rest. Six outputs against five preserved registers is one handed back, which is
-    /// `r11`. The shape is `sodium_sub` in libsodium, whose `sbbq` into memory the reader has no
-    /// form for, and before this the allocator ran out of registers on it.
+    /// `r9`. `r11` and `r10` come back ahead of it without counting, since they are the allocator's
+    /// scratch and no operand is given one, but an output it spills is carried in one of them, which
+    /// it cannot be while the template claims it. The shape is `sodium_sub` in libsodium, whose
+    /// `sbbq` into memory the reader has no form for, and before this the allocator ran out of
+    /// registers on it.
     #[test]
     fn a_template_kept_as_text_with_more_outputs_than_are_kept_gets_registers_back() {
         let i64 = Type::int(64);
@@ -8704,8 +8715,10 @@ mod tests {
 
         let printed = lower(&mut names, &source);
         let line = printed.lines().find(|line| line.contains("x64.template")).unwrap_or_default();
-        assert!(line.contains("early $r10"), "{printed}");
-        assert!(!line.contains("early $r11"), "{printed}");
+        assert!(line.contains("early $r8"), "{printed}");
+        for reg in ["r9", "r10", "r11"] {
+            assert!(!line.contains(&format!("early ${reg}")), "{printed}");
+        }
     }
 
     /// A register the template named is placed as itself, fixed to the register the program wrote
