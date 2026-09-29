@@ -124,9 +124,14 @@ impl<'a> Area<'a> {
     }
 
     /// Whether the value is live at that point.
+    ///
+    /// The pieces are in order and the extra point only moves a start down to just past the end
+    /// of the piece in front, so the first piece that ends at or after the point is the only one
+    /// that can hold it, and a search finds that one without looking at the rest.
     #[must_use]
     pub fn covers(self, point: Point) -> bool {
-        (0..self.pieces.len()).any(|piece| self.piece(piece).covers(point))
+        let first = self.pieces.partition_point(|piece| piece.end < point);
+        first < self.pieces.len() && self.piece(first).covers(point)
     }
 
     /// Whether two values are both live somewhere, which is what stops them sharing a register.
