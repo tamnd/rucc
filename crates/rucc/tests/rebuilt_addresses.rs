@@ -98,12 +98,13 @@ fn frame(usage: &str, function: &str) -> u32 {
         .unwrap_or_else(|| panic!("no line for {function} in\n{usage}"))
 }
 
-/// One function's instructions, from its label to the directive that closes it.
-fn body<'a>(asm: &'a str, function: &str) -> Vec<&'a str> {
+/// One function's instructions, from its label to the directive that closes it, each with its
+/// mnemonic and operands set apart by single spaces however the assembly lined them up.
+fn body(asm: &str, function: &str) -> Vec<String> {
     asm.lines()
         .skip_while(|line| line.trim() != format!("{function}:"))
         .skip(1)
-        .map(str::trim)
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .take_while(|line| !line.starts_with(".size") && !line.starts_with(".cfi_endproc"))
         .filter(|line| !line.is_empty() && !line.starts_with('.'))
         .collect()
@@ -113,8 +114,9 @@ fn body<'a>(asm: &'a str, function: &str) -> Vec<&'a str> {
 /// of a local or of a name.
 fn address_into(line: &str) -> Option<&str> {
     // x86-64: `leaq 12(%rsp), %rax` and `leaq .LC3(%rip), %rax`.
+    // The `leaq` that puts the stack pointer back in an epilogue is not one.
     if let Some(rest) = line.strip_prefix("leaq ") {
-        return rest.rsplit(", ").next();
+        return rest.rsplit(", ").next().filter(|&into| into != "%rsp");
     }
     // AArch64: `add x0, sp, #12` and the `add` after an `adrp`.
     let rest = line.strip_prefix("add ")?;
@@ -122,7 +124,8 @@ fn address_into(line: &str) -> Option<&str> {
     let into = parts.next()?;
     let from = parts.next()?;
     let what = parts.next()?;
-    (from == "sp" || what.starts_with(":lo12:")).then_some(into)
+    // Neither is the `add` that sets the frame pointer in a prologue.
+    (into != "x29" && (from == "sp" || what.starts_with(":lo12:"))).then_some(into)
 }
 
 /// Whether an operand is a place in this function's frame.
@@ -160,11 +163,11 @@ fn written(line: &str) -> Option<&str> {
 /// The frame slots an address was stored into and later read back out of, which is what a spilled
 /// address looks like. A store of an address into the argument area of a call is not one, since
 /// nothing in this function reads that back.
-fn spilled_addresses<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+fn spilled_addresses(lines: &[String]) -> Vec<&str> {
     let mut holding: Vec<&str> = Vec::new();
     let mut stored: Vec<&str> = Vec::new();
     let mut spilled = Vec::new();
-    for line in lines {
+    for line in lines.iter().map(String::as_str) {
         if let Some((reg, slot)) = slot_of(line, "movq ").or_else(|| slot_of(line, "str ")) {
             if !line.ends_with(reg) && holding.contains(&reg) {
                 stored.push(slot);
