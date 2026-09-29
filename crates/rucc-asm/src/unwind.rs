@@ -706,6 +706,59 @@ enum Step {
     Save { reg: u16, from: i64 },
 }
 
+/// One code of a Windows prologue, in the terms both the record and gas's `.seh_` directives use.
+///
+/// This is what a listing and an object have to agree on. The code generator's rows are turned
+/// into these once, by [`prologue`], and then either written into a record or printed as the
+/// directive that asks an assembler for the same code, and a file of assembly is read back into
+/// these from those directives. So a function that goes through a listing and one that does not
+/// are described by the same codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Seh {
+    /// `.seh_pushreg`: a register went on the stack, by the machine's number for it.
+    Push(u8),
+    /// `.seh_stackalloc`: the frame was taken, that many bytes of it.
+    Alloc(i64),
+    /// `.seh_setframe`: the frame register was pointed that far above the stack pointer.
+    Frame { reg: u8, offset: i64 },
+    /// `.seh_savereg` and `.seh_savexmm`: a register went into a slot that far above where the
+    /// stack pointer ends the prologue.
+    Save { reg: u8, vector: bool, above: i64 },
+}
+
+impl std::fmt::Display for Seh {
+    /// The directive gas reads this code from, in the spelling gcc writes it in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Seh::Push(reg) => write!(f, "\t.seh_pushreg\t%{}", GPR[usize::from(reg & 15)]),
+            Seh::Alloc(size) => write!(f, "\t.seh_stackalloc\t{size}"),
+            Seh::Frame { reg, offset } => {
+                write!(f, "\t.seh_setframe\t%{}, {offset}", GPR[usize::from(reg & 15)])
+            }
+            Seh::Save { reg, vector: false, above } => {
+                write!(f, "\t.seh_savereg\t%{}, {above}", GPR[usize::from(reg & 15)])
+            }
+            Seh::Save { reg, vector: true, above } => {
+                write!(f, "\t.seh_savexmm\t%xmm{reg}, {above}")
+            }
+        }
+    }
+}
+
+/// The general purpose registers, by the number the machine and the codes give them.
+pub(crate) const GPR: [&str; 16] = [
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
+
+/// One function's prologue as codes: where the prologue ends, and each code with where the
+/// instruction that did it ended, both counted from the front of the function.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Prologue {
+    pub(crate) end: usize,
+    pub(crate) codes: Vec<(usize, Seh)>,
+}
+
 /// The table Windows wants: one row per function in one section, and the description each row
 /// points at in another.
 ///
@@ -714,13 +767,35 @@ enum Step {
 /// The name is local, since what it points at is one function's prologue and no other object has
 /// any use for it.
 fn windows(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Result<Unwind, Error> {
+    let prologues = funcs
+        .iter()
+        .zip(rows)
+        .map(|(func, rows)| {
+            let codes = prologue(&func.name, rows, conv)?;
+            // Where the last instruction that touched the frame ended, rather than where the last
+            // instruction of the prologue ended. The two differ by the pieces that describe
+            // nothing, which is the canary and the call to a profiler's hook, and what the number
+            // is for is telling an address inside the prologue from one after it. An address in
+            // those trailing pieces is one where the frame is already whole, so it is the right
+            // answer for both.
+            let end = codes.last().map_or(0, |(at, _)| *at);
+            Ok(Prologue { end, codes })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    seh(funcs, &prologues)
+}
+
+/// The same table, from prologues already turned into codes, which is where a file of assembly
+/// that said them with `.seh_` directives joins in.
+pub(crate) fn seh(funcs: &[Extent], prologues: &[Prologue]) -> Result<Unwind, Error> {
+    debug_assert_eq!(funcs.len(), prologues.len(), "a record per function");
     let mut out = Unwind::default();
-    for (func, rows) in funcs.iter().zip(rows) {
+    for (func, prologue) in funcs.iter().zip(prologues) {
         // The description first, because the row that points at it needs a name to point at and
         // the name is where the description landed.
         let name = format!("$unwind${}", func.name);
         let at = out.info.len();
-        describe(&mut out.info, func, rows, conv)?;
+        describe(&mut out.info, &func.name, prologue)?;
         out.labels.push(Marker { name: name.clone(), at });
         // The row: where the function starts, one past where it ends, and where its description is.
         // None of the three is a number this compilation knows, since all of them are placed by the
@@ -751,21 +826,35 @@ fn windows(funcs: &[Extent], rows: &[Rows], conv: &CallRegs) -> Result<Unwind, E
 /// long the prologue is; how many nodes of codes follow; and which register the frame is counted
 /// from, which is the frame pointer in a function that keeps one and nothing in a function that
 /// does not.
-///
-/// How long the prologue is is taken as where the last instruction that touched the frame ended,
-/// rather than where the last instruction of the prologue ended. The two differ by the pieces that
-/// describe nothing, which is the canary and the call to a profiler's hook, and what the number is
-/// for is telling an address inside the prologue from one after it. An address in those trailing
-/// pieces is one where the frame is already whole, so it is the right answer for both.
-fn describe(info: &mut Vec<u8>, func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<(), Error> {
-    let Described { codes, base } = codes(func, rows, conv)?;
-    let prologue = codes.last().map_or(0, |code| code[0]);
+fn describe(info: &mut Vec<u8>, func: &str, prologue: &Prologue) -> Result<(), Error> {
+    let codes = prologue
+        .codes
+        .iter()
+        .map(|&(at, code)| nodes(func, at, code))
+        .collect::<Result<Vec<_>, _>>()?;
+    let end = u8::try_from(prologue.end).map_err(|_| {
+        frame(func, "a prologue longer than a record can count in a byte".to_owned())
+    })?;
     let nodes = codes.iter().map(Vec::len).sum::<usize>() / 2;
     let count = u8::try_from(nodes).map_err(|_| {
         let why = format!("a prologue of {nodes} unwind slots, more than a record holds");
         frame(func, why)
     })?;
-    info.extend_from_slice(&[1, prologue, count, base]);
+    // The machine's number for the frame register in the low four bits and how far above the end
+    // of the prologue it was left, in sixteens, in the four above that. Zero in a function that
+    // keeps no frame pointer, which is a register number no unwinder reads because a header that
+    // names one says so in a code as well.
+    let mut base = 0;
+    for (_, code) in &prologue.codes {
+        if let Seh::Frame { reg, offset } = *code {
+            if !(0..=240).contains(&offset) || offset % 16 != 0 {
+                let why = format!("a frame register {offset} bytes up, which a record cannot say");
+                return Err(frame(func, why));
+            }
+            base = reg | u8::try_from(offset / 16).expect("checked just above") << 4;
+        }
+    }
+    info.extend_from_slice(&[1, end, count, base]);
     // Backwards, because the runtime reads them from the address it is unwinding at and works its
     // way to the front of the function, so it wants the last thing the prologue did first.
     for code in codes.iter().rev() {
@@ -785,9 +874,15 @@ fn describe(info: &mut Vec<u8>, func: &Extent, rows: &Rows, conv: &CallRegs) -> 
 /// about putting the frame back, and this format works that out by reading the instructions at the
 /// address it is unwinding from rather than by being told.
 ///
-/// Every code carries where the instruction that did it ended, which is what the rows already hold,
-/// so the two are the same number and no translation is needed for it.
-fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Described, Error> {
+/// Every code carries where the instruction that did it was, which is whatever the rows say: a
+/// byte offset for the object writer, where it is where the instruction ended, and an instruction's
+/// place in the function for the listing, which prints the directive after that instruction and
+/// leaves the counting to the assembler.
+pub(crate) fn prologue(
+    func: &str,
+    rows: &[(usize, CfiOp)],
+    conv: &CallRegs,
+) -> Result<Vec<(usize, Seh)>, Error> {
     let end = rows.iter().position(|(_, op)| *op == CfiOp::RememberState).unwrap_or(rows.len());
     let rows = &rows[..end];
     let word = i64::from(conv.word);
@@ -804,9 +899,6 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Described, Error
         let len = rest.iter().take_while(|(offset, _)| *offset == at).count();
         let (group, next) = rest.split_at(len);
         rest = next;
-        let at = u8::try_from(at).map_err(|_| {
-            frame(func, "a prologue longer than a record can count in a byte".to_owned())
-        })?;
         match group {
             // A push, which says two things about one instruction: the end of the frame is a word
             // further up, and the register went in the word it just moved past. One code says both.
@@ -863,51 +955,47 @@ fn codes(func: &Extent, rows: &Rows, conv: &CallRegs) -> Result<Described, Error
     // Every slot is measured from where the stack pointer ends the prologue, which is the one place
     // in the frame this format counts from, and the rows measure from the end of the frame instead.
     // The two are `below` apart once the prologue has done everything it does.
-    let base = if steps.iter().any(|(_, step)| matches!(step, Step::Frame)) {
-        machine(func, conv, pointer.expect("a row that named the frame pointer"))?
-    } else {
-        0
-    };
-    let codes = steps
+    steps
         .into_iter()
-        .map(|(at, step)| code(func, conv, at, step, below))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Described { codes, base })
+        .map(|(at, step)| {
+            let code = match step {
+                Step::Push(reg) => Seh::Push(machine(func, conv, reg)?),
+                Step::Alloc(size) => Seh::Alloc(size),
+                Step::Frame => {
+                    let reg = pointer.expect("a row that named the frame pointer");
+                    Seh::Frame { reg: machine(func, conv, reg)?, offset: 0 }
+                }
+                Step::Save { reg, from } => Seh::Save {
+                    reg: machine(func, conv, reg)?,
+                    vector: conv.machine(conv.int_class, reg).is_none(),
+                    above: below + from,
+                },
+            };
+            Ok((at, code))
+        })
+        .collect()
 }
 
-/// A prologue as this format holds it: the codes, and which register the slots below them are
-/// counted from.
-///
-/// The second is a field of the header rather than a code, which is why it comes back beside them
-/// rather than among them. It is the machine's number for the frame pointer in the low four bits and
-/// how far above the end of the prologue the pointer was left, in sixteens, in the four above that.
-/// Zero in a function that keeps no frame pointer, which is a register number no unwinder reads
-/// because a header that names one says so in a code as well.
-struct Described {
-    codes: Vec<Vec<u8>>,
-    base: u8,
-}
+/// How big a slot is on the one machine this format is written for, which is what the two codes
+/// that count in slots divide by.
+const WORD: i64 = 8;
 
-/// One step, as the nodes that say it.
-fn code(func: &Extent, conv: &CallRegs, at: u8, step: Step, below: i64) -> Result<Vec<u8>, Error> {
-    match step {
-        Step::Push(reg) => Ok(vec![at, PUSH_NONVOL | machine(func, conv, reg)? << 4]),
-        Step::Alloc(size)
-            if (word_size(conv)..=SMALL_FRAME).contains(&size) && size % word_size(conv) == 0 =>
-        {
-            let steps = u8::try_from(size / word_size(conv) - 1).expect("a frame this small");
+/// One code, as the nodes that say it.
+fn nodes(func: &str, at: usize, code: Seh) -> Result<Vec<u8>, Error> {
+    let at = u8::try_from(at).map_err(|_| {
+        frame(func, "a prologue longer than a record can count in a byte".to_owned())
+    })?;
+    match code {
+        Seh::Push(reg) => Ok(vec![at, PUSH_NONVOL | reg << 4]),
+        Seh::Alloc(size) if (WORD..=SMALL_FRAME).contains(&size) && size % WORD == 0 => {
+            let steps = u8::try_from(size / WORD - 1).expect("a frame this small");
             Ok(vec![at, ALLOC_SMALL | steps << 4])
         }
-        Step::Alloc(size) => large(func, at, size, word_size(conv)),
+        Seh::Alloc(size) => large(func, at, size),
         // The four bits the other codes put an operand in are reserved here, so they are nothing.
-        Step::Frame => Ok(vec![at, SET_FPREG]),
-        Step::Save { reg, from } => slot(func, conv, at, reg, below + from),
+        Seh::Frame { .. } => Ok(vec![at, SET_FPREG]),
+        Seh::Save { reg, vector, above } => slot(func, at, reg, vector, above),
     }
-}
-
-/// How big a slot is, which is what the two codes that count in slots divide by.
-fn word_size(conv: &CallRegs) -> i64 {
-    i64::from(conv.word).max(1)
 }
 
 /// A frame too big for the code that holds one in four bits, in the two forms that hold a larger
@@ -916,13 +1004,13 @@ fn word_size(conv: &CallRegs) -> i64 {
 /// The first counts in slots and fits a frame of half a megabyte in one extra node. The second
 /// counts in bytes and takes two, which is every frame a program on this machine can have, since a
 /// thread's stack is not four gigabytes.
-fn large(func: &Extent, at: u8, size: i64, word: i64) -> Result<Vec<u8>, Error> {
-    if size <= 0 || size % word != 0 {
+fn large(func: &str, at: u8, size: i64) -> Result<Vec<u8>, Error> {
+    if size <= 0 || size % WORD != 0 {
         let why = format!("a frame of {size} bytes, not a whole number of slots");
         return Err(frame(func, why));
     }
     let mut out = vec![at, ALLOC_LARGE];
-    if let Ok(slots) = u16::try_from(size / word) {
+    if let Ok(slots) = u16::try_from(size / WORD) {
         out.extend_from_slice(&slots.to_le_bytes());
         return Ok(out);
     }
@@ -940,7 +1028,7 @@ fn large(func: &Extent, at: u8, size: i64, word: i64) -> Result<Vec<u8>, Error> 
 /// what fits in a node, and one counts in bytes and takes two nodes for anything else. A general
 /// purpose register counts in words and a vector register counts in sixteens, which is what one of
 /// them is.
-fn slot(func: &Extent, conv: &CallRegs, at: u8, reg: u16, above: i64) -> Result<Vec<u8>, Error> {
+fn slot(func: &str, at: u8, reg: u8, vector: bool, above: i64) -> Result<Vec<u8>, Error> {
     if above < 0 {
         let why = format!("a register saved {} bytes below its own frame", -above);
         return Err(frame(func, why));
@@ -948,15 +1036,13 @@ fn slot(func: &Extent, conv: &CallRegs, at: u8, reg: u16, above: i64) -> Result<
     let bytes = u32::try_from(above).map_err(|_| {
         frame(func, format!("a register saved {above} bytes up, further than a record reaches"))
     })?;
-    let vector = conv.machine(conv.int_class, reg).is_none();
     let (near, far, step) = if vector {
         (SAVE_XMM128, SAVE_XMM128_FAR, 16)
     } else {
-        (SAVE_NONVOL, SAVE_NONVOL_FAR, u32::try_from(word_size(conv)).expect("a pointer width"))
+        (SAVE_NONVOL, SAVE_NONVOL_FAR, WORD as u32)
     };
-    let number = machine(func, conv, reg)?;
     let scaled = (above % i64::from(step) == 0).then(|| u16::try_from(bytes / step).ok()).flatten();
-    let mut out = vec![at, if scaled.is_some() { near } else { far } | number << 4];
+    let mut out = vec![at, if scaled.is_some() { near } else { far } | reg << 4];
     match scaled {
         Some(scaled) => out.extend_from_slice(&scaled.to_le_bytes()),
         None => out.extend_from_slice(&bytes.to_le_bytes()),
@@ -971,7 +1057,7 @@ fn slot(func: &Extent, conv: &CallRegs, at: u8, reg: u16, above: i64) -> Result<
 /// the general purpose registers on this machine and nowhere else, which is the worst shape a
 /// disagreement can have: every number is a register either way, so a table written in the wrong
 /// one comes out well formed and about the wrong registers.
-fn machine(func: &Extent, conv: &CallRegs, reg: u16) -> Result<u8, Error> {
+fn machine(func: &str, conv: &CallRegs, reg: u16) -> Result<u8, Error> {
     let found = conv
         .machine(conv.int_class, reg)
         .or_else(|| conv.machine(conv.sse_class, reg))
@@ -986,8 +1072,8 @@ fn machine(func: &Extent, conv: &CallRegs, reg: u16) -> Result<u8, Error> {
 }
 
 /// A prologue this cannot describe, named by the function it is the prologue of.
-fn frame(func: &Extent, why: String) -> Error {
-    Error::Frame { func: func.name.clone(), why }
+fn frame(func: &str, why: String) -> Error {
+    Error::Frame { func: func.to_owned(), why }
 }
 
 /// A register number small enough to ride in the low six bits of an opcode.

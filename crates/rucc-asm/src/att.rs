@@ -33,6 +33,13 @@
 //! it, which says the frame ends at `rsp+8` and the return address is the word below that, is
 //! already the right answer for such a function and the empty record is how it asks for it.
 //!
+//! A COFF function is wrapped in `.seh_proc` and `.seh_endproc` instead, with the codes of its
+//! prologue between, which is what gcc writes for Windows. They are worked out from the same rows
+//! by the same code the object writer uses, so an object gas or the reader here assembles from the
+//! listing has the same `.pdata` and `.xdata` as one written directly. Without them a function has
+//! no row at all, and Windows takes it for a leaf and cannot unwind through it, which is what
+//! a structured exception raised in `main` needs to do.
+//!
 //! A row written after the last instruction of the last block is dropped. It would describe an
 //! address at or past the end of the function, which is outside what the record covers, and the
 //! usual thing to find there is an epilogue putting back a state nothing is going to read.
@@ -50,13 +57,14 @@ use rucc_base::Interner;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
-use rucc_target::{PhysReg, RegClass, Segment, TargetInfo, aarch64};
+use rucc_target::{CallRegs, PhysReg, RegClass, Segment, TargetInfo, aarch64};
 use rucc_tuple::Arch;
 
 use crate::Error;
 use crate::a64;
 use crate::data::{Globals, Piece, Variable};
 use crate::format::{Directives, binding, visibility};
+use crate::unwind::Prologue;
 
 /// The prefix every x86-64 opcode carries in the machine IR.
 ///
@@ -160,9 +168,10 @@ fn listing(
         names,
         directives,
         // Apple's assembler reads the same directives gas does and so does the reader here, which
-        // makes the DWARF table ld64 turns into its own. COFF's are other directives, so a request
-        // for a table there is a request for nothing.
+        // makes the DWARF table ld64 turns into its own. COFF's are other directives, the `.seh_`
+        // ones, and they are asked for below instead.
         unwind: unwind && directives != Directives::Coff,
+        seh: target.call_regs.filter(|_| unwind && directives == Directives::Coff),
         out: String::new(),
         labels: Vec::new(),
         sections,
@@ -229,6 +238,7 @@ pub(crate) fn template(
         names,
         directives,
         unwind: false,
+        seh: None,
         out: String::new(),
         labels: Vec::new(),
         sections: Sections::default(),
@@ -247,6 +257,9 @@ struct Writer<'a> {
     directives: Directives,
     /// Whether each function is wrapped in an unwind record.
     unwind: bool,
+    /// The calling convention the prologues were built against, on COFF when there is to be an
+    /// unwind table, which is when each function is described with `.seh_` directives instead.
+    seh: Option<&'static CallRegs>,
     out: String,
     /// The number each block is written as, indexed by its own, which is its place in the layout
     /// rather than the order somebody happened to create the blocks in.
@@ -291,6 +304,14 @@ impl Writer<'_> {
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");
         }
+        let seh = self.prologue(func, &name)?;
+        if let Some(seh) = &seh {
+            let _ = writeln!(self.out, "\t.seh_proc\t{name}");
+            if seh.codes.is_empty() {
+                let _ = writeln!(self.out, "\t.seh_endprologue");
+            }
+        }
+        let mut place = 0;
         // The personality routine and the call site table, for a function with a landing pad, in
         // gcc's spelling, which is what the unwind writer puts in the object as well. See
         // `crate::unwind`. The calls with a pad are named on either side below, since the table
@@ -356,12 +377,24 @@ impl Writer<'_> {
                         self.cfi(op);
                     }
                 }
+                if let Some(seh) = &seh {
+                    for (_, code) in seh.codes.iter().filter(|(at, _)| *at == place) {
+                        let _ = writeln!(self.out, "{code}");
+                    }
+                    if seh.codes.last().is_some_and(|(at, _)| *at == place) {
+                        let _ = writeln!(self.out, "\t.seh_endprologue");
+                    }
+                }
+                place += 1;
             }
         }
         if let Some(which) = self.marks {
             let _ = writeln!(self.out, "{}rucc_end{which}:", self.directives.local());
         }
         self.tables(func, &name);
+        if seh.is_some() {
+            let _ = writeln!(self.out, "\t.seh_endproc");
+        }
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_endproc");
             if !sites.is_empty() {
@@ -373,6 +406,30 @@ impl Writer<'_> {
             *which += 1;
         }
         Ok(())
+    }
+
+    /// The codes a COFF function's prologue is described with, keyed by each instruction's place in
+    /// the function rather than by a byte, or nothing when there is no table to write.
+    ///
+    /// The same rows the object writer reads and the same code turning them into codes, so a
+    /// listing asks the assembler for exactly the record the object writer would have written. Each
+    /// code is printed after the instruction it is about, which is where gas measures it from, and
+    /// the end of the prologue after the last of them, which is where the object writer measures
+    /// that from. A prologue the table cannot describe is refused here as it is there.
+    fn prologue(&self, func: &Func, name: &str) -> Result<Option<Prologue>, Error> {
+        let Some(conv) = self.seh else {
+            return Ok(None);
+        };
+        let end = func.cfi_end();
+        let mut rows = Vec::new();
+        let insts = func.blocks().flat_map(|block| func.insts(block));
+        for (place, inst) in insts.enumerate() {
+            if Some(inst) != end {
+                rows.extend(func.cfi_after(inst).map(|op| (place, op)));
+            }
+        }
+        let codes = crate::unwind::prologue(name, &rows, conv)?;
+        Ok(Some(Prologue { end: codes.last().map_or(0, |(at, _)| *at), codes }))
     }
 
     /// The instructions that do nothing which go in front of a function's own label.
