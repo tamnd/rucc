@@ -358,8 +358,9 @@ impl Preprocessor {
         let mut reader = Reader::new(bytes.as_slice(), start, cx.lex);
         let depth_on_entry = self.conds.len();
         // Consecutive text lines are expanded as one run rather than line by line, because a
-        // function-like macro invocation may span lines. It may not span a directive, which is
-        // undefined behaviour, so a directive is where the run ends.
+        // function-like macro invocation may span lines. A directive is where the run ends,
+        // except a conditional one in the middle of an invocation's arguments: that is undefined
+        // behaviour, but GCC takes the branch and carries on collecting, and toybox counts on it.
         let mut text: Vec<Tok> = Vec::new();
         let mut body: Vec<PpToken> = Vec::new();
         let mut scan = Scan::Start;
@@ -371,9 +372,13 @@ impl Preprocessor {
                 break;
             }
             if is_directive(first) {
-                self.flush(&mut text, out, cx, names);
                 body.clear();
                 let name_tok = reader.next(cx.interner);
+                if !(is_conditional(ident_of(&name_tok), names)
+                    && open_invocation(&text, &self.macros))
+                {
+                    self.flush(&mut text, out, cx, names);
+                }
                 // The null directive. A line of just `#` is legal and does nothing, and there
                 // is a surprising amount of it in real headers as a visual separator.
                 if name_tok.is_eof() || name_tok.flags.has(TokenFlags::START_OF_LINE) {
@@ -1669,6 +1674,37 @@ fn is_alternative(name: Option<Symbol>, names: &Names) -> bool {
     name == names.r#else || name == names.elif || name == names.elifdef || name == names.elifndef
 }
 
+/// Whether a directive name is one of the conditionals, which change what is read but not
+/// what any name means.
+fn is_conditional(name: Option<Symbol>, names: &Names) -> bool {
+    let Some(name) = name else { return false };
+    name == names.r#if
+        || name == names.ifdef
+        || name == names.ifndef
+        || name == names.endif
+        || is_alternative(Some(name), names)
+}
+
+/// Whether `text` ends partway through the arguments of a function-like macro, that is with a
+/// parenthesis still open right after the name of one.
+fn open_invocation(text: &[Tok], macros: &MacroTable) -> bool {
+    let mut open: Vec<usize> = Vec::new();
+    for (at, tok) in text.iter().enumerate() {
+        if tok.is(Punct::LParen) {
+            open.push(at);
+        } else if tok.is(Punct::RParen) {
+            open.pop();
+        }
+    }
+    open.iter().any(|&at| {
+        at > 0
+            && text[at - 1]
+                .ident()
+                .and_then(|name| macros.lookup(name))
+                .is_some_and(|def| def.function_like)
+    })
+}
+
 /// Whether a directive name is one that may be followed by a header name.
 fn is_include(name: Option<Symbol>, names: &Names) -> bool {
     name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
@@ -2324,6 +2360,15 @@ mod tests {
     #[test]
     fn an_invocation_may_span_lines_within_a_run_of_text() {
         assert_eq!(clean("#define M(a, b) a + b\nM(1,\n2)\n"), "1 + 2");
+    }
+
+    #[test]
+    fn a_conditional_inside_the_arguments_of_an_invocation_picks_what_they_hold() {
+        // toybox wraps each command's globals in `GLOBALS(...)` with `#if` lines inside.
+        let src = "#define G(...) struct { __VA_ARGS__ } g;\nG(\nint a;\n#if 0\nint b;\n#elif 1\nint c;\n#else\nint d;\n#endif\nint e;\n)\n";
+        assert_eq!(clean(src), "struct { int a; int c; int e; } g;");
+        // A parenthesis that is not a macro's still ends the run, as it always did.
+        assert_eq!(clean("f(1,\n#ifdef X\n2\n#else\n3\n#endif\n)\n"), "f(1, 3 )");
     }
 
     #[test]
