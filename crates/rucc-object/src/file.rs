@@ -33,18 +33,18 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use object::write::{
-    Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
+    Comdat, Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
 };
 use object::{
-    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionFlags, SectionKind,
+    Architecture, BinaryFormat, ComdatKind, Endianness, RelocationFlags, SectionFlags, SectionKind,
     SymbolFlags, SymbolKind, SymbolScope,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Apart, Array, Binding, Data, EXCEPT_TABLE, Info, Object, Output, Place, Property,
-    Reference, Reloc, Sections, Text, Visibility,
+    Alias, Apart, Array, Binding, Data, EXCEPT_TABLE, Export, Info, Object, Output, Place,
+    Property, Reference, Reloc, Sections, Text, Visibility,
 };
 use crate::{coff, elf};
 
@@ -463,6 +463,12 @@ pub fn write(
     let mut named = HashMap::new();
     for object in &data.objects {
         let (section, offset) = put(&mut obj, object, &mut named, sections, flavour);
+        // COFF says which section a group is with the section's own symbol, which carries the
+        // selection, and takes the first symbol after it in the table as the one the group is
+        // keyed on. So a pointer's section gets its symbol here, before the pointer's own name.
+        if let (Place::Pointer, Some(section)) = (&object.place, section.id()) {
+            obj.section_symbol(section);
+        }
         let id = obj.add_symbol(Symbol {
             name: object.name.clone().into_bytes(),
             // A common symbol says what it wants rather than where it is, and what it wants is
@@ -483,6 +489,12 @@ pub fn write(
             flags: SymbolFlags::None,
         });
         flavour.see(&mut obj, id, object.binding, object.visibility);
+        // A pointer every object that reads the variable writes the same copy of, so the section
+        // it is in is one the linker keeps any one of and drops the rest, keyed on the pointer's
+        // own name. That is `discard` in the listing and `IMAGE_COMDAT_SELECT_ANY` here.
+        if let (Place::Pointer, Some(section)) = (&object.place, section.id()) {
+            obj.add_comdat(Comdat { kind: ComdatKind::Any, symbol: id, sections: vec![section] });
+        }
         symbols.insert(object.name.clone(), id);
         placed.push((section.id(), offset));
     }
@@ -774,6 +786,15 @@ pub fn write(
         }
     }
 
+    // The names the DLL this file is linked into offers to others, as options for the linker in
+    // the one section COFF reads options from. Nothing at all where there are none, which is every
+    // file on every other format. See `Export`.
+    if !data.exports.is_empty() {
+        let options: String = data.exports.iter().map(Export::option).collect();
+        let id = obj.add_section(Vec::new(), b".drectve".to_vec(), SectionKind::Linker);
+        obj.append_section_data(id, options.as_bytes(), 1);
+    }
+
     // What the file was built to have checked, when it was built to have anything checked. Left
     // out otherwise rather than written as a zero, because a linker treats a missing note and a
     // note with no bits in it the same way and gcc writes nothing.
@@ -967,6 +988,13 @@ fn put(
             }
             section
         }
+        // A section of its own whatever the flags say, since it is the unit the linker keeps one
+        // copy of. The name after the `$` is dropped by the linker when it sorts, so the pointer
+        // ends up in `.rdata` with the rest of the read only data.
+        Place::Pointer => {
+            let name = format!(".rdata${}", object.name);
+            made(obj, named, &name, SectionKind::ReadOnlyData)
+        }
     };
     let offset = if carries_no_bytes(&object.place) {
         obj.append_section_bss(section, object.size, object.align)
@@ -1072,7 +1100,7 @@ fn made(
 /// value that is never used rather than a claim about either.
 fn kind_of(place: &Place) -> SectionKind {
     match place {
-        Place::ReadOnly => SectionKind::ReadOnlyData,
+        Place::ReadOnly | Place::Pointer => SectionKind::ReadOnlyData,
         Place::RelocReadOnly { .. } => SectionKind::ReadOnlyDataWithRel,
         Place::Zero => SectionKind::UninitializedData,
         Place::Thread { zero: false } => SectionKind::Tls,
@@ -1129,7 +1157,7 @@ mod tests {
     use super::*;
 
     use object::read::elf::Sym as _;
-    use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use object::read::{Object as _, ObjectComdat as _, ObjectSection as _, ObjectSymbol as _};
     use object::{elf, pe};
     use rucc_target::{Arch, Env, Os, Triple};
 
@@ -1876,7 +1904,7 @@ mod tests {
             bytes: 4,
         };
         let apart = vec![apart(0, ".L1", ".L0"), apart(4, ".L0", ".L1")];
-        (text, Data { apart, weak: Vec::new(), objects: vec![table] })
+        (text, Data { apart, exports: Vec::new(), weak: Vec::new(), objects: vec![table] })
     }
 
     #[test]
@@ -1907,7 +1935,12 @@ mod tests {
 
     /// A file of that one variable and nothing else.
     fn holding(object: Object) -> Vec<u8> {
-        let data = Data { apart: Vec::new(), weak: Vec::new(), objects: vec![object] };
+        let data = Data {
+            apart: Vec::new(),
+            exports: Vec::new(),
+            weak: Vec::new(),
+            objects: vec![object],
+        };
         write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
             .expect("an object")
     }
@@ -1989,7 +2022,7 @@ mod tests {
             variable("x", Place::Named(".init_array".to_owned())),
             variable("y", Place::Named(".init_array".to_owned())),
         ];
-        let data = Data { apart: Vec::new(), weak: Vec::new(), objects };
+        let data = Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects };
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
                 .expect("an object");
@@ -2018,6 +2051,7 @@ mod tests {
         ] {
             let data = Data {
                 apart: Vec::new(),
+                exports: Vec::new(),
                 weak: Vec::new(),
                 objects: vec![variable("x", place.clone())],
             };
@@ -2045,7 +2079,7 @@ mod tests {
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes = write(
             &Text::default(),
-            &Data { apart: Vec::new(), weak: Vec::new(), objects },
+            &Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects },
             &[],
             &target(),
             sections,
@@ -2082,7 +2116,7 @@ mod tests {
         let objects = vec![variable("first", Place::Written), pointer];
         let bytes = write(
             &Text::default(),
-            &Data { apart: Vec::new(), weak: Vec::new(), objects },
+            &Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects },
             &[],
             &target(),
             sections,
@@ -2110,6 +2144,7 @@ mod tests {
         let place = Place::RelocReadOnly { local: true };
         let data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("first", place.clone()), variable("second", place)],
         };
@@ -2125,6 +2160,7 @@ mod tests {
     fn a_variable_is_a_symbol_that_says_where_it_is_and_how_long_it_is() {
         let mut data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("first", Place::Written)],
         };
@@ -2217,6 +2253,7 @@ mod tests {
         });
         let data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: vec!["hook".to_owned(), "never_called".to_owned()],
             objects: vec![],
         };
@@ -2270,7 +2307,8 @@ mod tests {
             addend: -4,
             after: 0,
         });
-        let data = Data { apart: Vec::new(), weak: Vec::new(), objects: vec![] };
+        let data =
+            Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects: vec![] };
         let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2289,6 +2327,7 @@ mod tests {
     fn a_relocation_counts_from_the_start_of_the_section_and_not_of_the_image_it_is_in() {
         let mut data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("first", Place::Written)],
         };
@@ -2320,6 +2359,7 @@ mod tests {
     fn a_second_name_is_a_second_symbol_at_the_first_one_s_address_and_no_second_image() {
         let data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: Vec::new(),
             objects: vec![Object { binding: Binding::Local, ..variable("a", Place::Written) }],
         };
@@ -2434,6 +2474,7 @@ mod tests {
         text.bytes.resize(33, 0x90);
         let data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("seen", Place::Written), {
                 let mut quiet = variable("quiet", Place::Zero);
@@ -2561,7 +2602,12 @@ mod tests {
             }],
             ..variable("p", Place::Written)
         };
-        let data = Data { apart: Vec::new(), weak: Vec::new(), objects: vec![object] };
+        let data = Data {
+            apart: Vec::new(),
+            exports: Vec::new(),
+            weak: Vec::new(),
+            objects: vec![object],
+        };
         let bytes =
             write(&Text::default(), &data, &[], &windows(), Output::default(), &Info::default())
                 .expect("an object");
@@ -2572,6 +2618,79 @@ mod tests {
         assert_eq!(reloc.flags(), RelocationFlags::Coff { typ });
     }
 
+    /// A pointer to a variable the file only declares is in a section of its own that the linker
+    /// keeps one copy of, keyed on the pointer's name, and read only, which is what gcc and clang
+    /// both write for `.refptr.` and the name.
+    #[test]
+    fn a_pointer_to_a_variable_elsewhere_is_a_section_the_linker_keeps_one_copy_of() {
+        let pointer = Object {
+            bytes: vec![0; 8],
+            size: 8,
+            align: 8,
+            relocs: vec![Reloc {
+                at: 0,
+                symbol: "environ".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 0,
+                after: 0,
+            }],
+            ..variable(".refptr.environ", Place::Pointer)
+        };
+        let data = Data { objects: vec![pointer], ..Data::default() };
+        let bytes =
+            write(&Text::default(), &data, &[], &windows(), Output::default(), &Info::default())
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".rdata$.refptr.environ").expect("a section of its own");
+        let SectionFlags::Coff { characteristics } = section.flags() else {
+            panic!("a COFF section has COFF flags");
+        };
+        let read_only = pe::IMAGE_SCN_CNT_INITIALIZED_DATA.0 | pe::IMAGE_SCN_MEM_READ.0;
+        // The alignment, which is its own field in the same word.
+        let set_apart = 0x00f0_0000 | pe::IMAGE_SCN_LNK_COMDAT.0;
+        assert_eq!(characteristics.0 & !set_apart, read_only, "{characteristics:#x}");
+        assert_ne!(characteristics.0 & pe::IMAGE_SCN_LNK_COMDAT.0, 0, "{characteristics:#x}");
+        let comdat = file.comdats().next().expect("a group the linker picks one copy of");
+        assert_eq!(comdat.kind(), ComdatKind::Any);
+        assert_eq!(comdat.name(), Ok(".refptr.environ"));
+        let (_, reloc) = section.relocations().next().expect("the address it holds");
+        assert_eq!(reloc.flags(), RelocationFlags::Coff { typ: pe::IMAGE_REL_AMD64_ADDR64 });
+    }
+
+    /// What `dllexport` asks for is an option to the linker, one per name, in the order clang
+    /// writes them and in the section COFF keeps options in, which the linker drops afterwards.
+    #[test]
+    fn a_name_offered_to_other_dlls_is_an_option_to_the_linker() {
+        let exports = vec![
+            Export { name: "offered".to_owned(), data: false },
+            Export { name: "count".to_owned(), data: true },
+        ];
+        let data = Data { exports, ..Data::default() };
+        let bytes =
+            write(&Text::default(), &data, &[], &windows(), Output::default(), &Info::default())
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".drectve").expect("the options section");
+        assert_eq!(section.data().expect("the options"), b" -export:offered -export:count,data");
+        let SectionFlags::Coff { characteristics } = section.flags() else {
+            panic!("a COFF section has COFF flags");
+        };
+        let removed = pe::IMAGE_SCN_LNK_INFO.0 | pe::IMAGE_SCN_LNK_REMOVE.0;
+        assert_eq!(characteristics.0 & removed, removed, "{characteristics:#x}");
+
+        let none = write(
+            &Text::default(),
+            &Data::default(),
+            &[],
+            &windows(),
+            Output::default(),
+            &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&none[..]).expect("a readable object");
+        assert!(file.section_by_name(".drectve").is_none(), "nothing to say is no section");
+    }
+
     /// `.data.rel.ro` is an ELF answer to a problem this format solves elsewhere, so both halves of
     /// it land in ordinary read only data, which is where the platform's own linker puts them.
     #[test]
@@ -2579,6 +2698,7 @@ mod tests {
         for local in [false, true] {
             let data = Data {
                 apart: Vec::new(),
+                exports: Vec::new(),
                 weak: Vec::new(),
                 objects: vec![variable("p", Place::RelocReadOnly { local })],
             };
@@ -2677,6 +2797,7 @@ mod tests {
         let text = calling("puts");
         let data = Data {
             apart: Vec::new(),
+            exports: Vec::new(),
             weak: Vec::new(),
             objects: vec![variable("shared", Place::Written)],
         };

@@ -32,7 +32,7 @@ use std::fmt;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, AliasKind, AttrSet, Builder, DataList, Datum, Extra, FpContract, Func, Global, Imm,
+    Alias, AliasKind, AttrSet, Builder, DataList, Datum, Dll, Extra, FpContract, Func, Global, Imm,
     InstData, Linkage as IrLinkage, Meta, Module, Opcode, Reloc, Signature, SymbolRef, TlsModel,
     Type, Visibility as IrVisibility,
 };
@@ -661,6 +661,18 @@ impl Unit<'_> {
             return;
         }
 
+        // `__declspec(dllimport) int x;` with no `extern` in front says the object is in another
+        // DLL, which is a declaration and not the tentative definition the same words are
+        // without the attribute. gcc and clang both read it that way, and making room for it here
+        // as well would be a second object the program never reaches.
+        let state = if state == Definition::Tentative
+            && node.flags.contains(DeclFlags::DLLIMPORT)
+            && duration == StorageDuration::Static
+        {
+            Definition::Declared
+        } else {
+            state
+        };
         let symbol = self.symbol_of(decl);
         let size = repr::size_of(self.types, self.target, ty);
         let align = alignment.unwrap_or_else(|| repr::align_of(self.types, self.target, ty));
@@ -669,6 +681,12 @@ impl Unit<'_> {
         // A tentative definition counts as one, because it is one: `int x;` at file scope puts a
         // symbol in this object and the linker never has to look anywhere else for it.
         global.visibility = self.seen(decl, state != Definition::Declared);
+        // A thread-local is reached through the index and the block the loader sets up for this
+        // module, so there is no pointer to another DLL's copy to go through, and gcc refuses
+        // the pair outright. It is left as an ordinary external name here.
+        if duration == StorageDuration::Static {
+            global.dll = self.dll(decl, state != Definition::Declared);
+        }
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
@@ -821,6 +839,12 @@ impl Unit<'_> {
         // sends the calls to whatever unit holds the external definition, so it is not this
         // file's to describe. That is the condition the body is lowered under, a few lines below.
         func.visibility = self.seen(decl, body.is_some() && (node.inline.emits() || copied));
+        // An inline copy made for this unit's own calls is not the definition another DLL would
+        // be sent to, so it is not exported, and it is not imported either, since it is here.
+        func.dll = match self.dll(decl, body.is_some() && node.inline.emits()) {
+            Dll::Import if copied => Dll::Default,
+            dll => dll,
+        };
         // An inline definition is not an external definition, so what goes in the module is the
         // declaration and not the body. C 6.7.4p7 says the calls in this unit go to the definition
         // some other unit holds, which is what the declaration gives them, and glibc's headers
@@ -1175,6 +1199,30 @@ impl Unit<'_> {
             Some(Visibility::Protected) => IrVisibility::Protected,
             None if defined => self.visibility,
             None => IrVisibility::Default,
+        }
+    }
+
+    /// What a name says about which DLL it is in, which only the code written for a COFF object
+    /// reads.
+    ///
+    /// `dllimport` means something only where this unit does not define the name and `dllexport`
+    /// only where it does, which is the `defined` argument, and neither means anything for a name
+    /// the linker never sees. gcc and clang both drop an import on a name the file goes on to
+    /// define, without a word at `-O0` and with a warning that it was ignored above that, and
+    /// export a name that says both, since the definition is here. Neither exports a name this
+    /// file only declares, so a header that writes `dllexport` on every prototype costs the files
+    /// that include it nothing.
+    fn dll(&self, decl: DeclId, defined: bool) -> Dll {
+        let node = &self.tast[decl];
+        if node.linkage != Linkage::External {
+            return Dll::Default;
+        }
+        if defined && node.flags.contains(DeclFlags::DLLEXPORT) {
+            Dll::Export
+        } else if !defined && node.flags.contains(DeclFlags::DLLIMPORT) {
+            Dll::Import
+        } else {
+            Dll::Default
         }
     }
 

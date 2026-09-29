@@ -36,7 +36,7 @@ use crate::inst::{
     Signature, Value,
 };
 use crate::module::{Alias, Datum, Global, Module, Reloc};
-use crate::{Extra, FORMAT_VERSION, Linkage, MemOrder, Opcode, Type, Visibility};
+use crate::{Dll, Extra, FORMAT_VERSION, Linkage, MemOrder, Opcode, Type, Visibility};
 
 /// Where an instruction sits on the memory chain, which the printer writes apart from the rest.
 #[derive(Clone, Copy)]
@@ -213,6 +213,7 @@ impl<'a> Printer<'a> {
         }
         let _ = write!(self.out, ", align {}", global.align);
         self.linkage(global.linkage, global.visibility);
+        self.dll(global.dll);
         if let Some(model) = global.tls {
             let _ = write!(self.out, ", tls({})", model.name());
         }
@@ -300,6 +301,7 @@ impl<'a> Printer<'a> {
         let _ = write!(self.out, "func @{}", self.names.resolve(func.name));
         self.signature(func.signature());
         self.linkage(func.linkage, func.visibility);
+        self.dll(func.dll);
         if !func.attrs.is_default() {
             let _ = write!(self.out, ", {}", func.attrs);
         }
@@ -878,6 +880,13 @@ impl<'a> Printer<'a> {
         let _ = write!(self.out, ", linkage({})", linkage.name());
         if visibility != Visibility::Default {
             let _ = write!(self.out, ", visibility({})", visibility.name());
+        }
+    }
+
+    /// Which DLL the name is in, where anything was said about it.
+    fn dll(&mut self, dll: Dll) {
+        if dll != Dll::Default {
+            let _ = write!(self.out, ", dll({})", dll.name());
         }
     }
 

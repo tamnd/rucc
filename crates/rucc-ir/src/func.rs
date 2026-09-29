@@ -38,7 +38,7 @@ use crate::inst::{
     Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SlotList, SwitchInfo,
     VaInfo, Value, ValueData, ValueList,
 };
-use crate::module::{Linkage, Visibility};
+use crate::module::{Dll, Linkage, Visibility};
 use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
 
 /// One function.
@@ -63,6 +63,9 @@ pub struct Func {
     pub linkage: Linkage,
     /// How the dynamic linker sees it.
     pub visibility: Visibility,
+    /// Whether it is in another DLL or offered to others by this one, which only a COFF target
+    /// reads.
+    pub dll: Dll,
     /// The section to put it in, from `__attribute__((section(...)))`, or `None` to let the
     /// object writer choose.
     pub section: Option<Symbol>,
@@ -168,6 +171,7 @@ impl Func {
             spelled: None,
             linkage: Linkage::External,
             visibility: Visibility::Default,
+            dll: Dll::Default,
             section: None,
             align: None,
             attrs: Attrs::NONE,

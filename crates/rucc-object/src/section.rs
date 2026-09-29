@@ -343,6 +343,36 @@ pub struct Data {
     /// Every distance between two labels an image holds, which the writer fills in once it knows
     /// where the labels are. See [`Apart`].
     pub apart: Vec<Apart>,
+    /// Every name this file offers to other DLLs, functions first and then variables, each in the
+    /// order the module held them. Only COFF has anywhere to say it and every other format is
+    /// handed an empty list. See [`Export`].
+    pub exports: Vec<Export>,
+}
+
+/// One name the DLL this file is linked into offers to others, which is `dllexport`.
+///
+/// What a COFF object says it with is an option for the linker, ` -export:name`, in a section
+/// called `.drectve` that holds nothing but options and that the linker reads and then drops. A
+/// variable is ` -export:name,data`, which keeps the import library from writing a stub under the
+/// plain name for it, since a jump is no use to somebody reading a variable. The list is in the
+/// order clang writes it and the options are spelled the way it spells them, which is also what
+/// gcc's are, apart from the quotes gcc puts round each name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    /// The name as the linker sees it.
+    pub name: String,
+    /// Whether it is a variable rather than a function.
+    pub data: bool,
+}
+
+impl Export {
+    /// The option the linker is handed for it, with the space in front that holds it apart from
+    /// the one before.
+    #[must_use]
+    pub fn option(&self) -> String {
+        let data = if self.data { ",data" } else { "" };
+        format!(" -export:{}{data}", self.name)
+    }
 }
 
 /// How far one label is from another, written into a variable's image.
@@ -471,6 +501,15 @@ pub enum Place {
     Merged,
     /// The section the program named, from `__attribute__((section(...)))`.
     Named(String),
+    /// A pointer to a variable this file only declares, in a read only section of its own that
+    /// the linker keeps one copy of whichever objects wrote it. COFF only, where it is called
+    /// `.rdata$` and the pointer's name, and every object that reads the variable writes the same
+    /// one with the same name, which is why a copy has to be allowed to lose to another.
+    ///
+    /// What the pointer is for is `rucc_codegen::elsewhere::Slot::Referred`. The runtime may write
+    /// it once the DLL the variable turns out to be in is loaded, which is why the section is not
+    /// merely read only: the runtime unprotects the page for that one write.
+    Pointer,
 }
 
 impl Place {
@@ -506,7 +545,7 @@ impl Place {
             Place::Zero => ".bss",
             Place::Thread { zero: false } => ".tdata",
             Place::Thread { zero: true } => ".tbss",
-            Place::Merged | Place::Named(_) => return None,
+            Place::Merged | Place::Named(_) | Place::Pointer => return None,
         })
     }
 }

@@ -708,6 +708,28 @@ impl Checker<'_> {
         flags
     }
 
+    /// What an attribute list says about which DLL the name is in, as [`DeclFlags::DLLIMPORT`] and
+    /// [`DeclFlags::DLLEXPORT`].
+    ///
+    /// `__declspec(dllimport)` is a macro for `__attribute__((dllimport))` in every Windows header,
+    /// so the one spelling is all there is to read, under the namespace test and the unarmouring
+    /// [`Self::inlining`] uses. It is read on every target, as gcc and clang read it, and only the
+    /// code written for a COFF object does anything with it.
+    pub(in crate::check) fn dll(&self, attrs: AttrList) -> DeclFlags {
+        let mut flags = DeclFlags::NONE;
+        for attr in &self.ast[attrs] {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            match rucc_gnu::unarmour(self.text(attr.name)) {
+                "dllimport" => flags |= DeclFlags::DLLIMPORT,
+                "dllexport" => flags |= DeclFlags::DLLEXPORT,
+                _ => {}
+            }
+        }
+        flags
+    }
+
     /// The options an `optimize` attribute names, one for each string and each comma in one.
     ///
     /// A number, such as `optimize (2)`, is a level and names no option, so it gives nothing.

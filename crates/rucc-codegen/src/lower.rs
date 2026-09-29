@@ -93,7 +93,7 @@ use rucc_target::{aarch64, x86_64};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
-use crate::elsewhere::Elsewhere;
+use crate::elsewhere::{Elsewhere, Slot};
 use crate::frame::{Layout, Local};
 use crate::select::{Match, Piece, Pointer, Reach, Rule, Selector};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
@@ -1621,7 +1621,19 @@ impl<'a> Lowering<'a> {
             let &address = values.first().ok_or_else(|| self.unsupported(inst))?;
             abi::Callee::Through(self.reg_of(address)?)
         } else {
-            abi::Callee::Named(info.callee.ok_or_else(|| self.unsupported(inst))?)
+            let symbol = info.callee.ok_or_else(|| self.unsupported(inst))?;
+            // A function a declaration said is in a DLL is called through the pointer the loader
+            // fills in, which is what gcc writes at `-O0`: the pointer into a register and a call
+            // through the register. gcc at `-O2` and clang call through the pointer in memory,
+            // which is one instruction shorter and the same call.
+            match self.elsewhere.slot(symbol) {
+                Some(slot) => {
+                    let reg = self.out.new_vreg(self.gpr);
+                    self.through_slot(inst, slot, symbol, reg)?;
+                    abi::Callee::Through(reg)
+                }
+                None => abi::Callee::Named(symbol),
+            }
         };
 
         // What the ABI asks of each argument, read out before any of them is, because reading one
@@ -2707,6 +2719,10 @@ impl<'a> Lowering<'a> {
         if self.elsewhere.thread(symbol) {
             return self.thread_address(inst, symbol, result);
         }
+        if let Some(slot) = self.elsewhere.slot(symbol) {
+            let reg = self.new_reg(result);
+            return self.through_slot(inst, slot, symbol, reg);
+        }
 
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
@@ -2724,6 +2740,42 @@ impl<'a> Lowering<'a> {
                 self.out.build(block, opcode).at(span).def(reg, self.gpr).symbol(symbol).finish();
             }
         }
+        Ok(())
+    }
+
+    /// The address of a name on COFF that is reached through a pointer, into `reg`.
+    ///
+    /// One load of the pointer from the instruction pointer, which is the same instruction the
+    /// global offset table is read with on the other formats and for much the same reason: the
+    /// pointer is in this image, so the distance to it is a number the linker has, and what it
+    /// holds is an address the loader or the runtime writes once the DLL the name is in has been
+    /// put somewhere. See [`Slot`] for which pointer and who writes it.
+    ///
+    /// ```text
+    /// movq  __imp_GetCurrentProcessId(%rip), %rax
+    /// movq  .refptr.environ(%rip), %rax
+    /// ```
+    fn through_slot(
+        &mut self,
+        inst: Inst,
+        slot: Slot,
+        symbol: Symbol,
+        reg: mir::Reg,
+    ) -> Result<(), Unsupported> {
+        let Reach::Mode(name) = self.selector.symbols.far else {
+            return Err(self.unsupported(inst));
+        };
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let pointer = slot.name(self.names.resolve(symbol));
+        let pointer = self.names.intern(&pointer);
+        let opcode = self.named(name);
+        self.out
+            .build(block, opcode)
+            .at(span)
+            .def(reg, self.gpr)
+            .mem(mir::Mem::of(pointer))
+            .finish();
         Ok(())
     }
 

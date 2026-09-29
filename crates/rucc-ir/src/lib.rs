@@ -60,7 +60,7 @@ pub use inst::{
     ValueList, ValueRef,
 };
 pub use module::{
-    Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, FuncId, Global,
+    Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, Dll, FuncId, Global,
     GlobalId, Linkage, Module, ModuleCounts, Pic, Reloc, SymbolRef, TlsModel, Visibility,
 };
 pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};

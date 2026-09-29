@@ -195,6 +195,15 @@ fn listing(
     for name in &globals.weak {
         writer.directives.absent(&mut writer.out, name);
     }
+    // What `dllexport` asks for, as the options the linker reads out of `.drectve`, one `.ascii` a
+    // name the way clang writes them. Only COFF has anything in the list. See
+    // [`rucc_object::Export`].
+    if !globals.exports.is_empty() {
+        writer.out.push_str("\t.section\t.drectve,\"yni\"\n");
+        for export in &globals.exports {
+            let _ = writeln!(writer.out, "\t.ascii\t\"{}\"", export.option());
+        }
+    }
     writer.directives.end(&mut writer.out, property);
     Ok(writer.out)
 }
@@ -1713,6 +1722,47 @@ mod tests {
 
         let text = data(vec![var("b", Place::ReadOnly, vec![piece(-2, 2)])], Os::Linux);
         assert!(text.contains("\nb:\n\t.short\t.Llbl.1-.Llbl.0-2\n"), "{text}");
+    }
+
+    /// What clang writes for a variable a Windows file reads and only declares: the pointer in a
+    /// section of its own, named after it, which the linker keeps one copy of.
+    #[test]
+    fn a_pointer_to_a_variable_elsewhere_is_written_the_way_clang_writes_it() {
+        let mut globals = Globals::default();
+        globals.pointers([(".refptr.environ".to_owned(), "environ".to_owned())]);
+        let names = Interner::new();
+        let text = print(&[], &globals, &[], &names, &target(Os::Windows), true, Output::default())
+            .expect("a machine with a writer");
+        let expected = "\t.section\t.rdata$.refptr.environ,\"dr\",discard,.refptr.environ\n\
+                        \t.globl\t.refptr.environ\n\t.p2align\t3\n.refptr.environ:\n\
+                        \t.quad\tenviron\n";
+        assert!(text.contains(expected), "{text}");
+    }
+
+    /// What clang writes for `dllexport`: every name as a linker option in `.drectve`, the
+    /// functions first, and a variable marked as data.
+    #[test]
+    fn a_name_offered_to_other_dlls_is_an_option_in_the_directive_section() {
+        let exports = vec![
+            rucc_object::Export { name: "offered".to_owned(), data: false },
+            rucc_object::Export { name: "count".to_owned(), data: true },
+        ];
+        let names = Interner::new();
+        let text = print(
+            &[],
+            &Globals { exports, ..Globals::default() },
+            &[],
+            &names,
+            &target(Os::Windows),
+            true,
+            Output::default(),
+        )
+        .expect("a machine with a writer");
+        let expected = "\t.section\t.drectve,\"yni\"\n\t.ascii\t\" -export:offered\"\n\
+                        \t.ascii\t\" -export:count,data\"\n";
+        assert!(text.contains(expected), "{text}");
+        let none = data(Vec::new(), Os::Windows);
+        assert!(!none.contains(".drectve"), "{none}");
     }
 
     #[test]

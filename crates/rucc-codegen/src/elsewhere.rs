@@ -31,11 +31,17 @@
 //! than a variation of it, because there is no address to work out at all. Every thread has its own
 //! copy, so what the link can say is only where the variable sits inside the block a thread gets,
 //! and turning that into an address is something the running program does. See [`Elsewhere::thread`].
+//!
+//! COFF has no global offset table and answers the same question with pointers of its own, one per
+//! name, which is [`Elsewhere::slot`]. A name a declaration said is in another DLL is reached
+//! through the pointer the loader fills in for it, and a variable this file only declares is
+//! reached through a pointer the file writes itself, so that the link may send it to a DLL without
+//! this file having known.
 
 use std::collections::HashSet;
 
 use rucc_base::Symbol;
-use rucc_ir::{AttrSet, Linkage, Module, Pic, Visibility};
+use rucc_ir::{AttrSet, Dll, Extra, Linkage, Module, Opcode, Pic, Visibility};
 use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
@@ -73,6 +79,44 @@ pub struct Elsewhere {
     twice: HashSet<Symbol>,
     described: bool,
     indexed: bool,
+    imported: HashSet<Symbol>,
+    referred: HashSet<Symbol>,
+}
+
+/// Which pointer a name on COFF is reached through, when it is reached through one.
+///
+/// The code is the same for both, a load of the pointer from the instruction pointer and then the
+/// name's address in a register. What differs is who writes the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// The one the loader fills in for a name in another DLL, which the import library calls
+    /// `__imp_` and the name. A declaration said `dllimport`, so there is no other way to the name:
+    /// the import library has no stub under the plain name for a variable, and for a function the
+    /// stub is a jump through this same pointer, so going through it here saves the jump.
+    Imported,
+    /// One this file writes itself, called `.refptr.` and the name, for a variable it only
+    /// declares and nothing said was in a DLL.
+    ///
+    /// The variable may still turn out to be in one, and `environ` in the C runtime is one that
+    /// is. Then the address a `lea` would work out is not a distance the linker has, since the DLL
+    /// is loaded wherever it fits, and what it does instead is write a record for the runtime to
+    /// patch the reference with once the DLL is loaded. A four byte reference from the code cannot
+    /// hold an address that far away, and an eight byte pointer in a data section can, so the
+    /// reference the runtime patches is this pointer. Every object that reads the name writes the
+    /// same one in a section of its own that the linker keeps one copy of, which is what gcc and
+    /// clang both do for `x86_64-w64-mingw32`.
+    Referred,
+}
+
+impl Slot {
+    /// The pointer's own name, for a pointer to `name`.
+    #[must_use]
+    pub fn name(self, name: &str) -> String {
+        match self {
+            Self::Imported => format!("__imp_{name}"),
+            Self::Referred => format!(".refptr.{name}"),
+        }
+    }
 }
 
 impl Elsewhere {
@@ -97,7 +141,54 @@ impl Elsewhere {
             .collect();
         let described = format == ObjectFormat::MachO;
         let indexed = format == ObjectFormat::Coff;
-        Self { threads, twice, described, indexed, ..Self::table(module, pic, format, copies) }
+        let (imported, referred) = Self::pointers(module, format);
+        Self {
+            threads,
+            twice,
+            described,
+            indexed,
+            imported,
+            referred,
+            ..Self::table(module, pic, format, copies)
+        }
+    }
+
+    /// The names COFF reaches through a pointer, as the ones a declaration said are in another DLL
+    /// and the ones this file writes a pointer to itself. Both are empty on every other format.
+    ///
+    /// A variable gets a pointer of this file's own when it is only declared here, the linker may
+    /// see it, and nothing said where it is. A thread-local is left out, since it has no address
+    /// to point at and [`Self::thread`] answers for it. So is a hidden one, which is promised to be
+    /// in this image: clang reaches that one directly and so does this, where gcc still goes
+    /// through a pointer for it. A function never gets one from this file, since the import
+    /// library's stub under the plain name is already an address in this image, and neither
+    /// compiler writes one for a function either.
+    fn pointers(module: &Module, format: ObjectFormat) -> (HashSet<Symbol>, HashSet<Symbol>) {
+        if format != ObjectFormat::Coff {
+            return (HashSet::new(), HashSet::new());
+        }
+        let funcs = module
+            .funcs()
+            .filter(|&id| module[id].is_declaration() && module[id].dll == Dll::Import)
+            .map(|id| module[id].name);
+        let globals = module
+            .globals()
+            .filter(|&id| module[id].is_declaration() && module[id].tls.is_none())
+            .filter(|&id| module[id].dll == Dll::Import)
+            .map(|id| module[id].name);
+        let referred = module
+            .globals()
+            .filter(|&id| {
+                let global = &module[id];
+                global.is_declaration()
+                    && global.tls.is_none()
+                    && global.dll != Dll::Import
+                    && global.visibility == Visibility::Default
+                    && matches!(global.linkage, Linkage::External | Linkage::Weak)
+            })
+            .map(|id| module[id].name)
+            .collect();
+        (funcs.chain(globals).collect(), referred)
     }
 
     /// The half of the above that is about the global offset table, which is the older one.
@@ -112,6 +203,10 @@ impl Elsewhere {
     /// `x86_64-w64-mingw32`, which writes `leaq other(%rip), %rax` for the address of a function it
     /// has only seen declared. Asking for a table there instead reached the object writer as a
     /// relocation it has no way to write, which is what tamnd/rucc#1443 was.
+    ///
+    /// A variable has no stub to stand for it, so one this file only declares is reached through a
+    /// pointer instead, and so is anything a declaration said is in a DLL. Neither is a table the
+    /// linker builds, which is why they are [`Self::slot`] and not in here.
     fn table(module: &Module, pic: Pic, format: ObjectFormat, copies: bool) -> Self {
         if format == ObjectFormat::Coff {
             return Self::default();
@@ -155,6 +250,53 @@ impl Elsewhere {
     #[must_use]
     pub fn holds(&self, name: Symbol) -> bool {
         self.names.contains(&name)
+    }
+
+    /// The pointer the address of that name is read out of on COFF, where it is read out of one.
+    ///
+    /// Asked after [`Self::thread`] and in place of [`Self::holds`], which is never yes on the
+    /// format this is ever yes on.
+    #[must_use]
+    pub fn slot(&self, name: Symbol) -> Option<Slot> {
+        if self.imported.contains(&name) {
+            Some(Slot::Imported)
+        } else if self.referred.contains(&name) {
+            Some(Slot::Referred)
+        } else {
+            None
+        }
+    }
+
+    /// The names this file has to write a pointer of its own for, in the order the module has
+    /// them, which are the ones [`Self::slot`] says are [`Slot::Referred`] and that some function
+    /// here takes the address of.
+    ///
+    /// Asked of the module once its functions have been compiled, because the question is which
+    /// references survived: a read the optimizer took out needs no pointer, and gcc and clang both
+    /// write one only for a name the code still reads. A pointer nothing reads would not be free
+    /// either, since it names the variable and so asks the link to find a definition of it.
+    #[must_use]
+    pub fn referred(&self, module: &Module) -> Vec<Symbol> {
+        if self.referred.is_empty() {
+            return Vec::new();
+        }
+        let mut read = HashSet::new();
+        for id in module.funcs() {
+            let func = &module[id];
+            for block in func.blocks() {
+                for inst in func.insts(block) {
+                    let data = &func[inst];
+                    if let (Opcode::GlobalAddr, Extra::Symbol(name)) = (data.opcode, data.extra) {
+                        read.insert(name);
+                    }
+                }
+            }
+        }
+        module
+            .globals()
+            .map(|id| module[id].name)
+            .filter(|name| self.referred.contains(name) && read.contains(name))
+            .collect()
     }
 
     /// Whether that name is a variable every thread has its own copy of.
@@ -233,7 +375,9 @@ mod tests {
     use super::*;
 
     use rucc_base::Interner;
-    use rucc_ir::{Alias, Func, Global, Linkage, Signature, TlsModel, Visibility};
+    use rucc_ir::{
+        Alias, Builder, Func, Global, InstData, Linkage, Signature, TlsModel, Visibility,
+    };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     /// A module with one of everything: a function with a body and one without, a variable with an
@@ -430,5 +574,73 @@ mod tests {
         let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf, true);
         assert!(!elsewhere.holds(names.intern("quiet")));
         assert!(!elsewhere.holds(names.intern("shy")));
+    }
+
+    /// The module above with the names a Windows program has: a function and a variable a
+    /// declaration said are in a DLL, a variable it only declares and one it said is hidden, and
+    /// a function that reads every variable in it.
+    fn windows(names: &mut Interner) -> Module {
+        let mut module = module(names);
+        let mut pid = Func::new(names.intern("GetCurrentProcessId"), Signature::new());
+        pid.dll = Dll::Import;
+        module.add_func(pid);
+        let mut mode = Global::new(names.intern("_fmode"), 4, 4);
+        mode.dll = Dll::Import;
+        module.add_global(mode);
+        let mut near = Global::new(names.intern("near"), 4, 4);
+        near.visibility = Visibility::Hidden;
+        module.add_global(near);
+        let mut reader = Func::new(names.intern("reader"), Signature::new());
+        let block = reader.create_block();
+        for name in ["kept", "away", "quiet", "_fmode", "near"] {
+            let symbol = names.intern(name);
+            let data =
+                InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) };
+            Builder::new(&mut reader, block).value(data, rucc_ir::Type::PTR);
+        }
+        module.add_func(reader);
+        module
+    }
+
+    /// What a declaration said is in a DLL is reached through the pointer the loader fills in,
+    /// whether it is a function or a variable, and what it said nothing about keeps the plain name
+    /// for a function and gets a pointer of the file's own for a variable.
+    #[test]
+    fn a_name_in_a_dll_is_reached_through_the_pointer_the_loader_fills_in() {
+        let mut names = Interner::new();
+        let module = windows(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff, true);
+        for name in ["GetCurrentProcessId", "_fmode"] {
+            assert_eq!(elsewhere.slot(names.intern(name)), Some(Slot::Imported), "{name}");
+        }
+        assert_eq!(elsewhere.slot(names.intern("away")), Some(Slot::Referred));
+        for name in ["exit", "here", "kept", "quiet", "shy", "own", "near"] {
+            assert_eq!(elsewhere.slot(names.intern(name)), None, "{name}");
+        }
+        assert_eq!(Slot::Imported.name("_fmode"), "__imp__fmode");
+        assert_eq!(Slot::Referred.name("away"), ".refptr.away");
+    }
+
+    /// A pointer of the file's own is written only for a name some function still reads, so
+    /// `unread`, which is declared the way `away` is and read by nothing, gets none.
+    #[test]
+    fn a_pointer_is_written_only_for_a_variable_the_code_reads() {
+        let mut names = Interner::new();
+        let mut module = windows(&mut names);
+        module.add_global(Global::new(names.intern("unread"), 4, 4));
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff, true);
+        assert_eq!(elsewhere.referred(&module), vec![names.intern("away")]);
+    }
+
+    /// Every other format has a table of its own and never asks for either pointer.
+    #[test]
+    fn a_format_with_a_table_has_no_pointers() {
+        let mut names = Interner::new();
+        let module = windows(&mut names);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
+        for name in ["GetCurrentProcessId", "_fmode", "away"] {
+            assert_eq!(elsewhere.slot(names.intern(name)), None, "{name}");
+        }
+        assert!(elsewhere.referred(&module).is_empty());
     }
 }
