@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The windows-gnu sysroots `--fetch` installs are built for the UCRT rather than msvcrt, pinned to the `sysroots-2026-09-29` release of tamnd/rucc-cross. A program now imports the `api-ms-win-crt-*` API sets, and `_mingw.h` sets `__MSVCRT_VERSION__` to 0xE00 and defines `_UCRT`, as it does for a UCRT gcc. The link line is unchanged, because the sysroot's `libmsvcrt.a` is a copy of whichever runtime it was built for. The same release has a `-msvcrt` archive of each target for anyone who needs `msvcrt.dll`, and nothing pins it (#2069).
 - The rule tables keep each head name's first sixteen bytes as a number next to the name, and finding a branch compares those numbers before it compares any names. Instruction selection no longer calls `memcmp` at every step of the search, which on jtckdint's `test.c` takes about 1.5% off `-O0` and a quarter of a billion instructions off `-O2`, with the same assembly (#2160).
+- The rule matcher walks the trie with one stack of subterms that it pushes to and truncates, where it used to copy the stack for every branch it followed. That is one allocation fewer per branch tried in instruction selection (#2176).
 
 ### Fixed
 
