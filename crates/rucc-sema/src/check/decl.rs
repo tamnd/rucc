@@ -970,20 +970,12 @@ impl Checker<'_> {
                 }
                 // The GNU extension that ties a variable to a register for the whole program,
                 // `register char *stack_ptr asm ("sp")`. It is not the local form with a wider
-                // scope: the register is taken away from every function in the file, which is a
-                // promise the allocator would have to keep everywhere, so it is refused by name
-                // rather than read as an ordinary global that some other code would then write.
+                // scope: the register is taken away from every function in the file. Whether that
+                // is a promise this compiler keeps depends on the register, which is read with
+                // the string in `declared_asm`, and that is where one it cannot keep is refused.
+                // Either way it names no object a linker knows about.
                 Some(StorageClass::Register) if named => {
-                    self.report(
-                        Diagnostic::error(
-                            format!(
-                                "'{spelled}' is a global register variable, which this compiler \
-                                 does not support"
-                            ),
-                            span,
-                        )
-                        .with_code("E0714"),
-                    );
+                    return (Linkage::None, StorageDuration::Static);
                 }
                 // gcc words this after the same extension, since a register it names is the only
                 // thing `register` at file scope could mean.
@@ -1416,6 +1408,33 @@ impl Checker<'_> {
             return (None, None);
         };
         let written = self.asm_label(id, span);
+        // A register kept for the whole program, which is honoured only for a register the code
+        // generator never hands out, since every function in the program would otherwise have to
+        // keep off it. On AArch64 that is `x18`, and `winnt.h` declares the TEB there. Anything
+        // else is refused by name rather than read as an ordinary global that some other code
+        // would then write.
+        if specs.storage == Some(StorageClass::Register) && self.scopes.at_file_scope() {
+            let register: String = self.tast[written]
+                .elements
+                .iter()
+                .filter_map(|&unit| char::from_u32(unit))
+                .collect();
+            if self.cx.target.keeps_register_for_the_program(&register) {
+                return (None, Some(written));
+            }
+            let spelled = self.text(name).to_owned();
+            self.report(
+                Diagnostic::error(
+                    format!(
+                        "'{spelled}' is a global register variable, which this compiler does not \
+                         support"
+                    ),
+                    span,
+                )
+                .with_code("E0714"),
+            );
+            return (None, None);
+        }
         if duration != StorageDuration::Automatic {
             return (Some(written), None);
         }

@@ -122,3 +122,40 @@ fn sets_an_argument_vector(line: &str) -> bool {
             Some("0" | "1" | "2" | "3" | "4" | "5" | "6" | "7")
         )
 }
+
+/// What the compiler says about a fixture it is expected to refuse.
+fn refused(what: &str, source: &str) -> String {
+    let path = fixture(what, source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={WINDOWS}"))
+        .args(["-O1", "-S", "-o", "-"])
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    assert!(!out.status.success(), "the compiler took the fixture");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn the_teb_is_read_out_of_x18_as_winnt_h_declares_it() {
+    // The declaration and the function are mingw-w64's, from `winnt.h`, and clang writes the one
+    // move for it.
+    let got = insts(
+        "teb",
+        "struct _TEB;\n\
+         register struct _TEB *__mingw_current_teb __asm__(\"x18\");\n\
+         static inline struct _TEB *NtCurrentTeb(void) { return __mingw_current_teb; }\n\
+         void *teb(void) { return NtCurrentTeb(); }\n",
+    );
+    assert_eq!(got, ["mov x0, x18", "ret"]);
+}
+
+#[test]
+fn x18_is_not_written_and_no_other_register_is_kept_for_the_program() {
+    let said =
+        refused("write", "register void *teb __asm__(\"x18\");\nvoid set(void *p) { teb = p; }\n");
+    assert!(said.contains("a write to or the address of a global register variable"), "{said}");
+    let said = refused("x19", "register long g __asm__(\"x19\");\nlong f(void) { return g; }\n");
+    assert!(said.contains("'g' is a global register variable"), "{said}");
+}

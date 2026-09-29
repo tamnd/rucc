@@ -3144,6 +3144,36 @@ impl<'u> Body<'_, 'u> {
         self.write(place, held, span);
     }
 
+    /// A read of a register kept for the whole program, `register void *teb asm ("x18")` at file
+    /// scope, which is a move out of that register where the read is.
+    ///
+    /// The checking lets one through only for a register the code generator never hands out, so
+    /// what the register holds here is what the platform put there. mingw-w64's `NtCurrentTeb` on
+    /// AArch64 is one of these, and clang reads it as the one `mov` this writes.
+    fn global_register(&mut self, operand: ExprId, span: Span) -> Option<Value> {
+        let tast = self.tast();
+        let ExprKind::Decl(decl) = tast[operand].kind else { return None };
+        let node = &tast[decl];
+        let register = node.register?;
+        if node.duration == StorageDuration::Automatic {
+            return None;
+        }
+        let ty = node.ty;
+        let value = repr::value_type(self.types(), self.target(), ty)
+            .filter(|value| value.is_ptr() || (value.is_scalar() && value.is_int()));
+        let Some(value) = value else {
+            self.unsupported("an object of this type kept in a named register", span);
+            return Some(self.poison(Type::PTR, span));
+        };
+        let spelling: String =
+            tast[register].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+        let symbol = self.unit.names.intern(&spelling);
+        Some(self.build(span).value(
+            InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::RegisterValue) },
+            value,
+        ))
+    }
+
     /// The initializer of one declaration in a declaration statement.
     fn init(&mut self, decl: DeclId) {
         let tast = self.tast();
@@ -3379,6 +3409,17 @@ impl<'u> Body<'_, 'u> {
                     // a `goto` over it can arrange. The object does not exist yet, so there is
                     // no address to answer with.
                     self.unsupported("a variable length array used before its declaration", span);
+                    let addr = self.poison(Type::PTR, span);
+                    Place::new(Where::Addr(addr), ty)
+                }
+                None if tast[decl].register.is_some() => {
+                    // A register kept for the whole program is read where it stands, in
+                    // `global_register`, and has no address. Writing one would take it from
+                    // whatever the platform keeps in it, which for `x18` on Windows is the TEB.
+                    self.unsupported(
+                        "a write to or the address of a global register variable",
+                        span,
+                    );
                     let addr = self.poison(Type::PTR, span);
                     Place::new(Where::Addr(addr), ty)
                 }
@@ -5531,6 +5572,9 @@ impl<'u> Body<'_, 'u> {
         let from = self.tast()[operand].ty;
         match kind {
             Conversion::Lvalue => {
+                if let Some(value) = self.global_register(operand, span) {
+                    return Some(value);
+                }
                 let place = self.place(operand);
                 self.read(place, span)
             }

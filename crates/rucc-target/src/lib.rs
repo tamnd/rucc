@@ -783,6 +783,18 @@ impl TargetInfo {
         typenames::type_names(self.tuple.arch())
     }
 
+    /// Whether a file-scope `register T x asm ("name")` on this target can be kept as what it says.
+    ///
+    /// Such a variable is the register for the whole program, so it can only be honoured for a
+    /// register the code generator never hands out and nothing else writes behind its back. On
+    /// AArch64 that is `x18`, which rucc keeps off every target because Windows and Apple give it
+    /// to the platform, and which mingw-w64's `winnt.h` declares this way so that `NtCurrentTeb`
+    /// reads the thread's TEB out of it.
+    #[must_use]
+    pub fn keeps_register_for_the_program(&self, name: &str) -> bool {
+        self.tuple.arch() == tuple::Arch::Aarch64 && name == "x18"
+    }
+
     /// The description of `target`.
     ///
     /// Every row of the target table has one of these, whether or not there is a backend that can
