@@ -198,3 +198,15 @@ int __try = 1, __noop = 2, __forceinline = 3;
     let (ok, _, said) = run("mingw", &[MINGW, "-fsyntax-only"], source);
     assert!(ok, "{said}");
 }
+
+#[test]
+fn a_selectany_definition_is_one_the_link_may_find_elsewhere_too() {
+    // The universal CRT's <wchar.h> defines a variable this way that libucrt.lib defines as well,
+    // so a program that includes it has to give way to the library's copy rather than clash.
+    let source = "__declspec(selectany) int one_copy = 1;\nint ordinary = 2;\n";
+    let (ok, asm, said) = run("selectany", &[MSVC, "-S", "-o", "-"], source);
+    assert!(ok, "{said}");
+    assert!(asm.contains("\t.weak\tone_copy\n"), "{asm}");
+    assert!(!asm.contains("\t.globl\tone_copy\n"), "{asm}");
+    assert!(asm.contains("\t.globl\tordinary\n"), "{asm}");
+}

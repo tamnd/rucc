@@ -2,10 +2,17 @@
 //! accepted first.
 //!
 //! Design: `spec/cross-compile/13-distribution.md` section 13.4. Neither of those two things is
-//! ours to redistribute, and neither ever will be, so there is no artifact a release of this
-//! compiler pins for an MSVC target and `rucc --fetch` of one says so. What Microsoft does publish
-//! is a manifest naming every file its own installer would fetch, and a licence that lets a person
-//! who accepts it fetch them, which is the mechanism `cargo-xwin` uses and the one copied here.
+//! ours to redistribute, and neither ever will be, so there is no artifact of ours a release of
+//! this compiler pins for an MSVC target. What Microsoft does publish is a manifest naming every
+//! file its own installer would fetch, and a licence that lets a person who accepts it fetch them,
+//! which is the mechanism `cargo-xwin` uses and the one copied here. Every byte comes from
+//! Microsoft to the machine of the person who accepted the licence, and nothing of it passes
+//! through us.
+//!
+//! Two commands run it. `rucc --fetch <tuple>` starts from [`rucc_sysroot::PINNED_BUILD`], a
+//! Visual Studio build whose two documents are held to hashes, so that it gets the same files
+//! everywhere. `rucc --fetch-msvc-sdk <tuple>` starts from the build Microsoft's channel names
+//! today, which is newer and which nothing holds still.
 //!
 //! [`rucc_sysroot::msvc`] is the reading half: it takes the two documents and says which files a
 //! compiler needs out of the nineteen thousand packages in them. This is the half that moves bytes.
@@ -29,7 +36,8 @@
 //!
 //! # The two downloads with no hash behind them
 //!
-//! The channel manifest is the root of the chain, so nothing above it could name its hash. The
+//! This is `--fetch-msvc-sdk`, and `--fetch` has hashes for both, measured by us. The channel
+//! manifest is the root of the chain, so nothing above it could name its hash. The
 //! installer manifest has a hash published for it in the channel and that hash does not match the
 //! file served at the URL the channel names in the same breath, which was measured rather than
 //! assumed and is written down in section 13.4. Both go through [`crate::fetch::trusted`], which
@@ -49,7 +57,7 @@ pub mod tree;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rucc_sysroot::msvc::{Channel, Chip, Selection, Wanted};
+use rucc_sysroot::msvc::{Channel, Chip, PinnedBuild, Selection, Wanted};
 use rucc_sysroot::{Input, Licence, Manifest, Provenance, Sysroot, sha256};
 use rucc_tuple::TargetTuple;
 use rucc_unpack::cab::File as CabFile;
@@ -103,16 +111,31 @@ fn mb(bytes: u64) -> String {
 /// The exit code, since this is what an action runs and there is nothing above it to return an
 /// error to. A run that has not been given the acceptance prints the licence and what would be
 /// downloaded and exits non-zero, because it did not do what it was asked to do.
-pub fn fetch_msvc_sdk(target: TargetTuple, accepted: bool, cache: &Path) -> i32 {
+///
+/// `pinned` is the build `rucc --fetch` starts from, with both of its documents held to hashes.
+/// Without it the run starts from whatever Microsoft's channel names today, which is
+/// `rucc --fetch-msvc-sdk`.
+pub fn fetch_msvc_sdk(
+    target: TargetTuple,
+    accepted: bool,
+    cache: &Path,
+    pinned: Option<&PinnedBuild>,
+) -> i32 {
     let tuple = target.to_canonical_string();
-    match run(target, &tuple, accepted, cache) {
+    match run(target, &tuple, accepted, cache, pinned) {
         Ok(code) => code,
         Err(why) => crate::complain(why),
     }
 }
 
 /// The same, as something that can fail in the ordinary way.
-fn run(target: TargetTuple, tuple: &str, accepted: bool, cache: &Path) -> Result<i32, CliError> {
+fn run(
+    target: TargetTuple,
+    tuple: &str,
+    accepted: bool,
+    cache: &Path,
+    pinned: Option<&PinnedBuild>,
+) -> Result<i32, CliError> {
     let say = |line: &str| println!("rucc: {tuple}: {line}");
 
     // Which targets this is for is `Wall::of` rather than a second list of the ones it covers, the
@@ -133,28 +156,11 @@ fn run(target: TargetTuple, tuple: &str, accepted: bool, cache: &Path) -> Result
         )));
     };
 
-    let dir = cache.join("downloads").join("msvc");
-    let channel = dir.join("channel.json");
-    // Always downloaded rather than read from the cache. It is the pointer to the current build, so
-    // a cached copy is an answer to a question about the day it was fetched.
-    fetch::trusted(CHANNEL, &channel)?;
-    let text = read(&channel)?;
-    let channel = Channel::parse(&text)
-        .map_err(|why| err(format!("{CHANNEL} is not a channel manifest: {why}")))?;
+    let (channel, dir, text) = match pinned {
+        Some(pin) => documents_pinned(pin, tuple, cache)?,
+        None => documents(chip, cache)?,
+    };
     say(&format!("Visual Studio {}, build {}", channel.release, channel.build));
-
-    let dir = downloads(cache, &channel.build);
-    let manifest = dir.join(stored_as(&channel.manifest.name));
-    // Named by the build, so a second run for another architecture reads the one already here
-    // rather than moving eighteen megabytes again. A copy that does not parse is a run that was
-    // interrupted, and it is downloaded again once rather than reported, because there is no hash
-    // to tell a truncated file from a Microsoft that changed its mind.
-    let mut text = if manifest.exists() { read(&manifest).ok() } else { None };
-    if text.as_deref().and_then(|text| Selection::parse(text, &[chip]).ok()).is_none() {
-        fetch::trusted(&channel.manifest.url, &manifest)?;
-        text = Some(read(&manifest)?);
-    }
-    let text = text.unwrap_or_default();
     let chosen = Selection::parse(&text, &[chip]).map_err(|why| {
         err(format!("{} is not an installer manifest: {why}", channel.manifest.url))
     })?;
@@ -196,6 +202,73 @@ fn run(target: TargetTuple, tuple: &str, accepted: bool, cache: &Path) -> Result
     Ok(0)
 }
 
+/// The channel, the directory this build's downloads go in, and the installer manifest's text,
+/// for the build Microsoft's channel names today.
+fn documents(chip: Chip, cache: &Path) -> Result<(Channel, PathBuf, String), CliError> {
+    let dir = cache.join("downloads").join("msvc");
+    let channel = dir.join("channel.json");
+    // Always downloaded rather than read from the cache. It is the pointer to the current build, so
+    // a cached copy is an answer to a question about the day it was fetched.
+    fetch::trusted(CHANNEL, &channel)?;
+    let text = read(&channel)?;
+    let channel = Channel::parse(&text)
+        .map_err(|why| err(format!("{CHANNEL} is not a channel manifest: {why}")))?;
+
+    let dir = downloads(cache, &channel.build);
+    let manifest = dir.join(stored_as(&channel.manifest.name));
+    // Named by the build, so a second run for another architecture reads the one already here
+    // rather than moving eighteen megabytes again. A copy that does not parse is a run that was
+    // interrupted, and it is downloaded again once rather than reported, because there is no hash
+    // to tell a truncated file from a Microsoft that changed its mind.
+    let mut text = if manifest.exists() { read(&manifest).ok() } else { None };
+    if text.as_deref().and_then(|text| Selection::parse(text, &[chip]).ok()).is_none() {
+        fetch::trusted(&channel.manifest.url, &manifest)?;
+        text = Some(read(&manifest)?);
+    }
+    Ok((channel, dir, text.unwrap_or_default()))
+}
+
+/// The same for the build this release pins, where both documents are held to hashes.
+///
+/// Kept apart from the other build's copies, under the first twelve digits of each hash the way the
+/// payloads are, because the file names are the same and a hash is what decides which one it is.
+/// A copy already there is checked rather than downloaded again, which the other path cannot do.
+fn documents_pinned(
+    pin: &PinnedBuild,
+    tuple: &str,
+    cache: &Path,
+) -> Result<(Channel, PathBuf, String), CliError> {
+    let dir = downloads(cache, pin.build);
+    // A pinned file that cannot be had is most likely a build Microsoft has stopped serving, and
+    // the way on from that is the command that follows the channel instead.
+    let gone = |why: CliError| {
+        err(format!(
+            "{why}. This release fetches Visual Studio build {} for {tuple}, and if Microsoft no \
+             longer serves it, `rucc --fetch-msvc-sdk {tuple} --accept-licence` gets the build \
+             Microsoft's channel names today instead",
+            pin.build
+        ))
+    };
+    let get = |url: &str, sha256: &str| -> Result<String, CliError> {
+        let at = dir.join(&sha256[..12]).join(stored_as(url));
+        fetch::fetch(url, sha256, &at).map_err(&gone)?;
+        read(&at)
+    };
+    let text = get(pin.channel, pin.channel_sha256)?;
+    let channel = Channel::parse(&text)
+        .map_err(|why| err(format!("{} is not a channel manifest: {why}", pin.channel)))?;
+    // The hash says these are the bytes that were measured, so this cannot fail unless the pin
+    // was written wrong, and a pin written wrong should say so rather than fetch some other build.
+    if channel.build != pin.build {
+        return Err(err(format!(
+            "{} is the channel for build {} and this release pins it as build {}",
+            pin.channel, channel.build, pin.build
+        )));
+    }
+    let text = get(pin.manifest, pin.manifest_sha256)?;
+    Ok((channel, dir, text))
+}
+
 /// Lay the downloaded packages out as the tree `--sysroot` reads, and record what went into it.
 ///
 /// The record is written last and is what says the tree is finished, so a run that was interrupted
@@ -234,11 +307,11 @@ fn unpack(
     }
 
     let written = manifest.inputs().len();
-    let alike = aliases(&root)?;
+    let alike = aliases(&root)? + spellings(&root)?;
     std::fs::create_dir_all(&root).map_err(|why| err(format!("{}: {why}", root.display())))?;
     std::fs::write(&record, manifest.render())
         .map_err(|why| err(format!("{}: {why}", record.display())))?;
-    say(&format!("{written} files and {alike} lowercase names are at {}", root.display()));
+    say(&format!("{written} files and {alike} other spellings are at {}", root.display()));
     Ok(root)
 }
 
@@ -445,6 +518,100 @@ fn aliases(_root: &Path) -> Result<usize, CliError> {
     Ok(0)
 }
 
+/// The directories of the tree an include is looked for in, in the order the search takes them.
+const INCLUDES: [&str; 4] =
+    ["crt/include", "sdk/include/ucrt", "sdk/include/um", "sdk/include/shared"];
+
+/// Give every header the spelling the headers themselves include it by.
+///
+/// [`aliases`] covers a program that writes `windows.h` for `Windows.h`. The kit also does it the
+/// other way round: `specstrings.h` is written in lowercase, and `winver.h` and `shellapi.h`
+/// include it as `SpecStrings.h`, and `kernelspecs.h` includes `driverspecs.h` as `DriverSpecs.h`.
+/// Those names are only known by reading the includes, so every header in the tree is read, and a
+/// name it includes that no directory has, but whose lowercase spelling one of them does, gets a
+/// link by that name beside the file. This is what `xwin` does for the same reason.
+#[cfg(unix)]
+fn spellings(root: &Path) -> Result<usize, CliError> {
+    let dirs: Vec<PathBuf> = INCLUDES.iter().map(|dir| root.join(dir)).collect();
+    let mut wanted = std::collections::BTreeSet::new();
+    let mut todo = dirs.clone();
+    while let Some(dir) = todo.pop() {
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in listing {
+            let entry = entry.map_err(|why| err(format!("{}: {why}", dir.display())))?;
+            let kind = entry.file_type().map_err(|why| err(format!("{}: {why}", dir.display())))?;
+            if kind.is_dir() {
+                todo.push(entry.path());
+            } else if kind.is_file() {
+                let text = slurp(&entry.path())?;
+                wanted.extend(included(&String::from_utf8_lossy(&text)));
+            }
+        }
+    }
+    let mut made = 0;
+    for name in wanted {
+        let lower = name.to_ascii_lowercase();
+        if lower == name || dirs.iter().any(|dir| dir.join(&name).exists()) {
+            continue;
+        }
+        let Some(dir) = dirs.iter().find(|dir| dir.join(&lower).is_file()) else {
+            continue;
+        };
+        // Only the last component is spelled differently, so the link points at its neighbour.
+        let Some(target) = Path::new(&lower).file_name() else {
+            continue;
+        };
+        let link = dir.join(&name);
+        match std::os::unix::fs::symlink(target, &link) {
+            Ok(()) => made += 1,
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(why) => return Err(err(format!("{}: {why}", link.display()))),
+        }
+    }
+    Ok(made)
+}
+
+/// The same on a host where the question does not arise, for the reason [`aliases`] gives.
+#[cfg(not(unix))]
+fn spellings(_root: &Path) -> Result<usize, CliError> {
+    Ok(0)
+}
+
+/// The names a header's `#include` lines ask for, with a capital in them and a directory, if any,
+/// in lowercase, which are the only ones [`spellings`] can do anything about.
+#[cfg(unix)]
+fn included(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix('#') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix("include") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let close = match rest.chars().next() {
+            Some('<') => '>',
+            Some('"') => '"',
+            _ => continue,
+        };
+        let Some((name, _)) = rest[1..].split_once(close) else {
+            continue;
+        };
+        let name = name.replace('\\', "/");
+        let (directory, file) = name.rsplit_once('/').unwrap_or(("", &name));
+        if file.chars().any(|c| c.is_ascii_uppercase())
+            && !directory.chars().any(|c| c.is_ascii_uppercase())
+            && !name.contains("..")
+        {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
 /// Read a file that was downloaded, saying which one when it cannot be read.
 fn slurp(at: &Path) -> Result<Vec<u8>, CliError> {
     std::fs::read(at).map_err(|why| err(format!("{}: {why}", at.display())))
@@ -498,7 +665,7 @@ fn read(at: &Path) -> Result<String, CliError> {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use super::aliases;
+    use super::{aliases, included, spellings};
     use super::{downloads, files, mb, put, stored_as};
     use rucc_sysroot::{Manifest, Provenance};
     use std::path::{Path, PathBuf};
@@ -593,6 +760,37 @@ mod tests {
         // the same cache would do, and nothing new is made and nothing fails.
         assert_eq!(aliases(&root).expect("the links again"), 0);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_header_included_by_a_spelling_with_capitals_gets_a_link_by_that_name() {
+        let root = scratch("spellings");
+        std::fs::create_dir_all(root.join("sdk/include/um")).expect("a directory");
+        std::fs::create_dir_all(root.join("sdk/include/shared")).expect("a directory");
+        std::fs::write(root.join("sdk/include/shared/specstrings.h"), b"s").expect("a header");
+        std::fs::write(root.join("sdk/include/shared/Windows.h"), b"w").expect("a header");
+        std::fs::write(
+            root.join("sdk/include/um/winver.h"),
+            b"#include <SpecStrings.h>\n  #  include \"Windows.h\"\n#include <Nowhere.h>\n",
+        )
+        .expect("a header");
+
+        let made = spellings(&root).expect("the links");
+        // One on a host that tells the spellings apart and none on a Mac, as for `aliases`.
+        assert!(made == 1 || made == 0, "{made} links");
+        assert_eq!(std::fs::read(root.join("sdk/include/shared/SpecStrings.h")).expect("it"), b"s");
+        assert!(!root.join("sdk/include/um/Nowhere.h").exists());
+        assert_eq!(spellings(&root).expect("the links again"), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_names_a_header_includes_are_read_off_either_kind_of_include() {
+        let text = "#include <SpecStrings.h>\n# include \"sys/Stat.h\"\n#include <winver.h>\n\
+                    #include <GL/gl.h>\n#include MACRO\n#define X <Foo.h>\n";
+        assert_eq!(included(text), ["SpecStrings.h", "sys/Stat.h"]);
     }
 
     #[test]

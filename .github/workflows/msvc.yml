@@ -1,0 +1,91 @@
+# The x86_64-windows-msvc row on a Windows machine, which is the exit of W4 in the Windows plan.
+#
+# rucc fetches the MSVC C runtime and the Windows SDK from Microsoft on the runner, as a user's
+# machine would, compiles against them, links with lld-link, and runs what it built. Nothing of
+# Microsoft's is cached or uploaded here, since the licence lets a user download it and does not
+# let us pass it on. That download is several hundred megabytes and comes from somebody else's
+# servers, so this runs once a day and when asked rather than on every pull request.
+
+name: msvc
+
+on:
+  schedule:
+    # An hour after the nightly tier, so the two do not queue behind each other.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: msvc
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  programs:
+    name: msvc programs on windows
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: build rucc and the runtime
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target x86_64-windows-msvc
+      # The last thing --fetch says is the --sysroot to compile with. lld-link comes with the
+      # LLVM on the runner image, and rucc falls back to link.exe if it is not on PATH.
+      - name: fetch the CRT and the SDK from Microsoft
+        run: |
+          ./target/release/rucc.exe --fetch x86_64-windows-msvc --accept-licence 2>&1 | tee fetch.log
+          echo "SYSROOT=$(sed -n 's/.*with --sysroot=//p' fetch.log | tr -d '\r')" >> "$GITHUB_ENV"
+          command -v lld-link || echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+      - name: compile windows.h and stdio.h
+        run: |
+          cat > headers.c <<'EOF'
+          #include <windows.h>
+          #include <stdio.h>
+          int main(void) { printf("%d\n", GetCurrentProcessId() != 0); return 0; }
+          EOF
+          lld-link --version
+          ./target/release/rucc.exe --target=x86_64-windows-msvc "--sysroot=$SYSROOT" headers.c -o headers.exe
+          test "$(./headers.exe | tr -d '\r')" = 1
+      - name: run tests/exec/windows with rucc for msvc
+        run: tests/exec/windows/run.sh "$PWD/target/release/rucc.exe --target=x86_64-windows-msvc --sysroot=$SYSROOT"
+
+  # The signature corpus with cl.exe on one side of every call and rucc on the other. The
+  # x86-64 Linux row is held to gcc by the same corpus in ci.yml, and this is the msvc row held
+  # to the compiler whose convention it is.
+  abi:
+    name: the signature corpus against cl.exe
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: build rucc and the runtime
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target x86_64-windows-msvc
+      # The last thing --fetch says is the --sysroot to compile with. lld-link comes with the
+      # LLVM on the runner image, and rucc falls back to link.exe if it is not on PATH.
+      - name: fetch the CRT and the SDK from Microsoft
+        run: |
+          ./target/release/rucc.exe --fetch x86_64-windows-msvc --accept-licence 2>&1 | tee fetch.log
+          echo "SYSROOT=$(sed -n 's/.*with --sysroot=//p' fetch.log | tr -d '\r')" >> "$GITHUB_ENV"
+          command -v lld-link || echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: run the corpus
+        run: |
+          cl 2>&1 | head -1
+          RUCC_ABI_SYSROOT="$SYSROOT" cargo xtask abi-differential --target x86_64-windows-msvc

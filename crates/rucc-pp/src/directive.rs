@@ -22,7 +22,7 @@ use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
 use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
 use rucc_session::{Found, IncludeForm, PrefixMap, Preinclude};
-use rucc_target::TargetInfo;
+use rucc_target::{Env, Os, TargetInfo, Triple};
 
 use crate::cond;
 use crate::embed;
@@ -108,6 +108,11 @@ pub struct Preprocessor {
     /// on any other target gcc warns that they are ignored, so `__has_attribute` answers nought
     /// for them there. Set by [`Preprocessor::predefine`], which is where the target arrives.
     second_convention: bool,
+    /// Whether `__pragma(...)` is Microsoft's pragma operator here rather than an identifier,
+    /// which it is where clang has Microsoft extensions on: the `*-windows-msvc` rows unless
+    /// `-fno-ms-extensions` said otherwise, and any row under `-fms-extensions`. Set by
+    /// [`Preprocessor::predefine`].
+    ms_pragma: bool,
     macros: MacroTable,
     /// What a character constant in `#if` comes to, which the target decides and
     /// [`Preprocessor::predefine`] learns.
@@ -218,6 +223,9 @@ impl Preprocessor {
         cx: &mut Context<'_>,
     ) -> Result<(), SourceMapFull> {
         self.second_convention = target.tuple.arch().as_str() == "x86_64";
+        let msvc = Triple::from_tuple(target.tuple)
+            .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
+        self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
         let names = Names::new(cx.interner);
         self.chars = cond::Chars::of(target);
         let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
@@ -429,8 +437,8 @@ impl Preprocessor {
                     // mean. So a line that spells one is expanded on its own, or the line after a
                     // pop would go through the expander in the same batch as the line before it
                     // and would still see the definition the pop was there to undo.
-                    let operator = ident_of(&first) == Some(names.pragma_op)
-                        || body.iter().any(|t| ident_of(t) == Some(names.pragma_op));
+                    let operator = self.is_pragma_operator(ident_of(&first), names)
+                        || body.iter().any(|t| self.is_pragma_operator(ident_of(t), names));
                     if operator {
                         self.flush(&mut text, out, cx, names);
                     }
@@ -1533,11 +1541,24 @@ impl Preprocessor {
         found
     }
 
+    /// Whether `name` is `_Pragma`, or `__pragma` where that is an operator too.
+    fn is_pragma_operator(&self, name: Option<Symbol>, names: &Names) -> bool {
+        name.is_some_and(|name| {
+            name == names.pragma_op || (self.ms_pragma && name == names.ms_pragma_op)
+        })
+    }
+
     /// Applies the `_Pragma` operator to an expanded run and appends the result.
     ///
     /// `_Pragma("x")` is a pragma written as an expression, which is what makes a pragma
     /// usable from inside a macro. It is handled after expansion because the string it takes
     /// is very often produced by one.
+    ///
+    /// `__pragma(x)` is Microsoft's spelling of the same thing, with the pragma written as tokens
+    /// in parentheses rather than as a string, and the SDK's headers are full of it:
+    /// `vcruntime.h` opens every C header with `__pragma(pack(push, _CRT_PACKING))`. The tokens
+    /// have been expanded by the time they get here, as they are for clang, which is what turns
+    /// `_CRT_PACKING` into the 8 the pragma needs.
     fn pragma_operator(
         &mut self,
         expanded: Vec<Tok>,
@@ -1545,7 +1566,7 @@ impl Preprocessor {
         interner: &mut Interner,
         names: &Names,
     ) {
-        if !expanded.iter().any(|t| t.ident() == Some(names.pragma_op)) {
+        if !expanded.iter().any(|t| self.is_pragma_operator(t.ident(), names)) {
             out.extend(expanded);
             return;
         }
@@ -1557,6 +1578,25 @@ impl Preprocessor {
         let mut ends_a_line = false;
         while at < expanded.len() {
             let mut tok = expanded[at];
+            if self.ms_pragma && tok.ident() == Some(names.ms_pragma_op) {
+                let Some(len) = balanced(&expanded[at + 1..]) else {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            "`__pragma` takes the pragma in parentheses",
+                            tok.report_span(),
+                        )
+                        .with_code("E0340"),
+                    );
+                    out.push(tok);
+                    at += 1;
+                    continue;
+                };
+                let inside = expanded[at + 2..at + len].iter().map(|t| t.to_pp()).collect();
+                self.emit_pragma_tokens(inside, tok.report_span(), out, interner, names);
+                ends_a_line = true;
+                at += 1 + len;
+                continue;
+            }
             if tok.ident() != Some(names.pragma_op) {
                 if ends_a_line {
                     tok.flags = tok.flags.with(TokenFlags::START_OF_LINE);
@@ -1605,6 +1645,19 @@ impl Preprocessor {
                 .map(|d| Diagnostic::new(d.severity, d.message, span).with_code("E0340")),
         );
         let tokens: Vec<PpToken> = tokens.into_iter().filter(|t| !t.is_eof()).collect();
+        self.emit_pragma_tokens(tokens, span, out, interner, names);
+    }
+
+    /// Writes the `# pragma ...` tokens for a pragma whose words are `tokens`, reporting at
+    /// `span`, or carries it out here for the two that are the preprocessor's own business.
+    fn emit_pragma_tokens(
+        &mut self,
+        tokens: Vec<PpToken>,
+        span: Span,
+        out: &mut Vec<Tok>,
+        interner: &mut Interner,
+        names: &Names,
+    ) {
         // `_Pragma("push_macro(\"X\")")` is the same pragma written the other way, and the two
         // spellings have to mean the same thing because a macro that wants to save a name has no
         // other way to say it: a `#pragma` line cannot come out of a macro body.
@@ -1633,6 +1686,26 @@ impl Preprocessor {
             out.push(Tok::synthetic(t.kind, t.value, flags, span));
         }
     }
+}
+
+/// How many tokens a parenthesised group at the start of `toks` takes, both parentheses
+/// included, or [`None`] when it does not start with one or never closes.
+fn balanced(toks: &[Tok]) -> Option<usize> {
+    if !toks.first()?.is(Punct::LParen) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.is(Punct::LParen) {
+            depth += 1;
+        } else if tok.is(Punct::RParen) {
+            depth -= 1;
+            if depth == 0 {
+                return Some(at + 1);
+            }
+        }
+    }
+    None
 }
 
 /// The macro a file's opening line guards the whole file with, if the line has that shape.
@@ -1977,6 +2050,7 @@ struct Names {
     push_macro: Symbol,
     pop_macro: Symbol,
     pragma_op: Symbol,
+    ms_pragma_op: Symbol,
     has: HasOps,
 }
 
@@ -2005,6 +2079,7 @@ impl Names {
             push_macro: interner.intern("push_macro"),
             pop_macro: interner.intern("pop_macro"),
             pragma_op: interner.intern("_Pragma"),
+            ms_pragma_op: interner.intern("__pragma"),
             has: HasOps::new(interner),
         }
     }
@@ -2666,6 +2741,45 @@ mod tests {
         let starts: Vec<_> =
             out.iter().map(|tok| tok.flags.has(TokenFlags::START_OF_LINE)).collect();
         assert_eq!(starts, vec![true, false, false]);
+    }
+
+    /// `vcruntime.h` opens every C runtime header this way, so on an msvc row nothing that
+    /// includes `stdio.h` gets past its first declaration without it.
+    #[test]
+    fn microsofts_pragma_operator_takes_tokens_on_an_msvc_row() {
+        let src = "#define PACKING 8\n#define BEGIN __pragma(pack(push, PACKING))\nBEGIN int x;\n\
+                   __pragma(warning(disable: 4001)) int y;\n";
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &Predef::new());
+        assert_eq!(
+            run.go(src),
+            "#pragma pack(push, 8) int x; #pragma warning(disable: 4001) int y;"
+        );
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &Predef::new());
+        run.go("__pragma(pack(push) int x;\n");
+        assert_eq!(run.messages(), vec!["`__pragma` takes the pragma in parentheses".to_owned()]);
+    }
+
+    /// Elsewhere it is an identifier like any other, as it is to gcc, unless `-fms-extensions`
+    /// asks for Microsoft's dialect, and `-fno-ms-extensions` takes it away on an msvc row.
+    #[test]
+    fn microsofts_pragma_operator_is_an_identifier_without_microsofts_extensions() {
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-gnu", &Predef::new());
+        assert_eq!(run.go("__pragma(pack(1))\n"), "__pragma(pack(1))");
+
+        let off = Predef { ms_extensions: Some(false), ..Predef::new() };
+        let mut run = Run::new();
+        run.predefine("x86_64-pc-windows-msvc", &off);
+        assert_eq!(run.go("__pragma(pack(1))\n"), "__pragma(pack(1))");
+
+        let on = Predef { ms_extensions: Some(true), ..Predef::new() };
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &on);
+        assert_eq!(run.go("__pragma(pack(1))\n"), "#pragma pack(1)");
     }
 
     #[test]

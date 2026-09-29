@@ -36,6 +36,17 @@
 //! A caller that reports both hashes gives a person auditing the download the one thing that
 //! matters, which is exactly which bytes they got.
 //!
+//! # What can be pinned anyway
+//!
+//! The `aka.ms` address is a redirect, and where it ends is a storage URL with the build in it that
+//! is not written to again: the channel for 17.14.37710.0 and the installer manifest it names are
+//! served from two such URLs, and the 17.8, 17.10 and 17.12 channels of the long term servicing
+//! branches are still served from theirs a year or more on. So a build's two documents can be held
+//! to the hash of the bytes they are served as, measured here rather than taken from the channel,
+//! and [`PINNED_BUILD`] is that. The installer manifest at its URL hashed to `f0a50ea1...` in
+//! September 2026 on the day it was first measured and again weeks later, from two networks. What
+//! rotates is which build the redirect points at, and that is the part a pin leaves out.
+//!
 //! # What is chosen, and why it is so little
 //!
 //! A C compiler needs headers and import libraries and nothing else. No linker, no assembler, no
@@ -70,9 +81,10 @@
 //! carry them: [`Selection::cab`] takes the name an installer gives and hands back the file the
 //! manifest publishes under it.
 //!
-//! The newest version of each is taken rather than a pinned one. A pinned version would be a
-//! promise about a file on somebody else's server, which section 13.8 already declines to make for
-//! the sysroots we do publish, and Microsoft retires old versions from the manifest.
+//! The newest version of each in the manifest is taken, and the manifest is what decides it. The
+//! one the current channel names moves as Microsoft retires old versions, and the one
+//! [`PINNED_BUILD`] names does not, so the same `rucc --fetch` gets the same files on every machine
+//! for as long as Microsoft serves that build.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -232,6 +244,46 @@ impl Channel {
         Ok(Channel { release, build, manifest, licence })
     }
 }
+
+/// A Visual Studio build whose channel and installer manifest are held to hashes.
+///
+/// What `rucc --fetch` of an MSVC target starts from, where `rucc --fetch-msvc-sdk` starts from
+/// whatever the `aka.ms` channel names today. The hashes are of the bytes as served, measured
+/// rather than copied out of the channel, since the channel's hash for its own manifest is the
+/// wrong one. Every file after these two is held to the hash the pinned manifest gives for it, so
+/// the whole download is fixed by these two lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedBuild {
+    /// The build, which the channel has to say it is.
+    pub build: &'static str,
+    /// Where the channel manifest for this build is served.
+    pub channel: &'static str,
+    /// What the channel manifest hashes to.
+    pub channel_sha256: &'static str,
+    /// Where the installer manifest for this build is served, which is the URL its channel names.
+    pub manifest: &'static str,
+    /// What the installer manifest hashes to.
+    pub manifest_sha256: &'static str,
+}
+
+/// The build this release fetches, which is Visual Studio 2022 17.14.41 of September 2026.
+///
+/// Its installer manifest picks MSVC CRT 14.44 and Windows SDK 10.0.26100. Moving it is a matter of
+/// following `aka.ms/vs/17/release/channel` to where it ends, hashing that file and the manifest it
+/// names, and writing the four values here.
+pub const PINNED_BUILD: PinnedBuild = PinnedBuild {
+    build: "17.14.37710.0",
+    channel: "https://download.visualstudio.microsoft.com/download/pr/\
+              bc92e2cb-33de-4a0c-995d-efa817f16b16/\
+              0dbdfd40c17757e64fc9f72cd9954ec8471c04fd8461a77806e5291e23239ac0/\
+              VisualStudio.17.Release.chman",
+    channel_sha256: "fca418ba94ffbcfb7a2b25f10f16f39dd09660568d21eef4bd3f274cb0b27b8c",
+    manifest: "https://download.visualstudio.microsoft.com/download/pr/\
+               bc92e2cb-33de-4a0c-995d-efa817f16b16/\
+               6e470016e4324c84c255ffd0beb3767d17ec89cc8561e9409ee3e1f6d29400f5/\
+               VisualStudio.vsman",
+    manifest_sha256: "f0a50ea157222c29abd5ea6ff01bfc3c33b04e011c5e45ee2ca38ef0778e5643",
+};
 
 /// The product the licence is taken from, which is the one a person who wants a compiler and no
 /// IDE would install.
@@ -439,13 +491,15 @@ impl Selection {
 /// headers that are not per architecture live and it is four times the size of the other two for
 /// that reason. The universal CRT is one installer for every architecture. The store app headers
 /// and libraries are here because a desktop program still includes `windows.h`, and the desktop
-/// installers do not carry all of what that reaches.
+/// installers do not carry all of what that reaches. The OnecoreUap one of the store headers is
+/// where `winapifamily.h`, `sdkddkver.h` and `specstrings.h` are, which `windows.h` includes first.
 fn installers(chips: &[Chip]) -> Vec<String> {
     let mut all = vec![
         "Universal CRT Headers Libraries and Sources-x86_en-us.msi".to_owned(),
         "Windows SDK Desktop Headers x86-x86_en-us.msi".to_owned(),
         "Windows SDK OnecoreUap Headers x86-x86_en-us.msi".to_owned(),
         "Windows SDK for Windows Store Apps Headers-x86_en-us.msi".to_owned(),
+        "Windows SDK for Windows Store Apps Headers OnecoreUap-x86_en-us.msi".to_owned(),
         "Windows SDK for Windows Store Apps Libs-x86_en-us.msi".to_owned(),
     ];
     for chip in sorted(chips) {
@@ -674,6 +728,28 @@ impl std::error::Error for MsvcError {}
 mod tests {
     use super::*;
 
+    /// The pin is two storage URLs and two hashes, and the one thing that can be checked about it
+    /// without the network is that it is written the way the code that reads it expects.
+    #[test]
+    fn the_pinned_build_names_two_storage_urls_and_holds_each_to_a_hash() {
+        let pin = PINNED_BUILD;
+        for (url, sha256, file) in [
+            (pin.channel, pin.channel_sha256, "VisualStudio.17.Release.chman"),
+            (pin.manifest, pin.manifest_sha256, "VisualStudio.vsman"),
+        ] {
+            // The line continuations have to have taken the indentation with them.
+            assert!(!url.contains(' '), "{url}");
+            assert!(url.starts_with("https://download.visualstudio.microsoft.com/"), "{url}");
+            assert!(url.ends_with(&format!("/{file}")), "{url}");
+            assert_eq!(sha256.len(), 64, "{sha256}");
+            assert!(sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        }
+        // The manifest's URL has the channel's wrong hash in it and not the right one, which is
+        // why the right one is written here and not read out of the channel.
+        assert!(!pin.manifest.contains(pin.manifest_sha256));
+        assert!(pin.build.starts_with("17."));
+    }
+
     /// A channel manifest cut down to the two entries that are read, with the real shape and the
     /// real addresses of the September 2026 release.
     const CHANNEL: &str = r#"{
@@ -740,6 +816,7 @@ mod tests {
             { "fileName": "Installers\\Windows SDK Desktop Libs arm64-x86_en-us.msi", "sha256": "c7", "size": 528384, "url": "https://example.invalid/larm64" },
             { "fileName": "Installers\\Windows SDK OnecoreUap Headers x86-x86_en-us.msi", "sha256": "c8", "size": 495616, "url": "https://example.invalid/onecore" },
             { "fileName": "Installers\\Windows SDK for Windows Store Apps Headers-x86_en-us.msi", "sha256": "c9", "size": 1060864, "url": "https://example.invalid/store-h" },
+            { "fileName": "Installers\\Windows SDK for Windows Store Apps Headers OnecoreUap-x86_en-us.msi", "sha256": "ce", "size": 471040, "url": "https://example.invalid/store-onecore" },
             { "fileName": "Installers\\Windows SDK for Windows Store Apps Libs-x86_en-us.msi", "sha256": "ca", "size": 528384, "url": "https://example.invalid/store-l" },
             { "fileName": "Installers\\Windows SDK Desktop Tools x64-x86_en-us.msi", "sha256": "cb", "size": 475136, "url": "https://example.invalid/tools" },
             { "fileName": "Installers\\0f1a2b3c.cab", "sha256": "cc", "size": 9999, "url": "https://example.invalid/cab" },
@@ -786,7 +863,7 @@ mod tests {
     #[test]
     fn a_selection_is_the_headers_two_library_packages_per_chip_and_the_installers() {
         let one = Selection::parse(MANIFEST, &[Chip::X64]).expect("a selection");
-        assert_eq!(one.files.len(), 1 + 2 + 7);
+        assert_eq!(one.files.len(), 1 + 2 + 8);
 
         let two = Selection::parse(MANIFEST, &[Chip::X64, Chip::Arm64]).expect("a selection");
         // Two more library packages and two more installers, and the headers are still one copy.

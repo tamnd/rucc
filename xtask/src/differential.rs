@@ -49,14 +49,15 @@
 //!
 //! # Other targets
 //!
-//! `--target` names a row other than the machine's own, and today the one it accepts is
-//! `x86_64-windows-gnu`, held against MinGW GCC. That path does not use the script below, because
+//! `--target` names a row other than the machine's own, and today it accepts
+//! `x86_64-windows-gnu`, held against MinGW GCC, and `x86_64-windows-msvc`, held against `cl.exe`
+//! on a Windows machine. That path does not use the script below, because
 //! it has to work on a Windows machine with no `sh` on it as well as on Linux, so the same builds
 //! are compiled, linked and run from here one command at a time. [`Reference`] is what differs
 //! between the rows: which compiler is the reference, how it is spelled, and what starts one of
 //! the programs it links. On Linux that is Wine and on Windows it is nothing, since the program
-//! is native there. A row whose reference is not spelled like gcc, `cl.exe` on the MSVC rows,
-//! is one more way of writing [`Reference::compile`] and [`Reference::link`] and nothing else.
+//! is native there. `cl.exe` is not spelled like gcc, and that is one more way of writing
+//! [`Reference::compile`] and [`Reference::link`] and nothing else.
 //!
 //! rucc is on both sides at `-O0` and at `-O2` on that path, so it is nine builds rather than
 //! four: the reference against itself first, as the control, and then every pairing with rucc on
@@ -116,7 +117,7 @@ pub(crate) fn differential(args: &[String]) -> Result<()> {
             Some(reference) => foreign(&reference),
             None => Err(Error::Io(format!(
                 "abi-differential: there is no reference compiler for {triple} yet, only for \
-                 x86_64-linux-gnu and x86_64-windows-gnu"
+                 x86_64-linux-gnu, x86_64-windows-gnu and x86_64-windows-msvc"
             ))),
         },
     }
@@ -325,6 +326,10 @@ struct Reference {
     cc: String,
     /// What starts a program built for the row, empty when this machine runs it directly.
     runner: Vec<String>,
+    /// Whether `cc` reads its options the way `cl.exe` does rather than the way gcc does.
+    msvc: bool,
+    /// What rucc is told on top of `--target`, on both sides and for the link on the MSVC rows.
+    rucc: Vec<String>,
 }
 
 impl Reference {
@@ -334,35 +339,74 @@ impl Reference {
     /// the programs, split at spaces, for a machine where the defaults are somewhere else. The
     /// defaults are MinGW GCC by its cross name and Wine on Linux, and plain `gcc` and nothing on
     /// Windows, which is what MSYS2's MinGW environment puts on `PATH`.
+    ///
+    /// On `x86_64-windows-msvc` the reference is `cl.exe`, which a Developer Command Prompt or
+    /// `ilammy/msvc-dev-cmd` puts on `PATH`. rucc links every build there, against the CRT and
+    /// SDK that `RUCC_ABI_SYSROOT` names, which is the directory `rucc --fetch` said to use. So
+    /// the link is the same for all nine builds and only the compilers differ. cl.exe has no
+    /// `__int128` and no `_Float128`, and the corpus leaves both out when their `__SIZEOF_`
+    /// macros are not defined, so rucc is told to forget both or its side would call functions
+    /// the cl.exe side never wrote.
     fn for_target(triple: &str) -> Option<Self> {
-        let triple = match triple {
+        let (triple, msvc) = match triple {
             "x86_64-windows-gnu" | "x86_64-w64-mingw32" | "x86_64-pc-windows-gnu" => {
-                "x86_64-windows-gnu"
+                ("x86_64-windows-gnu", false)
             }
+            "x86_64-windows-msvc" | "x86_64-pc-windows-msvc" => ("x86_64-windows-msvc", true),
             _ => return None,
         };
         let windows = cfg!(windows);
         let cc = std::env::var("RUCC_ABI_CC").unwrap_or_else(|_| {
-            if windows { "gcc".to_owned() } else { "x86_64-w64-mingw32-gcc".to_owned() }
+            match (msvc, windows) {
+                (true, _) => "cl",
+                (false, true) => "gcc",
+                (false, false) => "x86_64-w64-mingw32-gcc",
+            }
+            .to_owned()
         });
         let runner = match std::env::var("RUCC_ABI_RUNNER") {
             Ok(said) => said.split_whitespace().map(str::to_owned).collect(),
             Err(_) if windows => Vec::new(),
             Err(_) => vec![wine()],
         };
-        Some(Self { triple, cc, runner })
+        let mut rucc = Vec::new();
+        if msvc {
+            rucc.extend(["-U__SIZEOF_INT128__", "-U__SIZEOF_FLOAT128__"].map(str::to_owned));
+        }
+        if let Ok(sysroot) = std::env::var("RUCC_ABI_SYSROOT") {
+            rucc.push(format!("--sysroot={sysroot}"));
+        }
+        Some(Self { triple, cc, runner, msvc, rucc })
+    }
+
+    /// The name the reference's side goes by in what this prints.
+    fn side(&self) -> &'static str {
+        if self.msvc { "cl" } else { "gcc" }
     }
 
     /// Compiles one file of the corpus to an object.
     fn compile(&self, source: &Path, object: &Path) -> Command {
         let mut command = Command::new(&self.cc);
-        command.args(["-std=c17", LEVEL, "-c"]).arg(source).arg("-o").arg(object);
+        if self.msvc {
+            // cl.exe wants the object glued to its option, and `-Od` is its `-O0`.
+            let mut fo = std::ffi::OsString::from("-Fo");
+            fo.push(object);
+            command.args(["-nologo", "-c", "-std:c11", "-Od"]).arg(source).arg(fo);
+        } else {
+            command.args(["-std=c17", LEVEL, "-c"]).arg(source).arg("-o").arg(object);
+        }
         command
     }
 
-    /// Links a caller, a callee and the report into a program.
-    fn link(&self, objects: &[PathBuf], program: &Path) -> Command {
-        let mut command = Command::new(&self.cc);
+    /// Links a caller, a callee and the report into a program, with `rucc` on the MSVC rows.
+    fn link(&self, rucc: &Path, objects: &[PathBuf], program: &Path) -> Command {
+        let mut command;
+        if self.msvc {
+            command = Command::new(rucc);
+            command.arg(format!("--target={}", self.triple)).args(&self.rucc);
+        } else {
+            command = Command::new(&self.cc);
+        }
         command.args(objects).arg("-o").arg(program);
         command
     }
@@ -416,9 +460,9 @@ fn foreign(reference: &Reference) -> Result<()> {
 
     // The reference's objects. A corpus the reference will not compile is not a finding about
     // rucc, so it stops the run rather than turning into nine failures.
-    let mut sides = vec!["gcc".to_owned()];
+    let mut sides = vec![reference.side().to_owned()];
     for name in ["report", "caller", "callee"] {
-        let object = work.join(format!("gcc-{name}.o"));
+        let object = work.join(format!("{}-{name}.o", reference.side()));
         let out = reference
             .compile(&work.join(format!("{name}.c")), &object)
             .current_dir(&work)
@@ -441,6 +485,7 @@ fn foreign(reference: &Reference) -> Result<()> {
         for name in ["caller", "callee"] {
             let out = Command::new(&rucc)
                 .args(["-c", &format!("--target={triple}"), level])
+                .args(&reference.rucc)
                 .arg(work.join(format!("{name}.c")))
                 .arg("-o")
                 .arg(work.join(format!("{side}-{name}.o")))
@@ -466,7 +511,7 @@ fn foreign(reference: &Reference) -> Result<()> {
             builds += 1;
             let run = match refused.get(caller).or_else(|| refused.get(callee)) {
                 Some(why) => Ran { output: why.clone(), status: None },
-                None => pairing(reference, &work, caller, callee)?,
+                None => pairing(reference, &rucc, &work, caller, callee)?,
             };
             judge(caller, callee, &run, &mut problems);
         }
@@ -485,15 +530,21 @@ fn foreign(reference: &Reference) -> Result<()> {
 
 /// Links one caller to one callee and runs it, by the rule [`SCRIPT`] follows: a status of 0 or
 /// 1 is believed the first time, and anything else is tried again up to three times.
-fn pairing(reference: &Reference, work: &Path, caller: &str, callee: &str) -> Result<Ran> {
+fn pairing(
+    reference: &Reference,
+    rucc: &Path,
+    work: &Path,
+    caller: &str,
+    callee: &str,
+) -> Result<Ran> {
     let program = work.join(format!("{caller}-{callee}.exe"));
     let objects = [
         work.join(format!("{caller}-caller.o")),
         work.join(format!("{callee}-callee.o")),
-        work.join("gcc-report.o"),
+        work.join(format!("{}-report.o", reference.side())),
     ];
     let out = reference
-        .link(&objects, &program)
+        .link(rucc, &objects, &program)
         .current_dir(work)
         .output()
         .map_err(|e| Error::Io(format!("could not run {}: {e}", reference.cc)))?;

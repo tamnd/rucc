@@ -327,9 +327,10 @@ impl std::error::Error for RecordError {}
 ///
 /// A flexible array member, meaning an array with no size as the last member of a `struct`, is
 /// laid out at the offset it would have had and contributes nothing to the size, which is what
-/// makes `malloc(sizeof(struct S) + n)` the idiom it is. An array with no size anywhere else is
-/// an incomplete member and reported as one; whether it was allowed to be there at all is a
-/// question for whoever holds the span.
+/// makes `malloc(sizeof(struct S) + n)` the idiom it is. So is one anywhere in a `union`, which
+/// Microsoft's dialect allows. An array with no size anywhere else is an incomplete member and
+/// reported as one; whether it was allowed to be there at all is a question for whoever holds the
+/// span.
 ///
 /// A member whose length is a variable is not an error either. It is placed by the same rules as
 /// any other member, over a position that is a recipe rather than a number once the first of them
@@ -470,7 +471,9 @@ impl Builder {
         decl: &FieldDecl,
         last: bool,
     ) -> Result<(), RecordError> {
-        let flexible = last && self.kind == RecordKind::Struct && flexible_array(types, decl.ty);
+        // Any member of a union may have no size, which only Microsoft's dialect lets through,
+        // and it costs the union nothing but its alignment for the same reason as in a struct.
+        let flexible = (last || self.kind == RecordKind::Union) && flexible_array(types, decl.ty);
         let member = match member_layout(types, decl.ty, flexible, target) {
             Ok(member) => member,
             // A member whose length nobody knows yet, which is laid out by a path of its own

@@ -35,7 +35,7 @@
 //!
 //! PE in Microsoft's environment has a line of its own, `msvc`, because `lld-link` and
 //! `link.exe` take a different command line rather than a different set of flags. Its libraries
-//! come out of a tree `--fetch-msvc-sdk` lays out once the person asking has accepted Microsoft's
+//! come out of a tree `--fetch` lays out once the person asking has accepted Microsoft's
 //! licence, which is the one sysroot here that is not ours to produce, so the line names the tree's
 //! directories and the libraries by name and leaves the finding to the linker.
 //!

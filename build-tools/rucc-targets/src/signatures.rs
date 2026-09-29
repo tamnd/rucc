@@ -1263,12 +1263,21 @@ fn header(signatures: &[Signature]) -> String {
          \x20* report.c exists, and stdarg.h is the one header a freestanding program is still\n\
          \x20* allowed to want. Every compiler this corpus is compiled by implements va_start,\n\
          \x20* va_arg and va_end as exactly these builtins, so this is the same header with one\n\
-         \x20* fewer thing that has to be found on disk. */\n",
+         \x20* fewer thing that has to be found on disk. cl.exe is the exception: it has none of\n\
+         \x20* them, and its <stdarg.h> is a few lines of vcruntime.h with no libc behind it. */\n",
     );
+    out.push_str("#if defined(_MSC_VER) && !defined(__rucc__) && !defined(__clang__)\n");
+    out.push_str("#include <stdarg.h>\n");
+    out.push_str("#define ABI_VA_LIST va_list\n");
+    out.push_str("#define ABI_VA_START(ap, last) va_start(ap, last)\n");
+    out.push_str("#define ABI_VA_ARG(ap, ty) va_arg(ap, ty)\n");
+    out.push_str("#define ABI_VA_END(ap) va_end(ap)\n");
+    out.push_str("#else\n");
     out.push_str("#define ABI_VA_LIST __builtin_va_list\n");
     out.push_str("#define ABI_VA_START(ap, last) __builtin_va_start(ap, last)\n");
     out.push_str("#define ABI_VA_ARG(ap, ty) __builtin_va_arg(ap, ty)\n");
-    out.push_str("#define ABI_VA_END(ap) __builtin_va_end(ap)\n\n");
+    out.push_str("#define ABI_VA_END(ap) __builtin_va_end(ap)\n");
+    out.push_str("#endif\n\n");
 
     for signature in signatures {
         reason(&mut out, signature.why);

@@ -1,9 +1,13 @@
+/* msvc flags: -Wl,/stack:4194304 */
 /* A frame of one megabyte, touched at its far end first.
  *
  * Windows commits a thread's stack one page at a time behind a guard page, so a function whose frame
  * is bigger than a page has to touch each page in order on the way down, which is what __chkstk is
  * for. Without it the first write below lands past the guard page and the program dies with an
- * access violation instead of printing. Document 09.2. */
+ * access violation instead of printing. Document 09.2.
+ *
+ * A megabyte is the whole stack lld-link reserves by default, where GNU ld reserves two, so on the
+ * msvc row the link asks for four. */
 #include <stdio.h>
 
 __attribute__((noinline)) static unsigned big(unsigned seed) {
