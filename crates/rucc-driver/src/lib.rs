@@ -32,6 +32,7 @@ pub mod assemble;
 pub mod cache;
 pub mod compile;
 pub mod deps;
+pub mod dlltool;
 pub mod fetch;
 mod glibc;
 pub mod install;
@@ -286,6 +287,7 @@ options:
   --fetch <tuple>        get the sysroot this release pins for <tuple> and install it in the cache
   --fetch-msvc-sdk <tuple>   Microsoft's licence, then the SDK behind it with --accept-licence
   --offline              never download anything, which a compilation never does anyway
+  --dlltool <args>       write an import library from a .def, as dlltool; --dlltool --help says how
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -fstack-usage, -time   keep the .i and .s, write a .su, time each step
@@ -729,6 +731,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // passes it is saying what it expects of this compiler, and what it expects is already
             // true.
             "--offline" => offline = true,
+            // Anywhere but first it would be a compiler command line with a dlltool one inside it,
+            // and there is no reading of that which is not a guess.
+            "--dlltool" => {
+                return Err(err(
+                    "--dlltool has to be the first argument, since everything after it is a \
+                     dlltool command line rather than a compiler one",
+                ));
+            }
             "--print-config" => print_config = true,
             "--print-pipeline" => print_pipeline = true,
             "-###" => print_plan = true,
@@ -3701,7 +3711,16 @@ pub fn target_from_program(program: &str) -> Option<String> {
 ///
 /// A target taken from the name goes in front of `args`, so a `--target=` written on the command
 /// line comes later and wins, which is what gcc and clang do with a prefixed name.
+///
+/// A name ending in `dlltool`, or `--dlltool` as the first argument, is [`dlltool::run`] instead,
+/// which writes an import library and compiles nothing.
 pub fn run_as(program: &str, args: &[String]) -> i32 {
+    if dlltool::is_dlltool(program) {
+        return dlltool::run(program, args);
+    }
+    if args.first().is_some_and(|first| first == "--dlltool") {
+        return dlltool::run(program, &args[1..]);
+    }
     match target_from_program(program) {
         Some(triple) => {
             let mut all = Vec::with_capacity(args.len() + 1);
@@ -3891,6 +3910,27 @@ mod tests {
         let looped = response_files(&args(&[&format!("@{}", itself.display())]));
         assert!(looped.is_err(), "a file that names itself should be refused");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dlltool_mode_is_asked_for_first_or_by_the_program_name() {
+        let dir = std::env::temp_dir().join(format!("rucc-dlltool-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let def = dir.join("w.def");
+        std::fs::write(&def, "LIBRARY w.dll\nEXPORTS\nw\n").unwrap();
+        let def = def.display().to_string();
+        let first = dir.join("first.a").display().to_string();
+        let named = dir.join("named.a").display().to_string();
+        let line = args(&["--dlltool", "-m", "i386:x86-64", "-d", &def, "-l", &first]);
+        assert_eq!(run_as("rucc", &line), 0);
+        // The prefix says the machine, as it does for a prefixed GNU dlltool.
+        let line = args(&["-d", &def, "-l", &named]);
+        assert_eq!(run_as("/opt/bin/x86_64-w64-mingw32-dlltool", &line), 0);
+        assert_eq!(std::fs::read(&first).unwrap(), std::fs::read(&named).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let later = parse_args(&args(&["x.c", "--dlltool", "-d", "x.def"])).unwrap_err();
+        assert!(later.to_string().contains("first argument"), "{later}");
     }
 
     #[test]
@@ -7222,7 +7262,10 @@ mod tests {
         // compile downloads nothing either way. The one it went up by last is the other fetch, the
         // one behind Microsoft's licence wall, which is a line rather than a paragraph because what
         // a person needs from here is that the command exists and that it will not do anything
-        // until they have read a licence it prints for them.
-        assert!(USAGE.lines().count() < 73, "usage text has grown past one screen");
+        // until they have read a licence it prints for them. The one it went up by last is dlltool
+        // mode, which is not a compiler flag at all but a second program behind the same binary,
+        // and which a person building mingw-w64 with this compiler has to be able to find without
+        // knowing it is there.
+        assert!(USAGE.lines().count() < 74, "usage text has grown past one screen");
     }
 }

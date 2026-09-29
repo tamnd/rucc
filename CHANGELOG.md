@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `rucc --dlltool` writes an import library from a module definition file, with GNU dlltool's options for it: `-m`, `-d`, `-l`, `-D` and `-k`, with `--as` and `--as-flags` taken and ignored. A program named `<host>-dlltool`, such as a link called `x86_64-w64-mingw32-dlltool`, is the same thing with the target taken from the name when there is no `-m`. The library is the one `rucc-stub` writes, which is byte for byte what `llvm-dlltool` writes, so mingw-w64's crt can be built with no dlltool but this one. Other options are refused by name, and so are `-m i386` without `-k` and a `-D` with no dot, since both would write a library other than the one asked for (#2069).
 - The windows-gnu sysroots carry winpthreads, built static from the same mingw-w64 14.0.0, so `-pthread` and `-lpthread` link and the program needs no `libwinpthread-1.dll`. `tests/exec/windows/pthread.c` checks threads, a mutex, a condition variable, `pthread_once` and thread-specific keys, and that the program does not import winpthreads (#2069).
 
 ### Changed
