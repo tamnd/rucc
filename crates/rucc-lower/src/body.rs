@@ -1546,10 +1546,10 @@ impl<'u> Body<'_, 'u> {
     /// else goes through memory the way an aggregate would, written as the registers and read back
     /// as the value.
     fn joined(&mut self, values: &[Value], travel: &Travel, ir: Type, span: Span) -> Value {
-        if let ([value], [ty]) = (values, &travel.types[..])
-            && ty.bits() == ir.bits()
-        {
-            return self.build(span).unary(Opcode::Bitcast, *value, ir);
+        if let ([value], [ty]) = (values, &travel.types[..]) {
+            if ty.bits() == ir.bits() {
+                return self.build(span).unary(Opcode::Bitcast, *value, ir);
+            }
         }
         let at = self.scratch(travel.size, travel.align, span);
         self.store_slots(at, travel, values, span);
@@ -1560,10 +1560,10 @@ impl<'u> Body<'_, 'u> {
     /// A scalar taken apart into the registers it travels in, which is [`Self::joined`] the other
     /// way round.
     fn split(&mut self, value: Value, travel: &Travel, span: Span) -> Vec<Value> {
-        if let [ty] = travel.types[..]
-            && ty.bits() == self.func[value].ty.bits()
-        {
-            return vec![self.build(span).unary(Opcode::Bitcast, value, ty)];
+        if let [ty] = travel.types[..] {
+            if ty.bits() == self.func[value].ty.bits() {
+                return vec![self.build(span).unary(Opcode::Bitcast, value, ty)];
+            }
         }
         let at = self.scratch(travel.size, travel.align, span);
         let info = self.access(travel.ty);
