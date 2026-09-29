@@ -110,9 +110,9 @@ impl Wall {
             }
             Wall::Microsoft => {
                 "Build for the mingw-w64 environment instead, which is fully redistributable and \
-                 needs nothing installed, or run rucc --fetch-msvc-sdk <tuple>, which prints that \
-                 licence and downloads what is behind it once you have accepted it, or install \
-                 Visual Studio and the Windows SDK, which are found without being named on a \
+                 needs nothing installed, or run rucc --fetch <tuple>, which prints that licence \
+                 and downloads what is behind it from Microsoft once you have accepted it, or \
+                 install Visual Studio and the Windows SDK, which are found without being named on a \
                  Windows machine and are what INCLUDE names anywhere else, or point \
                  --sysroot=<dir> at a tree laid out with crt/include and sdk/include"
             }
@@ -136,6 +136,9 @@ impl Wall {
     }
 
     /// Why a fetch cannot get the sysroot for `target`, which no release of this compiler will pin.
+    ///
+    /// Only asked of Apple's wall. `rucc --fetch` of a target behind Microsoft's gets Microsoft's
+    /// own files from Microsoft instead, which is the one lawful download behind either wall.
     #[must_use]
     pub fn no_fetch(self, target: &str) -> String {
         format!(
@@ -205,9 +208,9 @@ mod tests {
         // section 8.6 means by being able to target the platform without the SDK.
         assert!(said.contains("-nostdinc"), "{said}");
 
-        let said = Wall::Microsoft.no_fetch("x86_64-windows-msvc");
-        assert!(said.contains("x86_64-windows-msvc"), "{said}");
-        assert!(said.contains("mingw-w64"), "{said}");
+        let said = Wall::Apple.no_fetch("x86_64-macos");
+        assert!(said.contains("x86_64-macos"), "{said}");
+        assert!(said.contains("xcrun"), "{said}");
         // The part that tells this apart from a target whose artifact has not been published yet.
         assert!(said.contains("there never will be"), "{said}");
     }

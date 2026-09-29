@@ -467,6 +467,11 @@ impl Checker<'_> {
     /// A flexible array member is the last member of a `struct` that has other named members. A
     /// member with no size anywhere else is refused, and dropped, since the layout has no offset
     /// to give it and every member after it would be at the wrong one.
+    ///
+    /// Microsoft's rule is wider, and clang follows it under `-fms-extensions`: every member of a
+    /// `union` may be one, since they all start at nought anyway, and so may the only member of a
+    /// `struct`. `winioctl.h` has a union of two of them inside
+    /// `STORAGE_QUERY_DEPENDENT_VOLUME_RESPONSE`, so `windows.h` does not compile without it.
     fn check_flexible(&mut self, kind: RecordKind, fields: &mut Vec<(FieldDecl, Span)>) {
         let last = fields.len().wrapping_sub(1);
         let mut refused = Vec::new();
@@ -478,11 +483,12 @@ impl Checker<'_> {
                 .iter()
                 .enumerate()
                 .any(|(other, (decl, _))| other != index && decl.name.is_some());
+            let microsoft = self.cx.ms_extensions;
             let wrong = if kind == RecordKind::Union {
-                Some(("flexible array member in union", "E0552"))
+                (!microsoft).then_some(("flexible array member in union", "E0552"))
             } else if index != last {
                 Some(("flexible array member not at end of struct", "E0553"))
-            } else if !named {
+            } else if !named && !microsoft {
                 Some(("flexible array member in a struct with no named members", "E0554"))
             } else {
                 None
@@ -1265,6 +1271,39 @@ mod tests {
         let ty = checker.declared_type(specs, hole);
         assert_eq!(placed(&checker, ty), (5, 1, vec![0, 32, 32]));
         assert!(messages(&checker).is_empty());
+    }
+
+    /// `winioctl.h` has a union of two arrays with no size, so `windows.h` needs this on an msvc
+    /// row. The union is as big as its other members and as aligned as any of them.
+    #[test]
+    fn microsofts_rule_takes_a_flexible_array_member_in_a_union_or_alone_in_a_struct() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let ch = fixture.keywords(&[BuiltinSet::CHAR]);
+        let unsized_array = Derived::Array {
+            size: ast::ArraySize::Unspecified,
+            quals: Quals::NONE,
+            has_static: false,
+        };
+        let a = fixture.declarator(Some("a"), &[unsized_array]);
+        let b = fixture.declarator(Some("b"), &[unsized_array]);
+        let c = fixture.declarator(Some("c"), &[]);
+        let inside = record(
+            &mut fixture,
+            ast::RecordKind::Union,
+            Some("U"),
+            &[member(int, a), member(ch, b), member(ch, c)],
+        );
+        let alone = structure(&mut fixture, Some("T"), &[member(int, a)]);
+        let hole = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker_with_ms_extensions();
+        let ty = checker.declared_type(inside, hole);
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0, 0, 0]));
+        let ty = checker.declared_type(alone, hole);
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
+        assert_eq!(placed(&checker, ty), (0, 4, vec![0]));
     }
 
     #[test]

@@ -142,7 +142,7 @@ pub use link::{Crt, Libc, LinkLine, LinkMode, libc};
 pub use manifest::{
     Input, KernelFile, KernelManifest, Licence, Manifest, ManifestError, Provenance,
 };
-pub use msvc::{Channel, Chip, MsvcError, Payload, Selection, Wanted};
+pub use msvc::{Channel, Chip, MsvcError, PINNED_BUILD, Payload, PinnedBuild, Selection, Wanted};
 pub use search::{Entry, Options, Origin, include_paths};
 pub use wall::Wall;
 

@@ -119,9 +119,10 @@ pub enum Action {
     ///
     /// The other action that may run another program to move bytes onto the machine, and the only
     /// one that asks a person to accept somebody else's licence first.
-    /// `spec/cross-compile/13-distribution.md` section 13.4 is why it is a command of its own
-    /// rather than something `--fetch` does when it recognises the target: no release pins an
-    /// artifact for these, and nothing about this may ever happen because a compile wanted it to.
+    /// `spec/cross-compile/13-distribution.md` section 13.4 is why no release pins an artifact
+    /// for these, and nothing about this may ever happen because a compile wanted it to. `--fetch`
+    /// of an MSVC target is this action too, starting from the build this release pins rather than
+    /// from the one Microsoft's channel names today.
     FetchMsvcSdk {
         /// The target, which says which architecture's CRT library package is wanted.
         target: TargetTuple,
@@ -130,6 +131,9 @@ pub enum Action {
         accepted: bool,
         /// Where the cache is, read where everything else that needs it reads it.
         cache: PathBuf,
+        /// Whether the documents at the top of the chain are [`rucc_sysroot::PINNED_BUILD`]'s,
+        /// which is `--fetch`, rather than the current channel's, which is `--fetch-msvc-sdk`.
+        pinned: bool,
     },
     /// Compile the given inputs.
     Compile {
@@ -284,7 +288,7 @@ options:
   -print-sysroot-provenance   every input under it, where it came from and its licence
   -print-sysroot-digest   the sha256 of that record, which names the whole sysroot in one line
   --fetch <tuple>        get the sysroot this release pins for <tuple> and install it in the cache
-  --fetch-msvc-sdk <tuple>   Microsoft's licence, then the SDK behind it with --accept-licence
+  --fetch-msvc-sdk <tuple>   the same for *-windows-msvc, from Microsoft's current build
   --offline              never download anything, which a compilation never does anyway
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
@@ -2270,12 +2274,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         if fetch_msvc.is_some() {
             return Err(err(
                 "--fetch and --fetch-msvc-sdk are two different commands and this command line \
-                 asked for both. --fetch gets a sysroot this release pins by URL and by hash, and \
-                 --fetch-msvc-sdk gets what is behind Microsoft's licence wall, which no release \
-                 pins and which nobody may republish. Run whichever one you meant",
+                 asked for both. --fetch gets what this release pins by URL and by hash, which for \
+                 a *-windows-msvc target is one Visual Studio build, and --fetch-msvc-sdk gets the \
+                 build Microsoft's channel names today. Run whichever one you meant",
             ));
         }
-        return fetch_action(&named, offline, &inputs);
+        return fetch_action(&named, offline, accepted, &inputs);
     }
     if let Some(named) = fetch_msvc {
         return fetch_msvc_action(&named, offline, accepted, &inputs);
@@ -2284,8 +2288,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         return Err(err(
             "--accept-licence says that Microsoft's Visual Studio Build Tools licence is accepted, \
              and nothing on this command line asked for anything that licence covers. \
-             --fetch-msvc-sdk <tuple> is the command it belongs to, and an ordinary compile \
-             downloads nothing with it or without it",
+             --fetch <tuple> or --fetch-msvc-sdk <tuple> for a *-windows-msvc target is the \
+             command it belongs to, and an ordinary compile downloads nothing with it or \
+             without it",
         ));
     }
 
@@ -2515,9 +2520,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
 /// # Errors
 ///
 /// [`CliError`] when `--offline` forbade it, when there are input files as well, when the tuple is
-/// not a target this compiler knows, when its sysroot is behind one of section 13.4's licence walls,
-/// and when this release pins no artifact for it.
-fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, CliError> {
+/// not a target this compiler knows, when its sysroot is behind Apple's licence wall, and when this
+/// release pins no artifact for it.
+fn fetch_action(
+    named: &str,
+    offline: bool,
+    accepted: bool,
+    inputs: &[Input],
+) -> Result<Action, CliError> {
     // Not a precedence question. Section 13.2 says `--offline` forbids a fetch entirely, so a
     // command line that writes both has asked for two opposite things and the answer is to say so
     // rather than to pick one of them.
@@ -2542,6 +2552,13 @@ fn fetch_action(named: &str, offline: bool, inputs: &[Input]) -> Result<Action, 
     // The canonical spelling, because that is what a row is named by and what the directory under
     // the cache is called, and a person is free to write a tuple the long way round.
     let tuple = target.to_canonical_string();
+    // Microsoft's side of the wall has something to fetch after all, which is the files its own
+    // installer would fetch, from the build this release pins and only once the licence has been
+    // accepted. Nothing of it is ours and nothing of it comes from us, which is why it is the other
+    // action with a flag on it rather than a row in the table.
+    if rucc_sysroot::Wall::of(target) == Some(rucc_sysroot::Wall::Microsoft) {
+        return Ok(Action::FetchMsvcSdk { target, accepted, cache: cache::dir(), pinned: true });
+    }
     // Before the table is consulted, because a target behind a licence wall is not a row that has not
     // been written yet. Section 13.4 is that no release pins one of these ever, so the message says
     // the licence and the two lawful ways rather than naming the producer that will publish the rest.
@@ -2589,7 +2606,7 @@ fn fetch_msvc_action(
     let target: TargetTuple = named.parse().map_err(|why| {
         err(format!("--fetch-msvc-sdk {named}: {why}, so there is no SDK to get"))
     })?;
-    Ok(Action::FetchMsvcSdk { target, accepted, cache: cache::dir() })
+    Ok(Action::FetchMsvcSdk { target, accepted, cache: cache::dir(), pinned: false })
 }
 
 /// Why there is nothing to fetch for a target, which is a different sentence when the table is
@@ -3776,9 +3793,12 @@ pub fn run(args: &[String]) -> i32 {
                 .map(|_| &rucc_sysroot::KERNEL_HEADERS);
             fetch_sysroot(what, kernel, target, &cache)
         }
-        Ok(Action::FetchMsvcSdk { target, accepted, cache }) => {
-            msvc::fetch_msvc_sdk(target, accepted, &cache)
-        }
+        Ok(Action::FetchMsvcSdk { target, accepted, cache, pinned }) => msvc::fetch_msvc_sdk(
+            target,
+            accepted,
+            &cache,
+            pinned.then_some(&rucc_sysroot::PINNED_BUILD),
+        ),
         Ok(Action::Compile { opts, plan, link, jobs, verbose, notes }) => {
             {
                 let mut stderr = std::io::stderr().lock();
@@ -4171,8 +4191,9 @@ mod tests {
     /// The two targets a release will never pin, which is a different answer from the one above.
     ///
     /// Section 13.4. A person who reads "this release pins no sysroot yet" waits for a release that
-    /// does, and no release of this compiler can ship either of these, so the message names the
-    /// licence that decides it and what to do instead.
+    /// does, and no release of this compiler can ship either of these. An Apple target gets the
+    /// licence and what to do instead, and a Microsoft one gets Microsoft's own files from
+    /// Microsoft, which is the one lawful download either wall has behind it.
     #[test]
     fn a_fetch_of_a_target_behind_a_licence_wall_says_so_rather_than_saying_not_yet() {
         let e = parse_args(&args(&["--fetch", "aarch64-macos"])).unwrap_err();
@@ -4180,10 +4201,19 @@ mod tests {
         assert!(e.message.contains("there never will be"), "{}", e.message);
         assert!(!e.message.contains("tamnd/rucc-cross"), "{}", e.message);
 
-        let e = parse_args(&args(&["--fetch", "x86_64-windows-msvc"])).unwrap_err();
-        assert!(e.message.contains("redistributed"), "{}", e.message);
-        // The way out of this one is a target rather than a download, and it is the default already.
-        assert!(e.message.contains("mingw-w64"), "{}", e.message);
+        // Microsoft's side has a download behind it, which is Microsoft's own files from the build
+        // this release pins, and the licence still has to be accepted for anything to move.
+        let action = parse_args(&args(&["--fetch", "x86_64-windows-msvc"])).expect("pinned build");
+        let Action::FetchMsvcSdk { target, accepted, pinned, .. } = action else {
+            panic!("{action:?}")
+        };
+        assert_eq!(target.to_canonical_string(), "x86_64-windows-msvc");
+        assert!(pinned);
+        assert!(!accepted);
+        let action = parse_args(&args(&["--fetch=aarch64-windows-msvc", "--accept-licence"]))
+            .expect("pinned build");
+        let Action::FetchMsvcSdk { accepted, pinned, .. } = action else { panic!("{action:?}") };
+        assert!(accepted && pinned);
         // And the mingw-w64 target next to it is ours to ship and published, so the same flag has
         // something to get rather than a licence to explain.
         let action = parse_args(&args(&["--fetch", "x86_64-windows-gnu"])).expect("it is pinned");
@@ -4199,12 +4229,14 @@ mod tests {
             vec!["--fetch-msvc-sdk=x86_64-windows-msvc"],
         ] {
             let action = parse_args(&args(&line)).expect("that is a target behind the wall");
-            let Action::FetchMsvcSdk { target, accepted, .. } = action else {
+            let Action::FetchMsvcSdk { target, accepted, pinned, .. } = action else {
                 panic!("{action:?}")
             };
             assert_eq!(target.to_canonical_string(), "x86_64-windows-msvc");
             // Nothing on the line accepted anything, so nothing did.
             assert!(!accepted);
+            // This one follows Microsoft's channel to whatever it names today.
+            assert!(!pinned);
         }
 
         // And both spellings of the word, because the prose here uses one and most of the people
@@ -4255,7 +4287,7 @@ mod tests {
         // And an acceptance with nothing to accept for is a command line that says something about
         // a licence no part of it goes near.
         let e = parse_args(&args(&["--accept-licence", "-c", "a.c"])).unwrap_err();
-        assert!(e.message.contains("--fetch-msvc-sdk <tuple> is the command"), "{}", e.message);
+        assert!(e.message.contains("--fetch-msvc-sdk <tuple> for a"), "{}", e.message);
     }
 
     /// An Apple target on a machine with no SDK, which is section 8.6's other host.

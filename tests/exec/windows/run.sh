@@ -22,6 +22,13 @@
 # -shared into a DLL of the same name, with the .def file of that name if there is one, and writes
 # an import library that main.c is then linked against. The program runs beside its DLLs and its
 # output is compared with main.out in the directory.
+#
+# When CC compiles for x86_64-windows-msvc, a program whose first lines have "not on msvc:" in them
+# is skipped, with the reason after it, and one with a NAME.msvc.out beside it is compared with that
+# rather than with NAME.out, for a program whose output is the C runtime's and differs between
+# msvcrt and the universal CRT. "msvc flags:" go after the source there, for a link option that
+# is lld-link's rather than GNU ld's. The directories are skipped there too, since they are built
+# with GNU ld's options.
 set -euo pipefail
 
 bless=0
@@ -36,6 +43,10 @@ fi
 read -r -a cc <<<"$1"
 shift
 runner=("$@")
+msvc=0
+case " ${cc[*]} " in
+    *windows-msvc*) msvc=1 ;;
+esac
 
 here=$(cd "$(dirname "$0")" && pwd)
 work=${WORK:-$(mktemp -d)}
@@ -81,6 +92,15 @@ judge() {
 
 for src in "$here"/*.c; do
     name=$(basename "$src" .c)
+    want="$here/$name.out"
+    if [ $msvc = 1 ]; then
+        why=$(sed -n '1,3s|^/\* not on msvc: \(.*\) \*/$|\1|p' "$src")
+        if [ -n "$why" ]; then
+            echo "skip $name: $why"
+            continue
+        fi
+        [ -f "$here/$name.msvc.out" ] && want="$here/$name.msvc.out"
+    fi
     args=()
     line=$(sed -n '1,3s|^/\* args: \(.*\)$|\1|p' "$src")
     if [ -n "$line" ]; then
@@ -102,6 +122,10 @@ for src in "$here"/*.c; do
             read -r -a theirs <<<"$theirs"
             ;;
     esac
+    if [ $msvc = 1 ]; then
+        theirs=$(sed -n '1,3s|^/\* msvc flags: \(.*\) \*/$|\1|p' "$src")
+        read -r -a theirs <<<"$theirs"
+    fi
     opts=(-O0 -O2)
     if [ $bless = 1 ]; then
         opts=(-O2)
@@ -115,11 +139,12 @@ for src in "$here"/*.c; do
             failed=$((failed + 1))
             continue
         fi
-        judge "$name" "$opt" "$exe" "$here/$name.out" "${args[@]}"
+        judge "$name" "$opt" "$exe" "$want" "${args[@]}"
     done
 done
 
 for dir in "$here"/*/; do
+    [ $msvc = 1 ] && break
     dir=${dir%/}
     [ -f "$dir/main.c" ] || continue
     name=$(basename "$dir")

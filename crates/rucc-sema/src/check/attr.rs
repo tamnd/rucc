@@ -426,12 +426,19 @@ impl Checker<'_> {
     /// This is a fact about the name and not about one declaration of it, which is why it is kept
     /// where `visibility` is kept and merged the same way. A header saying it once is enough, and
     /// the definition below it that says nothing is still weak.
+    ///
+    /// Microsoft's `selectany`, which `__declspec` hands on under that name, is read as the same
+    /// thing. It asks for one copy of a definition that several objects each have, and the
+    /// universal CRT's <wchar.h> defines a variable that way which libucrt.lib defines as well. A
+    /// weak definition is what gives that here: a link with several keeps one, and a link with a
+    /// strong one keeps that.
     pub(in crate::check) fn weakened(&self, attrs: AttrList) -> Option<Span> {
         self.ast[attrs].iter().find_map(|attr| {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 return None;
             }
-            (rucc_gnu::unarmour(self.text(attr.name)) == "weak").then_some(attr.span)
+            matches!(rucc_gnu::unarmour(self.text(attr.name)), "weak" | "selectany")
+                .then_some(attr.span)
         })
     }
 

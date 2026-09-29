@@ -1,3 +1,4 @@
+/* not on msvc: winpthreads is mingw-w64's, and the Microsoft CRT has no POSIX threads */
 /* flags: -pthread */
 /* gcc flags: -static */
 /* POSIX threads out of the sysroot's winpthreads, which -pthread links as -lpthread. Four threads add

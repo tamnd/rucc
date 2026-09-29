@@ -155,11 +155,20 @@ void abi_fail(const char *fn, const char *slot);
  * report.c exists, and stdarg.h is the one header a freestanding program is still
  * allowed to want. Every compiler this corpus is compiled by implements va_start,
  * va_arg and va_end as exactly these builtins, so this is the same header with one
- * fewer thing that has to be found on disk. */
+ * fewer thing that has to be found on disk. cl.exe is the exception: it has none of
+ * them, and its <stdarg.h> is a few lines of vcruntime.h with no libc behind it. */
+#if defined(_MSC_VER) && !defined(__rucc__) && !defined(__clang__)
+#include <stdarg.h>
+#define ABI_VA_LIST va_list
+#define ABI_VA_START(ap, last) va_start(ap, last)
+#define ABI_VA_ARG(ap, ty) va_arg(ap, ty)
+#define ABI_VA_END(ap) va_end(ap)
+#else
 #define ABI_VA_LIST __builtin_va_list
 #define ABI_VA_START(ap, last) __builtin_va_start(ap, last)
 #define ABI_VA_ARG(ap, ty) __builtin_va_arg(ap, ty)
 #define ABI_VA_END(ap) __builtin_va_end(ap)
+#endif
 
 /* Ten integers, which is more than any ABI here has argument registers, so the tail is on the
  * stack and the boundary between the two is what this is about. */

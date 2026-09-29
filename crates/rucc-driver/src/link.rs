@@ -54,11 +54,12 @@
 //! # Windows in Microsoft's environment
 //!
 //! `lld-link` takes a line of its own, which [`rucc_sysroot::argv`] writes as it writes the others,
-//! and the libraries on it come out of a tree nobody may redistribute. `--fetch-msvc-sdk` lays that
-//! tree out once the person asking has accepted Microsoft's licence and says which `--sysroot` to
-//! pass, so the tree is always one somebody named, and `msvc_sysroot` is the one place that says
-//! so. A mingw-w64 target links against the cache like every other cross target, because PE in
-//! that environment is written in the GNU style and the import libraries for it are ours.
+//! and the libraries on it come out of a tree nobody may redistribute. `--fetch` and
+//! `--fetch-msvc-sdk` lay that tree out from Microsoft's own downloads once the person asking has
+//! accepted Microsoft's licence, and say which `--sysroot` to pass, so the tree is always one
+//! somebody named, and `msvc_sysroot` is the one place that says so. A mingw-w64 target links
+//! against the cache like every other cross target, because PE in that environment is written in
+//! the GNU style and the import libraries for it are ours.
 //!
 //! Darwin has a line of its own, [`darwin_line`], and it is the same line on a Mac and anywhere
 //! else. Everything it links against is in the SDK, which is found the way the header search finds
@@ -430,7 +431,7 @@ fn is_msvc(target: Triple) -> bool {
 ///
 /// Never the cache, because the cache holds what a release of this compiler pins and nothing for
 /// this environment ever will be: `spec/cross-compile/13-distribution.md` section 13.4. What
-/// `--fetch-msvc-sdk` lays out is under a directory named for the versions it fetched, and it ends
+/// `--fetch` lays out is under a directory named for the versions it fetched, and it ends
 /// by printing the `--sysroot` to pass, so a link with no `--sysroot` is one where that has not
 /// happened yet and the answer is to say what to run.
 ///
@@ -444,8 +445,8 @@ fn msvc_sysroot(target: Triple, opts: &LinkOptions) -> Result<Sysroot, Error> {
         None => Err(Error::Cross {
             why: format!(
                 "a link for {tuple} is against Microsoft's C runtime and the Windows SDK, which \
-                 this compiler may not ship. `rucc --fetch-msvc-sdk {tuple}` gets them once you \
-                 accept Microsoft's licence and prints the --sysroot=<dir> to pass",
+                 this compiler may not ship. `rucc --fetch {tuple}` gets them from Microsoft once \
+                 you accept Microsoft's licence and prints the --sysroot=<dir> to pass",
                 tuple = tuple.to_canonical_string()
             ),
         }),
@@ -781,7 +782,7 @@ fn msvc_preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
             return Err(Error::Cross {
                 why: format!(
                     "{} has no {}, so it is not a tree for {tuple} to link against. `rucc \
-                     --fetch-msvc-sdk {tuple}` lays one out and prints where",
+                     --fetch {tuple}` lays one out and prints where",
                     sysroot.root().display(),
                     crt.display(),
                     tuple = tuple.to_canonical_string()
@@ -2420,7 +2421,7 @@ mod tests {
         // Not the cache, even with one to look in, because nothing of ours is ever there for it.
         let error = line(target, &cached(), &one("a.obj"), "a.exe").expect_err("no tree named");
         let Error::Cross { why } = &error else { panic!("{error:?}") };
-        assert!(why.contains("--fetch-msvc-sdk x86_64-windows-msvc"), "{why}");
+        assert!(why.contains("rucc --fetch x86_64-windows-msvc"), "{why}");
 
         let tree = PathBuf::from("/trees/msvc");
         let named = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
@@ -2448,7 +2449,7 @@ mod tests {
         let named = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
         let error = preflight(target, &named).expect_err("a tree for the other architecture");
         let Error::Cross { why } = &error else { panic!("{error:?}") };
-        assert!(why.contains("--fetch-msvc-sdk"), "{why}");
+        assert!(why.contains("rucc --fetch x86_64-windows-msvc"), "{why}");
         fs::create_dir_all(tree.join("crt/lib/x86_64")).expect("the right one");
         preflight(target, &named).expect("a tree for this one");
         let _ = fs::remove_dir_all(&tree);

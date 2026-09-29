@@ -1,3 +1,4 @@
+/* not on msvc: the universal CRT has no _environ data to import, only a function */
 /* environ and _timezone are data in the C runtime DLL, reached without a dllimport in the source. */
 #include <stdio.h>
 #include <stdlib.h>
