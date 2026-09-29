@@ -21,7 +21,7 @@
 use rucc_base::float::Format;
 use rucc_target::TargetInfo;
 
-use crate::classify::bare;
+use crate::classify::{bare, element_as_written};
 use crate::kind::{ArrayLen, FloatKind, IntKind, TypeKind};
 use crate::types::{TypeId, Types};
 
@@ -139,8 +139,10 @@ pub fn align(types: &Types, id: TypeId, target: &TargetInfo) -> Result<u64, Layo
 
 /// The alignment of a type whose size is not known here.
 fn variable_align(types: &Types, id: TypeId, target: &TargetInfo) -> Result<u64, LayoutError> {
+    if let Some(elem) = element_as_written(types, id) {
+        return align(types, elem, target);
+    }
     match types.kind(types.canonical(id)) {
-        TypeKind::Array { elem, .. } => align(types, elem, target),
         // The alignment is in the layout beside the recipe, where the size is zero and this is
         // the part of it that means something.
         TypeKind::Record(record) => {
@@ -155,6 +157,7 @@ fn variable_align(types: &Types, id: TypeId, target: &TargetInfo) -> Result<u64,
 fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<Layout, LayoutError> {
     // A typedef of an array of a typedef is common enough that resolving it once here beats
     // resolving it at every arm below.
+    let original = id;
     let id = types.canonical(id);
     match types.kind(id) {
         TypeKind::Void => Err(LayoutError::Incomplete),
@@ -187,6 +190,9 @@ fn unaligned_layout(types: &Types, id: TypeId, target: &TargetInfo) -> Result<La
                 }
                 return Err(LayoutError::Incomplete);
             };
+            // The element as it was written and not the canonical one, which has lost any
+            // alignment a typedef in it asked for.
+            let elem = element_as_written(types, original).unwrap_or(elem);
             let elem = layout(types, elem, target)?;
             let size = elem.size.checked_mul(count).ok_or(LayoutError::TooLarge)?;
             if size > target.max_object_size() {

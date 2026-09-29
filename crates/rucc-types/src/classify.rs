@@ -167,6 +167,25 @@ pub fn element(types: &Types, id: TypeId) -> Option<TypeId> {
     }
 }
 
+/// The element type of an array with whatever it was written as still on it, or [`None`] where
+/// it is not an array.
+///
+/// The same reasoning as [`pointee_as_written`]. The canonical array holds the canonical element,
+/// which has lost any alignment a typedef in it asked for, and mingw-w64's `jmp_buf` is an array of
+/// a sixteen byte struct that only a typedef aligns to sixteen. msvcrt's `setjmp` stores into it
+/// with `movdqa`, so the element as written is the one an array's alignment comes from.
+#[must_use]
+pub fn element_as_written(types: &Types, id: TypeId) -> Option<TypeId> {
+    let mut id = id;
+    loop {
+        match types.kind(id) {
+            TypeKind::Array { elem, .. } => return Some(elem),
+            TypeKind::Typedef { underlying, .. } => id = underlying,
+            _ => return None,
+        }
+    }
+}
+
 /// A function type.
 #[must_use]
 pub fn is_function(types: &Types, id: TypeId) -> bool {

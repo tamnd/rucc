@@ -37,8 +37,8 @@ use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
     ArrayLen, Extent, FloatKind, Layout, LayoutError, RecordId, TypeId, TypeKind, align,
-    compatible, is_arithmetic, is_complete, is_floating, is_function, is_integer, is_pointer,
-    is_record, is_void, layout,
+    compatible, element_as_written, is_arithmetic, is_complete, is_floating, is_function,
+    is_integer, is_pointer, is_record, is_void, layout,
 };
 
 use crate::check::Checker;
@@ -594,10 +594,17 @@ impl Checker<'_> {
     }
 
     /// The type whose alignment an array's is, which is its element's however deep it goes.
+    ///
+    /// The element as it was written, since a typedef in it may have said what it is aligned to
+    /// and the canonical element has forgotten, and a typedef of the array that said so itself is
+    /// the answer and not something to look through. tamnd/rucc#2151.
     fn element_of(&self, ty: TypeId) -> TypeId {
-        match self.types.kind(self.types.canonical(ty)) {
-            TypeKind::Array { elem, .. } => self.element_of(elem),
-            _ => ty,
+        if self.types.align_override(ty).is_some() {
+            return ty;
+        }
+        match element_as_written(&self.types, ty) {
+            Some(elem) => self.element_of(elem),
+            None => ty,
         }
     }
 

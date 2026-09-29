@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- An array of a typedef that asked for an alignment with `__attribute__((aligned(n)))` is as aligned as the typedef, as with gcc. It used to take the alignment of the type behind the typedef, so mingw-w64's `jmp_buf`, an array of a sixteen byte struct that a typedef aligns to sixteen, was aligned to eight, and msvcrt's `setjmp` faulted storing the vector registers into one that landed off a multiple of sixteen. That was cJSON's tests under Wine. The same held for `_Alignof`, member offsets and globals on every target. `tests/exec/windows/jmpbuf.c` (#2069).
+
 ## 0.15.1
 
 0.15.0 as it was meant to ship. Its tag stopped at the release gate because `Cargo.lock` did not record that `rucc-opt` depends on `rucc-abi`, so nothing was published. This release records it, and brings in `__chkstk` for the windows-msvc builtins, unwind directives in Windows listings, and faster liveness lists.
