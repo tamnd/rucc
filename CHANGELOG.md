@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.16.0
+
+The W4 release, for the MSVC environment on Windows. `x86_64-windows-msvc` is tier 3: `rucc --fetch x86_64-windows-msvc` downloads the CRT and the Windows SDK from Microsoft, programs link with lld-link against the static CRT by default, and the ABI differential against cl.exe is clean. Most of that shipped in 0.15.3 already. This release adds the last fix W4 needed, for dllimport data from the static CRT, along with `rucc --dlltool` from W3 and the first AArch64 Windows pieces from W5.
+
 ### Added
 
 - `rucc --dlltool` writes an import library from a module definition file, with GNU dlltool's options for it: `-m`, `-d`, `-l`, `-D` and `-k`, with `--as` and `--as-flags` taken and ignored. A program named `<host>-dlltool`, such as a link called `x86_64-w64-mingw32-dlltool`, is the same thing with the target taken from the name when there is no `-m`. The library is the one `rucc-stub` writes, which is byte for byte what `llvm-dlltool` writes, so mingw-w64's crt can be built with no dlltool but this one. Other options are refused by name, and so are `-m i386` without `-k` and a `-D` with no dot, since both would write a library other than the one asked for (#2069).
