@@ -311,14 +311,19 @@ fn placed(
     Some(assignment)
 }
 
+/// A value in a register, by number, with the stretch of the line it covers.
+type Held = (usize, Range);
+
 /// What the allocation knows while it runs.
 struct State<'a, 'v> {
     live: &'a Live,
     blocked: &'a Blocks,
     reuses: &'a [Option<Reuse>],
     values: &'v [Option<Value<'a>>],
-    /// Which values are in each register of each class, by number.
-    held: Vec<((RegClass, PhysReg), Vec<usize>)>,
+    /// Which values are in each register of each class, by number, each with the stretch of the
+    /// line it covers. Most values in a register are nowhere near the one being placed, and having
+    /// the stretch here tells so without reading the value itself from wherever it is in `values`.
+    held: Vec<((RegClass, PhysReg), Vec<Held>)>,
     /// Which register each value is in now, if one.
     at: Vec<Option<PhysReg>>,
     /// The instruction whose sources were swapped for the answer written by each value, if its
@@ -333,7 +338,7 @@ impl<'a> State<'a, '_> {
         self.at.get(usize::try_from(reg.number()?).ok()?).copied().flatten()
     }
 
-    fn slot(&mut self, class: RegClass, at: PhysReg) -> &mut Vec<usize> {
+    fn slot(&mut self, class: RegClass, at: PhysReg) -> &mut Vec<Held> {
         let found = self.held.iter().position(|(key, _)| *key == (class, at));
         let index = found.unwrap_or_else(|| {
             self.held.push(((class, at), Vec::new()));
@@ -349,10 +354,13 @@ impl<'a> State<'a, '_> {
             return Vec::new();
         };
         let mut clashes = Vec::new();
-        for &other in &self.held[index].1 {
-            let Some(held) = self.values[other] else { continue };
+        for &(other, range) in &self.held[index].1 {
             self.work += 1;
-            if !held.range.overlaps(value.range) || !held.area.overlaps(value.area) {
+            if !range.overlaps(value.range) {
+                continue;
+            }
+            let Some(held) = self.values[other] else { continue };
+            if !held.area.overlaps(value.area) {
                 continue;
             }
             if !self.shares(value.reg, held.reg) {
@@ -476,7 +484,7 @@ impl<'a> State<'a, '_> {
     /// Takes `at` back from the values in it that are in the way of `value`, and says which.
     fn evict(&mut self, value: Value<'_>, at: PhysReg) -> Vec<usize> {
         let clashes = self.clashes(value, at);
-        self.slot(value.class, at).retain(|other| !clashes.contains(other));
+        self.slot(value.class, at).retain(|(other, _)| !clashes.contains(other));
         for &other in &clashes {
             self.at[other] = None;
             self.commuted[other] = None;
@@ -525,7 +533,7 @@ impl<'a> State<'a, '_> {
                     continue;
                 }
                 better.sort_by_key(|&(count, _)| Reverse(count));
-                self.slot(value.class, now).retain(|&other| other != number);
+                self.slot(value.class, now).retain(|&(other, _)| other != number);
                 self.at[number] = None;
                 let was = self.commuted[number];
                 let mut to = now;
@@ -551,7 +559,7 @@ impl<'a> State<'a, '_> {
     fn take(&mut self, value: Value<'_>, at: PhysReg) {
         let number = index(value.reg);
         self.at[number] = Some(at);
-        self.slot(value.class, at).push(number);
+        self.slot(value.class, at).push((number, value.range));
     }
 }
 
