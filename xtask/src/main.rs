@@ -1133,13 +1133,29 @@ fn stale_lock(root: &Path) -> Result<Vec<String>> {
             continue;
         };
         let has = edges.get(&krate.name);
-        for dep in parse_crate(&krate.manifest, &manifest)?.deps {
+        let deps = parse_crate(&krate.manifest, &manifest)?.deps;
+        for dep in &deps {
             if members.contains(&dep.name) && !has.is_some_and(|h| h.contains(&dep.name)) {
                 problems.push(format!(
                     "Cargo.lock: {} depends on {} and the lockfile does not say so",
                     krate.name, dep.name
                 ));
             }
+        }
+        // And the other way: an edge the manifest has dropped, which `--locked` refuses as well.
+        // `rucc-lex` and `rucc-opt` kept `rucc-tuple` in the lockfile after they stopped asking for
+        // it, and 0.15.3 got as far as `cargo publish` before anything said so.
+        let mut stale: Vec<&String> = has
+            .into_iter()
+            .flatten()
+            .filter(|dep| members.contains(*dep) && !deps.iter().any(|d| &d.name == *dep))
+            .collect();
+        stale.sort();
+        for dep in stale {
+            problems.push(format!(
+                "Cargo.lock: {} does not depend on {dep} and the lockfile says it does",
+                krate.name
+            ));
         }
     }
     Ok(problems)

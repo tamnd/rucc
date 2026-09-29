@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.15.3
+
+The M6 release on crates.io. 0.15.2 built and passed on every host and is on GitHub, but its `cargo publish --locked` stopped before uploading anything, because `Cargo.lock` still had `rucc-lex` and `rucc-opt` depending on `rucc-tuple` after both had dropped it. This release fixes the lockfile, and `cargo xtask version` now fails a lockfile edge that no manifest asks for, as well as a manifest edge the lockfile lacks, so the gate sees this before publish does. It also brings `x86_64-windows-msvc` to tier 3.
+
 ### Added
 
 - `rucc --fetch x86_64-windows-msvc`, and the same for `aarch64-windows-msvc`, downloads the MSVC C runtime and the Windows SDK from Microsoft once `--accept-licence` is given, and lays them out as `--fetch-msvc-sdk` does. Unlike `--fetch-msvc-sdk`, which follows whatever build Microsoft's channel names today, `--fetch` starts from one Visual Studio build, 17.14.37710.0, and holds its channel file and its installer manifest to a sha256 each, so every rucc of a release fetches the same CRT and SDK. Nothing of Microsoft's is in rucc or passes through a server of ours.
