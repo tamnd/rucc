@@ -718,6 +718,54 @@ jobs:
           path: compat/results/
           if-no-files-found: ignore
 
+  # PostgreSQL 18.6 built by rucc at -O0 and held to its own regression suite, which is the per
+  # commit job of the PG2 milestone in tamnd/rucc#1989. The configuration is the minimal one
+  # tamnd/rucc-postgres uses, less the TAP tests, which make check does not run. The release tarball
+  # is used rather than a clone because it carries the generated parser and scanner, so the job
+  # needs neither bison nor flex, and it is pinned by its checksum. The Postgres part is meant to
+  # stay under fifteen minutes.
+  postgres:
+    name: postgres make check at -O0
+    needs: quick
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PG_VERSION: "18.6"
+      PG_SHA256: 555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: build rucc
+        run: cargo build --release --bin rucc
+      - name: fetch postgres
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o pg.tar.bz2 "https://ftp.postgresql.org/pub/source/v$PG_VERSION/postgresql-$PG_VERSION.tar.bz2"
+          echo "$PG_SHA256  pg.tar.bz2" | sha256sum -c -
+          tar xjf pg.tar.bz2
+      - name: configure
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/postgresql-$PG_VERSION"
+          ./configure CC="$GITHUB_WORKSPACE/target/release/rucc" CFLAGS=-O0 \
+            --without-icu --without-readline --without-zlib --without-llvm \
+            --disable-nls --disable-cassert --enable-debug
+      - name: build
+        run: make -C "$RUNNER_TEMP/postgresql-$PG_VERSION" -j"$(nproc)" -s
+      - name: make check
+        run: make -C "$RUNNER_TEMP/postgresql-$PG_VERSION" check
+      - name: keep the differences
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: postgres-regress
+          path: |
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/config.log
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/regress/regression.diffs
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/regress/log/
+          if-no-files-found: ignore
+
   # A single required check, so branch protection does not have to list every job above. It is the
   # only check the main ruleset requires, which means a job missing from this list runs, reports and
   # blocks nothing, and three of them were missing: the stub reader, the safety suite and the
@@ -726,7 +774,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, windows, windows-objects, safety, accounting, audit, differential, abi-differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, windows, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

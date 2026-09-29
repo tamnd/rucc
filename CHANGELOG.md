@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-g` works for Windows targets. The COFF writer now puts the DWARF sections in the object, the way mingw-w64 gcc does, with an offset from one debug section into another written as `IMAGE_REL_AMD64_SECREL` and an address in the code as `IMAGE_REL_AMD64_ADDR64`. The warning that `-g` was ignored for COFF is gone. gdb on Linux reads a program built this way for line numbers, types and variable addresses.
 - `-fcommon` is accepted, and it is the default for Darwin targets as it is for Apple's clang. A file scope `int g;` with no initializer is a common symbol there, so two files that each write one link on a Mac the way they do with clang. `-fno-common` turns it off, and every other target keeps `-fno-common` as its default, which is gcc's since 10.
+- CI builds PostgreSQL 18.6 with rucc at `-O0` on every pull request and runs its `make check`. The configuration is the minimal one tamnd/rucc-postgres uses, with no ICU, readline, zlib, LLVM, NLS or assertions, and the release tarball is pinned by its checksum. When the suite fails, `regression.diffs` and the server logs are kept as an artifact. This is the per commit job of PG2 (#1989).
 
 ### Changed
 
