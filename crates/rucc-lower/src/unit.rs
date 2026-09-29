@@ -901,15 +901,6 @@ impl Unit<'_> {
             {
                 self.module[id] = func;
             }
-            // A second declaration of the symbol, which may be the one that says what the source
-            // calls it. mingw-w64's `<stdio.h>` declares `__mingw_fprintf` under its own name and
-            // then `fprintf` with that name as its assembler name, and a module that kept only the
-            // first would have no `fprintf` in it for the library call folds to find.
-            Some(SymbolRef::Func(id)) => {
-                if self.module[id].spelled.is_none() {
-                    self.module[id].spelled = func.spelled;
-                }
-            }
             Some(_) => {}
         }
     }

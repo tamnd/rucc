@@ -529,7 +529,7 @@ pub fn rows(table: &Table) -> Vec<Row> {
 /// walk needs it to be, so there is nothing to do here but read it.
 pub(crate) fn pattern_heads(table: &Table) -> Vec<&'static str> {
     let Some(root) = table.nodes.first() else { return Vec::new() };
-    let mut found: Vec<&'static str> = root.heads.iter().map(|&(_, head, ..)| head).collect();
+    let mut found: Vec<&'static str> = root.heads.iter().map(|&(head, ..)| head).collect();
     found.dedup();
     found
 }

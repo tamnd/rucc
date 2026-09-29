@@ -151,7 +151,7 @@ fn nodes(out: &mut String, matcher: &Matcher) {
         let _ = writeln!(out, "    // {index}");
         out.push_str("    Node {\n        heads: &[");
         for (head, arity, next) in &node.heads {
-            let _ = write!(out, "\n            (Node::key({head:?}), {head:?}, {arity}, {next}),");
+            let _ = write!(out, "\n            ({head:?}, {arity}, {next}),");
         }
         if !node.heads.is_empty() {
             out.push_str("\n        ");
@@ -667,7 +667,7 @@ mod tests {
         );
         assert!(out.contains("use super::{Node, Piece, Rule, Table};"), "{out}");
         assert!(out.contains("pub const SOURCE: &str = \"rules/test.rules\";"), "{out}");
-        assert!(out.contains("(Node::key(\"add.i64\"), \"add.i64\", 2, 1),"), "{out}");
+        assert!(out.contains("(\"add.i64\", 2, 1),"), "{out}");
         assert!(out.contains("wildcard: Some((\"x\", 3)),"), "{out}");
         assert!(out.contains("accept: &[0],"), "{out}");
         assert!(out.contains("Piece::App { head: \"x64.add_rr_64\", arity: 2 }"), "{out}");
