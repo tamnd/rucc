@@ -614,9 +614,14 @@ impl Checker<'_> {
             "inlining failed in call to 'always_inline' '{name}': target specific option mismatch"
         );
         let missing = wanted.minus(caller);
+        let flag = if self.cx.target.tuple.arch().as_str() == "aarch64" {
+            format!("a '-march=' with '+{missing}'")
+        } else {
+            String::from("the matching '-m' flag")
+        };
         let note = format!(
             "'{name}' is built for {missing} as well, which neither this function nor the unit is; \
-             a 'target' attribute on this function or the matching '-m' flag gives it"
+             a 'target' attribute on this function or {flag} gives it"
         );
         let at = self.tast.decl_span(decl);
         self.report(

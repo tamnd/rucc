@@ -36,6 +36,7 @@ pub const DIR: &str = "<builtin>";
 /// small and fixed, and because a build script would put the headers behind a step that has
 /// to run before anything can be read.
 const HEADERS: &[(&str, &str)] = &[
+    ("arm_acle.h", include_str!("../runtime/include/arm_acle.h")),
     ("arm_neon.h", include_str!("../runtime/include/arm_neon.h")),
     ("avx512bwintrin.h", include_str!("../runtime/include/avx512bwintrin.h")),
     ("avx512fintrin.h", include_str!("../runtime/include/avx512fintrin.h")),

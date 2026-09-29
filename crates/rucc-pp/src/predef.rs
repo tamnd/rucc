@@ -21,7 +21,7 @@
 
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
-use rucc_target::{Arch, Env, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, Env, Feature, Isa, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
 /// The name a diagnostic about the generated set points at.
@@ -582,6 +582,13 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // calling `fma` is cheaper than writing the product and the sum apart.
             for name in ["", "F", "F32", "F64", "F32x"] {
                 d.set(&format!("__FP_FAST_FMA{name}"), "1");
+            }
+            // The CRC32 instructions, which are optional in Armv8.0 and part of every architecture
+            // after it. gcc says so for `-march=armv8-a+crc` and for `armv8.1-a` and later, and
+            // not for plain `armv8-a`, and PostgreSQL's checksum is one of the programs that looks
+            // before it includes `<arm_acle.h>`.
+            if Feature::aarch64("crc").is_some_and(|crc| opts.isa.has(crc)) {
+                d.set("__ARM_FEATURE_CRC32", "1");
             }
         }
         Arch::Riscv64 => {
@@ -2306,6 +2313,30 @@ mod tests {
         assert!(!x86.contains("__ARM_FEATURE_CLZ"));
         assert!(!x86.contains("__FP_FAST_FMA"));
         assert!(has(&x86, "#define __GCC_DESTRUCTIVE_SIZE 64"));
+    }
+
+    #[test]
+    fn the_crc32_macro_follows_the_aarch64_march() {
+        // tamnd/rucc#2006, and gcc 16's `-dM` for aarch64-linux-gnu under each `-march=`.
+        let arm: Triple = "aarch64-unknown-linux-gnu".parse().expect("a triple");
+        let macro_line = "#define __ARM_FEATURE_CRC32 1";
+        for (march, defined) in [
+            ("armv8-a", false),
+            ("armv8-a+crc", true),
+            ("armv8-a+crc+simd", true),
+            ("armv8.1-a", true),
+            ("armv9-a", true),
+            ("armv8.1-a+nocrc", false),
+        ] {
+            let opts = Predef { isa: Isa::aarch64_march(march), ..Predef::new() };
+            let text = built_in(&TargetInfo::new(arm), &opts);
+            assert_eq!(has(&text, macro_line), defined, "{march}");
+        }
+        assert!(!set_for("aarch64-unknown-linux-gnu").contains("__ARM_FEATURE_CRC32"));
+        // An x86-64 unit has no such thing whatever it is built for.
+        let x86: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
+        let opts = Predef { isa: Isa::aarch64_march("armv8-a+crc"), ..Predef::new() };
+        assert!(!built_in(&TargetInfo::new(x86), &opts).contains("__ARM_FEATURE_CRC32"));
     }
 
     #[test]

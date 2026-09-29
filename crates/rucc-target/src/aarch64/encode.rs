@@ -748,6 +748,8 @@ impl At<'_> {
             "lsrv" => self.two_source(0b00_1001, values)?,
             "asrv" => self.two_source(0b00_1010, values)?,
             "rorv" => self.two_source(0b00_1011, values)?,
+            "crc32b" | "crc32h" | "crc32w" | "crc32x" | "crc32cb" | "crc32ch" | "crc32cw"
+            | "crc32cx" => self.crc(values)?,
             "lsl" | "lsr" | "asr" | "ror" => self.shift(values)?,
             "sxtb" | "sxth" | "sxtw" | "uxtb" | "uxth" | "uxtw" => self.extend(values)?,
             "ubfm" | "sbfm" | "bfm" | "ubfx" | "sbfx" | "bfxil" | "bfi" | "ubfiz" | "sbfiz" => {
@@ -1310,6 +1312,38 @@ impl At<'_> {
         let ((wd, rd), (wn, rn), (wm, rmm)) = (self.zr(d)?, self.zr(n)?, self.zr(mm)?);
         let width = self.same(self.same(wd, wn)?, wm)?;
         Ok(width.sf() << 31 | 0x1ac0_0000 | rmm << 16 | opcode << 10 | rn << 5 | rd)
+    }
+
+    /// The CRC32 and CRC32C steps from the CRC32 extension, which are two source instructions
+    /// with `010`, the polynomial and the size of the data where the others have their opcode:
+    /// `sf 0 0 11010110 Rm 010 C sz Rn Rd`, with `C` set for CRC32C, which is the Castagnoli
+    /// polynomial, and `sz` counting bytes, halves, words and doublewords.
+    ///
+    /// The running value in and out is always a `w` register. The data is a `w` register too
+    /// except in the `x` forms, which read a whole `x` register and are the only ones with `sf`
+    /// set. GNU as refuses any other widths, and so does this.
+    fn crc(self, values: &[Value]) -> Result<u32, Error> {
+        let rest = self.mnemonic.strip_prefix("crc32").ok_or_else(|| self.unwritten())?;
+        let (castagnoli, size) = match rest.strip_prefix('c') {
+            Some(size) => (1, size),
+            None => (0, rest),
+        };
+        let sz: u32 = match size {
+            "b" => 0b00,
+            "h" => 0b01,
+            "w" => 0b10,
+            "x" => 0b11,
+            _ => return Err(self.unwritten()),
+        };
+        let [d, n, mm] = values else {
+            return Err(self.unwritten());
+        };
+        let ((wd, rd), (wn, rn), (wm, rmm)) = (self.zr(d)?, self.zr(n)?, self.zr(mm)?);
+        let data = if sz == 0b11 { Width::X } else { Width::W };
+        if [wd, wn, wm] != [Width::W, Width::W, data] {
+            return Err(self.register());
+        }
+        Ok(data.sf() << 31 | 0x1ac0_4000 | rmm << 16 | castagnoli << 12 | sz << 10 | rn << 5 | rd)
     }
 
     /// The instructions with one register source.
@@ -1901,6 +1935,44 @@ mod tests {
         }
         assert!(count > 400, "golden.txt has only {count} lines");
         assert!(wrong.is_empty(), "{} of {count} lines differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    /// The words for the CRC32 extension, from the encoding in the Arm ARM, C6.2 under `CRC32B`
+    /// and `CRC32CB` and their siblings, and the same words LLVM's assembler writes for these
+    /// lines under `-march=armv8-a+crc`. GNU as writes them as well, since the encoding has no
+    /// choice in it.
+    #[test]
+    fn the_crc32_steps_are_the_words_the_manual_gives() {
+        for (text, word) in [
+            ("crc32b w0, w1, w2", 0x1ac2_4020),
+            ("crc32h w3, w4, w5", 0x1ac5_4483),
+            ("crc32w w6, w7, w8", 0x1ac8_48e6),
+            ("crc32x w9, w10, x11", 0x9acb_4d49),
+            ("crc32cb w0, w1, w2", 0x1ac2_5020),
+            ("crc32ch w3, w4, w5", 0x1ac5_5483),
+            ("crc32cw w6, w7, w8", 0x1ac8_58e6),
+            ("crc32cx w9, w10, x11", 0x9acb_5d49),
+            ("crc32cx w0, w0, xzr", 0x9adf_5c00),
+            ("crc32cw wzr, w30, w29", 0x1add_5bdf),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup), (word, None), "{text}");
+        }
+        // The widths the instruction does not have, which GNU as refuses too.
+        for text in [
+            "crc32x w0, w1, w2",
+            "crc32cb w0, w1, x2",
+            "crc32cw x0, w1, w2",
+            "crc32cx x0, x1, x2",
+            "crc32cb w0, w1",
+            "crc32cb w0, wsp, w2",
+        ] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
+        assert!(encode("crc32c", &[Value::Gpr(Width::W, 0); 3]).is_err());
+        assert!(encode("crc32cq", &[Value::Gpr(Width::W, 0); 3]).is_err());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Which extensions of the x86-64 instruction set a unit is built for.
+//! Which extensions of the instruction set a unit is built for, on x86-64 and on AArch64.
 //!
 //! Design: `spec/04-driver-and-cli.md` section 4.5, for the macros this decides.
 //!
@@ -38,6 +38,20 @@
 //! finished set, so `-msse4.2 -mno-sse4.2` leaves neither behind while `-mpopcnt -msse4.2
 //! -mno-sse4.2` keeps the population count it was asked for. These are all checked against gcc 16's
 //! `-dM` output in the tests below.
+//!
+//! # AArch64
+//!
+//! AArch64 says the same thing another way. `-march=armv8-a+crc` names an architecture and then
+//! the extensions to add to it or take away, each after a `+`, and `target("+crc")` on a function
+//! is only the second half. The one extension this compiler reads out of either is the CRC32 one,
+//! because `<arm_acle.h>` has its intrinsics and PostgreSQL's checksum is built on them. It is a
+//! row of [`FEATURES`] like the others, marked as AArch64's so that no x86-64 flag or attribute
+//! can name it, and the set it lands in is the same [`Isa`], which is what lets the refusal of a
+//! call from a function not built for the instruction be the one x86-64 already has. Armv8.1-A
+//! made the extension part of the architecture, so every name from `armv8.1-a` up has it, and
+//! plain `armv8-a` does not, which is gcc's answer too: gcc for aarch64-linux-gnu defines no
+//! `__ARM_FEATURE_CRC32` without a flag. Everything else after a `+` is accepted and changes
+//! nothing here, as all of it did before.
 
 use std::fmt;
 
@@ -50,23 +64,33 @@ pub struct Row {
     pub needs: &'static [&'static str],
     /// Whether this compiler provides what the name stands for. See [`Feature::honoured`].
     pub honoured: bool,
+    /// Whether this is an extension of AArch64 rather than of x86-64. See the module
+    /// documentation.
+    pub aarch64: bool,
 }
 
 /// A row this compiler provides.
 const fn yes(name: &'static str, needs: &'static [&'static str]) -> Row {
-    Row { name, needs, honoured: true }
+    Row { name, needs, honoured: true, aarch64: false }
 }
 
 /// A row this compiler knows the name of and nothing more.
 const fn named(name: &'static str, needs: &'static [&'static str]) -> Row {
-    Row { name, needs, honoured: false }
+    Row { name, needs, honoured: false, aarch64: false }
 }
 
-/// Every extension gcc 16.2.0 has a `-m` flag and an attribute name for.
+/// A row for AArch64, which this compiler provides.
+const fn arm(name: &'static str) -> Row {
+    Row { name, needs: &[], honoured: true, aarch64: true }
+}
+
+/// Every extension gcc 16.2.0 has a `-m` flag and an attribute name for on x86-64, and the one
+/// AArch64 extension this compiler reads.
 ///
 /// The honoured ones first, in the order of the SSE line, and then the rest roughly in the order
 /// gcc's own table has them. What each needs is gcc's `_SET` mask for it, cut down to the
-/// extensions directly beneath it, since the closure is taken when the table is read.
+/// extensions directly beneath it, since the closure is taken when the table is read. AArch64's
+/// come last.
 pub static FEATURES: &[Row] = &[
     yes("mmx", &[]),
     yes("sse", &[]),
@@ -176,6 +200,7 @@ pub static FEATURES: &[Row] = &[
     named("amx-fp8", &["amx-tile"]),
     named("amx-movrs", &["amx-tile"]),
     named("amx-tf32", &["amx-tile"]),
+    arm("crc"),
 ];
 
 /// One extension, as its row in [`FEATURES`].
@@ -191,7 +216,13 @@ impl Feature {
     #[must_use]
     pub fn named(name: &str) -> Option<Feature> {
         let name = if name == "sse4" { "sse4.2" } else { name };
-        FEATURES.iter().position(|row| row.name == name).map(|at| Feature(at as u8))
+        FEATURES.iter().position(|row| row.name == name && !row.aarch64).map(|at| Feature(at as u8))
+    }
+
+    /// The AArch64 extension with that name, as it is written after a `+`.
+    #[must_use]
+    pub fn aarch64(name: &str) -> Option<Feature> {
+        FEATURES.iter().position(|row| row.name == name && row.aarch64).map(|at| Feature(at as u8))
     }
 
     /// The extension a `no-` in front of that name turns off.
@@ -367,9 +398,86 @@ impl Isa {
         (0..FEATURES.len() as u8).map(Feature).filter(move |feature| self.has(*feature))
     }
 
-    /// The macros this set defines, which are the honoured extensions' and no others.
+    /// The macros this set defines on x86-64, which are the honoured extensions' and no others.
+    ///
+    /// AArch64's have names of their own, `__ARM_FEATURE_CRC32` for `crc`, which the target's
+    /// macros say, so they are left out.
     pub fn macros(self) -> impl Iterator<Item = String> {
-        self.features().filter(|feature| feature.honoured()).map(Feature::macro_name)
+        self.features()
+            .filter(|feature| feature.honoured() && !feature.row().aarch64)
+            .map(Feature::macro_name)
+    }
+
+    /// The extensions an AArch64 architecture has, for the names gcc takes after `-march=` and
+    /// `arch=`, or `None` for a name that is not one.
+    ///
+    /// Only the CRC32 extension is tracked, and it is `armv8-a` alone that lacks it: the
+    /// extension is optional in Armv8.0 and part of every architecture from Armv8.1-A on, which
+    /// includes the Armv9 line and Armv8-R, whose gcc entry is built over Armv8.4-A.
+    #[must_use]
+    pub fn aarch64_arch(name: &str) -> Option<Isa> {
+        let (number, profile) = name.strip_prefix("armv")?.split_once('-')?;
+        let (major, minor) = number.split_once('.').unwrap_or((number, "0"));
+        let major: u32 = major.parse().ok()?;
+        let minor: u32 = minor.parse().ok()?;
+        let crc = Feature::aarch64("crc").map_or(Isa::NONE, |crc| Isa(crc.bit()));
+        match (major, minor, profile) {
+            (8, 0, "a") => Some(Isa::NONE),
+            (8 | 9, _, "a") | (8, 0, "r") => Some(crc),
+            _ => None,
+        }
+    }
+
+    /// This set with the modifiers of an AArch64 `-march=` or `target` string applied in order,
+    /// each written after a `+`: `crc` turns the CRC32 extension on, `nocrc` turns it off, and
+    /// `nothing` turns off everything before it, which is how gcc's own `<arm_acle.h>` says
+    /// `+nothing+crc`. Every other modifier is left alone.
+    #[must_use]
+    pub fn aarch64_modifiers(self, text: &str) -> Isa {
+        let Some(crc) = Feature::aarch64("crc") else { return self };
+        text.split('+').fold(self, |isa, modifier| match modifier {
+            "crc" => isa.union(Isa(crc.bit())),
+            "nocrc" => isa.minus(Isa(crc.bit())),
+            "nothing" => Isa::NONE,
+            _ => isa,
+        })
+    }
+
+    /// What `-march=` says on AArch64: an architecture and then its modifiers, as in
+    /// `armv8-a+crc+simd`.
+    ///
+    /// An architecture this does not know is taken to have none of the extensions, which is a
+    /// program that could have been faster rather than one that is wrong, and is what every name
+    /// was taken to be before. `native` is the driver's to answer, since only it may ask the
+    /// processor it runs on.
+    #[must_use]
+    pub fn aarch64_march(text: &str) -> Isa {
+        let (arch, modifiers) = text.split_once('+').unwrap_or((text, ""));
+        Isa::aarch64_arch(arch).unwrap_or(Isa::NONE).aarch64_modifiers(modifiers)
+    }
+
+    /// What one AArch64 `target` attribute string makes of a function in a unit built for this
+    /// set.
+    ///
+    /// The options are comma separated. One starting with `+` is modifiers over what the
+    /// function has so far, which is how `target("+crc")` builds one function for the
+    /// instruction whatever the unit is. `arch=` starts again from the architecture it names and
+    /// its modifiers, and a `cpu=` keeps what there is and applies the modifiers after its name,
+    /// since no processor's list is kept here. Anything else, `tune=` or `branch-protection=` or
+    /// `strict-align`, says nothing about the extensions and is accepted as it always was.
+    #[must_use]
+    pub fn aarch64_target(self, text: &str) -> Isa {
+        text.split(',').fold(self, |isa, option| {
+            if option.starts_with('+') {
+                isa.aarch64_modifiers(option)
+            } else if let Some(arch) = option.strip_prefix("arch=") {
+                Isa::aarch64_march(arch)
+            } else if let Some(cpu) = option.strip_prefix("cpu=") {
+                cpu.split_once('+').map_or(isa, |(_, modifiers)| isa.aarch64_modifiers(modifiers))
+            } else {
+                isa
+            }
+        })
     }
 }
 
@@ -651,12 +759,14 @@ impl std::str::FromStr for Isa {
     type Err = String;
 
     /// The comma separated names [`Isa`]'s `Display` writes, each taken alone without what it is
-    /// built over, which is what reading back a set written out needs.
+    /// built over, which is what reading back a set written out needs. The names are unique
+    /// across both machines, so an AArch64 set reads back the same way.
     fn from_str(text: &str) -> Result<Isa, String> {
         let mut isa = Isa::NONE;
         for name in text.split(',').filter(|name| !name.is_empty()) {
-            let feature =
-                Feature::named(name).ok_or_else(|| format!("`{name}` is not an extension"))?;
+            let feature = Feature::named(name)
+                .or_else(|| Feature::aarch64(name))
+                .ok_or_else(|| format!("`{name}` is not an extension"))?;
             isa = isa.union(Isa(feature.bit()));
         }
         Ok(isa)
@@ -892,5 +1002,67 @@ mod tests {
         assert_eq!(isa.to_string().parse::<Isa>(), Ok(isa));
         assert_eq!("".parse::<Isa>(), Ok(Isa::NONE));
         assert!("sse9".parse::<Isa>().is_err());
+        let crc = Isa::aarch64_march("armv8-a+crc");
+        assert_eq!(crc.to_string(), "crc");
+        assert_eq!("crc".parse::<Isa>(), Ok(crc));
+    }
+
+    /// Whether a set has the CRC32 extension.
+    fn has_crc(isa: Isa) -> bool {
+        isa.has(Feature::aarch64("crc").unwrap())
+    }
+
+    #[test]
+    fn crc_is_an_aarch64_name_and_not_an_x86_one() {
+        assert!(Feature::named("crc").is_none() && Feature::aarch64("crc").is_some());
+        assert!(Feature::aarch64("crc32").is_none());
+        assert!(Choices::new().read("crc").is_err());
+        let refused = attribute(&["crc"], Isa::baseline()).unwrap_err();
+        assert_eq!(refused, TargetRefusal::Unknown("crc".to_owned()));
+        // And an AArch64 set defines no x86-64 macro.
+        assert_eq!(Isa::aarch64_march("armv8.1-a").macros().count(), 0);
+    }
+
+    #[test]
+    fn the_aarch64_architectures_from_8_1_have_crc_and_8_0_needs_the_modifier() {
+        // gcc 16's `-dM` for aarch64-linux-gnu defines `__ARM_FEATURE_CRC32` for each of these
+        // and not for plain `armv8-a`.
+        for march in [
+            "armv8-a+crc",
+            "armv8-a+crc+simd",
+            "armv8-a+simd+crc",
+            "armv8.1-a",
+            "armv8.2-a+fp16",
+            "armv8.9-a",
+            "armv9-a",
+            "armv9.4-a",
+            "armv8-r",
+            "armv8-a+nothing+crc",
+        ] {
+            assert!(has_crc(Isa::aarch64_march(march)), "{march}");
+        }
+        for march in ["armv8-a", "armv8-a+simd", "armv8.1-a+nocrc", "armv8-a+crc+nocrc", "bogus"] {
+            assert!(!has_crc(Isa::aarch64_march(march)), "{march}");
+        }
+        assert_eq!(Isa::aarch64_arch("armv8-a"), Some(Isa::NONE));
+        assert_eq!(Isa::aarch64_arch("armv7-a"), None);
+        assert_eq!(Isa::aarch64_arch("cortex-a72"), None);
+    }
+
+    #[test]
+    fn an_aarch64_attribute_string_adds_to_the_unit_or_starts_again() {
+        let plain = Isa::aarch64_march("armv8-a");
+        let crc_unit = Isa::aarch64_march("armv8-a+crc");
+        assert!(has_crc(plain.aarch64_target("+crc")));
+        assert!(has_crc(plain.aarch64_target("+simd+crc")));
+        assert!(has_crc(plain.aarch64_target("+nothing+crc")));
+        assert!(!has_crc(crc_unit.aarch64_target("+nocrc")));
+        assert!(has_crc(crc_unit.aarch64_target("+simd")));
+        assert!(has_crc(plain.aarch64_target("arch=armv8.1-a")));
+        assert!(has_crc(plain.aarch64_target("arch=armv8-a+crc")));
+        assert!(!has_crc(crc_unit.aarch64_target("arch=armv8-a")));
+        assert!(has_crc(plain.aarch64_target("cpu=cortex-a72+crc")));
+        assert!(has_crc(crc_unit.aarch64_target("tune=cortex-a72,branch-protection=standard")));
+        assert!(!has_crc(plain.aarch64_target("strict-align,+crc,+nocrc")));
     }
 }

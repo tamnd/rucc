@@ -90,6 +90,44 @@ for level in 0 1 2; do
 	fi
 done
 
+# The CRC32 and CRC32C steps from <arm_acle.h>, which is AArch64's alone. crc.c checks each step
+# against a bit at a time reading of the same checksum and exits nonzero when one disagrees, and
+# prints the values so gcc's build under -march=armv8-a+crc is the reference as well. rucc builds
+# it once under that flag and once without one, where only the functions carrying target("+crc")
+# may use the steps, which is how a program that chooses its checksum at run time is written.
+case $triple in
+aarch64*)
+	acle=$here/tests/qemu/acle/crc.c
+	"$triple-gcc" -O2 -march=armv8-a+crc -o "$out/acle-reference" "$acle"
+	"$qemu" "$out/acle-reference" >"$out/acle-reference.txt"
+	for march in armv8-a+crc none; do
+		flag=-march=$march
+		[ "$march" = none ] && flag=
+		for level in 0 1 2; do
+			binary=$out/acle-$march-O$level
+			# shellcheck disable=SC2086
+			if ! $rucc --target="$triple" -O$level $flag -o "$binary" "$acle" 2>"$out/build.log"; then
+				printf 'acle %-11s -O%s  did not build\n' "$march" "$level"
+				sed 's/^/    /' "$out/build.log"
+				failed=$((failed + 1))
+			elif ! "$qemu" "$binary" >"$binary.txt" 2>&1; then
+				printf 'acle %-11s -O%s  exited nonzero\n' "$march" "$level"
+				grep -A1 -m5 'software' "$binary.txt" | sed 's/^/    /'
+				tail -5 "$binary.txt" | sed 's/^/    /'
+				failed=$((failed + 1))
+			elif diff -u "$out/acle-reference.txt" "$binary.txt" >"$out/diff"; then
+				printf 'acle %-11s -O%s  ok, %s lines\n' "$march" "$level" "$(wc -l <"$binary.txt")"
+				passed=$((passed + 1))
+			else
+				printf 'acle %-11s -O%s  printed something else than gcc\n' "$march" "$level"
+				head -20 "$out/diff" | sed 's/^/    /'
+				failed=$((failed + 1))
+			fi
+		done
+	done
+	;;
+esac
+
 # The signature corpus from `cargo xtask abi-signatures`, which is where the calling convention is
 # checked rather than the arithmetic. The caller and the callee are each built by rucc and by gcc,
 # and every pairing is linked and run, so a pairing that fails is the two compilers disagreeing

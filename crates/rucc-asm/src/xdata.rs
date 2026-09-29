@@ -417,11 +417,10 @@ fn describe(len: usize, proc: &Proc) -> Result<Record, String> {
         }
         _ => None,
     };
-    if let Some(index) = packed
-        && index < prologue_bytes
-        && len / 4 <= PACKED_LONGEST
-        && let Some(word) = pack(len, &prologue, index)
-    {
+    let word = packed
+        .filter(|&index| index < prologue_bytes && len / 4 <= PACKED_LONGEST)
+        .and_then(|index| pack(len, &prologue, index));
+    if let Some(word) = word {
         return Ok(Record::Packed(word));
     }
 
