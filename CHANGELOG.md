@@ -24,6 +24,7 @@ The M6 release on crates.io. 0.15.2 built and passed on every host and is on Git
 
 ### Fixed
 
+- `__ARM_SIZEOF_WCHAR_T` follows the target's `wchar_t`, so it is 2 on the AArch64 Windows rows, as clang for aarch64-w64-mingw32 has it, and 4 elsewhere. It was 4 everywhere.
 - `setjmp` on the `x86_64-windows-msvc` row passes the calling frame to the C runtime's `_setjmp`, as cl.exe, clang and mingw-w64 do. Microsoft's `<setjmp.h>` calls it with one argument and `longjmp` unwound to whatever RDX held, so on Windows every program that used `longjmp` died, though Wine ran them. rucc ships a `<setjmp.h>` that wraps Microsoft's, and `jmpbuf`, `longjmp` and `realign` in `tests/exec/windows` pass on the windows-2025 runner.
 - `__pragma(...)`, Microsoft's form of `_Pragma` that takes tokens rather than a string, is read on the msvc rows and wherever `-fms-extensions` is given, as in clang. `vcruntime.h` opens every C header with `__pragma(pack(push, 8))`, so no `<stdio.h>` from the MSVC CRT preprocessed.
 - Under Microsoft's extensions a flexible array member may be the only member of a struct or a member of a union, as with cl.exe and clang. `<winioctl.h>` has one in a union, so `<windows.h>` did not compile on the msvc rows.
