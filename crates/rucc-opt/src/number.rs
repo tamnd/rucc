@@ -105,9 +105,8 @@
 //! to the common predecessor is [`crate::hoist`], and it wants the profitability question this pass
 //! does not ask.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value};
 
 use crate::purity::{Callee, Facts};
@@ -158,16 +157,16 @@ impl Pass for Number {
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let facts = an.purity();
         let mut stats = Stats::new();
-        let mut decided = Decided { same: HashMap::new(), gone: Vec::new() };
+        let mut decided = Decided { same: Map::default(), gone: Vec::new() };
 
         for block in func.blocks().collect::<Vec<Block>>() {
-            let mut seen: HashMap<Key, Value> = HashMap::new();
+            let mut seen: Map<Key, Value> = Map::default();
             // The signature is beside the result rather than in the key, because a signature is
             // pushed per call site and never interned, so two calls written the same way have two
             // indices and comparing the indices would answer no to every question asked here. It
             // is compared by value on a hit, which is once per duplicate rather than once per
             // call.
-            let mut calls: HashMap<CallKey, (Sig, Value)> = HashMap::new();
+            let mut calls: Map<CallKey, (Sig, Value)> = Map::default();
             // How many times memory has been written since the top of the block, which is what a
             // `pure` call's answer is good for. Taken before the instruction runs, because a call
             // that reads memory reads the version it was handed.
@@ -220,7 +219,7 @@ struct Decided {
     /// What each removed instruction's result is read as. It is also what an operand is looked up
     /// through while the block is being walked, which is why it is built as the walk goes and
     /// applied to the function at the end rather than either one alone.
-    same: HashMap<Value, Value>,
+    same: Map<Value, Value>,
     /// The instructions on their way out, in the order they were found.
     gone: Vec<Inst>,
 }
@@ -352,7 +351,7 @@ enum Tag {
 /// either a key of `same`, meaning it is on its way out, or a value in `seen`, meaning it is
 /// staying, and it cannot be both, because a value only enters `same` on a hit and a hit never
 /// touches what the table already holds.
-fn key(func: &Func, same: &HashMap<Value, Value>, inst: Inst) -> Option<(Key, Value)> {
+fn key(func: &Func, same: &Map<Value, Value>, inst: Inst) -> Option<(Key, Value)> {
     let data = &func[inst];
     if data.opcode.has_effects() || data.opcode == Opcode::MemEntry {
         return None;
@@ -393,7 +392,7 @@ fn key(func: &Func, same: &HashMap<Value, Value>, inst: Inst) -> Option<(Key, Va
 fn call_key(
     func: &Func,
     facts: &Facts,
-    same: &HashMap<Value, Value>,
+    same: &Map<Value, Value>,
     inst: Inst,
     memory: u32,
 ) -> Option<(CallKey, Sig, Value)> {

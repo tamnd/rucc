@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Counting the reads of each register before a codegen pass keeps physical registers in a list indexed by their number instead of a hashed map, which was about 1% of `-O0` (#2181).
 - `rucc-base` has one fast hasher, `hash::Mix`, with `Map` and `Set` aliases, for maps keyed by numbers and names the compiler made itself. The two private copies of it in memssa and the target name tables use it now, and so does the map `copies::clean` keeps of what each place holds, which hashed with SipHash before (#2183).
+- Value numbering, scalar evolution and the pass that writes the register allocator's edits into a function hash their maps with `rucc_base::hash::Map` instead of SipHash (#2185).
 
 ## 0.15.2
 

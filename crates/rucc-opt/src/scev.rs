@@ -47,9 +47,8 @@
 //! `max_loop_iterations` and `estimate_numbers_of_iterations` and the names do not stop anyone.
 //! Different structs do.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, IntPred, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
@@ -719,15 +718,15 @@ pub struct Scev<'a> {
     func: &'a Func,
     cfg: &'a Cfg,
     loops: &'a Loops,
-    known: HashMap<LoopId, HashMap<Value, Evolution>>,
-    held: HashMap<LoopId, Option<Chrec>>,
+    known: Map<LoopId, Map<Value, Evolution>>,
+    held: Map<LoopId, Option<Chrec>>,
 }
 
 impl<'a> Scev<'a> {
     /// A fresh analysis over these loops, knowing nothing yet.
     #[must_use]
     pub fn new(func: &'a Func, cfg: &'a Cfg, loops: &'a Loops) -> Self {
-        Self { func, cfg, loops, known: HashMap::new(), held: HashMap::new() }
+        Self { func, cfg, loops, known: Map::default(), held: Map::default() }
     }
 
     /// How this value changes across the iterations of this loop.
