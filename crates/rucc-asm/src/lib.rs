@@ -44,6 +44,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-asm/0.16.0")]
 
 mod a64;
+mod arm_unwind;
 mod att;
 mod bytes;
 mod data;
