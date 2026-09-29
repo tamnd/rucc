@@ -113,9 +113,10 @@ pub trait Subject {
 /// lets the two that can be searched be searched.
 #[derive(Debug, Clone, Copy)]
 pub struct Node {
-    /// The branches taken on the head of the subterm, as the name, how many arguments it takes,
-    /// and where to go. Sorted by the first two, which is what [`Node::branch`] needs.
-    pub heads: &'static [(&'static str, usize, u32)],
+    /// The branches taken on the head of the subterm, as the [`Node::key`] of the name, the name,
+    /// how many arguments it takes, and where to go. Sorted by the first three, which is what
+    /// [`Node::branch`] needs and is the same order as sorting by the name and the count.
+    pub heads: &'static [(u128, &'static str, usize, u32)],
     /// The branches taken on the value of a subterm that is a constant, sorted by the value.
     pub ints: &'static [(i128, u32)],
     /// The branches taken when the subterm is the same thing as a binding this pattern already
@@ -137,13 +138,49 @@ impl Node {
     /// A binary search, which is the whole point of the list being sorted. At most one branch can
     /// answer, so nothing about which rule fires depends on the list being in this order rather
     /// than in the order the rules were written.
+    ///
+    /// Each step compares the keys first and only compares the names when the keys agree, which
+    /// for names no longer than sixteen bytes is only on the branch being looked for. Comparing
+    /// the names at every step called `memcmp` at every step, and that was most of what finding a
+    /// branch cost.
     #[must_use]
     pub fn branch(&self, head: &str, arity: usize) -> Option<u32> {
+        // The same number as `Node::key`, made with one copy rather than a byte at a time.
+        let mut bytes = [0; 16];
+        let take = head.len().min(16);
+        bytes[..take].copy_from_slice(&head.as_bytes()[..take]);
+        let key = u128::from_be_bytes(bytes);
         let found = self
             .heads
-            .binary_search_by(|(have, count, _)| have.cmp(&head).then(count.cmp(&arity)))
+            .binary_search_by(|(first, have, count, _)| {
+                first.cmp(&key).then_with(|| have.cmp(&head)).then(count.cmp(&arity))
+            })
             .ok()?;
-        Some(self.heads[found].2)
+        Some(self.heads[found].3)
+    }
+
+    /// The first sixteen bytes of a name as one number, padded with zeros, which orders the way
+    /// the names do.
+    ///
+    /// Reading the bytes most significant first makes comparing two of these the same as
+    /// comparing the bytes one at a time. A name never holds a zero byte, so the padding sorts
+    /// below every byte a name does hold and a name that runs out first is the smaller one, as it
+    /// should be. Two names with one key are only known to be equal when neither is longer than
+    /// sixteen bytes, which is why [`Node::branch`] compares the names as well. A table computes
+    /// the key of each of its names when it is compiled.
+    #[must_use]
+    pub const fn key(name: &str) -> u128 {
+        let bytes = name.as_bytes();
+        let mut key = 0;
+        let mut at = 0;
+        while at < 16 {
+            key <<= 8;
+            if at < bytes.len() {
+                key |= bytes[at] as u128;
+            }
+            at += 1;
+        }
+        key
     }
 
     /// The branch for a constant of this value, if the node has one.
@@ -440,9 +477,14 @@ mod tests {
     /// A node with nothing on it, so that the ones below say only what they are about.
     const NOTHING: Node = Node { heads: &[], ints: &[], same: &[], wildcard: None, accept: &[] };
 
+    /// A branch on a head, with the key a generated table would give it.
+    const fn head(name: &'static str, arity: usize, next: u32) -> (u128, &'static str, usize, u32) {
+        (Node::key(name), name, arity, next)
+    }
+
     static NODES: &[Node] = &[
         // 0, the root.
-        Node { heads: &[("add", 2, 1), ("and", 2, 5)], ..NOTHING },
+        Node { heads: &[head("add", 2, 1), head("and", 2, 5)], ..NOTHING },
         // 1, the first operand.
         Node { wildcard: Some(("x", 2)), ..NOTHING },
         // 2, the second operand.
@@ -613,14 +655,14 @@ mod tests {
     /// finding one rather than by reading to the end.
     #[test]
     fn a_branch_is_found_by_searching_the_node_and_not_by_reading_it() {
-        static WIDE: &[(&str, usize, u32)] = &[
-            ("add.i16", 2, 1),
-            ("add.i32", 2, 2),
-            ("add.i64", 2, 3),
-            ("add.i64", 3, 4),
-            ("sub.i32", 2, 5),
-            ("sub.i64", 2, 6),
-            ("xor.i8", 2, 7),
+        static WIDE: &[(u128, &str, usize, u32)] = &[
+            head("add.i16", 2, 1),
+            head("add.i32", 2, 2),
+            head("add.i64", 2, 3),
+            head("add.i64", 3, 4),
+            head("sub.i32", 2, 5),
+            head("sub.i64", 2, 6),
+            head("xor.i8", 2, 7),
         ];
         let node = Node { heads: WIDE, ..NOTHING };
         assert!(WIDE.is_sorted(), "the search is only a search if the node is in order");
@@ -632,6 +674,31 @@ mod tests {
         // A head no branch is about, and one the node has at another arity, are both nothing.
         assert_eq!(node.branch("mul.i64", 2), None);
         assert_eq!(node.branch("sub.i32", 3), None);
+    }
+
+    /// Names that agree in their first sixteen bytes, and names that run out before that, are
+    /// still told apart, which is what the search has to get right to leave the names alone at
+    /// every step but the last.
+    #[test]
+    fn names_that_share_their_first_sixteen_bytes_are_still_told_apart() {
+        static LONG: &[(u128, &str, usize, u32)] = &[
+            head("load.i64", 1, 1),
+            head("load.i64", 2, 2),
+            head("load.i64.012345678", 1, 3),
+            head("load.i64.012345679", 1, 4),
+            head("load.i64.01234567x", 1, 5),
+            head("load.i64x", 1, 6),
+            head("load.i8", 1, 7),
+        ];
+        let node = Node { heads: LONG, ..NOTHING };
+        assert!(LONG.is_sorted(), "the search is only a search if the node is in order");
+        for &(_, name, arity, next) in LONG {
+            assert_eq!(node.branch(name, arity), Some(next), "{name} with {arity}");
+        }
+        for name in ["load.i6", "load.i64.", "load.i64.0123456", "load.i64.01234567", "load"] {
+            assert_eq!(node.branch(name, 1), None, "{name}");
+        }
+        assert_eq!(node.branch("load.i64.012345677", 1), None);
     }
 
     /// The same for a constant, which is the other kind of branch that can be searched.
@@ -688,8 +755,9 @@ mod tests {
         /// The four ends, and in front of them the node that binds the first operand so that
         /// there is something for a repeat to be a repeat of.
         fn table(second: &'static Node) -> Table {
+            const F: &[(u128, &str, usize, u32)] = &[head("f", 2, 1)];
             let nodes: &'static [Node] = Box::leak(Box::new([
-                Node { heads: &[("f", 2, 1)], ..NOTHING },
+                Node { heads: F, ..NOTHING },
                 Node { wildcard: Some(("x", 2)), ..NOTHING },
                 *second,
                 Node { accept: &[0], ..NOTHING },
@@ -702,7 +770,7 @@ mod tests {
 
         // All three kinds on one node, with a hole behind them.
         static MIXED: Node = Node {
-            heads: &[("k", 0, 3)],
+            heads: &[head("k", 0, 3)],
             ints: &[(7, 4)],
             same: &[(0, 5)],
             wildcard: Some(("y", 6)),
