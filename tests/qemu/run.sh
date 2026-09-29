@@ -59,6 +59,37 @@ for fixture in wide/arithmetic.c divide/constants.c tail/calls.c; do
 	done
 done
 
+# The registers a call keeps only half of. AAPCS64 preserves the low sixty four bits of v8 to v15,
+# and clobber.c, built by gcc, writes the rest and restores only what it owes. values.c keeps
+# sixteen byte values live across calls to it, built by gcc as the reference and by rucc at every
+# level, and each is linked against gcc's clobber.o so the callee is always one that takes the ABI
+# at its word.
+preserved=$here/tests/qemu/preserved
+"$triple-gcc" -O2 -c -o "$out/clobber.o" "$preserved/clobber.c"
+"$triple-gcc" -O2 -o "$out/preserved-reference" "$preserved/values.c" "$out/clobber.o"
+"$qemu" "$out/preserved-reference" >"$out/preserved-reference.txt"
+for level in 0 1 2; do
+	binary=$out/preserved-O$level
+	if ! $rucc --target="$triple" -O$level -c -o "$binary.o" "$preserved/values.c" \
+		2>"$out/build.log" || ! "$triple-gcc" -o "$binary" "$binary.o" "$out/clobber.o" \
+		2>>"$out/build.log"; then
+		printf 'preserved -O%s  did not build\n' "$level"
+		sed 's/^/    /' "$out/build.log"
+		failed=$((failed + 1))
+	elif ! "$qemu" "$binary" >"$binary.txt" 2>&1; then
+		printf 'preserved -O%s  exited nonzero\n' "$level"
+		tail -5 "$binary.txt" | sed 's/^/    /'
+		failed=$((failed + 1))
+	elif diff -u "$out/preserved-reference.txt" "$binary.txt" >"$out/diff"; then
+		printf 'preserved -O%s  ok, %s lines\n' "$level" "$(wc -l <"$binary.txt")"
+		passed=$((passed + 1))
+	else
+		printf 'preserved -O%s  printed something else than gcc\n' "$level"
+		head -20 "$out/diff" | sed 's/^/    /'
+		failed=$((failed + 1))
+	fi
+done
+
 # The signature corpus from `cargo xtask abi-signatures`, which is where the calling convention is
 # checked rather than the arithmetic. The caller and the callee are each built by rucc and by gcc,
 # and every pairing is linked and run, so a pairing that fails is the two compilers disagreeing
