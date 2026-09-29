@@ -797,8 +797,13 @@ impl Unit<'_> {
         // for, so a unit that only declares the function gets nothing out of it unless the
         // promise arrives here. `const` says the result comes from the arguments alone, which
         // is `readnone`, and `pure` says it may read memory, which is `readonly`. The two are
-        // an incompatible pair in the IR and only one of them is ever set.
+        // an incompatible pair in the IR and only one of them is ever set. Neither is kept for a
+        // function that returns through memory, because in the IR the value it returns is a store
+        // through the pointer it was handed, and a call that promised to write nothing would have
+        // that store forgotten and the call deleted. A `_Complex double` is one of those on
+        // Windows x64, which is `execute/20050121-1.c`, and a large enough struct is one anywhere.
         func.attrs.set |= match effects {
+            _ if plan.returns_through_memory() => AttrSet::NONE,
             Effects::Any => AttrSet::NONE,
             Effects::Pure => AttrSet::READONLY,
             Effects::Const => AttrSet::READNONE,

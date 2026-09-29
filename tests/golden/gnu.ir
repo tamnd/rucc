@@ -448,6 +448,18 @@ block0(%0: i32, %1: ptr):
     return %4
 }
 
+func @make_four(ptr sret(32, align 8), i32), linkage(external);
+
+func @asks_for_four(i32) -> i64, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 32, align 8
+    call @make_four(%1, %0) : (ptr sret(32, align 8), i32)
+    %2 = iconst.i64 16
+    %3 = ptr_add %1, %2
+    %4 = load.i64 %3, align 8, tbaa !3
+    return %4
+}
+
 func @reads_the_table(i32) -> i32, linkage(external) {
 block0(%0: i32):
     %1 = global_addr @table
@@ -608,3 +620,4 @@ block0(%0: i32):
 !0 = tbaa "char", offset 0
 !1 = tbaa "int", parent !0, offset 0
 !2 = tbaa "pointer", parent !0, offset 0
+!3 = tbaa "long", parent !0, offset 0

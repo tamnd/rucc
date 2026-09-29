@@ -6213,6 +6213,21 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(text, "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n");
     }
 
+    /// A `pure` or `const` function whose value comes back through memory writes that memory, so
+    /// neither promise reaches the IR for it and a call whose value is read is kept. Windows x64
+    /// returns a `_Complex double` this way, which is `execute/20050121-1.c`.
+    #[test]
+    fn a_pure_function_that_returns_through_memory_is_still_called() {
+        let text = optimized(concat!(
+            "struct four { long a, b, c, d; };\n",
+            "__attribute__((pure)) struct four made(int);\n",
+            "__attribute__((const)) struct four counted(int);\n",
+            "long f(int x) { return made(x).c + counted(x).d; }\n",
+        ));
+        assert!(text.contains("call\tmade"), "{text}");
+        assert!(text.contains("call\tcounted"), "{text}");
+    }
+
     /// A library builtin is the library function of the same name, and the call says so.
     ///
     /// A program writes `__builtin_strlen` rather than `strlen` to reach the function the C

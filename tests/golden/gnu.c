@@ -318,6 +318,15 @@ extern int look(const int *at) __attribute__((pure));
 
 int asks_both(int a, const int *at) { return weigh(a) + look(at); }
 
+// Except where the value comes back through memory. The callee returns it by storing through the
+// pointer it was handed, so a promise to write nothing would have the store forgotten and the call
+// deleted, and neither attribute travels.
+struct four_longs { long a, b, c, d; };
+
+extern struct four_longs make_four(int) __attribute__((pure));
+
+long asks_for_four(int a) { return make_four(a).c; }
+
 // An `asm` written at file scope, whose template is directives and therefore says what the
 // object file itself holds rather than what any function does. A section, a label, the bytes
 // under it, and a second label whose distance from the first is the size: that is the whole of
