@@ -1769,6 +1769,17 @@ impl Checker<'_> {
             (right, then, otherwise)
         } else if is_record(&self.types, left) && compatible(&self.types, left, right) {
             (left, then, otherwise)
+        } else if rucc_types::is_vector(&self.types, left)
+            && rucc_types::is_vector(&self.types, right)
+            && {
+                let (a, b) = (self.types.unqualified(left), self.types.unqualified(right));
+                compatible(&self.types, a, b)
+            }
+        {
+            // Two vectors of one type under a scalar condition, which gcc takes and which the
+            // SSSE3 BLAKE2b in libsodium picks a rotation with. The condition is a scalar here, so
+            // one whole arm is chosen and not one lane from each.
+            (left, then, otherwise)
         } else {
             let (left, right) = (self.spell(left), self.spell(right));
             self.report(
