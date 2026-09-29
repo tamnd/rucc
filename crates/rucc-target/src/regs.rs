@@ -21,7 +21,7 @@
 
 use std::fmt;
 
-use rucc_abi::{AbiDescription, StackArgs};
+use rucc_abi::{AbiDescription, Convention, StackArgs};
 
 /// One class of registers, and the registers in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,9 +475,68 @@ pub struct CallRegs {
     /// all. A prologue that leaves this out on Windows writes a function that faults on its own
     /// locals.
     pub chkstk: Option<Chkstk>,
+    /// Every convention a function on this platform may be compiled for, each with its registers,
+    /// and empty on a platform that has only the one.
+    ///
+    /// x86-64 is where this is not empty. A function written `__attribute__((ms_abi))` on Linux
+    /// takes its arguments where Windows puts them and preserves what Windows preserves, and
+    /// everything about it that is the platform's rather than the convention's stays Linux's: the
+    /// canary is still at `%fs:40`, nothing probes a large frame and the frame pointer still goes
+    /// up first. So a convention on a platform is its own set of registers and not the other
+    /// platform's set, and this list is where [`CallRegs::under`] finds it. Every set on one
+    /// platform carries the same list, which is what lets a function of one convention find the
+    /// registers of a function of the other that it calls.
+    pub conventions: Conventions,
 }
 
+/// The conventions one platform has and the registers each of them uses, which is
+/// [`CallRegs::conventions`].
+///
+/// A list of references between statics that name each other, so the two traits a derive would
+/// write are written by hand: a derived [`fmt::Debug`] would print a set of registers that holds
+/// this list that holds the same set again, and never stop, and so would a derived comparison.
+/// Two lists are the same when they name the same conventions and the same sets of registers,
+/// which is a question about where the sets are and not about what is in them.
+#[derive(Clone, Copy)]
+pub struct Conventions(pub &'static [(Convention, &'static CallRegs)]);
+
+impl Conventions {
+    /// The list of a platform with one convention, which every convention but x86-64's is.
+    pub const ONLY: Conventions = Conventions(&[]);
+}
+
+impl fmt::Debug for Conventions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.iter().map(|(convention, _)| convention)).finish()
+    }
+}
+
+impl PartialEq for Conventions {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(other.0).all(|((a, x), (b, y))| a == b && std::ptr::eq(*x, *y))
+    }
+}
+
+impl Eq for Conventions {}
+
 impl CallRegs {
+    /// The registers a function of that convention uses on this platform, and [`None`] for a
+    /// convention the platform does not have.
+    ///
+    /// [`Convention::Target`] is always an answer, and it is the platform's own set rather than
+    /// this one: asked of the set an `ms_abi` function on Linux uses, it gives back SysV, which is
+    /// what a call from that function to an ordinary one wants. A platform with one convention
+    /// has no list, and there this set is the answer.
+    #[must_use]
+    pub fn under(&self, convention: Convention) -> Option<&CallRegs> {
+        match self.conventions.0.iter().find(|(named, _)| *named == convention) {
+            Some(&(_, regs)) => Some(regs),
+            None if convention == Convention::Target => Some(self),
+            None => None,
+        }
+    }
+
     /// The number DWARF gives that register, or `None` for one it has no column for.
     ///
     /// The x87 stack is the case that answers `None` on x86-64, and it is not an omission: a
@@ -819,6 +878,7 @@ mod tests {
             guard: None,
             trace: None,
             chkstk: None,
+            conventions: Conventions::ONLY,
         }
     }
 

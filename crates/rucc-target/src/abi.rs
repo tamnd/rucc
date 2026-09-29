@@ -38,7 +38,7 @@ use rucc_abi::abis;
 
 #[doc(inline)]
 pub use rucc_abi::{
-    AbiDescription, Arg, Call, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, Variadic,
+    AbiDescription, Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, Variadic,
 };
 
 use crate::TargetInfo;
@@ -57,6 +57,16 @@ impl TargetInfo {
     #[must_use]
     pub fn call(&self) -> Option<Call> {
         abis::for_target(self.tuple).map(AbiDescription::call)
+    }
+
+    /// The same for a function of that convention, which is [`TargetInfo::call`] for the target's
+    /// own and [`None`] for one this target does not have.
+    ///
+    /// Only the passing changes. What a type is stays the target's, so the shape a caller hands
+    /// in is the same shape whichever convention it asks about.
+    #[must_use]
+    pub fn call_under(&self, convention: Convention) -> Option<Call> {
+        abis::for_convention(self.tuple, convention).map(AbiDescription::call)
     }
 }
 

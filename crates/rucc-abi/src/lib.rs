@@ -69,6 +69,7 @@ pub mod describe;
 pub mod layout;
 pub mod shape;
 
+pub use abis::Convention;
 pub use classify::Call;
 pub use describe::{
     AbiDescription, Banks, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel,

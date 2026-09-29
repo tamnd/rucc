@@ -321,6 +321,85 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     narrow: Narrow::Unspecified,
 };
 
+/// Which calling convention one function is defined and called with.
+///
+/// A target has one convention, and nearly every function in a program is defined and called with
+/// it, which is what [`Convention::Target`] says and why it is the default. x86-64 is the one
+/// machine with two conventions over one register file, and gcc lets a program pick the other one
+/// for a single function with `__attribute__((ms_abi))` or `__attribute__((sysv_abi))`. UEFI is the
+/// reason that exists: its firmware interfaces are Windows x64 whatever the loader is built on, so
+/// a UEFI application built with a Linux toolchain calls every one of them through a pointer whose
+/// type says `ms_abi`. Wine is the other user, going the other way.
+///
+/// The two named conventions are only ever the one the target does not already follow. The front
+/// end writes `ms_abi` on a Windows target as [`Convention::Target`], which is what makes the
+/// attribute change nothing there, not even which function type a declaration has: every header
+/// mingw-w64 ships spells its own convention out on some declaration and not on the next.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Convention {
+    /// Whatever the target follows, which is what a function without either attribute has.
+    #[default]
+    Target,
+    /// Windows x64, on an x86-64 target that is not Windows.
+    Ms,
+    /// SysV AMD64, on an x86-64 target that is Windows.
+    Sysv,
+}
+
+impl Convention {
+    /// The attribute that asks for this one, which is what a diagnostic and a dump call it, and
+    /// [`None`] for the target's own, which is asked for by writing nothing.
+    #[must_use]
+    pub const fn attribute(self) -> Option<&'static str> {
+        match self {
+            Self::Target => None,
+            Self::Ms => Some("ms_abi"),
+            Self::Sysv => Some("sysv_abi"),
+        }
+    }
+
+    /// The convention an attribute asks for on this target, and [`None`] for a name that is not
+    /// one of the two or a target that has neither.
+    ///
+    /// The one the target already follows comes back as [`Convention::Target`], which is the
+    /// whole of the normalising the paragraph on the type promises. Only x86-64 has the pair, and
+    /// gcc knows neither name anywhere else.
+    #[must_use]
+    pub fn asked(target: TargetTuple, name: &str) -> Option<Self> {
+        if target.arch() != Arch::X86_64 {
+            return None;
+        }
+        let windows = target.os() == Os::Windows;
+        match name {
+            "ms_abi" if windows => Some(Self::Target),
+            "ms_abi" => Some(Self::Ms),
+            "sysv_abi" if windows => Some(Self::Sysv),
+            "sysv_abi" => Some(Self::Target),
+            _ => None,
+        }
+    }
+}
+
+/// The ABI a function of that convention follows on this target, which is [`for_target`] for the
+/// target's own and the other description on x86-64 for the other one.
+///
+/// Only the passing half of the ABI changes. What a type is stays the target's, so a `long double`
+/// is still the eighty bit x87 format in sixteen bytes in an `ms_abi` function on Linux, and the
+/// Windows description answers for it the way it answers for any sixteen byte scalar, which is by
+/// the address of a copy. gcc 13 passes it that way too.
+#[must_use]
+pub fn for_convention(
+    target: TargetTuple,
+    convention: Convention,
+) -> Option<&'static AbiDescription> {
+    match (convention, target.arch()) {
+        (Convention::Target, _) => for_target(target),
+        (Convention::Ms, Arch::X86_64) => Some(&WIN64),
+        (Convention::Sysv, Arch::X86_64) => Some(&SYSV_AMD64),
+        _ => None,
+    }
+}
+
 /// Every ABI described here, which is what the report and the tests iterate.
 pub static DESCRIBED: &[&AbiDescription] =
     &[&SYSV_AMD64, &AAPCS64, &DARWIN_ARM64, &WIN64, &RISCV_LP64D, &I386_SYSV];

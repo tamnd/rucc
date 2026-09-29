@@ -19,10 +19,10 @@
 //! module documentation in `src/abis.rs` records why the rest of that ABI cannot be described
 //! yet, and a demonstration that only ever ran on the easy ones would be worth less.
 
-use rucc_abi::abis::{DESCRIBED, for_target};
+use rucc_abi::abis::{DESCRIBED, SYSV_AMD64, WIN64, for_convention, for_target};
 use rucc_abi::{
-    AbiDescription, Arg, Banks, Format, Narrow, Pass, ReturnPointer, Rule, Scalar, Scalars, Short,
-    Slot, StackArgs, Test, Travel, Variadic, pieces, record,
+    AbiDescription, Arg, Banks, Convention, Format, Narrow, Pass, ReturnPointer, Rule, Scalar,
+    Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
 };
 use rucc_tuple::{TARGETS, TargetEntry};
 
@@ -201,6 +201,26 @@ fn windows_on_aarch64_gets_no_answer_rather_than_the_almost_right_one() {
     // AAPCS64 here would be right for most programs and wrong for the ones that call `printf`,
     // which is exactly the failure the crate exists to avoid.
     assert!(for_target(target).is_none());
+}
+
+#[test]
+fn the_other_x86_64_convention_is_the_other_description_and_nothing_else_has_one() {
+    let linux = "x86_64-unknown-linux-gnu".parse().expect("a row in the target table");
+    let windows = "x86_64-pc-windows-gnu".parse().expect("a row in the target table");
+    let arm = "aarch64-unknown-linux-gnu".parse().expect("a row in the target table");
+    // The attribute naming the convention a target already has is the target's own, which is
+    // what keeps `ms_abi` on Windows from making a second function type out of the first.
+    assert_eq!(Convention::asked(linux, "sysv_abi"), Some(Convention::Target));
+    assert_eq!(Convention::asked(linux, "ms_abi"), Some(Convention::Ms));
+    assert_eq!(Convention::asked(windows, "ms_abi"), Some(Convention::Target));
+    assert_eq!(Convention::asked(windows, "sysv_abi"), Some(Convention::Sysv));
+    assert_eq!(Convention::asked(arm, "ms_abi"), None);
+    assert_eq!(Convention::asked(linux, "stdcall"), None);
+    let named = |abi: Option<&'static AbiDescription>| abi.map(|abi| abi.name);
+    assert_eq!(named(for_convention(linux, Convention::Ms)), Some(WIN64.name));
+    assert_eq!(named(for_convention(windows, Convention::Sysv)), Some(SYSV_AMD64.name));
+    assert_eq!(named(for_convention(windows, Convention::Target)), Some(WIN64.name));
+    assert!(for_convention(arm, Convention::Ms).is_none());
 }
 
 /// The s390x ELF ABI, written here rather than in `src/`.

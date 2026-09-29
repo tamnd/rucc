@@ -814,6 +814,8 @@ const fn aapcs64(
         trace: None,
         // Linux and Apple both grow a stack by faulting, as System V does on x86-64.
         chkstk: None,
+        // One convention on this machine, since gcc has no attribute that picks another here.
+        conventions: crate::Conventions::ONLY,
     }
 }
 
