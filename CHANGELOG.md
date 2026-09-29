@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A file-scope `register T *x asm("x18")` on AArch64 is read as the register, which is how mingw-w64's `winnt.h` declares the TEB for `NtCurrentTeb`, and `tests/exec/windows/x18.sh` checks that nothing rung 0 compiles for Windows on ARM64 writes x18 or w18. Any other global register variable is still refused. (#2071)
+
 ## 0.16.1
 
 The W4 release on crates.io. The v0.16.0 tag stopped at the release gate and published nothing, because two let chains had come in with the AArch64 Windows work, and the workspace still builds with Rust 1.85. This release takes them out (#2215) and carries what else has landed since: the Windows ARM64 calling convention, unwind tables for compiled AArch64 Windows functions, and a fix for `setjmp` on x86_64-windows-gnu.

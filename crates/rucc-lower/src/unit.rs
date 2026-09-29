@@ -653,6 +653,12 @@ impl Unit<'_> {
             // that declares it, and the body is what makes it. Nothing is emitted here.
             return;
         }
+        // A register kept for the whole program, `register void *teb asm ("x18")`, is the
+        // register and not memory, so there is nothing to lay out. Every read of it is a read of
+        // the register, made where it stands.
+        if node.register.is_some() {
+            return;
+        }
         // A second name for something else is not an object of its own, so nothing is laid out
         // and no image is built. It is held back until the rest of the file has been walked,
         // because what it points at may be below it.
