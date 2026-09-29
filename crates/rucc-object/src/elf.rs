@@ -61,7 +61,7 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
 /// instruction here asks through a field.
 pub(crate) fn r_type_aarch64(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
-        Reference::Field(fixup) => elf::RelocationType(fixup.elf()),
+        Reference::Field(fixup) => elf::RelocationType(fixup.elf()?),
         Reference::Address { bytes: 8 } => elf::R_AARCH64_ABS64,
         Reference::Address { bytes: 4 } => elf::R_AARCH64_ABS32,
         Reference::Data | Reference::Away => elf::R_AARCH64_PREL32,

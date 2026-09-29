@@ -286,6 +286,8 @@ fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
                 "gottprel_lo12" => Operator::GotTprelLo12,
                 "tprel_hi12" => Operator::TprelHi12,
                 "tprel_lo12_nc" => Operator::TprelLo12Nc,
+                "secrel_hi12" => Operator::SecrelHi12,
+                "secrel_lo12" => Operator::SecrelLo12,
                 _ => return Err(error(text)),
             };
             (operator, name)

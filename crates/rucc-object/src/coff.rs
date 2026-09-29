@@ -27,6 +27,7 @@
 use object::RelocationFlags;
 use object::pe;
 use object::write::Object as Writer;
+use rucc_target::aarch64::Fixup;
 
 use crate::section::Reference;
 
@@ -67,6 +68,106 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
 /// The same, as the writer underneath wants it.
 pub(crate) fn reloc(reference: Reference, after: u8) -> Option<RelocationFlags> {
     typ(reference, after).map(|typ| RelocationFlags::Coff { typ })
+}
+
+/// Which relocation of an AArch64 file one reference is.
+///
+/// A field of an instruction is the same field ELF names, less the table slots, which are not how
+/// this platform reaches anything, and the offsets from the thread pointer, which this platform
+/// reaches through the offset from the start of `.tls` instead. The literal load has nothing either:
+/// the format has no nineteen bit distance to data, only to code, and gas and clang never ask for
+/// one. The six loads and stores are one relocation here, since the linker reads how far to shift
+/// the low bits from the instruction rather than from the type.
+///
+/// The distance written as data is `REL32`, which counts from the byte after the four it fills,
+/// and the writer underneath adds the four back to the addend the way it does for the x86 types,
+/// so the linker's answer is the distance from the hole that ELF gives.
+pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
+    Some(match reference {
+        Reference::Field(Fixup::Call26 | Fixup::Jump26) => pe::IMAGE_REL_ARM64_BRANCH26,
+        Reference::Field(Fixup::CondBr19) => pe::IMAGE_REL_ARM64_BRANCH19,
+        Reference::Field(Fixup::TestBr14) => pe::IMAGE_REL_ARM64_BRANCH14,
+        Reference::Field(Fixup::AdrLo21) => pe::IMAGE_REL_ARM64_REL21,
+        Reference::Field(Fixup::AdrPage21) => pe::IMAGE_REL_ARM64_PAGEBASE_REL21,
+        Reference::Field(Fixup::AddLo12) => pe::IMAGE_REL_ARM64_PAGEOFFSET_12A,
+        Reference::Field(
+            Fixup::Ldst8Lo12
+            | Fixup::Ldst16Lo12
+            | Fixup::Ldst32Lo12
+            | Fixup::Ldst64Lo12
+            | Fixup::Ldst128Lo12,
+        ) => pe::IMAGE_REL_ARM64_PAGEOFFSET_12L,
+        Reference::Field(Fixup::SecrelHigh12A) => pe::IMAGE_REL_ARM64_SECREL_HIGH12A,
+        Reference::Field(Fixup::SecrelLow12A) => pe::IMAGE_REL_ARM64_SECREL_LOW12A,
+        Reference::Field(Fixup::SecrelLow12L) => pe::IMAGE_REL_ARM64_SECREL_LOW12L,
+        Reference::Field(
+            Fixup::Literal19
+            | Fixup::GotPage21
+            | Fixup::GotLo12
+            | Fixup::GotTprelPage21
+            | Fixup::GotTprelLo12Nc
+            | Fixup::TprelHi12
+            | Fixup::TprelLo12Nc,
+        ) => return None,
+        Reference::Address { bytes: 8 } => pe::IMAGE_REL_ARM64_ADDR64,
+        Reference::Address { bytes: 4 } => pe::IMAGE_REL_ARM64_ADDR32,
+        Reference::Image => pe::IMAGE_REL_ARM64_ADDR32NB,
+        Reference::Section => pe::IMAGE_REL_ARM64_SECREL,
+        Reference::Data | Reference::Away => pe::IMAGE_REL_ARM64_REL32,
+        Reference::Call | Reference::Got | Reference::GotBare | Reference::GotKept => return None,
+        Reference::Thread | Reference::Address { .. } => return None,
+    })
+}
+
+/// An instruction with the addend of its relocation written into the field the linker fills, or
+/// why it cannot be.
+///
+/// A COFF relocation has no addend, so the number added to the name goes where the linker will
+/// find it, which for data is the bytes being relocated and for an instruction is the field. The
+/// writer underneath does the first and refuses the second, so this is the second. What each field
+/// holds is what lld and link.exe read back out of it. The page `adrp` names is counted from the
+/// name plus the whole addend, so its field is the addend in bytes, all twenty one bits of it. The
+/// low twelve bits are added to the low twelve bits of the name, which gives the low twelve bits of
+/// the sum whatever the addend is, carried or not, since what is carried out of them is the page's
+/// business. A load or store keeps its twelve bits shifted by the size of the access, so the addend
+/// has to be a multiple of that size, which it is for any field of a variable the access is of.
+///
+/// A branch is refused. Its field is combined with the distance in a way that has changed between
+/// linkers, and a branch to a name plus a number is not something a compiler writes. The two halves
+/// of an offset into `.tls` are refused too, because the high half is worked out from the name
+/// alone and a carry out of the low half, which the addend can cause, would be lost between them.
+pub(crate) fn carry(fixup: Fixup, word: u32, addend: i64) -> Result<u32, String> {
+    if addend == 0 {
+        return Ok(word);
+    }
+    let low = u32::try_from(addend & 0xfff).expect("twelve bits");
+    let refused = || format!("{} cannot carry {addend} added to its name", fixup.name());
+    match fixup {
+        Fixup::AdrPage21 | Fixup::AdrLo21 => {
+            let bits = u32::try_from(addend + (1 << 20)).ok().filter(|&bits| bits < 1 << 21);
+            let bits = bits.ok_or_else(refused)? ^ (1 << 20);
+            Ok(word & !(3 << 29 | 0x7ffff << 5) | (bits & 3) << 29 | (bits >> 2) << 5)
+        }
+        Fixup::AddLo12 => Ok(word & !(0xfff << 10) | low << 10),
+        Fixup::Ldst8Lo12
+        | Fixup::Ldst16Lo12
+        | Fixup::Ldst32Lo12
+        | Fixup::Ldst64Lo12
+        | Fixup::Ldst128Lo12 => {
+            let scale = match fixup {
+                Fixup::Ldst8Lo12 => 0,
+                Fixup::Ldst16Lo12 => 1,
+                Fixup::Ldst32Lo12 => 2,
+                Fixup::Ldst64Lo12 => 3,
+                _ => 4,
+            };
+            if low & ((1 << scale) - 1) != 0 {
+                return Err(refused());
+            }
+            Ok(word & !(0xfff << 10) | (low >> scale) << 10)
+        }
+        _ => Err(refused()),
+    }
 }
 
 /// Nothing, which is what this format has for a variable the loader writes into before anything

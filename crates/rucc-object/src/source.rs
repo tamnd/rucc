@@ -505,24 +505,28 @@ pub fn assembled_described(
     target: &TargetInfo,
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
-    // AArch64 on ELF and Mach-O, and x86-64 on ELF and COFF. What an AArch64 file for Windows would
-    // need is a table of its own relocations and an unwind table of its own shape, and neither is
-    // written yet. Mach-O is a function of its own, since what it answers differently is most of
-    // what is below.
+    // Both machines on ELF and COFF, and AArch64 on Mach-O, which is a function of its own since
+    // what it answers differently is most of what is below.
     let (flavour, machine) = match (Flavour::of(target), target.tuple.arch()) {
         (Some(flavour), Arch::X86_64) => (flavour, Architecture::X86_64),
-        (Some(Flavour::Elf), Arch::Aarch64) => (Flavour::Elf, Architecture::Aarch64),
+        (Some(flavour), Arch::Aarch64) => (flavour, Architecture::Aarch64),
         (None, Arch::Aarch64) if target.object_format == ObjectFormat::MachO => {
             return crate::macho::write(input, target, info);
         }
         _ => return Err(Error::Format { triple: target.tuple.to_string() }),
     };
-    let flags_of = |kind, after| match machine {
-        Architecture::Aarch64 => {
+    let flags_of = |kind, after| match (machine, flavour) {
+        (Architecture::Aarch64, Flavour::Coff) => {
+            crate::coff::arm64(kind).map(|typ| RelocationFlags::Coff { typ })
+        }
+        (Architecture::Aarch64, _) => {
             crate::elf::r_type_aarch64(kind).map(|r_type| RelocationFlags::Elf { r_type })
         }
         _ => flavour.reloc(kind, after),
     };
+    // Whether the addend of a field of an instruction goes into the field rather than into the
+    // relocation, which is what a format without addends does. See [`crate::coff::carry`].
+    let carried = machine == Architecture::Aarch64 && flavour == Flavour::Coff;
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
 
     // Every section first, because a symbol says which one it is in and a relocation says which one
@@ -649,6 +653,21 @@ pub fn assembled_described(
             let flags = flags_of(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
                 why: format!("no relocation is {:?}", reloc.kind),
             })?;
+            let addend = match reloc.kind {
+                crate::section::Reference::Field(fixup) if carried => {
+                    let data = obj.section_mut(*id).data_mut();
+                    let Some(bytes) = data.get_mut(reloc.at..reloc.at + 4) else {
+                        let why = format!("a field at {} is past the end of its section", reloc.at);
+                        return Err(Error::Refused { why });
+                    };
+                    let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    let word = crate::coff::carry(fixup, word, addend)
+                        .map_err(|why| Error::Refused { why })?;
+                    bytes.copy_from_slice(&word.to_le_bytes());
+                    0
+                }
+                _ => addend,
+            };
             obj.add_relocation(*id, Relocation { offset: reloc.at as u64, symbol, addend, flags })
                 .map_err(|why| Error::Refused { why: why.to_string() })?;
         }
@@ -1180,9 +1199,9 @@ mod tests {
             names: Vec::new(),
             subsections: false,
         };
-        let elsewhere = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Msvc));
+        let elsewhere = TargetInfo::new(Triple::new(TargetArch::Riscv64, Os::Linux, Env::Gnu));
         let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
-        assert!(format!("{why}").contains("aarch64"), "{why}");
+        assert!(format!("{why}").contains("riscv64"), "{why}");
     }
 
     #[test]
@@ -1246,6 +1265,143 @@ mod tests {
         );
         assert_eq!(relocs(".data"), [(8, elf::R_AARCH64_ABS64, 0)]);
         assert!(file.symbols().all(|s| s.name() != Ok(".Ltable")), "a label only this file sees");
+    }
+
+    #[test]
+    fn a_file_of_assembly_for_aarch64_windows_carries_its_addends_in_the_instructions() {
+        // The same instructions as the ELF test above, and a load of the eighth byte of the table,
+        // a `bl` to a name, then the two halves of an offset into `.tls`. COFF has no addend field,
+        // so the eight goes into the page `adrp` names, into the low twelve bits `add` carries and,
+        // divided by the size of the access, into the offset of the load. A distance written as
+        // data is `REL32`, which counts from the end of its four bytes, so four more is in them.
+        let adrp = 0x9000_0000u32;
+        let add = 0x9100_0000u32;
+        let ldr = 0xf940_0000u32;
+        let bl = 0x9400_0000u32;
+        let words = [adrp, add, ldr, bl, add | 1 << 22, add];
+        let mut text = part(".text", words.iter().flat_map(|word| word.to_le_bytes()).collect());
+        let field = |at, symbol: &str, fixup, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Field(fixup),
+            addend,
+            after: 0,
+        };
+        text.relocs = vec![
+            field(0, "table", Fixup::AdrPage21, 8),
+            field(4, "table", Fixup::AddLo12, 8),
+            field(8, "table", Fixup::Ldst64Lo12, 8),
+            field(12, "g", Fixup::Call26, 0),
+            field(16, "counter", Fixup::SecrelHigh12A, 0),
+            field(20, "counter", Fixup::SecrelLow12A, 0),
+        ];
+        let mut data = part(".data", vec![0; 16]);
+        data.relocs = vec![
+            Reloc {
+                at: 0,
+                symbol: "table".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 8,
+                after: 0,
+            },
+            Reloc { at: 8, symbol: "g".to_owned(), kind: Reference::Data, addend: 0, after: 0 },
+            Reloc {
+                at: 12,
+                symbol: "table".to_owned(),
+                kind: Reference::Image,
+                addend: 0,
+                after: 0,
+            },
+        ];
+        let mut table = at("table", 0, Sort::Object, Binding::Global);
+        table.at = Held::In { part: 1, offset: 0 };
+        let undefined =
+            |name| Name { at: Held::Undefined, ..at(name, 0, Sort::Untyped, Binding::Global) };
+        let input = Assembled {
+            parts: vec![text, data],
+            names: vec![table, undefined("g"), undefined("counter")],
+            subsections: false,
+        };
+        let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Gnu));
+        let bytes = assembled(&input, &target).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert_eq!(file.format(), object::BinaryFormat::Coff);
+        assert_eq!(file.architecture(), Architecture::Aarch64);
+        let relocs = |name: &str| -> Vec<(u64, u16, String)> {
+            let section = file.section_by_name(name).expect("the section");
+            section
+                .relocations()
+                .map(|(at, reloc)| {
+                    let RelocationFlags::Coff { typ } = reloc.flags() else { panic!("COFF") };
+                    let object::RelocationTarget::Symbol(symbol) = reloc.target() else {
+                        panic!("a symbol")
+                    };
+                    let symbol = file.symbol_by_index(symbol).expect("the symbol");
+                    (at, typ.0, symbol.name().expect("a name").to_owned())
+                })
+                .collect()
+        };
+        let named = |at, typ: pe::RelocationType, name: &str| (at, typ.0, name.to_owned());
+        assert_eq!(
+            relocs(".text"),
+            [
+                named(0, pe::IMAGE_REL_ARM64_PAGEBASE_REL21, "table"),
+                named(4, pe::IMAGE_REL_ARM64_PAGEOFFSET_12A, "table"),
+                named(8, pe::IMAGE_REL_ARM64_PAGEOFFSET_12L, "table"),
+                named(12, pe::IMAGE_REL_ARM64_BRANCH26, "g"),
+                named(16, pe::IMAGE_REL_ARM64_SECREL_HIGH12A, "counter"),
+                named(20, pe::IMAGE_REL_ARM64_SECREL_LOW12A, "counter"),
+            ]
+        );
+        assert_eq!(
+            relocs(".data"),
+            [
+                named(0, pe::IMAGE_REL_ARM64_ADDR64, "table"),
+                named(8, pe::IMAGE_REL_ARM64_REL32, "g"),
+                named(12, pe::IMAGE_REL_ARM64_ADDR32NB, "table"),
+            ]
+        );
+        let text = file.section_by_name(".text").expect("the section");
+        let text = text.data().expect("the bytes");
+        let word = |nth: usize| u32::from_le_bytes(text[nth * 4..nth * 4 + 4].try_into().unwrap());
+        assert_eq!(word(0), adrp | 2 << 5, "eight bytes is immhi two and immlo nothing");
+        assert_eq!(word(1), add | 8 << 10);
+        assert_eq!(word(2), ldr | 1 << 10, "eight bytes is one doubleword");
+        assert_eq!([word(3), word(4), word(5)], [bl, add | 1 << 22, add]);
+        let data = file.section_by_name(".data").expect("the section");
+        let data = data.data().expect("the bytes");
+        assert_eq!(data[..8], 8u64.to_le_bytes());
+        assert_eq!(data[8..12], 4u32.to_le_bytes());
+    }
+
+    #[test]
+    fn an_addend_an_aarch64_coff_field_cannot_carry_is_refused() {
+        // A load of four bytes cannot be told to start two bytes in, since its offset is counted in
+        // fours, and a branch to a name and a number is not something the field can say for every
+        // linker. Both are refused rather than written as something close.
+        for (word, fixup, addend) in
+            [(0xb940_0000u32, Fixup::Ldst32Lo12, 2), (0x9400_0000, Fixup::Call26, 4)]
+        {
+            let mut text = part(".text", word.to_le_bytes().to_vec());
+            text.relocs = vec![Reloc {
+                at: 0,
+                symbol: "g".to_owned(),
+                kind: Reference::Field(fixup),
+                addend,
+                after: 0,
+            }];
+            let input = Assembled {
+                parts: vec![text],
+                names: vec![Name {
+                    at: Held::Undefined,
+                    ..at("g", 0, Sort::Untyped, Binding::Global)
+                }],
+                subsections: false,
+            };
+            let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Gnu));
+            let why = assembled(&input, &target).expect_err("a field that cannot say it");
+            assert!(format!("{why}").contains(fixup.name()), "{why}");
+        }
     }
 
     #[test]
