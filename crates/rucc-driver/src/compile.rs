@@ -2517,11 +2517,11 @@ mod tests {
     #[test]
     fn every_shipped_header_can_be_included_twice() {
         // This is x86-64, and `<arm_neon.h>` is for AArch64 only, so it is held to the same
-        // thing by the AArch64 test below. `<intrin.h>` and `<vadefs.h>` are the library's
-        // anywhere but an msvc row, where they go on to find it, and there is no library here.
+        // thing by the AArch64 test below. `<intrin.h>`, `<setjmp.h>` and `<vadefs.h>` wrap the
+        // library's, which they go on to find, and there is no library here.
         let once: String = rucc_session::runtime::names()
             .iter()
-            .filter(|name| !["arm_neon.h", "intrin.h", "vadefs.h"].contains(*name))
+            .filter(|name| !["arm_neon.h", "intrin.h", "setjmp.h", "vadefs.h"].contains(*name))
             .map(|name| format!("#include <{name}>\n"))
             .collect();
         let twice = once.repeat(2);
