@@ -264,6 +264,12 @@ pub enum Operator {
     TprelHi12,
     /// The low twelve bits of it, `:tprel_lo12_nc:`.
     TprelLo12Nc,
+    /// Bits twelve to twenty three of the offset from the start of the section, `:secrel_hi12:`,
+    /// which is how a Windows program finds a thread-local variable in its block once the block's
+    /// address has been read out of the thread's slot for the image.
+    SecrelHi12,
+    /// The low twelve bits of it, `:secrel_lo12:`.
+    SecrelLo12,
 }
 
 /// What is added to the base register of an address.
@@ -347,8 +353,10 @@ pub enum Value {
 
 /// How the zeros an instruction was written with are to be filled in.
 ///
-/// Each of these is one relocation type in the ELF ABI for this machine, and the names are that
-/// document's without the `R_AARCH64_` in front.
+/// Each of these but the last three is one relocation type in the ELF ABI for this machine, and the
+/// names are that document's without the `R_AARCH64_` in front. The last three are the offset from
+/// the start of the section, which ELF has no relocation for on this machine and COFF does, and
+/// their names are COFF's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fixup {
     /// The distance to where `b` goes, in words, in twenty six bits.
@@ -389,13 +397,21 @@ pub enum Fixup {
     TprelHi12,
     /// The low twelve bits of it, for `add`.
     TprelLo12Nc,
+    /// Bits twelve to twenty three of the offset from the start of the section, for `add` with a
+    /// shift.
+    SecrelHigh12A,
+    /// The low twelve bits of it, for `add`.
+    SecrelLow12A,
+    /// The low twelve bits of it, as the offset of an access of the size the instruction says,
+    /// which carries them divided by that size.
+    SecrelLow12L,
 }
 
 impl Fixup {
-    /// The relocation type the ELF ABI gives it.
+    /// The relocation type the ELF ABI gives it, or `None` for the three it has no type for.
     #[must_use]
-    pub fn elf(self) -> u32 {
-        match self {
+    pub fn elf(self) -> Option<u32> {
+        Some(match self {
             Fixup::Literal19 => 273,
             Fixup::AdrLo21 => 274,
             Fixup::AdrPage21 => 275,
@@ -415,7 +431,8 @@ impl Fixup {
             Fixup::GotTprelLo12Nc => 542,
             Fixup::TprelHi12 => 549,
             Fixup::TprelLo12Nc => 551,
-        }
+            Fixup::SecrelHigh12A | Fixup::SecrelLow12A | Fixup::SecrelLow12L => return None,
+        })
     }
 
     /// The name the ELF ABI gives it, which is what `readelf` and `objdump` print.
@@ -441,6 +458,9 @@ impl Fixup {
             Fixup::GotTprelLo12Nc => "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC",
             Fixup::TprelHi12 => "R_AARCH64_TLSLE_ADD_TPREL_HI12",
             Fixup::TprelLo12Nc => "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC",
+            Fixup::SecrelHigh12A => "IMAGE_REL_ARM64_SECREL_HIGH12A",
+            Fixup::SecrelLow12A => "IMAGE_REL_ARM64_SECREL_LOW12A",
+            Fixup::SecrelLow12L => "IMAGE_REL_ARM64_SECREL_LOW12L",
         }
     }
 
@@ -466,8 +486,8 @@ impl Fixup {
                 }
                 Some(word | adr_bits(value >> 12)?)
             }
-            Fixup::AddLo12 | Fixup::TprelLo12Nc => Some(word | low << 10),
-            Fixup::TprelHi12 => {
+            Fixup::AddLo12 | Fixup::TprelLo12Nc | Fixup::SecrelLow12A => Some(word | low << 10),
+            Fixup::TprelHi12 | Fixup::SecrelHigh12A => {
                 let high = u32::try_from(value >> 12).ok().filter(|&high| high < 1 << 12)?;
                 (value >= 0).then_some(word | high << 10)
             }
@@ -476,8 +496,17 @@ impl Fixup {
             Fixup::Ldst32Lo12 => scaled_low(word, low, 2),
             Fixup::Ldst64Lo12 | Fixup::GotLo12 | Fixup::GotTprelLo12Nc => scaled_low(word, low, 3),
             Fixup::Ldst128Lo12 => scaled_low(word, low, 4),
+            Fixup::SecrelLow12L => scaled_low(word, low, access_scale(word)),
         }
     }
+}
+
+/// How many bits the offset of a load or store with an unsigned offset is shifted by, which is the
+/// log of the size of the access: the two size bits at the top, and four for a whole vector
+/// register, which says so with a bit of the opcode as well.
+fn access_scale(word: u32) -> u32 {
+    let size = word >> 30;
+    if word & 0x0480_0000 == 0x0480_0000 { size + 4 } else { size }
 }
 
 /// A distance in bytes as that many bits of words, or `None` when it is not a whole number of
@@ -1081,6 +1110,11 @@ impl At<'_> {
                     (Operator::Lo12, []) => (Fixup::AddLo12, 0),
                     (Operator::TprelLo12Nc, []) => (Fixup::TprelLo12Nc, 0),
                     (Operator::TprelHi12, [Value::Shift(Shift::Lsl, 12)]) => (Fixup::TprelHi12, 1),
+                    (Operator::SecrelLo12, []) => (Fixup::SecrelLow12A, 0),
+                    // With the shift said or not, since clang writes it without and reads both.
+                    (Operator::SecrelHi12, [] | [Value::Shift(Shift::Lsl, 12)]) => {
+                        (Fixup::SecrelHigh12A, 1)
+                    }
                     _ => return Err(self.unwritten()),
                 };
                 Ok((width.sf() << 31 | 0x1100_0000 | high << 22 | rn << 5 | rd, Some(fixup)))
@@ -1572,6 +1606,7 @@ impl At<'_> {
                     (Operator::GotTprelLo12, 3) if m == "ldr" && access.v == 0 => {
                         Fixup::GotTprelLo12Nc
                     }
+                    (Operator::SecrelLo12, _) => Fixup::SecrelLow12L,
                     _ => return Err(self.unwritten()),
                 };
                 return Ok((front | 1 << 24 | rn << 5, Some(fixup)));
@@ -1889,6 +1924,28 @@ mod tests {
         assert_eq!(Fixup::Ldst64Lo12.apply(0xf940_0000, 0x1238), Some(0xf941_1c00));
         assert_eq!(Fixup::Ldst64Lo12.apply(0xf940_0000, 0x1234), None);
         assert_eq!(Fixup::TprelHi12.apply(0x9140_0000, 0x5000), Some(0x9140_1400));
+    }
+
+    #[test]
+    fn an_offset_into_the_section_is_the_word_clang_writes_for_windows() {
+        // What clang for aarch64-w64-mingw32 writes for the last two instructions of a Windows
+        // thread-local access and for a load straight from the variable. The high half is written
+        // with the shift and without it, and both are the same word.
+        for (text, word, fixup) in [
+            ("add x8, x8, :secrel_hi12:counter", 0x9140_0108, Fixup::SecrelHigh12A),
+            ("add x8, x8, :secrel_hi12:counter, lsl #12", 0x9140_0108, Fixup::SecrelHigh12A),
+            ("add x8, x8, :secrel_lo12:counter", 0x9100_0108, Fixup::SecrelLow12A),
+            ("ldr w9, [x8, :secrel_lo12:counter]", 0xb940_0109, Fixup::SecrelLow12L),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup), (word, Some(fixup)), "{text}");
+            assert_eq!(fixup.elf(), None, "ELF has no relocation for {text}");
+        }
+        // The low bits of a load are scaled by its size, which is in the word.
+        assert_eq!(Fixup::SecrelLow12L.apply(0xb940_0109, 0x388), Some(0xb943_8909));
+        assert_eq!(Fixup::SecrelLow12L.apply(0x3dc0_0000, 0x20), Some(0x3dc0_0800));
+        assert_eq!(Fixup::SecrelLow12L.apply(0x3dc0_0000, 0x28), None);
     }
 
     #[test]

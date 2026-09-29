@@ -185,7 +185,10 @@ fn reference(line: &mut String, operator: Operator, named: Named<'_>) {
             Operator::GotLo12 => Some("@GOTPAGEOFF"),
             Operator::GotTprel => Some("@TLVPPAGE"),
             Operator::GotTprelLo12 => Some("@TLVPPAGEOFF"),
-            Operator::TprelHi12 | Operator::TprelLo12Nc => None,
+            Operator::TprelHi12
+            | Operator::TprelLo12Nc
+            | Operator::SecrelHi12
+            | Operator::SecrelLo12 => None,
         };
         if let Some(suffix) = suffix {
             let _ = write!(line, "{symbol}{suffix}");
@@ -201,6 +204,8 @@ fn reference(line: &mut String, operator: Operator, named: Named<'_>) {
         Operator::GotTprelLo12 => ":gottprel_lo12:",
         Operator::TprelHi12 => ":tprel_hi12:",
         Operator::TprelLo12Nc => ":tprel_lo12_nc:",
+        Operator::SecrelHi12 => ":secrel_hi12:",
+        Operator::SecrelLo12 => ":secrel_lo12:",
     };
     let _ = write!(line, "{prefix}{symbol}");
 }
