@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-g` works for Windows targets. The COFF writer now puts the DWARF sections in the object, the way mingw-w64 gcc does, with an offset from one debug section into another written as `IMAGE_REL_AMD64_SECREL` and an address in the code as `IMAGE_REL_AMD64_ADDR64`. The warning that `-g` was ignored for COFF is gone. gdb on Linux reads a program built this way for line numbers, types and variable addresses.
+
 ### Changed
 
 - The optimizer's pressure model counts the values of each register class live at the edges of a block with one bitmap per class and a population count per word, rather than looking up the type of every live value. On jtckdint's `test.c` at `-O2`, with #2107 and #2110 in, the build runs 63.23G instructions instead of 69.83G, with the same assembly (#2114).

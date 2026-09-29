@@ -137,6 +137,21 @@ impl Flavour {
     ///
     /// Nothing on COFF, where such a section is refused by [`beyond`] before it reaches here rather
     /// than written under a name nothing on that platform gathers.
+    /// What a relocation in a debug section is here, given whether it names another debug section.
+    ///
+    /// A four byte reference from one debug section into another is an offset from the front of
+    /// that section. ELF gets one from an address relocation against the section symbol, since the
+    /// debug sections all start at zero. COFF has a relocation of its own for it, because an address
+    /// there is one in the image and the debug sections are not placed in the image.
+    pub(crate) fn debug(self, kind: Reference, into_debug: bool) -> Reference {
+        match kind {
+            Reference::Address { bytes: 4 } if self == Flavour::Coff && into_debug => {
+                Reference::Section
+            }
+            kind => kind,
+        }
+    }
+
     fn gathered(self, array: Array) -> Option<SectionFlags> {
         match self {
             Flavour::Elf => Some(elf::gathered(array)),
@@ -308,7 +323,7 @@ pub fn write(
         return Err(Error::Format { triple: target.tuple.to_string() });
     };
     if flavour == Flavour::Coff {
-        beyond(text, data, info)?;
+        beyond(text, data)?;
     }
     let mut obj = Writer::new(flavour.binary(), Architecture::X86_64, Endianness::Little);
     // The one that holds every function when they are not being split up. Asked for even when it
@@ -743,9 +758,10 @@ pub fn write(
                     }
                 },
             };
-            let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
-                why: format!("no relocation is {:?}", reloc.kind),
-            })?;
+            let kind = flavour.debug(reloc.kind, named.contains_key(reloc.symbol.as_str()));
+            let flags = flavour
+                .reloc(kind, reloc.after)
+                .ok_or_else(|| Error::Refused { why: format!("no relocation is {kind:?}") })?;
             let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
             obj.add_relocation(section, record)
                 .map_err(|why| Error::Refused { why: why.to_string() })?;
@@ -813,11 +829,8 @@ fn distance(
 /// # Errors
 ///
 /// [`Error::Refused`], naming the one it found first.
-fn beyond(text: &Text, data: &Data, info: &Info) -> Result<(), Error> {
+fn beyond(text: &Text, data: &Data) -> Result<(), Error> {
     let why = |why: String| Err(Error::Refused { why });
-    if !info.chunks.is_empty() {
-        return why("debug information here goes in sections this writer does not name".to_owned());
-    }
     if text.funcs.iter().any(|func| func.patch.is_some()) {
         return why("a record of where a patcher's room is has no section flags here".to_owned());
     }
@@ -1121,7 +1134,7 @@ mod tests {
     use rucc_target::{Arch, Env, Os, Triple};
 
     use crate::elf::PATCHABLE;
-    use crate::section::{Extent, Marker, Patch, Reloc};
+    use crate::section::{Chunk, Extent, Marker, Patch, Reloc};
 
     /// A linux x86-64 target, which is the only one this writes.
     fn target() -> TargetInfo {
@@ -1793,6 +1806,43 @@ mod tests {
             &Info::default(),
         );
         assert!(matches!(written, Err(Error::Refused { .. })), "{written:?}");
+    }
+
+    /// Debug information on Windows: an offset into another debug section is a section relative
+    /// relocation, and an address in the code is still an address.
+    #[test]
+    fn debug_sections_on_windows_reach_each_other_by_section_offset() {
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Windows, Env::Gnu));
+        let reloc = |at, symbol: &str, bytes| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Address { bytes },
+            addend: 0,
+            after: 0,
+        };
+        let info = Info {
+            chunks: vec![
+                Chunk { name: ".debug_abbrev".to_owned(), bytes: vec![0; 4], relocs: Vec::new() },
+                Chunk {
+                    name: ".debug_info".to_owned(),
+                    bytes: vec![0; 12],
+                    relocs: vec![reloc(0, ".debug_abbrev", 4), reloc(4, "f", 8)],
+                },
+            ],
+        };
+        let bytes =
+            write(&calling("puts"), &Data::default(), &[], &target, Output::default(), &info)
+                .expect("object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".debug_info").expect("the debug section");
+        let kinds: Vec<_> = section.relocations().map(|(at, reloc)| (at, reloc.flags())).collect();
+        assert_eq!(
+            kinds,
+            [
+                (0, RelocationFlags::Coff { typ: pe::IMAGE_REL_AMD64_SECREL }),
+                (4, RelocationFlags::Coff { typ: pe::IMAGE_REL_AMD64_ADDR64 }),
+            ]
+        );
     }
 
     /// One variable of four bytes, in whichever section its own answer puts it.

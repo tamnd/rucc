@@ -507,9 +507,9 @@ pub fn assembled_described(
                     },
                 },
             };
-            let flags = flags_of(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
-                why: format!("no relocation is {:?}", reloc.kind),
-            })?;
+            let kind = flavour.debug(reloc.kind, named.contains_key(reloc.symbol.as_str()));
+            let flags = flags_of(kind, reloc.after)
+                .ok_or_else(|| Error::Refused { why: format!("no relocation is {kind:?}") })?;
             let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
             obj.add_relocation(section, record)
                 .map_err(|why| Error::Refused { why: why.to_string() })?;
