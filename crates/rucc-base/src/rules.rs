@@ -291,7 +291,7 @@ impl Table {
     #[must_use]
     pub fn find<S: Subject>(&self, subject: &S, term: S::Node) -> Option<Match<S::Node>> {
         let mut bindings = Vec::new();
-        let rule = self.run(subject, 0, vec![term], &mut bindings)?;
+        let rule = self.run(subject, 0, &mut vec![term], &mut bindings)?;
         Some(Match { rule, bindings })
     }
 
@@ -304,12 +304,15 @@ impl Table {
     /// Walk the trie and the subject together.
     ///
     /// `left` is the subterms still to be matched, innermost last, so that popping gives the
-    /// pre-order the patterns were flattened in.
+    /// pre-order the patterns were flattened in. It is one stack for the whole walk rather than a
+    /// copy per branch, so a walk that finds nothing puts back what it took: the term it popped,
+    /// and through [`Table::take`] the arguments it pushed. What is on it after a match is not
+    /// anything anybody reads.
     fn run<S: Subject>(
         &self,
         subject: &S,
         at: usize,
-        mut left: Vec<S::Node>,
+        left: &mut Vec<S::Node>,
         bindings: &mut Vec<S::Node>,
     ) -> Option<usize> {
         let Some(term) = left.pop() else {
@@ -321,7 +324,7 @@ impl Table {
         // The head of the term, which is the question nearly every branch of nearly every node
         // is about and the one that has to be found rather than looked for.
         if let Some(next) = head.and_then(|(name, arity)| node.branch(name, arity)) {
-            if let Some(rule) = self.take(subject, next, (term, head), &left, bindings) {
+            if let Some(rule) = self.take(subject, next, (term, head), left, bindings) {
                 return Some(rule);
             }
         }
@@ -331,7 +334,7 @@ impl Table {
         // have nothing to compare it against.
         if !node.ints.is_empty() {
             if let Some(next) = subject.int(term).and_then(|value| node.literal(value)) {
-                if let Some(rule) = self.take(subject, next, (term, head), &left, bindings) {
+                if let Some(rule) = self.take(subject, next, (term, head), left, bindings) {
                     return Some(rule);
                 }
             }
@@ -342,24 +345,26 @@ impl Table {
         // order.
         for &(index, next) in node.same {
             if bindings.get(index).is_some_and(|&bound| subject.same(bound, term)) {
-                if let Some(rule) = self.take(subject, next, (term, head), &left, bindings) {
+                if let Some(rule) = self.take(subject, next, (term, head), left, bindings) {
                     return Some(rule);
                 }
             }
         }
 
         // The wildcard is last, which is the whole of what specificity order means here.
-        let (_, next) = node.wildcard.as_ref()?;
-        let depth = bindings.len();
-        bindings.push(term);
-        if let Some(rule) = self.run(subject, *next as usize, left, bindings) {
-            return Some(rule);
+        if let Some((_, next)) = node.wildcard {
+            let depth = bindings.len();
+            bindings.push(term);
+            if let Some(rule) = self.run(subject, next as usize, left, bindings) {
+                return Some(rule);
+            }
+            bindings.truncate(depth);
         }
-        bindings.truncate(depth);
+        left.push(term);
         None
     }
 
-    /// Follow one branch, and give the bindings back as they were if it led nowhere.
+    /// Follow one branch, and give the stack and the bindings back as they were if it led nowhere.
     ///
     /// What goes on the stack is the arguments of the term, innermost last, whenever the term has
     /// any. That is the same for every kind of branch, because what a branch decided is that this
@@ -369,20 +374,21 @@ impl Table {
         subject: &S,
         next: u32,
         term: (S::Node, Option<(&str, usize)>),
-        left: &[S::Node],
+        left: &mut Vec<S::Node>,
         bindings: &mut Vec<S::Node>,
     ) -> Option<usize> {
         let (term, head) = term;
-        let mut deeper = left.to_vec();
+        let height = left.len();
         if let Some((_, arity)) = head {
             for index in (0..arity).rev() {
-                deeper.push(subject.arg(term, index));
+                left.push(subject.arg(term, index));
             }
         }
         let depth = bindings.len();
-        if let Some(rule) = self.run(subject, next as usize, deeper, bindings) {
+        if let Some(rule) = self.run(subject, next as usize, left, bindings) {
             return Some(rule);
         }
+        left.truncate(height);
         bindings.truncate(depth);
         None
     }
