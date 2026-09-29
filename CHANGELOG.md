@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.13.0
+
+The end of W1: rucc runs on Windows as a native compiler, and the programs it builds there run and pass on every commit. This release also has `-g` and realigned frames for Windows targets and more compile time work on the register allocator.
+
 ### Added
 
 - A function with a local that wants more alignment than the stack gives, such as `_Alignas(32)`, compiles for x86-64 Windows. It used to be refused because its prologue had no unwind record. The frame now takes the same order as every other Windows frame, pushes, then the frame, then the frame pointer and the vector saves, and only then rounds the stack pointer down, which is how clang lays out the same frame. The unwind record describes everything before the rounding, and the epilogue puts the stack pointer back from the frame pointer first. The vector saves go at the top of such a frame so the rounded body cannot reach them. `tests/exec/windows/realign.c` walks the stack and longjmps through three realigned frames (#1422).
