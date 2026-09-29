@@ -993,9 +993,8 @@ struct Lowering<'a> {
     /// is the first one after it once the block has been filled. See
     /// [`rucc_ir::Func::declare_value_from`].
     marks: HashMap<Block, Vec<Mark>>,
-    /// The frame slot each fixed size `alloca` was given, which a landing pad writes the address
-    /// of again rather than reading the register the rest of the function has it in. See
-    /// [`Self::pad`].
+    /// The frame slot each fixed size `alloca` was given, which is what every reader of its
+    /// address writes the address of. See [`Self::local`].
     frame_slots: HashMap<Value, usize>,
     /// The machine call each IR call with an unwind edge became, which [`Self::edges`] pairs with
     /// the pad the edge went to. See [`rucc_ir::Opcode::Unwound`].
@@ -1382,8 +1381,15 @@ impl<'a> Lowering<'a> {
                 // solver has no way to say anything about. There is nothing in `lea sym(%rip)` a
                 // proof over bitvectors could discharge, because what makes it the right answer
                 // is the relocation and what the linker does with it.
+                //
+                // Only a thread-local variable is built where the IR put it. Every other name's
+                // address is written again in each block that reads it, by [`Self::reg_of`], so
+                // here it is nothing. See [`Rebuilt`].
                 Opcode::GlobalAddr => {
-                    self.address_of(inst)?;
+                    let result = self.source[inst].first_result;
+                    if result.is_none_or(|result| self.rebuilt(result).is_none()) {
+                        self.address_of(inst)?;
+                    }
                     continue;
                 }
                 // The address of a label and the branch that reads one, built here for the same
@@ -1675,6 +1681,10 @@ impl<'a> Lowering<'a> {
         let returns: Vec<Type> = signature.return_types().collect();
 
         let mut args = Vec::with_capacity(values.len());
+        // The address each argument that is one was just written by, which goes down to where it
+        // is passed once the call is built. See [`Self::passed_late`].
+        let mut late = Vec::new();
+        let here = self.at.expect("a block is being filled");
         for (index, value) in values.into_iter().skip(usize::from(indirect)).enumerate() {
             let abi = named.get(index).or_else(|| beyond.get(index - named.len()));
             let abi = abi.copied().unwrap_or_default();
@@ -1683,8 +1693,19 @@ impl<'a> Lowering<'a> {
             // where they are rather than a register they are in, and there is no register they
             // could be in. Everything else about it is a sixteen byte object passed by value and
             // is built by the same code.
-            let reg =
-                if abi::on_the_stack(ty) { self.x87_slot(value) } else { self.reg_of(value)? };
+            let reg = if abi::on_the_stack(ty) {
+                self.x87_slot(value)
+            } else {
+                let before = self.out.terminator(here);
+                let reg = self.reg_of(value)?;
+                let written = self.out.terminator(here);
+                if matches!(self.rebuilt(value), Some(Rebuilt::Local(_) | Rebuilt::Name(_)))
+                    && written != before
+                {
+                    late.extend(written);
+                }
+                reg
+            };
             args.push(abi::Passing { ty, reg, abi });
         }
         let block = self.at.expect("a block is being filled");
@@ -1707,6 +1728,7 @@ impl<'a> Lowering<'a> {
             .ok_or(Unsupported::Unported { inst: Some(inst), what: Unported::Convention })?;
         let made = abi::call(&mut self.out, block, &what, conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
+        self.passed_late(&late);
         if self.source.unwinds_to_pad(inst) {
             let call = self.out.insts(block).last().expect("the call just built");
             self.unwinding.insert(inst, call);
@@ -1874,12 +1896,12 @@ impl<'a> Lowering<'a> {
     }
 
     /// One `alloca`: the bytes it asks for go on the list the frame is laid out from, and the
-    /// address of them is one instruction.
+    /// address of them is one instruction wherever it is read.
     ///
-    /// The instruction is a `lea` off the stack pointer, which is the one register that reaches
-    /// the frame in every function, and its displacement is left at nothing because there is no
-    /// frame yet. Which instruction is waiting for which local is remembered, and
-    /// [`crate::finish`] fills the numbers in after [`crate::frame::Frame`] has placed them.
+    /// Nothing is written where the `alloca` stands. The address is a `lea` off the stack pointer,
+    /// which is the one register that reaches the frame in every function, and [`Self::reg_of`]
+    /// writes one in front of each instruction that reads it, the way it writes a constant. See
+    /// [`Rebuilt`] for why that and not one register for the whole function.
     ///
     /// There is deliberately no rule for `alloca` and no name for one in [`crate::term`], and
     /// that is what stops it being folded into something else. An operand shown as the
@@ -1893,11 +1915,25 @@ impl<'a> Lowering<'a> {
         if let Some(&size) = self.source[data.args].first() {
             return self.grow(inst, size);
         }
+        self.local(inst).map(|_| ())
+    }
+
+    /// Which of the function's locals a fixed size `alloca` is, putting it on the list the frame
+    /// is laid out from the first time it is asked.
+    ///
+    /// Asked by the `alloca` itself and by every reader of its address, and whichever of them
+    /// comes first is the one that makes the entry. The `alloca` always does, since it dominates
+    /// what reads it and the blocks are filled in an order that puts a dominator first.
+    fn local(&mut self, inst: Inst) -> Result<usize, Unsupported> {
+        let data = &self.source[inst];
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        if let Some(&index) = self.frame_slots.get(&result) {
+            return Ok(index);
+        }
         let Extra::Mem(mem) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[mem];
         let size = u32::try_from(info.size)
             .map_err(|_| Unsupported::Dynamic { inst, growing: Growing::Huge })?;
-        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
 
         // At least one, because the frame divides by the alignment and an object with no
         // alignment at all is one the front end had nothing to say about rather than one that may
@@ -1907,17 +1943,29 @@ impl<'a> Lowering<'a> {
         if let Some(decl) = self.source.mem_decl(mem) {
             self.stack.declared.push((index, decl));
         }
+        self.frame_slots.insert(result, index);
+        Ok(index)
+    }
 
+    /// The address of a fixed size `alloca`, written into the block being filled.
+    ///
+    /// Its displacement is left at nothing because there is no frame yet. Which instruction is
+    /// waiting for which local is remembered, and [`crate::finish`] fills the number in after
+    /// [`crate::frame::Frame`] has placed it.
+    fn local_address(&mut self, inst: Inst, value: Value) -> Result<mir::Reg, Unsupported> {
+        let index = self.local(inst)?;
         let block = self.at.expect("a block is being filled");
-        let reg = self.new_reg(result);
+        // Cleared first so that the register is a new one rather than the one an earlier reader
+        // was handed, which that reader may still be reading.
+        self.regs[value.index()] = None;
+        let reg = self.new_reg(value);
         let span = self.source.span(inst);
         let lea = self.named(self.selector.frame.lea);
         let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
         let made =
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.addresses.push((made, index));
-        self.frame_slots.insert(result, index);
-        Ok(())
+        Ok(reg)
     }
 
     /// The other kind of `alloca`: one whose size the function does not know until it runs, which
@@ -4774,8 +4822,7 @@ impl<'a> Lowering<'a> {
     }
 
     /// The object in this function's frame a value is the address of, for one an `alloca` of a
-    /// size known here made. See [`Self::reserve`], which is where the `lea` it is found by came
-    /// from.
+    /// size known here made. See [`Self::reserve`], which is where it was put on the list.
     fn local_of(&self, value: Value) -> Option<usize> {
         let Def::Result { inst, .. } = self.source[value].def else { return None };
         if self.source[inst].opcode != Opcode::Alloca
@@ -4783,12 +4830,7 @@ impl<'a> Lowering<'a> {
         {
             return None;
         }
-        let reg = self.regs[value.index()]?;
-        self.stack.addresses.iter().find_map(|&(made, local)| {
-            let data = &self.out[made];
-            let defined = self.out[data.operands].first()?;
-            (defined.reg == reg).then_some(local)
-        })
+        self.frame_slots.get(&value).copied()
     }
 
     /// The name a value is the address of, for one a `global_addr` defined.
@@ -5924,7 +5966,6 @@ impl<'a> Lowering<'a> {
         if !first.is_some_and(|inst| self.source[inst].opcode == Opcode::Landing) {
             return Ok(kept);
         }
-        let out = self.at.expect("a block is being filled");
         let insts: Vec<Inst> = self.source.insts(block).collect();
         for inst in insts {
             let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
@@ -5937,27 +5978,13 @@ impl<'a> Lowering<'a> {
                 {
                     continue;
                 }
+                // A constant, a slot of the frame and most names are written again in every
+                // block that reads them anyway, by [`Self::reg_of`], so there is nothing to do for
+                // those here. See [`Rebuilt`].
+                if self.rebuilt(value).is_some() {
+                    continue;
+                }
                 match self.source[def].opcode {
-                    Opcode::IConst => {}
-                    Opcode::Alloca => {
-                        let &index =
-                            self.frame_slots.get(&value).ok_or_else(|| self.unsupported(def))?;
-                        kept.push((value, self.regs[value.index()]));
-                        let reg = self.out.new_vreg(self.gpr);
-                        self.regs[value.index()] = Some(reg);
-                        let lea = self.named(self.selector.frame.lea);
-                        let sp = mir::Reg::physical(self.conv.stack_pointer);
-                        let sp = mir::Operand::read(sp, self.gpr);
-                        let span = self.source.span(def);
-                        let made = self
-                            .out
-                            .build(out, lea)
-                            .at(span)
-                            .def(reg, self.gpr)
-                            .mem(mir::Mem::at(sp))
-                            .finish();
-                        self.stack.addresses.push((made, index));
-                    }
                     Opcode::GlobalAddr => {
                         kept.push((value, self.regs[value.index()]));
                         self.regs[value.index()] = None;
@@ -6721,51 +6748,130 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    /// The register a value is in, materializing it if it is a constant that has not been put in
-    /// one yet.
+    /// The register a value is in, writing it there first if it is one that is written where it
+    /// is wanted rather than where the IR defined it.
     ///
-    /// A constant is written where it is wanted rather than where the IR defined it, and where it
-    /// is wanted is a block that need not be the one the IR defined it in. So the register holding
-    /// one is only good inside the block it was written into, and a second block that wants the
-    /// same constant gets its own. Anything else is a register read where nothing wrote it: the
-    /// IR guarantees a definition dominates its uses, and this moved the definition.
+    /// A constant is written where it is wanted, and where it is wanted is a block that need not
+    /// be the one the IR defined it in. So the register holding one is only good inside the block
+    /// it was written into, and a second block that wants the same constant gets its own. Anything
+    /// else is a register read where nothing wrote it: the IR guarantees a definition dominates its
+    /// uses, and this moved the definition.
     ///
     /// Writing the number again is also the right answer and not merely the safe one. It is one
     /// instruction that reads nothing, which is cheaper than holding a register live across a
     /// branch for it, and it is what a rematerializing allocator would do with the value anyway.
+    /// The address of a local and the address of a name are the same kind of value, and
+    /// [`Rebuilt`] is the list and the reasons.
     fn reg_of(&mut self, value: Value) -> Result<mir::Reg, Unsupported> {
-        let constant = match self.source[value].def {
-            Def::Result { inst, .. } => {
-                (self.source[inst].opcode == Opcode::IConst).then_some(inst)
-            }
-            Def::Param { .. } => None,
-        };
+        let rebuilt = self.rebuilt(value);
         let here = self.at.expect("a block is being filled");
         if let Some(reg) = self.regs[value.index()] {
-            if constant.is_none() || self.written[value.index()] == Some(here) {
+            let good = match rebuilt {
+                None => true,
+                Some(Rebuilt::Local(_)) => false,
+                Some(Rebuilt::Constant(_) | Rebuilt::Name(_)) => {
+                    self.written[value.index()] == Some(here)
+                }
+            };
+            if good {
                 return Ok(reg);
             }
         }
-        if let Some(inst) = constant {
-            // Cleared so that the register the constant is written into is a new one rather than
-            // the one the block above wrote, which is still being read up there.
-            self.regs[value.index()] = None;
-            // Nothing is refused here. A constant is written on its own, out of the loop over the
-            // block, and the operands of the rule that writes one are the number and nothing else.
-            let matched = self
-                .select(inst, &HashSet::new())
-                .map(|(_, matched)| matched)
-                .ok_or_else(|| self.unsupported(inst))?;
-            self.emit(inst, &matched)?;
-            // The same mark the loop over the instructions makes, and it has to be made here as
-            // well because this is the only place a constant is ever selected: the loop skips one
-            // where the IR wrote it, so a rule that lowers a constant fires from nowhere else and
-            // would be reported as a rule nothing reaches.
-            self.fired.mark(matched.rule);
-            self.written[value.index()] = Some(here);
-            return Ok(self.regs[value.index()].expect("a constant is written into a register"));
+        match rebuilt {
+            Some(Rebuilt::Constant(inst)) => {
+                // Cleared so that the register the constant is written into is a new one rather
+                // than the one the block above wrote, which is still being read up there.
+                self.regs[value.index()] = None;
+                // Nothing is refused here. A constant is written on its own, out of the loop over
+                // the block, and the operands of the rule that writes one are the number and
+                // nothing else.
+                let matched = self
+                    .select(inst, &HashSet::new())
+                    .map(|(_, matched)| matched)
+                    .ok_or_else(|| self.unsupported(inst))?;
+                self.emit(inst, &matched)?;
+                // The same mark the loop over the instructions makes, and it has to be made here as
+                // well because this is the only place a constant is ever selected: the loop skips
+                // one where the IR wrote it, so a rule that lowers a constant fires from nowhere
+                // else and would be reported as a rule nothing reaches.
+                self.fired.mark(matched.rule);
+                self.written[value.index()] = Some(here);
+                Ok(self.regs[value.index()].expect("a constant is written into a register"))
+            }
+            Some(Rebuilt::Local(inst)) => self.local_address(inst, value),
+            Some(Rebuilt::Name(inst)) => {
+                self.regs[value.index()] = None;
+                self.address_of(inst)?;
+                self.written[value.index()] = Some(here);
+                Ok(self.regs[value.index()].expect("an address is written into a register"))
+            }
+            None => Ok(self.new_reg(value)),
         }
-        Ok(self.new_reg(value))
+    }
+
+    /// Whether a value is one [`Self::reg_of`] writes again where it is read rather than keeping
+    /// in the register it was first written into, and what writes it.
+    fn rebuilt(&self, value: Value) -> Option<Rebuilt> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        let data = &self.source[inst];
+        match data.opcode {
+            Opcode::IConst => Some(Rebuilt::Constant(inst)),
+            Opcode::Alloca if self.source[data.args].is_empty() => Some(Rebuilt::Local(inst)),
+            Opcode::GlobalAddr => match data.extra {
+                Extra::Symbol(symbol) if !self.elsewhere.thread(symbol) => {
+                    Some(Rebuilt::Name(inst))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Writes an address that was just read as an argument of a call in front of the instruction
+    /// that reads it, rather than in front of all of them.
+    ///
+    /// Every argument of a call is read before any of them is passed, so the addresses
+    /// [`Self::reg_of`] writes for them all come out in a row ahead of the stores and the call,
+    /// and all of them are live at once. A call with twelve string arguments then wants
+    /// twelve registers, which is every register a call leaves alone and a push for each of them
+    /// in the prologue. Moved down to the store that passes it, each address is live for one
+    /// instruction, which is what gcc writes: a `lea` and a store, one argument at a time.
+    ///
+    /// `made` is the instructions [`Self::called`] saw written for each argument that is an
+    /// address, and one is only moved when it reads nothing but the stack pointer, since then the
+    /// only thing that could change what it computes on the way down is something writing the
+    /// stack pointer, and the walk stops at one of those. A constant is left where it is, because
+    /// some of the instructions a constant is written with write the flags as well.
+    fn passed_late(&mut self, made: &[mir::Inst]) {
+        let sp = mir::Reg::physical(self.conv.stack_pointer);
+        for &inst in made {
+            let operands = &self.out[self.out[inst].operands];
+            let Some((first, rest)) = operands.split_first() else { continue };
+            if !first.role.is_def()
+                || rest.iter().any(|operand| operand.reg != sp || operand.role.is_def())
+            {
+                continue;
+            }
+            let reg = first.reg;
+            let mut reader = None;
+            let mut at = self.out.next_inst(inst);
+            while let Some(next) = at {
+                let operands = &self.out[self.out[next].operands];
+                if operands.iter().any(|operand| operand.reg == reg && !operand.role.is_def()) {
+                    reader = Some(next);
+                    break;
+                }
+                if operands.iter().any(|operand| operand.reg == sp && operand.role.is_def()) {
+                    break;
+                }
+                at = self.out.next_inst(next);
+            }
+            let Some(reader) = reader else { continue };
+            if self.out.next_inst(inst) != Some(reader) {
+                self.out.remove_inst(inst);
+                self.out.insert_before(reader, inst);
+            }
+        }
     }
 
     /// Which register file a value of that type lives in.
@@ -6823,6 +6929,39 @@ impl<'a> Lowering<'a> {
             ty: data.first_result.map(|result| self.source[result].ty),
         }
     }
+}
+
+/// A value [`Lowering::reg_of`] writes again where it is read, and the instruction that says what
+/// it is.
+///
+/// Each of these is one instruction that reads nothing a program can change, so writing it again
+/// costs what reloading it from a stack slot would and never needs the slot. Kept in one register
+/// from where the IR defined it instead, an address of a local or a name is live from the entry
+/// block to its last reader, and a function with more of those than registers pushes every
+/// register a call leaves alone and then spills the rest, one eight byte slot each. That was most
+/// of the difference between this compiler's frames and gcc's on PostgreSQL, tamnd/rucc#2200.
+///
+/// The address of a local also stops looking live between blocks, which is part of what
+/// [`crate::slots`] asks before it lets two locals share bytes.
+#[derive(Debug, Clone, Copy)]
+enum Rebuilt {
+    /// An integer constant, written once in each block that reads it.
+    Constant(Inst),
+    /// The address of a fixed size `alloca`, which is a `lea` off the stack pointer and is written
+    /// for every reader, so that it is never live across anything, a call least of all. A reader
+    /// that is a load or a store of the local then takes the whole of it into its own addressing
+    /// mode in [`crate::fold`], which is how gcc writes an access to a local.
+    Local(Inst),
+    /// The address of a name that is not thread-local, written once in each block that reads it.
+    ///
+    /// Once a block rather than once a reader, because [`crate::fold`] decides whether to put a
+    /// symbol into the instructions that read it by counting them, and a symbol written into each
+    /// of thirty readers is longer code than one `lea`. A name reached through the global offset
+    /// table or a pointer the loader fills in is a load, and it is written again all the same:
+    /// what it reads is written once before the program starts and never again, which is what
+    /// makes gcc treat it the same way. A thread-local variable is not here, because its address
+    /// is this thread's copy and on Mach-O that takes a call.
+    Name(Inst),
 }
 
 /// What the arguments of one replacement came to.
@@ -8218,17 +8357,19 @@ mod tests {
         let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
             .expect("every instruction has a rule");
 
-        // Four bytes on the list the frame is laid out from, and the one instruction that reads
-        // where they went. Its displacement is nothing here because there is no frame yet, and
-        // which instruction is waiting for which local is what `finish` is handed.
+        // Four bytes on the list the frame is laid out from, and one instruction that says where
+        // they went in front of each of the two that read them. Its displacement is nothing here
+        // because there is no frame yet, and which instruction is waiting for which local is what
+        // `finish` is handed.
         assert_eq!(lowered.stack.locals, vec![Local { size: 4, align: 4 }]);
-        assert_eq!(lowered.stack.addresses.len(), 1);
-        assert_eq!(lowered.stack.addresses[0].1, 0);
+        let taken: Vec<usize> = lowered.stack.addresses.iter().map(|&(_, local)| local).collect();
+        assert_eq!(taken, [0, 0]);
         assert_eq!(
             mir::print_func(&lowered.func, &names, &REGS),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.lea_64 [$rsp]\n    \
              %1:gpr = x64.mov_ri_32 9\n    x64.mov_mr_32 %1, [%0]\n    \
-             %2:gpr = x64.mov_rm_32 [%0]\n    x64.ret_val_32 %2($rax)\n}\n"
+             %2:gpr = x64.lea_64 [$rsp]\n    %3:gpr = x64.mov_rm_32 [%2]\n    \
+             x64.ret_val_32 %3($rax)\n}\n"
         );
     }
 
@@ -8375,7 +8516,7 @@ mod tests {
         // never moves and the four bytes are below it, which is what the negative offset is. The
         // instruction the lowering left with nothing in its displacement now has the answer in it.
         let text = mir::print_func(&out, &names, &REGS);
-        assert!(text.contains("$rax = x64.lea_64 [$rsp - 8]"), "{text}");
+        assert!(text.contains("= x64.lea_64 [$rsp - 8]"), "{text}");
         assert!(!text.contains("x64.sub_ri_64"), "{text}");
         assert_eq!(frame.size(), 0);
         assert_eq!(frame.local(0), Some(-8));
@@ -8522,6 +8663,96 @@ mod tests {
             "mfunc @f {\nblock0:\n    %0:gpr = x64.lea_64 [@counter]\n    \
              %1:gpr = x64.mov_rm_32 [%0]\n    x64.ret_val_32 %1($rax)\n}\n"
         );
+    }
+
+    /// A local read in two arms and after them has its address written in each of the three
+    /// blocks, and in none of them ahead of the branch. Kept in one register from the entry block,
+    /// the address would be live across all three and the local would look carried between blocks.
+    #[test]
+    fn the_address_of_a_local_is_written_in_every_block_that_reads_it() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let local = slot(&mut source, entry, 4, 4);
+        let then = source.create_block();
+        let other = source.create_block();
+        let join = source.create_block();
+
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], other, &[]);
+        let mut build = Builder::new(&mut source, then);
+        build.store(args[0], local, plain(), Flags::default());
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut source, other);
+        build.store(args[1], local, plain(), Flags::default());
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut source, join);
+        let loaded = build.load(i32, local, plain(), Flags::default());
+        build.ret(&[loaded]);
+
+        let lowered = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
+            .expect("every instruction has a rule");
+        let text = mir::print_func(&lowered.func, &names, &REGS);
+        let taken: Vec<usize> = lowered.stack.addresses.iter().map(|&(_, local)| local).collect();
+        assert_eq!(taken, [0, 0, 0], "{text}");
+        let (head, _) = text.split_once("block1:").expect("more than one block");
+        assert!(!head.contains("x64.lea_64"), "{text}");
+    }
+
+    /// The same for the address of a name, once in each block that reads it.
+    #[test]
+    fn the_address_of_a_name_is_written_in_every_block_that_reads_it() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let counter = address_of(&mut source, entry, &mut names, "counter");
+        let then = source.create_block();
+        let other = source.create_block();
+        let join = source.create_block();
+        let got = source.append_param(join, i32);
+
+        let mut build = Builder::new(&mut source, entry);
+        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], other, &[]);
+        let mut build = Builder::new(&mut source, then);
+        let first = build.load(i32, counter, plain(), Flags::default());
+        build.jump(join, &[first]);
+        let mut build = Builder::new(&mut source, other);
+        build.store(args[1], counter, plain(), Flags::default());
+        let second = build.load(i32, counter, plain(), Flags::default());
+        build.jump(join, &[second]);
+        Builder::new(&mut source, join).ret(&[got]);
+
+        let text = lower(&mut names, &source);
+        // One in each arm and not two in the second, which reads it twice.
+        assert_eq!(text.matches("x64.lea_64 [@counter]").count(), 2, "{text}");
+        let (head, _) = text.split_once("block1:").expect("more than one block");
+        assert!(!head.contains("x64.lea_64"), "{text}");
+    }
+
+    /// Seven strings to one call. The seventh goes to memory and its address is written in front
+    /// of the store that passes it, and the six that go in registers are written in front of the
+    /// call, so no more than the six are ever live at once.
+    #[test]
+    fn an_address_passed_to_a_call_is_written_next_to_what_passes_it() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        let strings: Vec<Value> = (0..7)
+            .map(|n| address_of(&mut source, block, &mut names, &format!(".LC{n}")))
+            .collect();
+        let sig = source.add_signature(Signature::new().with_params(&[Type::PTR; 7]));
+        let callee = names.intern("g");
+        Builder::new(&mut source, block).call(callee, sig, &strings);
+        Builder::new(&mut source, block).ret(&[]);
+
+        let text = lower(&mut names, &source);
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let at = |what: &str| {
+            lines.iter().position(|line| line.contains(what)).unwrap_or_else(|| panic!("{text}"))
+        };
+        let store = at("x64.mov_mr_64");
+        assert_eq!(at("[@.LC6]") + 1, store, "{text}");
+        for n in 0..6 {
+            assert!(at(&format!("[@.LC{n}]")) > store, "{text}");
+        }
     }
 
     #[test]

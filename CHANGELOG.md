@@ -35,6 +35,10 @@ The W4 release on crates.io. The v0.16.0 tag stopped at the release gate and pub
 - `__builtin_sponentry` on AArch64, the stack pointer the function was entered with, which the mingw-w64 `setjmp` passes to `_setjmp` on ARM64 Windows. clang writes the same address. On other targets the call is refused, as clang refuses it. (#2198)
 - `<arm_acle.h>` with the CRC32 and CRC32C intrinsics, `__crc32b`, `__crc32h`, `__crc32w`, `__crc32d` and the `__crc32c` forms of each, and the `crc32` and `crc32c` instructions in the AArch64 assembler. `__ARM_FEATURE_CRC32` is defined under `-march=armv8-a+crc` and under Armv8.1-A and later, and a function marked `target("+crc")` may use the intrinsics whatever the unit is built for. Plain `-march=armv8-a` refuses them as gcc does, so PostgreSQL's configure finds them under `-march=armv8-a+crc+simd` and builds its checksum with a run time check, the same as it does with gcc (#2006).
 
+### Changed
+
+- The address of a local or of a name is written again where it is read, the way a constant already was, rather than worked out once and kept in a register or spilled to a slot of its own. A local's address is a `lea` off the stack pointer and is written at each use; a name's is written once in each block that reads it. An address passed to a call is written next to the store or the move that passes it, so a call with many string arguments no longer holds all of them in registers the call leaves alone. The two reduced programs in #2200 took 144 and 128 bytes of frame where gcc takes 80 (#2200).
+
 ### Fixed
 
 - `__has_builtin(__builtin_sponentry)` is no on every target but AArch64, where it is the only place the builtin works, as with clang. #2198 made it yes everywhere, so mingw-w64's `<setjmp.h>` on x86_64-windows-gnu called `_setjmp(buf, __builtin_sponentry())`, which sema refused, and every program that used `setjmp` there failed to compile.
