@@ -457,7 +457,7 @@ fn flow(func: &Func, order: &Order, used: &Rows, defined: &Rows) -> (Rows, Rows)
             }
         }
     }
-    (Rows::gather(count, &live_in), Rows::gather(count, &live_out))
+    (Rows::transpose(count, &live_in), Rows::transpose(count, &live_out))
 }
 
 /// A set of virtual registers for each block, held as the numbers in it.
@@ -489,15 +489,11 @@ struct Rows {
 impl Rows {
     /// The rows out of a list of which row each number goes in. The numbers keep the order they
     /// come in within a row, so a row is in order when the caller hands its numbers over in order.
+    ///
+    /// This is for a list that comes a row at a time, which puts each row's numbers down together.
+    /// One that comes a value at a time wants [`Rows::transpose`].
     fn gather(rows: usize, pairs: &[(u32, u32)]) -> Self {
-        let mut starts = vec![0usize; rows + 1];
-        for &(row, _) in pairs {
-            starts[row as usize + 1] += 1;
-        }
-        for row in 0..rows {
-            starts[row + 1] += starts[row];
-        }
-        let mut filled = starts.clone();
+        let (starts, mut filled) = Self::starts(rows, pairs);
         let mut numbers = vec![0u32; pairs.len()];
         for &(row, number) in pairs {
             let at = &mut filled[row as usize];
@@ -505,6 +501,58 @@ impl Rows {
             *at += 1;
         }
         Self { starts, numbers }
+    }
+
+    /// The same rows as [`Rows::gather`] makes, out of a list that comes a value at a time.
+    ///
+    /// Putting each number straight into its row writes to every row by turns, and with 22000
+    /// rows that is 22000 places being written at once, far more than stay in the cache, so nearly
+    /// every write missed. So the list is first sorted into at most [`Rows::WAYS`] runs of
+    /// neighbouring rows, and then each run into its rows, which is two passes that each write to
+    /// few enough places at a time to stay in the cache. Both keep the order the pairs came in, so
+    /// the rows are the same.
+    fn transpose(rows: usize, pairs: &[(u32, u32)]) -> Self {
+        let mut shift = 0;
+        while rows > Self::WAYS << shift {
+            shift += 1;
+        }
+        if shift == 0 {
+            return Self::gather(rows, pairs);
+        }
+        let (starts, mut filled) = Self::starts(rows, pairs);
+        // Where each run starts in `runs`, which is where the first row in it starts in `numbers`.
+        let mut next: Vec<usize> =
+            (0..rows.div_ceil(1 << shift)).map(|run| starts[run << shift]).collect();
+        let mut runs = vec![(0u32, 0u32); pairs.len()];
+        for &pair in pairs {
+            let at = &mut next[(pair.0 >> shift) as usize];
+            runs[*at] = pair;
+            *at += 1;
+        }
+        let mut numbers = vec![0u32; pairs.len()];
+        for &(row, number) in &runs {
+            let at = &mut filled[row as usize];
+            numbers[*at] = number;
+            *at += 1;
+        }
+        Self { starts, numbers }
+    }
+
+    /// How many runs of rows [`Rows::transpose`] sorts a list into before the rows themselves.
+    const WAYS: usize = 256;
+
+    /// Where each row starts, with one more at the end for where the last one stops, and a copy
+    /// to count up as the rows are filled.
+    fn starts(rows: usize, pairs: &[(u32, u32)]) -> (Vec<usize>, Vec<usize>) {
+        let mut starts = vec![0usize; rows + 1];
+        for &(row, _) in pairs {
+            starts[row as usize + 1] += 1;
+        }
+        for row in 0..rows {
+            starts[row + 1] += starts[row];
+        }
+        let filled = starts.clone();
+        (starts, filled)
     }
 
     fn row(&self, row: usize) -> &[u32] {
@@ -861,5 +909,29 @@ mod tests {
             live.range(address),
             Some(Range { start: order.late(write), end: order.early(load) })
         );
+    }
+
+    #[test]
+    fn rows_from_a_list_a_value_at_a_time_over_many_blocks_keep_the_order_the_numbers_came_in() {
+        // Far more rows than one pass of runs covers, so the list goes through both passes, and
+        // pairs that jump about the way the fixpoint's do.
+        let rows = 3000;
+        let mut pairs = Vec::new();
+        let mut seed = 7u32;
+        for number in 0..400 {
+            for _ in 0..30 {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                pairs.push(((seed >> 8) % 3000, number));
+            }
+        }
+        let gathered = Rows::transpose(rows, &pairs);
+        for row in 0..rows {
+            let wanted: Vec<u32> = pairs
+                .iter()
+                .filter(|&&(at, _)| at as usize == row)
+                .map(|&(_, number)| number)
+                .collect();
+            assert_eq!(gathered.row(row), wanted, "row {row}");
+        }
     }
 }

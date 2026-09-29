@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Turning the register allocator's liveness answer into a list per block sorts it in two passes that each stay in the cache, where one pass writing to every block by turns missed on nearly every write. On jtckdint's `test.c` the time that step takes at `-O0` is down to between a fifth and a half, for about half a billion more instructions, with the same assembly (#2157).
+
 ## 0.15.0
 
 The end of M6: AArch64 as a second target and macOS as a second host (#7). A value wider than eight bytes is no longer kept in `v8` to `v15` across a call on AArch64, where a callee preserves only their low half. A prologue there saves `d8` to `d15` instead of the whole registers. On the Windows side, a DLL names its entry point for lld, and `cleanup` handlers work under `-fexceptions` on AArch64 Linux.
