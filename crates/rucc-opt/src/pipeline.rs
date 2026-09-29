@@ -859,7 +859,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // so the toggle only ever means this and never adds or removes anything from the list.
     let once = opts.wants(inline::ONCE);
     let started = Instant::now();
-    let inlined = inline::run(module, limit, once, opts.isa);
+    let inlined = inline::run(module, names, limit, once, opts.isa);
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {
         if opts.verify {

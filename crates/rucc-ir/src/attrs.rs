@@ -221,6 +221,24 @@ impl fmt::Debug for AttrSet {
     }
 }
 
+/// The functions a call to which comes back more than once, which is what `setjmp` is and what
+/// gcc's `special_function_p` lists. A name with underscores in front of it is the same function.
+///
+/// A function declared with `__attribute__((returns_twice))` is one as well, whatever it is called,
+/// and [`AttrSet::RETURNS_TWICE`] on its declaration is how that is known. The list is still here
+/// for a program that declares `setjmp` itself without the attribute, which gcc also allows.
+const TWICE: &[&str] = &["setjmp", "sigsetjmp", "savectx", "vfork", "getcontext"];
+
+/// Whether a function by that name comes back more than once from a call however it was declared,
+/// so glibc's `__sigsetjmp` and `_setjmp` are and `longjmp` is not.
+///
+/// The code generator and the inliner both ask this, and [`crate::Module::returns_twice`] is the
+/// question with the attribute asked too.
+#[must_use]
+pub fn twice_by_name(name: &str) -> bool {
+    TWICE.contains(&name.trim_start_matches('_'))
+}
+
 /// Each attribute with its name, in printing order.
 static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NOUNWIND, "nounwind"),
@@ -305,6 +323,16 @@ impl fmt::Display for FpContract {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setjmp_under_any_number_of_underscores_comes_back_twice_and_longjmp_does_not() {
+        for name in ["setjmp", "_setjmp", "__sigsetjmp", "sigsetjmp", "vfork", "getcontext"] {
+            assert!(twice_by_name(name), "{name}");
+        }
+        for name in ["longjmp", "siglongjmp", "setjmp_buf", "fork"] {
+            assert!(!twice_by_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn nothing_promised_prints_as_nothing() {

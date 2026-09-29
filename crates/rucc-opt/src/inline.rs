@@ -85,7 +85,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rucc_base::Symbol;
+use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
     INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_FRAME_GROWTH,
     INLINE_LARGE_FRAME,
@@ -144,7 +144,8 @@ pub enum InlineFailure {
     /// The body jumps to a label by its address, or a static table holds one of its labels,
     /// either of which would still name the original body from the copy.
     ComputedGoto,
-    /// The body calls `setjmp`, whose frame would become the caller's.
+    /// The body calls `setjmp`, or anything else that comes back more than once, whose frame
+    /// would become the caller's.
     Setjmp,
     /// The body saves the registers it was called with, which in the caller hold the caller's.
     ApplyArgs,
@@ -261,8 +262,15 @@ impl InlineFailure {
 /// documentation for why that is the right thing to do with one.
 ///
 /// `isa` is what the module is built for, which is what a function without a `target` attribute
-/// is built for. A callee built for more than its caller is never copied into it.
-pub fn run(module: &mut Module, limit: Option<u32>, once: bool, isa: Isa) -> Vec<(FuncId, Stats)> {
+/// is built for. A callee built for more than its caller is never copied into it. `names` is
+/// what the names of the functions a body calls are read from, to find a call to `setjmp`.
+pub fn run(
+    module: &mut Module,
+    names: &Interner,
+    limit: Option<u32>,
+    once: bool,
+    isa: Isa,
+) -> Vec<(FuncId, Stats)> {
     let once = if limit.is_some() && once { called_once(module) } else { HashSet::new() };
     let wanted: HashMap<Symbol, (FuncId, Kind)> = module
         .funcs()
@@ -294,7 +302,7 @@ pub fn run(module: &mut Module, limit: Option<u32>, once: bool, isa: Isa) -> Vec
         let convention = Convention::of(module);
         let mut state = HashMap::new();
         let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
-        let how = How { wanted: &wanted, convention, limit, isa };
+        let how = How { wanted: &wanted, convention, limit, isa, names };
         for id in module.funcs().collect::<Vec<FuncId>>() {
             settle(module, id, &how, &mut state, &mut done);
         }
@@ -419,6 +427,8 @@ struct How<'a> {
     limit: usize,
     /// What a function without a `target` attribute of its own is built for.
     isa: Isa,
+    /// What the names in the module are read from.
+    names: &'a Interner,
 }
 
 /// Where a function is in being settled.
@@ -506,6 +516,14 @@ fn settle(
             }
         }
         settle(module, callee, how, state, done);
+        // A body that calls `sigsetjmp` would take its `jmp_buf` into the caller's frame on every
+        // path, fast ones too, and make the caller a function that comes back twice, so it stays a
+        // call whatever kind it is. That is `__builtin_setjmp` in `check` by another road, and gcc
+        // refuses both, saying the function can never be inlined because it uses setjmp.
+        if calls_twice(module, &module[callee], how.names) {
+            stats.missed(why(InlineFailure::Setjmp));
+            continue;
+        }
         // Measured once the callee is settled, since what is copied is the body with its own
         // calls already inlined.
         let most = match kind {
@@ -534,6 +552,18 @@ fn settle(
     if !stats.is_empty() {
         done.push((id, stats));
     }
+}
+
+/// Whether a body calls something that comes back more than once, by the rule the code generator
+/// uses to lay out the frame of a function that does, `rucc_ir::Module::returns_twice`.
+fn calls_twice(module: &Module, func: &Func, names: &Interner) -> bool {
+    func.blocks().any(|block| {
+        func.insts(block).any(|inst| {
+            let Extra::Call(info) = func[inst].extra else { return false };
+            func[inst].opcode == Opcode::Call
+                && func[info].callee.is_some_and(|callee| module.returns_twice(callee, names))
+        })
+    })
 }
 
 /// How many instructions a body has, which is what the limit on a callee declared `inline` counts.
@@ -1435,7 +1465,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        let said = format!("{:?}", run(&mut module, limit, once, Isa::baseline()));
+        let said = format!("{:?}", run(&mut module, &names, limit, once, Isa::baseline()));
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
@@ -1611,7 +1641,7 @@ block0(%0: i32):
                 respan(func, &[brace, brace, statement, statement, statement]);
             }
         }
-        run(&mut module, None, true, Isa::baseline());
+        run(&mut module, &names, None, true, Isa::baseline());
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
         let mut seen = Vec::new();
@@ -1957,6 +1987,56 @@ block0(%0: ptr):
             Some(70),
         );
         assert!(out.contains("call @jump"), "{out}");
+    }
+
+    /// A `static` function called once that saves a place to come back to through `callee`,
+    /// declared as `declared`, the way Postgres's `PG_TRY` does with `sigsetjmp`.
+    fn guarded(callee: &str, declared: &str) -> String {
+        format!(
+            r#"
+func @{callee}(ptr, i32) -> i32, linkage(external){declared};
+
+func @fetch(ptr) -> i32, linkage(internal) {{
+block0(%0: ptr):
+    %1 = iconst.i32 0
+    %2 = call @{callee}(%0, %1) : (ptr, i32) -> i32
+    return %2
+}}
+
+func @g(ptr) -> i32, linkage(external) {{
+block0(%0: ptr):
+    %1 = call @fetch(%0) : (ptr) -> i32
+    return %1
+}}
+"#
+        )
+    }
+
+    /// glibc's `sigsetjmp` is a macro for `__sigsetjmp`, and a body calling it stays a call, so
+    /// its `jmp_buf` stays in its own frame rather than growing the caller's on every path.
+    #[test]
+    fn a_body_that_calls_sigsetjmp_stays_a_call() {
+        let (out, said) = inlined_with(&guarded("__sigsetjmp", ""), Some(70), true);
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(g.contains("call @fetch"), "{out}");
+        assert!(said.contains("callee calls setjmp"), "{said}");
+    }
+
+    /// The same for a function of any name declared `returns_twice`.
+    #[test]
+    fn a_body_that_calls_a_function_declared_returns_twice_stays_a_call() {
+        let out = inlined_under(&guarded("save_here", ", attrs(returns_twice)"), Some(70));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(g.contains("call @fetch"), "{out}");
+    }
+
+    /// And without the attribute the call is an ordinary one, so the body goes in.
+    #[test]
+    fn a_body_that_calls_an_ordinary_function_is_inlined() {
+        let out = inlined_under(&guarded("save_here", ""), Some(70));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @fetch"), "{out}");
+        assert!(g.contains("call @save_here"), "{out}");
     }
 
     /// A function that reaches itself is left as a call rather than unrolled for ever.
