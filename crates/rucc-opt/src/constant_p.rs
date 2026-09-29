@@ -110,7 +110,7 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
     let made = func.create_inst(data, &[ty], span);
     func.insert_before(made, inst);
     let value = func[made].results().next().expect("a constant is one value");
-    let forward = [(result, value)].into_iter().collect();
+    let forward: rucc_base::hash::Map<_, _> = [(result, value)].into_iter().collect();
     crate::uses::substitute(func, &forward);
     func.remove_inst(inst);
 }

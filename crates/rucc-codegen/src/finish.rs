@@ -66,9 +66,8 @@
 //! `spec/10-backend.md` section 10.8 as it applies to the one pass that would otherwise be full
 //! of `x64.` by hand.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_diag::Span;
 use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role};
 use rucc_regalloc::Allocation;
@@ -295,7 +294,7 @@ pub fn finish(
     let base = if frame.grows() { conv.frame_pointer } else { conv.stack_pointer };
     let mut writer = Writer { func, conv, insts, names, base, ahead: None };
 
-    let mut cursors: HashMap<At, Inst> = HashMap::new();
+    let mut cursors: Map<At, Inst> = Map::default();
     let mut moves = Moves::default();
     for edit in &allocation.edits {
         let inst = writer.mov(edit, frame);
@@ -1325,7 +1324,7 @@ impl Writer<'_> {
     ///
     /// The edits at one place are in the order they have to be made in, so each one goes behind
     /// the last, and the first of them is what the place itself means.
-    fn put(&mut self, cursors: &mut HashMap<At, Inst>, at: At, inst: Inst) {
+    fn put(&mut self, cursors: &mut Map<At, Inst>, at: At, inst: Inst) {
         if let Some(cursor) = cursors.get_mut(&at) {
             self.func.insert_after(*cursor, inst);
             *cursor = inst;
