@@ -110,6 +110,24 @@ impl Globals {
         }
     }
 
+    /// Asks the linker to keep each variable this file reads through the pointer a DLL import
+    /// gives it, given as the variable's name, for a target in Microsoft's environment.
+    ///
+    /// Each is `/INCLUDE:` of the variable, so the link keeps its definition when it finds one in
+    /// this image, and `/ALTERNATENAME:` from the variable to the pointer, so a variable that
+    /// really is in a DLL, which an import library names only through the pointer, still leaves
+    /// nothing undefined. What it works around is `lld-link` answering the pointer for a variable
+    /// the static C runtime defines with a pointer of its own, as it should, and then leaving the
+    /// variable out as unreferenced, since the only reference is from that pointer, and writing
+    /// the image base into it. That is tamnd/rucc#2182 and llvm/llvm-project#220370, and clang
+    /// writes the same object and gets the same program.
+    pub fn keep_imported(&mut self, list: impl IntoIterator<Item = String>) {
+        for name in list {
+            let options = format!("/INCLUDE:{name} /ALTERNATENAME:{name}=__imp_{name}");
+            self.exports.push(Export { name: options, kind: Offer::Verbatim });
+        }
+    }
+
     /// Whether anything here has to be read by the assembler, which today is an `asm` at file
     /// scope with an instruction in it.
     #[must_use]
