@@ -8,6 +8,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-fsafety=detect` and the other checked modes are refused when linking for a Windows target, with a message saying the runtime they need has not been ported yet. The link used to fail on the runtime's undefined `__rucc_check_` names instead. `-c`, `-S` and `--emit=ir` still build with the checks in (#2069).
 
+### Fixed
+
+- The runtime has `__mulsc3`, `__muldc3`, `__divsc3` and `__divdc3`, and `__mulxc3` and `__divxc3` or `__multc3` and `__divtc3` for the target's long double, in `runtime/builtins/complex.c`. Multiplying or dividing two complex values calls them, and with no libgcc on the link line a program that did so failed with the name undefined. They recover infinities as Annex G asks and divide with the scaling libgcc has used since GCC 12, so the gcc torture tests for complex division pass (#2069).
+- Multiplying or dividing two `_Complex long double` values on x86-64 Windows passes each half to the runtime routine by the address of a copy, which is how Win64 passes an 80-bit long double. The compiler used to stop with an internal error about the call's signature. `tests/exec/windows/complex.c` checks every width against gcc (#2069).
+- The assembler reads `.linkonce discard` on a COFF target, which makes the section a COMDAT about the first symbol it defines, and the compiler writes that for its `.refptr.` sections instead of clang's `.section ...,discard,name` form, which GNU as refuses. Assembly the compiler writes for Windows can now go through `x86_64-w64-mingw32-as` as well as our own assembler (#2069).
+
 ## 0.14.0
 
 The end of W2: the constructs real Windows programs use. x86-64 Windows gets `dllimport`, `dllexport` and `.refptr`, DLLs built with `-shared`, `#pragma comment(lib)`, and `ms_abi` and `sysv_abi` as real calling conventions, and the assembler reads COFF section flags.

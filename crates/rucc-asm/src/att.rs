@@ -1727,7 +1727,7 @@ mod tests {
         assert!(text.contains("\nb:\n\t.short\t.Llbl.1-.Llbl.0-2\n"), "{text}");
     }
 
-    /// What clang writes for a variable a Windows file reads and only declares: the pointer in a
+    /// What gcc writes for a variable a Windows file reads and only declares: the pointer in a
     /// section of its own, named after it, which the linker keeps one copy of.
     #[test]
     fn a_pointer_to_a_variable_elsewhere_is_written_the_way_clang_writes_it() {
@@ -1736,7 +1736,7 @@ mod tests {
         let names = Interner::new();
         let text = print(&[], &globals, &[], &names, &target(Os::Windows), true, Output::default())
             .expect("a machine with a writer");
-        let expected = "\t.section\t.rdata$.refptr.environ,\"dr\",discard,.refptr.environ\n\
+        let expected = "\t.section\t.rdata$.refptr.environ,\"dr\"\n\t.linkonce\tdiscard\n\
                         \t.globl\t.refptr.environ\n\t.p2align\t3\n.refptr.environ:\n\
                         \t.quad\tenviron\n";
         assert!(text.contains(expected), "{text}");

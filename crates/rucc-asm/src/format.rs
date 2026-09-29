@@ -311,9 +311,11 @@ impl Directives {
             }
             // A section of its own for every pointer, named after it, which is how clang and gcc
             // both write one. `discard` makes it a COMDAT the linker keeps any one copy of, and
-            // the symbol the group is about is the pointer itself. See [`Place::Pointer`].
+            // the symbol the group is about is the pointer itself. See [`Place::Pointer`]. Written
+            // with `.linkonce` as gcc writes it rather than with the two extra operands clang puts
+            // on `.section`, because GNU as refuses those and llvm-mc takes both.
             (Directives::Coff, Place::Pointer) => {
-                let _ = writeln!(out, "\t.section\t.rdata${name},\"dr\",discard,{name}");
+                let _ = writeln!(out, "\t.section\t.rdata${name},\"dr\"\n\t.linkonce\tdiscard");
             }
             // Nothing but COFF is ever handed one, and the section a read only address would be
             // in anywhere else is at least the section that would hold it.
