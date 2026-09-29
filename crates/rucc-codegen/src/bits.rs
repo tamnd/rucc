@@ -160,7 +160,7 @@ pub fn dead(
             }
             let Some((def, source)) = conversion(func, inst) else { continue };
             let kept = (insts.width)(name, SOURCE).unwrap_or(EVERYTHING);
-            let read = wanted.get(&def).copied().unwrap_or(0);
+            let read = wanted.get(def);
             if read == 0 || read > kept {
                 continue;
             }
@@ -260,8 +260,8 @@ const SOURCE: u8 = 1;
 /// Absent means none, which is a register nothing has been seen to read. That is the right
 /// starting point rather than a wrong one to be corrected later: the answer only grows, so a
 /// register still absent when the walk settles is one nothing reads at all.
-fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> HashMap<mir::Reg, u32> {
-    let mut wanted: HashMap<mir::Reg, u32> = HashMap::new();
+fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> Wanted {
+    let mut wanted = Wanted { virtuals: vec![0; func.vregs()], physical: HashMap::new() };
     loop {
         let mut moved = false;
         for block in func.blocks() {
@@ -273,7 +273,7 @@ fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> HashMap<mir::
                 let copies = name.is_some_and(|name| (insts.copies_low)(name));
                 let through = conversion(func, inst)
                     .filter(|_| copies)
-                    .map_or(EVERYTHING, |(def, _)| wanted.get(&def).copied().unwrap_or(0));
+                    .map_or(EVERYTHING, |(def, _)| wanted.get(def));
                 let operands = &func[func[inst].operands];
                 for (at, operand) in operands.iter().enumerate() {
                     if operand.role != Role::Use {
@@ -281,13 +281,13 @@ fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> HashMap<mir::
                     }
                     let Ok(at) = u8::try_from(at) else { continue };
                     let asked = read(name, insts, operands, at).min(through);
-                    moved |= raise(&mut wanted, operand.reg, asked);
+                    moved |= wanted.raise(operand.reg, asked);
                 }
             }
             for call in &func[block].succs {
                 for (arg, param) in call.args.iter().zip(&func[call.block].params) {
-                    let asked = wanted.get(&param.reg).copied().unwrap_or(0);
-                    moved |= raise(&mut wanted, *arg, asked);
+                    let asked = wanted.get(param.reg);
+                    moved |= wanted.raise(*arg, asked);
                 }
             }
         }
@@ -297,14 +297,44 @@ fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> HashMap<mir::
     }
 }
 
-/// Raises how much of a register is read, and says whether that changed anything.
-fn raise(wanted: &mut HashMap<mir::Reg, u32>, reg: mir::Reg, bits: u32) -> bool {
-    let had = wanted.entry(reg).or_insert(0);
-    if *had >= bits {
-        return false;
+/// How many low bits of each register something reads, as [`demand`] works it out.
+///
+/// A virtual register's answer is in a list by its number rather than in a map, since the numbers
+/// run from nought with no gaps and the walk asks about every operand of the function on every
+/// round until nothing moves. The few physical registers go in the map.
+#[derive(Debug)]
+struct Wanted {
+    virtuals: Vec<u32>,
+    physical: HashMap<mir::Reg, u32>,
+}
+
+impl Wanted {
+    /// How many bits of it are read, which is none for a register nothing has been seen to read.
+    fn get(&self, reg: mir::Reg) -> u32 {
+        match reg.number() {
+            Some(number) => self.virtuals.get(number as usize).copied().unwrap_or(0),
+            None => self.physical.get(&reg).copied().unwrap_or(0),
+        }
     }
-    *had = bits;
-    true
+
+    /// Raises how much of a register is read, and says whether that changed anything.
+    fn raise(&mut self, reg: mir::Reg, bits: u32) -> bool {
+        let had = match reg.number() {
+            Some(number) => {
+                let number = number as usize;
+                if number >= self.virtuals.len() {
+                    self.virtuals.resize(number + 1, 0);
+                }
+                &mut self.virtuals[number]
+            }
+            None => self.physical.entry(reg).or_insert(0),
+        };
+        if *had >= bits {
+            return false;
+        }
+        *had = bits;
+        true
+    }
 }
 
 /// How many bits of the operand at that index the instruction reads.
