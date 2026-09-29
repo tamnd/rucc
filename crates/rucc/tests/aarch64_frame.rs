@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const TARGETS: [(&str, &str); 2] =
     [("aarch64-unknown-linux-gnu", "both"), ("aarch64-apple-darwin", "_both")];
@@ -45,9 +46,13 @@ long double quads(long double a, long double b, long double c, long double d) {
 ";
 
 /// The fixture, under a directory of its own so that two of these running at once do not write
-/// the same file.
+/// the same file. Two tests compile the same source for the same target, so the name alone is not
+/// enough: the first to finish would take the directory away from the other.
 fn fixture(what: &str, source: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rucc-a64-frame-{}-{what}", std::process::id()));
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("rucc-a64-frame-{}-{n}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, source).expect("the fixture can be written");
