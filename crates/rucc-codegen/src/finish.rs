@@ -689,7 +689,7 @@ impl Writer<'_> {
             self.row(inst, CfiOp::DefCfa { reg: number, offset: below });
         }
         for save in frame.saved_sse() {
-            let inst = self.store(sse, save.reg, save.at);
+            let inst = self.save_sse(save.reg, save.at);
             out.push(inst);
             // Where it went is an offset from whichever register the frame counts from, and the
             // address is a constant above that register, so the two make one constant. In an
@@ -1180,7 +1180,7 @@ impl Writer<'_> {
             out.push(self.two(mov, sp, fp));
         }
         for save in frame.saved_sse() {
-            let inst = self.load(sse, save.reg, save.at);
+            let inst = self.restore_sse(save.reg, save.at);
             out.push(inst);
             if frame.realign().is_none() || frame.late() {
                 self.restored(inst, sse, save.reg);
@@ -1352,7 +1352,13 @@ impl Writer<'_> {
 
     /// Reads a register out of the frame.
     fn load(&mut self, class: RegClass, reg: PhysReg, at: i32) -> Inst {
-        let load = self.opcode(self.insts.moves(class).expect("a class to load").load);
+        let load = self.insts.moves(class).expect("a class to load").load;
+        self.load_as(load, class, reg, at)
+    }
+
+    /// Reads a register out of the frame with that load.
+    fn load_as(&mut self, load: &str, class: RegClass, reg: PhysReg, at: i32) -> Inst {
+        let load = self.opcode(load);
         let base = Operand::read(Reg::physical(self.base), self.conv.int_class);
         self.func
             .build_loose(load)
@@ -1363,7 +1369,33 @@ impl Writer<'_> {
 
     /// Writes a register into the frame.
     fn store(&mut self, class: RegClass, reg: PhysReg, at: i32) -> Inst {
-        let store = self.opcode(self.insts.moves(class).expect("a class to store").store);
+        let store = self.insts.moves(class).expect("a class to store").store;
+        self.store_as(store, class, reg, at)
+    }
+
+    /// The part of a vector register the prologue owes the caller, into the frame. The whole of it
+    /// unless the convention keeps only part, and then that part and no more. See
+    /// [`rucc_target::Kept`].
+    fn save_sse(&mut self, reg: PhysReg, at: i32) -> Inst {
+        let sse = self.conv.sse_class;
+        match self.insts.kept.filter(|_| self.conv.sse_kept.is_some()) {
+            Some(kept) => self.store_as(kept.store, sse, reg, at),
+            None => self.store(sse, reg, at),
+        }
+    }
+
+    /// What [`Self::save_sse`] wrote, back out of the frame.
+    fn restore_sse(&mut self, reg: PhysReg, at: i32) -> Inst {
+        let sse = self.conv.sse_class;
+        match self.insts.kept.filter(|_| self.conv.sse_kept.is_some()) {
+            Some(kept) => self.load_as(kept.load, sse, reg, at),
+            None => self.load(sse, reg, at),
+        }
+    }
+
+    /// Writes a register into the frame with that store.
+    fn store_as(&mut self, store: &str, class: RegClass, reg: PhysReg, at: i32) -> Inst {
+        let store = self.opcode(store);
         let base = Operand::read(Reg::physical(self.base), self.conv.int_class);
         self.func
             .build_loose(store)

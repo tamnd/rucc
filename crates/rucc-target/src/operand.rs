@@ -58,6 +58,11 @@ pub enum Constraint {
     /// x86-64 needs: the destination is the first source, and the allocator is the one that has
     /// to make that true.
     Reuse(u8),
+    /// Only on a physical register an instruction writes, and only the bytes of it from that many
+    /// up, so a value no wider than that is still there afterwards and a wider one is not. That is
+    /// what a call does to a vector register AArch64 keeps the low half of, which is the only
+    /// place one is written.
+    Above(u8),
 }
 
 /// One operand of one instruction, as a target's description of that instruction writes it.

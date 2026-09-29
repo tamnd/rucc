@@ -89,6 +89,19 @@ pub struct Pair {
     pub pop: &'static str,
 }
 
+/// The load and the store of the part of a vector register a call keeps, on a convention that
+/// keeps only part of one. See [`crate::CallRegs::sse_kept`].
+///
+/// AArch64's are the `d` forms, eight bytes, which is what a prologue there saves `v8` to `v15` with
+/// since the top half of each is nothing its caller may count on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kept {
+    /// Reads that much of the register back out of the frame.
+    pub load: &'static str,
+    /// Writes that much of the register into the frame.
+    pub store: &'static str,
+}
+
 /// Every instruction a prologue, an epilogue, a spill or a reload is made of.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameInsts {
@@ -109,6 +122,9 @@ pub struct FrameInsts {
     /// Pushes two registers at once, or `None` on a machine that pushes one at a time. See
     /// [`Pair`].
     pub pair: Option<Pair>,
+    /// Saves and restores the part of a vector register a call keeps, or `None` where a call keeps
+    /// the whole of one or none of it and the class's own load and store are the answer.
+    pub kept: Option<Kept>,
     /// Adds a constant to the stack pointer, which is how an epilogue gives the frame back.
     pub add: &'static str,
     /// Takes a constant off the stack pointer, which is how a prologue takes the frame.

@@ -366,6 +366,13 @@ impl<'a> Parser<'a, '_> {
                     Err(_) => self.fail(format!("no instruction has {at} operands")),
                 }
             }
+            "above" => {
+                let bytes = self.u32()?;
+                match u8::try_from(bytes) {
+                    Ok(bytes) => Ok(Constraint::Above(bytes)),
+                    Err(_) => self.fail(format!("no register is {bytes} bytes wide")),
+                }
+            }
             other => self.fail(format!("`{other}` is not something an operand can be")),
         }
     }
@@ -908,6 +915,20 @@ mod tests {
 mfunc @take {
 block0:
     %0:gpr = x64.mov_rm [got @away]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_write_of_only_the_top_of_a_register_round_trips() {
+        // What a call on AArch64 does to `v8`, written against the x86-64 names the fixtures use.
+        round_trip(
+            "\
+mfunc @keep {
+block0:
+    $rax, $rcx(above 8) = x64.nop
     x64.ret
 }
 ",

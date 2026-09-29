@@ -115,7 +115,7 @@
 //! since the body's view of the frame moves down by up to the alignment and must not reach them.
 //! This was `tamnd/rucc#1422`.
 
-use rucc_mir::Func;
+use rucc_mir::{Constraint, Func};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_target::{CallRegs, PhysReg, RegClass, RegFile};
@@ -297,8 +297,9 @@ impl Frame {
         let (saved_int, vectors) = saved(func, allocation, layout);
 
         // The vector registers are saved in the frame rather than pushed, because no machine here
-        // has an instruction that pushes one.
-        let vector = width(layout, conv.sse_class);
+        // has an instruction that pushes one. Each takes the part of it a call keeps, which on
+        // AArch64 is the bottom eight bytes, and the whole register everywhere else.
+        let vector = conv.sse_kept.map_or_else(|| width(layout, conv.sse_class), u32::from);
         let mut top = 0;
         let mut align = word;
         let mut saved_sse = Vec::with_capacity(vectors.len());
@@ -739,6 +740,11 @@ fn saved(
     for block in func.blocks() {
         for inst in func.insts(block) {
             for operand in &func[func[inst].operands] {
+                // Not the top of a register a call writes, which is nothing the caller counts on
+                // and nothing this function owes anybody. See [`Constraint::Above`].
+                if matches!(operand.constraint, Constraint::Above(_)) {
+                    continue;
+                }
                 if let Some(at) = operand.reg.phys() {
                     note(operand.class, at);
                 }

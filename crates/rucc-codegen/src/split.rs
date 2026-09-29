@@ -192,7 +192,20 @@ pub fn indirect(
                 param.class,
                 given.iter().map(|edges| edges.iter().map(|args| args[index]).collect()).collect(),
             );
-            let home = *homes.entry(key).or_insert_with(|| func.new_vreg(param.class));
+            let home = match homes.get(&key) {
+                Some(&home) => home,
+                None => {
+                    // As narrow as the widest thing it is given, since what it holds is one of
+                    // them, and the whole register when any of them is.
+                    let widths = key.1.iter().flatten().map(|&arg| func.width(arg));
+                    let width =
+                        widths.collect::<Option<Vec<u8>>>().and_then(|all| all.into_iter().max());
+                    let home = func.new_vreg(param.class);
+                    func.set_width(home, width.map_or(0, u32::from));
+                    homes.insert(key, home);
+                    home
+                }
+            };
             carried.push(home);
             for (branch, edges) in given.iter().enumerate() {
                 for args in edges {

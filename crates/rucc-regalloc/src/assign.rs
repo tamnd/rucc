@@ -363,6 +363,21 @@ struct Blocked {
     /// register outright claims it against everything, and a point no operand covers is a point
     /// the instruction has the register to itself at.
     by: Option<Reg>,
+    /// The byte the instruction writes the register from, when it leaves the bottom of it alone,
+    /// which is what a call does to a register AArch64 keeps the low half of. A value that fits
+    /// below it is not in the way. See [`Constraint::Above`].
+    above: Option<u8>,
+}
+
+impl Blocked {
+    /// Whether this is in the way of a value of that width, which it is unless it writes only
+    /// above everything the value takes.
+    fn reaches(&self, width: Option<u8>) -> bool {
+        match (self.above, width) {
+            (Some(above), Some(width)) => width > above,
+            _ => true,
+        }
+    }
 }
 
 /// A value written into the register another operand of the same instruction was read from.
@@ -505,6 +520,9 @@ pub(crate) enum Want {
 pub(crate) struct Blocks {
     /// The constraints, sorted by class, then by register, then by point.
     all: Vec<Blocked>,
+    /// How many bytes of its register each virtual register's value takes, by number, which is
+    /// what [`Blocked::reaches`] asks.
+    widths: Vec<Option<u8>>,
 }
 
 impl Blocks {
@@ -520,14 +538,28 @@ impl Blocks {
         at: PhysReg,
         want: Want,
     ) -> bool {
-        self.over(class, at, range)
-            .any(|one| one.by != Some(reg) && (want == Want::Clear || area.covers(one.point)))
+        self.over(class, at, range).any(|one| {
+            one.by != Some(reg)
+                && one.reaches(self.width(reg))
+                && (want == Want::Clear || area.covers(one.point))
+        })
+    }
+
+    /// How many bytes of its register a value takes, or `None` for all of it.
+    fn width(&self, reg: Reg) -> Option<u8> {
+        let number = usize::try_from(reg.number()?).ok()?;
+        self.widths.get(number).copied().flatten()
     }
 
     /// Every register an instruction takes for itself where no value may be in it, with the class
     /// and the point, sorted by class, then by register, then by point.
+    ///
+    /// Not one it writes only the top of, since a value narrow enough may still be in that.
     pub(crate) fn taken(&self) -> impl Iterator<Item = (RegClass, PhysReg, Point)> + '_ {
-        self.all.iter().filter(|one| one.by.is_none()).map(|one| (one.class, one.at, one.point))
+        self.all
+            .iter()
+            .filter(|one| one.by.is_none() && one.above.is_none())
+            .map(|one| (one.class, one.at, one.point))
     }
 
     /// The constraints on one register of one class at the points an interval covers.
@@ -570,8 +602,11 @@ fn available(
             && Some(held.reg) != except
             && held.area.overlaps(interval.area)
     });
+    let width = blocked.width(interval.reg);
     let insisted = blocked.over(interval.class, at, interval.range).any(|one| {
-        one.by != Some(interval.reg) && (want == Want::Clear || interval.area.covers(one.point))
+        one.by != Some(interval.reg)
+            && one.reaches(width)
+            && (want == Want::Clear || interval.area.covers(one.point))
     });
     !taken && !insisted
 }
@@ -710,7 +745,11 @@ pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
                         }
                         named = true;
                         let by = operand.reg.is_virtual().then_some(operand.reg);
-                        blocked.push(Blocked { class, at, point, by });
+                        let above = match operand.constraint {
+                            Constraint::Above(above) => Some(above),
+                            _ => None,
+                        };
+                        blocked.push(Blocked { class, at, point, by, above });
                     }
                     // A register no operand names where the operands are read is one the
                     // instruction writes and does not read, which is what a clobber is, and the
@@ -731,7 +770,7 @@ pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
                     // the dividend's own sign bits. `rucc_target::x86_64` writes both of them down
                     // as early definitions for exactly that reason.
                     if !named && role == Role::Def {
-                        blocked.push(Blocked { class, at, point, by: None });
+                        blocked.push(Blocked { class, at, point, by: None, above: None });
                     }
                 }
             }
@@ -743,7 +782,10 @@ pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
     // searchable, and it is stable so two constraints on one register at one point keep the order
     // the instruction wrote them in.
     blocked.sort_by_key(|one: &Blocked| (one.class, one.at, one.point));
-    Blocks { all: blocked }
+    let widths = (0..func.vregs())
+        .map(|number| func.width(Reg::virtual_reg(u32::try_from(number).ok()?)))
+        .collect();
+    Blocks { all: blocked, widths }
 }
 
 /// The register an operand has to be in, which is the one a constraint asks for or the one the
@@ -918,6 +960,36 @@ mod tests {
         // The first register in the order, twice, because the first value is finished with before
         // the second one is written.
         assert_eq!(places(&func, &env()), ["rax", "rax"]);
+    }
+
+    /// A value held over an instruction that writes the whole of the first register and the top
+    /// of the second, which is a call on AArch64 and `v8` in small, with the value as wide as that.
+    fn over_the_top(width: u32) -> Func {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let held = func.new_vreg(GPR);
+        func.set_width(held, width);
+        func.build(block, opcode).def(held, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::write(Reg::physical(RCX), GPR).with(Constraint::Above(8)))
+            .finish();
+        func.build(block, opcode).uses(held, GPR).finish();
+        func
+    }
+
+    #[test]
+    fn a_value_that_fits_under_what_an_instruction_writes_stays_in_the_register() {
+        assert_eq!(places(&over_the_top(8), &narrow(2)), ["rcx"]);
+        assert_eq!(places(&over_the_top(4), &narrow(2)), ["rcx"]);
+    }
+
+    #[test]
+    fn a_value_wider_than_that_or_of_no_known_width_does_not() {
+        assert_eq!(places(&over_the_top(16), &narrow(2)), ["slot 0"]);
+        assert_eq!(places(&over_the_top(0), &narrow(2)), ["slot 0"]);
     }
 
     #[test]
