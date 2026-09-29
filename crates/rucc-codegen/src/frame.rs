@@ -215,6 +215,15 @@ pub struct Layout<'a> {
     /// is the prologue's job and there is no prologue, which is why a naked function that wants any
     /// is refused rather than given a frame nothing sets up. See [`Frame::of`].
     pub naked: bool,
+    /// Whether the prologue puts the general purpose registers it saves on the stack two at a time,
+    /// which is what a machine with a pair instruction does and what [`crate::pipeline`] sets from
+    /// the target's `FrameInsts::pair`.
+    ///
+    /// On AArch64 a push moves the stack pointer sixteen bytes to keep it aligned, so a register
+    /// pushed alone wastes eight of them. Two in one `stp` fill the sixteen, which is how every
+    /// compiler for the machine saves `x19` to `x28`, and a count that is odd leaves the last one
+    /// alone.
+    pub pairs: bool,
     /// Which locals and spill slots share their bytes with which, or `None` for a frame where
     /// every one of them gets a run of its own.
     ///
@@ -241,6 +250,7 @@ impl<'a> Layout<'a> {
             red_zone: true,
             protect: false,
             naked: false,
+            pairs: false,
             share: None,
         }
     }
@@ -263,6 +273,7 @@ pub struct Frame {
     late: bool,
     grows: bool,
     naked: bool,
+    pairs: bool,
     usage: u32,
 }
 
@@ -425,7 +436,7 @@ impl Frame {
         // short of aligned when the function starts, and one push further off for every push. The
         // frame pointer is a push like any other here, which is why this is asked after the frames
         // that keep one without being asked to have said so.
-        let pushed = u32::from(frame_pointer) + u32::try_from(saved_int.len()).expect("a frame");
+        let pushed = u32::from(frame_pointer) + groups(saved_int.len(), layout.pairs);
         let entry = wrap(conv.stack_align, conv.return_address);
         let after = (entry + wrap(conv.stack_align, push * pushed)) % conv.stack_align;
 
@@ -465,7 +476,7 @@ impl Frame {
         // when the body starts and every distance from one is a distance from the other.
         let mut shift = if free { -offset(body) } else { offset(shifted) };
         if layout.grows && !late {
-            shift -= offset(size) + offset(push) * i32::try_from(saved_int.len()).expect("a frame");
+            shift -= offset(size + push * groups(saved_int.len(), layout.pairs));
         }
         for at in slots
             .iter_mut()
@@ -511,6 +522,7 @@ impl Frame {
             late,
             grows: layout.grows,
             naked: layout.naked,
+            pairs: layout.pairs,
             usage,
         }
     }
@@ -522,6 +534,12 @@ impl Frame {
     #[must_use]
     pub fn saved_int(&self) -> &[PhysReg] {
         &self.saved_int
+    }
+
+    /// The same registers as the pushes that put them on the stack, one or two to a push, in the
+    /// order the prologue makes them. See [`Layout::pairs`].
+    pub fn pushed_int(&self) -> std::slice::Chunks<'_, PhysReg> {
+        self.saved_int.chunks(if self.pairs { 2 } else { 1 })
     }
 
     /// The vector registers the prologue stores into the frame, and where each of them goes.
@@ -770,6 +788,12 @@ fn width(layout: &Layout<'_>, class: RegClass) -> u32 {
 #[must_use]
 pub fn widths(layout: &Layout<'_>, allocation: &Allocation) -> Vec<u32> {
     allocation.assignment.slots().iter().map(|&class| width(layout, class)).collect()
+}
+
+/// How many pushes put that many general purpose registers on the stack.
+fn groups(saved: usize, pairs: bool) -> u32 {
+    let pushes = if pairs { saved.div_ceil(2) } else { saved };
+    u32::try_from(pushes).expect("a frame")
 }
 
 /// How far past a multiple of an alignment a number is, counted the other way: what has to be

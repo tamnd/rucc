@@ -645,14 +645,18 @@ impl Writer<'_> {
                 from_sp = false;
             }
         }
-        for &reg in frame.saved_int() {
-            let inst = self.push(reg);
+        for regs in frame.pushed_int() {
+            let inst = self.push_int(regs);
             out.push(inst);
             below += push;
             if from_sp {
                 self.row(inst, CfiOp::DefCfaOffset(below));
             }
-            self.saved(inst, int, reg, -below);
+            // The first of a pair at the lower address and the second a word above it, which is
+            // what the pair instruction does and where [`Self::push_frame`] puts its two as well.
+            for (&reg, above) in regs.iter().zip([0, offset(self.conv.word)]) {
+                self.saved(inst, int, reg, above - below);
+            }
         }
         if let Some(to) = frame.realign().filter(|_| !frame.late()) {
             // Nothing is written for this and nothing can be. After it the stack pointer is a
@@ -1176,7 +1180,7 @@ impl Writer<'_> {
                 self.restored(inst, sse, save.reg);
             }
         }
-        let pushed = u32::try_from(frame.saved_int().len()).expect("a frame");
+        let pushed = u32::try_from(frame.pushed_int().len()).expect("a frame");
         if frame.frame_pointer() {
             // No row for either of these. The address is counted from the frame pointer here and
             // this is what moves the stack pointer rather than the frame pointer, so the rule that
@@ -1204,10 +1208,12 @@ impl Writer<'_> {
                 self.row(inst, CfiOp::DefCfaOffset(below));
             }
         }
-        for &reg in frame.saved_int().iter().rev() {
-            let inst = self.pop(reg);
+        for regs in frame.pushed_int().rev() {
+            let inst = self.pop_int(regs);
             out.push(inst);
-            self.restored(inst, int, reg);
+            for &reg in regs {
+                self.restored(inst, int, reg);
+            }
             below -= offset(push);
             if from_sp {
                 self.row(inst, CfiOp::DefCfaOffset(below));
@@ -1251,10 +1257,10 @@ impl Writer<'_> {
         out
     }
 
-    /// How many general purpose registers the prologue put on the stack, the frame pointer
-    /// included.
+    /// How many pushes the prologue made, the frame pointer's included, which on a machine that
+    /// pushes two at a time is fewer than the registers they saved.
     fn pushes(&self, frame: &Frame) -> i32 {
-        let saved = i32::try_from(frame.saved_int().len()).expect("a frame");
+        let saved = i32::try_from(frame.pushed_int().len()).expect("a frame");
         saved + i32::from(frame.frame_pointer())
     }
 
@@ -1357,6 +1363,33 @@ impl Writer<'_> {
             .build_loose(store)
             .uses(Reg::physical(reg), class)
             .mem(Mem::at(base).plus(at))
+            .finish()
+    }
+
+    /// Puts one general purpose register on the stack, or two with the pair instruction. See
+    /// [`crate::frame::Layout::pairs`].
+    fn push_int(&mut self, regs: &[PhysReg]) -> Inst {
+        let &[first, second] = regs else { return self.push(regs[0]) };
+        let pair = self.insts.pair.expect("a frame that pairs is on a machine that can");
+        let push = self.opcode(pair.push);
+        let class = self.conv.int_class;
+        self.func
+            .build_loose(push)
+            .uses(Reg::physical(first), class)
+            .uses(Reg::physical(second), class)
+            .finish()
+    }
+
+    /// Takes back what [`Self::push_int`] put on the stack.
+    fn pop_int(&mut self, regs: &[PhysReg]) -> Inst {
+        let &[first, second] = regs else { return self.pop(regs[0]) };
+        let pair = self.insts.pair.expect("a frame that pairs is on a machine that can");
+        let pop = self.opcode(pair.pop);
+        let class = self.conv.int_class;
+        self.func
+            .build_loose(pop)
+            .def(Reg::physical(first), class)
+            .def(Reg::physical(second), class)
             .finish()
     }
 
