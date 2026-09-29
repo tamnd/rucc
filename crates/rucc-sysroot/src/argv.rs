@@ -320,6 +320,12 @@ fn coff(
 
     if options.mode == LinkMode::Shared {
         args.push("-shared".to_owned());
+        // The entry point of a DLL is named the way gcc names it. lld before 20 does not pick it
+        // for a MinGW DLL and falls back to MSVC's `_DllMainCRTStartup`, which `dllcrt2.o` does
+        // not define. On i686 the name is decorated, and both linkers drop the leading underscore.
+        args.push("-e".to_owned());
+        let entry = if machine == "i386pe" { "_DllMainCRTStartup@12" } else { "DllMainCRTStartup" };
+        args.push(entry.to_owned());
     } else {
         args.push("--subsystem".to_owned());
         args.push(if options.gui { "windows" } else { "console" }.to_owned());
@@ -949,6 +955,8 @@ mod tests {
         assert!(named("dllcrt2.o"), "{args:?}");
         assert!(!named("crt2.o"), "{args:?}");
         assert!(!args.contains(&"--subsystem".to_owned()), "{args:?}");
+        let entry = args.iter().position(|arg| arg == "-e").expect("an entry point");
+        assert_eq!(args[entry + 1], "DllMainCRTStartup", "{args:?}");
     }
 
     #[test]

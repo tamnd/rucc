@@ -121,6 +121,8 @@ sysroot   <cache>/sysroots/x86_64-windows-gnu
   i386pep
   --sysroot=<cache>/sysroots/x86_64-windows-gnu
   -shared
+  -e
+  DllMainCRTStartup
   --dynamicbase
   --nxcompat
   --high-entropy-va
