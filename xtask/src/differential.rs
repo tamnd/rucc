@@ -47,21 +47,38 @@
 //! number is in `spec/cross-compile/14-testing.md` section 14.4's list of what qemu does that the
 //! hardware does not.
 //!
+//! # Other targets
+//!
+//! `--target` names a row other than the machine's own, and today the one it accepts is
+//! `x86_64-windows-gnu`, held against MinGW GCC. That path does not use the script below, because
+//! it has to work on a Windows machine with no `sh` on it as well as on Linux, so the same builds
+//! are compiled, linked and run from here one command at a time. [`Reference`] is what differs
+//! between the rows: which compiler is the reference, how it is spelled, and what starts one of
+//! the programs it links. On Linux that is Wine and on Windows it is nothing, since the program
+//! is native there. A row whose reference is not spelled like gcc, `cl.exe` on the MSVC rows,
+//! is one more way of writing [`Reference::compile`] and [`Reference::link`] and nothing else.
+//!
+//! rucc is on both sides at `-O0` and at `-O2` on that path, so it is nine builds rather than
+//! four: the reference against itself first, as the control, and then every pairing with rucc on
+//! one side or both. `-O0` is the question with the fewest other things going on and `-O2` is the
+//! one a user's program is built at, and a convention that only holds at one of them is a bug.
+//!
+//! The first run for `x86_64-windows-gnu`, against MinGW GCC 13 under Wine 9 on Linux, was nine
+//! builds and every value arrived in all of them: one hundred and three functions a side, the
+//! variadic ones included, with `long double` passed by reference as the Microsoft convention
+//! has it and the eight byte and sixteen byte aggregates in the places it puts them. Nothing
+//! crashed and nothing was retried.
+//!
 //! # What this does not cover yet
 //!
-//! One target. The corpus is the same C for all forty two rows of the table and only one of them
-//! has a back end, so what runs here is x86-64 System V and the rest of the matrix is waiting on
-//! the emulation layer of section 14.4.
-//!
-//! The corpus does now have variadic signatures, which is the piece where Darwin arm64 and
-//! Windows diverge from everyone else. On x86-64 they are the same question as the fixed ones and
-//! this run answers it. On the two targets where the answer differs there is no back end yet, so
-//! what checks the difference there is `rucc_lower::abi`'s unit tests and the compile of the same
-//! corpus for every row in tamnd/rucc-cross, and the execution follows the back end.
+//! The rest of the table. The corpus is the same C for all forty two rows, and what runs here is
+//! x86-64 System V on the machine's own row and the Microsoft x64 convention on the MinGW one.
+//! aarch64 Linux is held against gcc under qemu by `tests/qemu/run.sh`, which runs the same
+//! corpus. The rows with no back end wait on one.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
@@ -82,13 +99,57 @@ const LEVEL: &str = "-O0";
 /// paragraphs about registers.
 const PAIRS: &[(&str, &str)] = &[("cc", "cc"), ("rucc", "rucc"), ("rucc", "cc"), ("cc", "rucc")];
 
-/// Compiles the signature corpus four ways, runs each, and reports what disagreed.
+/// Compiles the signature corpus with both compilers, runs every pairing, and reports what
+/// disagreed.
+///
+/// `args` is what followed the task's name, which is nothing for the machine's own row or
+/// `--target` and a triple for another one.
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when the corpus will not compile or there is no way to run an x86-64 Linux
-/// program, and [`Error::Failed`] with one entry per build whose values did not all arrive.
-pub(crate) fn differential() -> Result<()> {
+/// [`Error::Io`] when the corpus will not compile or there is no way to run the programs, and
+/// [`Error::Failed`] with one entry per build whose values did not all arrive.
+pub(crate) fn differential(args: &[String]) -> Result<()> {
+    match target(args)?.as_deref() {
+        None | Some(TRIPLE | "x86_64-linux-gnu") => native(),
+        Some(triple) => match Reference::for_target(triple) {
+            Some(reference) => foreign(&reference),
+            None => Err(Error::Io(format!(
+                "abi-differential: there is no reference compiler for {triple} yet, only for \
+                 x86_64-linux-gnu and x86_64-windows-gnu"
+            ))),
+        },
+    }
+}
+
+/// Reads `--target` out of the arguments, the way `cargo xtask builtins` does.
+fn target(args: &[String]) -> Result<Option<String>> {
+    let mut target = None;
+    let mut at = 0;
+    while at < args.len() {
+        match args[at].as_str() {
+            "--target" => {
+                at += 1;
+                target = Some(
+                    args.get(at)
+                        .cloned()
+                        .ok_or_else(|| Error::Io("--target wants a triple after it".to_owned()))?,
+                );
+            }
+            other => match other.strip_prefix("--target=") {
+                Some(triple) => target = Some(triple.to_owned()),
+                None => {
+                    return Err(Error::Io(format!("abi-differential: unknown argument `{other}`")));
+                }
+            },
+        }
+        at += 1;
+    }
+    Ok(target)
+}
+
+/// The machine's own row, the four builds of the table at the top of this file.
+fn native() -> Result<()> {
     let runner = Runner::find("this harness")?;
     let work = build()?;
     let ran = read(&runner.run(&work, "the harness")?);
@@ -100,27 +161,7 @@ pub(crate) fn differential() -> Result<()> {
             problems.push(format!("{name}: did not run at all"));
             continue;
         };
-        match run.status {
-            Some(0) => {
-                println!("abi-differential: {caller} calling {callee}, every value arrived");
-                // A retry left its note in the output, and a run that needed one is worth saying
-                // out loud rather than swallowing. It is the emulation, but a rate that starts
-                // climbing is a thing somebody should get to see.
-                for line in run.output.lines() {
-                    println!("abi-differential:   {line}");
-                }
-            }
-            Some(1) => problems.push(format!(
-                "{name}: a {caller} caller and a {callee} callee do not agree\n{}",
-                indent(run.output.trim_end())
-            )),
-            Some(_) => problems.push(format!(
-                "{name}: crashed on every attempt\n{}",
-                indent(run.output.trim_end())
-            )),
-            None => problems
-                .push(format!("{name}: did not build or link\n{}", indent(run.output.trim_end()))),
-        }
+        judge(caller, callee, run, &mut problems);
     }
 
     if problems.is_empty() {
@@ -130,6 +171,30 @@ pub(crate) fn differential() -> Result<()> {
     Err(Error::Failed { task: "abi-differential", problems })
 }
 
+/// Says what one build did, on the terminal when every value arrived and in `problems` when not.
+fn judge(caller: &str, callee: &str, run: &Ran, problems: &mut Vec<String>) {
+    let name = format!("{caller}-{callee}");
+    match run.status {
+        Some(0) => {
+            println!("abi-differential: {caller} calling {callee}, every value arrived");
+            // A retry left its note in the output, and a run that needed one is worth saying out
+            // loud rather than swallowing. It is the emulation, but a rate that starts climbing is
+            // a thing somebody should get to see.
+            for line in run.output.lines() {
+                println!("abi-differential:   {line}");
+            }
+        }
+        Some(1) => problems.push(format!(
+            "{name}: a {caller} caller and a {callee} callee do not agree\n{}",
+            indent(run.output.trim_end())
+        )),
+        Some(_) => problems
+            .push(format!("{name}: crashed on every attempt\n{}", indent(run.output.trim_end()))),
+        None => problems
+            .push(format!("{name}: did not build or link\n{}", indent(run.output.trim_end()))),
+    }
+}
+
 /// Builds the compiler, compiles the corpus with it, and lays out the directory the runner runs.
 ///
 /// rucc produces assembly here and the reference compiler produces objects inside the runner,
@@ -137,31 +202,8 @@ pub(crate) fn differential() -> Result<()> {
 /// link, and the machine that can is the one the programs run on.
 fn build() -> Result<PathBuf> {
     let source = root().join("tests").join("abi-signatures");
-    let work = root().join("target").join("abi-differential");
-    if work.exists() {
-        std::fs::remove_dir_all(&work)
-            .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
-    }
-    std::fs::create_dir_all(&work)
-        .map_err(|e| Error::Io(format!("could not make {}: {e}", work.display())))?;
-
-    for name in ["abi.h", "report.c", "caller.c", "callee.c"] {
-        std::fs::copy(source.join(name), work.join(name)).map_err(|e| {
-            Error::Io(format!(
-                "could not copy {name}: {e}. Run `cargo xtask abi-signatures` to write the corpus."
-            ))
-        })?;
-    }
-
-    let status = Command::new("cargo")
-        .args(["build", "-q", "--release", "-p", "rucc"])
-        .current_dir(root())
-        .status()
-        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
-    if !status.success() {
-        return Err(Error::Io("the compiler did not build".to_owned()));
-    }
-    let rucc = root().join("target").join("release").join("rucc");
+    let work = corpus()?;
+    let rucc = compiler()?;
 
     for name in ["caller", "callee"] {
         let out = Command::new(&rucc)
@@ -183,6 +225,40 @@ fn build() -> Result<PathBuf> {
     std::fs::write(work.join("run.sh"), SCRIPT)
         .map_err(|e| Error::Io(format!("could not write the script: {e}")))?;
     Ok(work)
+}
+
+/// Clears the work directory and copies the corpus into it.
+fn corpus() -> Result<PathBuf> {
+    let source = root().join("tests").join("abi-signatures");
+    let work = root().join("target").join("abi-differential");
+    if work.exists() {
+        std::fs::remove_dir_all(&work)
+            .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
+    }
+    std::fs::create_dir_all(&work)
+        .map_err(|e| Error::Io(format!("could not make {}: {e}", work.display())))?;
+
+    for name in ["abi.h", "report.c", "caller.c", "callee.c"] {
+        std::fs::copy(source.join(name), work.join(name)).map_err(|e| {
+            Error::Io(format!(
+                "could not copy {name}: {e}. Run `cargo xtask abi-signatures` to write the corpus."
+            ))
+        })?;
+    }
+    Ok(work)
+}
+
+/// Builds the compiler and says where it is.
+fn compiler() -> Result<PathBuf> {
+    let status = Command::new("cargo")
+        .args(["build", "-q", "--release", "-p", "rucc"])
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if !status.success() {
+        return Err(Error::Io("the compiler did not build".to_owned()));
+    }
+    Ok(root().join("target").join("release").join(format!("rucc{}", std::env::consts::EXE_SUFFIX)))
 }
 
 /// The script that assembles each side, links the four combinations and runs them.
@@ -240,6 +316,217 @@ for pair in cc:cc rucc:rucc rucc:cc cc:rucc; do
     fi
 done
 ";
+
+/// The reference compiler for a row that is not the machine's own, and how its programs start.
+struct Reference {
+    /// The row, as rucc spells it after `--target=`.
+    triple: &'static str,
+    /// The command that compiles and links for that row, which is a program on `PATH` or a path.
+    cc: String,
+    /// What starts a program built for the row, empty when this machine runs it directly.
+    runner: Vec<String>,
+}
+
+impl Reference {
+    /// The reference for `triple` on this machine, or [`None`] when there is not one yet.
+    ///
+    /// `RUCC_ABI_CC` names a different compiler and `RUCC_ABI_RUNNER` a different way of starting
+    /// the programs, split at spaces, for a machine where the defaults are somewhere else. The
+    /// defaults are MinGW GCC by its cross name and Wine on Linux, and plain `gcc` and nothing on
+    /// Windows, which is what MSYS2's MinGW environment puts on `PATH`.
+    fn for_target(triple: &str) -> Option<Self> {
+        let triple = match triple {
+            "x86_64-windows-gnu" | "x86_64-w64-mingw32" | "x86_64-pc-windows-gnu" => {
+                "x86_64-windows-gnu"
+            }
+            _ => return None,
+        };
+        let windows = cfg!(windows);
+        let cc = std::env::var("RUCC_ABI_CC").unwrap_or_else(|_| {
+            if windows { "gcc".to_owned() } else { "x86_64-w64-mingw32-gcc".to_owned() }
+        });
+        let runner = match std::env::var("RUCC_ABI_RUNNER") {
+            Ok(said) => said.split_whitespace().map(str::to_owned).collect(),
+            Err(_) if windows => Vec::new(),
+            Err(_) => vec![wine()],
+        };
+        Some(Self { triple, cc, runner })
+    }
+
+    /// Compiles one file of the corpus to an object.
+    fn compile(&self, source: &Path, object: &Path) -> Command {
+        let mut command = Command::new(&self.cc);
+        command.args(["-std=c17", LEVEL, "-c"]).arg(source).arg("-o").arg(object);
+        command
+    }
+
+    /// Links a caller, a callee and the report into a program.
+    fn link(&self, objects: &[PathBuf], program: &Path) -> Command {
+        let mut command = Command::new(&self.cc);
+        command.args(objects).arg("-o").arg(program);
+        command
+    }
+
+    /// Starts a program this reference linked.
+    fn start(&self, program: &Path) -> Command {
+        match self.runner.split_first() {
+            Some((first, rest)) => {
+                let mut command = Command::new(first);
+                command.args(rest).arg(program);
+                command
+            }
+            None => Command::new(program),
+        }
+    }
+
+    /// How the programs were run, for the summary line.
+    fn how(&self) -> String {
+        match self.runner.first() {
+            Some(first) => format!("run under {first}"),
+            None => "run here".to_owned(),
+        }
+    }
+}
+
+/// Wine, by the first of its names that is on this machine.
+///
+/// `wine64` is what Debian and Ubuntu put in `/usr/lib/wine` and not on `PATH`, and `wine` is what
+/// the Wine project's own packages and most other distributions call it.
+fn wine() -> String {
+    for name in ["wine64", "wine"] {
+        if Command::new(name).arg("--version").output().is_ok_and(|out| out.status.success()) {
+            return name.to_owned();
+        }
+    }
+    if Path::new("/usr/lib/wine/wine64").exists() {
+        return "/usr/lib/wine/wine64".to_owned();
+    }
+    "wine".to_owned()
+}
+
+/// The levels rucc builds each side at on a row that is not the machine's own.
+const FOREIGN_LEVELS: &[&str] = &["-O0", "-O2"];
+
+/// A row that is not the machine's own, compiled, linked and run from here one command at a time.
+fn foreign(reference: &Reference) -> Result<()> {
+    let work = corpus()?;
+    let rucc = compiler()?;
+    let triple = reference.triple;
+    let mut problems = Vec::new();
+
+    // The reference's objects. A corpus the reference will not compile is not a finding about
+    // rucc, so it stops the run rather than turning into nine failures.
+    let mut sides = vec!["gcc".to_owned()];
+    for name in ["report", "caller", "callee"] {
+        let object = work.join(format!("gcc-{name}.o"));
+        let out = reference
+            .compile(&work.join(format!("{name}.c")), &object)
+            .current_dir(&work)
+            .output()
+            .map_err(|e| Error::Io(format!("could not run {}: {e}", reference.cc)))?;
+        if !out.status.success() {
+            return Err(Error::Io(format!(
+                "{} would not compile {name}.c:\n{}",
+                reference.cc,
+                indent(String::from_utf8_lossy(&out.stderr).trim_end())
+            )));
+        }
+    }
+
+    // rucc's, at each level. One that will not compile is a finding and its builds are reported
+    // as never having linked, which is what they are.
+    let mut refused = BTreeMap::new();
+    for level in FOREIGN_LEVELS {
+        let side = format!("rucc{level}");
+        for name in ["caller", "callee"] {
+            let out = Command::new(&rucc)
+                .args(["-c", &format!("--target={triple}"), level])
+                .arg(work.join(format!("{name}.c")))
+                .arg("-o")
+                .arg(work.join(format!("{side}-{name}.o")))
+                .current_dir(&work)
+                .output()
+                .map_err(|e| Error::Io(format!("could not run the compiler: {e}")))?;
+            if !out.status.success() {
+                refused.insert(
+                    side.clone(),
+                    format!(
+                        "rucc {level} would not compile {name}.c:\n{}",
+                        String::from_utf8_lossy(&out.stderr).trim_end()
+                    ),
+                );
+            }
+        }
+        sides.push(side);
+    }
+
+    let mut builds = 0;
+    for caller in &sides {
+        for callee in &sides {
+            builds += 1;
+            let run = match refused.get(caller).or_else(|| refused.get(callee)) {
+                Some(why) => Ran { output: why.clone(), status: None },
+                None => pairing(reference, &work, caller, callee)?,
+            };
+            judge(caller, callee, &run, &mut problems);
+        }
+    }
+
+    if problems.is_empty() {
+        println!(
+            "abi-differential: {builds} builds, {triple} against {}, {}",
+            reference.cc,
+            reference.how()
+        );
+        return Ok(());
+    }
+    Err(Error::Failed { task: "abi-differential", problems })
+}
+
+/// Links one caller to one callee and runs it, by the rule [`SCRIPT`] follows: a status of 0 or
+/// 1 is believed the first time, and anything else is tried again up to three times.
+fn pairing(reference: &Reference, work: &Path, caller: &str, callee: &str) -> Result<Ran> {
+    let program = work.join(format!("{caller}-{callee}.exe"));
+    let objects = [
+        work.join(format!("{caller}-caller.o")),
+        work.join(format!("{callee}-callee.o")),
+        work.join("gcc-report.o"),
+    ];
+    let out = reference
+        .link(&objects, &program)
+        .current_dir(work)
+        .output()
+        .map_err(|e| Error::Io(format!("could not run {}: {e}", reference.cc)))?;
+    if !out.status.success() {
+        return Ok(Ran { output: String::from_utf8_lossy(&out.stderr).into_owned(), status: None });
+    }
+
+    let mut output = String::new();
+    for attempt in 1..=3 {
+        let out = reference
+            .start(&program)
+            .current_dir(work)
+            .output()
+            .map_err(|e| Error::Io(format!("could not start {}: {e}", program.display())))?;
+        // A Windows program writes CRLF to a text stream, and the line it prints is the same line
+        // either way.
+        let said = String::from_utf8_lossy(&out.stderr).replace('\r', "")
+            + &String::from_utf8_lossy(&out.stdout).replace('\r', "");
+        let status = out.status.code();
+        if matches!(status, Some(0 | 1)) || attempt == 3 {
+            output.push_str(&said);
+            // A program killed by a signal has no code, and it is a crash like any other status
+            // the corpus does not choose.
+            return Ok(Ran { output, status: Some(status.unwrap_or(-1)) });
+        }
+        let _ = writeln!(
+            output,
+            "exit {}, which is not a status this program chooses. Trying again.",
+            status.map_or_else(|| "by a signal".to_owned(), |code| code.to_string())
+        );
+    }
+    unreachable!("the third attempt returns")
+}
 
 /// What one build did.
 struct Ran {
