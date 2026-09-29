@@ -6241,6 +6241,20 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("call\tcounted"), "{text}");
     }
 
+    /// A condition built on a `__builtin_constant_p` the optimizer has still to answer is left to
+    /// the optimizer, rather than decided in the front end on the no a constant expression gets.
+    /// At `-O2` `size` has become the four it was set to by the time the question is asked, and
+    /// gcc takes the first arm. `execute/builtin-constant.c` is the torture test that checks it.
+    #[test]
+    fn a_condition_on_a_builtin_constant_p_waits_for_the_optimizer() {
+        let text = optimized(concat!(
+            "void g(void);\n",
+            "void f(void) { int size = sizeof(int); __builtin_constant_p(size) ? (void)0 : g(); }\n",
+            "void h(void) { int size = sizeof(int); if (!__builtin_constant_p(size)) g(); }\n",
+        ));
+        assert!(!text.contains("call\tg") && !text.contains("jmp\tg"), "{text}");
+    }
+
     /// A library builtin is the library function of the same name, and the call says so.
     ///
     /// A program writes `__builtin_strlen` rather than `strlen` to reach the function the C

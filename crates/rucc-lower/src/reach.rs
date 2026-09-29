@@ -427,11 +427,13 @@ impl<'a> Decide<'a> {
     /// `if (&pthread_create)` is the idiom. That question belongs to the linker and to run time,
     /// so it keeps its branch. A condition the folder had something to say about does not answer
     /// either, since the ordinary path is the one that reports, and taking the answer here would
-    /// drop what it reported on the floor.
+    /// drop what it reported on the floor. Nor does one that leaned on a `__builtin_constant_p`
+    /// the optimizer has still to answer, since the folder's no is only right where a constant is
+    /// needed, and `execute/builtin-constant.c` checks the arm a `?:` takes on it at `-O2`.
     fn folded(&self, cond: ExprId) -> Option<bool> {
         let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
         let folded = eval.constant(cond);
-        if eval.addressed() || !eval.finish().is_empty() {
+        if eval.addressed() || eval.deferred() || !eval.finish().is_empty() {
             return None;
         }
         match folded {
