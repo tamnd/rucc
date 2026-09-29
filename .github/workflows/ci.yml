@@ -402,6 +402,30 @@ jobs:
           path: objects-linux.txt
           retention-days: 7
 
+  # The aarch64 row of the matrix in spec/15-testing.md section 15.7: cross compiled on this
+  # machine and run under qemu user mode. The programs are the ones held against gcc above, built
+  # by gcc for aarch64 as the reference and run under the same emulator, and rucc links them as
+  # well as compiling them, against the Debian cross packages the driver finds under /usr/<triple>.
+  qemu:
+    name: aarch64 programs under qemu
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install the cross packages, lld and qemu
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user lld-19
+          qemu-aarch64 --version | head -1
+          aarch64-linux-gnu-gcc --version | head -1
+      - name: build rucc and the runtime for aarch64
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target aarch64-linux-gnu
+      - name: run the programs
+        run: tests/qemu/run.sh "$PWD/target/release/rucc" aarch64-linux-gnu
+
   # The same programs built by rucc on Windows itself, with no flags, since x86_64-windows-gnu is
   # the default target there. lld is the one in the LLVM install the image carries, which the
   # driver finds on PATH or under %ProgramFiles%\LLVM\bin. MinGW GCC from MSYS2 then
@@ -702,7 +726,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, windows, windows-objects, safety, accounting, audit, differential, abi-differential]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, windows, windows-objects, safety, accounting, audit, differential, abi-differential]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed
