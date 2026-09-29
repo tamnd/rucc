@@ -609,6 +609,22 @@ fn native_isa() -> rucc_target::Isa {
     base
 }
 
+/// The AArch64 extensions the machine running the compiler has, which is what `-march=native`
+/// means there.
+///
+/// Only the CRC32 extension, which is the one [`rucc_target::Isa::aarch64_march`] reads, asked
+/// of the processor through the standard library. On any other machine there is nothing to ask,
+/// and the answer is plain Armv8-A.
+fn native_aarch64() -> rucc_target::Isa {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("crc") {
+            return rucc_target::Isa::aarch64_march("armv8-a+crc");
+        }
+    }
+    rucc_target::Isa::NONE
+}
+
 /// Parses a command line, without the program name.
 ///
 /// # Errors
@@ -2159,11 +2175,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 isa_flag.get_or_insert(arg);
             }
             // Which processor in the family to build for. What it decides is the extensions of
-            // the instruction set the unit may assume, which is the macros, and only on x86-64;
-            // see `rucc_target::isa`. A processor it has no list for is built for as the
-            // baseline, which is a program that could have been faster rather than a program
-            // that is wrong, and the same goes for every other target's processors. `-mtune=`
-            // says what to schedule for and changes nothing a program can see.
+            // the instruction set the unit may assume, which is the macros, on x86-64 and, for
+            // the CRC32 extension alone, on AArch64; see `rucc_target::isa`. A processor it has
+            // no list for is built for as the baseline, which is a program that could have been
+            // faster rather than a program that is wrong, and the same goes for every other
+            // target's processors. `-mtune=` says what to schedule for and changes nothing a
+            // program can see.
             _ if arg.starts_with("-march=") => march = Some(&arg["-march=".len()..]),
             _ if arg.starts_with("-mtune=") || arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
@@ -2364,9 +2381,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         || last("-funsafe-math-optimizations", "-fno-unsafe-math-optimizations");
     link.daz_ftz = daz_ftz;
     // The extensions, now that the target is known. On x86-64 the processor supplies whatever no
-    // flag said. Anywhere else there are none to have, and a flag naming one is gcc's unknown
-    // option there too, so it is refused the same way it would have been had it not looked like
-    // an x86 flag.
+    // flag said. On AArch64 `-march=` alone says them, with its `+crc` and the rest, and nowhere
+    // else is there any to have. Off x86-64 a flag naming one of its extensions is gcc's unknown
+    // option too, so it is refused the same way it would have been had it not looked like an x86
+    // flag.
     match opts.target.arch {
         rucc_target::Arch::X86_64 => {
             let base = match march {
@@ -2382,7 +2400,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             if let Some(flag) = isa_flag {
                 return Err(err(format!("unknown option `{flag}`")));
             }
-            opts.isa = rucc_target::Isa::NONE;
+            opts.isa = match (opts.target.arch, march) {
+                (rucc_target::Arch::Aarch64, Some(name)) => match name.strip_prefix("native") {
+                    Some(modifiers) => native_aarch64().aarch64_modifiers(modifiers),
+                    None => rucc_target::Isa::aarch64_march(name),
+                },
+                _ => rucc_target::Isa::NONE,
+            };
         }
     }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
@@ -6677,8 +6701,35 @@ mod tests {
         // No other target has these, whichever side of the target the flag was written on.
         let said = refused(&["-msse4.2", "--target=aarch64-linux-gnu", "-c", "a.c"]);
         assert!(said.contains("unknown option `-msse4.2`"), "{said}");
-        let (opts, _) = compile(&["--target=aarch64-linux-gnu", "-march=armv8-a+crc", "-c", "a.c"]);
+        let (opts, _) = compile(&["--target=riscv64-linux-gnu", "-march=rv64gc", "-c", "a.c"]);
         assert_eq!(opts.isa, rucc_target::Isa::NONE);
+    }
+
+    /// tamnd/rucc#2006. `-march=` on AArch64 decides the CRC32 extension, which is what
+    /// `__ARM_FEATURE_CRC32` and the intrinsics in `<arm_acle.h>` follow. PostgreSQL's configure
+    /// tries `-march=armv8-a+crc+simd` and then `-march=armv8-a+crc`, and gcc gives plain Armv8-A
+    /// none of it.
+    #[test]
+    fn the_aarch64_march_decides_the_crc_extension() {
+        let crc = |line: &[&str]| {
+            let args = [&["--target=aarch64-linux-gnu", "-c", "a.c"][..], line].concat();
+            let (opts, _) = compile(&args);
+            opts.isa.has(rucc_target::Feature::aarch64("crc").expect("a feature"))
+        };
+        assert!(crc(&["-march=armv8-a+crc"]));
+        assert!(crc(&["-march=armv8-a+crc+simd"]));
+        assert!(crc(&["-march=armv8.1-a"]));
+        assert!(crc(&["-march=armv9-a"]));
+        assert!(!crc(&[]));
+        assert!(!crc(&["-march=armv8-a"]));
+        assert!(!crc(&["-march=armv8-a+simd"]));
+        assert!(!crc(&["-march=armv8.2-a+nocrc"]));
+        // The last one written is the one that counts, as it is for gcc.
+        assert!(!crc(&["-march=armv8-a+crc", "-march=armv8-a"]));
+        assert!(crc(&["-march=armv8-a", "-march=armv8-a+crc"]));
+        // And `-march=` written before the target is still read for it.
+        let (opts, _) = compile(&["-march=armv8-a+crc", "--target=aarch64-linux-gnu", "-c", "a.c"]);
+        assert!(opts.isa.has(rucc_target::Feature::aarch64("crc").expect("a feature")));
     }
 
     #[test]

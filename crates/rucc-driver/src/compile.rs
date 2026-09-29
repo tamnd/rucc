@@ -2489,6 +2489,107 @@ mod tests {
         }
     }
 
+    /// Options for AArch64 Linux with the compiler's own headers, built for what `-march=`
+    /// says, and written out as assembly.
+    fn aarch64_asm(march: &str) -> Options {
+        let mut opts = freestanding();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        opts.isa = rucc_target::Isa::aarch64_march(march);
+        opts.emit = EmitKind::Asm;
+        opts
+    }
+
+    /// PostgreSQL's configure probe for the CRC32C intrinsics on AArch64, as
+    /// `PGAC_ARMV8_CRC32C_INTRINSICS` in its `config/c-compiler.m4` writes it.
+    const POSTGRES_ARMV8_PROBE: &str = concat!(
+        "#include <arm_acle.h>\n",
+        "unsigned int crc;\n",
+        "int main(void) {\n",
+        "  crc = __crc32cb(crc, 0);\n",
+        "  crc = __crc32ch(crc, 0);\n",
+        "  crc = __crc32cw(crc, 0);\n",
+        "  crc = __crc32cd(crc, 0);\n",
+        "  return crc == 0;\n",
+        "}\n",
+    );
+
+    /// tamnd/rucc#2006. Under `-march=armv8-a+crc`, and under `+crc+simd` and `armv8.1-a`, the
+    /// probe compiles and every step is its one instruction, which is what the intrinsics are
+    /// for. The CRC-32 ones beside them are the same with the other polynomial.
+    #[test]
+    fn the_shipped_arm_acle_is_one_instruction_per_step_under_crc() {
+        for march in ["armv8-a+crc", "armv8-a+crc+simd", "armv8.1-a"] {
+            let result = run(&aarch64_asm(march), POSTGRES_ARMV8_PROBE);
+            assert_eq!(result.messages, Vec::<String>::new(), "{march}");
+            let text = result.text();
+            for step in ["crc32cb", "crc32ch", "crc32cw", "crc32cx"] {
+                assert!(text.contains(step), "{march}: no {step} in:\n{text}");
+            }
+        }
+        let source = concat!(
+            "#include <arm_acle.h>\n",
+            "#ifndef __ARM_FEATURE_CRC32\n",
+            "#error \"no __ARM_FEATURE_CRC32\"\n",
+            "#endif\n",
+            "uint32_t b(uint32_t c, uint8_t v) { return __crc32b(c, v); }\n",
+            "uint32_t h(uint32_t c, uint16_t v) { return __crc32h(c, v); }\n",
+            "uint32_t w(uint32_t c, uint32_t v) { return __crc32w(c, v); }\n",
+            "uint32_t d(uint32_t c, uint64_t v) { return __crc32d(c, v); }\n",
+        );
+        let result = run(&aarch64_asm("armv8-a+crc"), source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        for step in ["crc32b", "crc32h", "crc32w", "crc32x"] {
+            assert!(text.contains(step), "no {step} in:\n{text}");
+        }
+    }
+
+    /// Plain Armv8-A is not built for the extension, so the probe is refused in gcc's words, which
+    /// is the answer gcc gives it without a flag and the one that sends configure on to
+    /// `-march=armv8-a+crc+simd`.
+    #[test]
+    fn the_shipped_arm_acle_refuses_a_caller_not_built_for_crc() {
+        for march in ["armv8-a", "armv8-a+simd", "armv8.1-a+nocrc"] {
+            let said = run(&aarch64_asm(march), POSTGRES_ARMV8_PROBE).messages.join("\n");
+            let refusal = "inlining failed in call to 'always_inline' '__crc32cb': target \
+                           specific option mismatch";
+            assert!(said.contains(refusal), "{march}: {said}");
+            assert!(said.contains("'-march=' with '+crc'"), "{march}: {said}");
+        }
+    }
+
+    /// A function carrying `target("+crc")` may call the intrinsics whatever the unit is built
+    /// for, and each step is inlined into it as its instruction rather than left as a call, which
+    /// is how a program that chooses its checksum at run time is written.
+    #[test]
+    fn a_function_built_for_crc_calls_the_steps_without_a_flag() {
+        let source = concat!(
+            "#include <arm_acle.h>\n",
+            "#ifdef __ARM_FEATURE_CRC32\n",
+            "#error \"plain armv8-a has no CRC32\"\n",
+            "#endif\n",
+            "__attribute__((target(\"+crc\")))\n",
+            "uint32_t cd(uint32_t c, uint64_t v) { return __crc32cd(c, v); }\n",
+            "__attribute__((target(\"arch=armv8.1-a\")))\n",
+            "uint32_t cb(uint32_t c, uint8_t v) { return __crc32cb(c, v); }\n",
+        );
+        let result = run(&aarch64_asm("armv8-a"), source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        let cd = &text[text.find("\ncd:").expect("cd is defined")..];
+        let cd = &cd[..cd.find("ret").expect("cd returns")];
+        assert!(cd.contains("crc32cx") && !cd.contains("__crc32"), "{cd}");
+        assert!(text.contains("crc32cb"), "{text}");
+    }
+
+    /// The header is AArch64's alone, as gcc's is.
+    #[test]
+    fn the_shipped_arm_acle_refuses_another_target() {
+        let result = run(&freestanding(), "#include <arm_acle.h>\n");
+        let said = result.messages.join("\n");
+        assert!(said.contains("arm_acle.h is for AArch64"), "{said}");
+    }
+
     /// AArch64 has strings of its own, which the x86-64 reading does not look at, so the
     /// checksum PostgreSQL builds there with `target("+crc")` still compiles.
     #[test]
@@ -2524,12 +2625,14 @@ mod tests {
     /// an assertion about how much `<mmintrin.h>` defines, which is not what is being asked.
     #[test]
     fn every_shipped_header_can_be_included_twice() {
-        // This is x86-64, and `<arm_neon.h>` is for AArch64 only, so it is held to the same
-        // thing by the AArch64 test below. `<intrin.h>`, `<setjmp.h>` and `<vadefs.h>` wrap the
+        // This is x86-64, and `<arm_neon.h>` and `<arm_acle.h>` are for AArch64 only, so they are
+        // held to the same thing by the AArch64 test below. `<intrin.h>`, `<setjmp.h>` and `<vadefs.h>` wrap the
         // library's, which they go on to find, and there is no library here.
         let once: String = rucc_session::runtime::names()
             .iter()
-            .filter(|name| !["arm_neon.h", "intrin.h", "setjmp.h", "vadefs.h"].contains(*name))
+            .filter(|name| {
+                !["arm_acle.h", "arm_neon.h", "intrin.h", "setjmp.h", "vadefs.h"].contains(*name)
+            })
             .map(|name| format!("#include <{name}>\n"))
             .collect();
         let twice = once.repeat(2);
@@ -2546,7 +2649,7 @@ mod tests {
             );
             result.text().to_owned()
         };
-        let neon = "#include <arm_neon.h>\n";
+        let neon = "#include <arm_neon.h>\n#include <arm_acle.h>\n";
         assert_eq!(tree(&format!("{neon}int x;\n")), tree(&format!("{neon}{neon}int x;\n")));
     }
 

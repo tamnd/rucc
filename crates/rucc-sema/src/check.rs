@@ -114,8 +114,8 @@ pub struct Context<'a> {
     /// front end does, and because gcc folds under it at `-O0` as well, where there is no
     /// optimizer to do it. [`crate::convert::Conv`] is where it is read.
     pub trapping_math: bool,
-    /// The x86-64 extensions the unit is built for, which the command line decided, and
-    /// [`Isa::NONE`] on every other target.
+    /// The extensions the unit is built for, which the command line decided: the x86-64 ones,
+    /// and on AArch64 whether it has the CRC32 extension. [`Isa::NONE`] on every other target.
     ///
     /// A function carrying `__attribute__((target(...)))` is built for this and what the
     /// attribute adds, and a call to an `always_inline` function built for more than its caller

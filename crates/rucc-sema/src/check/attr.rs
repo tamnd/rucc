@@ -903,23 +903,28 @@ impl Checker<'_> {
         options
     }
 
-    /// The x86-64 extensions `__attribute__((target(...)))` says a function is built for, read
-    /// from every list the declaration has, and nothing when none of them has the attribute.
+    /// The extensions `__attribute__((target(...)))` says a function is built for, read from
+    /// every list the declaration has, and nothing when none of them has the attribute.
     ///
-    /// Every string of every `target` attribute is one comma separated list to gcc, so they are
-    /// read into one [`Target`] and applied over the unit's set once, at the end. A name gcc does
-    /// not know is refused in gcc's words, and a declaration with a refused string is taken to be
-    /// built for the unit, since gcc drops the attribute that carried it.
+    /// Every string of every `target` attribute is one comma separated list to gcc, so on x86-64
+    /// they are read into one [`Target`] and applied over the unit's set once, at the end. A name
+    /// gcc does not know is refused in gcc's words, and a declaration with a refused string is
+    /// taken to be built for the unit, since gcc drops the attribute that carried it.
     ///
-    /// Only on x86-64. Every other target has strings of its own, AArch64's `+crc` among them,
-    /// and nothing here reads them: they are accepted and change nothing, which is what they did
-    /// before x86-64's were read.
+    /// AArch64's strings are read with [`Isa::aarch64_target`], one after another over the
+    /// unit's set, and what they say about the CRC32 extension is kept, which is what lets a
+    /// function with `target("+crc")` call the intrinsics in `<arm_acle.h>`. Nothing in them is
+    /// refused, since none of them was before. Every other target has strings of its own and
+    /// nothing here reads them.
     pub(in crate::check) fn targeted(&mut self, lists: &[AttrList]) -> Option<Isa> {
-        if self.cx.target.tuple.arch().as_str() != "x86_64" {
-            return None;
-        }
+        let x86 = match self.cx.target.tuple.arch().as_str() {
+            "x86_64" => true,
+            "aarch64" => false,
+            _ => return None,
+        };
         let ast = self.ast;
         let mut target = Target::new();
+        let mut arm = self.cx.isa;
         let (mut said, mut refused) = (false, false);
         for &list in lists {
             for &attr in &ast[list] {
@@ -944,14 +949,20 @@ impl Checker<'_> {
                         .iter()
                         .filter_map(|&unit| char::from_u32(unit))
                         .collect();
-                    if let Err(why) = target.read(&text) {
+                    let read = if x86 {
+                        target.read(&text)
+                    } else {
+                        arm = arm.aarch64_target(&text);
+                        Ok(())
+                    };
+                    if let Err(why) = read {
                         self.report(Diagnostic::error(why.to_string(), at).with_code("E0720"));
                         refused = true;
                     }
                 }
             }
         }
-        (said && !refused).then(|| target.over(self.cx.isa))
+        (said && !refused).then(|| if x86 { target.over(self.cx.isa) } else { arm })
     }
 
     /// What an attribute list promises a call to this function does.
