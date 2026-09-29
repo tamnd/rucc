@@ -211,19 +211,15 @@ pub fn read(text: &str) -> Result<Module, Error> {
             }
             Some(Statement::Exports) => {
                 exporting = true;
-                if words.len() > 1 {
-                    // Microsoft's page allows the first definition on the `EXPORTS` line itself.
-                    exports.push(export(&words[1..], line)?);
-                    lines.push(line);
-                }
+                // Microsoft's page allows the first definition on the `EXPORTS` line itself.
+                definitions(&words[1..], line, &mut exports, &mut lines)?;
             }
             Some(Statement::Other(what)) => return Err(Error::Statement { line, what }),
             None => {
                 if !exporting {
                     return Err(Error::Loose { line, word: first.to_string() });
                 }
-                exports.push(export(&words, line)?);
-                lines.push(line);
+                definitions(&words, line, &mut exports, &mut lines)?;
             }
         }
     }
@@ -325,8 +321,35 @@ fn name_of(rest: &[&str], line: usize) -> Result<String, Error> {
     Ok(name.to_owned())
 }
 
-/// One export definition, which is a name and then any of the parts that can follow one.
-fn export(words: &[&str], line: usize) -> Result<Export, Error> {
+/// The export definitions on one line, which is usually one and can be more.
+///
+/// A word after a name that is not one of the parts an export can have begins the next export, on
+/// the same line. That is how llvm-dlltool reads a file, since its parser takes the file as a stream
+/// of words and does not look at line ends at all, and mingw-w64 has a line that depends on it.
+/// `lib32/msvcr80d.def.in` comments out two exports as `: mbrtowc ; replaced, CRT version does not
+/// conform to C95`, which reads as an export named `:` and then an export named `mbrtowc`, and the
+/// `libmsvcr80d.a` zig and llvm-dlltool build has `_:` and `__imp__:` in it for that reason. Refusing
+/// the line would fail mingw-w64's own build, and reading only the first name would write an import
+/// library that is not the one llvm-dlltool writes, so the line is read as they read it.
+fn definitions(
+    words: &[&str],
+    line: usize,
+    exports: &mut Vec<Export>,
+    lines: &mut Vec<usize>,
+) -> Result<(), Error> {
+    let mut at = 0;
+    while at < words.len() {
+        let (definition, used) = export(&words[at..], line)?;
+        exports.push(definition);
+        lines.push(line);
+        at += used;
+    }
+    Ok(())
+}
+
+/// One export definition, which is a name and then any of the parts that can follow one, and the
+/// number of words it took up.
+fn export(words: &[&str], line: usize) -> Result<(Export, usize), Error> {
     let (name, rest) = words.split_first().expect("a line with no words is skipped before here");
     if let Some(ordinal) = ordinal(name) {
         // A line that is only an ordinal. Microsoft's grammar requires the name and dlltool's does
@@ -394,7 +417,9 @@ fn export(words: &[&str], line: usize) -> Result<Export, Error> {
                 None => form = Some(found),
             }
         } else {
-            return Err(Error::Word { line, word: word.to_owned() });
+            // The name of the next export, which [`definitions`] explains.
+            at -= 1;
+            break;
         }
     }
 
@@ -404,7 +429,7 @@ fn export(words: &[&str], line: usize) -> Result<Export, Error> {
         // all to reach it.
         return Err(Error::NoName { line, name: export.name });
     }
-    Ok(export)
+    Ok((export, 1 + at))
 }
 
 /// One of the words that can follow a name, in either of the two spellings a `.def` may use.
@@ -432,7 +457,14 @@ fn ordinal(word: &str) -> Option<u64> {
     Some(digits.parse().unwrap_or(u64::MAX))
 }
 
-/// Refuses one name twice and one ordinal twice.
+/// Refuses one name given two different definitions, and one ordinal twice.
+///
+/// A name given twice with the same definition both times is kept twice, because llvm-dlltool keeps
+/// it and writes a member for each, and there is one in mingw-w64. The two lines in
+/// `lib32/msvcr80d.def.in` that [`definitions`] describes each begin with `:`, so the file exports
+/// `:` twice, identically, and an import library with one member for it would not be the
+/// `libmsvcr80d.a` llvm-dlltool writes. Two identical definitions give the linker one answer twice,
+/// which it takes the first of. Two that differ give it two answers, and that is still refused.
 ///
 /// By sorting indices rather than by a hash map, because this crate has none: what a stub contains
 /// has to be a function of the description and not of an iteration order.
@@ -441,7 +473,7 @@ fn clashes(exports: &[Export], lines: &[usize]) -> Result<(), Error> {
     order.sort_by(|&a, &b| exports[a].name.cmp(&exports[b].name).then(lines[a].cmp(&lines[b])));
     for pair in order.windows(2) {
         let (first, second) = (pair[0], pair[1]);
-        if exports[first].name == exports[second].name {
+        if exports[first].name == exports[second].name && exports[first] != exports[second] {
             return Err(Error::Repeated {
                 line: lines[second],
                 first: lines[first],
@@ -519,13 +551,6 @@ pub enum Error {
         /// The line, counting from one.
         line: usize,
     },
-    /// A word after the name is not a part of an export definition.
-    Word {
-        /// The line, counting from one.
-        line: usize,
-        /// The word.
-        word: String,
-    },
     /// One part of an export definition is given twice.
     Twice {
         /// The line, counting from one.
@@ -568,7 +593,7 @@ pub enum Error {
         /// The name.
         name: String,
     },
-    /// One name is exported twice.
+    /// One name is exported twice, with two different definitions.
     Repeated {
         /// The line the second one is on, counting from one.
         line: usize,
@@ -620,11 +645,6 @@ impl fmt::Display for Error {
             Error::Nameless { line } => write!(
                 f,
                 "line {line}: the line begins with an ordinal, so there is no name to export"
-            ),
-            Error::Word { line, word } => write!(
-                f,
-                "line {line}: `{word}` is not part of an export, which after the name is =name, \
-                 ==name, @ordinal, NONAME, PRIVATE, DATA or CONSTANT"
             ),
             Error::Twice { line, part } => write!(
                 f,
@@ -736,12 +756,16 @@ SaferiRegisterExtensionDll@8 @1000 NONAME
     fn an_attribute_is_read_in_capitals_or_in_lower_case_and_in_nothing_between() {
         assert_eq!(read("LIBRARY k.dll\nEXPORTS\nf DATA\n").unwrap().exports[0].form, Form::Data);
         assert_eq!(read("LIBRARY k.dll\nEXPORTS\nf data\n").unwrap().exports[0].form, Form::Data);
-        // Which dlltool would read as a second word on the line rather than as an attribute, because
+        // Which dlltool reads as a second export on the line rather than as an attribute, because
         // `Data` is not in its keyword table in that spelling.
-        assert_eq!(
-            read("LIBRARY k.dll\nEXPORTS\nf Data\n"),
-            Err(Error::Word { line: 3, word: "Data".to_owned() })
-        );
+        let names: Vec<String> = read("LIBRARY k.dll\nEXPORTS\nf Data\n")
+            .unwrap()
+            .exports
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["f", "Data"]);
+        assert_eq!(read("LIBRARY k.dll\nEXPORTS\nf Data\n").unwrap().exports[0].form, Form::Code);
     }
 
     #[test]
@@ -835,9 +859,11 @@ TraceMessage ; cdecl
         // Neither happens in any of the 2124 real files, and both would put two answers in an import
         // library for one question.
         assert_eq!(
-            read("LIBRARY k.dll\nEXPORTS\nf\ng\nf\n"),
+            read("LIBRARY k.dll\nEXPORTS\nf\ng\nf DATA\n"),
             Err(Error::Repeated { line: 5, first: 3, name: "f".to_owned() })
         );
+        // The same answer twice is kept twice, which msvcr80d's `:` needs.
+        assert_eq!(read("LIBRARY k.dll\nEXPORTS\nf\ng\nf\n").unwrap().exports.len(), 3);
         assert_eq!(
             read("LIBRARY k.dll\nEXPORTS\nf @7\ng @7\n"),
             Err(Error::Ordinals { line: 4, first: 3, ordinal: 7 })
@@ -896,7 +922,24 @@ TraceMessage ; cdecl
         assert_eq!(with("f == g == h"), Error::Twice { line: 3, part: "==" });
         assert_eq!(with("f =="), Error::Rename { line: 3, form: "==".to_owned() });
         assert_eq!(with("f == @2"), Error::Rename { line: 3, form: "==".to_owned() });
-        assert_eq!(with("f WHATEVER"), Error::Word { line: 3, word: "WHATEVER".to_owned() });
+        assert_eq!(with("f g f DATA"), Error::Repeated { line: 3, first: 3, name: "f".to_owned() });
+    }
+
+    #[test]
+    fn a_word_that_is_not_part_of_an_export_begins_the_next_one() {
+        // The line out of mingw-w64's lib32/msvcr80d.def.in, which llvm-dlltool reads as two exports
+        // and which zig's libmsvcr80d.a is built from.
+        let module = read(
+            "LIBRARY msvcr80d.dll\nEXPORTS\nmbstowcs_s\n: mbrtowc ; replaced, CRT version does \
+             not conform to C95\n: mbsrtowcs ; replaced\nEXPORTS g DATA h @4 NONAME\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = module.exports.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["mbstowcs_s", ":", "mbrtowc", ":", "mbsrtowcs", "g", "h"]);
+        assert_eq!(module.exports[5].form, Form::Data);
+        assert_eq!(module.exports[6].ordinal, Some(4));
+        assert!(module.exports[6].noname);
+        assert_eq!(module.exports[2].form, Form::Code);
     }
 
     #[test]
@@ -918,7 +961,6 @@ TraceMessage ; cdecl
             Error::Statement { line: 1, what: "NAME" },
             Error::Loose { line: 2, word: "f".to_owned() },
             Error::Nameless { line: 3 },
-            Error::Word { line: 3, word: "WHATEVER".to_owned() },
             Error::Twice { line: 3, part: "DATA" },
             Error::Rename { line: 3, form: "==".to_owned() },
             Error::Forms { line: 3, name: "f".to_owned() },
