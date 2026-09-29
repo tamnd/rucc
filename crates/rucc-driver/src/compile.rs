@@ -7869,7 +7869,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     }
 
     /// A value set before `setjmp` and read after the `longjmp` keeps its slot to itself, at `-O0`
-    /// and at `-O2`.
+    /// and at `-O2`, when it has one.
     ///
     /// The reduction in tamnd/rucc#2035, which glibc's `<setjmp.h>` turns into a call to
     /// `_setjmp`. `v` is dead on the arm that runs first, so that arm's own values were given its
@@ -7922,12 +7922,20 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 .unwrap_or_else(|| panic!("the call that jumps back at {level:?}:\n{text}"));
             let printf = lines.iter().position(|l| *l == "call\tprintf").expect("the handler");
             // The load that hands `v` to `printf` as its second argument.
-            let slot = lines[jump..printf]
+            let place = lines[jump..printf]
                 .iter()
                 .rev()
                 .find_map(|l| l.strip_suffix(", %rsi").or_else(|| l.strip_suffix(", %esi")))
                 .and_then(|l| l.split_once('\t'))
                 .map(|(_, place)| place)
+                .unwrap_or_else(|| panic!("the handler hands v to printf at {level:?}:\n{text}"));
+            // `v` may also stay in a register a call leaves alone, which the jump back puts back
+            // the way it was when the save was made, and then there is no slot to share.
+            let kept = ["%rbx", "%rbp", "%r12", "%r13", "%r14", "%r15"];
+            if kept.contains(&place) {
+                continue;
+            }
+            let slot = Some(place)
                 .filter(|place| place.ends_with("(%rsp)") || place.ends_with("(%rbp)"))
                 .unwrap_or_else(|| panic!("the handler reads v from a slot at {level:?}:\n{text}"));
             let writes = |l: &&str| {

@@ -914,9 +914,13 @@ struct Lowering<'a> {
     out: mir::Func,
     /// The machine register each IR value is in, once it has one.
     regs: Vec<Option<mir::Reg>>,
-    /// For a constant that has been written into a register, the block it was written into,
-    /// which is the only block that register is any good in.
-    written: Vec<Option<mir::Block>>,
+    /// For a constant or an address that has been written into a register, the block it was
+    /// written into, which is the only block that register is any good in, and how many calls had
+    /// been lowered by then. An address written before a call is not read after it: see
+    /// [`Rebuilt::Name`].
+    written: Vec<Option<(mir::Block, u32)>>,
+    /// How many calls have been lowered so far, which is what [`Self::written`] counts with.
+    crossed: u32,
     /// How many times each IR value is read, which is what says whether an instruction may be
     /// folded into the one that reads it.
     uses: Vec<u32>,
@@ -1113,6 +1117,7 @@ impl<'a> Lowering<'a> {
             out,
             regs: vec![None; counts.values],
             written: vec![None; counts.values],
+            crossed: 0,
             blocks: vec![None; counts.blocks],
             uses,
             at: None,
@@ -1728,6 +1733,7 @@ impl<'a> Lowering<'a> {
             .ok_or(Unsupported::Unported { inst: Some(inst), what: Unported::Convention })?;
         let made = abi::call(&mut self.out, block, &what, conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
+        self.crossed += 1;
         self.passed_late(&late);
         if self.source.unwinds_to_pad(inst) {
             let call = self.out.insts(block).last().expect("the call just built");
@@ -6769,9 +6775,10 @@ impl<'a> Lowering<'a> {
             let good = match rebuilt {
                 None => true,
                 Some(Rebuilt::Local(_)) => false,
-                Some(Rebuilt::Constant(_) | Rebuilt::Name(_)) => {
-                    self.written[value.index()] == Some(here)
+                Some(Rebuilt::Constant(_)) => {
+                    self.written[value.index()].is_some_and(|(block, _)| block == here)
                 }
+                Some(Rebuilt::Name(_)) => self.written[value.index()] == Some((here, self.crossed)),
             };
             if good {
                 return Ok(reg);
@@ -6795,14 +6802,14 @@ impl<'a> Lowering<'a> {
                 // one where the IR wrote it, so a rule that lowers a constant fires from nowhere
                 // else and would be reported as a rule nothing reaches.
                 self.fired.mark(matched.rule);
-                self.written[value.index()] = Some(here);
+                self.written[value.index()] = Some((here, self.crossed));
                 Ok(self.regs[value.index()].expect("a constant is written into a register"))
             }
             Some(Rebuilt::Local(inst)) => self.local_address(inst, value),
             Some(Rebuilt::Name(inst)) => {
                 self.regs[value.index()] = None;
                 self.address_of(inst)?;
-                self.written[value.index()] = Some(here);
+                self.written[value.index()] = Some((here, self.crossed));
                 Ok(self.regs[value.index()].expect("an address is written into a register"))
             }
             None => Ok(self.new_reg(value)),
@@ -6952,7 +6959,8 @@ enum Rebuilt {
     /// that is a load or a store of the local then takes the whole of it into its own addressing
     /// mode in [`crate::fold`], which is how gcc writes an access to a local.
     Local(Inst),
-    /// The address of a name that is not thread-local, written once in each block that reads it.
+    /// The address of a name that is not thread-local, written once in each block that reads it
+    /// and again after each call in that block, so that it is not live across a call either.
     ///
     /// Once a block rather than once a reader, because [`crate::fold`] decides whether to put a
     /// symbol into the instructions that read it by counting them, and a symbol written into each
