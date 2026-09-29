@@ -108,6 +108,64 @@ jobs:
       - name: time bench/safety with the monitor off and on
         run: cargo xtask cost
 
+  # PostgreSQL 18.6 built by rucc at -O2 with assertions on, and its regression and isolation
+  # suites run against it. This is the cassert nightly of PG2 in tamnd/rucc#1989. It is ungraded:
+  # an assertion failure here is something to read in the morning rather than a red nightly, so
+  # the suites may fail without failing the job, and what they said goes in the run summary and
+  # the artifacts either way. The per commit job in ci.yml is the graded one.
+  postgres-cassert:
+    name: postgres with assertions at -O2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PG_VERSION: "18.6"
+      PG_SHA256: 555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: build rucc
+        run: cargo build --release --bin rucc
+      - name: fetch postgres
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o pg.tar.bz2 "https://ftp.postgresql.org/pub/source/v$PG_VERSION/postgresql-$PG_VERSION.tar.bz2"
+          echo "$PG_SHA256  pg.tar.bz2" | sha256sum -c -
+          tar xjf pg.tar.bz2
+      - name: configure
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/postgresql-$PG_VERSION"
+          ./configure CC="$GITHUB_WORKSPACE/target/release/rucc" CFLAGS=-O2 \
+            --without-icu --without-readline --without-zlib --without-llvm \
+            --disable-nls --enable-cassert --enable-debug
+      - name: build
+        run: make -C "$RUNNER_TEMP/postgresql-$PG_VERSION" -j"$(nproc)" -s
+      - name: run the suites
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/postgresql-$PG_VERSION"
+          for suite in src/test/regress src/test/isolation; do
+            make -C "$suite" check > "$RUNNER_TEMP/$(basename "$suite").log" 2>&1
+            status=$?
+            summary=$(grep -E '^# (All [0-9]+ tests passed|[0-9]+ of [0-9]+ tests failed)' "$RUNNER_TEMP/$(basename "$suite").log" | tail -1)
+            echo "$suite: exit $status, ${summary:-no summary line}" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          grep -h "TRAP:" src/test/*/log/postmaster.log src/test/*/output_iso/log/postmaster.log 2>/dev/null \
+            | sort | uniq -c | tee -a "$GITHUB_STEP_SUMMARY" || true
+      - name: keep what the suites said
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: postgres-cassert
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/regress/regression.diffs
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/regress/log/
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/isolation/output_iso/regression.diffs
+            ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/isolation/output_iso/log/
+          if-no-files-found: ignore
+
   # Named so the gap is visible rather than implicit. Each of these turns into a real job at
   # the milestone that makes it possible, per spec/15-testing.md section 15.7.
   planned:
