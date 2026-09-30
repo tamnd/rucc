@@ -650,18 +650,19 @@ tests = []
 name = "warning"
 kind = "attribute"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc", "linux"]
-tests = []
+tests = ["rucc::a_warning_attribute_is_a_warning_and_the_listing_is_still_written", "rucc::both_attributes_are_said_and_the_latest_message_stands"]
+notes = "A call still there once the optimizer is done is a warning quoting the message, and one it took out says nothing."
 
 [[feature]]
 name = "error"
 kind = "attribute"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc"]
-tests = []
-notes = "The kernel turns a link failure into a compile-time message with it, so it has to fire after optimization, when it is known the call survives."
+tests = ["rucc::a_build_bug_on_the_inliner_settles_true_is_an_error_quoting_the_message_at_the_call", "rucc::a_build_bug_on_the_inliner_settles_false_says_nothing", "rucc::a_call_in_code_that_was_taken_out_says_nothing", "rucc-driver::a_call_is_reported_only_in_a_function_the_program_can_reach"]
+notes = "The kernel turns a link failure into a compile-time message with it, so it fires after optimization, on a call in a function the program can still reach, and a call the optimizer took out says nothing."
 
 [[feature]]
 name = "format"

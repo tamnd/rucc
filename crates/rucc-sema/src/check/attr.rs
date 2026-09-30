@@ -707,6 +707,76 @@ impl Checker<'_> {
         self.tast.record_section(decl, id);
     }
 
+    /// Reads `error("...")` and `warning("...")` off the lists a declaration was written with and
+    /// keeps the message against the declaration, for a call that is still there once the
+    /// optimizer has run.
+    ///
+    /// Nothing is said about a call here. The kernel's `compiletime_assert` declares a function
+    /// carrying one and calls it under a condition that is only settled after inlining, and the
+    /// FORTIFY checks do the same, so a call written in the source is not yet a call the program
+    /// makes. The driver asks once the optimizer is done, and a call it took out is not reported.
+    ///
+    /// What is refused is what gcc refuses, in its words: the attribute on anything but a function
+    /// is dropped with a warning, and so is one whose argument is not a string, while the wrong
+    /// number of arguments is an error. The lists are read in the order given, so a message written
+    /// later replaces one written earlier, the way a later declaration's does.
+    pub(in crate::check) fn record_notices(
+        &mut self,
+        decl: DeclId,
+        lists: &[AttrList],
+        kind: DeclKind,
+    ) {
+        for &attrs in lists {
+            let written = self.ast[attrs].to_vec();
+            for attr in written {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                    continue;
+                }
+                let error = match rucc_gnu::unarmour(self.text(attr.name)) {
+                    "error" => true,
+                    "warning" => false,
+                    _ => continue,
+                };
+                let name = if error { "error" } else { "warning" };
+                let ignored = format!("'{name}' attribute ignored");
+                let args = self.ast[attr.args].to_vec();
+                if args.len() != 1 {
+                    let what =
+                        format!("wrong number of arguments specified for '{name}' attribute");
+                    let note = format!("expected 1, found {}", args.len());
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0751");
+                    self.report(refused.note(note, attr.span));
+                    continue;
+                }
+                if kind != DeclKind::Function {
+                    let what = "only a call to a function can be reported";
+                    let dropped = Diagnostic::warning(ignored, attr.span).with_code("E0751");
+                    self.report(dropped.note(what, attr.span));
+                    continue;
+                }
+                let message = match args[0] {
+                    AttrArg::Expr(expr) => {
+                        let checked = self.expr(expr);
+                        match self.tast[checked].kind {
+                            ExprKind::Str(id) if self.tast[id].encoding == Encoding::Plain => {
+                                Some(id)
+                            }
+                            _ => None,
+                        }
+                    }
+                    AttrArg::Ident(_) => None,
+                };
+                let Some(message) = message else {
+                    let what = "its argument has to be a string literal";
+                    let dropped = Diagnostic::warning(ignored, attr.span).with_code("E0751");
+                    self.report(dropped.note(what, attr.span));
+                    continue;
+                };
+                self.tast.record_notice(decl, error, message);
+            }
+        }
+    }
+
     /// The function a `cleanup` attribute asks to have called when the object goes out of scope.
     ///
     /// This is what glib writes as `g_autoptr`, systemd as `_cleanup_free_` and jansson as

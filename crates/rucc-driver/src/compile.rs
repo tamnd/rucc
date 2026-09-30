@@ -198,6 +198,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         };
     }
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    // What the calls to a function carrying `error` or `warning` that the optimizer left get said
+    // about them, kept apart so they come after what the checker said, which is about the source
+    // as written and is the order gcc says the two in.
+    let mut surviving: Vec<Diagnostic> = Vec::new();
     // Filled in by the back end when there is one, and empty for every kind that stops before it.
     let mut fired = Fired::new();
     // The same, and the other thing the back end is asked to record about itself.
@@ -457,7 +461,15 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     &mut remarks,
                                 )
                             })
-                            .map(|times| passes = times)
+                            .map(|times| {
+                                passes = times;
+                                // After the optimizer, since a call it took out is not one the
+                                // program makes. See `crate::notice`.
+                                surviving.extend(crate::notice::surviving_calls(
+                                    &lowered.module,
+                                    &sess.interner,
+                                ));
+                            })
                         {
                             diagnostics.extend(complaints);
                         } else if opts.emit == EmitKind::SafetySummary {
@@ -517,6 +529,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             }
         }
         diagnostics.extend(checked.diagnostics);
+        diagnostics.append(&mut surviving);
     }
     // The back end's remarks after the optimizer's, which is the order the work happened in. Only
     // the `switch` lowering says anything yet, and what it says is a rewrite.

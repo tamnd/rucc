@@ -377,6 +377,8 @@ impl Checker<'_> {
         if let Some(isa) = self.targeted(&[specs.attrs]) {
             self.tast.record_target(id, isa);
         }
+        // The specifiers only, for the reason `noreturn` above reads them only.
+        self.record_notices(id, &[specs.attrs], DeclKind::Function);
         if nested {
             return Some(id);
         }
@@ -760,6 +762,9 @@ impl Checker<'_> {
                 self.tast.record_target(id, isa);
             }
         }
+        // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
+        // declarator of a function declared inside the block that calls it.
+        self.record_notices(id, &[specs.attrs, item.attrs], kind);
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
         let mut worked = true;

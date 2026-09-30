@@ -35,6 +35,17 @@ pub type ConstId = Idx<Const>;
 /// A string literal, in the literal table.
 pub type StrId = Idx<StringLiteral>;
 
+/// The messages `__attribute__((error("...")))` and `__attribute__((warning("...")))` put on a
+/// function, for a call to it that survives optimization. A function may carry both, and gcc then
+/// reports both at each such call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Notices {
+    /// The message of an `error` attribute.
+    pub error: Option<StrId>,
+    /// The message of a `warning` attribute.
+    pub warning: Option<StrId>,
+}
+
 /// A label, in the label table.
 pub type LabelId = Idx<Label>;
 
@@ -164,6 +175,7 @@ pub struct Tast {
     targets: Vec<(DeclId, Isa)>,
     sections: Map<DeclId, StrId>,
     defined_at: Map<DeclId, Span>,
+    notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 
@@ -411,6 +423,29 @@ impl Tast {
     #[must_use]
     pub fn section(&self, decl: DeclId) -> Option<StrId> {
         self.sections.get(&decl).copied()
+    }
+
+    /// Records the message an `error` or a `warning` attribute asks to have said about a call to a
+    /// function that is still there once the optimizer is done with it.
+    ///
+    /// A list beside the tree for the reason [`Tast::record_target`] is one: a handful of functions
+    /// in a unit carry one, and they are the kernel's `__compiletime_assert_N` and the fortify
+    /// checks. Unlike a target, a later declaration replaces what an earlier one said, which is
+    /// what gcc does: the message a call is reported with is the last one written above it.
+    pub fn record_notice(&mut self, decl: DeclId, error: bool, message: StrId) {
+        let notices = self.notices.entry(decl).or_default();
+        if error {
+            notices.error = Some(message);
+        } else {
+            notices.warning = Some(message);
+        }
+    }
+
+    /// What an `error` or a `warning` attribute asks to have said about a call to this function,
+    /// which is nothing for almost every function.
+    #[must_use]
+    pub fn notices(&self, decl: DeclId) -> Notices {
+        self.notices.get(&decl).copied().unwrap_or_default()
     }
 
     /// The extensions a function was built for, when a `target` attribute said, and nothing when

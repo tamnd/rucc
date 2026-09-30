@@ -868,6 +868,14 @@ impl Unit<'_> {
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
         func.section = self.section_of(decl, true);
+        // What a call that survives the optimizer is reported with, which the driver reads once
+        // the optimizer is done. A declaration is the usual carrier, since the function is one
+        // nothing should ever call.
+        let notices = tast.notices(decl);
+        func.notices = rucc_ir::Notices {
+            error: notices.error.map(|id| self.spelled(id)),
+            warning: notices.warning.map(|id| self.spelled(id)),
+        };
         // An inline definition this unit calls, which this unit puts a copy of out of line for
         // every call the inliner leaves alone. See [`Self::out_of_line`].
         let copied = body.is_some() && self.out_of_line(decl, node.inline);
@@ -946,6 +954,16 @@ impl Unit<'_> {
             Some(SymbolRef::Func(id)) => {
                 if self.module[id].spelled.is_none() {
                     self.module[id].spelled = func.spelled;
+                }
+                // A later declaration's `error` or `warning` replaces an earlier one's, which is
+                // what gcc reports a call with. Two declarations inside two blocks are two
+                // declarations here and one function in the module.
+                let notices = &mut self.module[id].notices;
+                if func.notices.error.is_some() {
+                    notices.error = func.notices.error;
+                }
+                if func.notices.warning.is_some() {
+                    notices.warning = func.notices.warning;
                 }
             }
             Some(_) => {}
