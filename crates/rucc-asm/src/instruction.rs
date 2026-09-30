@@ -991,7 +991,12 @@ fn depths(mnemonic: &str) -> &'static [u8] {
 }
 
 /// A register, without its sigil.
-fn register(name: &str) -> Result<Operand, String> {
+///
+/// gas reads the name in either case, and a program can lean on that without meaning to:
+/// lib/raid6's `avx512.c` writes `%%Zmm14` in one of its templates.
+fn register(written: &str) -> Result<Operand, String> {
+    let lower = written.to_ascii_lowercase();
+    let name = lower.as_str();
     if let Some((reg, width)) = gpr_named(name) {
         return Ok(Operand::Reg(reg, width));
     }
@@ -1040,7 +1045,7 @@ fn register(name: &str) -> Result<Operand, String> {
             }
         }
     }
-    Err(format!("'%{name}' is not a register this compiler has"))
+    Err(format!("'%{written}' is not a register this compiler has"))
 }
 
 /// An address, which is a displacement and up to three things in brackets.
@@ -2532,6 +2537,27 @@ mod tests {
         for (line, expected) in lines {
             assert_eq!(bytes(line), *expected, "{line}");
         }
+    }
+
+    /// The lines lib/raid6 writes, each against the bytes gas writes for it, and a register named
+    /// in capitals, which gas reads as the same register and which `avx512.c` writes once.
+    #[test]
+    fn the_lines_raid6_writes_are_read() {
+        let lines: &[(&str, &[u8])] = &[
+            ("movntdq %xmm0,(%rax)", &[0x66, 0x0f, 0xe7, 0x00]),
+            ("vmovntdq %ymm9,0x20(%r8)", &[0xc4, 0x41, 0x7d, 0xe7, 0x48, 0x20]),
+            ("vmovntdq %zmm2,0x80(%rax,%rbx,1)", &[0x62, 0xf1, 0x7d, 0x48, 0xe7, 0x54, 0x18, 0x02]),
+            ("vpsraw $7,%ymm2,%ymm3", &[0xc5, 0xe5, 0x71, 0xe2, 0x07]),
+            ("vpcmpgtb %zmm4,%zmm1,%k1", &[0x62, 0xf1, 0x75, 0x48, 0x64, 0xcc]),
+            ("vpmovm2b %k1,%zmm5", &[0x62, 0xf2, 0x7e, 0x48, 0x28, 0xe9]),
+            ("vmovapd %ymm0, %ymm13", &[0xc5, 0x7d, 0x28, 0xe8]),
+            ("vpaddb %Zmm14,%zmm14,%zmm14", &[0x62, 0x51, 0x0d, 0x48, 0xfc, 0xf6]),
+            ("vpxor %YMM3,%ymm3,%ymm3", &[0xc5, 0xe5, 0xef, 0xdb]),
+        ];
+        for (line, expected) in lines {
+            assert_eq!(bytes(line), *expected, "{line}");
+        }
+        assert!(refused("vpaddb %Zmm32,%zmm14,%zmm14").contains("%Zmm32"));
     }
 
     /// A system instruction that names a register the processor does not use for it is refused,

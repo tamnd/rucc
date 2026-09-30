@@ -4647,9 +4647,11 @@ impl<'a> Lowering<'a> {
     /// constant as `$5`, or as `5` under the `c` modifier, and the address of a name as the name.
     /// An object in memory is the one thing that cannot be spelled yet, since where it is depends on
     /// registers nothing has chosen, so it is left as a hole the writer fills and its address is the
-    /// instruction's memory operand. One is all an instruction has room for, and every template this
-    /// has met names one at most. A template that names an operand by name rather than by number is
-    /// refused for now.
+    /// instruction's memory operand. One is all an instruction has room for, so a template naming
+    /// more than one spells the rest through the register its address is in, as `(%rax)`, which is
+    /// an address every instruction that takes one reads. lib/raid6 names two in one statement, a
+    /// block of data and the next one to fetch. A template that names an operand by name rather
+    /// than by number is refused for now.
     ///
     /// # An operand in a register
     ///
@@ -4665,7 +4667,10 @@ impl<'a> Lowering<'a> {
     /// A statement written with no colons is basic assembly, where `%` is a character like any
     /// other and a register is written `%eax`. The front end keeps no mark of which kind a statement
     /// was, so one with no operands and no clobbers is read as basic, which is what gcc would do for
-    /// every such template but one written with empty colons around it.
+    /// every such template but one written with empty colons around it. The exception is a template
+    /// with `%%` in it, which basic assembly hands the assembler as it is and which no assembler
+    /// takes, so the program wrote the colons. lib/raid6 writes `vpxorq %%zmm5,%%zmm5,%%zmm5`
+    /// with `: :` behind it.
     ///
     /// The registers a call may write are taken as written, see below for why.
     ///
@@ -4693,7 +4698,10 @@ impl<'a> Lowering<'a> {
         // How many labels an `asm goto` has, each of which is an arm after the fall through. A
         // statement with a label is never basic, since only one with colons can have one.
         let labels = self.source[self.source[asm].targets].len().saturating_sub(1);
-        let basic = list.is_empty() && clobbers.trim().is_empty() && labels == 0;
+        let basic = list.is_empty()
+            && clobbers.trim().is_empty()
+            && labels == 0
+            && !template.contains("%%");
 
         // The ones the list names, and on x86 the ones the text spells as well. The text can write
         // any register it likes without saying so, and tcc's tests do: gcc gets away with that at
@@ -4753,6 +4761,18 @@ impl<'a> Lowering<'a> {
             }
         }
         let pins: Vec<_> = list.iter().map(|operand| self.pinned_here(operand)).collect();
+        // The operand in memory that is the instruction's own memory operand, which is one in this
+        // function's frame when there is one, since that is spelled from the stack pointer rather
+        // than from a register the text might write. Every other one on x86 is read through the
+        // register its address is in.
+        let hole = if a64 {
+            None
+        } else {
+            let framed = |operand: &AsmOperand<'_>| {
+                operand.memory && operand.value.is_some_and(|value| self.local_of(value).is_some())
+            };
+            list.iter().position(framed).or_else(|| list.iter().position(|operand| operand.memory))
+        };
         let pin = |index: usize, file: RegClass| match pins[index] {
             Some((at, class)) if class == file => Ok(Some(Constraint::Fixed(at))),
             Some(_) => Err(refused()),
@@ -4794,7 +4814,19 @@ impl<'a> Lowering<'a> {
                     && (self.number(value).is_some() || self.named_address(value).is_some());
                 // An operand in memory is spelled on AArch64 as the register its address is in,
                 // which is `[x3]` and is an address every instruction that takes one reads.
-                if (operand.memory && !a64) || spelled {
+                if (operand.memory && !a64 && hole == Some(index)) || spelled {
+                    continue;
+                }
+                // Another one in memory, whose address is read as a register the text puts in
+                // parentheses. One in the frame or in a named address space has no register that
+                // says all of where it is, so it is refused.
+                if operand.memory && !a64 {
+                    if self.local_of(value).is_some() || self.segment(inst).is_some() {
+                        return Err(refused());
+                    }
+                    let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
+                    use_of[index] = Some(uses.len());
+                    uses.push(read);
                     continue;
                 }
                 let (ty, file) = (self.source[value].ty, files[index]);
@@ -5004,10 +5036,19 @@ impl<'a> Lowering<'a> {
                     text.push(']');
                     continue;
                 }
-                if operand.memory {
-                    if memory.is_some_and(|had| had != index) {
-                        return Err(refused());
+                if operand.memory && hole != Some(index) {
+                    let at = use_of[index].map(|at| first_use + at).ok_or_else(refused)?;
+                    match modifier {
+                        None => {}
+                        Some('H') => text.push('8'),
+                        Some(_) => return Err(refused()),
                     }
+                    text.push('(');
+                    text.push_str(&template_reg(at, 'q'));
+                    text.push(')');
+                    continue;
+                }
+                if operand.memory {
                     memory = Some(index);
                     // `%H` is the word eight bytes on, for the high half of a sixteen byte
                     // object.

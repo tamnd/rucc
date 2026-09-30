@@ -810,6 +810,11 @@ static KKK: [Kind; 3] = [Kind::Mask, Kind::Mask, Kind::Mask];
 /// A compare of two vectors, or of a vector and an address, into a mask.
 static IVVK: [Kind; 4] = [Kind::Imm, Kind::Vec, Kind::Vec, Kind::Mask];
 static IMVK: [Kind; 4] = [Kind::Imm, Kind::Mem, Kind::Vec, Kind::Mask];
+/// The same with no immediate, as `vpcmpgtb` writes it.
+static VVK: [Kind; 3] = [Kind::Vec, Kind::Vec, Kind::Mask];
+static MVK: [Kind; 3] = [Kind::Mem, Kind::Vec, Kind::Mask];
+/// A mask spread out into a vector, as `vpmovm2b` does.
+static KV: [Kind; 2] = [Kind::Mask, Kind::Vec];
 /// A blend of two vectors under a third, which is `vpblendvb`.
 static VVVV: [Kind; 4] = [Kind::Vec, Kind::Vec, Kind::Vec, Kind::Vec];
 static VMVV: [Kind; 4] = [Kind::Vec, Kind::Mem, Kind::Vec, Kind::Vec];
@@ -2874,6 +2879,9 @@ static ENCODINGS: &[Encoding] = &[
     bytes("phminposuw", &VV, Word, &[0x0F, 0x38, 0x41], pair(0, 1), NO_IMM),
     bytes("phminposuw", &MV, Word, &[0x0F, 0x38, 0x41], pair(0, 1), NO_IMM),
     bytes("movntdqa", &MV, Word, &[0x0F, 0x38, 0x2A], pair(0, 1), NO_IMM),
+    // The store the other way, which goes around the cache, and is how lib/raid6 writes the
+    // parity it worked out.
+    bytes("movntdq", &VM, Word, &[0x0F, 0xE7], pair(1, 0), NO_IMM),
     // SSE4.1 and the SSE4.2 string comparisons behind the `0x3A` escape, each with its immediate.
     // `extractps` writes a general register or memory, which is the low bits of the addressing byte
     // the way it is for `pextrd`.
@@ -3086,6 +3094,9 @@ static ENCODINGS: &[Encoding] = &[
     evex("vmovdqa64", &VV, Word, &[0x6F], pair(0, 1), Evex::new(Map::Escape, true)),
     evex("vmovdqa64", &MV, Word, &[0x6F], pair(0, 1), Evex::new(Map::Escape, true)),
     evex("vmovdqa64", &VM, Word, &[0x7F], pair(1, 0), Evex::new(Map::Escape, true)),
+    // A store that goes around the cache, which is VEX encoded for an `xmm` or a `ymm` below the
+    // sixteenth and EVEX otherwise.
+    evex("vmovntdq", &VM, Word, &[0xE7], pair(1, 0), Evex::new(Map::Escape, false).or_vex(false)),
     evex("vmovdqu8", &VV, Double, &[0x6F], pair(0, 1), Evex::new(Map::Escape, false)),
     evex("vmovdqu8", &MV, Double, &[0x6F], pair(0, 1), Evex::new(Map::Escape, false)),
     evex("vmovdqu8", &VM, Double, &[0x7F], pair(1, 0), Evex::new(Map::Escape, false)),
@@ -3243,6 +3254,12 @@ static ENCODINGS: &[Encoding] = &[
     // An unsigned compare of eight byte lanes, whose result is a mask rather than a vector.
     evex("vpcmpuq", &IVVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
     evex("vpcmpuq", &IMVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    // A signed compare of byte lanes into a mask, and the mask turned back into a vector whose
+    // bytes are all ones where its bits were set. lib/raid6 multiplies by two in GF(2^8) with the
+    // pair of them.
+    evex("vpcmpgtb", &VVK, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vpcmpgtb", &MVK, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vpmovm2b", &KV, Single, &[0x28], pair(0, 1), Evex::new(Map::Escape38, false)),
     // GFNI, which has a VEX form and an EVEX form and writes the wide bit in both.
     evex(
         "vgf2p8affineqb",
@@ -3691,6 +3708,9 @@ static ENCODINGS: &[Encoding] = &[
     avx("vmovups", &VV, Long, Map::Escape, &[0x10], None, pair(0, 1)),
     avx("vmovups", &MV, Long, Map::Escape, &[0x10], None, pair(0, 1)),
     avx("vmovups", &VM, Long, Map::Escape, &[0x11], None, pair(1, 0)),
+    avx("vmovapd", &VV, Word, Map::Escape, &[0x28], None, pair(0, 1)),
+    avx("vmovapd", &MV, Word, Map::Escape, &[0x28], None, pair(0, 1)),
+    avx("vmovapd", &VM, Word, Map::Escape, &[0x29], None, pair(1, 0)),
     avx("vmovd", &RV, Word, Map::Escape, &[0x6E], None, pair(0, 1)),
     avx("vmovd", &MV, Word, Map::Escape, &[0x6E], None, pair(0, 1)),
     avx("vmovd", &VR, Word, Map::Escape, &[0x7E], None, pair(1, 0)),
@@ -3751,6 +3771,14 @@ static ENCODINGS: &[Encoding] = &[
         &IVV,
         Word,
         &[0x72],
+        ext(1, 4),
+        Evex::new(Map::Escape, false).third(2).or_vex(false),
+    ),
+    evex(
+        "vpsraw",
+        &IVV,
+        Word,
+        &[0x71],
         ext(1, 4),
         Evex::new(Map::Escape, false).third(2).or_vex(false),
     ),
@@ -5927,6 +5955,38 @@ mod tests {
         assert_eq!(hex("kmovq", &[quad(R13), Value::Mask(7)]), "c4 c1 fb 92 fd");
         assert_eq!(hex("kmovq", &[Value::Mask(1), quad(RAX)]), "c4 e1 fb 93 c1");
         assert_eq!(hex("kmovq", &[Value::Mask(3), quad(R9)]), "c4 61 fb 93 cb");
+    }
+
+    /// What lib/raid6 writes to work out its parity: stores that go around the cache, the shift
+    /// that spreads a sign across a word, and the compare into a mask and back that doubles every
+    /// byte in GF(2^8).
+    #[test]
+    fn the_stores_and_shifts_raid6_writes_are_the_bytes_gas_writes() {
+        let to = Addr { base: Some(R8), disp: 16, ..Addr::default() };
+        assert_eq!(hex("movntdq", &[Value::Xmm(xmm(0)), at(RAX, 0)]), "66 0f e7 00");
+        assert_eq!(hex("movntdq", &[Value::Xmm(xmm(9)), Value::Mem(to)]), "66 45 0f e7 48 10");
+        // VEX for what VEX can name, and EVEX for a whole `zmm` or a register past fifteen.
+        assert_eq!(hex("vmovntdq", &[y(0), at(RAX, 0)]), "c5 fd e7 00");
+        assert_eq!(hex("vmovntdq", &[y(9), at(R8, 32)]), "c4 41 7d e7 48 20");
+        assert_eq!(hex("vmovntdq", &[x(2), at(RCX, 0)]), "c5 f9 e7 11");
+        assert_eq!(hex("vmovntdq", &[z(2), at(RAX, 0)]), "62 f1 7d 48 e7 10");
+        assert_eq!(hex("vmovntdq", &[z(17), at(RDX, 64)]), "62 e1 7d 48 e7 4a 01");
+        assert_eq!(hex("vmovntdq", &[y(20), at(RAX, 32)]), "62 e1 7d 28 e7 60 01");
+        assert_eq!(hex("vpsraw", &[Value::Imm(7), y(2), y(3)]), "c5 e5 71 e2 07");
+        assert_eq!(hex("vpsraw", &[Value::Imm(1), x(9), x(12)]), "c4 c1 19 71 e1 01");
+        assert_eq!(hex("vpsraw", &[Value::Imm(3), z(2), z(3)]), "62 f1 65 48 71 e2 03");
+        assert_eq!(hex("vpcmpgtb", &[z(4), z(1), Value::Mask(1)]), "62 f1 75 48 64 cc");
+        assert_eq!(hex("vpcmpgtb", &[z(14), z(15), Value::Mask(4)]), "62 d1 05 48 64 e6");
+        assert_eq!(hex("vpcmpgtb", &[z(20), z(1), Value::Mask(7)]), "62 b1 75 48 64 fc");
+        assert_eq!(hex("vpcmpgtb", &[at(RAX, 64), z(1), Value::Mask(2)]), "62 f1 75 48 64 50 01");
+        assert_eq!(hex("vpmovm2b", &[Value::Mask(1), z(5)]), "62 f2 7e 48 28 e9");
+        assert_eq!(hex("vpmovm2b", &[Value::Mask(4), z(15)]), "62 72 7e 48 28 fc");
+        assert_eq!(hex("vpmovm2b", &[Value::Mask(2), z(21)]), "62 e2 7e 48 28 ea");
+        assert_eq!(hex("vpmovm2b", &[Value::Mask(1), y(5)]), "62 f2 7e 28 28 e9");
+        assert_eq!(hex("vmovapd", &[y(0), y(13)]), "c5 7d 28 e8");
+        assert_eq!(hex("vmovapd", &[y(13), y(0)]), "c5 7d 29 e8");
+        assert_eq!(hex("vmovapd", &[at(RAX, 0), y(9)]), "c5 7d 28 08");
+        assert_eq!(hex("vmovapd", &[y(9), at(RAX, 32)]), "c5 7d 29 48 20");
     }
 
     /// A control, debug or segment register goes in the field beside the addressing byte, and a
