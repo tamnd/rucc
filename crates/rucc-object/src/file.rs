@@ -1458,6 +1458,20 @@ mod tests {
         }
     }
 
+    /// The relocations a kernel's hand written assembly asks for beyond what a compiler writes:
+    /// eight bytes of distance for its jump table, and an address in one byte or two.
+    #[test]
+    fn a_wide_distance_and_a_narrow_address_have_relocations_of_their_own() {
+        for (reference, wanted) in [
+            (Reference::AwayWide, elf::R_X86_64_PC64),
+            (Reference::Address { bytes: 2 }, elf::R_X86_64_16),
+            (Reference::Address { bytes: 1 }, elf::R_X86_64_8),
+        ] {
+            assert_eq!(crate::elf::r_type(reference), Some(wanted));
+        }
+        assert_eq!(crate::elf::r_type_aarch64(Reference::AwayWide), Some(elf::R_AARCH64_PREL64));
+    }
+
     #[test]
     fn a_name_wanted_twice_is_one_symbol_rather_than_two() {
         let mut text = calling("puts");

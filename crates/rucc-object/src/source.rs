@@ -773,7 +773,7 @@ fn moved(
     if flavour != Flavour::Elf || name.binding != Binding::Local {
         return None;
     }
-    let near = matches!(reloc.kind, Reference::Data | Reference::Away);
+    let near = matches!(reloc.kind, Reference::Data | Reference::Away | Reference::AwayWide);
     let fixed = match reloc.kind {
         Reference::Call
         | Reference::Got
