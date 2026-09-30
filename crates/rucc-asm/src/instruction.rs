@@ -28,8 +28,8 @@
 //! reaches its data. Those come back as holes too, for the whole address rather than a distance.
 
 use rucc_target::x86_64::{
-    Addr, Encoding, ImmSize, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width, encode_masked,
-    encoding, gpr_name, gpr_named, xmm,
+    Addr, Encoding, ImmSize, Kind, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width,
+    encode_masked, encode_masked_in, encoding_in, gpr_name, gpr_named, xmm,
 };
 use rucc_target::{PhysReg, Segment};
 
@@ -76,6 +76,16 @@ pub(crate) enum Sort {
     /// The offset of a thread-local variable from the thread pointer, which is what
     /// `message@GOTTPOFF(%rip)` is and is a relocation for the same reason.
     Thread,
+    /// Somewhere to jump or call on i386 that the file did not mark `@PLT`. gas asks the linker for
+    /// the plain distance to it there, `R_386_PC32`, and keeps the stub for a branch that asks.
+    Plain,
+    /// How far a name is from the global offset table, which is what `message@GOTOFF(%ebx)` is on
+    /// i386. Code there has no instruction pointer to count from, so it keeps the table's address
+    /// in a register and reaches what it defines itself as a distance from that.
+    Offset,
+    /// A slot of the global offset table as a distance from the table, which is what
+    /// `message@GOT(%ebx)` is on i386 and is the same question [`Sort::Table`] asks on x86-64.
+    Slot,
 }
 
 /// The name in a displacement, and which of the three ways of reaching it the suffix asks for.
@@ -91,6 +101,35 @@ fn reached(named: &str) -> Result<(String, Sort), String> {
         "GOTTPOFF" => Ok((name.to_owned(), Sort::Thread)),
         _ => Err(format!("'@{how}' is not a way of reaching something this compiler reads")),
     }
+}
+
+/// The same for i386, where an address is counted from registers and never from the instruction.
+///
+/// A bare name is the address of the name. `@GOTOFF` and `@GOT` are what gcc writes for position
+/// independent code there, and the thread-local suffixes are left for when this reads those.
+fn reached_i386(named: &str) -> Result<(String, Sort), String> {
+    let Some((name, how)) = named.split_once('@') else {
+        return Ok((named.to_owned(), Sort::Extended));
+    };
+    match how {
+        "GOTOFF" => Ok((name.to_owned(), Sort::Offset)),
+        "GOT" => Ok((name.to_owned(), Sort::Slot)),
+        _ => {
+            Err(format!("'@{how}' is not a way of reaching something this compiler reads on i386"))
+        }
+    }
+}
+
+/// An expression with the suffix taken out of it, and the suffix, when it has one.
+///
+/// gas finds the `@` wherever it is and reads the rest as the expression, so `table@GOTOFF+8` and
+/// `table+8@GOTOFF` are the same thing, and this reads them the same way.
+pub(crate) fn unsuffixed(text: &str) -> Option<(String, &str)> {
+    let at = text.find('@')?;
+    let tail = &text[at + 1..];
+    let end = tail.find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').unwrap_or(tail.len());
+    let rest = format!("{}{}", &text[..at], &tail[end..]);
+    Some((rest.trim().to_owned(), &tail[..end]))
 }
 
 /// One instruction, written.
@@ -161,8 +200,21 @@ const STANDING: i64 = 0x1000_0000;
 ///
 /// A sentence saying what about the line could not be read, with no line number on it, since the
 /// caller is the one that knows which line this was.
-pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
-    let mut written = full(word, args)?;
+///
+/// `mode` is the machine the file was written for, which is thirty two bit mode for i386.
+pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
+    if mode == Mode::Bits32 {
+        // Thirty two bit registers are the only ones an i386 address is made of, so there is no
+        // prefix to add, and a sixty four bit one is a register the machine does not have.
+        if let Some(arg) = args.iter().find(|arg| wide(arg)) {
+            return Err(format!(
+                "'{}' is an address of sixty four bit registers, which i386 does not have",
+                arg.trim()
+            ));
+        }
+        return full(word, args, mode);
+    }
+    let mut written = full(word, args, mode)?;
     // An address made of thirty two bit registers is the same address with the top half of the
     // sum thrown away, which is one prefix byte in front of the instruction and otherwise the
     // same bytes. It goes behind a segment and in front of everything else, where gas puts it.
@@ -178,13 +230,20 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
 
 /// Whether the operand is an address whose registers are thirty two bits wide.
 fn narrow(arg: &str) -> bool {
+    addressed(arg, Width::Long)
+}
+
+/// Whether the operand is an address whose registers are sixty four bits wide.
+fn wide(arg: &str) -> bool {
+    addressed(arg, Width::Quad)
+}
+
+/// Whether the operand is an address with a register of that width in its brackets.
+fn addressed(arg: &str, width: Width) -> bool {
     let text = arg.trim();
     let Some(cut) = grouped(text) else { return false };
     text[cut + 1..text.len() - 1].split(',').take(2).any(|part| {
-        part.trim()
-            .strip_prefix('%')
-            .and_then(gpr_named)
-            .is_some_and(|(_, width)| width == Width::Long)
+        part.trim().strip_prefix('%').and_then(gpr_named).is_some_and(|(_, named)| named == width)
     })
 }
 
@@ -193,8 +252,8 @@ fn segment_prefix(byte: u8) -> bool {
     matches!(byte, 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65)
 }
 
-/// [`one`], for an address of whole registers.
-fn full(word: &str, args: &[String]) -> Result<Written, String> {
+/// [`one_in`], for an address of whole registers.
+fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     let mut mask = Opmask::default();
     let mut operands = Vec::with_capacity(args.len());
     let ported = matches!(word, "in" | "inb" | "inw" | "inl" | "out" | "outb" | "outw" | "outl");
@@ -209,9 +268,9 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
         // gas takes the port of an `in` or an `out` in brackets as well as bare, since it is where
         // the value comes from or goes to, and it is the register all the same.
         let text = if ported && text.replace(' ', "") == "(%dx)" { "%dx" } else { text };
-        operands.push(operand(text)?);
+        operands.push(operand(text, mode)?);
     }
-    if let Some(written) = segmented(word, &operands)? {
+    if let Some(written) = segmented(word, &operands, mode)? {
         return Ok(written);
     }
     implied(word, &operands)?;
@@ -233,15 +292,15 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
     }
     if !BRANCHES.iter().any(|branch| word.starts_with(branch)) {
         for operand in &mut operands {
-            outright(operand);
+            outright(operand, mode);
         }
     }
     let mut values: Vec<Value> = operands.iter().map(|op| value(op, STANDING)).collect();
-    let (mnemonic, row) = match spelled(word, &operands, &values) {
+    let (mnemonic, row) = match spelled(word, &operands, &values, mode) {
         Ok(found) => found,
         Err(_) if operands.iter().any(|op| matches!(op, Operand::Expr(_))) => {
             values = operands.iter().map(|op| value(op, 0)).collect();
-            spelled(word, &operands, &values)?
+            spelled(word, &operands, &values, mode)?
         }
         Err(why) => return Err(why),
     };
@@ -271,15 +330,18 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
     special(word, &mnemonic, &operands)?;
 
     let mut bytes = Vec::with_capacity(16);
-    let holes =
-        encode_masked(&mnemonic, &values, mask, &mut bytes).map_err(|why| why.to_string())?;
+    let mut holes = encode_masked_in(mode, &mnemonic, &values, mask, &mut bytes)
+        .map_err(|why| why.to_string())?;
+    if mode == Mode::Bits32 && moffs(&mut bytes, &operands) {
+        holes.disp = holes.disp.map(|at| at - 1);
+    }
     if !named.is_empty() {
         if let Some(last) = bytes.last_mut() {
             *last = last.wrapping_add(named[which]).wrapping_sub(row_depths[which]);
         }
     }
     if holes.dest.is_none() {
-        shorter(&mut bytes, &operands, Mode::Bits64);
+        shorter(&mut bytes, &operands, mode);
     }
 
     let mut wanted = Vec::new();
@@ -304,17 +366,19 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
             _ => 4,
         };
         // `@PLT` asks for the stub a call to another object's name may go through, which is the
-        // relocation a branch gets here whether the file asks or not. So the suffix is nothing to
-        // do and it is not part of the name: leaving it on would put a symbol in the table that
-        // nothing anywhere defines and the link would fail on it.
-        let name = match name.split_once('@') {
-            None => name.clone(),
-            Some((name, "PLT")) => name.to_owned(),
+        // relocation a branch gets on x86-64 whether the file asks or not. So the suffix is nothing
+        // to do there and it is not part of the name: leaving it on would put a symbol in the
+        // table that nothing anywhere defines and the link would fail on it. On i386 gas asks for
+        // the stub only when the suffix is there, and the plain distance when it is not.
+        let (name, sort) = match name.split_once('@') {
+            None if mode == Mode::Bits32 => (name.clone(), Sort::Plain),
+            None => (name.clone(), Sort::Branch),
+            Some((name, "PLT")) => (name.to_owned(), Sort::Branch),
             Some((_, how)) => {
                 return Err(format!("'@{how}' is not a way of reaching somewhere to go"));
             }
         };
-        wanted.push(Hole { at, width, name, addend: *addend, sort: Sort::Branch });
+        wanted.push(Hole { at, width, name, addend: *addend, sort });
     }
     if let Some(at) = holes.rip {
         // Only when the source put a name there. `8(%rip)` is a number the machine counts from the
@@ -337,13 +401,12 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
         }) else {
             return Err(format!("'{word}' left room for a name in an address and was given none"));
         };
-        wanted.push(Hole {
-            at,
-            width: 4,
-            name: named.name,
-            addend: named.addend,
-            sort: Sort::Extended,
-        });
+        // A suffix only gets this far on i386, where every address is counted from registers.
+        let (name, sort) = match mode {
+            Mode::Bits32 => reached_i386(&named.name)?,
+            Mode::Bits64 => (named.name, Sort::Extended),
+        };
+        wanted.push(Hole { at, width: 4, name, addend: named.addend, sort });
     }
     // A number is the last thing in an instruction on this machine, so an expression the
     // instruction carries is the last bytes of it, however many the row gave it.
@@ -363,8 +426,27 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
         // it there. The hole is what goes in those bytes, and a hole the linker fills is read as
         // nothing plus its addend, which is what gas leaves: `pushq $sym` is `68 00 00 00 00`.
         bytes[at..].fill(0);
-        let sort =
-            if width == 4 && extends(&bytes, Mode::Bits64) { Sort::Extended } else { Sort::Value };
+        // On i386 the number may be a name's distance from the global offset table, or a slot of
+        // it, which is `$message@GOTOFF` and is four bytes whatever the instruction.
+        if let Some((rest, how)) = unsuffixed(&text).filter(|_| mode == Mode::Bits32) {
+            let sort = match how {
+                "GOTOFF" => Sort::Offset,
+                "GOT" => Sort::Slot,
+                _ => {
+                    return Err(format!(
+                        "'@{how}' is not a way of reaching something this compiler reads on i386"
+                    ));
+                }
+            };
+            if width != 4 {
+                return Err(format!(
+                    "'{word}' carries '{text}' in {width} bytes, and it takes four"
+                ));
+            }
+            wanted.push(Hole { at, width: 4, name: rest, addend: 0, sort });
+            return Ok(Written { bytes, holes: wanted });
+        }
+        let sort = if width == 4 && extends(&bytes, mode) { Sort::Extended } else { Sort::Value };
         wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort });
     }
     Ok(Written { bytes, holes: wanted })
@@ -376,13 +458,17 @@ fn full(word: &str, args: &[String]) -> Result<Written, String> {
 /// an opcode of its own rather than a register in an addressing byte, so the encoder has a row for
 /// each under a name that says which register it is. The other four are refused here, since the
 /// opcodes that pushed them on thirty two bits are not instructions on sixty four.
-fn segmented(word: &str, operands: &[Operand]) -> Result<Option<Written>, String> {
+fn segmented(word: &str, operands: &[Operand], mode: Mode) -> Result<Option<Written>, String> {
     let [Operand::Seg(segment)] = operands else { return Ok(None) };
     let way = match word {
         "push" | "pushq" => "pushq",
         "pop" | "popq" => "popq",
         _ => return Ok(None),
     };
+    // Thirty two bit mode has all six under other names, and none of them is written yet.
+    if mode == Mode::Bits32 {
+        return Err(format!("'{word} %{}' is not written for i386 yet", segment.name()));
+    }
     if !matches!(segment, Segment::Fs | Segment::Gs) {
         return Err(format!(
             "'{word} %{}' is not an instruction in long mode, which pushes and pops fs and gs only",
@@ -530,7 +616,10 @@ fn extends(bytes: &[u8], mode: Mode) -> bool {
 /// finds out and asks for the long form back when it does not.
 pub(crate) fn short(long: &Written) -> Option<Written> {
     let [hole] = long.holes.as_slice() else { return None };
-    if hole.sort != Sort::Branch || hole.width != 4 || hole.at + 4 != long.bytes.len() {
+    if !matches!(hole.sort, Sort::Branch | Sort::Plain)
+        || hole.width != 4
+        || hole.at + 4 != long.bytes.len()
+    {
         return None;
     }
     let code = match long.bytes.as_slice() {
@@ -636,6 +725,39 @@ fn predicated(word: &str) -> Option<(String, i64)> {
 /// The mnemonics whose bare name operand is somewhere to go rather than an address.
 const BRANCHES: [&str; 4] = ["j", "call", "loop", "xbegin"];
 
+/// Whether a `mov` between the accumulator and an address with no registers in it was rewritten
+/// into the form with no addressing byte, which gas takes on i386.
+///
+/// `movl counter, %eax` is `A1` and four bytes of address there, one shorter than `8B 05`, and the
+/// table only has the long rows since on x86-64 the short ones carry eight bytes of address and gas
+/// leaves them to `movabs`. A slot of the global offset table keeps the long form, because the
+/// linker can only rewrite a load of one with the addressing byte in it and gas knows that. A
+/// distance from the table does not, `movl foo@GOTOFF, %eax` being `A1` as well.
+fn moffs(bytes: &mut Vec<u8>, operands: &[Operand]) -> bool {
+    let reached = operands
+        .iter()
+        .any(|op| matches!(op, Operand::Mem(_, Some(named)) if slotted(&named.name)));
+    if reached {
+        return false;
+    }
+    let at = bytes.iter().take_while(|&&byte| segment_prefix(byte) || byte == 0x66).count();
+    let short = match bytes.get(at..at + 2) {
+        Some([0x8A, 0x05]) => 0xA0,
+        Some([0x8B, 0x05]) => 0xA1,
+        Some([0x88, 0x05]) => 0xA2,
+        Some([0x89, 0x05]) => 0xA3,
+        _ => return false,
+    };
+    bytes[at] = short;
+    bytes.remove(at + 1);
+    true
+}
+
+/// Whether the name in an address asks for a slot of the global offset table.
+fn slotted(name: &str) -> bool {
+    matches!(unsuffixed(name), Some((_, "GOT")))
+}
+
 /// A bare number where an address goes, read as the address it is.
 ///
 /// `movq %rax, 0` stores to address zero, which is what a program writes to crash on purpose, and
@@ -645,7 +767,9 @@ const BRANCHES: [&str; 4] = ["j", "call", "loop", "xbegin"];
 /// A bare name is the same, `movl counter, %eax` being what gcc writes for a global under
 /// `-fno-pie`: four bytes of address with no base and no index, which the linker fills in. A name
 /// with a suffix is left alone, since every suffix asks for something reached from the instruction.
-fn outright(operand: &mut Operand) {
+/// On i386 none does, and `movl foo@GOT, %eax` is a slot of the table at an address of its own,
+/// which gas takes and which only a program that has put the table at a fixed place would write.
+fn outright(operand: &mut Operand, mode: Mode) {
     let Operand::Dest(Named { name, addend }) = operand else { return };
     if *addend == 0 {
         if let Some(disp) = number(name).ok().and_then(|value| i32::try_from(value).ok()) {
@@ -653,7 +777,8 @@ fn outright(operand: &mut Operand) {
             return;
         }
     }
-    if number(name).is_ok() || name.contains('@') || name == "." {
+    let suffixed = matches!(unsuffixed(name), Some((_, "GOT" | "GOTOFF"))) && mode == Mode::Bits32;
+    if number(name).is_ok() || name.contains('@') && !suffixed || name == "." {
         return;
     }
     let named = Named { name: std::mem::take(name), addend: *addend };
@@ -675,6 +800,7 @@ fn spelled(
     word: &str,
     operands: &[Operand],
     values: &[Value],
+    mode: Mode,
 ) -> Result<(String, &'static Encoding), String> {
     // The byte form of the checksum step has two encodings, one into a thirty two bit register
     // and one into a sixty four bit register with REX.W. Both leave the same zero extended value
@@ -700,7 +826,8 @@ fn spelled(
             _ => None,
         })
         .unwrap_or(0);
-    let names = [Some(word.to_owned()), aliased(word)];
+    let encoding = |name: &str, kinds: &[Kind], imm| encoding_in(mode, name, kinds, imm);
+    let names = [Some(word.to_owned()), aliased(word, mode)];
     for name in names.iter().flatten() {
         if let Some(row) = encoding(name, &kinds, imm) {
             return Ok((name.clone(), row));
@@ -778,7 +905,7 @@ const CONDITIONS: &[(&str, &str)] = &[
 /// Three kinds of instruction read a condition and all three spell it the same way, so the name is
 /// a prefix and a condition and, for a conditional move, a width letter behind it. Both readings of
 /// the tail are tried because `jnb` ends in a letter that is also a width and is not one.
-fn aliased(word: &str) -> Option<String> {
+fn aliased(word: &str, mode: Mode) -> Option<String> {
     // Shifting left arithmetically and shifting left logically are one instruction under two
     // names, because the two differ only in what is put back at the bottom and neither puts
     // anything back at the bottom. gas takes both and the encoder knows one.
@@ -791,9 +918,11 @@ fn aliased(word: &str) -> Option<String> {
     // letter is not a thing a file has to write and mostly is not written. The letter cannot be
     // worked out from the operands the way every other one is, because an address says nothing
     // about how wide the access is, so these are named here rather than guessed at. The same for
-    // the two about the flags, whose operand is not written at all.
+    // the two about the flags, whose operand is not written at all. Thirty two bit mode moves four
+    // bytes the same way.
     if let Some(known) = ["push", "pop", "pushf", "popf"].iter().find(|&&known| known == word) {
-        return Some(format!("{known}q"));
+        let letter = if mode == Mode::Bits32 { 'l' } else { 'q' };
+        return Some(format!("{known}{letter}"));
     }
     let (prefix, rest) = ["cmov", "set", "j"]
         .iter()
@@ -921,14 +1050,20 @@ fn value(operand: &Operand, standing: i64) -> Value {
 }
 
 /// One operand, read.
-fn operand(text: &str) -> Result<Operand, String> {
+fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
     if text.is_empty() {
         return Err("an operand with nothing in it".to_owned());
     }
     // A jump or a call through a register or through memory, which is the same operand as any
     // other and a different instruction from a jump to a name. The star is how AT&T says which.
     if let Some(rest) = text.strip_prefix('*') {
-        return match operand(rest.trim())? {
+        // On i386 the place may be a bare name, `call *foo@GOT` being a call through a slot of the
+        // table at a fixed address, which is an address with no registers like any other there.
+        let mut inner = operand(rest.trim(), mode)?;
+        if mode == Mode::Bits32 {
+            outright(&mut inner, mode);
+        }
+        return match inner {
             it @ (Operand::Reg(_, _) | Operand::Mem(_, _)) => Ok(it),
             _ => Err(format!("'{text}' goes through something that is not a place")),
         };
@@ -951,7 +1086,7 @@ fn operand(text: &str) -> Result<Operand, String> {
         return register(&text[1..]);
     }
     if text.starts_with('%') || text.contains('(') {
-        return address(text);
+        return address(text, mode);
     }
     // What is left is a bare name, which in an instruction is somewhere to go. An address written
     // as a bare name is refused inside `address` rather than here, so that the message is about
@@ -1053,7 +1188,7 @@ fn register(written: &str) -> Result<Operand, String> {
 /// `segment:displacement(base, index, scale)`, with any of them left out, and the displacement
 /// either a number or `%rip`, which is what makes an address a distance from the end of the
 /// instruction rather than a place a register points at.
-fn address(text: &str) -> Result<Operand, String> {
+fn address(text: &str, mode: Mode) -> Result<Operand, String> {
     let mut rest = text;
     let mut addr = Addr { scale: 1, ..Addr::default() };
 
@@ -1093,7 +1228,16 @@ fn address(text: &str) -> Result<Operand, String> {
     // name is only read in front of `(%rip)`, since every other shape of address wants a
     // relocation against a place rather than against a distance and this does not write one.
     let mut named = None;
-    if !front.is_empty() {
+    // A suffix on i386 is taken out before the rest is read and put back on the name, since gas
+    // takes it anywhere in the expression and what it is about is the one name there.
+    let suffix = unsuffixed(front).filter(|_| mode == Mode::Bits32);
+    if let Some((rest, how)) = &suffix {
+        let (value, name) = parted(rest)?;
+        let Some(name) = name else {
+            return Err(format!("'{front}' has '@{how}' and no name for it to be about"));
+        };
+        named = Some(Named { name: format!("{name}@{how}"), addend: value });
+    } else if !front.is_empty() {
         let (value, name) = parted(front)?;
         match name {
             // The number goes with the name rather than into the bytes, because what the bytes end
@@ -1123,6 +1267,11 @@ fn address(text: &str) -> Result<Operand, String> {
         return Err(format!("'{text}' adds registers of two widths"));
     }
     if let Some(base) = parts.first().filter(|base| !base.is_empty()) {
+        if *base == "%rip" && mode == Mode::Bits32 {
+            return Err(format!(
+                "'{text}' is counted from the instruction, which i386 has no way to address"
+            ));
+        }
         if *base == "%rip" {
             addr.rip = true;
         } else {
@@ -1145,7 +1294,7 @@ fn address(text: &str) -> Result<Operand, String> {
     // asks for a table slot or a thread's offset, which is only reached from the instruction.
     if let Some(named) = &named {
         if !addr.rip {
-            if let Some((_, how)) = named.name.split_once('@') {
+            if let Some((_, how)) = named.name.split_once('@').filter(|_| mode == Mode::Bits64) {
                 return Err(format!(
                     "'@{how}' in an address that is not counted from the instruction, which is \
                      not a way this compiler reaches anything"
@@ -1191,7 +1340,7 @@ fn whole(text: &str) -> Result<PhysReg, String> {
         return Err(format!("'{text}' is not a register"));
     };
     match gpr_named(name) {
-        // A thirty two bit one is the same register under the prefix [`one`] puts in front.
+        // A thirty two bit one is the same register under the prefix [`one_in`] puts in front.
         Some((reg, Width::Quad | Width::Long)) => Ok(reg),
         Some((_, width)) => Err(format!(
             "'%{name}' is {} bits, and an address on this machine is made of whole registers",
@@ -1310,6 +1459,11 @@ fn number(text: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One x86-64 instruction, which is what nearly every test here reads.
+    fn one(word: &str, args: &[String]) -> Result<Written, String> {
+        one_in(word, args, Mode::Bits64)
+    }
 
     /// One instruction, as the bytes of it.
     fn bytes(line: &str) -> Vec<u8> {
