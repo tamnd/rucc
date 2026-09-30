@@ -310,8 +310,8 @@ impl Checker<'_> {
             TypeSpec::Record { kind, tag, fields, attrs, pack } => {
                 self.record_spec(kind, tag, fields, attrs, pack, span)
             }
-            TypeSpec::Enum { tag, enumerators, underlying, .. } => {
-                self.enum_spec(tag, enumerators, underlying, span)
+            TypeSpec::Enum { tag, enumerators, underlying, attrs } => {
+                self.enum_spec(tag, enumerators, underlying, attrs, span)
             }
             TypeSpec::Typedef(name) => match self.scopes.lookup(name) {
                 Some(Binding::Typedef(ty)) => ty,
@@ -702,6 +702,7 @@ impl Checker<'_> {
         tag: Option<Symbol>,
         enumerators: Option<ast::EnumeratorList>,
         underlying: Option<ast::TypeNameId>,
+        attrs: ast::AttrList,
         span: Span,
     ) -> TypeId {
         let underlying = underlying.map(|name| {
@@ -735,7 +736,10 @@ impl Checker<'_> {
         };
         let (id, ty) = self.enum_defined(tag, span);
         self.built.defined.insert(ty);
-        self.enum_body(id, list, underlying, span);
+        // `packed` on an enumeration is `-fshort-enums` for that one type, which is how the
+        // kernel keeps `enum rw_hint` to a byte.
+        let short = self.packing(attrs).packed;
+        self.enum_body(id, list, underlying, short, span);
         ty
     }
 

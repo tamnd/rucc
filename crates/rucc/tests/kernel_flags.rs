@@ -147,3 +147,23 @@ fn the_kernel_s_headers_compile_quietly_under_werror() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// `packed` on an enumeration asks for the smallest type that holds it, the same as
+/// `-fshort-enums` does for all of them, and the kernel asserts that `enum rw_hint` is one byte.
+/// The sizes were measured against gcc 13, before and after the tag and past the width of an
+/// `int`.
+#[test]
+fn a_packed_enumeration_is_as_small_as_its_values_allow() {
+    let source = "enum a { A0 = 0, A5 = 5 } __attribute__((__packed__));\n\
+        enum __attribute__((packed)) b { B = -200 };\n\
+        enum c { C = 70000 } __attribute__((packed));\n\
+        enum d { D = 0x100000000 } __attribute__((packed));\n\
+        enum e { E = 1 };\n\
+        _Static_assert(sizeof(enum a) == 1 && sizeof(enum b) == 2, \"small\");\n\
+        _Static_assert(sizeof(enum c) == 4 && sizeof(enum d) == 8, \"wide\");\n\
+        _Static_assert(sizeof(enum e) == 4 && (enum b)B < 0, \"the rest\");\n";
+    let out =
+        run(&["--target=x86_64-unknown-linux-gnu", "-Werror", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+}
