@@ -862,9 +862,17 @@ fn looked_up(
         hops.push((call, block));
         block
     };
-    let default = hop(func, of.default);
     let cases: Vec<(i128, Block)> =
         arms.iter().map(|&(value, call)| (value - low, hop(func, call))).collect();
+    // A table with a case for every value in its range never reaches its default, since the range
+    // check above is what sends everything else on. The default is then one of the cases, so that
+    // no block is made for it: a block made for the arguments of an edge nothing takes is written
+    // out all the same, and objtool calls the jump in it an unreachable instruction.
+    let full = usize::try_from(high - low + 1).is_ok_and(|size| size == cases.len());
+    let default = match cases.first() {
+        Some(&(_, block)) if full => block,
+        _ => hop(func, of.default),
+    };
 
     let mut build = Builder::new(func, at).at(of.span);
     let base = shifted_down(&mut build, of, low);
@@ -1768,6 +1776,41 @@ mod tests {
         assert_eq!(text.matches("icmp ule").count(), 1, "one bound over the span: {text}");
         assert_eq!(text.matches("switch").count(), 1, "and one table inside it: {text}");
         assert!(!text.contains("icmp eq"), "and no case compared on its own: {text}");
+    }
+
+    /// A table with a case for every value in its range has a default only the range check reaches.
+    /// When the default carries an argument, a block made for that argument inside the table would
+    /// be a block nothing jumps to, and `mas_find` in the kernel's maple tree came out with one that
+    /// objtool called an unreachable instruction. So only the range check's edge carries it.
+    #[test]
+    fn a_full_table_makes_no_block_for_a_default_it_cannot_reach() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..13).collect();
+        let mut built = built(&cases);
+        let int = Type::int(32);
+        built.func.append_param(built.default, int);
+        let entry = built.func.entry().expect("an entry block");
+        let term = built.func.terminator(entry).expect("the switch");
+        let at = built.func.target_list(term).iter().next().expect("the default edge");
+        let args = built.func.push_values(&[built.operand]);
+        let call = BlockCall { args, ..built.func[at] };
+        built.func.set_block_call(at, call);
+        let before = count(&built.func);
+        switches(&mut built.func, Goal::Speed);
+        verified(&mut built);
+
+        let text = printed(&built.func, &mut built.names);
+        assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
+        // The range check and the block it guards, and nothing for the default's argument.
+        assert_eq!(count(&built.func), before + 1, "{text}");
+        let probes: Vec<i128> = (-3..17).collect();
+        for &x in &probes {
+            let want = match usize::try_from(x) {
+                Ok(at) if at < 13 => built.arms[at],
+                _ => built.default,
+            };
+            assert_eq!(arrives(&built.func, built.operand, x, ty), want, "{x}: {text}");
+        }
     }
 
     /// A table with holes in it sends the holes to the default, and the index is the case less the
