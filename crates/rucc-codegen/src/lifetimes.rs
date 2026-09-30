@@ -23,8 +23,7 @@
 //! read back from memory and used after the end of the object it points at is a program reading an
 //! object whose lifetime is over, which is what the end means in the first place.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, Def, Func, Inst, Opcode, Value};
 
 /// How many steps [`settle`] may take over one function before it gives up and takes every end
@@ -51,7 +50,7 @@ pub fn settle(func: &mut Func, keep: bool) {
         return;
     }
 
-    let mut of: HashMap<Value, Vec<Inst>> = HashMap::new();
+    let mut of: Map<Value, Vec<Inst>> = Map::default();
     for &inst in &ends {
         match func[func[inst].args].first().copied().filter(|&slot| fixed(func, slot)) {
             Some(slot) => of.entry(slot).or_default().push(inst),
@@ -92,18 +91,18 @@ fn fixed(func: &Func, value: Value) -> bool {
 struct Graph {
     /// The instructions reading each value, a terminator counted once for each argument it hands a
     /// block, along with which parameter of which block that argument becomes.
-    readers: HashMap<Value, Vec<(Inst, Option<Value>)>>,
+    readers: Map<Value, Vec<(Inst, Option<Value>)>>,
     /// The blocks that jump to each block.
-    preds: HashMap<Block, Vec<Block>>,
+    preds: Map<Block, Vec<Block>>,
     /// Where each instruction is in its block, counting from the top.
-    places: HashMap<Inst, usize>,
+    places: Map<Inst, usize>,
 }
 
 impl Graph {
     fn of(func: &Func) -> Self {
-        let mut readers: HashMap<Value, Vec<(Inst, Option<Value>)>> = HashMap::new();
-        let mut preds: HashMap<Block, Vec<Block>> = HashMap::new();
-        let mut places: HashMap<Inst, usize> = HashMap::new();
+        let mut readers: Map<Value, Vec<(Inst, Option<Value>)>> = Map::default();
+        let mut preds: Map<Block, Vec<Block>> = Map::default();
+        let mut places: Map<Inst, usize> = Map::default();
         for block in func.blocks() {
             for (place, inst) in func.insts(block).enumerate() {
                 places.insert(inst, place);
@@ -146,7 +145,7 @@ fn crosses(
     budget: &mut usize,
 ) -> Option<bool> {
     let mut derived: Vec<Value> = Vec::new();
-    let mut seen: HashSet<Value> = HashSet::from([slot]);
+    let mut seen: Set<Value> = std::iter::once(slot).collect();
     let mut queue = vec![slot];
     while let Some(value) = queue.pop() {
         for &(inst, param) in graph.readers.get(&value).map(Vec::as_slice).unwrap_or_default() {
@@ -195,7 +194,7 @@ fn live_at(func: &Func, graph: &Graph, value: Value, at: Inst, budget: &mut usiz
     let Some(home) = home else { return Some(false) };
 
     // The blocks the value is live into, found by walking up from every read to the definition.
-    let mut into: HashSet<Block> = HashSet::new();
+    let mut into: Set<Block> = Set::default();
     let mut read_after = false;
     let mut walk: Vec<Block> = Vec::new();
     for &(reader, param) in graph.readers.get(&value).map(Vec::as_slice).unwrap_or_default() {
