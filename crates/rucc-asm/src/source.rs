@@ -4541,6 +4541,25 @@ mod tests {
         assert!(narrow.why.contains("sixty four bit register"), "{}", narrow.why);
     }
 
+    /// Three things the kernel's assembly writes that gas takes: `sgdtl` in thirty two bit mode, a
+    /// push and a pop of two bytes, and the AVX spelling of the lane extracts and inserts narrower
+    /// than a quadword. The bytes are the ones gas writes for the same lines.
+    #[test]
+    fn the_kernel_s_narrow_pushes_descriptor_stores_and_vex_lane_moves_assemble() {
+        let file = assembled(
+            ".text\n.code32\nsgdtl (%esp)\n.code64\npushw (%rax)\npushw $0xff\npushw $1\npopw %bx\n\
+             vpextrd $1, %xmm9, (%r10)\nvpextrw $3, %xmm0, %eax\nvpinsrb $1, (%rax), %xmm1, %xmm12\n",
+        );
+        assert_eq!(
+            bytes(&file, ".text"),
+            [
+                0x0f, 0x01, 0x04, 0x24, 0x66, 0xff, 0x30, 0x66, 0x68, 0xff, 0x00, 0x66, 0x6a, 0x01,
+                0x66, 0x5b, 0xc4, 0x43, 0x79, 0x16, 0x0a, 0x01, 0xc5, 0xf9, 0xc5, 0xc0, 0x03, 0xc4,
+                0x63, 0x71, 0x20, 0x20, 0x01,
+            ]
+        );
+    }
+
     /// A listing that names a personality routine and a call site table, the way gcc writes a
     /// function with a `cleanup` under `-fexceptions`, gets a header that names the routine and
     /// says `zPLR`, a record that points at the table, and the table with its distances worked
