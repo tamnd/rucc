@@ -58,6 +58,7 @@ A patch release on the way to building the Linux kernel. The x86-64 kernel flags
 - About fifty passes stop collecting each block's instructions into a vector of its own on the way to collecting the whole function's (#2349).
 - Scalar replacement keeps a list of the readers of each value and looks only at those, where before it walked the whole function for every local it planned and again for every local it rewrote. An optimized build of jtckdint goes from 243G instructions back down to 52G (#2360).
 - The register allocator's rewrite stops copying the moves in front of an instruction that borrowed no scratch register, and collects the function's instructions once rather than once a block (#2364).
+- The register allocator asks whether a register is free of a sorted list of the pieces of the values in it, rather than comparing the value with each of them in turn, which takes about a fifth off an optimized build of jtckdint (#2390).
 
 ### Fixed
 

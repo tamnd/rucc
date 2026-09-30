@@ -107,6 +107,13 @@ pub struct Area<'a> {
 }
 
 impl<'a> Area<'a> {
+    /// An area over pieces already in order and apart, for a test that wants one without a
+    /// function to work it out from.
+    #[cfg(test)]
+    pub(crate) fn of_pieces(pieces: &'a [Range]) -> Self {
+        Self { pieces, also: None }
+    }
+
     /// The same area with one more point in it, joined to the piece that starts just after it.
     ///
     /// A point already inside a piece changes nothing, which is what a value a loop carries round

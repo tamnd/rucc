@@ -314,6 +314,9 @@ struct Active<'a> {
     soonest: Vec<Point>,
     /// How many values have been given a register so far.
     count: usize,
+    /// The pieces of the values in each register, by class and then by register number, which is
+    /// what [`available`] asks about.
+    pieces: Vec<Vec<Pieces>>,
 }
 
 impl<'a> Active<'a> {
@@ -331,6 +334,78 @@ impl<'a> Active<'a> {
         self.by[slot].push(Held { reg, class, range, area, at, since: self.count });
         self.soonest[slot] = self.soonest[slot].min(range.end);
         self.count += 1;
+        let held = &self.by[slot];
+        let pieces = pieces_mut(&mut self.pieces, class, slot);
+        if pieces.kept {
+            pieces.drop_before(range.start);
+            for piece in area.pieces() {
+                pieces.insert(piece, reg);
+            }
+        } else if held.len() > FEW {
+            // Enough values to be worth a list, which starts with what is already there.
+            pieces.kept = true;
+            for held in held.iter().filter(|held| held.class == class) {
+                for piece in held.area.pieces() {
+                    pieces.insert(piece, held.reg);
+                }
+            }
+        }
+    }
+
+    /// Whether a value of the class in `at` other than `except` is live anywhere the area is.
+    fn taken(&self, class: RegClass, at: PhysReg, area: Area<'_>, except: Option<Reg>) -> bool {
+        let held = self.at(at);
+        if held.len() > FEW {
+            if let Some(answer) = self.listed(class, at, area, except) {
+                return answer;
+            }
+        }
+        held.iter()
+            .any(|held| held.class == class && Some(held.reg) != except && held.area.overlaps(area))
+    }
+
+    /// What the list of `at`'s pieces says, or nothing when it is not kept or not in order. Out of
+    /// line so that the walk above, which is all most registers ever need, stays small enough to
+    /// be put inline where it is asked.
+    #[inline(never)]
+    fn listed(
+        &self,
+        class: RegClass,
+        at: PhysReg,
+        area: Area<'_>,
+        except: Option<Reg>,
+    ) -> Option<bool> {
+        let by = self.pieces.get(usize::from(class.number()))?;
+        let pieces = by.get(usize::from(at.number()))?;
+        (pieces.kept && !pieces.broken).then(|| pieces.touch(area, except))
+    }
+
+    /// Takes the values of the class in `at` whose areas `goes` says to, and hands each to `gone`.
+    fn evict(
+        &mut self,
+        class: RegClass,
+        at: PhysReg,
+        goes: impl Fn(&Held<'a>) -> bool,
+        mut gone: impl FnMut(&Held<'a>),
+    ) {
+        let slot = usize::from(at.number());
+        let mut taken = Vec::new();
+        self.by[slot].retain(|held| {
+            let out = held.class == class && goes(held);
+            if out {
+                gone(held);
+                taken.push((held.reg, held.area));
+            }
+            !out
+        });
+        let pieces = pieces_mut(&mut self.pieces, class, slot);
+        if pieces.kept {
+            for (reg, area) in taken {
+                for piece in area.pieces() {
+                    pieces.remove(piece, reg);
+                }
+            }
+        }
     }
 
     /// Lets go of every value whose interval ends before a point.
@@ -346,6 +421,94 @@ impl<'a> Active<'a> {
             held.retain(|held| held.range.end >= point);
             *soonest = held.iter().map(|held| held.range.end).min().unwrap_or(Point::MAX);
         }
+    }
+}
+
+/// How many values a register can hold before its pieces are kept in a list. A register with no
+/// more than this in it, which is most of them without optimization, is quicker to ask about by
+/// walking its values, and keeping a list for every one of those cost more than it saved.
+const FEW: usize = 4;
+
+/// The list for one class and register number, made when it is first asked for.
+fn pieces_mut(pieces: &mut Vec<Vec<Pieces>>, class: RegClass, slot: usize) -> &mut Pieces {
+    let class = usize::from(class.number());
+    if pieces.len() <= class {
+        pieces.resize_with(class + 1, Vec::new);
+    }
+    let by = &mut pieces[class];
+    if by.len() <= slot {
+        by.resize_with(slot + 1, Pieces::default);
+    }
+    &mut by[slot]
+}
+
+/// The pieces of every value of one class in one register, sorted by where they start.
+///
+/// Asking whether a register is free for a value used to compare the value with every other value
+/// in the register, a walk over both lists of pieces for each one, and with a few dozen values
+/// in each register that was a large part of an optimized build of a large file. Two values in
+/// one register are never live at once, bar the one point a value written over the one it reuses
+/// shares with it, so in start order the pieces end in order too. Then the only piece that can
+/// touch one of the value's is the last one that starts before that piece ends, and asking is a
+/// search for each piece of the value rather than a walk over everything in the register.
+///
+/// Whether the ends really are in order is checked as each piece goes in, and a register where
+/// they are not is answered by the walk over its values instead, so the answer is the same either
+/// way.
+#[derive(Default)]
+struct Pieces {
+    /// Start, end and whose, sorted by start and then by end.
+    list: Vec<(Point, Point, Reg)>,
+    /// Whether a piece went in that ends before one in front of it.
+    broken: bool,
+    /// Whether the list is kept at all, which it is from the first time the register holds more
+    /// than [`FEW`] values.
+    kept: bool,
+}
+
+impl Pieces {
+    #[inline(never)]
+    fn insert(&mut self, piece: Range, reg: Reg) {
+        let key = (piece.start, piece.end);
+        let at = self.list.partition_point(|&(start, end, _)| (start, end) <= key);
+        let after = at == 0 || self.list[at - 1].1 <= piece.end;
+        let before = self.list.get(at).is_none_or(|next| piece.end <= next.1);
+        if !(after && before) {
+            self.broken = true;
+        }
+        self.list.insert(at, (piece.start, piece.end, reg));
+    }
+
+    fn remove(&mut self, piece: Range, reg: Reg) {
+        let from = self.list.partition_point(|&(start, _, _)| start < piece.start);
+        let found = self.list[from..]
+            .iter()
+            .take_while(|&&(start, _, _)| start == piece.start)
+            .position(|&(_, end, owner)| end == piece.end && owner == reg);
+        if let Some(offset) = found {
+            self.list.remove(from + offset);
+        }
+    }
+
+    /// Lets go of the pieces that end before a point, which no value starting there can touch.
+    /// They are the ones at the front while the ends are in order.
+    fn drop_before(&mut self, point: Point) {
+        if !self.broken {
+            let gone = self.list.partition_point(|&(_, end, _)| end < point);
+            self.list.drain(..gone);
+        }
+    }
+
+    /// Whether a piece of a value other than `except` touches the area.
+    fn touch(&self, area: Area<'_>, except: Option<Reg>) -> bool {
+        area.pieces().any(|piece| {
+            let below = self.list.partition_point(|&(start, _, _)| start <= piece.end);
+            self.list[..below]
+                .iter()
+                .rev()
+                .find(|&&(_, _, owner)| Some(owner) != except)
+                .is_some_and(|&(_, end, _)| end >= piece.start)
+        })
     }
 }
 
@@ -578,6 +741,7 @@ impl Blocks {
     ///
     /// Both ends of the walk come from the ordering rather than from a test, so what comes back is
     /// exactly what the old `covers` call used to keep and in the same order.
+    #[inline]
     fn over(
         &self,
         class: RegClass,
@@ -611,11 +775,7 @@ fn available(
     except: Option<Reg>,
     want: Want,
 ) -> bool {
-    let taken = active.at(at).iter().any(|held| {
-        held.class == interval.class
-            && Some(held.reg) != except
-            && held.area.overlaps(interval.area)
-    });
+    let taken = active.taken(interval.class, at, interval.area, except);
     let width = blocked.width(interval.reg);
     let insisted = blocked.over(interval.class, at, interval.range).any(|one| {
         one.by != Some(interval.reg)
@@ -710,13 +870,12 @@ fn spill_one<'a>(
         .map(|&(_, at, _, _)| at);
     match chosen {
         Some(at) => {
-            active.by[usize::from(at.number())].retain(|held| {
-                let goes = held.class == interval.class && held.area.overlaps(interval.area);
-                if goes {
-                    assignment.spill(held.reg, held.class);
-                }
-                !goes
-            });
+            active.evict(
+                interval.class,
+                at,
+                |held| held.area.overlaps(interval.area),
+                |held| assignment.spill(held.reg, held.class),
+            );
             assignment.places[index(interval.reg)] = Some(Place::Reg(at));
             active.push(interval.reg, interval.class, interval.range, interval.area, at);
         }
@@ -1692,5 +1851,69 @@ mod tests {
         // it.
         assert_eq!(assignment.place(Reg::physical(RCX)), None);
         assert_eq!(env().scratch(GPR), [R13, R14, R15]);
+    }
+
+    /// Pieces of a value, from pairs of points.
+    fn ranges(pairs: &[(Point, Point)]) -> Vec<Range> {
+        pairs.iter().map(|&(start, end)| Range { start, end }).collect()
+    }
+
+    #[test]
+    fn the_pieces_of_a_register_answer_what_a_walk_over_its_values_would() {
+        // Three values that take turns in one register, the first with a hole the third sits in.
+        let held = [
+            (Reg::virtual_reg(0), ranges(&[(0, 4), (20, 30)])),
+            (Reg::virtual_reg(1), ranges(&[(5, 9)])),
+            (Reg::virtual_reg(2), ranges(&[(10, 19), (31, 40)])),
+        ];
+        let mut pieces = Pieces::default();
+        for (reg, list) in &held {
+            for &piece in list {
+                pieces.insert(piece, *reg);
+            }
+        }
+        assert!(!pieces.broken);
+        let asked = [
+            ranges(&[(41, 50)]),
+            ranges(&[(40, 50)]),
+            ranges(&[(9, 9)]),
+            ranges(&[(3, 3), (41, 42)]),
+            ranges(&[(50, 60)]),
+            ranges(&[(15, 15)]),
+        ];
+        for list in &asked {
+            let area = Area::of_pieces(list);
+            for except in [None, Some(Reg::virtual_reg(0)), Some(Reg::virtual_reg(2))] {
+                let walked = held.iter().any(|(reg, pieces)| {
+                    Some(*reg) != except && Area::of_pieces(pieces).overlaps(area)
+                });
+                assert_eq!(pieces.touch(area, except), walked, "{list:?} except {except:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pieces_that_end_out_of_order_are_marked() {
+        let mut pieces = Pieces::default();
+        pieces.insert(Range { start: 0, end: 10 }, Reg::virtual_reg(0));
+        pieces.insert(Range { start: 12, end: 20 }, Reg::virtual_reg(1));
+        assert!(!pieces.broken);
+        // Inside the first, which two values in one register never are.
+        pieces.insert(Range { start: 2, end: 3 }, Reg::virtual_reg(2));
+        assert!(pieces.broken);
+    }
+
+    #[test]
+    fn a_value_taken_out_of_a_register_leaves_its_pieces_with_it() {
+        let mut pieces = Pieces::default();
+        let (first, second) = (Reg::virtual_reg(0), Reg::virtual_reg(1));
+        pieces.insert(Range { start: 0, end: 10 }, first);
+        pieces.insert(Range { start: 12, end: 20 }, second);
+        let asked = ranges(&[(15, 16)]);
+        assert!(pieces.touch(Area::of_pieces(&asked), None));
+        pieces.remove(Range { start: 12, end: 20 }, second);
+        assert!(!pieces.touch(Area::of_pieces(&asked), None));
+        pieces.drop_before(11);
+        assert!(pieces.list.is_empty());
     }
 }
