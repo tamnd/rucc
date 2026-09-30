@@ -1621,8 +1621,9 @@ impl<'a> Verifier<'a> {
                 }
             }
 
-            // The unwind edge a call inside a cleanup handler's scope has under `-fexceptions`.
-            // An `unwound` with no call in front of it is one whose call was folded away, and it
+            // The unwind edge a call inside a cleanup handler's scope has under `-fexceptions`, and
+            // a load, a store or a division has under `-fnon-call-exceptions`. An `unwound` with
+            // nothing like that in front of it is one whose instruction was folded away, and it
             // answers false, so only the shape is checked. The exception has to be the first thing
             // its pad does, because the code generator finds the pad by it.
             Opcode::Unwound => {
