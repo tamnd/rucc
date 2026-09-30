@@ -270,16 +270,20 @@ impl<'a> Entry<'a> {
                 // `p` is an address, which is a value like any other until something reads what
                 // it points at, and it is kept in a register the same way.
                 'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'A' | 'q' | 'Q' | 'f' | 't' | 'u' | 'x'
-                | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => {
+                | 'y' | 'v' | 'l' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => {
                     register = true;
-                    if matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'e' | 'z') {
+                    if matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'z') {
                         immediate = true;
                         open = true;
                     }
                 }
                 // The immediate ranges, which are `I` through `P` on x86 and are a constant
                 // wherever they are read.
-                'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' => {
+                // `e` and `Z` are x86-64's thirty two bit immediates, sign and zero extended, which
+                // is what `"er"` in the kernel's `atomic64_add` asks for. A constant wider than that
+                // goes in a register, since `addq` has no room for it.
+                'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'e'
+                | 'Z' => {
                     register = true;
                     immediate = true;
                     range.get_or_insert(letter);
@@ -370,6 +374,10 @@ mod tests {
         let read = AsmOperands::read("Nd,iN,r", &[], &values).expect("three inputs");
         let ranges: Vec<Option<char>> = read.iter().map(|operand| operand.range).collect();
         assert_eq!(ranges, [Some('N'), None, None]);
+
+        let read = AsmOperands::read("er,Zr,ier", &[], &values).expect("three inputs");
+        let ranges: Vec<Option<char>> = read.iter().map(|operand| operand.range).collect();
+        assert_eq!(ranges, [Some('e'), Some('Z'), None]);
     }
 
     #[test]
