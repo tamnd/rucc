@@ -31,7 +31,7 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
     BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, MachineInsts, PhysReg,
-    RegFile, ShortInsts, TargetInfo, TimingInsts, aarch64, x86_64,
+    RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -56,6 +56,7 @@ use crate::shorten;
 use crate::slots::{self, Slots};
 use crate::split;
 use crate::tail;
+use crate::thunks;
 use crate::usage::{StackUsage, Usage};
 use crate::weights;
 pub use rucc_regalloc::Allocator;
@@ -316,6 +317,13 @@ pub struct Flags {
     /// `-fcf-protection=branch` asks for. That is every function, and every label of a function
     /// whose address the program took.
     pub landing: bool,
+    /// What the x86 speculation hardening flags ask of indirect branches and returns. See
+    /// [`crate::thunks`].
+    pub speculation: Speculation,
+    /// Whether a `switch` may become a jump table, which `-fno-jump-tables` turns off. A jump
+    /// through a table is an indirect jump, which a retpoline build pays a thunk for and an IBT
+    /// build has to land on a pad for. See [`crate::switch::lowered`].
+    pub jump_tables: bool,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
     /// How much room every function opens with for a patcher, which
@@ -377,7 +385,7 @@ pub struct Flags {
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
-    /// no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
+    /// no branch rewritten for speculation, jump tables allowed, no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
     /// nothing in the frame sharing with anything, no scheduling, no loop padded to a boundary and
     /// code that is meant to be fast rather than small, with no debugging information, which is
     /// what a convention that has a red zone says at `-O0` when nobody on the command line has said
@@ -389,6 +397,8 @@ impl Default for Flags {
             code_model: CodeModel::Small,
             stack_clash: false,
             landing: false,
+            speculation: Speculation::default(),
+            jump_tables: true,
             profile: Profile::No,
             patch: Room::default(),
             reorder: false,
@@ -505,7 +515,8 @@ pub fn compile_recording(
     // than as a dozen lines here. What is in the group and what the order between its members is
     // for are both in `crate::lowering`, which is where a new lowering is added.
     let counting = recording.lowerings.wanted();
-    let ran = lowering::group(source, names, machine.conv, flags.goal, flags.switch, counting);
+    let switching = (flags.goal, flags.switch, flags.jump_tables);
+    let ran = lowering::group(source, names, machine.conv, switching, counting);
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();
         recording.lowerings.switched(&called, &ran.switches);
@@ -904,6 +915,11 @@ pub fn compile_recording(
     // leave alone and a jump out of the function is one some of them would not know about. Nothing
     // before this sees anything but a call, a return and an epilogue, which is right on its own.
     tail::jumps(&mut func, &stack.tails, machine.insts, names);
+
+    // After the tail jumps, because a `ret` that became a jump to a callee is a direct jump and no
+    // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
+    // branch goes to is named after the register the allocator gave it.
+    thunks::harden(&mut func, machine.insts, flags.speculation, names);
 
     // Last of all, because a stretch is named by the instructions at either end of it and every
     // pass above is free to take an instruction out or move one. The frame is wanted here as well

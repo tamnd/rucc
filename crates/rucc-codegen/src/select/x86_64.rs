@@ -554,6 +554,14 @@ mod tests {
     /// [`rucc_target::x86_64::Step::Away`].
     const AWAY: &[&str] = &["jmp_away"];
 
+    /// The branches the speculation hardening pass writes in place of an indirect call or jump,
+    /// and the breakpoint it puts behind one.
+    ///
+    /// None of these is an answer to a term. The pass runs after register allocation and rewrites
+    /// a `call_reg` or a `jmp_reg` that a rule or the lowering already chose, so the rule for the
+    /// call is still the rule that picked it, and the thunk is only where the branch is sent.
+    const THUNKS: &[&str] = &["call_thunk", "call_thunk_cs", "jmp_thunk", "jmp_thunk_cs", "int3"];
+
     /// The instructions that change an object where it lives, which a template asks for and
     /// nothing else does.
     ///
@@ -1002,7 +1010,7 @@ mod tests {
             if AWAY.contains(&opcode) || MEMORY.contains(&opcode) || STRING.contains(&opcode) {
                 continue;
             }
-            if TEMPLATED.contains(&opcode) {
+            if TEMPLATED.contains(&opcode) || THUNKS.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {

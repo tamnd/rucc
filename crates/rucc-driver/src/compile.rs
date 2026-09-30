@@ -972,6 +972,8 @@ fn generate(
         code_model: opts.code_model,
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
+        speculation: opts.speculation,
+        jump_tables: opts.jump_tables,
         profile: match profile {
             None => pipeline::Profile::No,
             Some(true) => pipeline::Profile::Early,

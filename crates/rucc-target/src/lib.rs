@@ -69,7 +69,7 @@ pub use crate::abi::{
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-pub use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe};
+pub use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe, Thunks};
 pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
 pub use crate::machine::{Address, MachineInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
@@ -270,6 +270,40 @@ impl CodeModel {
             CodeModel::Small => "small",
             CodeModel::Kernel => "kernel",
         }
+    }
+}
+
+/// What the x86 speculation hardening flags ask of indirect branches and returns.
+///
+/// Each field is one flag's request and all of them are off by default, which is gcc's default.
+/// The kernel turns them on for `MITIGATION_RETPOLINE`, `MITIGATION_RETHUNK` and `MITIGATION_SLS`,
+/// and objtool then checks that every branch it asked about was written the way gcc writes it.
+/// Nothing here is written by the compiler into a section of its own: `.retpoline_sites` and
+/// `.return_sites` are objtool's, built from the calls and jumps it finds.
+///
+/// Design: `spec/04-driver-and-cli.md` section 4.12.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Speculation {
+    /// `-mindirect-branch=thunk-extern`: a call or jump through a register goes to the thunk for
+    /// that register instead, `call __x86_indirect_thunk_rax` for `call *%rax`.
+    pub indirect: bool,
+    /// `-mindirect-branch-cs-prefix`: a call or jump to the thunk for `r8` to `r15` has a code
+    /// segment override in front of it.
+    pub padded: bool,
+    /// `-mfunction-return=thunk-extern`: a return is `jmp __x86_return_thunk` instead.
+    pub returns: bool,
+    /// `-mharden-sls=return` or `all`: an `int3` after every return.
+    pub after_return: bool,
+    /// `-mharden-sls=indirect-jmp` or `all`: an `int3` after every jump through a register, and
+    /// after the jump to a thunk that takes its place.
+    pub after_jump: bool,
+}
+
+impl Speculation {
+    /// Whether anything at all is asked for.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.indirect || self.returns || self.after_return || self.after_jump
     }
 }
 

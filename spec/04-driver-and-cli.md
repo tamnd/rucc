@@ -326,7 +326,7 @@ GCC has no `-Z`, which is what makes it the right prefix for the flags that are 
 
 kbuild passes some gcc flags on every compile and probes others with `cc-option`, which compiles an empty file with the flag and keeps the flag if the compiler exits with zero. A refused flag does not stop the build, it is dropped, and the kernel is configured and compiled without it. A flag taken and ignored is worse, because the kernel is then configured as though the compiler did what the flag asked. So every flag the top Makefile, `arch/x86/Makefile`, `arch/arm64/Makefile` and `scripts/Makefile.*` of Linux 7.2 pass is in one of three places in the table below. It is honored, or it is taken because what it asks for is already what happens, with the reason written down, or it is refused with the reason and, where there is one, the issue that would make it honored. Nothing is taken and ignored.
 
-The flags that are taken or refused without doing anything are one table in `crates/rucc-driver/src/kbuild.rs`, read before any other arm of the parser, and a test checks that every flag in it is written in this section. A row can be for one architecture, and on any other the flag is left to the rest of the parser, which usually means an unknown option, as it is in gcc. A flag written with a `*` at the end covers every flag that starts with what comes before the `*` and that a more particular row does not answer, so `-mindirect-branch=*` is every value but `keep`.
+The flags that are taken or refused without doing anything are one table in `crates/rucc-driver/src/kbuild.rs`, read before any other arm of the parser, and a test checks that every flag in it is written in this section. A row can be for one architecture, and on any other the flag is left to the rest of the parser, which usually means an unknown option, as it is in gcc. A flag written with a `*` at the end covers every flag that starts with what comes before the `*` and that a more particular row does not answer, so `-fzero-call-used-regs=*` is every value but `skip`.
 
 The `-W` flags the kernel passes are the rule in section 4.1: a name gcc 16 knows is taken and one it does not know is refused, from the list in `crates/rucc-driver/data/gcc-warnings.txt`. So the clang names kbuild probes for clang builds, `-Wthread-safety` and `-Werror=unknown-warning-option` among them, are refused the way gcc refuses them, and `cc-disable-warning` gets gcc's answers.
 
@@ -339,6 +339,11 @@ Honored, by doing what gcc does:
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
 | `-mpreferred-stack-boundary=N` (x86-64) | The stack pointer is kept on a multiple of 2 to the N at every call and counted on to be no more than that on entry, for N from 4 to 12. A frame is rounded to that and not to sixteen, and a local that asks for more is aligned by the prologue behind a frame pointer with `and`, which is gcc's sequence and the one objtool reads. 3, which the x86-64 kernel passes, waits on `-mno-sse`. |
 | `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
+| `-mindirect-branch=thunk-extern`, `-mindirect-branch=keep` (x86-64) | An indirect call or jump goes to the thunk for the register the address is in, `call __x86_indirect_thunk_rax` rather than `call *%rax`, and the kernel links the thunks in. `keep` is the default. The branch is always through a register, so nothing is loaded out of memory first. |
+| `-mindirect-branch-cs-prefix`, `-mno-indirect-branch-cs-prefix` (x86-64) | A `cs` segment override on its own line before a call or jump to the thunk for `%r8` to `%r15`, which is what gcc writes and gives the kernel room to patch the call into an inline `lfence; jmp *%r11`. Nothing without `-mindirect-branch=thunk-extern`. |
+| `-mfunction-return=thunk-extern`, `-mfunction-return=keep` (x86-64) | A `ret` is `jmp __x86_return_thunk`. `keep` is the default. |
+| `-mharden-sls=none`, `-mharden-sls=return`, `-mharden-sls=indirect-jmp`, `-mharden-sls=all` (x86-64) | An `int3` after every `ret`, after every jump through a register or to an indirect thunk, or after both, as gcc does. None goes after a call, or after the jump to the return thunk, which is a direct jump. |
+| `-fjump-tables`, `-fno-jump-tables` | Whether a `switch` may become a jump table. Without one it is a search or a walk over the clusters, and a bit test is still written. `-Zswitch=table` asks for no table under `-fno-jump-tables`. |
 
 Taken because what they ask for is what happens:
 
@@ -357,12 +362,12 @@ Taken because what they ask for is what happens:
 | `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |
 | `-fstrict-flex-arrays=0`, `-fno-strict-flex-arrays` | Every trailing array is treated as flexible, which is how `__builtin_object_size` treats one here. |
-| `-fjump-tables` | The default. |
 | `-ftrivial-auto-var-init=uninitialized` | The default. |
 | `-fzero-call-used-regs=skip` | The default. |
 | `-gz=none` | The debug sections are not compressed. |
 | `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=fs`, `-mstack-protector-guard-offset=40` (x86-64) | Where the canary is read from already, `%fs:40`. |
-| `-mindirect-branch=keep`, `-mfunction-return=keep`, `-mno-indirect-branch-register` (x86-64), `-mharden-sls=none` | Branches and returns are left as they are. |
+| `-mindirect-branch-register`, `-mno-indirect-branch-register` (x86-64) | Every indirect call and jump already goes through a register and never through memory. |
+| `-mharden-sls=none` (AArch64) | Nothing is put after a return or an indirect branch, the default. |
 | `-mno-record-mcount`, `-mno-nop-mcount` (x86-64) | The defaults. |
 | `-mskip-rax-setup`, `-mno-skip-rax-setup` (x86-64) | `%al` is set before every variadic call, which is always correct whether or not gcc would have skipped it. |
 | `-maccumulate-outgoing-args`, `-mno-accumulate-outgoing-args` (x86-64) | Whether gcc pushes a call's stack arguments or stores them. They end up in the same places. |
@@ -378,7 +383,6 @@ Refused, with the issue that would honor them:
 | `-mno-sse`, `-mno-sse2`, `-mno-mmx`, `-mno-80387`, `-mno-fp-ret-in-387`, `-msoft-float`, `-mgeneral-regs-only` | Any function may use the vector registers, for copies, fills and the variadic save area as well as for floating point. On AArch64 it is `-mgeneral-regs-only` alone. | #2277 |
 | `-mpreferred-stack-boundary=3` (x86-64) | gcc takes 3 only with the vector registers off, since a spilled vector is stored with an instruction that needs sixteen. | #2277 |
 | `-mstack-protector-guard*` | The canary is read from where the C library keeps it. | #2279 |
-| `-mindirect-branch=*`, `-mfunction-return=*`, `-mindirect-branch-register`, `-mindirect-branch-cs-prefix`, `-mharden-sls=*` (x86-64), `-fno-jump-tables` | No thunks, no `int3` after a return and jump tables where a switch wants one. | #2280 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
 | `-mrecord-mcount`, `-mnop-mcount` (x86-64) | The `__fentry__` calls `-pg` writes are neither listed in `__mcount_loc` nor written as nops. | #2283 |
@@ -397,6 +401,7 @@ Refused, with no issue, because nothing is planned for them:
 | `-fplugin=*`, `-fplugin-arg-*` | A gcc plugin is built against gcc's own internals. |
 | `-mharden-sls=*` (AArch64) | Nothing is put after a return to stop speculation past it. |
 | `-mregparm=*` (x86-64) | It is for 32 bit x86, which is not a target here. |
+| `-mindirect-branch=thunk`, `-mindirect-branch=thunk-inline`, `-mfunction-return=thunk`, `-mfunction-return=thunk-inline` (x86-64) | They ask for the thunk's body in the unit, and only calls to a thunk the program links in are written. The kernel passes `thunk-extern`. |
 | `-mbig-endian` (AArch64) | There is no big endian AArch64 target. |
 | `-mstrict-align` (AArch64) | A load or store may be unaligned, a packed member say, and nothing splits one. |
 

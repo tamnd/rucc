@@ -56,7 +56,7 @@ pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-use crate::frame::{ClassMoves, FrameInsts, Probe};
+use crate::frame::{ClassMoves, FrameInsts, Probe, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{
@@ -225,6 +225,28 @@ pub static FRAME: FrameInsts = FrameInsts {
     pad: Some("nop"),
     step_bits: None,
     reaches: None,
+    thunks: Some(THUNKS),
+};
+
+/// What the x86 speculation hardening flags rewrite branches into, with the names gcc and the
+/// kernel's `arch/x86/lib/retpoline.S` agree on.
+///
+/// The override goes on the calls to the thunks for `r8` to `r15`, which is what gcc's
+/// `-mindirect-branch-cs-prefix` does: a call through one of those takes a REX byte, so the
+/// `lfence; call *%r11` the kernel writes over it in place is one byte longer than the five of a
+/// call to a name, and the override is that byte.
+pub static THUNKS: Thunks = Thunks {
+    call_through: "call_reg",
+    jump_through: "jmp_reg",
+    call: "call_thunk",
+    call_padded: "call_thunk_cs",
+    jump: "jmp_thunk",
+    jump_padded: "jmp_thunk_cs",
+    trap: "int3",
+    indirect: "__x86_indirect_thunk_",
+    ret: "__x86_return_thunk",
+    regs: &GPR_NAMES,
+    padded_from: 8,
 };
 
 /// How an x86-64 prologue touches a page of the stack it has just reached.

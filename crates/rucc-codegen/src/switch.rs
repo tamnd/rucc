@@ -155,19 +155,24 @@ pub const LINEAR: usize = 32;
 /// `goal` is whether the level asked for small code, which decides how dense a stretch has to be
 /// and how many clusters it needs before it is a table. See `JUMP_TABLE_GROWTH_FOR_SIZE`.
 pub fn switches(func: &mut Func, goal: Goal) {
-    let _ = lowered(func, goal, None);
+    let _ = lowered(func, goal, None, true);
 }
 
 /// The same, with a shape forced on every `switch` when `force` names one, answering what each
 /// `switch` became in the order they were found.
+///
+/// `tables` is false under `-fno-jump-tables`, and then no `switch` becomes a table, not even one
+/// `-Zswitch=table` forced: the kernel asks for that because a jump through a table is an indirect
+/// branch, and one of those has no thunk to go through. A bit test is still allowed, since it
+/// branches to a block it names, and gcc writes them under the same flag.
 #[must_use]
-pub fn lowered(func: &mut Func, goal: Goal, force: Option<Force>) -> Vec<Lowered> {
+pub fn lowered(func: &mut Func, goal: Goal, force: Option<Force>, tables: bool) -> Vec<Lowered> {
     let found: Vec<Inst> = func
         .blocks()
         .filter_map(|block| func.terminator(block))
         .filter(|&inst| func[inst].opcode == Opcode::Switch)
         .collect();
-    found.into_iter().filter_map(|inst| lower(func, inst, goal, force)).collect()
+    found.into_iter().filter_map(|inst| lower(func, inst, goal, force, tables)).collect()
 }
 
 /// A shape forced on every `switch`, which is what `-Zswitch=` asks for.
@@ -259,7 +264,13 @@ impl Lowered {
 }
 
 /// One `switch`, as the clusters its cases fall into and a decision tree over them.
-fn lower(func: &mut Func, inst: Inst, goal: Goal, force: Option<Force>) -> Option<Lowered> {
+fn lower(
+    func: &mut Func,
+    inst: Inst,
+    goal: Goal,
+    force: Option<Force>,
+    allowed: bool,
+) -> Option<Lowered> {
     let block = func.block_of(inst).expect("a terminator is in a block");
     let span = func.span(inst);
     let Extra::Switch(info) = func[inst].extra else { return None };
@@ -276,9 +287,10 @@ fn lower(func: &mut Func, inst: Inst, goal: Goal, force: Option<Force>) -> Optio
     let hot = hottest(&arms).map(|at| (cases.remove(at).signed(ty), arms.remove(at)));
     let found = clusters(func, &cases, &arms, ty);
     let clusters = match force {
-        None => group(func, tables(func, found, ty, goal)),
-        Some(Force::Table) => forced(found, ty),
-        Some(Force::Tree | Force::Walk) => found,
+        None if allowed => group(func, tables(func, found, ty, goal)),
+        None => group(func, found),
+        Some(Force::Table) if allowed => forced(found, ty),
+        Some(Force::Table | Force::Tree | Force::Walk) => found,
     };
     let leaf = match force {
         Some(Force::Tree) => 1,
@@ -1177,7 +1189,7 @@ mod tests {
     fn forcing(cases: &[i128], force: Force) -> Lowered {
         let arms: Vec<usize> = (0..cases.len()).collect();
         let mut built = built(cases);
-        let said = lowered(&mut built.func, Goal::Speed, Some(force));
+        let said = lowered(&mut built.func, Goal::Speed, Some(force), true);
         lands(&mut built, cases, &arms, &around(cases, Type::int(32)), Type::int(32));
         assert_eq!(said.len(), 1);
         said[0]
@@ -1202,10 +1214,22 @@ mod tests {
     }
 
     #[test]
+    fn no_table_is_written_when_tables_are_not_allowed_even_a_forced_one() {
+        let dense: Vec<i128> = (0..40).collect();
+        let arms: Vec<usize> = (0..dense.len()).collect();
+        for force in [None, Some(Force::Table)] {
+            let mut built = built(&dense);
+            let said = lowered(&mut built.func, Goal::Speed, force, false);
+            lands(&mut built, &dense, &arms, &around(&dense, Type::int(32)), Type::int(32));
+            assert_eq!((said[0].tables, said[0].shape()), (0, "tree"), "{force:?}");
+        }
+    }
+
+    #[test]
     fn what_a_switch_became_is_said_in_one_line() {
         let dense: Vec<i128> = (0..40).collect();
         let mut built = built(&dense);
-        let said = lowered(&mut built.func, Goal::Speed, None);
+        let said = lowered(&mut built.func, Goal::Speed, None, true);
         assert_eq!(
             said.iter().map(Lowered::describe).collect::<Vec<_>>(),
             ["switch of 40 cases lowered as a table; clusters 1, tables 1, bit tests 0"]

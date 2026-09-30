@@ -285,19 +285,19 @@ impl Step {
     /// Only the two that [`Step::whole_function`] names ever answer `false`, because they are the
     /// only two that know. The rest work instruction by instruction and are not asked.
     ///
-    /// `switching` is the level's goal and the shape `-Zswitch=` forced, and what the `switch`
-    /// lowering says it did goes into `switched`.
+    /// `switching` is the level's goal, the shape `-Zswitch=` forced and whether a jump table may
+    /// be written at all, and what the `switch` lowering says it did goes into `switched`.
     fn run(
         self,
         func: &mut Func,
         names: &mut Interner,
         conv: &CallRegs,
-        switching: (Goal, Option<Force>),
+        switching: (Goal, Option<Force>, bool),
         switched: &mut Vec<Lowered>,
     ) -> bool {
-        let (goal, force) = switching;
+        let (goal, force, tables) = switching;
         match self {
-            Self::Switches => switched.extend(switch::lowered(func, goal, force)),
+            Self::Switches => switched.extend(switch::lowered(func, goal, force, tables)),
             Self::Retries => retry::loops(func),
             Self::Orderings => expand::orderings(func, conv.word, conv.total_store_order),
             Self::Overflows => expand::overflows(func),
@@ -494,24 +494,24 @@ impl Lowerings {
 /// [`Lowerings::wanted`] answers and which costs what it says there. The steps run either way and
 /// the function comes out the same; what a `false` gives back is an empty [`Ran`].
 ///
-/// `goal` is whether the level asked for small code, which the `switch` lowering reads to decide
-/// when a table is worth writing, and `force` is the shape `-Zswitch=` forced on it, if any.
+/// `switching` is three things the `switch` lowering reads: whether the level asked for small code,
+/// which decides when a table is worth writing, the shape `-Zswitch=` forced on it, if any, and
+/// whether a table may be written at all, which `-fno-jump-tables` says it may not.
 pub fn group(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
-    goal: Goal,
-    force: Option<Force>,
+    switching: (Goal, Option<Force>, bool),
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();
     for &step in Step::GROUP {
         if !counting {
-            step.run(func, names, conv, (goal, force), &mut ran.switches);
+            step.run(func, names, conv, switching, &mut ran.switches);
             continue;
         }
         let (before, found) = tally(func, step);
-        let did = step.run(func, names, conv, (goal, force), &mut ran.switches);
+        let did = step.run(func, names, conv, switching, &mut ran.switches);
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
@@ -566,7 +566,7 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, Goal::Speed, None, true)
+        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true), true)
     }
 
     fn i32() -> Type {
@@ -797,14 +797,14 @@ mod tests {
             build.ret(&[swapped]);
         };
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let quiet = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, None, false);
+        let quiet = group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true), false);
         assert!(quiet.did.is_empty(), "nothing was counted");
         assert_eq!(super::tally(&func, Step::Bytes), (super::tally(&func, Step::Bytes).0, 0));
 
         // The same function through the counting path comes out the same size, so what the flag
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let loud = group(&mut func, &mut names, &x86_64::SYSV, Goal::Speed, None, true);
+        let loud = group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true), true);
         assert_eq!(loud.of(Step::Bytes).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,

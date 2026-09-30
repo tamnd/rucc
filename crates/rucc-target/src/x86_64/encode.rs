@@ -1843,6 +1843,16 @@ static ENCODINGS: &[Encoding] = &[
     // that the manual promises this opcode will never be given a meaning, so every processor there
     // is raises the fault for an instruction it does not know rather than doing something.
     bytes("ud2", &NO_ARGS, Long, &[0x0F, 0x0B], NO_MODRM, NO_IMM),
+    // The breakpoint, one byte. `-mharden-sls=` puts one after a return and after an indirect
+    // jump, where nothing runs it except a processor speculating straight past the branch, and it
+    // stops that speculation there.
+    bytes("int3", &NO_ARGS, Long, &[0xCC], NO_MODRM, NO_IMM),
+    // The code segment override on a line of its own, which is how gcc writes the byte it puts in
+    // front of a call or jump to a retpoline thunk through `r8` to `r15` under
+    // `-mindirect-branch-cs-prefix`. The segment means nothing to a direct branch, so the byte only
+    // makes the instruction six bytes long, which is the length the kernel needs to write
+    // `lfence; call *%r11` over it in place.
+    bytes("cs", &NO_ARGS, Long, &[0x2E], NO_MODRM, NO_IMM),
     // The landing pad, and four bytes for the same reason the barrier is three: no operands, so
     // the addressing byte at the end of it is part of the opcode. A machine that does not check
     // reads the whole of it as a wider `nop`, which is what makes an object built with it run
@@ -3786,6 +3796,14 @@ mod tests {
     fn the_landing_pad_is_four_bytes_and_none_of_them_are_worked_out() {
         assert_eq!(hex("endbr64", &[]), "f3 0f 1e fa");
         assert_eq!(hex("ud2", &[]), "0f 0b");
+    }
+
+    /// The two bytes the speculation hardening flags write, each on its own: the breakpoint that
+    /// stops speculation past a return and the segment override that pads a thunk call.
+    #[test]
+    fn the_breakpoint_and_the_segment_override_are_one_byte_each() {
+        assert_eq!(hex("int3", &[]), "cc");
+        assert_eq!(hex("cs", &[]), "2e");
     }
 
     /// The two x87 instructions, whose bytes are checked against what the assembler writes for the

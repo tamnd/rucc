@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Arch, CodeModel, Env, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, CodeModel, Env, Isa, Os, Speculation, TargetInfo, Triple};
 
 /// An optimisation level.
 ///
@@ -2169,6 +2169,18 @@ pub struct Options {
     /// See [`Control`]. Off by default, which is gcc's default on these targets, and on again in
     /// every distribution's global flags for the same reason the stack protector is.
     pub control: Control,
+    /// Which indirect branches and returns are rewritten against speculative execution, from
+    /// `-mindirect-branch=`, `-mindirect-branch-cs-prefix`, `-mfunction-return=` and
+    /// `-mharden-sls=`. x86-64 only, which the driver checks. tamnd/rucc#2280.
+    ///
+    /// All off by default, which is gcc's default. The kernel turns every one of them on when it is
+    /// configured with the mitigations, and links in the thunks the rewritten branches go to.
+    pub speculation: Speculation,
+    /// Whether a `switch` may become a jump table, from `-fjump-tables` and `-fno-jump-tables`.
+    ///
+    /// On by default. The kernel turns it off beside the thunks, because a jump through a table is
+    /// an indirect branch and a table is read with no thunk in the way.
+    pub jump_tables: bool,
     /// Whether every function calls a profiler's hook on the way in, from `-pg` and `-p`.
     ///
     /// A profiler wants a count of which function called which, and the moment a function is
@@ -2634,6 +2646,8 @@ impl Options {
             protector: Protector::default(),
             stack_clash: false,
             control: Control::default(),
+            speculation: Speculation::default(),
+            jump_tables: true,
             profile: false,
             hook: Hook::default(),
             patchable: Patchable::default(),
