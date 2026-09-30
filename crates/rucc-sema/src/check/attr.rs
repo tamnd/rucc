@@ -607,6 +607,106 @@ impl Checker<'_> {
         Some(id)
     }
 
+    /// The section a `section` attribute asks for the definition to go in, with where it was
+    /// written.
+    ///
+    /// The armour and the namespace are read the way [`Self::packing`] reads them, and two of them
+    /// on one declaration is the first one. An object inside a block with no `static` is a slot in
+    /// the frame rather than something the linker places, and gcc refuses the attribute there
+    /// with the same sentence this does.
+    pub(in crate::check) fn sectioned(
+        &mut self,
+        attrs: AttrList,
+        duration: StorageDuration,
+    ) -> Option<(StrId, Span)> {
+        let written = self.ast[attrs].to_vec();
+        for attr in written {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if rucc_gnu::unarmour(self.text(attr.name)) != "section" {
+                continue;
+            }
+            if duration == StorageDuration::Automatic {
+                let what = "section attribute cannot be specified for local variables";
+                self.report(Diagnostic::error(what, attr.span).with_code("E0750"));
+                return None;
+            }
+            return self.section_argument(attr).map(|id| (id, attr.span));
+        }
+        None
+    }
+
+    /// The string one `section` was written with, and nothing when it was not written with one.
+    fn section_argument(&mut self, attr: rucc_ast::Attribute) -> Option<StrId> {
+        let args = self.ast[attr.args].to_vec();
+        let expr = match args.as_slice() {
+            [AttrArg::Expr(expr)] => *expr,
+            [AttrArg::Ident(_)] => {
+                let what = "section attribute argument not a string constant";
+                self.report(Diagnostic::error(what, attr.span).with_code("E0750"));
+                return None;
+            }
+            _ => {
+                let what = format!(
+                    "wrong number of arguments specified for 'section' attribute, which takes one \
+                     and was given {}",
+                    args.len()
+                );
+                self.report(Diagnostic::error(what, attr.span).with_code("E0750"));
+                return None;
+            }
+        };
+        let checked = self.expr(expr);
+        let what = "section attribute argument not a string constant";
+        let ExprKind::Str(id) = self.tast[checked].kind else {
+            let at = self.tast.expr_span(checked);
+            self.report(Diagnostic::error(what, at).with_code("E0750"));
+            return None;
+        };
+        // A section name is bytes in the object file's string table, and a wide literal holds code
+        // units rather than bytes, which is the reason `alias` refuses one.
+        if self.tast[id].encoding != Encoding::Plain {
+            self.report(Diagnostic::error(what, attr.span).with_code("E0750"));
+            return None;
+        }
+        if self.tast[id].elements.is_empty() {
+            let empty = "a section attribute naming no section";
+            self.report(Diagnostic::error(empty, attr.span).with_code("E0750"));
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Keeps the section a declaration named, or warns when an earlier declaration of the same
+    /// name already named a different one.
+    ///
+    /// The first one stands, which is gcc's answer and its warning: whatever the file has already
+    /// been told about where the name lives is what a later declaration would be contradicting.
+    pub(in crate::check) fn record_section(&mut self, decl: DeclId, asked: Option<(StrId, Span)>) {
+        let Some((id, span)) = asked else { return };
+        let spell = |checker: &Self, id: StrId| -> String {
+            checker.tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
+        };
+        if let Some(before) = self.tast.section(decl) {
+            let (was, now) = (spell(self, before), spell(self, id));
+            if was != now {
+                let what = format!(
+                    "ignoring attribute 'section (\"{now}\")' because it conflicts with previous \
+                     'section (\"{was}\")'"
+                );
+                let at = self.tast.decl_span(decl);
+                self.report(
+                    Diagnostic::warning(what, span)
+                        .with_code("E0750")
+                        .note("previous declaration here", at),
+                );
+            }
+            return;
+        }
+        self.tast.record_section(decl, id);
+    }
+
     /// The function a `cleanup` attribute asks to have called when the object goes out of scope.
     ///
     /// This is what glib writes as `g_autoptr`, systemd as `_cleanup_free_` and jansson as

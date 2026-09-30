@@ -523,8 +523,9 @@ pub enum Place {
     /// A tentative definition, which is not in a section at all: the linker is asked for that
     /// much zeroed space and merges every definition of the name into one. `.comm`.
     Merged,
-    /// The section the program named, from `__attribute__((section(...)))`.
-    Named(String),
+    /// The section the program named, from `__attribute__((section(...)))`, and what the
+    /// variable put there holds, which is what the section's flags have to say.
+    Named(String, Holds),
     /// A pointer to a variable this file only declares, in a read only section of its own that
     /// the linker keeps one copy of whichever objects wrote it. COFF only, where it is called
     /// `.rdata$` and the pointer's name, and every object that reads the variable writes the same
@@ -534,6 +535,38 @@ pub enum Place {
     /// it once the DLL the variable turns out to be in is loaded, which is why the section is not
     /// merely read only: the runtime unprotects the page for that one write.
     Pointer,
+}
+
+/// What a variable in a section the program named holds, which is the one thing about the section
+/// the name does not say.
+///
+/// The answers are the ones gcc gives, which a kernel's linker script and `readelf` both see: a
+/// section is writable unless the variable is constant and holds no address, and it carries no
+/// bytes only when its name is one of the names that always mean zeros and the variable is zeros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holds {
+    /// Bytes the program or the loader may write. `"aw"` on ELF.
+    Written,
+    /// Bytes nothing writes, which a loader maps read only. `"a"` on ELF.
+    ReadOnly,
+    /// Zeros, in a section named for holding nothing else, so the file carries none of them.
+    /// `"aw",@nobits` on ELF.
+    Zero,
+}
+
+impl Holds {
+    /// Whether a section of this name is one gcc makes carry no bytes, which is `.bss` and the
+    /// names under it, the small data one and the old COMDAT spellings of both. A kernel puts
+    /// its page aligned zeros in `.bss..page_aligned` and relies on this.
+    #[must_use]
+    pub fn nobits(name: &str) -> bool {
+        name == ".bss"
+            || name.starts_with(".bss.")
+            || name.starts_with(".gnu.linkonce.b.")
+            || name == ".sbss"
+            || name.starts_with(".sbss.")
+            || name.starts_with(".gnu.linkonce.sb.")
+    }
 }
 
 impl Place {
@@ -569,7 +602,7 @@ impl Place {
             Place::Zero => ".bss",
             Place::Thread { zero: false } => ".tdata",
             Place::Thread { zero: true } => ".tbss",
-            Place::Merged | Place::Named(_) | Place::Pointer => return None,
+            Place::Merged | Place::Named(..) | Place::Pointer => return None,
         })
     }
 }

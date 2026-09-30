@@ -13,6 +13,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__attribute__((section("name")))` puts a function or an object in the section it names, where before the attribute was accepted and dropped. A function goes there as code, `"ax"`, and an object as `"a"` when it is a constant holding no address and `"aw"` otherwise, which are gcc's flags. Zeros are written as bytes in the named section rather than sent to `.bss`, except in a section whose name means zeros such as `.bss..page_aligned`, relocations are kept, and several definitions naming one section share it in the order they were written. On Mach-O a name written for ELF becomes `__DATA,__name` or `__TEXT,__name`. The attribute on an automatic object or a typedef is refused, and a later declaration naming a different section is warned about and ignored, as gcc does (#909).
+
+### Added
+
 - Under the GNU dialects a `const` object of integer type that is not `volatile` and was initialized with a constant is read as its value in the size of an array and in the initializer of an object with static storage, the two places gcc reads one. `const int n = 4; char buf[n];` is an array of four rather than a variable length array, one at file scope compiles, and `static int x = n;` does too, with a warning under `-pedantic` for the array as gcc gives. `_Static_assert`, `case`, enumerators and the other places a constant is required still refuse it, as gcc 16 does, and the strict dialects are unchanged. Linux 7.2 relies on this (#2262).
 
 ### Fixed

@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Alias, Array, Binding, Place, Property, Sections, Visibility};
+use rucc_object::{Alias, Array, Binding, Holds, Place, Property, Sections, Visibility};
 use rucc_target::ObjectFormat;
 
 use crate::data::Variable;
@@ -103,6 +103,25 @@ impl Directives {
                 let _ = writeln!(out, "\t.section\t.text,\"xr\",one_only,{name}");
             }
             Directives::MachO => {}
+        }
+    }
+
+    /// The directive that opens the section a program put a function in with
+    /// `__attribute__((section(...)))`, which is the name as written with the flags code has.
+    ///
+    /// The flags are spelled out for the reason [`Directives::section`] gives for a named data
+    /// section: nothing else tells the assembler that a section called `.init.text` holds
+    /// instructions, and one that is not marked as holding them is loaded into a page nobody may
+    /// run. They are the ones gcc writes. The name is used whatever `-ffunction-sections` said,
+    /// since the program's answer is the one gcc keeps too.
+    ///
+    /// A Mach-O name already has its segment in front, put there where the attribute was read.
+    #[must_use]
+    pub fn named_code(self, section: &str) -> String {
+        match self {
+            Directives::Elf => format!("\t.section\t{section},\"ax\",@progbits"),
+            Directives::Coff => format!("\t.section\t{section},\"xr\""),
+            Directives::MachO => format!("\t.section\t{section},regular,pure_instructions"),
         }
     }
 
@@ -303,12 +322,26 @@ impl Directives {
             // not for are the ones the startup code calls what it finds in. A section of the wrong
             // type under the right name is gathered by the linker all the same and then called by
             // nobody, which is a program whose constructors silently do not run.
-            (Directives::Elf, Place::Named(name)) => {
-                let kind = Array::of(name).map_or("@progbits", Array::asm);
-                let _ = writeln!(out, "\t.section\t{name},\"aw\",{kind}");
+            //
+            // The flags are what the variable holds, which is how gcc writes them: `"a"` for a
+            // constant with no address in it, `"aw"` for the rest, and `@nobits` only where the
+            // name is one that always means zeros.
+            (Directives::Elf, Place::Named(name, holds)) => {
+                let (flags, kind) = match holds {
+                    Holds::Written => ("aw", "@progbits"),
+                    Holds::ReadOnly => ("a", "@progbits"),
+                    Holds::Zero => ("aw", "@nobits"),
+                };
+                let kind = Array::of(name).map_or(kind, Array::asm);
+                let _ = writeln!(out, "\t.section\t{name},\"{flags}\",{kind}");
             }
-            (Directives::Coff, Place::Named(name)) => {
-                let _ = writeln!(out, "\t.section\t{name},\"dw\"");
+            (Directives::Coff, Place::Named(name, holds)) => {
+                let flags = match holds {
+                    Holds::Written => "dw",
+                    Holds::ReadOnly => "dr",
+                    Holds::Zero => "bw",
+                };
+                let _ = writeln!(out, "\t.section\t{name},\"{flags}\"");
             }
             // A section of its own for every pointer, named after it, which is how clang and gcc
             // both write one. `discard` makes it a COMDAT the linker keeps any one copy of, and
@@ -333,7 +366,7 @@ impl Directives {
             }
             // A Mach-O section name carries the segment it is in, so a program that named one
             // named both halves and there is nothing to add to it.
-            (Directives::MachO, Place::Named(name)) => {
+            (Directives::MachO, Place::Named(name, _)) => {
                 let _ = writeln!(out, "\t.section\t{name}");
             }
             (Directives::MachO, Place::Thread { .. }) => {
@@ -799,7 +832,7 @@ mod tests {
         let mut merged = String::new();
         Directives::Elf.section(&mut merged, &Place::Merged, "x", split);
         assert_eq!(merged, "\t.data\n");
-        let named = Place::Named(".init_array".to_owned());
+        let named = Place::Named(".init_array".to_owned(), Holds::Written);
         let mut asked = String::new();
         Directives::Elf.section(&mut asked, &named, "x", split);
         assert_eq!(asked, "\t.section\t.init_array,\"aw\",@init_array\n");
@@ -826,10 +859,39 @@ mod tests {
         ];
         for (name, want) in cases {
             let mut out = String::new();
-            let place = Place::Named(name.to_owned());
+            let place = Place::Named(name.to_owned(), Holds::Written);
             Directives::Elf.section(&mut out, &place, "x", Sections::default());
             assert_eq!(out, want, "{name}");
         }
+    }
+
+    /// The flags a section the program named is written with, which say what the variable in it
+    /// holds, and the flags a function in one is written with, which say it is code.
+    #[test]
+    fn a_named_section_says_what_is_in_it() {
+        let cases = [
+            (Directives::Elf, Holds::Written, "\t.section\t.mine,\"aw\",@progbits\n"),
+            (Directives::Elf, Holds::ReadOnly, "\t.section\t.mine,\"a\",@progbits\n"),
+            (Directives::Elf, Holds::Zero, "\t.section\t.mine,\"aw\",@nobits\n"),
+            (Directives::Coff, Holds::Written, "\t.section\t.mine,\"dw\"\n"),
+            (Directives::Coff, Holds::ReadOnly, "\t.section\t.mine,\"dr\"\n"),
+            (Directives::Coff, Holds::Zero, "\t.section\t.mine,\"bw\"\n"),
+        ];
+        for (directives, holds, want) in cases {
+            let mut out = String::new();
+            let place = Place::Named(".mine".to_owned(), holds);
+            directives.section(&mut out, &place, "x", Sections { functions: true, data: true });
+            assert_eq!(out, want, "{holds:?}");
+        }
+        assert_eq!(
+            Directives::Elf.named_code(".init.text"),
+            "\t.section\t.init.text,\"ax\",@progbits"
+        );
+        assert_eq!(Directives::Coff.named_code(".init.text"), "\t.section\t.init.text,\"xr\"");
+        assert_eq!(
+            Directives::MachO.named_code("__TEXT,__init_text"),
+            "\t.section\t__TEXT,__init_text,regular,pure_instructions"
+        );
     }
 
     #[test]

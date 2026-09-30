@@ -176,6 +176,7 @@ fn listing(
         labels: Vec::new(),
         sections,
         marks: marks.then_some(0),
+        moved: false,
     };
     writer.out.push_str(writer.directives.text());
     writer.out.push('\n');
@@ -243,6 +244,7 @@ pub(crate) fn template(
         labels: Vec::new(),
         sections: Sections::default(),
         marks: None,
+        moved: false,
     };
     writer.inst(func, block, inst, names.resolve(func.name))?;
     Ok(writer.out)
@@ -269,9 +271,19 @@ struct Writer<'a> {
     /// Which function of the list is being written, in a listing that puts a label in front of
     /// every instruction, and `None` in one that does not. See [`print_marked`].
     marks: Option<usize>,
+    /// Whether the function written last was in a section the program named, which leaves the
+    /// assembler somewhere the next function must not follow it into.
+    moved: bool,
 }
 
 impl Writer<'_> {
+    /// The directive that goes back to the section the program put this function in, and
+    /// nothing for a function it said nothing about.
+    fn home(&self, func: &Func) -> Option<String> {
+        let section = func.section?;
+        Some(self.directives.named_code(self.names.resolve(section)))
+    }
+
     /// One function: what the assembler is told about it, then its blocks.
     fn func(&mut self, func: &Func) -> Result<(), Error> {
         let name = self.names.resolve(func.name).to_owned();
@@ -279,7 +291,20 @@ impl Writer<'_> {
         let binding = binding(func.binding);
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
-        self.directives.code(&mut self.out, &name, self.sections);
+        // A function the program put in a section of its own goes there, and the one after it
+        // goes back to wherever it would have gone, which is `.text` unless it has a section of
+        // its own too. See [`Self::home`].
+        let home = self.home(func);
+        match &home {
+            Some(section) => {
+                let _ = writeln!(self.out, "{section}");
+            }
+            None if self.moved && !self.sections.functions => {
+                let _ = writeln!(self.out, "{}", self.directives.text());
+            }
+            None => self.directives.code(&mut self.out, &name, self.sections),
+        }
+        self.moved = home.is_some();
         // What has to be written between what the assembler is told about the function and the
         // function's own label, which is nothing at all unless a patcher was promised room in
         // front of the label. See `patch`.
@@ -287,7 +312,9 @@ impl Writer<'_> {
             func.patch.map(|patch| (patch, format!("{}pfe_{name}", self.directives.local())));
         let mut ahead = String::new();
         if let Some((patch, label)) = &patch {
-            let back = if self.sections.functions {
+            let back = if let Some(section) = &home {
+                section.clone()
+            } else if self.sections.functions {
                 format!("\t.section\t.text.{name}")
             } else {
                 self.directives.text().to_owned()
@@ -432,7 +459,7 @@ impl Writer<'_> {
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_endproc");
             if !sites.is_empty() {
-                self.call_sites(&name, &sites);
+                self.call_sites(func, &name, &sites);
             }
         }
         self.directives.close(&mut self.out, &name);
@@ -961,7 +988,9 @@ impl Writer<'_> {
             }
         }
         if apart {
-            if self.sections.functions {
+            if let Some(section) = self.home(func) {
+                let _ = writeln!(self.out, "{section}");
+            } else if self.sections.functions {
                 let _ = writeln!(self.out, "\t.section\t.text.{func_name},\"ax\",@progbits");
             } else {
                 let _ = writeln!(self.out, "{}", self.directives.text());
@@ -976,7 +1005,7 @@ impl Writer<'_> {
     /// distance is from the function's own label, which is what a missing base means. `sites` is
     /// the pad of each call in the order the calls were written, which is the order the unwinder
     /// wants them in.
-    fn call_sites(&mut self, name: &str, sites: &[Block]) {
+    fn call_sites(&mut self, func: &Func, name: &str, sites: &[Block]) {
         let local = self.directives.local();
         let _ = writeln!(self.out, "\t.section\t{},\"a\",@progbits", rucc_object::EXCEPT_TABLE);
         let _ = writeln!(self.out, "\t.p2align\t2");
@@ -994,7 +1023,9 @@ impl Writer<'_> {
         let _ = writeln!(self.out, "{local}LSDACSE_{name}:");
         // Back to the function's section, since what closes the function measures its size from
         // where the assembler is.
-        if self.sections.functions {
+        if let Some(section) = self.home(func) {
+            let _ = writeln!(self.out, "{section}");
+        } else if self.sections.functions {
             let _ = writeln!(self.out, "\t.section\t.text.{name},\"ax\",@progbits");
         } else {
             let _ = writeln!(self.out, "{}", self.directives.text());

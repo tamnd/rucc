@@ -363,7 +363,11 @@ impl Checker<'_> {
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
+        // The specifiers only, for the reason `noreturn` above reads them only. A kernel writes
+        // `__init` between the return type and the name, which is still the specifiers.
+        let section = self.sectioned(specs.attrs, duration);
         let id = self.merge(declared);
+        self.record_section(id, section);
         // The return type's name, kept for the debug information the way an object's is below.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
@@ -737,7 +741,14 @@ impl Checker<'_> {
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
+        // Both places, for the reason `retained` above reads both. The kernel's `__initdata` and
+        // `__read_mostly` are written after the declarator and its `__init` in front of the name.
+        let section = match self.sectioned(specs.attrs, duration) {
+            Some(section) => Some(section),
+            None => self.sectioned(item.attrs, duration),
+        };
         let id = self.merge(declared);
+        self.record_section(id, section);
         // Kept for the debug information, which names the typedef where the program did.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
@@ -802,6 +813,19 @@ impl Checker<'_> {
         item: ast::InitDeclarator,
         span: Span,
     ) -> Option<DeclId> {
+        // A type is not something the linker places, so a section on one is refused the way gcc
+        // refuses it rather than dropped.
+        for attrs in [specs.attrs, item.attrs] {
+            let written = self.ast[attrs].to_vec();
+            if let Some(attr) = written.iter().find(|attr| {
+                !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    && rucc_gnu::unarmour(self.text(attr.name)) == "section"
+            }) {
+                let what = format!("section attribute not allowed for '{}'", self.text(name));
+                self.report(Diagnostic::error(what, attr.span).with_code("E0750"));
+                break;
+            }
+        }
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();
             self.report(

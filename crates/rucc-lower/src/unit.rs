@@ -642,6 +642,33 @@ impl Unit<'_> {
         self.tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
     }
 
+    /// The section a `section` attribute put this function or object in, as the object format
+    /// spells a section name.
+    ///
+    /// ELF and COFF take the name as written. A Mach-O section is a segment and a section of up to
+    /// sixteen bytes each with a comma between them, and a program written for ELF says `.mine`,
+    /// which no Mach-O assembler takes. So a name with no comma in it is given the segment its
+    /// contents belong in, `__TEXT` for code and `__DATA` for anything else, and the leading dots
+    /// become the two underscores every Mach-O section name starts with: `.init.text` on a
+    /// function is `__TEXT,__init_text`. A name that already has a comma is the program speaking
+    /// Mach-O and is left alone.
+    fn section_of(&mut self, decl: DeclId, code: bool) -> Option<Symbol> {
+        let written = self.spelled(self.tast.section(decl)?);
+        let name = match self.target.object_format {
+            ObjectFormat::MachO if !written.contains(',') => {
+                let segment = if code { "__TEXT" } else { "__DATA" };
+                let mut section =
+                    format!("__{}", written.trim_start_matches('.').replace('.', "_"));
+                while section.len() > 16 {
+                    section.pop();
+                }
+                format!("{segment},{section}")
+            }
+            _ => written,
+        };
+        Some(self.names.intern(&name))
+    }
+
     /// One object with static storage duration.
     fn object(&mut self, decl: DeclId) {
         let tast = self.tast;
@@ -696,14 +723,17 @@ impl Unit<'_> {
         }
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
+        global.section = self.section_of(decl, false);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
-        // the plain case is: a thread-local one has to be a copy per thread, and a weak or internal
-        // one is not the linker's to merge.
+        // the plain case is: a thread-local one has to be a copy per thread, a weak or internal
+        // one is not the linker's to merge, and one the program put in a section of its own is in
+        // that section, which is gcc's answer too.
         if self.common
             && state == Definition::Tentative
             && global.linkage == IrLinkage::External
             && global.tls.is_none()
+            && global.section.is_none()
         {
             global.linkage = IrLinkage::Common;
         }
@@ -837,6 +867,7 @@ impl Unit<'_> {
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
+        func.section = self.section_of(decl, true);
         // An inline definition this unit calls, which this unit puts a copy of out of line for
         // every call the inliner leaves alone. See [`Self::out_of_line`].
         let copied = body.is_some() && self.out_of_line(decl, node.inline);
