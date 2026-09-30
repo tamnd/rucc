@@ -21,6 +21,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - gcc's scheduler flags under `-fsched-` and `-fsched2-` are taken and ignored, like `-fschedule-insns`. crypto/serpent_generic.c asks for `-fsched-pressure`.
+- A comparison of the address of a function or object this unit defines against `NULL` is decided at `-O1` and above, and so is an equality test between two integer constants cast to pointers, so the kernel's `BUILD_BUG_ON (fn == NULL)` and its `ERR_PTR` sentinel checks in i915 build.
 - A cast between a pointer and an enum no longer warns about the widths, which gcc only does for a plain integer type. lib/kunit/attributes.c casts an enum to `void *` under `-Werror`.
 - Comparing a pointer with NULL on x86-64 tests the register with itself instead of first loading a zero into another register.
 - A `_Bool` combined with a constant by `&`, `|` or `^` takes the constant as an immediate on x86-64, so `!b` on a kept truth value is one `xorb $1` rather than a `movb $1` into a register of its own first.
