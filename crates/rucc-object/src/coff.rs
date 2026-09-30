@@ -117,7 +117,7 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
         Reference::Section => pe::IMAGE_REL_ARM64_SECREL,
         Reference::Data | Reference::Away => pe::IMAGE_REL_ARM64_REL32,
         Reference::Call | Reference::Got | Reference::GotBare | Reference::GotKept => return None,
-        Reference::Thread | Reference::Address { .. } => return None,
+        Reference::Thread | Reference::Address { .. } | Reference::Signed => return None,
     })
 }
 
