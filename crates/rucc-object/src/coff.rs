@@ -138,6 +138,69 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
     })
 }
 
+/// Which relocation of an i386 file one reference is.
+///
+/// Fewer than x86-64 has, because the one relocation for a distance counts from the end of the four
+/// bytes it fills and i386 keeps the addend in those bytes rather than in the type. Whatever else of
+/// the instruction comes after the hole is already in the addend, so the count of bytes after it
+/// that `REL32_1` through `REL32_5` exist to carry on x86-64 has nowhere to go here and nothing to
+/// say. The writer underneath adds the four back, the same as it does for the other machines, so a
+/// call carries nothing in its field and a distance written into an image carries four, which is
+/// what gas for mingw writes for both.
+///
+/// An address is `DIR32`, the address from the front of the image is `DIR32NB` and the offset from
+/// the start of a section is `SECREL`, which is what a debug section points into another with. An
+/// address an instruction holds is `DIR32` too, even where the reader called it signed: the sign
+/// extension x86-64 asks about has nothing wider to extend into here, which is why ELF for this
+/// machine makes the same choice.
+/// `SECTION` is the index of the section a name is in, which only the debug information asks for
+/// and is two bytes wide.
+///
+/// Nothing for the global offset table in any of its forms or for a thread-local variable, which
+/// are ELF's ways of reaching something this platform reaches through an import stub and the
+/// offset into `.tls` instead. Nothing for eight bytes of anything either, which this machine does
+/// not write.
+pub(crate) fn i386(reference: Reference) -> Option<pe::RelocationType> {
+    Some(match reference {
+        Reference::Call | Reference::Data | Reference::Away => pe::IMAGE_REL_I386_REL32,
+        Reference::Address { bytes: 4 } | Reference::Signed => pe::IMAGE_REL_I386_DIR32,
+        Reference::Address { bytes: 2 } => pe::IMAGE_REL_I386_DIR16,
+        Reference::Image => pe::IMAGE_REL_I386_DIR32NB,
+        Reference::Section => pe::IMAGE_REL_I386_SECREL,
+        Reference::Address { .. } | Reference::AwayWide => return None,
+        Reference::Got | Reference::GotBare | Reference::GotKept | Reference::Thread => {
+            return None;
+        }
+        Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
+            return None;
+        }
+        Reference::Field(_) | Reference::Tls(_) => return None,
+    })
+}
+
+/// The name a symbol has in an i386 file, given the name C gave it.
+///
+/// Every C name on this machine gets an underscore in front, which is the one decoration the other
+/// Windows machines dropped. A name that already starts with `@` is a `__fastcall` function and is
+/// already all it is going to be: the `@` takes the place of the underscore rather than coming
+/// after one, which is `@f@8`. The pointer the import library fills in for a function in a DLL is
+/// `__imp_` in front of the decorated name, so its underscore goes after that prefix and not before
+/// it, which makes `__imp__puts` rather than `___imp_puts`.
+///
+/// The other machines are left alone, and so is a name from a file of assembly, which is already
+/// what it says.
+pub(crate) fn decorate(name: &str) -> String {
+    match name.strip_prefix(IMPORT) {
+        Some(rest) => format!("{IMPORT}{}", decorate(rest)),
+        None if name.starts_with('@') => name.to_owned(),
+        None => format!("_{name}"),
+    }
+}
+
+/// What the pointer the import library fills in for a function in a DLL is called, in front of the
+/// function's own name.
+const IMPORT: &str = "__imp_";
+
 /// An instruction with the addend of its relocation written into the field the linker fills, or
 /// why it cannot be.
 ///

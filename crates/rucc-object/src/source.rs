@@ -528,7 +528,7 @@ pub fn assembled_described(
     target: &TargetInfo,
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
-    // x86-64 and AArch64 on ELF and COFF, i386 on ELF, and AArch64 on Mach-O, which is a function
+    // x86-64, AArch64 and i386 on ELF and COFF, and AArch64 on Mach-O, which is a function
     // of its own since what it answers differently is most of what is below.
     let (flavour, machine) = match Flavour::of(target) {
         Some(flavour) => match flavour.machine(target.tuple.arch()) {
@@ -547,6 +547,9 @@ pub fn assembled_described(
     // relocation, which is what a format without addends does. See [`crate::coff::carry`].
     let carried = machine == Architecture::Aarch64 && flavour == Flavour::Coff;
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
+    // A name in a file of assembly is already the name in the object, underscore and all, which the
+    // writer underneath would otherwise put a second one on for COFF on i386.
+    obj.set_mangling(object::write::Mangling::None);
 
     // Every section first, because a symbol says which one it is in and a relocation says which one
     // it is written into, so both need the whole list before either can be added.
@@ -586,7 +589,9 @@ pub fn assembled_described(
     // are then asked for by nothing and left out, before either is written down.
     let defined: Map<&str, &Name> =
         input.names.iter().map(|name| (name.name.as_str(), name)).collect();
-    let onto = |reloc: &Reloc| moved(flavour, input, &defined, reloc);
+    // COFF for i386 has temporary names of its own. See [`unseen`].
+    let pe32 = flavour == Flavour::Coff && machine == Architecture::I386;
+    let onto = |reloc: &Reloc| moved(flavour, pe32, input, &defined, reloc);
     let wanted: Set<&str> = input
         .parts
         .iter()
@@ -606,7 +611,8 @@ pub fn assembled_described(
     // relocation that points at it, so this whole pass is in front of the one below.
     let mut symbols = std::collections::BTreeMap::new();
     for name in &input.names {
-        if flavour == Flavour::Elf && unseen(name) && !wanted.contains(name.name.as_str()) {
+        let dropped = flavour == Flavour::Elf || pe32;
+        if dropped && unseen(name, pe32) && !wanted.contains(name.name.as_str()) {
             continue;
         }
         let (section, value, size) = match name.at {
@@ -833,8 +839,14 @@ fn together_groups(bytes: &mut [u8], together: &[bool]) {
 /// a section the linker may merge, where the offset into the section is not an offset into the
 /// merged one. The last of those is only a problem for a distance, or for an address with
 /// something added to it, since the address of the start of a string is what the linker follows.
+///
+/// COFF for i386, `pe32`, does the same for a temporary name, whatever refers to it, since it has
+/// no stubs or tables of that kind to go through. gas goes further there and writes the section for
+/// every name the file defines, `_main` included. Naming the symbol instead is what the other COFF
+/// machines here do, and the linker lands on the same address either way.
 fn moved(
     flavour: Flavour,
+    pe32: bool,
     input: &Assembled,
     defined: &Map<&str, &Name>,
     reloc: &Reloc,
@@ -842,6 +854,9 @@ fn moved(
     use crate::section::Reference;
     let name = defined.get(reloc.symbol.as_str())?;
     let Held::In { part, offset } = name.at else { return None };
+    if pe32 && unseen(name, pe32) {
+        return Some((part, offset));
+    }
     if flavour != Flavour::Elf || name.binding != Binding::Local {
         return None;
     }
@@ -877,11 +892,16 @@ fn moved(
 /// Whether a name is one the assembler made up or a label only it sees, which gas leaves out of the
 /// table unless a relocation still names it. `.L` is the prefix for those that ELF assemblers agree
 /// on, and a name with a `\u{1}` in it is one this assembler made for a numbered label or a frame.
-fn unseen(name: &Name) -> bool {
+///
+/// COFF for i386, `pe32`, adds a bare `L`, which is what gcc and clang for that target start their
+/// own labels with, `L3` for a block and `LC0` for a string. No C name can start that way there,
+/// since every one of them has an underscore in front, and gas for `pe-i386` leaves them out too.
+fn unseen(name: &Name, pe32: bool) -> bool {
     name.binding == Binding::Local
         && (name.name.starts_with(".L")
             || name.name.starts_with("..")
-            || name.name.contains('\u{1}'))
+            || name.name.contains('\u{1}')
+            || (pe32 && name.name.starts_with('L')))
 }
 
 /// Every name in it a linker can find, which is what an archive's symbol index is built from.
@@ -1808,6 +1828,165 @@ mod tests {
             .map(|(n, &(_, r_type))| (4 * n as u64, r_type.0, "x".to_owned(), n as i64))
             .collect();
         assert_eq!(implicit(&file, ".text"), want);
+    }
+
+    /// A file of assembly for i386 on Windows is COFF with the i386 relocations, and its names are
+    /// what the file spelled: a listing for that platform already has the underscore on every C
+    /// name, so nothing is put in front of `_main`, `_puts` or a `__fastcall` `@f@8`.
+    #[test]
+    fn an_i386_windows_file_of_assembly_keeps_its_names_as_written() {
+        use object::pe::{
+            IMAGE_REL_I386_DIR32, IMAGE_REL_I386_DIR32NB, IMAGE_REL_I386_REL32,
+            IMAGE_REL_I386_SECREL,
+        };
+        let reloc = |at, symbol: &str, kind, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind,
+            addend,
+            after: 0,
+        };
+        let code = vec![
+            0xe8, 0, 0, 0, 0, // call _puts
+            0xe8, 0, 0, 0, 0, // call @f@8
+            0xa1, 0, 0, 0, 0, // movl _counter+8, %eax
+            0xc3,
+        ];
+        let mut text = part(".text", code);
+        text.relocs = vec![
+            reloc(1, "_puts", Reference::Call, -4),
+            reloc(6, "@f@8", Reference::Call, -4),
+            reloc(11, "_counter", Reference::Address { bytes: 4 }, 8),
+        ];
+        let mut data = part(".data", vec![0; 12]);
+        data.relocs = vec![
+            reloc(0, "_main", Reference::Image, 0),
+            reloc(4, "_main", Reference::Section, 0),
+            reloc(8, "_puts", Reference::Away, 0),
+        ];
+        let undefined = |name: &str| Name {
+            at: Held::Undefined,
+            ..at(name, 0, Sort::Untyped, Binding::Global)
+        };
+        let names = vec![
+            at("_main", 0, Sort::Func, Binding::Global),
+            undefined("_puts"),
+            undefined("@f@8"),
+            undefined("_counter"),
+        ];
+        let input = Assembled { parts: vec![text, data], names, subsections: false };
+        let target = TargetInfo::new(Triple::new(TargetArch::X86, Os::Windows, Env::Gnu));
+        let bytes = assembled(&input, &target).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert_eq!(file.format(), object::BinaryFormat::Coff);
+        assert_eq!(file.architecture(), Architecture::I386);
+        for name in ["_main", "_puts", "@f@8", "_counter"] {
+            assert!(file.symbol_by_name(name).is_some(), "{name}");
+        }
+        assert!(file.symbol_by_name("__main").is_none());
+        let types = |name: &str| -> Vec<(u64, u16, String)> {
+            let section = file.section_by_name(name).expect("a section");
+            section
+                .relocations()
+                .map(|(at, reloc)| {
+                    let RelocationFlags::Coff { typ } = reloc.flags() else { panic!("COFF") };
+                    let object::RelocationTarget::Symbol(symbol) = reloc.target() else {
+                        panic!("a symbol")
+                    };
+                    let symbol = file.symbol_by_index(symbol).expect("a symbol");
+                    (at, typ.0, symbol.name().expect("a name").to_owned())
+                })
+                .collect()
+        };
+        let want = |list: &[(u64, pe::RelocationType, &str)]| -> Vec<(u64, u16, String)> {
+            list.iter().map(|&(at, typ, name)| (at, typ.0, name.to_owned())).collect()
+        };
+        assert_eq!(
+            types(".text"),
+            want(&[
+                (1, IMAGE_REL_I386_REL32, "_puts"),
+                (6, IMAGE_REL_I386_REL32, "@f@8"),
+                (11, IMAGE_REL_I386_DIR32, "_counter"),
+            ])
+        );
+        assert_eq!(
+            types(".data"),
+            want(&[
+                (0, IMAGE_REL_I386_DIR32NB, "_main"),
+                (4, IMAGE_REL_I386_SECREL, "_main"),
+                (8, IMAGE_REL_I386_REL32, "_puts"),
+            ])
+        );
+        let code = file.section_by_name(".text").expect("a text section");
+        let code = code.data().expect("the bytes");
+        assert_eq!(&code[1..5], &0i32.to_le_bytes(), "a call counts from the end of its bytes");
+        assert_eq!(&code[11..15], &8i32.to_le_bytes());
+        let image = file.section_by_name(".data").expect("a data section");
+        assert_eq!(&image.data().expect("the bytes")[8..12], &4i32.to_le_bytes());
+    }
+
+    /// The labels gcc writes for i686 Windows start with a bare `L`, and they are left out of the
+    /// table the way gas leaves them out, with whatever pointed at one pointing at its section and
+    /// the distance into it added in the bytes.
+    #[test]
+    fn an_i386_windows_label_of_gccs_own_is_its_section_and_not_a_name() {
+        use object::pe::{IMAGE_REL_I386_DIR32, IMAGE_REL_I386_REL32};
+        // movl $LC1, (%esp) ; jmp L3 ; L3: ret
+        let mut text = part(".text", vec![0xc7, 0x04, 0x24, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0, 0xc3]);
+        let reloc = |at, symbol: &str, kind, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind,
+            addend,
+            after: 0,
+        };
+        text.relocs = vec![
+            reloc(3, "LC1", Reference::Address { bytes: 4 }, 0),
+            reloc(8, "Lfar", Reference::Data, -4),
+        ];
+        let rdata = part(".rdata", vec![0; 8]);
+        let names = vec![
+            at("_f", 0, Sort::Func, Binding::Global),
+            at("L3", 12, Sort::Untyped, Binding::Local),
+            Name {
+                at: Held::In { part: 1, offset: 4 },
+                ..at("LC1", 0, Sort::Untyped, Binding::Local)
+            },
+            Name {
+                at: Held::In { part: 1, offset: 0 },
+                ..at("Lfar", 0, Sort::Untyped, Binding::Local)
+            },
+        ];
+        let input = Assembled { parts: vec![text, rdata], names, subsections: false };
+        let target = TargetInfo::new(Triple::new(TargetArch::X86, Os::Windows, Env::Gnu));
+        let bytes = assembled(&input, &target).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.symbol_by_name("_f").is_some());
+        for name in ["L3", "LC1", "Lfar"] {
+            assert!(file.symbol_by_name(name).is_none(), "{name}");
+        }
+        let section = file.section_by_name(".text").expect("a section");
+        let relocs: Vec<_> = section
+            .relocations()
+            .map(|(at, reloc)| {
+                let RelocationFlags::Coff { typ } = reloc.flags() else { panic!("COFF") };
+                let object::RelocationTarget::Symbol(symbol) = reloc.target() else {
+                    panic!("a symbol")
+                };
+                let symbol = file.symbol_by_index(symbol).expect("a symbol");
+                (at, typ.0, symbol.name().expect("a name").to_owned())
+            })
+            .collect();
+        assert_eq!(
+            relocs,
+            vec![
+                (3, IMAGE_REL_I386_DIR32.0, ".rdata".to_owned()),
+                (8, IMAGE_REL_I386_REL32.0, ".rdata".to_owned())
+            ]
+        );
+        let code = section.data().expect("the bytes");
+        assert_eq!(&code[3..7], &4i32.to_le_bytes(), "the distance into .rdata");
+        assert_eq!(&code[8..12], &0i32.to_le_bytes(), "the start of .rdata, counted from the end");
     }
 
     /// What i386 has no relocation for is refused rather than written as the nearest thing.
