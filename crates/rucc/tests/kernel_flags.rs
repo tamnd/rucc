@@ -51,6 +51,7 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
         "-mindirect-branch-cs-prefix",
         "-mharden-sls=all",
         "-fno-jump-tables",
+        "-fconserve-stack",
     ] {
         assert!(cc_option(X86, flag), "{flag}");
     }
@@ -59,13 +60,34 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
 
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    for flag in ["-mindirect-branch=thunk", "-gz=zlib", "-fconserve-stack"] {
+    for flag in ["-mindirect-branch=thunk", "-gz=zlib", "-gdwarf-4"] {
         assert!(!cc_option(X86, flag), "{flag}");
     }
     assert!(!cc_option(ARM64, "-mbranch-protection=pac-ret+bti"));
     // And what gcc does not know either, which is what `cc-disable-warning` depends on.
     assert!(!cc_option(X86, "-Wthread-safety"));
     assert!(cc_option(X86, "-Wno-frame-address"));
+}
+
+/// A helper with a 200 byte buffer, called once from a function with none, is inlined by default,
+/// since gcc lets any frame grow to 256 bytes. Under `-fconserve-stack` that is 100 bytes, so it
+/// stays a call and its buffer stays in its own frame, which is what gcc 13 does with both.
+#[test]
+fn conserve_stack_keeps_a_large_buffer_out_of_its_caller() {
+    let src = "\
+void use(char *);
+static int helper(int x) { char buf[200]; buf[0] = x; use(buf); return buf[1]; }
+int caller(int x) { return helper(x) + 1; }
+";
+    let target = "--target=x86_64-unknown-linux-gnu";
+    for (flags, kept) in [(&[][..], false), (&["-fconserve-stack"][..], true)] {
+        let mut args = vec![target, "-O2", "-S", "-o", "-"];
+        args.extend_from_slice(flags);
+        let out = run(&args, src);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(text.contains("call\thelper"), kept, "{flags:?}:\n{text}");
+    }
 }
 
 #[test]

@@ -800,6 +800,7 @@ fn optimize(
     // What a function with no `target` attribute is built for, which the inliner compares a
     // callee with one against.
     settings.isa = opts.isa;
+    settings.conserve_stack = opts.conserve_stack;
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.global_fuel = opts.pass_fuel_global;
     settings.verify |= opts.verify_each;

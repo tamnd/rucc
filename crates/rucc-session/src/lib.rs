@@ -2249,6 +2249,10 @@ pub struct Options {
     /// converting `L""`, the checker typing it and the macros that spell `wchar_t` all read one
     /// answer. It changes the ABI of anything that passes a `wchar_t`.
     pub short_wchar: bool,
+    /// Whether inlining may grow a frame only as far as gcc lets it under `-fconserve-stack`,
+    /// which is 40 percent more than the caller's own locals or 100 bytes. The kernel passes it,
+    /// since its stacks are a few pages.
+    pub conserve_stack: bool,
     /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
     /// integer type that holds its enumerators, from `-fshort-enums`.
     ///
@@ -2680,6 +2684,7 @@ impl Options {
             wrapping: Wrapping::NONE,
             char_signed: None,
             short_wchar: false,
+            conserve_stack: false,
             short_enums: false,
             ms_extensions: None,
             common: None,

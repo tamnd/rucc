@@ -336,6 +336,7 @@ Honored, by doing what gcc does:
 
 | Flag | What it does |
 |---|---|
+| `-fconserve-stack`, `-fno-conserve-stack` | Inlining may grow a caller's frame to 40 percent more than its own locals or to 100 bytes, whichever is more, where the default is 1000 percent or 256 bytes. Those are the values gcc gives `large-stack-frame-growth` and `large-stack-frame` under the flag. See section 33.7 of the optimizer spec. |
 | `-fshort-wchar`, `-fno-short-wchar` | `wchar_t` is a 16 bit unsigned type, in `L""`, in `__WCHAR_TYPE__` and its neighbours and in the checker, because the session puts it into the target the way it puts `-funsigned-char` there. The negative form is the target's own `wchar_t`. |
 | `-fmin-function-alignment=N` | A floor under every function, rounded up to a power of two the way gcc rounds `-falign-functions=`. `-falign-functions` may raise it and cannot lower it, in whichever order the two are written. |
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
@@ -387,7 +388,6 @@ Refused, with the issue that would honor them:
 | `-mstack-protector-guard*` (AArch64) | There is no stack protector on AArch64 yet, and the kernel's canary at an offset from `sp_el0` is part of that work. | #2279 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
-| `-fconserve-stack` | Inlining does not weigh how much it grows the caller's frame. | #2284 |
 | `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
 | `-gdwarf-4` | DWARF 5 is the only version written. | #2287 |
 | `-gz`, `-gz=zlib`, `-gz=zlib-gnu`, `-gz=zstd` | The debug sections are written uncompressed. The kernel probes `-gz=zlib` for `DEBUG_INFO_COMPRESSED`. | #2288 |

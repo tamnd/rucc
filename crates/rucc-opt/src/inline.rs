@@ -90,7 +90,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
     INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_FRAME_GROWTH,
-    INLINE_LARGE_FRAME,
+    INLINE_FRAME_GROWTH_CONSERVE, INLINE_LARGE_FRAME, INLINE_LARGE_FRAME_CONSERVE,
 };
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
@@ -266,12 +266,14 @@ impl InlineFailure {
 /// `isa` is what the module is built for, which is what a function without a `target` attribute
 /// is built for. A callee built for more than its caller is never copied into it. `names` is
 /// what the names of the functions a body calls are read from, to find a call to `setjmp`.
+/// `growth` is how far a caller's frame may grow, which `-fconserve-stack` makes tighter.
 pub fn run(
     module: &mut Module,
     names: &Interner,
     limit: Option<u32>,
     once: bool,
     isa: Isa,
+    growth: Growth,
 ) -> Vec<(FuncId, Stats)> {
     let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
     let wanted: Map<Symbol, (FuncId, Kind)> = module
@@ -304,7 +306,7 @@ pub fn run(
         let convention = Convention::of(module);
         let mut state = Map::default();
         let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
-        let how = How { wanted: &wanted, convention, limit, isa, names };
+        let how = How { wanted: &wanted, convention, limit, isa, names, growth };
         for id in module.funcs().collect::<Vec<FuncId>>() {
             settle(module, id, &how, &mut state, &mut done);
         }
@@ -430,6 +432,27 @@ struct How<'a> {
     isa: Isa,
     /// What the names in the module are read from.
     names: &'a Interner,
+    /// How far a caller's frame may grow.
+    growth: Growth,
+}
+
+/// How far inlining may grow a caller's frame, gcc's `large-stack-frame-growth` and
+/// `large-stack-frame`. See [`fits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Growth {
+    /// How much larger than the caller's own locals its frame may become, in percent.
+    pub percent: u32,
+    /// The frame size, in bytes, that is never too large.
+    pub bytes: u32,
+}
+
+impl Growth {
+    /// gcc's defaults, 1000 percent and 256 bytes.
+    pub const DEFAULT: Self = Self { percent: INLINE_FRAME_GROWTH, bytes: INLINE_LARGE_FRAME };
+    /// What gcc sets under `-fconserve-stack`, 40 percent and 100 bytes, which is what the Linux
+    /// kernel builds with.
+    pub const CONSERVE: Self =
+        Self { percent: INLINE_FRAME_GROWTH_CONSERVE, bytes: INLINE_LARGE_FRAME_CONSERVE };
 }
 
 /// Where a function is in being settled.
@@ -537,7 +560,9 @@ fn settle(
             stats.missed(why(InlineFailure::TooLarge));
             continue;
         }
-        if kind != Kind::Always && !fits(own, frame(&module[id]), frame(&module[callee])) {
+        if kind != Kind::Always
+            && !fits(own, frame(&module[id]), frame(&module[callee]), how.growth)
+        {
             stats.missed(why(InlineFailure::Frame));
             continue;
         }
@@ -604,11 +629,13 @@ fn frame(func: &Func) -> u64 {
 }
 
 /// Whether a caller whose own locals came to `own` bytes, and whose locals come to `now` bytes with
-/// what has been inlined into it so far, can take a body whose locals come to `body` more.
+/// what has been inlined into it so far, can take a body whose locals come to `body` more, when the
+/// frame may grow as far as `growth` says.
 ///
 /// This is gcc's `caller_growth_limits` test for the stack. The frame may grow to
 /// `large-stack-frame-growth` percent more than the caller's own locals, and a frame no larger than
-/// `large-stack-frame` bytes is always fine. gcc also lets a call through when a sibling already
+/// `large-stack-frame` bytes is always fine. Those are 1000 and 256 by default and 40 and 100 under
+/// `-fconserve-stack`. gcc also lets a call through when a sibling already
 /// made the frame that large, on the grounds that the two bodies will share bytes. That is left
 /// out, since here they do not (see [`frame`]), which is tamnd/rucc#1989.
 ///
@@ -616,10 +643,10 @@ fn frame(func: &Func) -> u64 {
 /// moves the buffer into the caller, and a caller of many such helpers ends up with all their
 /// buffers at once where gcc has one at a time. `select_default_timezone` in postgres's `initdb`
 /// had a frame of 44560 bytes this way, against gcc's 16.
-fn fits(own: u64, now: u64, body: u64) -> bool {
-    let limit = own + own * u64::from(INLINE_FRAME_GROWTH) / 100;
+fn fits(own: u64, now: u64, body: u64, growth: Growth) -> bool {
+    let limit = own + own * u64::from(growth.percent) / 100;
     let after = now + body;
-    after <= limit || after <= u64::from(INLINE_LARGE_FRAME)
+    after <= limit || after <= u64::from(growth.bytes)
 }
 
 /// Inlines one call, or says why not and leaves the caller as it was.
@@ -1480,7 +1507,10 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        let said = format!("{:?}", run(&mut module, &names, limit, once, Isa::baseline()));
+        let said = format!(
+            "{:?}",
+            run(&mut module, &names, limit, once, Isa::baseline(), Growth::DEFAULT)
+        );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
@@ -1688,7 +1718,7 @@ block0(%0: i32):
                 respan(func, &[brace, brace, statement, statement, statement]);
             }
         }
-        run(&mut module, &names, None, true, Isa::baseline());
+        run(&mut module, &names, None, true, Isa::baseline(), Growth::DEFAULT);
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
         let mut seen = Vec::new();
@@ -1963,6 +1993,23 @@ block0(%0: i32):
         assert_eq!(fixture.matches("alloca").count(), 2, "{fixture}");
         let (out, _) = inlined_with(&fixture, Some(70), true);
         assert!(!out.contains("call @scale"), "{out}");
+    }
+
+    /// Under `-fconserve-stack` the frame may grow by 40 percent or to 100 bytes, gcc's numbers
+    /// there, so both of the bodies the default lets in above stay calls, and a small one goes in.
+    #[test]
+    fn conserving_the_stack_keeps_bodies_out_that_the_default_lets_in() {
+        let conserved = |fixture: &str| {
+            let mut names = Interner::new();
+            let text = format!("{HEAD}{fixture}");
+            let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+            run(&mut module, &names, Some(70), true, Isa::baseline(), Growth::CONSERVE);
+            rucc_ir::print(&module, &names)
+        };
+        assert!(conserved(&framed(256, 0, "")).contains("call @scale"));
+        assert!(conserved(&framed(4096, 1024, "")).contains("call @scale"));
+        assert!(!conserved(&framed(96, 0, "")).contains("call @scale"));
+        assert!(!conserved(&framed(400, 1024, "")).contains("call @scale"));
     }
 
     /// `always_inline` is a promise and the frame does not change that.
