@@ -854,7 +854,8 @@ fn moved(
         | Reference::Slot
         | Reference::SlotKept
         | Reference::GotFront
-        | Reference::Thread => false,
+        | Reference::Thread
+        | Reference::Tls(_) => false,
         // The same for a field of an instruction that goes through a stub or a table slot, or that
         // says where a thread-local variable is, which a linker checks against the name's type.
         Reference::Field(
@@ -907,7 +908,7 @@ mod tests {
     use object::{RelocationFlags, SectionFlags};
     use rucc_target::{Arch as TargetArch, Env, Os, Triple};
 
-    use crate::section::Reference;
+    use crate::section::{Reference, Tls};
 
     /// A linux x86-64 target, which is the one most of these are written against.
     fn target() -> TargetInfo {
@@ -1762,11 +1763,58 @@ mod tests {
         assert_eq!(data, want);
     }
 
+    /// Each way i386 reaches a thread-local variable is the relocation gas writes for its suffix,
+    /// with what is added in the bytes and the variable's own name kept even though only this file
+    /// sees it, which is what gas does for these where it would have named the section for any
+    /// other reference.
+    #[test]
+    fn the_i386_thread_local_references_are_the_relocations_gas_writes() {
+        let kinds = [
+            (Tls::General, elf::R_386_TLS_GD),
+            (Tls::Module, elf::R_386_TLS_LDM),
+            (Tls::InModule, elf::R_386_TLS_LDO_32),
+            (Tls::Slot, elf::R_386_TLS_GOTIE),
+            (Tls::SlotAddress, elf::R_386_TLS_IE),
+            (Tls::SlotNegated, elf::R_386_TLS_IE_32),
+            (Tls::Offset, elf::R_386_TLS_LE),
+            (Tls::Negated, elf::R_386_TLS_LE_32),
+        ];
+        let mut text = part(".text", vec![0; 4 * kinds.len()]);
+        text.relocs = kinds
+            .iter()
+            .enumerate()
+            .map(|(n, &(tls, _))| Reloc {
+                at: 4 * n,
+                symbol: "x".to_owned(),
+                kind: Reference::Tls(tls),
+                addend: n as i64,
+                after: 0,
+            })
+            .collect();
+        let tdata = part(".tdata", vec![0; 8]);
+        let names = vec![
+            at("f", 0, Sort::Func, Binding::Global),
+            Name {
+                at: Held::In { part: 1, offset: 4 },
+                ..at("x", 0, Sort::Thread, Binding::Local)
+            },
+        ];
+        let input = Assembled { parts: vec![text, tdata], names, subsections: false };
+        let bytes = assembled(&input, &i386()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let want: Vec<_> = kinds
+            .iter()
+            .enumerate()
+            .map(|(n, &(_, r_type))| (4 * n as u64, r_type.0, "x".to_owned(), n as i64))
+            .collect();
+        assert_eq!(implicit(&file, ".text"), want);
+    }
+
     /// What i386 has no relocation for is refused rather than written as the nearest thing.
     ///
     /// An address in eight bytes and a distance in eight are wider than anything this machine
-    /// relocates, a load from the instruction pointer is something it cannot do, and a thread-local
-    /// variable is reached with relocations that depend on a model the back end has not picked yet.
+    /// relocates, a load from the instruction pointer is something it cannot do, and the x86-64 slot
+    /// of a thread-local variable is not how this machine reaches one.
     #[test]
     fn a_reference_i386_has_no_relocation_for_is_refused() {
         for kind in [

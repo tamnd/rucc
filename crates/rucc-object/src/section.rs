@@ -770,6 +770,39 @@ pub struct Reloc {
     pub after: u8,
 }
 
+/// Which of the i386 thread-local relocations a [`Reference::Tls`] is, named after what the four
+/// bytes end up holding.
+///
+/// The suffix gcc writes for each is beside it. The linker may rewrite the instruction around the
+/// first three into a cheaper model once it knows where the variable ends up, which is why each
+/// kind is kept apart from the others rather than folded into an address or an offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tls {
+    /// The pair of slots of the global offset table `___tls_get_addr` takes, as a distance from the
+    /// table. `@TLSGD`, `R_386_TLS_GD`.
+    General,
+    /// The same pair for the module as a whole rather than one variable. `@TLSLDM`,
+    /// `R_386_TLS_LDM`.
+    Module,
+    /// How far into its module's block a variable is, which is what goes with the address
+    /// [`Tls::Module`] found. `@DTPOFF`, `R_386_TLS_LDO_32`.
+    InModule,
+    /// A slot of the global offset table holding where the variable is from the thread pointer, as
+    /// a distance from the table. `@GOTNTPOFF`, `R_386_TLS_GOTIE`.
+    Slot,
+    /// The same slot by its address, for code that is not position independent. `@INDNTPOFF`,
+    /// `R_386_TLS_IE`.
+    SlotAddress,
+    /// A slot holding the distance the other way round, from the variable up to the thread
+    /// pointer, as a distance from the table. `@GOTTPOFF`, `R_386_TLS_IE_32`.
+    SlotNegated,
+    /// Where the variable is from the thread pointer, which is below it and so negative.
+    /// `@NTPOFF`, `R_386_TLS_LE`.
+    Offset,
+    /// The same distance the other way round, which is positive. `@TPOFF`, `R_386_TLS_LE_32`.
+    Negated,
+}
+
 /// What kind of thing a relocation is asking the linker for.
 ///
 /// The first four are the distance from the end of an instruction to something, which is what every
@@ -887,6 +920,12 @@ pub enum Reference {
     /// The same slot read or written by an instruction the linker has to leave as it is, because it
     /// is not one of the few it knows how to rewrite. `R_386_GOT32` on ELF.
     SlotKept,
+    /// One of the ways i386 code reaches a thread-local variable, which the model says which.
+    ///
+    /// Apart from [`Reference::Thread`] because this machine has a relocation for each step of each
+    /// model rather than the one x86-64 needs from a compiler that only writes one of them, and a
+    /// file of assembly may use any of them. See [`Tls`].
+    Tls(Tls),
     /// Some bits of an AArch64 instruction, which the fixup says which and how to fill in.
     ///
     /// Its own kind rather than one of the above, because on this machine a reference is not four

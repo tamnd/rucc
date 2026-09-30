@@ -660,7 +660,7 @@ impl Reader {
             let here = (part, at as i64);
             let sum = if matches!(
                 hole.sort,
-                Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot
+                Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot | Reach::Tls(_)
             ) {
                 // The number itself, with nothing taken off for where the instruction ends. A name
                 // in an address carries what is added to it apart, and a number carries nothing.
@@ -2035,6 +2035,17 @@ impl Reader {
                         (sum, Reach::Offset, Reference::GotOffset)
                     }
                 }
+                // Where a thread-local variable is, as gcc writes it into the debug information:
+                // `.long x@dtpoff`. gas takes every thread-local suffix here and so does this.
+                Some((rest, how)) if crate::instruction::threaded(how).is_some() => {
+                    if width != 4 {
+                        return Err(self.bad(&format!(
+                            "'@{how}' in {width} bytes, and a thread-local offset on i386 is four"
+                        )));
+                    }
+                    let tls = crate::instruction::threaded(how).expect("matched above");
+                    (self.expression(&rest)?, Reach::Tls(tls), Reference::Got)
+                }
                 _ => (self.expression(arg)?, Reach::Near, Reference::Got),
             };
             let at = self.at();
@@ -2801,11 +2812,24 @@ impl Reader {
                 (Held::Undefined, Binding::Local) => Binding::Global,
                 (_, binding) => binding,
             };
+            // gas makes anything in a thread-local section thread-local, whatever `.type` said,
+            // and gcc's i386 listing says `@object` for a `__thread` variable. A linker refuses a
+            // thread-local reference to a name another object defines as anything else.
+            let sort = match at {
+                Held::In { part, .. }
+                    if self.i386
+                        && parts[part].shape.thread
+                        && matches!(sym.sort, Sort::Untyped | Sort::Object) =>
+                {
+                    Sort::Thread
+                }
+                _ => sym.sort,
+            };
             names.push(Name {
                 name: sym.name,
                 at,
                 size: sym.size,
-                sort: sym.sort,
+                sort,
                 binding,
                 visibility: sym.visibility,
             });
@@ -3169,8 +3193,10 @@ impl Reader {
             // distance to the name from these bytes, and whether the label is in the right section
             // is for the arm below that writes it to say. Anything else left over, two names this
             // file does not define say, is not a number the linker writes into an instruction.
-            let value =
-                matches!(fixup.reach, Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot);
+            let value = matches!(
+                fixup.reach,
+                Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot | Reach::Tls(_)
+            );
             let named =
                 matches!(residue.left.as_slice(), [Left { coeff: 1, what: What::Symbol(_), .. }]);
             let distance = matches!(fixup.reach, Reach::Value | Reach::Extended)
@@ -3198,6 +3224,13 @@ impl Reader {
                     return Err(bad(
                         "'@GOTOFF' or '@GOT' of something that comes out as a number, which has \
                          no place in the global offset table"
+                            .to_owned(),
+                    ));
+                }
+                [] if matches!(fixup.reach, Reach::Tls(_)) => {
+                    return Err(bad(
+                        "a thread-local suffix on something that comes out as a number, which is \
+                         not a variable any thread has"
                             .to_owned(),
                     ));
                 }
@@ -3240,6 +3273,16 @@ impl Reader {
                     let kind = match fixup.reach {
                         Reach::Offset => Reference::GotOffset,
                         Reach::Slot => fixup.slot,
+                        Reach::Tls(tls) => {
+                            // gas marks a name a thread-local suffix reaches as thread-local,
+                            // defined here or not, and a linker checks the two agree.
+                            if let Some(&sym) = self.known.get(name) {
+                                if matches!(self.syms[sym].sort, Sort::Untyped | Sort::Object) {
+                                    self.syms[sym].sort = Sort::Thread;
+                                }
+                            }
+                            Reference::Tls(tls)
+                        }
                         _ if self.i386 && name == TABLE => self.front(fixup.width, line)?,
                         Reach::Extended if fixup.width == 4 => Reference::Signed,
                         _ => Reference::Address { bytes: fixup.width },
@@ -4471,7 +4514,7 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
 mod tests {
     use super::*;
 
-    use rucc_object::Reference;
+    use rucc_object::{Reference, Tls};
 
     /// The file, read, with a failure reported as a panic naming the line it was on.
     fn assembled(text: &str) -> Assembled {
@@ -6275,6 +6318,83 @@ g:
         assert!(i386_refused("f:\n\t.cfi_startproc\n\t.cfi_offset %ebp, -6\n").contains("slot"));
     }
 
+    /// The i386 thread-local suffixes, in either case, in an address, a number and a data
+    /// directive, with the bytes and relocations gas 2.42 writes for them. Whatever is added goes
+    /// in the relocation and the name is kept even when it is local, the way gas keeps it.
+    #[test]
+    fn the_i386_thread_local_suffixes_are_the_ones_gas_writes() {
+        let read = i386(concat!(
+            "f:\tmovl %gs:0, %eax\n",
+            "\tmovl %gs:x@ntpoff, %eax\n",
+            "\tmovl %gs:x@NTPOFF+4, %ecx\n",
+            "\tleal x@ntpoff(%eax), %eax\n",
+            "\taddl $x@ntpoff, %eax\n",
+            "\tmovl ex@gotntpoff(%ebx), %eax\n",
+            "\tmovl ex@indntpoff, %eax\n",
+            "\tmovl ex@indntpoff, %ecx\n",
+            "\tsubl ex@gottpoff(%ebx), %eax\n",
+            "\tmovl $x@tpoff, %eax\n",
+            "\tleal ex@tlsgd(,%ebx,1), %eax\n",
+            "\tcall ___tls_get_addr@PLT\n",
+            "\tleal x@tlsldm(%ebx), %eax\n",
+            "\tmovl x@dtpoff+4(%eax), %edx\n",
+            "\t.section .tbss,\"awT\",@nobits\n",
+            "\t.type x, @object\n",
+            "x:\t.zero 8\n",
+            "\t.section .rodata\n",
+            "\t.long x@dtpoff, x@tpoff, x@ntpoff, ex@tpoff+4\n",
+        ));
+        #[rustfmt::skip]
+        let gas: [u8; 82] = [
+            0x65, 0xa1, 0, 0, 0, 0,
+            0x65, 0xa1, 0, 0, 0, 0,
+            0x65, 0x8b, 0x0d, 0, 0, 0, 0,
+            0x8d, 0x80, 0, 0, 0, 0,
+            0x05, 0, 0, 0, 0,
+            0x8b, 0x83, 0, 0, 0, 0,
+            0xa1, 0, 0, 0, 0,
+            0x8b, 0x0d, 0, 0, 0, 0,
+            0x2b, 0x83, 0, 0, 0, 0,
+            0xb8, 0, 0, 0, 0,
+            0x8d, 0x04, 0x1d, 0, 0, 0, 0,
+            0xe8, 0, 0, 0, 0,
+            0x8d, 0x83, 0, 0, 0, 0,
+            0x8b, 0x90, 0, 0, 0, 0,
+        ];
+        assert_eq!(bytes(&read, ".text"), gas);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (8, "x", Reference::Tls(Tls::Offset), 0),
+                (15, "x", Reference::Tls(Tls::Offset), 4),
+                (21, "x", Reference::Tls(Tls::Offset), 0),
+                (26, "x", Reference::Tls(Tls::Offset), 0),
+                (32, "ex", Reference::Tls(Tls::Slot), 0),
+                (37, "ex", Reference::Tls(Tls::SlotAddress), 0),
+                (43, "ex", Reference::Tls(Tls::SlotAddress), 0),
+                (49, "ex", Reference::Tls(Tls::SlotNegated), 0),
+                (54, "x", Reference::Tls(Tls::Negated), 0),
+                (61, "ex", Reference::Tls(Tls::General), 0),
+                (66, "___tls_get_addr", Reference::Call, -4),
+                (72, "x", Reference::Tls(Tls::Module), 0),
+                (78, "x", Reference::Tls(Tls::InModule), 4),
+            ]
+        );
+        assert_eq!(
+            relocs(&read, ".rodata"),
+            [
+                (0, "x", Reference::Tls(Tls::InModule), 0),
+                (4, "x", Reference::Tls(Tls::Negated), 0),
+                (8, "x", Reference::Tls(Tls::Offset), 0),
+                (12, "ex", Reference::Tls(Tls::Negated), 4),
+            ]
+        );
+        assert_eq!(name(&read, "x").sort, Sort::Thread);
+        assert_eq!(name(&read, "ex").sort, Sort::Thread);
+        assert!(i386_refused("\t.quad x@dtpoff\n").contains("four"));
+        assert!(i386_refused("\tmovl $5@ntpoff, %eax\n").contains("thread"));
+    }
+
     /// An address with no registers in it is four bytes the linker fills with the address, and a
     /// `mov` of one into or out of the accumulator takes the form with no addressing byte.
     #[test]
@@ -6325,7 +6445,7 @@ g:
     /// What i386 has no relocation for is refused rather than written as something else.
     #[test]
     fn i386_forms_that_are_not_read_yet_are_refused() {
-        assert!(i386_refused("\tmovl foo@TLSGD(%ebx), %eax\n").contains("@TLSGD"));
+        assert!(i386_refused("\tleal foo@TLSDESC(%ebx), %eax\n").contains("@TLSDESC"));
         assert!(i386_refused("\tmovl foo@GOTPCREL(%rip), %eax\n").contains("i386"));
         assert!(i386_refused("\tmovl (%rax), %eax\n").contains("sixty four"));
         assert!(i386_refused("\t.quad foo@GOTOFF\n").contains("four"));

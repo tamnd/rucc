@@ -61,9 +61,13 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
         Reference::GotBare | Reference::GotKept | Reference::Field(_) => return None,
         Reference::Away | Reference::AwayWide => return None,
-        // The ways i386 reaches the global offset table, which is not something this machine or
-        // this format has.
-        Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
+        // The ways i386 reaches the global offset table and thread-local storage on ELF, which is
+        // not something this machine or this format has.
+        Reference::GotOffset
+        | Reference::GotFront
+        | Reference::Slot
+        | Reference::SlotKept
+        | Reference::Tls(_) => {
             return None;
         }
         // Absolute addresses in instructions are what code that is not position independent
@@ -124,7 +128,11 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
         Reference::Call | Reference::Got | Reference::GotBare | Reference::GotKept => return None,
         Reference::Thread | Reference::Address { .. } | Reference::Signed => return None,
         Reference::AwayWide => return None,
-        Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
+        Reference::GotOffset
+        | Reference::GotFront
+        | Reference::Slot
+        | Reference::SlotKept
+        | Reference::Tls(_) => {
             return None;
         }
     })
