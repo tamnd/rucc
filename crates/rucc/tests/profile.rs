@@ -235,11 +235,54 @@ fn every_hook_is_listed_in_mcount_loc_when_asked() {
 /// tracer writes the call back, and the nop is still what `__mcount_loc` points at.
 #[test]
 fn the_hook_is_a_nop_of_the_same_length_when_asked() {
-    let text = asm("nop", &["-pg", "-mfentry", "-mnop-mcount", "-mrecord-mcount"], THREE);
+    let text =
+        asm("nop", &["-pg", "-mfentry", "-fno-pie", "-mnop-mcount", "-mrecord-mcount"], THREE);
     assert!(!text.contains("__fentry__"), "{text}");
     for name in ["leaf", "calls", "deep"] {
         let nop = format!(".Lmcount_{name}:\n\t.byte\t0x0f, 0x1f, 0x44, 0x00, 0x00\n");
         assert!(text.contains(&nop), "{name}:\n{text}");
+    }
+}
+
+/// gcc refuses `-mnop-mcount` in position independent code, the default included, and so does
+/// rucc, in gcc's words.
+#[test]
+fn the_nop_is_refused_beside_position_independent_code() {
+    for flags in
+        [&["-mnop-mcount"][..], &["-fPIC", "-pg", "-mnop-mcount"], &["-fpie", "-mnop-mcount"]]
+    {
+        let (ok, _, err) = run("nop-pic", TARGET, flags, THREE);
+        assert!(!ok, "{flags:?}");
+        assert!(err.contains("'-mnop-mcount' is not implemented for '-fPIC'"), "{flags:?}: {err}");
+    }
+    asm("nop-abs", &["-pg", "-fno-pic", "-mnop-mcount"], THREE);
+}
+
+/// A function that said `no_instrument_function` gets no hook and no entry in `__mcount_loc`, as
+/// with gcc. It is the kernel's `notrace`, which is on the tracer itself and on what runs before
+/// the tracer can, so a hook there would call back into the code handling one.
+#[test]
+fn a_function_that_said_no_instrument_function_gets_no_hook() {
+    let source = "\
+int g(int);
+__attribute__((no_instrument_function)) int quiet(int x) { return g(x); }
+int loud(int x) { return g(x); }
+";
+    for flags in [
+        &["-pg", "-mfentry"][..],
+        &["-pg", "-mno-fentry"],
+        &["-pg", "-mfentry", "-mrecord-mcount"],
+        &["-pg", "-fno-pie", "-mrecord-mcount", "-mnop-mcount"],
+    ] {
+        let text = asm("notrace", flags, source);
+        let body = |name: &str| -> String {
+            let from = text.find(&format!("\n{name}:\n")).unwrap_or_else(|| panic!("{name}"));
+            text[from..].split("\t.size\t").next().unwrap_or("").to_owned()
+        };
+        let hooked =
+            |body: &str| ["mcount", "fentry", "0x0f, 0x1f"].iter().any(|h| body.contains(h));
+        assert!(!hooked(&body("quiet")), "{flags:?}:\n{text}");
+        assert!(hooked(&body("loud")), "{flags:?}:\n{text}");
     }
 }
 
