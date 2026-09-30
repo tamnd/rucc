@@ -666,6 +666,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // chains the four so that the last one written wins, and a negative one only speaks for its
     // own family. The answer is worked out after the loop.
     let mut pic: Option<bool> = None;
+    let mut cmodel = rucc_target::CodeModel::Small;
     let mut pie: Option<bool> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
@@ -2268,10 +2269,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     )));
                 }
             }
-            // How far apart the pieces of the program may be. The small model is what we emit and
-            // it is every hosted program's default; the kernel model is a different one and a
-            // build that asks for it and does not get it links and then does not run.
-            "-mcmodel=small" => {}
+            // How far apart the pieces of the program may be, and where. The small model is every
+            // hosted program's default. The kernel model is the top 2 GiB of the address space,
+            // which is where every x86-64 Linux kernel is linked, and a build that asks for it and
+            // does not get it links and then does not run. Which machine and which link it is
+            // checked against after the loop, since `--target=` may come after it.
+            // tamnd/rucc#2275.
+            "-mcmodel=small" => cmodel = rucc_target::CodeModel::Small,
+            "-mcmodel=kernel" => cmodel = rucc_target::CodeModel::Kernel,
             // clang's spellings of the deployment target, which it takes over a version in the
             // tuple. gcc on a Mac takes the first. A target that is not Apple ignores it, as
             // clang does, so a makefile that always passes it still builds for Linux.
@@ -2285,8 +2290,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("-mcmodel=") => {
                 return Err(err(format!(
-                    "{arg}: this compiler emits the small code model and no other, see \
-                     spec/12-targets.md"
+                    "{arg}: this compiler emits the small and kernel code models and no other, \
+                     see spec/04-driver-and-cli.md section 4.3"
                 )));
             }
             // GCC's own scripting language for how the driver builds a command line.
@@ -2516,6 +2521,26 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         (_, Some(true)) => Pic::Library,
         _ => Pic::Absolute,
     };
+    // The kernel model promises every address is a 32 bit number sign extended, which is only
+    // true of code linked where it runs, so it is refused beside anything position independent,
+    // the default included, with the words gcc uses. A distribution's gcc builds position
+    // independent executables by default and says the same about `-mcmodel=kernel` on its own.
+    if cmodel == rucc_target::CodeModel::Kernel {
+        if opts.target.arch != rucc_target::Arch::X86_64
+            || opts.target.os.object_format() != ObjectFormat::Elf
+        {
+            return Err(err(format!(
+                "-mcmodel=kernel: {} has no kernel code model, which is x86-64 ELF's",
+                opts.target
+            )));
+        }
+        if opts.pic != Pic::Absolute {
+            return Err(err(
+                "code model kernel does not support PIC mode: add -fno-pie or -fno-pic".to_owned(),
+            ));
+        }
+    }
+    opts.code_model = cmodel;
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -5142,6 +5167,34 @@ mod tests {
     }
 
     #[test]
+    fn the_kernel_code_model_is_taken_beside_position_dependent_code_on_x86_64_elf() {
+        let (opts, _) = compile(&[LINUX, "-mcmodel=kernel", "-fno-PIE", "-c", "a.c"]);
+        assert_eq!(opts.code_model, rucc_target::CodeModel::Kernel);
+        // In either order, since the target and the link are settled after the loop.
+        let (opts, _) = compile(&["-fno-pic", "-mcmodel=kernel", LINUX, "-c", "a.c"]);
+        assert_eq!(opts.code_model, rucc_target::CodeModel::Kernel);
+        // And the last one on the line counts.
+        let (opts, _) = compile(&[LINUX, "-mcmodel=kernel", "-mcmodel=small", "-c", "a.c"]);
+        assert_eq!(opts.code_model, rucc_target::CodeModel::Small);
+        assert_eq!(compile(&[LINUX, "-c", "a.c"]).0.code_model, rucc_target::CodeModel::Small);
+    }
+
+    #[test]
+    fn the_kernel_code_model_is_refused_where_it_cannot_be_true() {
+        // gcc's words, and the default is a position independent executable here as it is on a
+        // distribution's gcc.
+        for line in [&[LINUX, "-mcmodel=kernel"][..], &[LINUX, "-mcmodel=kernel", "-fPIC"]] {
+            let mut line = line.to_vec();
+            line.extend(["-c", "a.c"]);
+            let message = refused(&line);
+            assert!(message.contains("code model kernel does not support PIC mode"), "{message}");
+        }
+        let arm =
+            refused(&["--target=aarch64-linux-gnu", "-mcmodel=kernel", "-fno-pic", "-c", "a.c"]);
+        assert!(arm.contains("no kernel code model"), "{arm}");
+    }
+
+    #[test]
     fn the_pic_and_pie_families_are_settled_the_way_gcc_settles_them() {
         let pic = |line: &[&str]| {
             let mut line = line.to_vec();
@@ -6679,7 +6732,7 @@ mod tests {
         assert!(refused(&["-Wa,--execstack", "-c", "a.c"]).contains("`--execstack`"));
         assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate preprocessor"));
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
-        assert!(refused(&["-mcmodel=kernel", "-c", "a.c"]).contains("small code model"));
+        assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("kernel code models"));
         assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
         // The word size the target does not have, which is a target this compiler was not asked
         // for rather than a flag it does not know.
@@ -7942,8 +7995,6 @@ mod tests {
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
         for (flag, issue) in [
-            ("-mcmodel=kernel", 2275),
-            ("-fno-PIE", 2276),
             ("-mno-sse", 2277),
             ("-mno-80387", 2277),
             ("-mgeneral-regs-only", 2277),

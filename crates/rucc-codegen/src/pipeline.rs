@@ -30,8 +30,8 @@ use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
-    BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, MachineInsts, PhysReg, RegFile,
-    ShortInsts, TargetInfo, TimingInsts, aarch64, x86_64,
+    BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, MachineInsts, PhysReg,
+    RegFile, ShortInsts, TargetInfo, TimingInsts, aarch64, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -291,6 +291,10 @@ pub struct Flags {
     pub frame_pointer: bool,
     /// Whether the red zone may be used, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
+    /// Where the code and static data are promised to be, which `-mcmodel=` says. Under the kernel
+    /// model an address of a name wanted as a value is written as a number, and one with an index
+    /// added to it is one instruction. See [`crate::fold::absolute`].
+    pub code_model: CodeModel,
     /// Whether a frame is taken a page at a time, which `-fstack-clash-protection` asks for.
     pub stack_clash: bool,
     /// Whether every address an indirect branch may arrive at opens with a landing pad, which
@@ -367,6 +371,7 @@ impl Default for Flags {
         Self {
             frame_pointer: false,
             red_zone: true,
+            code_model: CodeModel::Small,
             stack_clash: false,
             landing: false,
             profile: Profile::No,
@@ -556,7 +561,14 @@ pub fn compile_recording(
         arguments: &mut stack.arguments,
         dynamic: &mut stack.dynamic,
     };
-    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending);
+    fold::addresses(
+        &mut func,
+        machine.insts,
+        machine.shapes,
+        names,
+        &mut pending,
+        flags.code_model,
+    );
 
     // After that fold rather than before it, because what this puts inside an arithmetic
     // instruction is a load's addressing mode and a load whose address is still a `lea` in front of
@@ -568,6 +580,11 @@ pub fn compile_recording(
     // the same run written a second way.
     combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
+    // Last of the three, so that a name read or written directly is still read from the
+    // instruction pointer and only an address wanted as a value is written as a number.
+    if flags.code_model == CodeModel::Kernel {
+        fold::absolute(&mut func, machine.insts, names);
+    }
 
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by

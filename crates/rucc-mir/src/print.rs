@@ -321,6 +321,7 @@ impl<'a> Printer<'a> {
             Reach::Table => self.out.push_str("got "),
             Reach::Thread => self.out.push_str("thread "),
             Reach::Section => self.out.push_str("secrel "),
+            Reach::Absolute => self.out.push_str("abs "),
         }
         // The same, and in front of that: which storage the address is in is decided before
         // anything about where in it, and an address in a segment names nothing else anyway.

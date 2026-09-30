@@ -21,7 +21,7 @@
 
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
-use rucc_target::{Arch, Env, Feature, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, CodeModel, Env, Feature, Isa, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
 /// The name a diagnostic about the generated set points at.
@@ -127,6 +127,9 @@ pub struct Predef {
     /// Which link the output is for, from `-fPIC` and `-fPIE`. It decides `__PIE__`, since
     /// `__PIC__` is defined either way and says only that there are no absolute addresses.
     pub pic: Pic,
+    /// `-mcmodel=`, which decides whether `__code_model_small__` or `__code_model_kernel__` is
+    /// defined on x86-64.
+    pub code_model: CodeModel,
     /// `__DATE__` and `__TIME__`.
     pub timestamp: Timestamp,
     /// The glibc release the headers are, as the minor number alone, when they are ours.
@@ -171,6 +174,7 @@ impl Predef {
             opt_level: OptLevel::O0,
             hosted: true,
             pic: Pic::Executable,
+            code_model: CodeModel::Small,
             timestamp: Timestamp::now(),
             glibc_minor: None,
             trapping_math: true,
@@ -203,6 +207,7 @@ impl Predef {
             opt_level: opts.opt_level,
             hosted: opts.hosted,
             pic: opts.pic,
+            code_model: opts.code_model,
             timestamp: Timestamp::now(),
             glibc_minor: opts.glibc_minor,
             trapping_math: opts.trapping_math,
@@ -555,9 +560,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__SSE2_MATH__");
             d.flag("__k8");
             d.flag("__k8__");
-            // The small code model, which is the default and the only one a program gets without
-            // being told otherwise.
-            d.flag("__code_model_small__");
+            // Which code model, which is the small one unless `-mcmodel=kernel` said otherwise.
+            // A kernel header reads the second to know its addresses are in the top 2 GiB.
+            d.flag(match opts.code_model {
+                CodeModel::Small => "__code_model_small__",
+                CodeModel::Kernel => "__code_model_kernel__",
+            });
             // The MMX registers are not used on x86-64: the sixty four bit operations go
             // through SSE instead. gcc's own `xmmintrin.h` reads this to decide how to write
             // `_mm_maskmove_si64`, so a compiler that leaves it undefined is handed a

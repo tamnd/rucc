@@ -681,6 +681,7 @@ impl Assembler<'_> {
                                 Reach::Table => Reference::Got,
                                 Reach::Thread => Reference::Thread,
                                 Reach::Section => Reference::Section,
+                                Reach::Absolute => Reference::Signed,
                             };
                             wanted = Some((symbol, kind, i64::from(addr.disp)));
                         }
@@ -712,15 +713,25 @@ impl Assembler<'_> {
                 });
             }
 
+            // The address of a name under the kernel code model, which is the name as a number and
+            // is written as the immediate of a `movq`, the way gcc writes it. The four bytes of
+            // the immediate are the last four of the instruction.
+            let mut mnemonic = machine.mnemonic;
+            let immediate = mnemonic == "leaq"
+                && data.mem.is_some_and(|mem| absolute_only(&self.func[mem]))
+                && matches!(values.first(), Some(Value::Mem(_)));
+            if immediate {
+                mnemonic = "movq";
+                values[0] = Value::Imm(0);
+            }
             let start = self.text.bytes.len();
-            let holes =
-                x86_64::encode(machine.mnemonic, &values, &mut self.text.bytes).map_err(|why| {
-                    Error::Encode {
-                        func: self.name.to_owned(),
-                        opcode: spelled.to_owned(),
-                        why: why.to_string(),
-                    }
-                })?;
+            let holes = x86_64::encode(mnemonic, &values, &mut self.text.bytes).map_err(|why| {
+                Error::Encode {
+                    func: self.name.to_owned(),
+                    opcode: spelled.to_owned(),
+                    why: why.to_string(),
+                }
+            })?;
             let end = self.text.bytes.len();
 
             // A hole is either something outside the file, which is a relocation, or a block of
@@ -738,13 +749,15 @@ impl Assembler<'_> {
                     | Reference::GotKept
                     | Reference::Thread => holes.rip,
                     Reference::Section => holes.disp,
+                    Reference::Signed if immediate => Some(end - 4),
+                    Reference::Signed => holes.disp,
                     // An address written into an image rather than reached by an instruction, and
                     // how far something is from the front of one, which is what a table of data
                     // holds. Nothing above produces either, because every reference an instruction
-                    // makes is a distance from where the instruction ends. The field of an AArch64
-                    // instruction is not something this machine has.
+                    // makes is a distance from where the instruction ends or, under the kernel
+                    // code model, the four bytes above. The field of an AArch64 instruction is not
+                    // something this machine has.
                     Reference::Address { .. }
-                    | Reference::Signed
                     | Reference::Image
                     | Reference::Away
                     | Reference::Field(_) => {
@@ -755,7 +768,7 @@ impl Assembler<'_> {
                 let addend = match kind {
                     // Counted from the front of the section, so nothing about where the
                     // instruction ends comes into it.
-                    Reference::Section => disp,
+                    Reference::Section | Reference::Signed => disp,
                     _ => disp - i64::try_from(end - at).expect("an instruction this long"),
                 };
                 // How many bytes of the instruction come after the four the linker writes over,
@@ -816,10 +829,12 @@ impl Assembler<'_> {
         // fills them in, which is this file rather than the linker, and that is the caller's to
         // sort out: what it needs from here is that the address was written that way at all.
         let names = symbol.is_some() || amode.block.is_some() || amode.table.is_some();
-        let rip = names && base.is_none() && index.is_none();
+        let absolute = symbol.is_some() && amode.reach == Reach::Absolute;
+        let rip = names && base.is_none() && index.is_none() && !absolute;
         // Or a symbol's offset in its section added to a register, which is the linker's to fill
-        // in as well but is not counted from the instruction.
-        let linked = symbol.is_some() && amode.reach == Reach::Section;
+        // in as well but is not counted from the instruction. The symbol's own address under the
+        // kernel code model is the same four bytes, with or without registers added to it.
+        let linked = symbol.is_some() && matches!(amode.reach, Reach::Section | Reach::Absolute);
         let segment = amode.segment;
         let addr = Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment, linked };
         Ok((addr, if rip || linked { symbol } else { None }))
@@ -832,6 +847,16 @@ impl Assembler<'_> {
             .phys()
             .ok_or_else(|| Error::Virtual { func: self.name.to_owned(), opcode: opcode.to_owned() })
     }
+}
+
+/// Whether an address is a name's own address under the kernel code model and nothing else, no
+/// register and no segment, which is what a `leaq` of it is written as a `movq` of an immediate for.
+pub(crate) fn absolute_only(amode: &Amode) -> bool {
+    amode.reach == Reach::Absolute
+        && amode.symbol.is_some()
+        && amode.base.is_none()
+        && amode.index.is_none()
+        && amode.segment.is_none()
 }
 
 /// Which relocation a read of a slot of the global offset table asks for, from the bytes of the
@@ -1252,6 +1277,63 @@ mod tests {
                 symbol: "away".to_owned(),
                 kind: Reference::Got,
                 addend: -4,
+                after: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn the_address_of_a_name_under_the_kernel_model_is_a_movq_of_the_number() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_64"));
+            let here = names.intern("here");
+            func.build(block, lea)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem { disp: 8, ..Mem::absolute(here) })
+                .finish();
+        });
+        // `movq $here+8, %rax`, the form gcc writes, with the four bytes the machine sign extends
+        // at the end and the addend in the relocation rather than in them.
+        assert_eq!(hex(&text.bytes), "48 c7 c0 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 3,
+                symbol: "here".to_owned(),
+                kind: Reference::Signed,
+                addend: 8,
+                after: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn an_indexed_name_under_the_kernel_model_is_one_instruction() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
+            let tab = names.intern("tab");
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem {
+                    index: Some(Operand::read(Reg::physical(RDX), GPR)),
+                    scale: 8,
+                    disp: 16,
+                    ..Mem::absolute(tab)
+                })
+                .finish();
+        });
+        // `movq tab+16(,%rdx,8), %rax`: no base, so the four bytes after the index byte are the
+        // address, and they are `R_X86_64_32S` rather than anything counted from the instruction.
+        assert_eq!(hex(&text.bytes), "48 8b 04 d5 00 00 00 00");
+        assert_eq!(
+            text.relocs,
+            [Reloc {
+                at: 4,
+                symbol: "tab".to_owned(),
+                kind: Reference::Signed,
+                addend: 16,
                 after: 0
             }]
         );
