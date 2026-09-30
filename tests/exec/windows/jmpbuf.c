@@ -1,3 +1,4 @@
+/* x86_64 only: the jmp_buf it measures and aligns to sixteen is x86_64's */
 /* setjmp and longjmp through a jmp_buf in a struct, in a global and on the stack.
  *
  * mingw-w64 declares jmp_buf as an array of _JBTYPE, which is a sixteen byte struct that a typedef

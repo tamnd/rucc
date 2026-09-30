@@ -24,6 +24,11 @@ ran=0
 
 cd "$here"
 for src in *.c */*.c; do
+    # A program marked as one for x86_64 alone is not one AArch64 compiles.
+    if sed -n '1,3p' "$src" | grep -q '^/\* x86_64 only: '; then
+        echo "skip $src"
+        continue
+    fi
     flags=$(sed -n '1,3s|^/\* flags: \(.*\) \*/$|\1|p' "$src")
     read -r -a flags <<<"$flags"
     for opt in -O0 -O2; do

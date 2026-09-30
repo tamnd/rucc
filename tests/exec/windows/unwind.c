@@ -1,9 +1,15 @@
-/* An access violation eight rucc frames down, and a walk of the stack from inside the handler.
+/* gcc flags: -fno-omit-frame-pointer */
+/* An access violation below eight rucc frames, and a walk of the stack from inside the handler.
  *
  * RtlCaptureStackBackTrace unwinds through the exception dispatcher into the faulting frame and on
  * up, one RtlVirtualUnwind per frame, so every frame on the way has to have .pdata that covers it and
  * .xdata that says what its prologue did. Each return address is looked up with
- * RtlLookupFunctionEntry and matched to the function it is in. Document 06.4. */
+ * RtlLookupFunctionEntry and matched to the function it is in. Document 06.4.
+ *
+ * On AArch64 the walk follows the chain of frame records that x29 heads instead. That chain has the
+ * return address of every frame, but not the address the faulting function stopped at, so the fault
+ * is one call below the eight that are checked, and the reference build asks clang for mingw for the
+ * frame records it otherwise leaves out. */
 #include <windows.h>
 #include <stdio.h>
 
@@ -22,13 +28,15 @@ static volatile int *nowhere;
 __attribute__((noinline)) static void touch(volatile char *pad) { pad[1] = pad[0]; }
 
 /* Not a leaf, because a leaf that allocates nothing has no .pdata to find it by in any compiler's
- * output, and then the walk steps over it by reading the return address at the stack pointer. */
-__attribute__((noinline)) static int d7(volatile int *p, int x) {
+ * output, and then the walk steps over it by reading the return address at the stack pointer. On
+ * AArch64 it also needs a frame record of its own, which holds d7's return address. */
+__attribute__((noinline)) static int fault(volatile int *p, int x) {
     volatile char pad[32];
     pad[0] = (char)x;
     touch(pad);
     return *p + x + pad[1];
 }
+LEVEL(7, fault)
 LEVEL(6, d7)
 LEVEL(5, d6)
 LEVEL(4, d5)

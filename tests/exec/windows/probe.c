@@ -1,4 +1,5 @@
 /* msvc flags: -Wl,/stack:4194304 */
+/* gcc flags: -Wl,--stack,4194304 */
 /* A frame of one megabyte, touched at its far end first.
  *
  * Windows commits a thread's stack one page at a time behind a guard page, so a function whose frame
@@ -6,8 +7,8 @@
  * for. Without it the first write below lands past the guard page and the program dies with an
  * access violation instead of printing. Document 09.2.
  *
- * A megabyte is the whole stack lld-link reserves by default, where GNU ld reserves two, so on the
- * msvc row the link asks for four. */
+ * A megabyte is the whole stack lld reserves by default, for lld-link and for llvm-mingw on AArch64,
+ * where GNU ld reserves two, so the msvc row and the reference compilers ask for four. */
 #include <stdio.h>
 
 __attribute__((noinline)) static unsigned big(unsigned seed) {

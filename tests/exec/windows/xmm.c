@@ -1,3 +1,4 @@
+/* x86_64 only: the asm names the XMM registers */
 /* XMM6 to XMM15 belong to the caller on Windows x64, unlike every other x86-64 convention.
  *
  * The caller here is an asm block that puts known values in all ten, calls a function that has

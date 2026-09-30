@@ -410,6 +410,59 @@ jobs:
           path: objects-linux.txt
           retention-days: 7
 
+  # The same programs for aarch64-windows-gnu, under the Wine that Ubuntu builds for arm64, which
+  # runs an AArch64 Windows program directly with nothing emulated. This is the gate the native job
+  # below is held to as well, and it comes first because it needs no Windows machine. The x18 check
+  # reads what rucc writes for every program here and fails on any instruction that writes the
+  # register the TEB lives in.
+  wine-arm:
+    name: aarch64 windows programs under wine
+    needs: quick
+    runs-on: ubuntu-24.04-arm
+    # Wine 9.0 from Ubuntu 24.04 is built with return address signing, and its unwinder does not
+    # know the CFA opcode that says so, so the first exception in wineboot unwinds forever. Debian
+    # 13's Wine 10.0 knows it.
+    container: debian:trixie
+    # The container runs as root with HOME pointing elsewhere, which rustup and Wine both refuse,
+    # so the toolchain and the prefix are in places root owns.
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      WINEPREFIX: /root/wine
+    steps:
+      - name: install a toolchain, lld 19 and wine
+        run: |
+          apt-get update
+          apt-get install -y build-essential ca-certificates curl git lld-19 wine64
+          /usr/lib/wine/wine64 --version
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      # Made here with a limit on it, so that a prefix that does not come up says so in its own
+      # step rather than as the first program never finishing. Mono and Gecko are left out, since
+      # nothing here needs them and asking for them is what waits on a dialog.
+      - name: make the wine prefix
+        env:
+          WINEDEBUG: -all
+          WINEDLLOVERRIDES: mscoree,mshtml=
+        run: |
+          timeout -k 10 600 /usr/lib/wine/wine64 wineboot --init
+          timeout -k 10 300 /usr/lib/wine/wineserver64 -w
+      - name: build rucc, the sysroot and the runtime
+        run: |
+          cargo build --release --bin rucc
+          ./target/release/rucc --fetch aarch64-windows-gnu
+          cargo xtask builtins --target aarch64-windows-gnu
+      - name: nothing writes x18
+        run: tests/exec/windows/x18.sh "$PWD/target/release/rucc --target=aarch64-windows-gnu"
+      - name: run tests/exec/windows
+        # Run even when the x18 check fails, since the two say different things.
+        if: ${{ !cancelled() }}
+        env:
+          WINEDEBUG: -all
+        run: tests/exec/windows/run.sh "$PWD/target/release/rucc --target=aarch64-windows-gnu" /usr/lib/wine/wine64
+
   # The aarch64 row of the matrix in spec/15-testing.md section 15.7: cross compiled on this
   # machine and run under qemu user mode. The programs are the ones held against gcc above, built
   # by gcc for aarch64 as the reference and run under the same emulator, and rucc links them as
@@ -482,6 +535,48 @@ jobs:
         run: |
           PATH="$PATH:$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
           cargo xtask abi-differential --target x86_64-windows-gnu
+
+  # The same programs built by rucc on Windows on Arm, with llvm-mingw's clang for AArch64 as the
+  # reference, since MSYS2 has no GCC for it. llvm-mingw also brings the lld that rucc links with.
+  # The release is pinned by hash like every other download here.
+  windows-arm:
+    name: aarch64 windows programs on windows
+    needs: quick
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install rustup if the image has none
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -fsSL -o rustup-init.exe https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe
+            ./rustup-init.exe -y --profile minimal --default-toolchain none
+            echo "$USERPROFILE\.cargo\bin" >> "$GITHUB_PATH"
+          fi
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: fetch llvm-mingw
+        run: |
+          curl -fsSL -o llvm-mingw.zip https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-aarch64.zip
+          echo "a317514a7a63badd692032c0c2b8e165f630bbaebbe7a3254348051f43a64949  llvm-mingw.zip" | sha256sum -c -
+          unzip -q llvm-mingw.zip -d "$RUNNER_TEMP"
+          cygpath -w "$RUNNER_TEMP/llvm-mingw-20260922-ucrt-aarch64/bin" >> "$GITHUB_PATH"
+      - name: build rucc, the sysroot and the runtime
+        run: |
+          cargo build --release --bin rucc
+          ./target/release/rucc.exe --fetch aarch64-windows-gnu
+          cargo xtask builtins --target aarch64-windows-gnu
+      - name: nothing writes x18
+        run: tests/exec/windows/x18.sh "$PWD/target/release/rucc.exe --target=aarch64-windows-gnu"
+      - name: run tests/exec/windows with rucc
+        # Run even when the x18 check fails, since the two say different things.
+        if: ${{ !cancelled() }}
+        run: tests/exec/windows/run.sh "$PWD/target/release/rucc.exe --target=aarch64-windows-gnu"
+      - name: run tests/exec/windows with llvm-mingw clang
+        # Run even when the x18 check fails, since the two say different things.
+        if: ${{ !cancelled() }}
+        run: tests/exec/windows/run.sh aarch64-w64-mingw32-clang
 
   # rucc on Windows and rucc on Linux have to write the same object for the same source and
   # target. The two jobs above each hash what they wrote and this compares the lists.
