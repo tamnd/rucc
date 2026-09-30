@@ -52,7 +52,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
     ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
     RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, Spelled, TypeId, TypeKind,
-    integer_info, is_complete, is_function, is_void, layout, layout_record,
+    integer_info, is_complete, is_function, is_integer, is_void, layout, layout_record,
 };
 
 use super::{MEMBER, Subject};
@@ -631,15 +631,27 @@ impl Checker<'_> {
         // the final answer when the program wrote the underlying type, and a placeholder
         // otherwise, since what an enumeration is represented in is not known until its last
         // enumerator has been seen.
-        let provisional = fixed.unwrap_or(int);
+        //
+        // Without an underlying type the placeholder is `int` wherever the value fits in one, and
+        // otherwise it is the type of the expression that gave the value, or for one with no
+        // expression the type of the one before it, as C23 has it and gcc does in every mode. So
+        // in `enum { A = -1U, B = A - 1 }` the `A` that `B` reads is an `unsigned int`, the
+        // subtraction does not overflow, and the kernel's blk-mq.h writes exactly that.
+        let (int_low, int_high) = self.enum_bounds(Some(int));
+        let mut previous = int;
         let mut values = Vec::with_capacity(ast[list].len());
         let mut next = Some(0i128);
         for enumerator in &ast[list] {
+            let mut written = None;
             let value = match enumerator.value {
                 Some(expr) => {
-                    let value = self
-                        .enumerator_value(enumerator.name, expr)
-                        .unwrap_or_else(|| next.unwrap_or(high));
+                    let value = match self.enumerator_value(enumerator.name, expr) {
+                        Some((value, ty)) => {
+                            written = Some(ty);
+                            value
+                        }
+                        None => next.unwrap_or(high),
+                    };
                     self.check_enum_range(value, fixed, (low, high), enumerator.span)
                 }
                 // The enumerator after the greatest value there is has nowhere to go, which is
@@ -658,6 +670,12 @@ impl Checker<'_> {
                     }
                 },
             };
+            let provisional = match fixed {
+                Some(ty) => ty,
+                None if value >= int_low && value <= int_high => int,
+                None => self.enumerator_placeholder(value, written.unwrap_or(previous)),
+            };
+            previous = provisional;
             self.declare_enumerator(enumerator.name, value, provisional, enumerator.span);
             values.push((enumerator.name, value, enumerator.span));
             next = if value < high { Some(value + 1) } else { None };
@@ -680,7 +698,6 @@ impl Checker<'_> {
         // Nothing has been folded with the placeholder in between, since an enumerator is the
         // only thing that can refer to an earlier enumerator of the same enumeration and every
         // one of them holds a value rather than a type.
-        let (int_low, int_high) = self.enum_bounds(Some(int));
         for &(name, value, _) in &values {
             let ty = match fixed {
                 Some(ty) => ty,
@@ -717,8 +734,31 @@ impl Checker<'_> {
         value.clamp(low, high)
     }
 
-    /// The value an `= expression` gives an enumerator.
-    fn enumerator_value(&mut self, name: Symbol, expr: ast::ExprId) -> Option<i128> {
+    /// The type an enumerator too wide for an `int` has while the list is still being read.
+    ///
+    /// `ty` is the type of the expression that gave the value, or of the enumerator before it,
+    /// and is the answer when the value fits in it. One that does not fit is the first of the
+    /// wider types that holds it, signed first, which is where counting on past the end of an
+    /// `unsigned int` or a `long` lands in gcc.
+    fn enumerator_placeholder(&mut self, value: i128, ty: TypeId) -> TypeId {
+        let fits = |c: &mut Self, ty| {
+            let (low, high) = c.enum_bounds(Some(ty));
+            value >= low && value <= high
+        };
+        if is_integer(&self.types, ty) && fits(self, ty) {
+            return ty;
+        }
+        for kind in [IntKind::Long, IntKind::ULong] {
+            let wider = self.types.int(kind);
+            if fits(self, wider) {
+                return wider;
+            }
+        }
+        self.types.int(IntKind::ULong)
+    }
+
+    /// The value an `= expression` gives an enumerator, and the type of that expression.
+    fn enumerator_value(&mut self, name: Symbol, expr: ast::ExprId) -> Option<(i128, TypeId)> {
         // As a value and not as an lvalue, which is what `= side` needs when `side` is a named
         // constant: the folding answers about a read of one and has nothing to say about the
         // object itself. Nothing before named constants could tell the two apart, since no
@@ -729,8 +769,9 @@ impl Checker<'_> {
         if self.is_poisoned(value) {
             return None;
         }
+        let ty = self.tast[value].ty;
         match self.eval_integer(value) {
-            Ok(value) => Some(value),
+            Ok(folded) => Some((folded, ty)),
             Err(failure) => {
                 if !failure.poisoned {
                     let spelled = self.text(name).to_owned();
