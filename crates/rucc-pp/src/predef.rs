@@ -558,6 +558,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__x86_64");
             d.flag("__amd64__");
             d.flag("__amd64");
+            // Flag outputs, `"=@ccz"`, which the kernel's `CC_SET` uses when this is defined and
+            // replaces with a `set<cond>` of its own when it is not.
+            d.flag("__GCC_ASM_FLAG_OUTPUTS__");
             // One macro per extension the unit is built for, which is `__SSE__`, `__SSE2__`,
             // `__MMX__` and `__FXSR__` for the baseline every x86-64 has, and `__SSE4_2__` and
             // its relatives for what `-march=` and `-msse4.2` add. Only the extensions this
@@ -593,6 +596,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         Arch::Aarch64 => {
             d.flag("__aarch64__");
             d.flag("__AARCH64EL__");
+            d.flag("__GCC_ASM_FLAG_OUTPUTS__");
             d.set("__ARM_ARCH", "8");
             d.set("__ARM_ARCH_PROFILE", "'A'");
             d.set("__ARM_64BIT_STATE", "1");
@@ -1701,6 +1705,9 @@ mod tests {
         assert!(!has(&x86, "#define __aarch64__ 1"));
         assert!(has(&arm, "#define __aarch64__ 1"));
         assert!(!has(&arm, "#define __x86_64__ 1"));
+        for side in [&x86, &arm] {
+            assert!(has(side, "#define __GCC_ASM_FLAG_OUTPUTS__ 1"));
+        }
         assert!(has(&x86, "#define __linux__ 1") && has(&arm, "#define __linux__ 1"));
     }
 

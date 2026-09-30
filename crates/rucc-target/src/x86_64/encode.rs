@@ -1694,8 +1694,12 @@ static ENCODINGS: &[Encoding] = &[
     bytes("btcw", &RR, Word, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
     bytes("btcl", &RR, Long, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
     bytes("btcq", &RR, Quad, &[0x0F, 0xBB], pair(1, 0), NO_IMM),
-    // The same three on something in memory, which is the same opcode with the addressing byte
+    // The same four on something in memory, which is the same opcode with the addressing byte
     // pointing at an address rather than at a register, the way the arithmetic's memory rows are.
+    // The kernel's `test_bit` on a bit number it cannot see is `bt` on memory.
+    takes("btw", &IM, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 4), ImmSize::Ib),
+    takes("btl", &IM, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 4), ImmSize::Ib),
+    takes("btq", &IM, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 4), ImmSize::Ib),
     takes("btsw", &IM, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
     takes("btsl", &IM, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
     takes("btsq", &IM, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 5), ImmSize::Ib),
@@ -1705,6 +1709,9 @@ static ENCODINGS: &[Encoding] = &[
     takes("btcw", &IM, Fits::Byte, Word, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
     takes("btcl", &IM, Fits::Byte, Long, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
     takes("btcq", &IM, Fits::Byte, Quad, &[0x0F, 0xBA], ext(1, 7), ImmSize::Ib),
+    bytes("btw", &RM, Word, &[0x0F, 0xA3], pair(1, 0), NO_IMM),
+    bytes("btl", &RM, Long, &[0x0F, 0xA3], pair(1, 0), NO_IMM),
+    bytes("btq", &RM, Quad, &[0x0F, 0xA3], pair(1, 0), NO_IMM),
     bytes("btsw", &RM, Word, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
     bytes("btsl", &RM, Long, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
     bytes("btsq", &RM, Quad, &[0x0F, 0xAB], pair(1, 0), NO_IMM),
