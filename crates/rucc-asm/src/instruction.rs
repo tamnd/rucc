@@ -924,6 +924,16 @@ fn aliased(word: &str, mode: Mode) -> Option<String> {
         let letter = if mode == Mode::Bits32 { 'l' } else { 'q' };
         return Some(format!("{known}{letter}"));
     }
+    // The other way round for a call, a return, a jump and leaving, which the encoder knows without
+    // a letter and which gas takes with the one that matches the mode. The kernel writes `retq`
+    // and `callq` in a few hand written files.
+    let letter = if mode == Mode::Bits32 { "l" } else { "q" };
+    if let Some(known) = ["call", "ret", "jmp", "leave"]
+        .iter()
+        .find(|&&known| word.strip_prefix(known) == Some(letter))
+    {
+        return Some((*known).to_owned());
+    }
     let (prefix, rest) = ["cmov", "set", "j"]
         .iter()
         .find_map(|prefix| word.strip_prefix(prefix).map(|rest| (*prefix, rest)))?;
@@ -1519,6 +1529,24 @@ mod tests {
         assert_eq!(bytes("fprem"), [0xd9, 0xf8]);
         assert_eq!(bytes("fnstsw %ax"), [0xdf, 0xe0]);
         assert!(refused("fnstsw %bx").contains("ax"));
+    }
+
+    #[test]
+    fn the_instructions_the_x86_kernel_writes_by_hand() {
+        // Every expected sequence here is what GNU as 2.44 writes for the line.
+        assert_eq!(bytes("fdivl (%rax)"), [0xdc, 0x30]);
+        assert_eq!(bytes("fmull (%rax)"), [0xdc, 0x08]);
+        assert_eq!(bytes("fadds 4(%rax)"), [0xd8, 0x40, 0x04]);
+        assert_eq!(bytes("prefetchw (%rdi)"), [0x0f, 0x0d, 0x0f]);
+        assert_eq!(bytes("cmpxchg16b (%rdi)"), [0x48, 0x0f, 0xc7, 0x0f]);
+        assert_eq!(bytes("cmpxchg8b (%rdi)"), [0x0f, 0xc7, 0x0f]);
+        assert_eq!(bytes("movnti %eax, (%rdi)"), [0x0f, 0xc3, 0x07]);
+        assert_eq!(bytes("movnti %rax, 8(%rdi)"), [0x48, 0x0f, 0xc3, 0x47, 0x08]);
+        assert_eq!(bytes("vpmovzxbd (%rsi), %xmm1"), [0xc4, 0xe2, 0x79, 0x31, 0x0e]);
+        assert_eq!(bytes("vpmovzxbd %xmm2, %ymm3"), [0xc4, 0xe2, 0x7d, 0x31, 0xda]);
+        assert_eq!(bytes("retq"), [0xc3]);
+        assert_eq!(bytes("callq *%rax"), [0xff, 0xd0]);
+        assert_eq!(bytes("leaveq"), [0xc9]);
     }
 
     #[test]

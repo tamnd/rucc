@@ -24,6 +24,7 @@ A patch release on the way to building the Linux kernel. The KVM units for VMX a
 
 ### Fixed
 
+- The assembler writes `prefetch`, `prefetchw`, `cmpxchg8b`, `cmpxchg16b`, `movnti`, the x87 arithmetic with an operand in memory (`fadds` through `fdivrl`), and the AVX `vpmovzx` and `vpmovsx` widening moves, and takes `retq`, `callq`, `jmpq` and `leaveq`. All of them turn up in the x86-64 kernel, and every encoding was checked against GNU as.
 - An `asm` constant is only written into the template when it fits the range letter that allowed it, such as `N` for 0 to 255 on x86. One that does not fit goes in the register the constraint also names, the way gcc does it, so the kernel's `outb` to port 0x4d0 comes out as `outb %al, %dx` instead of an instruction the assembler refuses.
 - `__builtin_extract_return_addr` and `__builtin_frob_return_addr` are their argument, the way gcc has them on x86-64 and AArch64. The kernel's `vsprintf.c` calls the first.
 - A function declared with a parameter of an enumeration nobody has finished is taken, the way gcc takes it, as long as nothing calls it. The kernel's `irq.h` declares one, which stopped five units in an x86-64 tinyconfig build.
