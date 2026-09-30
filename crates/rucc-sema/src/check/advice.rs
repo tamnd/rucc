@@ -216,8 +216,13 @@ impl Checker<'_> {
                 self.thrown_away(lhs, false);
                 self.thrown_away(rhs, voided);
             }
+            // Only a statement expression that is the one statement, which is where gcc 14 still
+            // sees the call. With anything in front of it gcc says nothing, and the kernel's
+            // `drmm_mutex_init` is a `mutex_init` and then a call whose answer it leaves unread.
             ExprKind::StmtExpr(stmt) => {
-                if let Some(last) = self.last_value(stmt) {
+                let alone =
+                    matches!(self.tast[stmt], Stmt::Block(body) if self.tast[body].len() == 1);
+                if let Some(last) = self.last_value(stmt).filter(|_| alone) {
                     self.thrown_away(last, voided);
                 }
             }
