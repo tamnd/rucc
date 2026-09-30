@@ -37,7 +37,8 @@ use rucc_object::{
     Sort, Visibility,
 };
 use rucc_target::aarch64::{self, AAPCS64};
-use rucc_target::x86_64::{Mode, SYSV, gpr_named, nops};
+use rucc_target::x86;
+use rucc_target::x86_64::{Mode, SYSV, Width, gpr_named, nops};
 use rucc_target::{CallRegs, ObjectFormat};
 use rucc_tuple::Arch;
 
@@ -881,7 +882,7 @@ impl Reader {
                     len: 0,
                     sym,
                     rows: Vec::new(),
-                    cfa: if self.aarch64 { 0 } else { 8 },
+                    cfa: i32::try_from(self.conv().return_address).expect("a word"),
                     remembered: Vec::new(),
                     personality: None,
                     lsda: None,
@@ -969,7 +970,7 @@ impl Reader {
                 if word == "cfi_rel_offset" {
                     offset -= frame.cfa;
                 }
-                if offset >= 0 || offset % 8 != 0 {
+                if offset >= 0 || offset % self.conv().word as i32 != 0 {
                     return Err(bad(
                         "a register saved somewhere that is not a whole slot below the end of the \
                          frame, which is the only place this writes a rule for",
@@ -1216,8 +1217,8 @@ impl Reader {
         if encoding == crate::unwind::OMIT {
             return Ok(None);
         }
-        // Eight bytes of pointer, since both machines this reads are sixty four bit ones.
-        if crate::unwind::pointer_size(encoding, 8, word == "cfi_personality").is_none() {
+        let word_size = self.conv().word as u8;
+        if crate::unwind::pointer_size(encoding, word_size, word == "cfi_personality").is_none() {
             return Err(self.bad(&format!(
                 "a '.{word}' in encoding {encoding:#x}, which is not one the unwind table here \
                  can write"
@@ -1238,6 +1239,18 @@ impl Reader {
         i32::try_from(value).map_err(|_| self.bad(&format!("{value} is not a distance in a frame")))
     }
 
+    /// The calling convention whose state at a call every frame rule starts from, which is also
+    /// where the width of a slot and of a pointer in the unwind table come from.
+    fn conv(&self) -> &'static CallRegs {
+        if self.aarch64 {
+            &AAPCS64
+        } else if self.i386 {
+            &x86::SYSV
+        } else {
+            &SYSV
+        }
+    }
+
     /// The number DWARF gives a register a frame rule names, which a file may write either way.
     fn dwarf(&self, text: &str) -> Result<u16, Trouble> {
         let text = text.trim();
@@ -1250,6 +1263,19 @@ impl Reader {
             });
         }
         let name = text.strip_prefix('%').unwrap_or(text);
+        // The eight thirty two bit registers and `eip`, in i386's own numbering, which is not the
+        // order x86-64 gave the same registers.
+        if self.i386 {
+            if name == "eip" {
+                return Ok(x86::DWARF_RETURN_ADDRESS);
+            }
+            return gpr_named(name)
+                .filter(|&(reg, width)| width == Width::Long && reg.number() < 8)
+                .and_then(|(reg, _)| x86::SYSV.dwarf(x86::GPR, reg))
+                .ok_or_else(|| {
+                    self.bad(&format!("'{text}' is not a register a frame rule can name"))
+                });
+        }
         if name == "rip" {
             return Ok(SYSV.dwarf_return_address);
         }
@@ -2819,7 +2845,7 @@ impl Reader {
                 Some(Named { personality, lsda: frame.lsda.clone() })
             })
             .collect();
-        let conv: &CallRegs = if self.aarch64 { &AAPCS64 } else { &SYSV };
+        let conv = self.conv();
         let format = if self.macho { ObjectFormat::MachO } else { ObjectFormat::Elf };
         let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format, &named) else {
             return;
@@ -2845,7 +2871,8 @@ impl Reader {
             name: name.to_owned(),
             bytes: table.bytes,
             size,
-            align: 8,
+            // A pointer, which is what every record is padded to and what gas aligns it to.
+            align: u64::from(conv.word),
             shape,
             relocs: table.relocs,
             group: None,
@@ -6088,6 +6115,33 @@ g:
                 (8, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 8),
             ]
         );
+    }
+
+    /// The call frame table on i386 counts in words of four, keeps the return address in column
+    /// eight, and numbers the registers the way i386 does, which puts `%ebp` at five and `%ebx` at
+    /// three. The bytes are the ones gas 2.42 writes for the same lines.
+    #[test]
+    fn an_i386_frame_table_is_the_one_gas_writes() {
+        let read = i386(concat!(
+            "f:\n\t.cfi_startproc\n\tpushl %ebp\n\t.cfi_def_cfa_offset 8\n",
+            "\t.cfi_offset %ebp, -8\n\tmovl %esp, %ebp\n\t.cfi_def_cfa_register %ebp\n",
+            "\tpushl %ebx\n\t.cfi_offset %ebx, -12\n\tpopl %ebx\n\t.cfi_restore %ebx\n",
+            "\tpopl %ebp\n\t.cfi_def_cfa %esp, 4\n\tret\n\t.cfi_endproc\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x14, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x7c, 0x08, 0x01,
+            0x1b, 0x0c, 0x04, 0x04, 0x88, 0x01, 0, 0, 0x20, 0, 0, 0, 0x1c, 0, 0, 0,
+            0, 0, 0, 0, 0x07, 0, 0, 0, 0x00, 0x41, 0x0e, 0x08, 0x85, 0x02, 0x42, 0x0d,
+            0x05, 0x41, 0x83, 0x03, 0x41, 0xc3, 0x41, 0x0c, 0x04, 0x04, 0, 0,
+        ];
+        assert_eq!(bytes(&read, ".eh_frame"), gas);
+        let table = read.parts.iter().find(|part| part.name == ".eh_frame").expect("one");
+        let kinds: Vec<_> = table.relocs.iter().map(|reloc| (reloc.at, reloc.kind)).collect();
+        assert_eq!(kinds, [(32, Reference::Data)]);
+        assert_eq!(table.align, 4);
+        assert!(i386_refused("f:\n\t.cfi_startproc\n\t.cfi_offset %rbp, -8\n").contains("rbp"));
+        assert!(i386_refused("f:\n\t.cfi_startproc\n\t.cfi_offset %ebp, -6\n").contains("slot"));
     }
 
     /// An address with no registers in it is four bytes the linker fills with the address, and a
