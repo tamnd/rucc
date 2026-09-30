@@ -779,9 +779,17 @@ pub struct Stack {
     /// How many bytes the widest call in the function needs below the stack pointer for the
     /// arguments it passes there, or `None` for a function that makes no call at all.
     ///
-    /// `None` is a leaf, which is the function that may use the red zone and the one whose stack
-    /// pointer does not have to be left aligned for anybody.
+    /// `None` is a function that calls nothing, and a function whose calls all stay calls is not
+    /// a leaf, which is the function that may use the red zone and the one whose stack pointer does
+    /// not have to be left aligned for anybody. See [`Self::kept`].
     pub calls: Option<u32>,
+    /// Whether any of those calls stays a call, which is every one but the tail calls
+    /// [`crate::tail::jumps`] turns into jumps.
+    ///
+    /// A function whose every call became a jump is a leaf too. Nothing it does leaves a return
+    /// address below its frame, so it owes nobody an aligned stack pointer and has no link register
+    /// to put away, and gcc gives `int f(int a) { return g(a + 1); }` no frame at all.
+    pub kept: bool,
     /// The memory the function asked for itself, one entry for every `alloca` in it, in the order
     /// the walk reached them.
     pub locals: Vec<Local>,
@@ -878,13 +886,19 @@ impl Stack {
     #[must_use]
     pub fn layout<'a>(&'a self, base: Layout<'a>) -> Layout<'a> {
         Layout {
-            leaf: self.calls.is_none() && !self.saves_place,
+            leaf: !self.kept && !self.saves_place,
             outgoing: self.calls.unwrap_or(0),
             locals: &self.locals,
             grows: self.grown_at.is_some(),
             home: self.home,
             ..base
         }
+    }
+
+    /// Writes down a call that needs that many bytes below the stack pointer for its arguments.
+    fn call(&mut self, outgoing: u32) {
+        self.calls = Some(self.calls.unwrap_or(0).max(outgoing));
+        self.kept = true;
     }
 }
 
@@ -1795,8 +1809,7 @@ impl<'a> Lowering<'a> {
             let call = self.out.insts(block).last().expect("the call just built");
             self.unwinding.insert(inst, call);
         }
-        let calls = &mut self.stack.calls;
-        *calls = Some(calls.unwrap_or(0).max(made.outgoing));
+        self.stack.call(made.outgoing);
         // An eighty bit value came back on the x87 stack, and the one thing that has to happen
         // before anything else touches that stack is taking it off. So the `fstp` goes here, in
         // front of everything the block does next, and after it the value is in its slot and is
@@ -1828,6 +1841,7 @@ impl<'a> Lowering<'a> {
     /// back by instructions after the call. A call that is not written down stays a call and a
     /// return, which is what the IR said before `crate::tail::mark` read it.
     fn tail_called(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let kept = self.stack.kept;
         let outgoing = self.called(inst)?;
         let block = self.at.expect("a block is being filled");
         let call = self.out.insts(block).last().expect("the call just built");
@@ -1837,6 +1851,7 @@ impl<'a> Lowering<'a> {
         if outgoing == 0 && !x87 && self.sret().is_none() {
             let returns = self.out.insts(block).skip_while(|&at| at != call).skip(1).collect();
             self.stack.tails.push(crate::tail::Tail { call, returns });
+            self.stack.kept = kept;
         }
         Ok(())
     }
@@ -3074,8 +3089,7 @@ impl<'a> Lowering<'a> {
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
-        let calls = &mut self.stack.calls;
-        *calls = Some(calls.unwrap_or(0).max(made.outgoing));
+        self.stack.call(made.outgoing);
         let &[reg] = &made.results[..] else { return Err(self.unsupported(inst)) };
         self.regs[result.index()] = Some(reg);
         Ok(())
@@ -5225,8 +5239,7 @@ impl<'a> Lowering<'a> {
             build = build.operand(operand);
         }
         build.finish();
-        let calls = &mut self.stack.calls;
-        *calls = Some(calls.unwrap_or(0));
+        self.stack.call(0);
         for index in written {
             let place = places.get_mut(index).ok_or_else(refused)?;
             place.read = place.write;
@@ -6451,8 +6464,7 @@ impl<'a> Lowering<'a> {
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
-        let calls = &mut self.stack.calls;
-        *calls = Some(calls.unwrap_or(0).max(made.outgoing));
+        self.stack.call(made.outgoing);
 
         let back = self.stack.locals.len();
         self.stack.locals.push(Local { size: APPLY_BACK, align: varargs::VECTOR_SLOT });
