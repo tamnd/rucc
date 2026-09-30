@@ -308,3 +308,21 @@ fn a_small_number_cast_to_a_pointer_and_back_is_that_number() {
     let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], source);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// ext4 writes `failed_mount8: __maybe_unused` on a label only some configurations jump to. gcc
+/// gives the attribute to the label, so there is nothing to warn about under `-Werror`.
+#[test]
+fn an_attribute_after_a_label_is_the_label_s() {
+    let source = "int g(int);\n\
+        int f(int x) {\n\
+            if (x) goto out;\n\
+            x = g(x);\n\
+        out: __attribute__((__unused__))\n\
+            x = g(x);\n\
+            return x;\n\
+        }\n";
+    let out =
+        run(&["--target=x86_64-unknown-linux-gnu", "-Werror", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+}

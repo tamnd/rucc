@@ -395,6 +395,23 @@ impl Parser<'_> {
                 Pending::Label { name: Symbol::from_raw(self.cursor.bump().value), attrs }
             };
             self.expect_punct(Punct::Colon);
+            // A GNU attribute right after a named label is the label's, which is how the kernel
+            // writes `failed: __maybe_unused` on a label only some configurations jump to. gcc
+            // reads it that way rather than as an attribute on the statement that follows.
+            let label = match label {
+                Pending::Label { name, attrs } if self.at_keyword_attribute() => {
+                    let more = self.attributes();
+                    let attrs = if attrs.is_empty() {
+                        more
+                    } else {
+                        let mut all = self.ast[attrs].to_vec();
+                        all.extend_from_slice(&self.ast[more]);
+                        self.ast.add_attr_list(&all)
+                    };
+                    Pending::Label { name, attrs }
+                }
+                label => label,
+            };
             labels.push((label, at));
             at = self.cursor.span();
             attrs = self.leading_attributes();
