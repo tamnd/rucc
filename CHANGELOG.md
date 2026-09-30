@@ -5,6 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## Unreleased
 
 ### Added
+
 - A new pass, `rangetest`, reads comparisons of one value against constants joined by `and` and `or` as the set of values that passes and writes it back as the fewest tests (#2375). `x == 1 || x == 2 || x == 3` is one subtract and one comparison, `c >= '0' && c <= '9'` is one comparison, and a scattered set inside one word, like the whitespace characters, is a window comparison and one bit.
 
 ### Fixed
