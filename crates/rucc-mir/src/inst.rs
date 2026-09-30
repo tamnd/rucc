@@ -194,6 +194,12 @@ pub enum Reach {
     /// Windows thread finds its copy of a thread-local variable in the block `_tls_index` picks.
     /// See [`Mem::section`].
     Section,
+    /// The symbol's own address as a 32 bit number the machine sign extends, not counted from the
+    /// instruction pointer, which is `R_X86_64_32S`. Only code linked in the top 2 GiB of the
+    /// address space may write an address this way, which is `-mcmodel=kernel`, and what it buys is
+    /// that a register can be added to it: `sym(,%rdi,8)` indexes a static array in one
+    /// instruction, and `movq $sym, %rax` is the address itself. See tamnd/rucc#2275.
+    Absolute,
 }
 
 /// A memory addressing mode, as the instruction holds it.
@@ -402,6 +408,13 @@ impl Mem {
     #[must_use]
     pub const fn thread(symbol: Symbol) -> Self {
         Self { reach: Reach::Thread, ..Self::of(symbol) }
+    }
+
+    /// That symbol's own address as a number, which is how the kernel code model writes it. See
+    /// [`Reach::Absolute`].
+    #[must_use]
+    pub const fn absolute(symbol: Symbol) -> Self {
+        Self { reach: Reach::Absolute, ..Self::of(symbol) }
     }
 
     /// That symbol's offset in its own section, added to the address in that register.

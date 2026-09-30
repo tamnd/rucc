@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Arch, Env, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, CodeModel, Env, Isa, Os, TargetInfo, Triple};
 
 /// An optimisation level.
 ///
@@ -2066,6 +2066,9 @@ pub struct Options {
     /// makes the promise false, and every kernel build in the wild passes `-mno-red-zone` for
     /// exactly that reason. A convention without a red zone ignores this.
     pub red_zone: bool,
+    /// Where the code and static data are promised to be, which is `-mcmodel=`. The kernel model is
+    /// x86-64 ELF only and only beside `-fno-pic`, which the driver checks. tamnd/rucc#2275.
+    pub code_model: CodeModel,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2606,6 +2609,7 @@ impl Options {
             profile_data: Profile::default(),
             frame_pointer: None,
             red_zone: true,
+            code_model: CodeModel::Small,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 Arch::Aarch64 | Arch::Riscv64 => Isa::NONE,

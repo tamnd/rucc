@@ -963,6 +963,7 @@ fn generate(
     let flags = pipeline::Flags {
         frame_pointer: opts.keeps_frame_pointer(),
         red_zone: opts.red_zone,
+        code_model: opts.code_model,
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         profile: match profile {

@@ -125,7 +125,7 @@
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
-use rucc_target::{FrameInsts, MachineInsts, Role};
+use rucc_target::{CodeModel, FrameInsts, MachineInsts, Role};
 
 use crate::changes::{Changes, Plan, Reads};
 
@@ -296,7 +296,9 @@ pub fn addresses(
     machine: &MachineInsts,
     names: &mut Interner,
     pending: &mut Pending<'_>,
+    model: CodeModel,
 ) -> usize {
+    let absolute = model == CodeModel::Kernel;
     let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
     let sum = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sum)));
     let mut reads = Reads::of(func);
@@ -311,7 +313,7 @@ pub fn addresses(
         // writes what the address reads, or a reader turns up that cannot take it.
         let mut open: Map<mir::Reg, Open> = Map::default();
         for inst in func.insts(block).collect::<Vec<_>>() {
-            if let Some(ready) = offer(func, &mut open, inst) {
+            if let Some(ready) = offer(func, &mut open, inst, absolute) {
                 // The set is the whole of what this fold is: every reader takes the address and
                 // the address computation goes, and a set that is missing either half is one that
                 // works the address out twice. So it is proposed together and the target is asked
@@ -493,8 +495,13 @@ struct Open {
 /// can fold into, and one of those is enough, so the register is dropped rather than the read being
 /// passed over. Reading it twice in the one instruction counts as that too, since only one of the
 /// two reads is the memory operand and the other would be left naming a register nothing writes.
-fn offer(func: &mir::Func, open: &mut Map<mir::Reg, Open>, inst: mir::Inst) -> Option<Open> {
-    let folding = candidate(func, open, inst);
+fn offer(
+    func: &mir::Func,
+    open: &mut Map<mir::Reg, Open>,
+    inst: mir::Inst,
+    absolute: bool,
+) -> Option<Open> {
+    let folding = candidate(func, open, inst, absolute);
     let takes = |reg: mir::Reg| folding.as_ref().is_some_and(|fold| fold.base == reg);
     let refused: Vec<mir::Reg> = open
         .keys()
@@ -623,6 +630,46 @@ fn base_reg(func: &mir::Func, inst: mir::Inst) -> Option<mir::Reg> {
     Some(func[func[inst].operands].get(usize::from(amode.base?))?.reg)
 }
 
+/// Whether an address is the address of a name and nothing more: no register, no segment, and
+/// reached the ordinary way. Those are the ones the kernel code model can write as a number.
+fn named_alone(address: mir::Amode) -> bool {
+    address.symbol.is_some()
+        && address.reach == mir::Reach::Itself
+        && address.base.is_none()
+        && address.index.is_none()
+        && address.segment.is_none()
+        && address.block.is_none()
+        && address.table.is_none()
+}
+
+/// Marks what is left of the addresses of names as numbers, under the kernel code model, and gives
+/// back how many.
+///
+/// Run after [`addresses`] and after the loads and stores have taken what they can, so a name
+/// that is read or written directly is still read from the instruction pointer, `movl x(%rip)`,
+/// which is what gcc writes for the kernel too. What is left is a `lea` whose answer is wanted as a
+/// value, and that becomes `movq $sym, %rax` with `R_X86_64_32S`, where the small model would
+/// write `leaq sym(%rip), %rax`. The two are the same length and the same speed. The reason to
+/// write the first is that it is gcc's output, and that a kernel link checks every address of this
+/// kind fits in the top 2 GiB, which is the promise the model makes. tamnd/rucc#2275.
+pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
+    let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
+    let mut marked = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if func[inst].opcode != lea {
+                continue;
+            }
+            let Some(mem) = func[inst].mem else { continue };
+            if named_alone(func[mem]) {
+                func[mem].reach = mir::Reach::Absolute;
+                marked += 1;
+            }
+        }
+    }
+    marked
+}
+
 /// A fold that has been checked and not yet done.
 ///
 /// Everything the rewrite needs is worked out here rather than after the decision, so that the
@@ -648,7 +695,17 @@ struct Folding {
 /// the printer and the allocator both read. Dropping the ones the reader's own address named and
 /// putting the composed address's on the end keeps it, and the indices in the new addressing mode
 /// are worked out from the length rather than carried over.
-fn candidate(func: &mir::Func, open: &Map<mir::Reg, Open>, inst: mir::Inst) -> Option<Folding> {
+///
+/// Under the kernel code model a name's own address is a number the machine sign extends, so an
+/// address that is a name and nothing else does have room for the reader's index: `tab[i]` becomes
+/// `tab(,%rdi,8)` with `R_X86_64_32S`, which is what gcc writes for the kernel. That is `absolute`,
+/// and the composed address is marked as reaching the name that way. tamnd/rucc#2275.
+fn candidate(
+    func: &mir::Func,
+    open: &Map<mir::Reg, Open>,
+    inst: mir::Inst,
+    absolute: bool,
+) -> Option<Folding> {
     let base = base_reg(func, inst)?;
     let held = open.get(&base)?;
     let (from, address) = (held.from, held.address);
@@ -658,11 +715,16 @@ fn candidate(func: &mir::Func, open: &Map<mir::Reg, Open>, inst: mir::Inst) -> O
     // The machine scales one register and the two addresses between them can want two, so this is
     // where the second one is turned down. Whichever side the index came from decides what it is
     // multiplied by, so the operand and the scale are carried together.
+    let mut reach = address.reach;
     let scaled = match (address.index, reading.index) {
         (Some(_), Some(_)) => return None,
         // Nor an address that is a place in this function, which is reached from the instruction
         // pointer the way a symbol is and has no room for a register either.
         (None, Some(_)) if address.table.is_some() => return None,
+        (None, Some(_)) if absolute && named_alone(address) => {
+            reach = mir::Reach::Absolute;
+            reading.index.and_then(|at| reader.get(usize::from(at))).map(|op| (*op, reading.scale))
+        }
         (None, Some(_)) if address.symbol.is_some() || address.block.is_some() => return None,
         (Some(at), None) => Some((*taken.get(usize::from(at))?, address.scale)),
         (None, Some(at)) => Some((*reader.get(usize::from(at))?, reading.scale)),
@@ -677,6 +739,7 @@ fn candidate(func: &mir::Func, open: &Map<mir::Reg, Open>, inst: mir::Inst) -> O
         base: None,
         index: None,
         scale: scaled.map_or(1, |(_, scale)| scale),
+        reach,
         ..address
     };
 
@@ -718,6 +781,11 @@ mod tests {
     /// The lists are still there because the pass rewrites them, and a test that is about what it
     /// wrote in them builds its own rather than calling this.
     fn folds(func: &mut mir::Func, names: &mut Interner) -> usize {
+        folds_under(func, names, CodeModel::Small)
+    }
+
+    /// The same under a code model of the test's choosing.
+    fn folds_under(func: &mut mir::Func, names: &mut Interner, model: CodeModel) -> usize {
         let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
         addresses(
             func,
@@ -729,6 +797,7 @@ mod tests {
                 arguments: &mut arguments,
                 dynamic: &mut growable,
             },
+            model,
         )
     }
 
@@ -1044,6 +1113,76 @@ mod tests {
 
         assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A static array indexed, which is a `lea` of the name and a load that adds the index to it.
+    /// The small model reaches the name from the instruction pointer and has no room for the
+    /// index, so the two stay apart. The kernel model writes the name as a number and the index
+    /// goes beside it, `tab+8(,%rdi,8)`, which is what gcc writes for the kernel.
+    #[test]
+    fn a_name_takes_the_reader_s_index_under_the_kernel_model_and_not_otherwise() {
+        let build = |names: &mut Interner| {
+            let (_, mut func, block) = empty();
+            let address = func.new_vreg(GPR);
+            let index = func.new_vreg(GPR);
+            let value = func.new_vreg(GPR);
+            let lea = op(names, FRAME.lea);
+            let load = op(names, "mov_rm_64");
+            let tab = names.intern("tab");
+            func.build(block, lea).def(address, GPR).mem(mir::Mem::of(tab)).finish();
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(
+                    mir::Mem::at(mir::Operand::read(address, GPR))
+                        .indexed(mir::Operand::read(index, GPR), 8)
+                        .plus(8),
+                )
+                .finish();
+            (func, block, index)
+        };
+        let mut names = Interner::new();
+        let (mut small, _, _) = build(&mut names);
+        assert_eq!(folds_under(&mut small, &mut names, CodeModel::Small), 0);
+
+        let (mut kernel, block, index) = build(&mut names);
+        assert_eq!(folds_under(&mut kernel, &mut names, CodeModel::Kernel), 1);
+        let shape = shape(&kernel, &names, block);
+        let [(_, amode)] = &shape[..] else { panic!("one instruction left: {shape:?}") };
+        assert_eq!(amode.reach, mir::Reach::Absolute);
+        assert_eq!((amode.base, amode.scale, amode.disp), (None, 8, 8));
+        assert_eq!(names.resolve(amode.symbol.expect("the name")), "tab");
+        let load = kernel.insts(block).next().expect("the load");
+        assert_eq!(address_regs(&kernel, load), [index]);
+    }
+
+    /// What is left of the address of a name is marked as a number under the kernel model, and
+    /// nothing with a register or a slot in it is.
+    #[test]
+    fn only_the_address_of_a_name_alone_is_marked_as_a_number() {
+        let (mut names, mut func, block) = empty();
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_64");
+        let here = names.intern("here");
+        let away = names.intern("away");
+        let base = func.new_vreg(GPR);
+        for mem in [
+            mir::Mem::of(here).plus(4),
+            mir::Mem::got(away),
+            mir::Mem::at(mir::Operand::read(base, GPR)).plus(8),
+        ] {
+            let to = func.new_vreg(GPR);
+            func.build(block, lea).def(to, GPR).mem(mem).finish();
+        }
+        let to = func.new_vreg(GPR);
+        func.build(block, load).def(to, GPR).mem(mir::Mem::of(here)).finish();
+
+        assert_eq!(absolute(&mut func, &FRAME, &mut names), 1);
+        let reaches: Vec<mir::Reach> =
+            shape(&func, &names, block).into_iter().map(|(_, amode)| amode.reach).collect();
+        assert_eq!(
+            reaches,
+            [mir::Reach::Absolute, mir::Reach::Table, mir::Reach::Itself, mir::Reach::Itself]
+        );
     }
 
     /// Two readers and one of them is in another block, which is the same refusal as the single
@@ -1485,7 +1624,10 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (vec![(local, 3)], Vec::new(), Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        assert_eq!(addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending), 1);
+        assert_eq!(
+            addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, CodeModel::Small),
+            1
+        );
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
@@ -1522,7 +1664,8 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (Vec::new(), vec![(local, 7)], Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        let folded = addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending);
+        let folded =
+            addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, CodeModel::Small);
         assert!(locals.is_empty(), "an argument is owed off the other list");
         (folded, func.insts(block).collect(), arguments)
     }

@@ -204,14 +204,6 @@ pub(crate) const TABLE: &[Row] = &[
     refused("-gz=zlib-gnu", "the debug sections are written uncompressed", Some(2288)),
     refused("-gz=zstd", "the debug sections are written uncompressed", Some(2288)),
     // x86-64.
-    only(
-        X86,
-        refused(
-            "-mcmodel=kernel",
-            "this compiler emits the small code model and no other, see spec/12-targets.md",
-            Some(2275),
-        ),
-    ),
     only(X86, refused("-mno-sse", NO_VECTOR, Some(2277))),
     only(X86, refused("-mno-sse2", NO_VECTOR, Some(2277))),
     only(X86, refused("-mno-mmx", NO_VECTOR, Some(2277))),

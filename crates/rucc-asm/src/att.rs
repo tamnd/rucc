@@ -62,6 +62,7 @@ use rucc_tuple::Arch;
 
 use crate::Error;
 use crate::a64;
+use crate::bytes::absolute_only;
 use crate::data::{Globals, Piece, Variable};
 use crate::format::{Directives, binding, visibility};
 use crate::unwind::Prologue;
@@ -849,10 +850,18 @@ impl Writer<'_> {
                     },
                 });
             }
+            // The address of a name under the kernel code model is the name as a number, and gcc
+            // writes it as the immediate of a `movq` rather than as a `leaq` of an address with
+            // no registers in it, which is a byte shorter and the same `R_X86_64_32S`.
+            let mut mnemonic = machine.mnemonic;
+            if mnemonic == "leaq" && data.mem.is_some_and(|mem| absolute_only(&func[mem])) {
+                mnemonic = "movq";
+                args[0] = format!("${}", args[0]);
+            }
             if args.is_empty() {
-                let _ = writeln!(self.out, "\t{}", machine.mnemonic);
+                let _ = writeln!(self.out, "\t{mnemonic}");
             } else {
-                let _ = writeln!(self.out, "\t{}\t{}", machine.mnemonic, args.join(", "));
+                let _ = writeln!(self.out, "\t{mnemonic}\t{}", args.join(", "));
             }
         }
         Ok(())
@@ -907,6 +916,9 @@ impl Writer<'_> {
                 Reach::Thread => out.push_str("@GOTTPOFF"),
                 // How far into its section, which is how far into a thread's copy of `.tls`.
                 Reach::Section => out.push_str("@SECREL32"),
+                // The address itself as a number, which needs no suffix and no `(%rip)`: gas
+                // writes `R_X86_64_32S` for four bytes of it the machine sign extends.
+                Reach::Absolute => {}
             }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
@@ -945,7 +957,10 @@ impl Writer<'_> {
                 let _ = write!(out, ",{reg},{}", amode.scale);
             }
             out.push(')');
-        } else if amode.symbol.is_some() || amode.block.is_some() || amode.table.is_some() {
+        } else if (amode.symbol.is_some() && amode.reach != Reach::Absolute)
+            || amode.block.is_some()
+            || amode.table.is_some()
+        {
             out.push_str("(%rip)");
         }
         Ok(out)
@@ -1448,6 +1463,32 @@ mod tests {
         // this time is not an address at all: it is how far into a thread's own block the variable
         // sits, and what makes it an address is the addition that follows it.
         assert_eq!(body(&text), ["movq\taway@GOTTPOFF(%rip), %rax"]);
+    }
+
+    #[test]
+    fn a_name_under_the_kernel_model_is_written_as_a_number() {
+        let text = write(|func, names| {
+            let block = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_64"));
+            let load = Opcode::new(names.intern("x64.mov_rm_64"));
+            let here = names.intern("here");
+            let tab = names.intern("tab");
+            func.build(block, lea)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem { disp: 4, ..Mem::absolute(here) })
+                .finish();
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .mem(Mem {
+                    index: Some(Operand::read(Reg::physical(RCX), GPR)),
+                    scale: 8,
+                    ..Mem::absolute(tab)
+                })
+                .finish();
+        });
+        // What gcc writes for the kernel: the address as an immediate, and an index added to the
+        // name with no `(%rip)`, both of which gas gives `R_X86_64_32S`.
+        assert_eq!(body(&text), ["movq\t$here+4, %rax", "movq\ttab(,%rcx,8), %rax"]);
     }
 
     #[test]
