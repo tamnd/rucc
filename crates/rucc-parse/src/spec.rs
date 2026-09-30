@@ -880,8 +880,15 @@ impl Parser<'_> {
         self.error("E0405", "two or more data types in declaration specifiers", span);
     }
 
+    /// The GNU attributes written in front of a declarator that is not the first of its list,
+    /// and an empty list when there are none. Only the keyword spelling: gcc does not take a
+    /// standard `[[...]]` there.
+    pub(crate) fn declarator_attributes(&mut self) -> AttrList {
+        if self.at_keyword_attribute() { self.attributes() } else { AttrList::EMPTY }
+    }
+
     /// Two attribute lists as one, copying only when both have something in them.
-    fn join_attrs(&mut self, first: AttrList, second: AttrList) -> AttrList {
+    pub(crate) fn join_attrs(&mut self, first: AttrList, second: AttrList) -> AttrList {
         if first.is_empty() {
             return second;
         }
@@ -1032,11 +1039,15 @@ impl Parser<'_> {
         loop {
             let at = self.cursor.span();
             let before = self.cursor.index();
+            // Empty for the first member, whose attributes the specifiers have already taken, and
+            // the ones that belong to this member alone for the rest.
+            let before_name = self.declarator_attributes();
             let declarator =
                 if self.cursor.at_punct(Punct::Colon) { None } else { Some(self.declarator()) };
             let bits =
                 if self.cursor.eat_punct(Punct::Colon) { Some(self.const_expr()) } else { None };
-            let attrs = self.attributes();
+            let after = self.attributes();
+            let attrs = self.join_attrs(before_name, after);
             out.push(Member::Field(Field {
                 specs,
                 declarator,

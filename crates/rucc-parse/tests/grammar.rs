@@ -550,6 +550,24 @@ fn an_attribute_after_a_declarator_does_not_start_a_definition() {
 }
 
 #[test]
+fn an_attribute_in_front_of_a_later_declarator_is_that_declarators() {
+    // The kernel's blk-iocost.c writes `u64 __maybe_unused old_debt, __maybe_unused old_delay;`,
+    // and gcc gives the second attribute to the second name alone.
+    let out =
+        parsed("int __attribute__((unused)) a, __attribute__((unused)) b __attribute__((cold));");
+    let Decl::Var { specs, declarators } = only_decl(&out) else {
+        panic!("expected a declaration")
+    };
+    assert_eq!(out.ast[specs].attrs.len(), 1);
+    assert_eq!(out.ast[declarators].len(), 2);
+    assert!(out.ast[declarators][0].attrs.is_empty());
+    assert_eq!(out.ast[declarators][1].attrs.len(), 2);
+
+    // And the same in a member list.
+    assert!(complaints("struct S { int m, __attribute__((aligned(16))) n; };").is_empty());
+}
+
+#[test]
 fn a_standard_attribute_after_the_name_is_the_declarations_and_not_an_array() {
     let out = parsed("int x [[maybe_unused]];");
     let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
