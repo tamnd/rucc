@@ -4851,10 +4851,13 @@ impl<'a> Lowering<'a> {
                     continue;
                 }
                 // Another one in memory, whose address is read as a register the text puts in
-                // parentheses. One in the frame or in a named address space has no register that
-                // says all of where it is, so it is refused.
+                // parentheses. One in the frame has its address put in a register first, since
+                // only one operand can be the instruction's own and be named from the stack
+                // pointer. The kernel's `has_fpu` hands `fnstsw` and `fnstcw` two locals as `"+m"`.
+                // One in a named address space has no register that says all of where it is, so
+                // it is refused.
                 if operand.memory && !a64 {
-                    if self.local_of(value).is_some() || self.segment(inst).is_some() {
+                    if self.segment(inst).is_some() {
                         return Err(refused());
                     }
                     let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
