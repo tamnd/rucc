@@ -294,7 +294,7 @@ options:
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -fstack-usage, -time   keep the .i and .s, write a .su, time each step
-  --target=<triple>      generate code for <triple>, which a name like <triple>-rucc also does
+  --target=<triple>      generate code for <triple>, as the names <triple>-rucc and <triple>-gcc do
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
                          safety-summary, type-granules
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
@@ -3795,14 +3795,31 @@ fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
 /// The target a program name asks for, the way `aarch64-linux-gnu-gcc` is gcc for that target.
 ///
 /// `program` is the path the compiler was started as. The name without its directory and without a
-/// trailing `.exe` has to end in `-rucc`, and what comes before that has to be a target this
-/// compiler knows, or there is no answer and the name means nothing. A link named `my-rucc` is
-/// therefore just rucc and not an error.
+/// trailing `.exe` has to end in `-rucc`, `-gcc`, `-gcc-<version>` or `-cc`, and what comes before
+/// that has to read as a target, or there is no answer and the name means nothing. A link named
+/// `my-rucc` or `ccache-gcc` is therefore just rucc and not an error.
+///
+/// The gcc spellings are there for cross builds that put a prefix in front of `gcc`, which is how
+/// the Linux kernel's `CROSS_COMPILE=aarch64-linux-gnu-` reaches the compiler, and Debian installs
+/// the same compiler again as `aarch64-linux-gnu-gcc-14`. The prefix is read with the target model
+/// that knows every architecture a triple can name, not only the ones rucc generates code for, so
+/// `i686-linux-gnu-gcc` implies `--target=i686-linux-gnu` and that is refused by name. Compiling
+/// for the host instead would hand a 32 bit build a 64 bit object with no word said about it.
 pub fn target_from_program(program: &str) -> Option<String> {
     let name = program.rsplit(['/', '\\']).next()?;
     let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
-    let triple = name.strip_suffix("-rucc")?;
-    triple.parse::<Triple>().ok()?;
+    let triple = name
+        .strip_suffix("-rucc")
+        .or_else(|| name.strip_suffix("-gcc"))
+        .or_else(|| name.strip_suffix("-cc"))
+        .or_else(|| {
+            let (front, version) = name.rsplit_once('-')?;
+            let versioned = !version.is_empty()
+                && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                && version.as_bytes()[0].is_ascii_digit();
+            front.strip_suffix("-gcc").filter(|_| versioned)
+        })?;
+    triple.parse::<TargetTuple>().ok()?;
     Some(triple.to_owned())
 }
 
@@ -5068,7 +5085,51 @@ mod tests {
         assert_eq!(t("/usr/local/bin/rucc"), None);
         assert_eq!(t("my-rucc"), None);
         assert_eq!(t("sparc64-linux-gnu-rucc"), None);
-        assert_eq!(t("aarch64-linux-gnu-gcc"), None);
+    }
+
+    #[test]
+    fn a_cross_gcc_name_picks_the_target_in_front_of_it() {
+        let t = |p: &str| target_from_program(p);
+        assert_eq!(t("aarch64-linux-gnu-gcc").as_deref(), Some("aarch64-linux-gnu"));
+        assert_eq!(t("/usr/bin/x86_64-linux-gnu-gcc").as_deref(), Some("x86_64-linux-gnu"));
+        assert_eq!(t("i686-linux-gnu-gcc").as_deref(), Some("i686-linux-gnu"));
+        assert_eq!(t("aarch64-linux-gnu-gcc-14").as_deref(), Some("aarch64-linux-gnu"));
+        assert_eq!(t("x86_64-linux-gnu-gcc-14.2").as_deref(), Some("x86_64-linux-gnu"));
+        assert_eq!(t("riscv64-linux-gnu-cc").as_deref(), Some("riscv64-linux-gnu"));
+        assert_eq!(t(r"C:\bin\x86_64-w64-mingw32-gcc.exe").as_deref(), Some("x86_64-w64-mingw32"));
+        assert_eq!(t("gcc"), None);
+        assert_eq!(t("ccache-gcc"), None);
+        assert_eq!(t("x86_64-linux-gnu-gcc-ar"), None);
+        assert_eq!(t("x86_64-linux-gnu-gcc-"), None);
+        assert_eq!(t("sparc64-linux-gnu-gcc"), None);
+    }
+
+    #[test]
+    fn a_cross_gcc_name_compiles_for_its_target_and_a_written_target_still_wins() {
+        let target = |program: &str, line: &[&str]| {
+            let mut all: Vec<String> = target_from_program(program)
+                .map(|triple| format!("--target={triple}"))
+                .into_iter()
+                .collect();
+            all.extend(args(line));
+            match parse_args(&all) {
+                Ok(Action::Compile { opts, .. }) => Ok(opts.target),
+                Ok(_) => panic!("expected a compile"),
+                Err(e) => Err(e.message),
+            }
+        };
+        let aarch64: Triple = "aarch64-unknown-linux-gnu".parse().unwrap();
+        let x86_64: Triple = "x86_64-unknown-linux-gnu".parse().unwrap();
+        assert_eq!(target("aarch64-linux-gnu-gcc", &["-c", "a.c"]), Ok(aarch64));
+        assert_eq!(target("x86_64-linux-gnu-gcc", &["-c", "a.c"]), Ok(x86_64));
+        assert_eq!(
+            target("aarch64-linux-gnu-gcc", &["--target=x86_64-linux-gnu", "-c", "a.c"]),
+            Ok(x86_64)
+        );
+        // No i686 back end yet, so the name is refused with the triple it implied rather than
+        // quietly building for the host.
+        let e = target("i686-linux-gnu-gcc", &["-c", "a.c"]).unwrap_err();
+        assert!(e.contains("i686-linux-gnu"), "{e}");
     }
 
     #[test]
