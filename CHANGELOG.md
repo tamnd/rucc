@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The nightly run builds SQLite's veryquick suite for `aarch64-windows-gnu` natively on `windows-11-arm` with rucc and with llvm-mingw's clang, over a Tcl clang builds, and fails when a test fails only in rucc's build. `tests/sqlite/windows.sh` takes `ARCH=aarch64` and `REF_CC`, and runs without Wine under a Windows shell. (#2071)
 - The AArch64 assembler reads and encodes the Advanced SIMD instructions, so the listings gcc writes at `-O2` and `-O3`, where it vectorizes loops, now assemble. That covers every lane layout from `8b` to `2d`, single lanes like `v0.s[1]`, register lists like `{v0.16b - v3.16b}`, and the arithmetic, compare, shift, widening, narrowing, permute, reduction, by-element, immediate move and structure load and store families. Each word was checked against GNU as on nearly two thousand lines, and every line GNU as refuses from the same list is refused too.
 - The AArch64 assembler encodes `adc`, `adcs`, `sbc`, `sbcs`, `ngc` and `ngcs`, which gcc writes for sixteen byte integer arithmetic.
+- The target description knows i386: `i686` triples parse, and the i386 register file and its System V convention are written down, with the eight general purpose registers, `xmm0` to `xmm7`, the x87 stack, the psABI's DWARF numbers, which registers a call preserves, returns in `eax`, `edx:eax` and `st0`, and `ebx` kept out of the allocator's hands under position independent code. Nothing generates i386 code from it yet (#2247).
 
 ### Changed
 
