@@ -178,7 +178,48 @@ pub struct LinkOptions {
     pub os_version: Option<rucc_tuple::Version>,
     /// `-gz`, which the linker is told so that what it writes stays compressed.
     pub compress: Compress,
+    /// `-bundle`, which asks an Apple linker for an `MH_BUNDLE`: a file nothing links against and
+    /// a program loads with `dlopen`, which is what every Postgres module is on a Mac.
+    ///
+    /// Apart from [`LinkOptions::shared`] because the two are different files. `-shared` and
+    /// `-dynamiclib` are a library that other links name, and `-bundle` beside either of them is
+    /// refused the way clang refuses it.
+    pub bundle: bool,
+    /// The Apple linker flags the driver takes as its own, each with its argument when it has one,
+    /// in the order they were written: `-install_name`, `-bundle_loader`,
+    /// `-exported_symbols_list` and the rest of [`APPLE_FLAGS`].
+    ///
+    /// Kept as written rather than as the words `ld64` is given, because three of them are spelt
+    /// differently to the linker and are only allowed on a dynamic library, and both are decided
+    /// in [`darwin_line`] where the kind of file is known. Only an Apple target has any of them:
+    /// the driver refuses them for any other.
+    pub apple: Vec<(String, Option<String>)>,
 }
+
+/// The Apple linker flags the driver takes itself, and whether each has an argument.
+///
+/// These are the ones clang's Darwin driver hands to `ld64` and that a build writes on the compiler
+/// line rather than behind `-Wl,`. Postgres writes `-install_name`, `-compatibility_version`,
+/// `-current_version` and `-exported_symbols_list` in `Makefile.shlib` and `-bundle_loader` in
+/// `Makefile.darwin` and `meson.build`, and the rest are the ones a Mac build of anything else
+/// reaches for next. `-bundle` and `-dynamiclib` are not here because they choose the kind of file
+/// rather than being passed on.
+pub const APPLE_FLAGS: &[(&str, bool)] = &[
+    ("-bundle_loader", true),
+    ("-install_name", true),
+    ("-compatibility_version", true),
+    ("-current_version", true),
+    ("-exported_symbols_list", true),
+    ("-unexported_symbols_list", true),
+    ("-undefined", true),
+    ("-multiply_defined", true),
+    ("-framework", true),
+    ("-headerpad_max_install_names", false),
+    ("-dead_strip", false),
+    ("-flat_namespace", false),
+    ("-twolevel_namespace", false),
+    ("-bind_at_load", false),
+];
 
 impl LinkOptions {
     /// Whether gcc's `crtfastmath.o` goes on the line, which is its end file spec on x86-64.
@@ -1402,9 +1443,7 @@ pub fn darwin_line(
         "-o".to_owned(),
         output.to_owned(),
     ];
-    if opts.shared {
-        args.push("-dylib".to_owned());
-    }
+    args.extend(darwin_kind(opts)?);
     if opts.export_dynamic {
         args.push("-export_dynamic".to_owned());
     }
@@ -1425,6 +1464,44 @@ pub fn darwin_line(
     }
     if opts.wants_defaultlibs() {
         args.push("-lSystem".to_owned());
+    }
+    Ok(args)
+}
+
+/// The kind of file, and then the Apple flags the command line gave, as clang's Darwin driver hands
+/// them to `ld64`.
+///
+/// `-shared` is `-dynamiclib` here, as it is to clang on a Mac, and both are `-dylib` to the linker.
+/// `-bundle` is itself, and is refused beside either of them. The three flags that describe a
+/// dynamic library are given the names clang gives them, `-dylib_install_name` and the two
+/// versions, and are refused on anything else with clang's words, because `ld64` would otherwise
+/// take `-install_name` on a program and write nothing.
+fn darwin_kind(opts: &LinkOptions) -> Result<Vec<String>, Error> {
+    if opts.bundle && opts.shared {
+        return Err(Error::Cross {
+            why: "invalid argument '-bundle' not allowed with '-dynamiclib'".to_owned(),
+        });
+    }
+    let mut args = Vec::new();
+    if opts.bundle {
+        args.push("-bundle".to_owned());
+    } else if opts.shared {
+        args.push("-dylib".to_owned());
+    }
+    for (flag, value) in &opts.apple {
+        let word = match flag.as_str() {
+            "-install_name" => "-dylib_install_name",
+            "-compatibility_version" => "-dylib_compatibility_version",
+            "-current_version" => "-dylib_current_version",
+            other => other,
+        };
+        if word != flag.as_str() && !opts.shared {
+            return Err(Error::Cross {
+                why: format!("invalid argument '{flag}' only allowed with '-dynamiclib'"),
+            });
+        }
+        args.push(word.to_owned());
+        args.extend(value.iter().cloned());
     }
     Ok(args)
 }
@@ -2208,6 +2285,110 @@ mod tests {
         };
         let args = line(mac(), &opts, &one("a.o"), "a.out").expect("a line");
         assert_eq!(args[3..6], ["macos", "12", "12"]);
+    }
+
+    /// The words after `-o <file>` on a Mac link, which is where the kind of file and the Apple
+    /// flags go, up to the first object.
+    fn mac_kind(opts: LinkOptions) -> Result<Vec<String>, Error> {
+        let opts = LinkOptions {
+            sysroot: Some(an_sdk("Kinds.sdk", Some("{\"Version\": \"15.2\"}"))),
+            no_builtins_lib: true,
+            ..opts
+        };
+        let args = line(mac(), &opts, &one("a.o"), "out")?;
+        let from = args.iter().position(|arg| arg == "out").expect("the output") + 1;
+        let to = args.iter().position(|arg| arg == "a.o").expect("the object");
+        Ok(args[from..to].to_vec())
+    }
+
+    fn apple(flags: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        flags.iter().map(|(flag, value)| ((*flag).to_owned(), value.map(str::to_owned))).collect()
+    }
+
+    /// What Postgres's `Makefile.shlib` writes for libpq on a Mac, which is `-dynamiclib` with the
+    /// name the library is found by, its two versions and the list of what it exports, and the
+    /// words clang's Darwin driver hands `ld64` for each.
+    #[test]
+    fn a_mac_dynamic_library_gets_its_name_versions_and_exports() {
+        let opts = LinkOptions {
+            shared: true,
+            apple: apple(&[
+                ("-install_name", Some("@rpath/libpq.5.dylib")),
+                ("-compatibility_version", Some("5")),
+                ("-current_version", Some("5.18")),
+                ("-exported_symbols_list", Some("exports.list")),
+                ("-headerpad_max_install_names", None),
+            ]),
+            ..LinkOptions::default()
+        };
+        let args = mac_kind(opts).expect("a line");
+        let want = [
+            "-dylib",
+            "-dylib_install_name",
+            "@rpath/libpq.5.dylib",
+            "-dylib_compatibility_version",
+            "5",
+            "-dylib_current_version",
+            "5.18",
+            "-exported_symbols_list",
+            "exports.list",
+            "-headerpad_max_install_names",
+        ];
+        assert_eq!(args, want);
+    }
+
+    /// What `Makefile.darwin` and `meson.build` write for every module, which is a bundle whose
+    /// undefined symbols are looked for in the server it will be loaded into.
+    #[test]
+    fn a_mac_bundle_is_checked_against_the_program_that_loads_it() {
+        let opts = LinkOptions {
+            bundle: true,
+            apple: apple(&[
+                ("-bundle_loader", Some("../../src/backend/postgres")),
+                ("-undefined", Some("error")),
+                ("-dead_strip", None),
+            ]),
+            ..LinkOptions::default()
+        };
+        let args = mac_kind(opts).expect("a line");
+        let want = [
+            "-bundle",
+            "-bundle_loader",
+            "../../src/backend/postgres",
+            "-undefined",
+            "error",
+            "-dead_strip",
+        ];
+        assert_eq!(args, want);
+    }
+
+    /// Both kinds at once, and a library's name on something that is not a library, are refused
+    /// with clang's words rather than handed to a linker that would either complain less clearly
+    /// or write the file without them.
+    #[test]
+    fn a_mac_link_refuses_what_clang_refuses() {
+        let both = LinkOptions { bundle: true, shared: true, ..LinkOptions::default() };
+        let Err(Error::Cross { why }) = mac_kind(both) else {
+            panic!("-bundle with -dynamiclib was taken");
+        };
+        assert!(why.contains("'-bundle' not allowed with '-dynamiclib'"), "{why}");
+        for flag in ["-install_name", "-compatibility_version", "-current_version"] {
+            let opts = LinkOptions {
+                bundle: true,
+                apple: apple(&[(flag, Some("1"))]),
+                ..LinkOptions::default()
+            };
+            let Err(Error::Cross { why }) = mac_kind(opts) else {
+                panic!("{flag} on a bundle was taken");
+            };
+            assert!(why.contains(&format!("'{flag}' only allowed with '-dynamiclib'")), "{why}");
+        }
+        // And a program takes the flags that are not about a library, such as an export list.
+        let opts = LinkOptions {
+            apple: apple(&[("-exported_symbols_list", Some("keep"))]),
+            ..LinkOptions::default()
+        };
+        assert_eq!(mac_kind(opts).expect("a line"), ["-exported_symbols_list", "keep"]);
     }
 
     #[test]
