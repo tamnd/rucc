@@ -1539,6 +1539,11 @@ fn describe(
         // the table a frame base is read through is there.
         frames: opts.unwinds() || frames.is_some(),
         mach_o: target.object_format == rucc_target::ObjectFormat::MachO,
+        version: if opts.dwarf_version == 4 {
+            rucc_debug::Version::Four
+        } else {
+            rucc_debug::Version::Five
+        },
     };
     let mut info = rucc_debug::write(&unit).map_err(|why| why.to_string())?;
     info.chunks.extend(frames.clone());

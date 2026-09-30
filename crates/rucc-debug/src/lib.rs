@@ -1,4 +1,4 @@
-//! DWARF 5 generation.
+//! DWARF 5 generation, and DWARF 4 for a build that asks for it.
 //!
 //! Design: `spec/11-asm-objects-debug.md`. Layer rank 10, see `spec/18-package-layout.md`.
 //!
@@ -57,7 +57,7 @@ mod line;
 mod shape;
 mod tree;
 
-pub use crate::line::{Error, Function, Row, Unit, write};
+pub use crate::line::{Error, Function, Row, Unit, Version, write};
 pub use crate::shape::{
     Bits, Constant, Encoding, Global, Held, Local, Member, Param, Place, Qualifier, Reach, Scope,
     Shape, Sig, Span, Spot,
