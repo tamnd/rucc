@@ -117,6 +117,12 @@ impl Outside {
     pub fn pointer_bytes(&self) -> Option<u64> {
         Some(u64::from(self.layout?.pointer_bits).div_ceil(8))
     }
+
+    /// Whether the byte at the lowest address of an integer is its low byte, where the module says.
+    #[must_use]
+    pub fn little_endian(&self) -> Option<bool> {
+        Some(self.layout?.little_endian)
+    }
 }
 
 #[cfg(test)]
