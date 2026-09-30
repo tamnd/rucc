@@ -97,6 +97,14 @@ pub struct AsmOperand<'a> {
     /// is what `i`, `n`, `g` and the immediate ranges say and what `r` does not. A template that
     /// writes the operand into its text spells a constant as a number only when this allows it.
     pub immediate: bool,
+    /// The range letter a constant has to fit to be handed over as itself, when a range letter is
+    /// the only thing in the constraint that allows one.
+    ///
+    /// Kept as the letter because what it means is the target's: `N` is a port number from 0 to
+    /// 255 on x86 and something else entirely on AArch64. The kernel's `outb` is `"Nd"`, and a
+    /// port above 255 is meant to go in `dx` rather than be written as a number `outb` has no
+    /// room for.
+    pub range: Option<char>,
 }
 
 /// The operands of one assembly statement, in the order the template counts them.
@@ -141,6 +149,7 @@ impl<'a> AsmOperands<'a> {
                 named: entry.named,
                 early: entry.early,
                 immediate: entry.immediate,
+                range: entry.range,
             });
         }
 
@@ -203,6 +212,7 @@ struct Entry<'a> {
     named: Option<&'a str>,
     early: bool,
     immediate: bool,
+    range: Option<char>,
 }
 
 impl<'a> Entry<'a> {
@@ -222,6 +232,8 @@ impl<'a> Entry<'a> {
         let mut several = false;
         let mut early = false;
         let mut immediate = false;
+        let mut open = false;
+        let mut range = None;
 
         let mut rest = text.char_indices().peekable();
         while let Some((at, letter)) = rest.next() {
@@ -260,13 +272,17 @@ impl<'a> Entry<'a> {
                 'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'A' | 'q' | 'Q' | 'f' | 't' | 'u' | 'x'
                 | 'y' | 'v' | 'l' | 'e' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => {
                     register = true;
-                    immediate |= matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'e' | 'z');
+                    if matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'e' | 'z') {
+                        immediate = true;
+                        open = true;
+                    }
                 }
                 // The immediate ranges, which are `I` through `P` on x86 and are a constant
                 // wherever they are read.
                 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' => {
                     register = true;
                     immediate = true;
+                    range.get_or_insert(letter);
                 }
                 // A matching constraint, which is the number of the output this shares a place
                 // with. More than one digit is a statement with more than ten operands, and the
@@ -318,6 +334,7 @@ impl<'a> Entry<'a> {
             named,
             early,
             immediate,
+            range: if open { None } else { range },
         })
     }
 }
@@ -345,6 +362,14 @@ mod tests {
         let read = AsmOperands::read("r,ri,a,n", &[], &values).expect("four inputs");
         let allowed: Vec<bool> = read.iter().map(|operand| operand.immediate).collect();
         assert_eq!(allowed, [false, true, false, true]);
+    }
+
+    #[test]
+    fn a_range_letter_is_kept_only_when_nothing_else_allows_any_constant() {
+        let values = values(3);
+        let read = AsmOperands::read("Nd,iN,r", &[], &values).expect("three inputs");
+        let ranges: Vec<Option<char>> = read.iter().map(|operand| operand.range).collect();
+        assert_eq!(ranges, [Some('N'), None, None]);
     }
 
     #[test]

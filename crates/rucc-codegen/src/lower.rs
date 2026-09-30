@@ -122,6 +122,21 @@ fn held_bits(ty: Type, address: u32) -> u32 {
     }
 }
 
+/// Whether an x86 range letter takes that constant, the ranges gcc gives them. A letter this does
+/// not bound, and no letter at all, take any constant.
+fn in_range(range: Option<char>, number: i128) -> bool {
+    match range {
+        Some('I') => (0..=31).contains(&number),
+        Some('J') => (0..=63).contains(&number),
+        Some('K') => (-128..=127).contains(&number),
+        Some('L') => matches!(number, 0xff | 0xffff | 0xffff_ffff),
+        Some('M') => (0..=3).contains(&number),
+        Some('N') => (0..=255).contains(&number),
+        Some('O') => (0..=127).contains(&number),
+        _ => true,
+    }
+}
+
 /// The letter an x86-64 instruction is suffixed with for an operand that many bits wide, which is
 /// what gcc's `%z` modifier spells.
 fn suffix_of(bits: u32) -> Option<char> {
@@ -4811,7 +4826,11 @@ impl<'a> Lowering<'a> {
                 let spelled = operand.result.is_none()
                     && operand.tied.is_none()
                     && operand.immediate
-                    && (self.number(value).is_some() || self.named_address(value).is_some());
+                    && match (self.number(value), operand.range) {
+                        (Some(number), range) => a64 || in_range(range, number),
+                        (None, None) => self.named_address(value).is_some(),
+                        (None, Some(_)) => false,
+                    };
                 // An operand in memory is spelled on AArch64 as the register its address is in,
                 // which is `[x3]` and is an address every instruction that takes one reads.
                 if (operand.memory && !a64 && hole == Some(index)) || spelled {
