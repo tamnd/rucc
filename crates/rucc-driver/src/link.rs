@@ -77,6 +77,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rucc_session::Compress;
 use rucc_sysroot::layout::{Kernel, Sysroot};
 use rucc_sysroot::{Chip, Crt, LinkMode, argv};
 use rucc_target::{Arch, Env, Os, Triple};
@@ -175,6 +176,8 @@ pub struct LinkOptions {
     /// [`None`] is the platform's default, the same one the object writer puts in
     /// `LC_BUILD_VERSION`, so that the two agree when neither was told anything.
     pub os_version: Option<rucc_tuple::Version>,
+    /// `-gz`, which the linker is told so that what it writes stays compressed.
+    pub compress: Compress,
 }
 
 impl LinkOptions {
@@ -1121,6 +1124,26 @@ pub fn line(
     items: &[Item],
     output: &str,
 ) -> Result<Vec<String>, Error> {
+    let mut args = line_for(target, opts, items, output)?;
+    // `-gz` on a link, which gcc hands to the linker so the output keeps its debug sections
+    // compressed too. Only an ELF linker has the option, and on the others the sections are left
+    // as the objects had them, which is what the object writer does on those formats as well.
+    if !matches!(target.os, Os::Darwin | Os::Windows) {
+        match opts.compress {
+            Compress::None | Compress::Zstd => {}
+            how => args.push(format!("--compress-debug-sections={how}")),
+        }
+    }
+    Ok(args)
+}
+
+/// [`line`], before `-gz` is added to it.
+fn line_for(
+    target: Triple,
+    opts: &LinkOptions,
+    items: &[Item],
+    output: &str,
+) -> Result<Vec<String>, Error> {
     if opts.relocatable {
         return relocatable_line(target, opts, items, output);
     }
@@ -1963,6 +1986,21 @@ mod tests {
         let opts = LinkOptions { relocatable: true, ..LinkOptions::default() };
         let args = line(linux(), &opts, &one("a.o"), "built-in.o").expect("a line");
         assert_eq!(args, ["-o", "built-in.o", "-m", "elf_x86_64", "-r", "a.o"]);
+    }
+
+    /// `-gz` reaches the linker as gcc passes it, so the linked file keeps its debug sections
+    /// compressed, and a Mac link is not handed an option ld64 does not have.
+    #[test]
+    fn compressed_debug_sections_are_asked_of_an_elf_linker_only() {
+        let zlib =
+            LinkOptions { relocatable: true, compress: Compress::Zlib, ..LinkOptions::default() };
+        let args = line(linux(), &zlib, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zlib"));
+        let gnu = LinkOptions { compress: Compress::ZlibGnu, ..zlib.clone() };
+        let args = line(linux(), &gnu, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zlib-gnu"));
+        let args = line(mac(), &zlib, &one("a.o"), "b.o").expect("ld64 takes -r");
+        assert!(args.iter().all(|arg| !arg.contains("compress")), "{args:?}");
     }
 
     #[test]

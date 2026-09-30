@@ -210,6 +210,27 @@ pub struct Info {
     /// resolved against the sections this file already has. Writing them in the order the producer
     /// hands them over keeps that a property of the list rather than of the writer.
     pub chunks: Vec<Chunk>,
+    /// How the sections are stored in an ELF file, which is what `-gz` asks. Every other format
+    /// gets them as they are.
+    pub compress: Compress,
+}
+
+/// How an ELF file stores its debug sections.
+///
+/// A debug section is much larger than the code it describes and is read by a debugger rather than
+/// by the program, so it can be stored compressed and unpacked by whatever reads it. A section
+/// that would come out no smaller is left as it is, the way gas leaves one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Compress {
+    /// As they are.
+    #[default]
+    None,
+    /// `-gz=zlib`: the section keeps its name, gains `SHF_COMPRESSED`, and starts with an
+    /// `Elf_Chdr` saying it is zlib and how large it was.
+    Zlib,
+    /// `-gz=zlib-gnu`: the older layout, where `.debug_info` becomes `.zdebug_info` and starts with
+    /// `ZLIB` and its size as eight big endian bytes.
+    ZlibGnu,
 }
 
 /// One debug section, with the name it goes in the file under.

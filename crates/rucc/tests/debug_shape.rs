@@ -1,19 +1,15 @@
-//! What the two flags about the shape of the debug output do, which is nothing yet, and the
-//! difference between nothing and silence.
+//! What the two flags about the shape of the debug output do.
 //!
 //! Design: `spec/04-driver-and-cli.md` sections 4.8 and 4.12.
 //!
 //! `-gz` says how the debug sections are compressed and `-gsplit-dwarf` says they go in a file of
-//! their own. There are debug sections now, and `crates/rucc-debug` says what is in them, but
-//! nothing compresses one and nothing writes a second file. So both are refused when they ask for
-//! something, and taken when they ask for what happens anyway: `-gz=none` and `-gno-split-dwarf`.
-//! The kernel's `DEBUG_INFO_COMPRESSED` probes with `-gz=zlib`, and a compiler that took it would
-//! have the kernel configured for sections that are not there.
+//! their own. zlib is written in both of its layouts, and `-gz=zstd` is refused until there is a
+//! zstd writer, since the kernel's `DEBUG_INFO_COMPRESSED_ZSTD` probes it and a compiler that took
+//! it would have the kernel configured for sections that are not there. Nothing writes a second
+//! file, so `-gsplit-dwarf` is refused and `-gno-split-dwarf` is taken.
 //!
-//! The case that is taken is asserted on bytes rather than on options, because the claim being made
-//! to a build that passes the flag is about the object, not about a field somewhere. It is asserted
-//! with `-g` on, so that what is being compared is two objects that have something to compress
-//! rather than two that have nothing.
+//! What is asserted is the object's section table, read by hand below, because the claim being
+//! made to a build that passes the flag is about the object and not about a field somewhere.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,34 +50,123 @@ fn run(dir: &Path, flags: &[&str], object: &str) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// One section of a 64 bit little endian ELF file: its name, its flags and its bytes.
+struct Section {
+    name: String,
+    flags: u64,
+    bytes: Vec<u8>,
+}
+
+/// Every section in the file, read from the header table the way a linker reads it.
+fn sections(file: &[u8]) -> Vec<Section> {
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([file[at], file[at + 1]]));
+    let u32_at = |at: usize| u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"));
+    let u64_at = |at: usize| u64::from_le_bytes(file[at..at + 8].try_into().expect("eight bytes"));
+    let table = u64_at(0x28) as usize;
+    let (size, count, names) = (u16_at(0x3a), u16_at(0x3c), u16_at(0x3e));
+    let header = |index: usize| table + index * size;
+    let strings = u64_at(header(names) + 24) as usize;
+    (0..count)
+        .map(|index| {
+            let at = header(index);
+            let name = strings + u32_at(at) as usize;
+            let end = file[name..].iter().position(|&byte| byte == 0).expect("a name ends");
+            let (offset, len) = (u64_at(at + 24) as usize, u64_at(at + 32) as usize);
+            Section {
+                name: String::from_utf8_lossy(&file[name..name + end]).into_owned(),
+                flags: u64_at(at + 8),
+                bytes: file[offset..offset + len].to_vec(),
+            }
+        })
+        .collect()
+}
+
+fn named<'a>(all: &'a [Section], name: &str) -> &'a Section {
+    all.iter().find(|section| section.name == name).unwrap_or_else(|| panic!("no {name}"))
+}
+
+/// `SHF_COMPRESSED`.
+const COMPRESSED: u64 = 0x800;
+
 #[test]
-fn asking_for_compressed_debug_sections_is_refused_and_asking_for_none_is_not() {
-    // Asking for no compression is asking for what is written anyway, so it is taken and the
-    // object is the one no flag produces.
+fn asking_for_no_compression_changes_nothing() {
     let dir = fixture("same");
     let (ok, said) = run(&dir, &["-g"], "plain.o");
     assert!(ok, "{said}");
     let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
     let (ok, said) = run(&dir, &["-g", "-gz=none"], "asked.o");
-    assert!(ok && said.is_empty(), "-gz=none: {said}");
     let asked = std::fs::read(dir.join("asked.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok && said.is_empty(), "-gz=none: {said}");
     assert_eq!(asked, plain, "-gz=none changed the object");
+}
 
-    // Asking for compression is refused with the issue that will do it, because the sections would
-    // come out as they went in.
-    for spelling in ["-gz", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
-        let (ok, said) = run(&dir, &["-g", spelling], "never.o");
-        assert!(!ok, "{spelling} is refused");
-        assert!(said.contains("#2288"), "{spelling}: {said}");
+/// `-gz` and `-gz=zlib` keep each section's name, mark it compressed, and start it with an
+/// `Elf64_Chdr` that says zlib and gives the size the section was before.
+#[test]
+fn zlib_marks_the_section_compressed_and_says_how_large_it_was() {
+    let dir = fixture("zlib");
+    let (ok, said) = run(&dir, &["-g"], "plain.o");
+    assert!(ok, "{said}");
+    let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
+    let plain = sections(&plain);
+    for spelling in ["-gz", "-gz=zlib"] {
+        let (ok, said) = run(&dir, &["-g", spelling], "packed.o");
+        assert!(ok && said.is_empty(), "{spelling}: {said}");
+        let packed = std::fs::read(dir.join("packed.o")).expect("the object was written");
+        let packed = sections(&packed);
+        let info = named(&packed, ".debug_info");
+        assert_eq!(info.flags & COMPRESSED, COMPRESSED, "{spelling}: not marked compressed");
+        let word = |at: usize| u64::from_le_bytes(info.bytes[at..at + 8].try_into().expect("8"));
+        assert_eq!(info.bytes[..4], [1, 0, 0, 0], "{spelling}: not ELFCOMPRESS_ZLIB");
+        assert_eq!(word(8), named(&plain, ".debug_info").bytes.len() as u64, "{spelling}");
+        assert_eq!(word(16), 1, "{spelling}: the alignment it had");
+        // A zlib stream with a 32 KiB window, right after the header.
+        assert_eq!(info.bytes[24], 0x78, "{spelling}");
+        assert!(info.bytes.len() < named(&plain, ".debug_info").bytes.len());
+        // The relocations stay as they were, counted into the section as it was before.
+        let relocs = named(&packed, ".rela.debug_info");
+        assert_eq!(relocs.bytes, named(&plain, ".rela.debug_info").bytes, "{spelling}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
-    // And a value nothing has heard of stops the compilation, so that a typo in a distribution's
+/// `-gz=zlib-gnu` is the older layout: the section is renamed to `.zdebug_*` and starts with
+/// `ZLIB` and its size in eight big endian bytes, with no flag.
+#[test]
+fn zlib_gnu_renames_the_section_and_gives_its_size_after_zlib() {
+    let dir = fixture("gnu");
+    let (ok, said) = run(&dir, &["-g"], "plain.o");
+    assert!(ok, "{said}");
+    let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
+    let (ok, said) = run(&dir, &["-g", "-gz=zlib-gnu"], "packed.o");
+    let packed = std::fs::read(dir.join("packed.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok && said.is_empty(), "{said}");
+    let (plain, packed) = (sections(&plain), sections(&packed));
+    assert!(packed.iter().all(|section| section.name != ".debug_info"));
+    let info = named(&packed, ".zdebug_info");
+    assert_eq!(info.flags & COMPRESSED, 0);
+    assert_eq!(&info.bytes[..4], b"ZLIB");
+    let size = u64::from_be_bytes(info.bytes[4..12].try_into().expect("eight bytes"));
+    assert_eq!(size, named(&plain, ".debug_info").bytes.len() as u64);
+    named(&packed, ".rela.zdebug_info");
+}
+
+#[test]
+fn zstd_and_a_name_nothing_has_heard_of_are_refused() {
+    let dir = fixture("never");
+    let (ok, said) = run(&dir, &["-g", "-gz=zstd"], "never.o");
+    assert!(!ok, "-gz=zstd is refused");
+    assert!(said.contains("#2288"), "{said}");
+
+    // A value nothing has heard of stops the compilation, so that a typo in a distribution's
     // flags is found here rather than by whoever later wonders why nothing got smaller.
     let (ok, said) = run(&dir, &["-gz=gzip"], "never.o");
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!ok, "a value outside the list is refused");
     assert!(said.contains("is not a way to compress"), "{said}");
-    assert!(said.contains("zstd"), "the refusal lists what would have worked: {said}");
+    assert!(said.contains("zstd"), "the refusal lists the names: {said}");
 }
 
 #[test]

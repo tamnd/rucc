@@ -598,7 +598,7 @@ mod tests {
         let abbrev = Chunk { name: ".debug_abbrev".to_owned(), bytes: vec![0; 32], relocs: vec![] };
         let offsets =
             Chunk { name: ".debug_str_offsets".to_owned(), bytes: vec![0; 8], relocs: vec![] };
-        let info = Info { chunks: vec![unit, abbrev, offsets] };
+        let info = Info { chunks: vec![unit, abbrev, offsets], ..Info::default() };
         let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         let bytes = write(&input, &target, &info).unwrap();
         let file = object::File::parse(&bytes[..]).unwrap();

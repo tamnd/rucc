@@ -44,8 +44,8 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Apart, Array, Binding, Data, EXCEPT_TABLE, Export, Holds, Info, Object, Output, Place,
-    Property, Reference, Reloc, Sections, Text, Visibility,
+    Alias, Apart, Array, Binding, Compress, Data, EXCEPT_TABLE, Export, Holds, Info, Object,
+    Output, Place, Property, Reference, Reloc, Sections, Text, Visibility,
 };
 use crate::{coff, elf};
 
@@ -761,8 +761,8 @@ pub fn write(
     // file already has.
     let mut named = Map::default();
     for chunk in &info.chunks {
-        let id = obj.add_section(Vec::new(), chunk.name.clone().into_bytes(), SectionKind::Debug);
-        obj.append_section_data(id, &chunk.bytes, 1);
+        let how = if flavour == Flavour::Elf { info.compress } else { Compress::None };
+        let id = crate::zlib::debug_section(&mut obj, chunk, how);
         named.insert(chunk.name.as_str(), id);
     }
     for chunk in &info.chunks {
@@ -1922,6 +1922,7 @@ mod tests {
                     relocs: vec![reloc(0, ".debug_abbrev", 4), reloc(4, "f", 8)],
                 },
             ],
+            ..Info::default()
         };
         let bytes =
             write(&calling("puts"), &Data::default(), &[], &target, Output::default(), &info)
