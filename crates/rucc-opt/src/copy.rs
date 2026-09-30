@@ -33,8 +33,7 @@
 //! that is when the operands are walked, once each, over the original names the copies are still
 //! holding.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{
     Block, BlockCall, Extra, ExtraKind, Func, Inst, InstData, Opcode, Type, Value, ValueList,
 };
@@ -50,9 +49,9 @@ use rucc_ir::{
 pub(crate) fn blocks(
     func: &mut Func,
     body: &[Block],
-    map: &mut HashMap<Value, Value>,
-) -> HashMap<Block, Block> {
-    let mut copies: HashMap<Block, Block> = HashMap::new();
+    map: &mut Map<Value, Value>,
+) -> Map<Block, Block> {
+    let mut copies: Map<Block, Block> = Map::default();
     for &block in body {
         copies.insert(block, func.create_block());
     }
@@ -96,8 +95,8 @@ fn one(
     func: &mut Func,
     into: Block,
     inst: Inst,
-    map: &mut HashMap<Value, Value>,
-    blocks: &HashMap<Block, Block>,
+    map: &mut Map<Value, Value>,
+    blocks: &Map<Block, Block>,
 ) -> Inst {
     let data = func[inst];
     let args: Vec<Value> = func[data.args].to_vec();
@@ -141,8 +140,8 @@ fn one(
 /// is what unrolling and splitting a loop do. The address still names the original, so a `goto *p`
 /// in the third copy of the body arrives in the first. tcc's `goto_test` jumps through a table of
 /// three labels in a loop that runs three times, and at `-O2` it never stopped.
-pub(crate) fn addressed(func: &Func) -> HashSet<Block> {
-    let mut taken: HashSet<Block> = func.named_blocks().map(|(block, _)| block).collect();
+pub(crate) fn addressed(func: &Func) -> Set<Block> {
+    let mut taken: Set<Block> = func.named_blocks().map(|(block, _)| block).collect();
     for block in func.blocks() {
         for inst in func.insts(block) {
             if func[inst].opcode != Opcode::BlockAddr {
@@ -182,9 +181,8 @@ pub(crate) fn edge_args(func: &Func, term: Inst, to: Block) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rucc_base::Interner;
+    use rucc_base::hash::Map;
     use rucc_ir::{
         Builder, Flags, Func, IntPred, Module, Opcode, Signature, Type, Value, verify_func,
     };
@@ -234,7 +232,7 @@ mod tests {
                 params.into_iter().chain(results)
             })
             .collect();
-        let mut map = HashMap::new();
+        let mut map = Map::default();
         let copies = blocks(&mut func, &body, &mut map);
         assert_eq!(copies.len(), body.len());
         for value in defined {
@@ -248,7 +246,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = pair(&mut names);
         let body: Vec<_> = func.blocks().collect();
-        let mut map = HashMap::new();
+        let mut map = Map::default();
         let copies = blocks(&mut func, &body, &mut map);
         let entry = copies[&body[0]];
         let term = func.terminator(entry).expect("the copied jump");
@@ -263,7 +261,7 @@ mod tests {
         let body: Vec<_> = func.blocks().collect();
         let held = func[body[1]].params[0];
         let seven = Builder::new(&mut func, body[0]).iconst(Type::int(32), 7);
-        let mut map = HashMap::from([(held, seven)]);
+        let mut map: Map<_, _> = [(held, seven)].into_iter().collect();
         let copies = blocks(&mut func, &body, &mut map);
         assert!(func[copies[&body[1]]].params.is_empty(), "spoken for, so no parameter of its own");
         assert_eq!(map[&held], seven, "and it still reads what it was told to read");
@@ -280,7 +278,7 @@ mod tests {
         // a parameter of its own, since the caller said nothing about that one.
         let body = vec![func.blocks().nth(1).expect("two blocks")];
         let original = func[body[0]].params[0];
-        let mut map = HashMap::new();
+        let mut map = Map::default();
         let copies = blocks(&mut func, &body, &mut map);
         let copy = copies[&body[0]];
         let held = func[copy].params[0];
@@ -313,7 +311,7 @@ mod tests {
         sound(&func, &mut names);
 
         let body = vec![header];
-        let mut map = HashMap::new();
+        let mut map = Map::default();
         let copies = blocks(&mut func, &body, &mut map);
         let copy = copies[&header];
         let term = func.terminator(copy).expect("the copied test");

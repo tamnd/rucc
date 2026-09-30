@@ -40,9 +40,8 @@
 //! conservative direction, so a test or a tool that builds a cache without a pipeline is slower
 //! rather than wrong.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{Attrs, DataLayout, Meta, Module};
 
 /// What one name in the module refers to, as much of it as the oracle asks about.
@@ -60,7 +59,7 @@ enum Named {
 #[derive(Clone, Debug, Default)]
 pub struct Outside {
     /// What each name the module defines or declares refers to.
-    names: HashMap<Symbol, Named>,
+    names: Map<Symbol, Named>,
     /// The node one level up from each metadata node, indexed the way the module's table is.
     parents: Vec<Option<Meta>>,
     /// What the module was built assuming, or nothing when this was built without a module.
@@ -71,7 +70,7 @@ impl Outside {
     /// Copies the four facts out of a module.
     #[must_use]
     pub fn of(module: &Module) -> Self {
-        let mut names = HashMap::new();
+        let mut names = Map::default();
         for id in module.funcs() {
             names.insert(module[id].name, Named::Func(module[id].attrs));
         }

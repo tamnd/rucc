@@ -43,9 +43,8 @@
 //! what the predictor was for: C error handling is `if (x) { report(); abort(); }` and it is the
 //! `abort` that shows up as unreachable.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_cost::heuristics::{
     PREDICT_CALL_NOT_TAKEN, PREDICT_COLD_CALL, PREDICT_CONTINUE_TAKEN, PREDICT_EXPECT,
     PREDICT_LOOP_EXIT_NOT_TAKEN, PREDICT_LOOP_GUARD_TAKEN, PREDICT_NEGATIVE_RETURN,
@@ -157,7 +156,7 @@ impl std::fmt::Display for Predictor {
 /// predictors that read it.
 #[derive(Debug, Clone, Default)]
 pub struct Callees {
-    known: HashMap<Symbol, AttrSet>,
+    known: Map<Symbol, AttrSet>,
 }
 
 impl Callees {
@@ -173,7 +172,7 @@ impl Callees {
     /// is the one the predictor most wants to know about.
     #[must_use]
     pub fn of_module(module: &Module) -> Self {
-        let mut known = HashMap::new();
+        let mut known = Map::default();
         for id in module.funcs() {
             let func = &module[id];
             known.insert(func.name, func.attrs.set);

@@ -137,8 +137,7 @@
 //! the same result by making the names uninterposable, which is a stronger thing to say and needs
 //! no promise.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{Block, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value};
 
@@ -246,8 +245,8 @@ impl Reach {
 /// and many call sites, which is the same shape [`crate::purity::Facts`] has.
 #[derive(Debug, Clone, Default)]
 pub struct Summaries {
-    nofree: HashSet<Symbol>,
-    reach: HashMap<Symbol, Reach>,
+    nofree: Set<Symbol>,
+    reach: Map<Symbol, Reach>,
 }
 
 impl Summaries {
@@ -264,7 +263,7 @@ impl Summaries {
     #[must_use]
     pub fn of_module(module: &Module, names: &Interner, pic: Pic) -> Self {
         let ids: Vec<FuncId> = module.funcs().collect();
-        let mut reach: HashMap<Symbol, Reach> = HashMap::new();
+        let mut reach: Map<Symbol, Reach> = Map::default();
         for &id in &ids {
             let func = &module[id];
             if func.is_declaration() {
@@ -281,7 +280,7 @@ impl Summaries {
         }
         // The same question again, for a name the module calls and has no function of any kind
         // for. See the module comment for why those exist and why the loop above cannot see them.
-        let present: HashSet<Symbol> = ids.iter().map(|&id| module[id].name).collect();
+        let present: Set<Symbol> = ids.iter().map(|&id| module[id].name).collect();
         for &id in &ids {
             let func = &module[id];
             for block in func.blocks() {
@@ -299,7 +298,7 @@ impl Summaries {
         // Read once and kept, because the fixed point below goes round the bodies as many times as
         // it has to and what each value is built out of does not change between the rounds. Only
         // the values some parameter reaches are in there, which is a small part of a function.
-        let bodies: Vec<(FuncId, HashMap<Value, Params>)> = ids
+        let bodies: Vec<(FuncId, Map<Value, Params>)> = ids
             .iter()
             .copied()
             .filter(|&id| !module[id].is_declaration() && trusted(&module[id], pic))
@@ -441,8 +440,8 @@ fn trusted(func: &Func, pic: Pic) -> bool {
 /// the bytes at that address rather than the parameter, and they are some other object's, so the
 /// walk stops there. That is what makes `free(p->next)` read as freeing something that is not `p`,
 /// which is both true and the answer that costs a check.
-fn derived(func: &Func, cfg: &Cfg) -> HashMap<Value, Params> {
-    let mut from: HashMap<Value, Params> = HashMap::new();
+fn derived(func: &Func, cfg: &Cfg) -> Map<Value, Params> {
+    let mut from: Map<Value, Params> = Map::default();
     let Some(entry) = func.entry() else { return from };
     // Values come out in the order they were made, which is a definition before its uses, so a body
     // with no loop in it settles in one pass and the loop is for the ones that have one.
@@ -470,13 +469,7 @@ fn derived(func: &Func, cfg: &Cfg) -> HashMap<Value, Params> {
 /// that reason rather than because anybody subscripts with a pointer. `p - q` is a `ptr_to_int` on
 /// each side and a subtract, and if the subtract stopped the walk then storing the difference would
 /// be storing something this had lost track of.
-fn source(
-    func: &Func,
-    cfg: &Cfg,
-    from: &HashMap<Value, Params>,
-    entry: Block,
-    value: Value,
-) -> Params {
+fn source(func: &Func, cfg: &Cfg, from: &Map<Value, Params>, entry: Block, value: Value) -> Params {
     let known = |of: Value| from.get(&of).copied().unwrap_or(Params::NONE);
     match func[value].def {
         // The parameters of the entry block are the function's parameters, and the index is the
@@ -526,7 +519,7 @@ fn source(
 ///
 /// `at` is what is known about the callees as the fixed point stands, so this is asked again every
 /// time one of them learns something, and the answer only ever grows.
-fn reaches(func: &Func, from: &HashMap<Value, Params>, at: &HashMap<Symbol, Reach>) -> Reach {
+fn reaches(func: &Func, from: &Map<Value, Params>, at: &Map<Symbol, Reach>) -> Reach {
     let known = |of: Value| from.get(&of).copied().unwrap_or(Params::NONE);
     // Freeing something no parameter reaches is the third field rather than nothing, because the
     // storage may still be the caller's: a pointer this function read out of a global is a pointer

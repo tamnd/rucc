@@ -14,8 +14,7 @@
 //! one, but narrower: a pass that goes through this can add a constant array and do nothing else
 //! to the module, which is what keeps it a function pass.
 
-use std::collections::HashSet;
-
+use rucc_base::hash::Set;
 use rucc_base::{Interner, Symbol};
 use rucc_ir::Type;
 
@@ -38,7 +37,7 @@ pub struct Table {
 #[derive(Debug)]
 pub struct ReadOnly<'a> {
     names: &'a mut Interner,
-    taken: &'a HashSet<Symbol>,
+    taken: &'a Set<Symbol>,
     pointer_bits: u32,
     measures: bool,
     next: u32,
@@ -54,7 +53,7 @@ impl<'a> ReadOnly<'a> {
     #[must_use]
     pub fn new(
         names: &'a mut Interner,
-        taken: &'a HashSet<Symbol>,
+        taken: &'a Set<Symbol>,
         pointer_bits: u32,
         next: u32,
     ) -> Self {
@@ -136,9 +135,8 @@ impl<'a> ReadOnly<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use rucc_base::Interner;
+    use rucc_base::hash::Set;
     use rucc_ir::Type;
 
     use super::ReadOnly;
@@ -146,7 +144,7 @@ mod tests {
     #[test]
     fn two_tables_get_two_names_and_a_taken_name_is_stepped_over() {
         let mut names = Interner::new();
-        let taken: HashSet<_> = [names.intern("CSWTCH.1")].into_iter().collect();
+        let taken: Set<_> = [names.intern("CSWTCH.1")].into_iter().collect();
         let mut data = ReadOnly::new(&mut names, &taken, 64, 0);
         let first = data.table(Type::int(8), vec![1, 2]);
         let second = data.table(Type::int(8), vec![3]);
@@ -160,7 +158,7 @@ mod tests {
     #[test]
     fn a_table_of_distances_is_four_byte_cells_named_like_any_other() {
         let mut names = Interner::new();
-        let taken = HashSet::new();
+        let taken = Set::default();
         let to = [names.intern("a"), names.intern("b")].map(Some);
         let mut data = ReadOnly::new(&mut names, &taken, 64, 0).measuring(true);
         assert!(data.measures());

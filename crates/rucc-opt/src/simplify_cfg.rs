@@ -148,9 +148,10 @@
 //! reads the graph as though they are not there, and a bisection that turned the obligation off
 //! would be bisecting over a function the rest of the optimizer does not believe in.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use rucc_base::Idx;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, BlockCall, Def, Extra, Func, Inst, Opcode, Value};
 
 use crate::copy::addressed;
@@ -222,7 +223,7 @@ impl Pass for SimplifyCfg {
         // Nothing bound, because this step asks where a branch goes whichever way control arrived
         // at it. Binding a block's parameters to one edge's arguments is the question
         // [`crate::thread`] asks, and it is a different question with a different answer.
-        let unbound = Bindings::new();
+        let unbound = Bindings::default();
         for block in func.blocks().collect::<Vec<Block>>() {
             let Some(term) = func.terminator(block) else { continue };
             let Some(taken) = taken(func, term, &unbound) else { continue };
@@ -243,7 +244,7 @@ impl Pass for SimplifyCfg {
             an.clear();
             sweep(func, an, &mut stats);
         }
-        let mut forward = HashMap::new();
+        let mut forward = Map::default();
         // Step three, and it keeps its own record of the edges rather than asking for the graph,
         // because it changes the edges as it goes and a cached answer would be about the shape the
         // function had one forwarder ago. The parameters nothing reads go first, for the reason
@@ -286,7 +287,7 @@ impl Pass for SimplifyCfg {
 /// is what this pass passes, since a branch it folds has to fold whichever way control arrived.
 /// [`crate::thread`] asks the same question one edge at a time and fills this in, which is the
 /// whole difference between folding a branch and threading one.
-pub(crate) type Bindings = HashMap<Value, Value>;
+pub(crate) type Bindings = Map<Value, Value>;
 
 /// The value this one stands for along the edge, which is itself when the edge says nothing.
 fn resolve(subst: &Bindings, value: Value) -> Value {
@@ -455,7 +456,7 @@ fn stranded(func: &Func, an: &mut Analyses) -> Vec<Block> {
 /// neither of them can find it again from the block it goes to. Redirecting one wants the slot in
 /// the pool, and taking a block parameter away wants the slot too, so this is what the step keeps
 /// instead of a [`crate::Cfg`].
-pub(crate) type Edges = HashMap<Block, Vec<(Block, Idx<BlockCall>)>>;
+pub(crate) type Edges = Map<Block, Vec<(Block, Idx<BlockCall>)>>;
 
 /// Every edge in the function, filed under the block it arrives at.
 ///
@@ -465,7 +466,7 @@ pub(crate) type Edges = HashMap<Block, Vec<(Block, Idx<BlockCall>)>>;
 /// Shared with [`crate::thread`], which edits edges as well and so wants the slot in the pool for
 /// the same reason this step does.
 pub(crate) fn incoming(func: &Func) -> Edges {
-    let mut edges: Edges = HashMap::new();
+    let mut edges: Edges = Map::default();
     for block in func.blocks() {
         let Some(term) = func.terminator(block) else { continue };
         for at in func.target_list(term).iter() {
@@ -492,7 +493,7 @@ fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     let live = live(func, entry, &addressed(func));
     let edges = incoming(func);
     let mut changed = false;
-    let mut gone: HashSet<Value> = HashSet::new();
+    let mut gone: Set<Value> = Set::default();
     for block in func.blocks().collect::<Vec<Block>>() {
         let mut taking = Vec::new();
         for (index, &param) in func[block].params.iter().enumerate() {
@@ -542,7 +543,7 @@ fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
 /// None, for the reason this module's documentation gives about the blocks a fold strands: this is
 /// the second half of a transformation that has already been paid for, and a budget that could
 /// stop between the two halves would hand the verifier a use with no definition.
-fn strand(func: &mut Func, mut gone: HashSet<Value>) {
+fn strand(func: &mut Func, mut gone: Set<Value>) {
     loop {
         let mut spread = false;
         for block in func.blocks().collect::<Vec<Block>>() {
@@ -579,11 +580,11 @@ fn strand(func: &mut Func, mut gone: HashSet<Value>) {
 /// The entry block's parameters are the function's own and are live by declaration rather than by
 /// use, and so are the parameters of a block whose address is taken, because an `indirect_br` is a
 /// way in that this reads from the wrong end.
-fn live(func: &Func, entry: Block, addressed: &HashSet<Block>) -> HashSet<Value> {
-    let mut where_from: HashMap<Value, (Block, usize)> = HashMap::new();
-    let mut live: HashSet<Value> = HashSet::new();
+fn live(func: &Func, entry: Block, addressed: &Set<Block>) -> Set<Value> {
+    let mut where_from: Map<Value, (Block, usize)> = Map::default();
+    let mut live: Set<Value> = Set::default();
     let mut work: Vec<Value> = Vec::new();
-    let seed = |value: Value, live: &mut HashSet<Value>, work: &mut Vec<Value>| {
+    let seed = |value: Value, live: &mut Set<Value>, work: &mut Vec<Value>| {
         if live.insert(value) {
             work.push(value);
         }
@@ -655,14 +656,14 @@ fn straighten(
     func: &mut Func,
     fuel: &mut Fuel,
     stats: &mut Stats,
-    forward: &mut HashMap<Value, Value>,
+    forward: &mut Map<Value, Value>,
 ) -> bool {
     let Some(entry) = func.entry() else { return false };
     let addressed = addressed(func);
     let mut edges = incoming(func);
     let mut work: VecDeque<Block> = func.blocks().collect();
-    let mut queued: HashSet<Block> = work.iter().copied().collect();
-    let mut gone: HashSet<Block> = HashSet::new();
+    let mut queued: Set<Block> = work.iter().copied().collect();
+    let mut gone: Set<Block> = Set::default();
     let mut changed = false;
     while let Some(block) = work.pop_front() {
         queued.remove(&block);
@@ -743,7 +744,7 @@ fn straighten(
 }
 
 /// Puts a block back on the worklist, if it is not on it already.
-fn requeue(block: Block, work: &mut VecDeque<Block>, queued: &mut HashSet<Block>) {
+fn requeue(block: Block, work: &mut VecDeque<Block>, queued: &mut Set<Block>) {
     if queued.insert(block) {
         work.push_back(block);
     }
@@ -768,7 +769,7 @@ fn redundant(
     func: &Func,
     block: Block,
     ins: Option<&Vec<(Block, Idx<BlockCall>)>>,
-    forward: &HashMap<Value, Value>,
+    forward: &Map<Value, Value>,
 ) -> Vec<(usize, Value)> {
     let Some(ins) = ins.filter(|ins| !ins.is_empty()) else { return Vec::new() };
     let mut found = Vec::new();
@@ -844,7 +845,7 @@ fn forwards(
     func: &Func,
     block: Block,
     entry: Block,
-    addressed: &HashSet<Block>,
+    addressed: &Set<Block>,
     edges: &Edges,
 ) -> Option<(Inst, Block, Vec<Value>)> {
     if block == entry || addressed.contains(&block) || !func[block].params.is_empty() {
@@ -921,8 +922,8 @@ fn chains(func: &Func, an: &mut Analyses) -> Vec<Vec<Block>> {
     let cfg = an.cfg(func);
     let Some(entry) = cfg.entry() else { return Vec::new() };
     let addressed = addressed(func);
-    let mut below = HashMap::new();
-    let mut is_below = HashSet::new();
+    let mut below = Map::default();
+    let mut is_below = Set::default();
     for block in func.blocks() {
         let Some(term) = func.terminator(block) else { continue };
         if func[term].opcode != Opcode::Jump {
@@ -978,7 +979,7 @@ pub(crate) fn merge_below(func: &mut Func, an: &mut Analyses, head: Block, into:
     if func[term].opcode != Opcode::Jump || addressed(func).contains(&into) {
         return false;
     }
-    let mut forward = HashMap::new();
+    let mut forward = Map::default();
     merge(func, head, into, &mut forward);
     uses::substitute(func, &forward);
     an.clear();
@@ -991,7 +992,7 @@ pub(crate) fn merge_below(func: &mut Func, an: &mut Analyses, head: Block, into:
 /// block's parameters were going to be told. Binding each parameter to the argument in its place
 /// and pointing every reader at it is exactly what the jump was doing at run time, so the record
 /// goes in the map and the whole map is spent in one walk when the pass is done.
-fn merge(func: &mut Func, head: Block, block: Block, forward: &mut HashMap<Value, Value>) {
+fn merge(func: &mut Func, head: Block, block: Block, forward: &mut Map<Value, Value>) {
     let term = func.terminator(head).expect("the head of a chain ends in a jump");
     let call = func.successors(term).next().expect("a jump goes somewhere");
     let args = func[call.args].to_vec();

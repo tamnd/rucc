@@ -92,8 +92,7 @@
 //! of this and is worth having, and it wants the call sites rewritten rather than the body, which
 //! puts it with the half above.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
 use crate::ipa::{self, Sites};
@@ -133,7 +132,7 @@ pub fn propagate(module: &mut Module, graph: &CallGraph, fuel: &mut Fuel) -> Vec
         return Vec::new();
     }
     let order = ipa::order(graph, &closed);
-    let mut stats: HashMap<FuncId, Stats> = HashMap::new();
+    let mut stats: Map<FuncId, Stats> = Map::default();
     let mut touched: Vec<FuncId> = Vec::new();
     for _ in 0..SWEEPS {
         let sites = ipa::sites(module, &closed);
@@ -202,9 +201,9 @@ fn settle(
     module: &Module,
     closed: &[FuncId],
     order: &[Vec<FuncId>],
-    sites: &HashMap<FuncId, Sites>,
-) -> HashMap<FuncId, Vec<Held>> {
-    let mut known: HashMap<FuncId, Vec<Held>> = closed
+    sites: &Map<FuncId, Sites>,
+) -> Map<FuncId, Vec<Held>> {
+    let mut known: Map<FuncId, Vec<Held>> = closed
         .iter()
         .map(|&id| (id, vec![Held::Nothing; module[id].signature().params.len()]))
         .collect();
@@ -233,8 +232,8 @@ fn settle(
 /// What one function's parameters hold, read off its call sites and what is known so far.
 fn row(
     module: &Module,
-    sites: &HashMap<FuncId, Sites>,
-    known: &HashMap<FuncId, Vec<Held>>,
+    sites: &Map<FuncId, Sites>,
+    known: &Map<FuncId, Vec<Held>>,
     id: FuncId,
 ) -> Vec<Held> {
     let count = module[id].signature().params.len();
@@ -262,7 +261,7 @@ fn row(
 /// closed functions for it to be read at all. Everything else is anything.
 fn passed(
     module: &Module,
-    known: &HashMap<FuncId, Vec<Held>>,
+    known: &Map<FuncId, Vec<Held>>,
     caller: FuncId,
     inst: Inst,
     index: usize,
@@ -315,10 +314,10 @@ fn number(func: &Func, value: Value) -> Option<(Imm, Type)> {
 fn rewrite(
     module: &mut Module,
     closed: &[FuncId],
-    sites: &HashMap<FuncId, Sites>,
-    known: &HashMap<FuncId, Vec<Held>>,
+    sites: &Map<FuncId, Sites>,
+    known: &Map<FuncId, Vec<Held>>,
     fuel: &mut Fuel,
-    stats: &mut HashMap<FuncId, Stats>,
+    stats: &mut Map<FuncId, Stats>,
 ) -> Vec<FuncId> {
     let mut changed = Vec::new();
     for &id in closed {
@@ -332,7 +331,7 @@ fn rewrite(
         let func = &mut module[id];
         let entry = func.entry().expect("a closed function has an entry block");
         let read = ipa::operands(func);
-        let mut same: HashMap<Value, Value> = HashMap::new();
+        let mut same: Map<Value, Value> = Map::default();
         for (index, &held) in row.iter().enumerate() {
             let Held::Number(imm, ty) = held else { continue };
             let param = func[entry].params[index];

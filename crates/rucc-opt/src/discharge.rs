@@ -320,8 +320,7 @@
 //! `aligned` in this file, and it is the binding constraint on the bounds half now rather than the
 //! call is.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Meta, Opcode, Type, Value};
 
 use crate::purity::{Callee, Facts};
@@ -733,7 +732,7 @@ impl Pass for Discharge {
 
         // One answer per allocation rather than one per check, because a function that reads twenty
         // fields of the same object asks the same question about the same pointer twenty times.
-        let mut checked: HashMap<Value, HashSet<Block>> = HashMap::new();
+        let mut checked: Map<Value, Set<Block>> = Map::default();
 
         // Whether anything in here says a lifetime is over. Read once over the whole function
         // rather than carried down the walk, because what the frame slot rule needs is that no
@@ -1389,7 +1388,7 @@ struct Scope {
     /// cannot tell which. That is enough to answer a later check asking with the same entry and it
     /// is not enough to answer one asking with any other, so the entry is the key rather than a
     /// field, and a lookup that misses is the honest answer for every other type.
-    typed: HashMap<Meta, Known>,
+    typed: Map<Meta, Known>,
     /// What a `check_bounds` that ran proved about where the address it was about starts.
     ///
     /// Nothing here is ever given up, and that is the difference between this and the other two.
@@ -1398,7 +1397,7 @@ struct Scope {
     /// nothing in a function changes the number an SSA value holds. So it survives a call, it
     /// survives inline assembly and it survives a `meta_end`, and dominance is the only thing that
     /// bounds it, which the walk already handles by giving each child its own copy.
-    aligns: HashMap<Value, u64>,
+    aligns: Map<Value, u64>,
 }
 
 impl Scope {
@@ -1558,7 +1557,7 @@ impl Crossed {
     }
 
     /// What one instruction does, which is what the walk does with it when it reaches it.
-    fn of(func: &Func, wrote: &HashSet<Inst>, inst: Inst) -> Self {
+    fn of(func: &Func, wrote: &Set<Inst>, inst: Inst) -> Self {
         let mut crossed = Self::default();
         match opaque(func, wrote, inst) {
             Some(Opaque::Called) => crossed.called = true,
@@ -1585,12 +1584,12 @@ impl Crossed {
 }
 
 /// Each block's [`Crossed`], for the blocks that do anything to the facts at all.
-struct Kills(HashMap<Block, Crossed>);
+struct Kills(Map<Block, Crossed>);
 
 impl Kills {
     /// Read off every block once, before the walk, so the question at each block is a lookup.
-    fn of(func: &Func, wrote: &HashSet<Inst>) -> Self {
-        let mut kills = HashMap::new();
+    fn of(func: &Func, wrote: &Set<Inst>) -> Self {
+        let mut kills = Map::default();
         for block in func.blocks() {
             let crossed = func
                 .insts(block)
@@ -1617,7 +1616,7 @@ impl Kills {
             return Crossed::default();
         }
         let mut crossed = Crossed::default();
-        let mut seen: HashSet<Block> = HashSet::new();
+        let mut seen: Set<Block> = Set::default();
         let mut work: Vec<Block> = graph.predecessors(block).to_vec();
         while let Some(at) = work.pop() {
             if at == above || !seen.insert(at) {
@@ -1662,7 +1661,7 @@ enum Opaque {
 /// with the calls, because the argument for keeping the bounds half rests on the lifetime check at
 /// the access reading a plane the runtime wrote, and a block of assembly is the one thing in the
 /// IR that can write over a plane without the runtime having been asked.
-fn opaque(func: &Func, wrote: &HashSet<Inst>, inst: Inst) -> Option<Opaque> {
+fn opaque(func: &Func, wrote: &Set<Inst>, inst: Inst) -> Option<Opaque> {
     match func[inst].opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
             if !func[inst].flags.contains(Flags::NOFREE) {
@@ -1678,7 +1677,7 @@ fn opaque(func: &Func, wrote: &HashSet<Inst>, inst: Inst) -> Option<Opaque> {
 /// The calls marked [`Flags::NOFREE`] that may still write memory, which is every one of them
 /// `crate::purity` has not said otherwise about. Worked out before the walk because the answer is
 /// in the analyses and the walk needs them borrowed for other things.
-fn writers(func: &Func, purity: &Facts) -> HashSet<Inst> {
+fn writers(func: &Func, purity: &Facts) -> Set<Inst> {
     func.blocks()
         .flat_map(|block| func.insts(block))
         .filter(|&inst| {
@@ -1981,7 +1980,7 @@ const DEEP: u32 = 4;
 /// [`Alignment::Lost`] is an address this followed all the way back to an object it knows the
 /// alignment of, where the steps taken from it landed somewhere the access may not start, and no
 /// fact answers one of those because a check that stays is what the conjunct is for.
-fn aligned(func: &Func, cfg: Option<&Cfg>, aligns: &HashMap<Value, u64>, check: Inst) -> Alignment {
+fn aligned(func: &Func, cfg: Option<&Cfg>, aligns: &Map<Value, u64>, check: Inst) -> Alignment {
     let Extra::Mem(info) = func[check].extra else { return Alignment::Unknown };
     let claim = u64::from(func[info].align);
     if claim <= 1 || func[check].flags.contains(Flags::ALIGNED) {
@@ -2051,7 +2050,7 @@ fn settles(known: u64, claim: u64) -> bool {
 pub(crate) fn settled(
     func: &Func,
     cfg: Option<&Cfg>,
-    aligns: &HashMap<Value, u64>,
+    aligns: &Map<Value, u64>,
     pointer: Value,
 ) -> u64 {
     let mut budget = JOINS;
@@ -2084,7 +2083,7 @@ const JOINS: u32 = 256;
 fn joined(
     func: &Func,
     cfg: Option<&Cfg>,
-    aligns: &HashMap<Value, u64>,
+    aligns: &Map<Value, u64>,
     pointer: Value,
     inside: &mut Vec<Value>,
     budget: &mut u32,
@@ -2159,7 +2158,7 @@ fn joined(
 fn handed(
     func: &Func,
     cfg: &Cfg,
-    aligns: &HashMap<Value, u64>,
+    aligns: &Map<Value, u64>,
     block: Block,
     index: u32,
     inside: &mut Vec<Value>,
@@ -2233,7 +2232,7 @@ fn divides(func: &Func, step: Value, depth: u32) -> u64 {
 fn allocation(
     func: &Func,
     cfg: Option<&Cfg>,
-    checked: &mut HashMap<Value, HashSet<Block>>,
+    checked: &mut Map<Value, Set<Block>>,
     block: Block,
     base: Value,
 ) -> Option<Fact> {
@@ -2253,7 +2252,7 @@ fn allocation(
 fn allocated(
     func: &Func,
     cfg: Option<&Cfg>,
-    checked: &mut HashMap<Value, HashSet<Block>>,
+    checked: &mut Map<Value, Set<Block>>,
     block: Block,
     parts: &[&Fact],
 ) -> bool {
@@ -2275,7 +2274,7 @@ fn allocated(
 fn allocated_around(
     func: &Func,
     cfg: Option<&Cfg>,
-    checked: &mut HashMap<Value, HashSet<Block>>,
+    checked: &mut Map<Value, Set<Block>>,
     block: Block,
     spans: &[&Reach],
 ) -> bool {

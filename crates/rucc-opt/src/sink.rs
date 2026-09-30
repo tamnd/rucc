@@ -72,8 +72,6 @@
 
 use rucc_ir::{Block, Builder, Extra, Flags, Func, Inst, InstData, Opcode, Type};
 
-use std::collections::HashMap;
-
 use crate::canon::route;
 use crate::cfg::Cfg;
 use crate::coalesce::crossed;
@@ -87,6 +85,7 @@ use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
 use crate::stats::Kind;
 use crate::trip::{Around, counted, covered, inst_of};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use rucc_base::hash::Map;
 
 /// What is reported when an init write comes out of a loop.
 const SUNK_INIT: &str =
@@ -185,7 +184,7 @@ impl Pass for Sink {
             }
         }
 
-        let mut split: HashMap<(Block, Block), Block> = HashMap::new();
+        let mut split: Map<(Block, Block), Block> = Map::default();
         for plan in plans {
             if !fuel.take() {
                 stats.missed(NO_FUEL);

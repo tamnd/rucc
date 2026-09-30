@@ -68,8 +68,7 @@
 //! because a pass here is a name a `-f` flag spells and there is nowhere for a level to hand a
 //! pass a number.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{
     Block, BlockCall, Builder, ExtraKind, Func, Inst, InstData, Opcode, Start, Type, Value,
@@ -135,7 +134,7 @@ impl Pass for HeaderCopy {
         if func.entry().is_none() {
             return stats;
         }
-        let mut done = HashSet::new();
+        let mut done = Set::default();
         let mut say = true;
         let mut dry = false;
         loop {
@@ -231,7 +230,7 @@ impl HeaderCopy {
         &self,
         func: &Func,
         an: &mut Analyses,
-        done: &HashSet<Block>,
+        done: &Set<Block>,
         stats: &mut Stats,
         say: bool,
     ) -> Vec<Job> {
@@ -355,13 +354,13 @@ fn carried(
     stats: &mut Stats,
     say: bool,
 ) -> Vec<Job> {
-    let mut watched: HashMap<Value, usize> = HashMap::new();
+    let mut watched: Map<Value, usize> = Map::default();
     for (which, candidate) in wanted.iter().enumerate() {
         for &value in &candidate.defined {
             watched.insert(value, which);
         }
     }
-    let mut read: Vec<HashSet<Value>> = vec![HashSet::new(); wanted.len()];
+    let mut read: Vec<Set<Value>> = vec![Set::default(); wanted.len()];
     let mut escapes = vec![false; wanted.len()];
     let mut names: Vec<usize> = Vec::new();
     for block in func.blocks() {
@@ -410,8 +409,8 @@ fn reads(
     inst: Inst,
     block: Block,
     wanted: &[Candidate],
-    watched: &HashMap<Value, usize>,
-    read: &mut [HashSet<Value>],
+    watched: &Map<Value, usize>,
+    read: &mut [Set<Value>],
     names: &mut Vec<usize>,
 ) {
     let mut note = |value: Value| {
@@ -499,7 +498,7 @@ fn apply(func: &mut Func, job: &Job) -> Block {
     // The header's parameters stand for whatever the one edge in hands them, so the copy is
     // written in terms of those arguments and needs no parameters of its own.
     let incoming = edge_args(func, entry_term, job.header);
-    let mut map: HashMap<Value, Value> = HashMap::new();
+    let mut map: Map<Value, Value> = Map::default();
     for (&param, &arg) in func[job.header].params.clone().iter().zip(&incoming) {
         map.insert(param, arg);
     }
@@ -533,12 +532,7 @@ fn edge_args(func: &Func, term: Inst, to: Block) -> Vec<Value> {
 }
 
 /// Copies one instruction to the end of a block, under the substitution, and records its results.
-pub(crate) fn clone_into(
-    func: &mut Func,
-    into: Block,
-    inst: Inst,
-    map: &mut HashMap<Value, Value>,
-) {
+pub(crate) fn clone_into(func: &mut Func, into: Block, inst: Inst, map: &mut Map<Value, Value>) {
     let data = func[inst];
     let args: Vec<Value> =
         func[data.args].iter().map(|value| map.get(value).copied().unwrap_or(*value)).collect();
@@ -557,7 +551,7 @@ pub(crate) fn clone_into(
 /// The targets are the header's own. What that means for the graph is that the copy decides,
 /// before the loop, which of the two places the header would have gone control goes to, and the
 /// header is left deciding it for every iteration after the first.
-fn clone_branch(func: &mut Func, into: Block, term: Inst, map: &HashMap<Value, Value>) {
+fn clone_branch(func: &mut Func, into: Block, term: Inst, map: &Map<Value, Value>) {
     let at = |value: &Value| map.get(value).copied().unwrap_or(*value);
     let cond = at(&func[func[term].args][0]);
     let calls: Vec<BlockCall> = func.successors(term).collect();

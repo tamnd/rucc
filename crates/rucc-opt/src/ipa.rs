@@ -14,8 +14,7 @@
 //! reachable from where, which is what makes it safe for a pass to ask again after it has changed
 //! something.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Extra, Func, FuncId, Inst, Linkage, Module, Opcode, Value};
 
 use crate::CallGraph;
@@ -65,7 +64,7 @@ pub fn closed(module: &Module, graph: &CallGraph) -> Vec<FuncId> {
 /// closed function in it is left out rather than walked over, since the round inside it would
 /// compute nothing.
 pub fn order(graph: &CallGraph, closed: &[FuncId]) -> Vec<Vec<FuncId>> {
-    let inside: HashSet<FuncId> = closed.iter().copied().collect();
+    let inside: Set<FuncId> = closed.iter().copied().collect();
     let mut order = Vec::new();
     for part in graph.components().iter().rev() {
         let part: Vec<FuncId> = part
@@ -90,12 +89,12 @@ pub fn order(graph: &CallGraph, closed: &[FuncId]) -> Vec<Vec<FuncId>> {
 /// a definition, which a translation unit may contain. The positions would not line up, so the call
 /// is not read and the callee is struck out instead of being read from the rest of its calls, since
 /// what that one passes is exactly what is not known.
-pub fn sites(module: &Module, closed: &[FuncId]) -> HashMap<FuncId, Sites> {
-    let mut where_defined: HashMap<_, FuncId> = HashMap::new();
+pub fn sites(module: &Module, closed: &[FuncId]) -> Map<FuncId, Sites> {
+    let mut where_defined: Map<_, FuncId> = Map::default();
     for &id in closed {
         where_defined.insert(module[id].name, id);
     }
-    let mut sites: HashMap<FuncId, Sites> = HashMap::new();
+    let mut sites: Map<FuncId, Sites> = Map::default();
     for id in module.funcs() {
         let func = &module[id];
         if func.is_declaration() {
@@ -134,8 +133,8 @@ pub struct Sites {
 }
 
 /// Every value the body reads, as an operand or as an argument on an edge.
-pub fn operands(func: &Func) -> HashSet<Value> {
-    let mut read = HashSet::new();
+pub fn operands(func: &Func) -> Set<Value> {
+    let mut read = Set::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
             read.extend(func[func[inst].args].iter().copied());

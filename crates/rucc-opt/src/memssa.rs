@@ -87,9 +87,7 @@
 //! one percent and the budget is too small or the alias analysis is too weak, and both of those
 //! are better fixed than cached around.
 
-use std::collections::{HashMap, HashSet};
-
-use rucc_base::hash::Set;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, BlockCall, Def, Flags, Func, Inst, InstData, MemOrder, Opcode, Type, Value};
 
 use crate::alias::{Access, Alias, Answer, Options};
@@ -254,7 +252,7 @@ pub fn build(func: &mut Func) -> bool {
     }
 
     let joins = iterated_frontier(&cfg, &doms, &defs);
-    let mut params = HashMap::new();
+    let mut params = Map::default();
     for block in func.blocks().collect::<Vec<_>>() {
         if joins.contains(&block) {
             params.insert(block, func.append_param(block, Type::MEM));
@@ -317,7 +315,7 @@ pub fn strip(func: &mut Func) -> bool {
     for inst in gone {
         func.remove_inst(inst);
     }
-    let forward: HashMap<Value, Value> = forward.into_iter().collect();
+    let forward: Map<Value, Value> = forward.into_iter().collect();
     if !forward.is_empty() {
         substitute(func, &forward);
     }
@@ -336,8 +334,8 @@ pub fn strip(func: &mut Func) -> bool {
 /// do it. The position is worked out before anything is removed, because renumbering the
 /// parameters and rewriting the arguments cannot both go first.
 fn drop_params(func: &mut Func) {
-    let mut at: HashMap<Block, Vec<usize>> = HashMap::new();
-    let mut going: HashSet<Value> = HashSet::new();
+    let mut at: Map<Block, Vec<usize>> = Map::default();
+    let mut going: Set<Value> = Set::default();
     for block in func.blocks().collect::<Vec<Block>>() {
         let mut keep = Vec::new();
         for (index, &param) in func[block].params.iter().enumerate() {
@@ -394,16 +392,16 @@ fn start_of_chain(func: &mut Func, first: Inst) -> Value {
 fn thread(
     func: &mut Func,
     doms: &Dominators,
-    params: &HashMap<Block, Value>,
+    params: &Map<Block, Value>,
     entry: Block,
     start: Value,
-) -> HashMap<Block, Value> {
+) -> Map<Block, Value> {
     // An instruction cannot grow a result, so threading one makes a new instruction beside it and
     // the old one goes away. What the old one produced is forwarded to what the new one produces,
     // at the same positions, in one substitution at the end rather than as each is replaced,
     // because an instruction threaded early can be an operand of one threaded late.
     let mut forward: Vec<(Value, Value)> = Vec::new();
-    let mut ends = HashMap::new();
+    let mut ends = Map::default();
     let mut stack = vec![(entry, start)];
     while let Some((block, incoming)) = stack.pop() {
         let mut current = params.get(&block).copied().unwrap_or(incoming);
@@ -425,7 +423,7 @@ fn thread(
         stack.extend(doms.children(block).map(|child| (child, current)));
     }
 
-    let forward: HashMap<Value, Value> = forward.into_iter().collect();
+    let forward: Map<Value, Value> = forward.into_iter().collect();
     if !forward.is_empty() {
         substitute(func, &forward);
     }
@@ -433,7 +431,7 @@ fn thread(
 }
 
 /// Replaces every use of what a threaded instruction produced with what its replacement produces.
-fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
+fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     let with = |value: Value| forward.get(&value).copied().unwrap_or(value);
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<_>>() {
@@ -455,7 +453,7 @@ fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
 }
 
 /// Passes the version of memory each block ends with to the joins it branches to.
-fn pass_it_on(func: &mut Func, params: &HashMap<Block, Value>, ends: &HashMap<Block, Value>) {
+fn pass_it_on(func: &mut Func, params: &Map<Block, Value>, ends: &Map<Block, Value>) {
     for block in func.blocks().collect::<Vec<_>>() {
         let Some(terminator) = func.terminator(block) else {
             continue;
@@ -478,10 +476,10 @@ fn pass_it_on(func: &mut Func, params: &HashMap<Block, Value>, ends: &HashMap<Bl
 
 /// The blocks that need a memory parameter, which is the iterated dominance frontier of the
 /// blocks that define a version of memory.
-fn iterated_frontier(cfg: &Cfg, doms: &Dominators, defs: &[Block]) -> HashSet<Block> {
+fn iterated_frontier(cfg: &Cfg, doms: &Dominators, defs: &[Block]) -> Set<Block> {
     let frontier = frontiers(cfg, doms);
-    let mut placed = HashSet::new();
-    let mut seen: HashSet<Block> = defs.iter().copied().collect();
+    let mut placed = Set::default();
+    let mut seen: Set<Block> = defs.iter().copied().collect();
     let mut work: Vec<Block> = defs.to_vec();
     while let Some(block) = work.pop() {
         let Some(targets) = frontier.get(&block) else {
@@ -498,8 +496,8 @@ fn iterated_frontier(cfg: &Cfg, doms: &Dominators, defs: &[Block]) -> HashSet<Bl
 
 /// The dominance frontier of every block, by Cytron's walk from each join up to its immediate
 /// dominator.
-fn frontiers(cfg: &Cfg, doms: &Dominators) -> HashMap<Block, Vec<Block>> {
-    let mut frontier: HashMap<Block, Vec<Block>> = HashMap::new();
+fn frontiers(cfg: &Cfg, doms: &Dominators) -> Map<Block, Vec<Block>> {
+    let mut frontier: Map<Block, Vec<Block>> = Map::default();
     for block in cfg.reverse_postorder() {
         let preds = cfg.predecessors(block);
         if preds.len() < 2 {
