@@ -112,6 +112,25 @@ fn an_operand_in_memory_is_the_object_it_names() {
 }
 
 #[test]
+fn two_locals_in_memory_are_each_written_where_they_are() {
+    // The kernel's `has_fpu` in `arch/x86/boot/cpuflags.c`. Only one operand can be the
+    // instruction's own and be named from the stack pointer, so the other has its address put in
+    // a register first, and each store goes to the object it names.
+    let source = "int f(void) { unsigned short fcw = -1, fsw = -1;\n\
+                  asm volatile (\"fninit ; fnstsw %0 ; fnstcw %1\" : \"+m\" (fsw), \"+m\" (fcw));\n\
+                  return fsw == 0 && (fcw & 0x103f) == 0x003f; }\n";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with("two-locals", source, &[level]);
+        assert!(ok, "the compiler refused the fixture at {level}:\n{said}");
+        let body = body(&text, "f");
+        let lea = body.lines().find(|line| line.contains("leaq")).expect("an address is taken");
+        let reg = lea.rsplit(", ").next().expect("the lea names a register").trim();
+        assert!(body.contains("fnstsw -") && body.contains("(%rsp) ;"), "{level}:\n{body}");
+        assert!(body.contains(&format!("fnstcw ({reg})")), "{level}:\n{body}");
+    }
+}
+
+#[test]
 fn an_instruction_on_an_operand_in_memory_works_on_the_object_where_it_lives() {
     // tcc's `tests/tcctest.c`, which counts a static local up from assembly to show that one is
     // reachable from there at all. The object is in memory and stays there, so what the listing
