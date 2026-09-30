@@ -21,6 +21,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A character constant that is a space or a comma, such as `' '` or `','`, is one macro argument and one directive operand in the assembler. The kernel's `relocate_kernel_64.S` passes `' '` to its `print_reg` macro.
 - The assembler writes `loop`, `loope`, `loopz`, `loopne` and `loopnz`, which the kernel's `relocate_kernel_64.S` uses.
 - A number of any width cast to a pointer and back folds to itself, so test_printf.c's `BUILD_BUG_ON(IS_ERR(PTR))` with a 64-bit `PTR` builds.
 - `p[0][1]` with `p` a pointer to an array of unknown length is refused again, as gcc refuses it. Only `*p` is let through.

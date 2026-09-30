@@ -4378,6 +4378,21 @@ pub(crate) fn split(text: &str, on: char) -> Vec<String> {
                 quote = Some(ch);
                 piece.push(ch);
             }
+            // A character constant, which is one character whatever it is, so `','` is not the
+            // end of an operand. Its closing quote is optional, as it is to gas.
+            '\'' => {
+                piece.push(ch);
+                let mut next = chars.next();
+                if next == Some('\\') {
+                    piece.push('\\');
+                    next = chars.next();
+                }
+                piece.extend(next);
+                if chars.clone().next() == Some('\'') {
+                    piece.push('\'');
+                    chars.next();
+                }
+            }
             '(' => {
                 depth += 1;
                 piece.push(ch);
