@@ -126,15 +126,16 @@ pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSyste
     let mut errors = 0;
     for diag in pp.take_diagnostics() {
         // `-w` and `-Wsystem-headers`, for the reason they are read here in the compiler proper.
-        if rucc_diag::dropped(&diag, &sess.sources, opts.warnings, opts.system_header_warnings) {
+        if rucc_diag::dropped(&diag, &sess.sources, opts.warnings, opts.system_header_warnings)
+            || opts.named_warnings.silenced(&diag)
+        {
             continue;
         }
-        let fatal = diag.severity.is_fatal()
-            || (diag.severity == Severity::Warning && opts.warnings_are_errors);
-        if fatal {
+        let promoted = opts.named_warnings.promoted(&diag, opts.warnings_are_errors);
+        if diag.severity.is_fatal() || promoted {
             errors += 1;
         }
-        messages.push(render(&diag, &sess.sources, opts.warnings_are_errors));
+        messages.push(render(&diag, &sess.sources, promoted));
     }
     Preprocessed { text, messages, errors, deps: pp.dependencies().to_vec() }
 }

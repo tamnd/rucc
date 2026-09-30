@@ -196,3 +196,32 @@ fn a_literal_in_a_block_is_a_constant_value_for_a_static_object() {
         );
     }
 }
+
+/// `-Wno-pointer-sign` quiets the warning gcc files under that name, which the kernel passes
+/// with `-Werror` because it mixes `char *` and `unsigned char *` all over. `-Werror=` and
+/// `-Wno-error=` of the name decide whether it is an error, whatever `-Werror` says.
+#[test]
+fn a_warning_turned_off_by_name_is_not_heard() {
+    let target = "--target=x86_64-unknown-linux-gnu";
+    let source = "int f(unsigned *u) { int *p = u; return *p; }\n";
+    let compile = |flags: &[&str]| {
+        let mut all = vec![target, "-c", "-o", "/dev/null"];
+        all.extend_from_slice(flags);
+        run(&all, source)
+    };
+    let quiet = compile(&["-Werror", "-Wno-pointer-sign"]);
+    assert!(quiet.status.success(), "{}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(quiet.stderr.is_empty(), "{}", String::from_utf8_lossy(&quiet.stderr));
+
+    let back = compile(&["-Wno-pointer-sign", "-Wpointer-sign"]);
+    assert!(back.status.success());
+    assert!(String::from_utf8_lossy(&back.stderr).contains("warning: pointer targets"));
+
+    let error = compile(&["-Werror=pointer-sign"]);
+    assert!(!error.status.success());
+    assert!(String::from_utf8_lossy(&error.stderr).contains("error: pointer targets"));
+
+    let kept = compile(&["-Werror", "-Wno-error=pointer-sign"]);
+    assert!(kept.status.success(), "{}", String::from_utf8_lossy(&kept.stderr));
+    assert!(String::from_utf8_lossy(&kept.stderr).contains("warning: pointer targets"));
+}

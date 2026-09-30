@@ -3,8 +3,10 @@
 //! Design: `spec/04-driver-and-cli.md` section 4.1.
 //!
 //! This compiler has no warning groups of its own yet (#485), so a `-W` flag it accepts turns
-//! nothing on. It still has to give the answer gcc gives, because configure scripts and meson find
-//! out whether a warning exists by passing it and reading the exit status. Accepting every name
+//! nothing on. Turning a warning off does work for the ones `rucc_diag::option_of` names, as do
+//! `-Werror=` and `-Wno-error=`. Either way the flag has to get the answer gcc gives, because
+//! configure scripts and meson find out whether a warning exists by passing it and reading the exit
+//! status. Accepting every name
 //! means a build probed with rucc passes flags that gcc refuses, such as clang's
 //! `-Wcast-function-type-strict`, and ends up with a different command line from the gcc build.
 //! Refusing a name gcc knows is worse, because it fails a configure script written for gcc.

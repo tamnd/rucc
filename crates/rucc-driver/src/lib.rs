@@ -2559,9 +2559,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // status, so the answer has to be gcc's. A name gcc knows is accepted, and one it does
             // not is refused, the way gcc refuses clang's names. `-Wno-` of a name nobody knows is
             // accepted, because gcc accepts it too, but `-Werror=` and `-Wno-error=` of one are
-            // not. None of them turns anything on yet, which #485 is about.
+            // not. What they say about a warning this compiler gives is recorded by name, so
+            // `-Wno-pointer-sign` quiets the warning gcc files under that name. Groups such as
+            // `-Wall` turn nothing on yet, which #485 is about.
             _ if arg.starts_with("-W") => {
                 let name = &arg["-W".len()..];
+                opts.named_warnings.flag(name);
                 let named = name.strip_prefix("error=").or_else(|| name.strip_prefix("no-error="));
                 if let Some(named) = named {
                     if !warnings::known(named) {
