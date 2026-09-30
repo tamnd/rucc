@@ -33,7 +33,8 @@
 use std::collections::BTreeMap;
 
 use object::write::{
-    Comdat, Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
+    Comdat, Mangling, Object as Writer, Relocation, StandardSection, Symbol, SymbolId,
+    SymbolSection,
 };
 use object::{
     Architecture, BinaryFormat, ComdatKind, Endianness, RelocationFlags, SectionFlags, SectionKind,
@@ -104,6 +105,9 @@ impl Flavour {
             (Flavour::Coff, Architecture::Aarch64) => {
                 coff::arm64(reference).map(|typ| RelocationFlags::Coff { typ })
             }
+            (Flavour::Coff, Architecture::I386) => {
+                coff::i386(reference).map(|typ| RelocationFlags::Coff { typ })
+            }
             (Flavour::Coff, _) => coff::reloc(reference, after),
             (Flavour::MachO, _) => crate::macho::reloc(reference, 0).ok(),
         }
@@ -112,14 +116,28 @@ impl Flavour {
     /// The machine the writer underneath is asked for, for a target whose objects this writes in
     /// this format, and nothing for one it does not.
     ///
-    /// i386 is ELF only so far. COFF for it has relocations of its own and a symbol decoration the
-    /// other machines do not, and both are still to be written.
+    /// i386 is both. COFF for it has relocations of its own and a symbol decoration the other
+    /// machines do not, which [`Flavour::spell`] puts on.
     pub(crate) fn machine(self, arch: Arch) -> Option<Architecture> {
         match (self, arch) {
             (Flavour::Elf | Flavour::Coff, Arch::X86_64) => Some(Architecture::X86_64),
             (Flavour::Elf | Flavour::Coff, Arch::Aarch64) => Some(Architecture::Aarch64),
-            (Flavour::Elf, Arch::X86) => Some(Architecture::I386),
+            (Flavour::Elf | Flavour::Coff, Arch::X86) => Some(Architecture::I386),
             _ => None,
+        }
+    }
+
+    /// The name a symbol the program named has in the file, given the name C gave it.
+    ///
+    /// The same name everywhere but COFF for i386, where a C name has an underscore in front. See
+    /// [`coff::decorate`]. The writer underneath would put one on as well, but on every name of a
+    /// function or a variable alike, which is wrong for a `__fastcall` one and for a pointer the
+    /// import library fills in, so it is told to leave names alone and the decoration is done here.
+    /// A name the compiler minted for a place inside a function is not a C name and is not asked.
+    pub(crate) fn spell(self, machine: Architecture, name: &str) -> String {
+        match (self, machine) {
+            (Flavour::Coff, Architecture::I386) => coff::decorate(name),
+            _ => name.to_owned(),
         }
     }
 
@@ -355,6 +373,10 @@ pub fn write(
         beyond(text, data)?;
     }
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
+    // The names go in as they are, and the one format and machine that decorates them has that
+    // done by `spell` rather than by the writer underneath.
+    obj.set_mangling(Mangling::None);
+    let spell = |name: &str| flavour.spell(machine, name).into_bytes();
     // How wide an address is, which is how wide the records of addresses below are written.
     let pointer = if machine == Architecture::I386 { 4u8 } else { 8 };
     // The one that holds every function when they are not being split up. Asked for even when it
@@ -434,7 +456,7 @@ pub fn write(
             });
         }
         let id = obj.add_symbol(Symbol {
-            name: func.name.clone().into_bytes(),
+            name: spell(&func.name),
             value: at,
             size: func.len as u64,
             kind: SymbolKind::Text,
@@ -534,7 +556,7 @@ pub fn write(
             obj.section_symbol(section);
         }
         let id = obj.add_symbol(Symbol {
-            name: object.name.clone().into_bytes(),
+            name: spell(&object.name),
             // A common symbol says what it wants rather than where it is, and what it wants is
             // recorded where an ordinary symbol records its address.
             value: if object.place == Place::Merged { object.align } else { offset },
@@ -594,7 +616,7 @@ pub fn write(
         let (value, size) = (obj.symbol(id).value, obj.symbol(id).size);
         let (kind, section) = (obj.symbol(id).kind, obj.symbol(id).section);
         let id = obj.add_symbol(Symbol {
-            name: alias.name.clone().into_bytes(),
+            name: spell(&alias.name),
             value,
             size,
             kind,
@@ -630,7 +652,7 @@ pub fn write(
             continue;
         }
         let id = obj.add_symbol(Symbol {
-            name: name.clone().into_bytes(),
+            name: spell(name),
             value: 0,
             size: 0,
             // What kind of thing an undefined name is is not known here and does not have to be:
@@ -691,7 +713,14 @@ pub fn write(
     // The unwind table, if there is one. Its own section rather than part of the text, because it
     // is read rather than run: the loader maps it and the linker gathers every input's into one
     // table and builds the index the unwinder searches.
-    if !text.unwind.bytes.is_empty() {
+    //
+    // Not on Windows for i386, which has no such table. A handler there is found by walking a
+    // chain of records the running code pushes onto its own stack, so a function that installs
+    // none needs nothing written about it, and `.pdata` is a section the loader of a 32 bit image
+    // does not read. What the rest of the file says is the same whether or not the producer
+    // described its frames.
+    let seh_free = flavour == Flavour::Coff && machine == Architecture::I386;
+    if !text.unwind.bytes.is_empty() && !seh_free {
         let ((name, align), second) = flavour.tables();
         // Four on a machine whose addresses are four bytes, which is what gas aligns the table to
         // there.
@@ -956,10 +985,9 @@ fn beyond(text: &Text, data: &Data) -> Result<(), Error> {
 /// the name undefined. So the list comes from the writer rather than from the caller, because the
 /// writer is the only thing that knows what it wrote.
 ///
-/// The names are as the C program spelled them, with nothing in front of them, which is what both
-/// the formats this writes have on this machine. Mach-O puts an underscore there and so does COFF on
-/// a 32-bit machine, and when either of those is written this is the function that has to say so,
-/// which is why it asks about the target it otherwise would not have to.
+/// The names are the ones in the file, which is the C name on every format and machine this writes
+/// except COFF for i386, where it has an underscore in front. That is why this asks about the target
+/// it otherwise would not have to. See [`Flavour::spell`].
 ///
 /// Order is the functions, then the variables, then the aliases, each in the order the module held
 /// them, which is the order [`write()`] adds the symbols in. A `static` is left out: it is a name the
@@ -977,25 +1005,26 @@ pub fn defines(
     aliases: &[Alias],
     target: &TargetInfo,
 ) -> Result<Vec<String>, Error> {
-    if written(target).is_none() {
+    let Some((flavour, machine)) = written(target) else {
         return Err(Error::Format { triple: target.tuple.to_string() });
-    }
+    };
+    let spell = |name: &String| flavour.spell(machine, name);
     let names = text
         .funcs
         .iter()
         .filter(|func| func.binding != Binding::Local)
-        .map(|func| func.name.clone())
+        .map(|func| spell(&func.name))
         .chain(
             data.objects
                 .iter()
                 .filter(|object| object.binding != Binding::Local)
-                .map(|object| object.name.clone()),
+                .map(|object| spell(&object.name)),
         )
         .chain(
             aliases
                 .iter()
                 .filter(|alias| alias.binding != Binding::Local)
-                .map(|alias| alias.name.clone()),
+                .map(|alias| spell(&alias.name)),
         )
         .collect();
     Ok(names)
@@ -3138,19 +3167,167 @@ mod tests {
         assert_eq!(&data[8..12], &7u32.to_le_bytes());
     }
 
-    /// COFF for i386 is not written yet, and saying so is better than a file with x86-64
-    /// relocation numbers in it.
+    /// A mingw i386 target, which [`write()`] writes as COFF with the i386 relocations.
+    fn i386_windows() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86, Os::Windows, Env::Gnu))
+    }
+
+    /// A compilation for i386 on Windows is a COFF file for that machine, with an underscore in
+    /// front of every C name, and with the addend of each relocation in the bytes it covers.
+    ///
+    /// The call is `REL32` with nothing in its field, because the linker counts from the end of
+    /// the four bytes and the minus four the call carried is that same distance. The pointer is
+    /// `DIR32` with its addend in the variable. A `__fastcall` name already carries its own `@`
+    /// and gets nothing more, and a pointer the import library fills in has the underscore after
+    /// its `__imp_`.
     #[test]
-    fn a_windows_i386_object_is_not_written_yet() {
-        let target = TargetInfo::new(Triple::new(Arch::X86, Os::Windows, Env::Gnu));
-        let written = write(
-            &calling("puts"),
+    fn a_compilation_for_i386_windows_is_coff_with_decorated_names() {
+        let mut text = calling("puts");
+        text.bytes.extend([0xe8, 0, 0, 0, 0, 0xc3]);
+        text.funcs.push(extent("@fast@8".to_owned(), 6, 6, Binding::Global));
+        text.relocs.push(Reloc {
+            at: 7,
+            symbol: "__imp_GetTickCount".to_owned(),
+            kind: Reference::Call,
+            addend: -4,
+            after: 0,
+        });
+        let data = Data {
+            objects: vec![Object {
+                name: "p".to_owned(),
+                bytes: vec![0; 12],
+                size: 12,
+                align: 4,
+                place: Place::Written,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+                relocs: vec![
+                    Reloc {
+                        at: 0,
+                        symbol: "x".to_owned(),
+                        kind: Reference::Address { bytes: 4 },
+                        addend: 12,
+                        after: 0,
+                    },
+                    Reloc {
+                        at: 4,
+                        symbol: "f".to_owned(),
+                        kind: Reference::Image,
+                        addend: 0,
+                        after: 0,
+                    },
+                    Reloc {
+                        at: 8,
+                        symbol: "x".to_owned(),
+                        kind: Reference::Away,
+                        addend: 0,
+                        after: 0,
+                    },
+                ],
+            }],
+            ..Data::default()
+        };
+        let aliases = [Alias {
+            name: "g".to_owned(),
+            target: "f".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+        }];
+        let target = i386_windows();
+        let bytes = write(&text, &data, &aliases, &target, Output::default(), &Info::default())
+            .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert_eq!(file.format(), BinaryFormat::Coff);
+        assert_eq!(file.architecture(), Architecture::I386);
+        assert!(!file.is_64());
+
+        let named = |name: &str| file.symbol_by_name(name).is_some();
+        for name in ["_f", "@fast@8", "_p", "_g", "_puts", "__imp__GetTickCount", "_x"] {
+            assert!(named(name), "{name}");
+        }
+        for name in ["f", "p", "puts", "_@fast@8", "___imp_GetTickCount"] {
+            assert!(!named(name), "{name}");
+        }
+
+        let code = file.section_by_name(".text").expect("a text section");
+        let relocs: Vec<_> = code.relocations().collect();
+        assert_eq!(relocs.len(), 2);
+        for (at, reloc) in &relocs {
+            assert_eq!(reloc.flags(), RelocationFlags::Coff { typ: pe::IMAGE_REL_I386_REL32 });
+            let at = *at as usize;
+            assert_eq!(&code.data().expect("the bytes")[at..at + 4], &0i32.to_le_bytes());
+        }
+
+        let variable = file.section_by_name(".data").expect("a data section");
+        let types: Vec<_> = variable
+            .relocations()
+            .map(|(at, reloc)| match reloc.flags() {
+                RelocationFlags::Coff { typ } => (at, typ),
+                flags => panic!("{flags:?}"),
+            })
+            .collect();
+        assert_eq!(
+            types,
+            [
+                (0, pe::IMAGE_REL_I386_DIR32),
+                (4, pe::IMAGE_REL_I386_DIR32NB),
+                (8, pe::IMAGE_REL_I386_REL32)
+            ]
+        );
+        // The addend of the address, and the four a distance written into an image needs back
+        // because the linker counts it from the end of the four bytes.
+        let image = variable.data().expect("the bytes");
+        assert_eq!(&image[0..4], &12u32.to_le_bytes());
+        assert_eq!(&image[8..12], &4u32.to_le_bytes());
+
+        // The archive index is the names the file has.
+        let listed = defines(&text, &data, &aliases, &target).expect("a list");
+        assert_eq!(listed, ["_f", "@fast@8", "_p", "_g"]);
+    }
+
+    /// Windows on i386 has no unwind table, so the rows a producer wrote for one are left out rather
+    /// than put in a `.pdata` the loader of a 32 bit image never reads.
+    #[test]
+    fn an_i386_windows_object_has_no_unwind_table() {
+        let mut text = calling("puts");
+        text.unwind.bytes = vec![0; 12];
+        let bytes = write(
+            &text,
             &Data::default(),
             &[],
-            &target,
+            &i386_windows(),
             Output::default(),
             &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.section_by_name(".pdata").is_none());
+        assert!(file.section_by_name(".xdata").is_none());
+        assert!(file.section_by_name(".eh_frame").is_none());
+    }
+
+    /// No relocation of this machine holds eight bytes or reaches through a table, so a file
+    /// asking for one is refused rather than written with some other number in the type.
+    #[test]
+    fn i386_windows_has_no_eight_byte_or_table_relocations() {
+        for kind in [
+            Reference::Address { bytes: 8 },
+            Reference::AwayWide,
+            Reference::Got,
+            Reference::GotOffset,
+            Reference::Slot,
+            Reference::Thread,
+        ] {
+            assert_eq!(Flavour::Coff.reloc(Architecture::I386, kind, 0), None, "{kind:?}");
+        }
+        assert_eq!(
+            Flavour::Coff.reloc(Architecture::I386, Reference::Section, 0),
+            Some(RelocationFlags::Coff { typ: pe::IMAGE_REL_I386_SECREL })
         );
-        assert!(matches!(written, Err(Error::Format { .. })), "{written:?}");
+        assert_eq!(
+            Flavour::Coff.reloc(Architecture::I386, Reference::Signed, 0),
+            Some(RelocationFlags::Coff { typ: pe::IMAGE_REL_I386_DIR32 }),
+            "an address an instruction holds"
+        );
     }
 }
