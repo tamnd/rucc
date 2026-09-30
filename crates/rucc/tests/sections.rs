@@ -252,6 +252,23 @@ fn a_function_returning_a_pointer_may_have_its_section_beside_the_star() {
 }
 
 #[test]
+fn a_weak_written_beside_the_star_makes_the_function_weak() {
+    // `struct execmem_info * __weak execmem_arch_setup(void)` in the kernel's `mm/execmem.c`,
+    // and `char * __weak __init pcibios_setup(char *str)`, on a definition and on a declaration.
+    let source = "int g;\n\
+                  int * __attribute__((__weak__)) f(void) { return &g; }\n\
+                  char * __attribute__((__weak__)) __attribute__((__section__(\".init.text\"))) \
+                  h(char *s) { return s; }\n\
+                  int * __attribute__((__weak__)) k(void);\n\
+                  int *use(void) { return k(); }\n";
+    let text = listing("starred-weak", LINUX, source);
+    for name in ["f", "h", "k"] {
+        assert!(text.contains(&format!("\t.weak\t{name}\n")), "{name} is weak:\n{text}");
+        assert!(!text.contains(&format!("\t.globl\t{name}\n")), "{name} is not global:\n{text}");
+    }
+}
+
+#[test]
 fn an_attribute_after_a_tag_with_no_body_is_the_declarations() {
     // `static enum memblock_flags __init_memblock choose_memblock_flags(void)` and
     // `struct mem_section __ref *sparse_index_alloc(int nid)`. With no brace after the tag the

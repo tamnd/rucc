@@ -355,8 +355,14 @@ impl Checker<'_> {
             visibility: self.seen(specs.attrs),
             // The specifiers only, for the reason the visibility above reads them only. A
             // definition carrying it is the usual way a program offers a default somebody else
-            // may replace, and the declaration above it is the other way.
-            weak: self.weak_here(self.weakened(specs.attrs), linkage, name),
+            // may replace, and the declaration above it is the other way. Beside a star as well,
+            // where the kernel writes `struct execmem_info * __weak execmem_arch_setup(void)`.
+            weak: self.weak_here(
+                self.weakened(specs.attrs)
+                    .or_else(|| starred.iter().find_map(|&attrs| self.weakened(attrs))),
+                linkage,
+                name,
+            ),
             // And the specifiers only here as well, which is where a definition carrying one of
             // the two attributes has put it.
             startup: self.startup(specs.attrs, DeclKind::Function),
@@ -743,7 +749,9 @@ impl Checker<'_> {
             // writes it is on the specifiers of a declaration in a header, which is where a hook
             // nobody has to define is offered.
             weak: self.weak_here(
-                self.weakened(specs.attrs).or_else(|| self.weakened(item.attrs)),
+                self.weakened(specs.attrs)
+                    .or_else(|| self.weakened(item.attrs))
+                    .or_else(|| starred.iter().find_map(|&attrs| self.weakened(attrs))),
                 linkage,
                 name,
             ),
@@ -834,7 +842,7 @@ impl Checker<'_> {
     /// `static void * __used __section(".discard.addressable") name`, which is how the kernel
     /// spells `__ADDRESSABLE`, or `void * __init f(void)`. gcc gives an attribute that only a
     /// declaration can have to the declaration wherever in the declarator it was written, so
-    /// `section` and `used` there are read as if they were written after the name.
+    /// `section`, `used` and `weak` there are read as if they were written after the name.
     fn starred(&self, declarator: ast::DeclaratorId) -> Vec<AttrList> {
         self.ast[self.ast[declarator].derived]
             .iter()
