@@ -755,12 +755,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut min_function_align: Option<u32> = None;
     // The register files the kernel keeps out of every function, which are weighed after the
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
-    // took those away, and `-mno-fp-ret-in-387` and a boundary of 3 are each taken only with the
-    // flags that make them mean nothing to the code, in whichever order they came.
+    // took those away, whichever flag took them, and in whichever order they came.
     let mut general_regs_only = false;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
-    let mut boundary_of_eight: Option<&str> = None;
     // Where the stack protector's canary is, which is put together after the loop because the
     // four flags that say it may come in any order and gcc lets the later one win for each.
     let mut guard_global = false;
@@ -2152,10 +2150,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             // The boundary the stack pointer is kept on at a call, as a power of two, which the
             // x86-64 kernel sets to 3 because interrupt entry leaves its stack on eight bytes.
-            // gcc's range is 4 to 12 while the vector registers are in use, because a spilled
-            // vector is stored with an instruction that needs sixteen, and 3 only once `-mno-sse`
-            // has turned them off, which is weighed after the loop. Only on x86-64, where gcc has
-            // the flag at all.
+            // gcc's range is 3 to 12, with the vector registers or without them. The kernel's
+            // display code is built with `-msse` and a boundary of 3, and a frame with a sixteen
+            // byte vector in it is then aligned by the prologue, the same as a local that asks
+            // for more than the boundary. Only on x86-64, where gcc has the flag at all.
             _ if arch == rucc_target::Arch::X86_64
                 && arg.starts_with("-mpreferred-stack-boundary=") =>
             {
@@ -2164,7 +2162,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let power = power.ok_or_else(|| {
                     err(format!("{arg}: the boundary is a power of two between 3 and 12"))
                 })?;
-                boundary_of_eight = (power == 3).then_some(arg);
                 opts.stack_boundary = Some(1 << power);
             }
             // The x87 stack, which is where `long double` is on x86-64. The kernel turns it off
@@ -2740,18 +2737,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         _ => !general_regs_only,
     };
     opts.x87 = x87;
-    if let Some(arg) = boundary_of_eight.filter(|_| sse("sse")) {
-        return Err(err(format!(
-            "{arg}: a boundary of 3 is taken only with -mno-sse, since a spilled vector is \
-             stored with an instruction that needs sixteen bytes"
-        )));
-    }
-    if !fp_ret_in_387 && x87 {
-        return Err(err(
-            "-mno-fp-ret-in-387: a `long double` is returned on the x87 stack while there is one, and \
-             this is taken only together with -mno-80387, where nothing returns one at all",
-        ));
-    }
+    opts.x87_return = fp_ret_in_387;
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
     // After the loop, since whether `--64` or `-march=` is true of the target is a question about
     // the last `--target=`.
@@ -8336,7 +8322,8 @@ mod tests {
     }
 
     /// The boundary is a power of two, as gcc spells it, and only on x86-64, where gcc has the
-    /// flag. 3 is the kernel's and waits on the vector registers being kept out.
+    /// flag. 3 is the kernel's, and it is taken with the vector registers on as well as off,
+    /// since the kernel's display code turns SSE back on and keeps the boundary.
     #[test]
     fn the_preferred_stack_boundary_is_a_power_of_two_on_x86_64() {
         let boundary = |flag: &str| compile(&[KERNEL_X86, flag, "-c", "a.c"]).0.stack_boundary;
@@ -8347,9 +8334,8 @@ mod tests {
         for bad in ["-mpreferred-stack-boundary=13", "-mpreferred-stack-boundary=2"] {
             assert!(refused(&[KERNEL_X86, bad, "-c", "a.c"]).contains("between 3 and 12"));
         }
-        // Eight bytes only without SSE, whichever of the two flags comes first.
-        let three = refused(&[KERNEL_X86, "-mpreferred-stack-boundary=3", "-c", "a.c"]);
-        assert!(three.contains("-mno-sse"), "{three}");
+        let sse = [KERNEL_X86, "-mpreferred-stack-boundary=3", "-msse", "-msse2", "-c", "a.c"];
+        assert_eq!(compile(&sse).0.stack_boundary, Some(8));
         let eight = [KERNEL_X86, "-mpreferred-stack-boundary=3", "-mno-sse", "-c", "a.c"];
         assert_eq!(compile(&eight).0.stack_boundary, Some(8));
         let eight = [KERNEL_X86, "-mno-sse", "-mpreferred-stack-boundary=3", "-c", "a.c"];
@@ -8378,9 +8364,12 @@ mod tests {
         // What the x86-64 kernel passes, all of it.
         let kernel = [KERNEL_X86, "-mno-sse", "-mno-mmx", "-mno-sse2", "-mno-80387"];
         assert_eq!(files(&[&kernel[..], &["-mno-fp-ret-in-387"]].concat()), (false, false));
-        // Where a `long double` comes back is only free to change once there is none.
-        let said = refused(&[KERNEL_X86, "-mno-fp-ret-in-387", "-c", "a.c"]);
-        assert!(said.contains("-mno-80387"), "{said}");
+        // The kernel's display code turns SSE and the x87 stack back on and keeps the flag, and
+        // gcc takes that and refuses only a function that returns a `long double`.
+        let display =
+            [&kernel[..], &["-mno-fp-ret-in-387", "-msse", "-msse2", "-mhard-float", "-c", "a.c"]];
+        let (opts, _) = compile(&display.concat());
+        assert!(opts.vector && opts.x87 && !opts.x87_return);
         // `-mno-80387` is an x86 flag, and gcc for AArch64 does not know it.
         let said = refused(&[KERNEL_ARM64, "-mno-80387", "-c", "a.c"]);
         assert!(said.contains("unknown option"), "{said}");

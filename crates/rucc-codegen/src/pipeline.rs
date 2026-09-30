@@ -395,6 +395,9 @@ pub struct Flags {
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` turns off. That is the
     /// eighty bit `long double`, and a function with one in it is refused too.
     pub x87: bool,
+    /// Whether a `long double` may be returned on the x87 stack, which `-mno-fp-ret-in-387` turns
+    /// off. A function returning one is refused even with the stack on.
+    pub x87_return: bool,
     /// Which registers `-fzero-call-used-regs=` has every `ret` clear, `None` for `skip`, which a
     /// function's `zero_call_used_regs` attribute replaces for that function. See [`crate::zero`].
     pub zero: Option<Zeroing>,
@@ -432,6 +435,7 @@ impl Default for Flags {
             debug: false,
             vector: true,
             x87: true,
+            x87_return: true,
             zero: None,
         }
     }
@@ -574,7 +578,7 @@ pub fn compile_recording(
     let alone = tail::comes_back(source, names, elsewhere);
     // Before selection, which would otherwise pick a register the command line said is not there.
     // Read after the lowerings above, since a value one of them makes is a value in the function.
-    lower::off_registers(source, flags.vector, flags.x87)?;
+    lower::off_registers(source, flags.vector, flags.x87, flags.x87_return)?;
     let lowered =
         lower::func_for(source, names, machine.selector, machine.conv, elsewhere, flags.debug)?;
     recording.fired.merge(&lowered.fired);

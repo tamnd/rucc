@@ -2088,6 +2088,10 @@ pub struct Options {
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` and `-msoft-float` turn
     /// off. That is the eighty bit `long double`.
     pub x87: bool,
+    /// Whether a `long double` may be returned on the x87 stack, which `-mno-fp-ret-in-387` turns
+    /// off while leaving the stack itself on. A function returning one is then refused, which is
+    /// what gcc does.
+    pub x87_return: bool,
     /// Where the stack protector's canary is copied from when the command line moved it, from the
     /// `-mstack-protector-guard` flags. `None` is the target's own place, which is `%fs:40` on
     /// x86-64 Linux. A kernel moves it to its per CPU block behind `%gs`.
@@ -2681,6 +2685,7 @@ impl Options {
             stack_boundary: None,
             vector: true,
             x87: true,
+            x87_return: true,
             guard: None,
             zero_regs: None,
             isa: match target.arch {
