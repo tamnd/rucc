@@ -241,7 +241,7 @@ The other float wider than a `double` is binary128, which is `_Float128` everywh
 
 **RISC-V 64** is third and is the simplest to encode and the most demanding on the optimizer, because the base ISA has no addressing mode beyond register-plus-immediate and no condition codes, so the quality of the generated code depends more heavily on the middle end. That makes it a useful canary: a regression that shows up first on RISC-V is usually a middle-end regression.
 
-Adding a fourth target should be a rule set and four data files. Whether that is actually true is testable, and the M10 exit criterion in document 17 is bringing up a fourth target (the candidate is 32-bit ARM or i686) with a measured effort number, which either validates the abstraction or reveals what leaked.
+Adding a fourth target should be a rule set and four data files. Whether that is actually true is testable, and the M10 exit criterion in document 17 is bringing up a fourth target (i686, because the x86-64 kernel needs it, as document 17 explains) with a measured effort number, which either validates the abstraction or reveals what leaked.
 
 ## 10.9 Peepholes after selection
 

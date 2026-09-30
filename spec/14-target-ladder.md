@@ -67,6 +67,8 @@ The operational definition from document 02, restated here as the criterion:
 
 **Level C: it is a real kernel.** Boots on all three architectures. Passes a kernel selftest run and an LTP run at parity with a GCC-built kernel. Survives a `make -j` build of a userspace under itself. Builds with the hardening options on: KASAN, stack protector, `CONFIG_RETPOLINE`, `CONFIG_UNWINDER_ORC`, `CONFIG_LTO` if we get there.
 
+**The optimization levels are the kernel's own.** The kernel is graded at `-O2` and `-Os`, the two levels its Makefile chooses between with `CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE` and `CONFIG_CC_OPTIMIZE_FOR_SIZE`, and at nothing else. This is an exception to the rule that a rung passes at every level, and it is written down here so that it reads as one. The kernel does not build at `-O0`, because it depends on dead code elimination and constant folding to satisfy `BUILD_BUG_ON` and the calls to undefined functions it uses as compile time assertions. `-O3` exists for some architectures on some kernels and is not graded, and `-flto` is only graded if the kernel's own `CONFIG_LTO` is reached. How the levels A, B and C map onto the kernel harness's milestones is in document 17 under M11.
+
 **What it demands** that nothing below it does:
 
 - The full `-f`/`-m` flag set from document 13.7, working rather than accepted.
