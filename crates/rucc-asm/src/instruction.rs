@@ -1141,6 +1141,31 @@ fn depths(mnemonic: &str) -> &'static [u8] {
     }
 }
 
+/// The operand with any space between a `%` and the register it names taken out.
+///
+/// gas skips it, and the kernel's `.S` files come out of the preprocessor with one in them:
+/// `_ASM_RIP(kvm_rebooting)` in `vmenter.S` is `kvm_rebooting (% rip)` by the time it is
+/// assembled. A `%` with a space after it is also the remainder in an expression, so the space
+/// only goes when the word after it is a register.
+pub(crate) fn joined(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len());
+    let mut rest = arg;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..=at]);
+        rest = &rest[at + 1..];
+        let after = rest.trim_start();
+        let word = after
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .map_or(after, |end| &after[..end]);
+        let named = register(word).is_ok() || word.eq_ignore_ascii_case("rip");
+        if after.len() < rest.len() && !word.is_empty() && named {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A register, without its sigil.
 ///
 /// gas reads the name in either case, and a program can lean on that without meaning to:
