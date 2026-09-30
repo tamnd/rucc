@@ -175,6 +175,7 @@ pub mod kept;
 pub mod layout;
 pub mod lower;
 pub mod lowering;
+pub mod mitigate;
 pub mod pipeline;
 pub mod pressure;
 pub mod quad;

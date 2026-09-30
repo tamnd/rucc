@@ -2174,6 +2174,42 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 guard_symbol = Some(name);
             }
+            // The speculation mitigations, which are rewrites of a branch the back end already
+            // wrote, see `rucc_codegen::mitigate`. Only the `extern` thunks, since those are what
+            // the kernel builds with: it keeps the thunks in `arch/x86/lib/retpoline.S` and patches
+            // them at boot. rucc always calls through a register, so `-mindirect-branch-register`
+            // asks for what already happens.
+            "-mindirect-branch=thunk-extern" if arch == rucc_target::Arch::X86_64 => {
+                opts.indirect_thunk = true;
+            }
+            "-mindirect-branch=keep" if arch == rucc_target::Arch::X86_64 => {
+                opts.indirect_thunk = false;
+            }
+            "-mindirect-branch-register" if arch == rucc_target::Arch::X86_64 => {}
+            "-mindirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
+                opts.thunk_cs_prefix = true;
+            }
+            "-mfunction-return=thunk-extern" if arch == rucc_target::Arch::X86_64 => {
+                opts.return_thunk = true;
+            }
+            "-mfunction-return=keep" if arch == rucc_target::Arch::X86_64 => {
+                opts.return_thunk = false;
+            }
+            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mharden-sls=") => {
+                (opts.sls_return, opts.sls_jump) = match &arg["-mharden-sls=".len()..] {
+                    "none" => (false, false),
+                    "return" => (true, false),
+                    "indirect-jmp" => (false, true),
+                    "all" => (true, true),
+                    _ => {
+                        return Err(err(format!(
+                            "{arg}: the choices are none, return, indirect-jmp and all"
+                        )));
+                    }
+                };
+            }
+            "-fjump-tables" => opts.jump_tables = true,
+            "-fno-jump-tables" => opts.jump_tables = false,
             // A floor under every function that `-falign-functions` cannot lower, which is gcc's
             // difference between the two: the kernel passes this one because ftrace and the call
             // padding it writes need every function on the boundary, the cold ones included. It is
@@ -8106,6 +8142,7 @@ mod tests {
             "-mindirect-branch=keep",
             "-mfunction-return=keep",
             "-mharden-sls=none",
+            "-mno-indirect-branch-register",
         ] {
             compile(&[KERNEL_X86, flag, "-c", "a.c"]);
         }
@@ -8224,16 +8261,48 @@ mod tests {
         }
     }
 
+    /// The retpoline, return thunk and straight line speculation flags a kernel with the
+    /// mitigations on passes, each read into the options and the later of two winning.
+    #[test]
+    fn the_kernel_mitigations_are_read() {
+        let opts = |more: &[&str]| compile(&[&[KERNEL_X86, "-c", "a.c"], more].concat()).0;
+        let off = opts(&[]);
+        assert!(!off.indirect_thunk && !off.return_thunk && !off.sls_return && !off.sls_jump);
+        assert!(off.jump_tables);
+        let on = opts(&[
+            "-mindirect-branch=thunk-extern",
+            "-mindirect-branch-register",
+            "-mindirect-branch-cs-prefix",
+            "-mfunction-return=thunk-extern",
+            "-mharden-sls=all",
+            "-fno-jump-tables",
+        ]);
+        assert!(on.indirect_thunk && on.thunk_cs_prefix && on.return_thunk);
+        assert!(on.sls_return && on.sls_jump && !on.jump_tables);
+        let sls = |kind| {
+            let it = opts(&[kind]);
+            (it.sls_return, it.sls_jump)
+        };
+        assert_eq!(sls("-mharden-sls=return"), (true, false));
+        assert_eq!(sls("-mharden-sls=indirect-jmp"), (false, true));
+        let back =
+            opts(&["-mharden-sls=all", "-mharden-sls=none", "-mfunction-return=thunk-extern"]);
+        assert_eq!((back.sls_return, back.sls_jump, back.return_thunk), (false, false, true));
+        let kept = opts(&["-mindirect-branch=thunk-extern", "-mindirect-branch=keep"]);
+        assert!(!kept.indirect_thunk);
+        assert!(refused(&[KERNEL_X86, "-mharden-sls=some", "-c", "a.c"]).contains("indirect-jmp"));
+        // A mitigation of one back end is an unknown option to the other.
+        assert!(refused(&[KERNEL_ARM64, "-mharden-sls=all", "-c", "a.c"]).contains("-mharden-sls"));
+        refused(&[KERNEL_ARM64, "-mindirect-branch=thunk-extern", "-c", "a.c"]);
+    }
+
     /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
         for (flag, issue) in [
-            ("-mindirect-branch=thunk-extern", 2280),
-            ("-mfunction-return=thunk-extern", 2280),
-            ("-mharden-sls=all", 2280),
-            ("-mindirect-branch-cs-prefix", 2280),
-            ("-fno-jump-tables", 2280),
+            ("-mindirect-branch=thunk-inline", 2326),
+            ("-mfunction-return=thunk", 2326),
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
             ("-mrecord-mcount", 2283),

@@ -3444,6 +3444,14 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
             _ => None,
         };
     }
+    // `cs` the same way, which is what the kernel's retpoline calls through `r8` to `r15` are.
+    if word == "cs" {
+        return match next {
+            "jmp" | "jmpq" => Some(("cs jmp".to_owned(), after)),
+            "call" | "callq" => Some(("cs call".to_owned(), after)),
+            _ => None,
+        };
+    }
     // `rep bsf` is how gcc writes `tzcnt` for a machine that may not have it: the bytes are the
     // same, and a processor without the instruction ignores the prefix and runs the `bsf`.
     if matches!(word, "rep" | "repe" | "repz") {

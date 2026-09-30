@@ -944,6 +944,7 @@ static TEXT: &[(&str, &[Written])] = &[
     // not written, because the machine does not read them and a reader of the assembly can see
     // them in the instructions above it.
     ("call", &[spell("call", &[Symbol])]),
+    ("call_cs", &[spell("cs call", &[Symbol])]),
     // A call through an address, which is the same mnemonic and a different instruction. The star
     // is the whole of the difference in the text and the addressing byte is the whole of it in the
     // bytes, and both come from the argument being a register rather than a place in the program.
@@ -1048,6 +1049,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("jcc_np", &[spell("jnp", &[Label])]),
     ("jmp", &[spell("jmp", &[Label])]),
     ("jmp_away", &[spell("jmp", &[Symbol])]),
+    ("jmp_away_cs", &[spell("cs jmp", &[Symbol])]),
     // A jump through a register, which is the same mnemonic and a different instruction, the way
     // `call_reg` above is. The star is the whole of the difference in the text.
     ("jmp_reg", &[spell("jmp", &[Through])]),
@@ -1068,6 +1070,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // The instruction a program stops on. No operands and one spelling, and the name is the whole
     // of it.
     ("ud2", &[spell("ud2", &[])]),
+    // The breakpoint `-mharden-sls=` writes after a return and a jump through a register.
+    ("int3", &[spell("int3", &[])]),
     // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
     // because there is only one of it on this machine and its name is the whole of it.
     ("endbr64", &[spell("endbr64", &[])]),

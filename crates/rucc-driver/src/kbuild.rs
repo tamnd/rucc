@@ -56,8 +56,8 @@ const A64: Arch = Arch::Aarch64;
 
 const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
                      at an offset from sp_el0 is part of that work";
-const THUNKS: &str = "indirect branches and returns are written as they are, with no thunk, no \
-                      int3 after them and jump tables where a switch wants one";
+const INLINE: &str = "only the extern thunks are written, which are the kernel's own, and a thunk \
+                      written into every object that wants one is not";
 const MCOUNT: &str = "the __fentry__ calls -pg writes are not listed in a __mcount_loc section and \
                       are not written as nops";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
@@ -161,8 +161,6 @@ pub(crate) const TABLE: &[Row] = &[
         None,
     ),
     // The default of a family whose other members are refused below.
-    same("-fjump-tables", "a switch may become a jump table, which is the default here too"),
-    refused("-fno-jump-tables", THUNKS, Some(2280)),
     same("-fzero-call-used-regs=skip", "no registers are cleared on return, the default"),
     refused(
         "-fzero-call-used-regs=*",
@@ -202,15 +200,12 @@ pub(crate) const TABLE: &[Row] = &[
     refused("-gz=zstd", "the debug sections are written uncompressed", Some(2288)),
     // x86-64.
     only(A64, refused("-mstack-protector-guard*", GUARD, Some(2279))),
-    only(X86, same("-mindirect-branch=keep", "indirect branches are left as they are")),
-    only(X86, refused("-mindirect-branch=*", THUNKS, Some(2280))),
-    only(X86, same("-mfunction-return=keep", "returns are left as they are")),
-    only(X86, refused("-mfunction-return=*", THUNKS, Some(2280))),
+    only(X86, refused("-mindirect-branch=thunk", INLINE, Some(2326))),
+    only(X86, refused("-mindirect-branch=thunk-inline", INLINE, Some(2326))),
+    only(X86, refused("-mfunction-return=thunk", INLINE, Some(2326))),
+    only(X86, refused("-mfunction-return=thunk-inline", INLINE, Some(2326))),
     only(X86, same("-mno-indirect-branch-register", "an indirect branch may go through memory")),
-    only(X86, refused("-mindirect-branch-register", THUNKS, Some(2280))),
-    only(X86, refused("-mindirect-branch-cs-prefix", THUNKS, Some(2280))),
-    same("-mharden-sls=none", "nothing is put after a return or an indirect jump, the default"),
-    only(X86, refused("-mharden-sls=*", THUNKS, Some(2280))),
+    only(A64, same("-mharden-sls=none", "nothing is put after a return or an indirect branch")),
     only(
         A64,
         refused(
@@ -333,8 +328,8 @@ mod tests {
     #[test]
     fn the_default_spelling_is_found_before_its_family() {
         let answer = |arg| row(arg, Arch::X86_64).map(|row| row.answer);
-        assert!(matches!(answer("-mindirect-branch=keep"), Some(Answer::Same(_))));
-        assert!(matches!(answer("-mindirect-branch=thunk-extern"), Some(Answer::Refused(..))));
+        assert!(answer("-mindirect-branch=thunk-extern").is_none());
+        assert!(matches!(answer("-mindirect-branch=thunk"), Some(Answer::Refused(..))));
         assert!(matches!(answer("-ftrivial-auto-var-init=uninitialized"), Some(Answer::Same(_))));
         assert!(matches!(answer("-ftrivial-auto-var-init=zero"), Some(Answer::Refused(..))));
     }

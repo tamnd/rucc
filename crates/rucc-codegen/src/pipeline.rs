@@ -49,6 +49,7 @@ use crate::kept;
 use crate::layout;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
+use crate::mitigate::{self, Mitigations};
 use crate::pressure::{Cost, Pressure};
 use crate::schedule;
 use crate::select::{self, Selector};
@@ -373,6 +374,10 @@ pub struct Flags {
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` turns off. That is the
     /// eighty bit `long double`, and a function with one in it is refused too.
     pub x87: bool,
+    /// The speculation mitigations `-mindirect-branch=`, `-mfunction-return=` and
+    /// `-mharden-sls=` ask for, which a function's `indirect_branch("keep")` and
+    /// `function_return("keep")` take back for that function. See [`crate::mitigate`].
+    pub mitigate: Mitigations,
 }
 
 impl Default for Flags {
@@ -404,6 +409,7 @@ impl Default for Flags {
             debug: false,
             vector: true,
             x87: true,
+            mitigate: Mitigations::default(),
         }
     }
 }
@@ -520,6 +526,8 @@ pub fn compile_recording(
     // the frame below rather than being one more thing in it. Read here rather than beside the rest
     // of the layout because the refusal a few lines down is the earliest thing that asks.
     let naked = source.attrs.set.contains(ir::AttrSet::NAKED);
+    let keep_returns = source.attrs.set.contains(ir::AttrSet::RETURN_KEEP);
+    let keep_indirect = source.attrs.set.contains(ir::AttrSet::INDIRECT_KEEP);
     // Last thing before selection, because a `tail_call` ends its block and every lowering above
     // is written against blocks that end the way the middle end left them. Only on a machine that
     // can jump to a name, since the call stays a call on one that cannot.
@@ -917,6 +925,14 @@ pub fn compile_recording(
     // leave alone and a jump out of the function is one some of them would not know about. Nothing
     // before this sees anything but a call, a return and an epilogue, which is right on its own.
     tail::jumps(&mut func, &stack.tails, machine.insts, names);
+
+    // After the tail calls, because a call that became a jump through a register is an indirect
+    // jump now and a `ret` that became a tail call is not a return any more.
+    let mut on = flags.mitigate;
+    // Keeping a branch is keeping it out of the thunk, and `-mharden-sls=` still hardens it.
+    on.returns &= !keep_returns;
+    on.indirect &= !keep_indirect;
+    mitigate::apply(&mut func, on, &machine.file, names);
 
     // Last of all, because a stretch is named by the instructions at either end of it and every
     // pass above is free to take an instruction out or move one. The frame is wanted here as well

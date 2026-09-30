@@ -326,7 +326,7 @@ GCC has no `-Z`, which is what makes it the right prefix for the flags that are 
 
 kbuild passes some gcc flags on every compile and probes others with `cc-option`, which compiles an empty file with the flag and keeps the flag if the compiler exits with zero. A refused flag does not stop the build, it is dropped, and the kernel is configured and compiled without it. A flag taken and ignored is worse, because the kernel is then configured as though the compiler did what the flag asked. So every flag the top Makefile, `arch/x86/Makefile`, `arch/arm64/Makefile` and `scripts/Makefile.*` of Linux 7.2 pass is in one of three places in the table below. It is honored, or it is taken because what it asks for is already what happens, with the reason written down, or it is refused with the reason and, where there is one, the issue that would make it honored. Nothing is taken and ignored.
 
-The flags that are taken or refused without doing anything are one table in `crates/rucc-driver/src/kbuild.rs`, read before any other arm of the parser, and a test checks that every flag in it is written in this section. A row can be for one architecture, and on any other the flag is left to the rest of the parser, which usually means an unknown option, as it is in gcc. A flag written with a `*` at the end covers every flag that starts with what comes before the `*` and that a more particular row does not answer, so `-mindirect-branch=*` is every value but `keep`.
+The flags that are taken or refused without doing anything are one table in `crates/rucc-driver/src/kbuild.rs`, read before any other arm of the parser, and a test checks that every flag in it is written in this section. A row can be for one architecture, and on any other the flag is left to the rest of the parser, which usually means an unknown option, as it is in gcc. A flag written with a `*` at the end covers every flag that starts with what comes before the `*` and that a more particular row does not answer, so `-ftrivial-auto-var-init=*` is every value but `uninitialized`.
 
 The `-W` flags the kernel passes are the rule in section 4.1: a name gcc 16 knows is taken and one it does not know is refused, from the list in `crates/rucc-driver/data/gcc-warnings.txt`. So the clang names kbuild probes for clang builds, `-Wthread-safety` and `-Werror=unknown-warning-option` among them, are refused the way gcc refuses them, and `cc-disable-warning` gets gcc's answers.
 
@@ -342,6 +342,10 @@ Honored, by doing what gcc does:
 | `-mstack-protector-guard=tls`, `-mstack-protector-guard=global`, `-mstack-protector-guard-reg=`, `-mstack-protector-guard-offset=`, `-mstack-protector-guard-symbol=` (x86-64) | Where the canary is read from. `tls` is a thread's block through `-mstack-protector-guard-reg=`, `fs` or `gs`, at `-mstack-protector-guard-offset=` or at the symbol `-mstack-protector-guard-symbol=` names when there is one, which is `%gs:__ref_stack_chk_guard(%rip)` for the kernel from 6.13 on and `%gs:40` before it. The register is `gs` under `-mcmodel=kernel` and `fs` otherwise, as in gcc. `global` is the variable `__stack_chk_guard` and the other three are not read. Under `-fPIC` a symbol's address is read out of the global offset table first, as gcc does. The default is `%fs:40`, and `%gs:40` under `-mcmodel=kernel`. |
 | `-mno-80387`, `-msoft-float` (x86-64) | The x87 stack is kept out of every function, and a function with a `long double` in it is refused. `-m80387` and `-mhard-float` turn it back on. |
 | `-mno-fp-ret-in-387` (x86-64) | Taken with `-mno-80387`, where nothing is returned on the x87 stack, and refused without it, since there it would change where a `long double` comes back. |
+| `-mindirect-branch=thunk-extern`, `-mindirect-branch=keep`, `-mindirect-branch-register`, `-mindirect-branch-cs-prefix` (x86-64) | A call or a jump through a register becomes a call or a jump to `__x86_indirect_thunk_<reg>`, which the kernel keeps in `arch/x86/lib/retpoline.S`. With the prefix flag the ones through `r8` to `r15` get `cs` in front, so that every one is six bytes and the kernel can patch the plain branch over it. rucc always branches through a register, so `-mindirect-branch-register` asks for what happens. `indirect_branch("keep")` on a function leaves its branches plain. |
+| `-mfunction-return=thunk-extern`, `-mfunction-return=keep` (x86-64) | `ret` becomes `jmp __x86_return_thunk`, unless the function says `function_return("keep")`. |
+| `-mharden-sls=none`, `-mharden-sls=return`, `-mharden-sls=indirect-jmp`, `-mharden-sls=all` (x86-64) | `int3` after every `ret` for `return`, after every jump through a register or to a thunk for `indirect-jmp`, and both for `all`. A `ret` the return thunk replaced gets none, as in gcc. |
+| `-fjump-tables`, `-fno-jump-tables` | Whether a `switch` may become a jump table. Under `-mindirect-branch=thunk-extern` it never does, as in gcc, since a jump through a table is a jump the thunk would not see. |
 | `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
 
 Taken because what they ask for is what happens:
@@ -361,11 +365,10 @@ Taken because what they ask for is what happens:
 | `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |
 | `-fstrict-flex-arrays=0`, `-fno-strict-flex-arrays` | Every trailing array is treated as flexible, which is how `__builtin_object_size` treats one here. |
-| `-fjump-tables` | The default. |
 | `-ftrivial-auto-var-init=uninitialized` | The default. |
 | `-fzero-call-used-regs=skip` | The default. |
 | `-gz=none` | The debug sections are not compressed. |
-| `-mindirect-branch=keep`, `-mfunction-return=keep`, `-mno-indirect-branch-register` (x86-64), `-mharden-sls=none` | Branches and returns are left as they are. |
+| `-mno-indirect-branch-register` (x86-64), `-mharden-sls=none` (AArch64) | Branches and returns are left as they are. |
 | `-mno-record-mcount`, `-mno-nop-mcount` (x86-64) | The defaults. |
 | `-mskip-rax-setup`, `-mno-skip-rax-setup` (x86-64) | `%al` is set before every variadic call, which is always correct whether or not gcc would have skipped it. |
 | `-maccumulate-outgoing-args`, `-mno-accumulate-outgoing-args` (x86-64) | Whether gcc pushes a call's stack arguments or stores them. They end up in the same places. |
@@ -379,7 +382,7 @@ Refused, with the issue that would honor them:
 | Flag | Why | Issue |
 |---|---|---|
 | `-mstack-protector-guard*` (AArch64) | There is no stack protector on AArch64 yet, and the kernel's canary at an offset from `sp_el0` is part of that work. | #2279 |
-| `-mindirect-branch=*`, `-mfunction-return=*`, `-mindirect-branch-register`, `-mindirect-branch-cs-prefix`, `-mharden-sls=*` (x86-64), `-fno-jump-tables` | No thunks, no `int3` after a return and jump tables where a switch wants one. | #2280 |
+| `-mindirect-branch=thunk`, `-mindirect-branch=thunk-inline`, `-mfunction-return=thunk`, `-mfunction-return=thunk-inline` (x86-64) | Only the extern thunks are written, which are the kernel's own, and not a thunk in every object that wants one. The kernel's vDSO asks for `thunk-inline`. | #2326 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
 | `-mrecord-mcount`, `-mnop-mcount` (x86-64) | The `__fentry__` calls `-pg` writes are neither listed in `__mcount_loc` nor written as nops. | #2283 |

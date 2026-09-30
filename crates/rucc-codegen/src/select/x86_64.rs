@@ -329,7 +329,10 @@ mod tests {
     /// no equality for the solver and no pattern for a rule. What makes it right is not a claim
     /// about the order anything becomes visible in either: it is what the operating system does
     /// with the fault, which is a fact about neither the values nor the program around it.
-    const STOP: &[&str] = &["ud2"];
+    ///
+    /// `int3` is here for the same reason. `crate::mitigate` puts it after a return and a jump
+    /// through a register under `-mharden-sls=`.
+    const STOP: &[&str] = &["ud2", "int3"];
 
     /// The instructions that are a hint rather than a computation.
     ///
@@ -553,6 +556,11 @@ mod tests {
     /// is a program writing `jmp` at the end of a template in a function that is `naked`. See
     /// [`rucc_target::x86_64::Step::Away`].
     const AWAY: &[&str] = &["jmp_away"];
+
+    /// The call and the jump to a retpoline thunk with `cs` in front, which `crate::mitigate`
+    /// writes after allocation in place of a `call_reg` or a `jmp_reg` through `r8` to `r15`. No
+    /// rule could, since which register the address ended up in is only known by then.
+    const THUNK: &[&str] = &["call_cs", "jmp_away_cs"];
 
     /// The instructions that change an object where it lives, which a template asks for and
     /// nothing else does.
@@ -1002,7 +1010,7 @@ mod tests {
             if AWAY.contains(&opcode) || MEMORY.contains(&opcode) || STRING.contains(&opcode) {
                 continue;
             }
-            if TEMPLATED.contains(&opcode) {
+            if TEMPLATED.contains(&opcode) || THUNK.contains(&opcode) {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {

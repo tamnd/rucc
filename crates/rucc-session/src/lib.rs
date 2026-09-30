@@ -2088,6 +2088,22 @@ pub struct Options {
     /// `-mstack-protector-guard` flags. `None` is the target's own place, which is `%fs:40` on
     /// x86-64 Linux. A kernel moves it to its per CPU block behind `%gs`.
     pub guard: Option<rucc_target::Guard>,
+    /// Whether a call or a jump through a register goes through the kernel's
+    /// `__x86_indirect_thunk_<reg>` instead, which `-mindirect-branch=thunk-extern` asks for.
+    pub indirect_thunk: bool,
+    /// Whether a call or a jump to one of those thunks through `r8` to `r15` gets a `cs` prefix,
+    /// which `-mindirect-branch-cs-prefix` asks for so that every one of them is six bytes long.
+    pub thunk_cs_prefix: bool,
+    /// Whether a `ret` is a jump to `__x86_return_thunk` instead, which
+    /// `-mfunction-return=thunk-extern` asks for.
+    pub return_thunk: bool,
+    /// Whether an `int3` follows every `ret`, from `-mharden-sls=return` and `-mharden-sls=all`.
+    pub sls_return: bool,
+    /// Whether an `int3` follows every jump through a register, from `-mharden-sls=indirect-jmp`
+    /// and `-mharden-sls=all`.
+    pub sls_jump: bool,
+    /// Whether a `switch` may become a jump table, which `-fno-jump-tables` turns off.
+    pub jump_tables: bool,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2633,6 +2649,12 @@ impl Options {
             vector: true,
             x87: true,
             guard: None,
+            indirect_thunk: false,
+            thunk_cs_prefix: false,
+            return_thunk: false,
+            sls_return: false,
+            sls_jump: false,
+            jump_tables: true,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 Arch::Aarch64 | Arch::Riscv64 => Isa::NONE,

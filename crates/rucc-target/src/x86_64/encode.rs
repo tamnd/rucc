@@ -49,7 +49,8 @@ use crate::x86_64::text::{Arg, Width};
 
 use Fits::{Signed8, Signed32};
 use Size::{
-    Byte, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Untracked, Word, WordDouble, WordQuad,
+    Byte, CodeSegment, Double, DoubleQuad, Long, Quad, Single, SingleQuad, Untracked, Word,
+    WordDouble, WordQuad,
 };
 
 /// What kind of thing one argument of an instruction is.
@@ -160,6 +161,14 @@ pub enum Size {
     /// of the REX byte, since behind it the REX byte would no longer be the last thing before the
     /// opcode and `jmp *%r8` would read as a jump through `rax`.
     Untracked,
+    /// The `0x2E` prefix, which is `cs` in front of a call or a jump to a retpoline thunk.
+    ///
+    /// Not a size either, and in 64 bit mode it changes nothing about what the instruction does.
+    /// What it buys is one byte of length. `-mindirect-branch-cs-prefix` puts it in front of a call
+    /// to a thunk through `r8` to `r15`, so that the call is six bytes whichever register it names,
+    /// which is what the kernel needs to write `lfence; call *%r11` over it in place when it
+    /// decides at boot that the thunk is not needed.
+    CodeSegment,
 }
 
 impl Size {
@@ -173,6 +182,7 @@ impl Size {
             Single | SingleQuad => Some(0xF3),
             Double | DoubleQuad | WordDouble => Some(0xF2),
             Untracked => Some(0x3E),
+            CodeSegment => Some(0x2E),
             Byte | Long | Quad => None,
         }
     }
@@ -1803,6 +1813,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("notrack jmp", &M, Untracked, &[0xFF], ext(0, 4), NO_IMM),
     bytes("notrack call", &R, Untracked, &[0xFF], ext(0, 2), NO_IMM),
     bytes("notrack call", &M, Untracked, &[0xFF], ext(0, 2), NO_IMM),
+    // A call and a jump to a symbol with `cs` in front, which is how a call to a retpoline thunk
+    // through `r8` to `r15` is made as long as one through the other eight. See [`Size::CodeSegment`].
+    bytes("cs call", &D, CodeSegment, &[0xE8], NO_MODRM, ImmSize::Cd),
+    bytes("cs jmp", &D, CodeSegment, &[0xE9], NO_MODRM, ImmSize::Cd),
     // What a prologue and an epilogue are made of. A push and a pop move eight bytes without
     // being told to, so neither carries the prefix that would say so.
     bytes("pushq", &R, Long, &[0x50], plus(0), NO_IMM),
@@ -1843,6 +1857,11 @@ static ENCODINGS: &[Encoding] = &[
     // that the manual promises this opcode will never be given a meaning, so every processor there
     // is raises the fault for an instruction it does not know rather than doing something.
     bytes("ud2", &NO_ARGS, Long, &[0x0F, 0x0B], NO_MODRM, NO_IMM),
+    // The breakpoint, one byte. Besides a debugger's use of it, it is what `-mharden-sls=` puts
+    // after a return or a jump through a register, so that a processor that runs on past the
+    // branch before it knows where the branch goes stops there rather than running whatever
+    // happens to follow. The kernel's own assembly writes it for the same reason.
+    bytes("int3", &NO_ARGS, Long, &[0xCC], NO_MODRM, NO_IMM),
     // The landing pad, and four bytes for the same reason the barrier is three: no operands, so
     // the addressing byte at the end of it is part of the opcode. A machine that does not check
     // reads the whole of it as a wider `nop`, which is what makes an object built with it run
@@ -3786,6 +3805,7 @@ mod tests {
     fn the_landing_pad_is_four_bytes_and_none_of_them_are_worked_out() {
         assert_eq!(hex("endbr64", &[]), "f3 0f 1e fa");
         assert_eq!(hex("ud2", &[]), "0f 0b");
+        assert_eq!(hex("int3", &[]), "cc");
     }
 
     /// The two x87 instructions, whose bytes are checked against what the assembler writes for the

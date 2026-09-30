@@ -966,6 +966,13 @@ fn generate(
         code_model: opts.code_model,
         vector: opts.vector,
         x87: opts.x87,
+        mitigate: rucc_codegen::mitigate::Mitigations {
+            indirect: opts.indirect_thunk,
+            cs_prefix: opts.thunk_cs_prefix,
+            returns: opts.return_thunk,
+            sls_return: opts.sls_return,
+            sls_jump: opts.sls_jump,
+        },
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         profile: match profile {
@@ -1015,8 +1022,15 @@ fn generate(
         // result exactly as `-O2` would have. The level is asked whether it optimizes for size
         // rather than matched against, so a level added later answers this without editing it.
         goal: Goal::for_size(opts.opt_level.is_size()),
-        // Only when somebody is measuring, and checked when the arguments were parsed.
-        switch: opts.switch_shape.as_deref().and_then(rucc_codegen::switch::Force::named),
+        // Only when somebody is measuring, and checked when the arguments were parsed. Otherwise
+        // a table only when the command line allows one, and gcc allows none under a retpoline,
+        // since a jump through a table is a jump through a register the thunk would not see.
+        switch: opts
+            .switch_shape
+            .as_deref()
+            .and_then(rucc_codegen::switch::Force::named)
+            .or((!opts.jump_tables || opts.indirect_thunk)
+                .then_some(rucc_codegen::switch::Force::NoTable)),
         // On from `-O2` and at `-Os`, which is where gcc turns `-foptimize-sibling-calls` on.
         sibling: opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls()),
         debug: opts.debug_info,

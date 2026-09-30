@@ -522,6 +522,24 @@ tests = ["rucc::a_function_that_says_no_stack_protector_gets_none_under_any_flag
 notes = "The kernel writes it on the code that runs before the canary is set up, where a check on the way out would fail in a function that did nothing wrong. Read on any declaration of the name and wins over every `-fstack-protector` flag."
 
 [[feature]]
+name = "function_return"
+kind = "attribute"
+gcc_version = "8.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::a_function_that_says_keep_is_left_as_it_was"]
+notes = "x86-64. `function_return` with the argument keep leaves a function's returns as `ret` under `-mfunction-return=thunk-extern`, which the kernel needs on code that runs before the return thunk can. The other values ask for a thunk on a function the command line left alone, which the kernel never writes, and are read as nothing."
+
+[[feature]]
+name = "indirect_branch"
+kind = "attribute"
+gcc_version = "8.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::a_function_that_says_keep_is_left_as_it_was"]
+notes = "x86-64. `indirect_branch` with the argument keep leaves a function's indirect calls and jumps as they are under `-mindirect-branch=thunk-extern`. The other values are read as nothing, as for `function_return`."
+
+[[feature]]
 name = "no_caller_saved_registers"
 kind = "attribute"
 gcc_version = "7.0"

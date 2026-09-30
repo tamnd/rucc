@@ -184,6 +184,10 @@ pub enum Force {
     Tree,
     /// Every cluster tested one after another, with no table and no bit test.
     Walk,
+    /// The shape it would have had, except that a stretch that would have been a table stays the
+    /// clusters it was. This one is not for measuring: it is `-fno-jump-tables`, which the kernel
+    /// asks for when a retpoline is on, since a jump through a table is a jump through a register.
+    NoTable,
 }
 
 impl Force {
@@ -277,13 +281,14 @@ fn lower(func: &mut Func, inst: Inst, goal: Goal, force: Option<Force>) -> Optio
     let found = clusters(func, &cases, &arms, ty);
     let clusters = match force {
         None => group(func, tables(func, found, ty, goal)),
+        Some(Force::NoTable) => group(func, found),
         Some(Force::Table) => forced(found, ty),
         Some(Force::Tree | Force::Walk) => found,
     };
     let leaf = match force {
         Some(Force::Tree) => 1,
         Some(Force::Walk) => usize::MAX,
-        Some(Force::Table) | None => LINEAR,
+        Some(Force::Table | Force::NoTable) | None => LINEAR,
     };
     let lowered = Lowered {
         cases: count,

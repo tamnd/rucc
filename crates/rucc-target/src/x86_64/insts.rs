@@ -2046,6 +2046,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // different one to the assembler, which writes the register with a star in front of it, and
     // that is the whole of why there are two names here rather than one.
     ("call", Call),
+    // The same with `cs` in front, for a call to a retpoline thunk through `r8` to `r15`.
+    ("call_cs", Call),
     ("call_reg", Call),
     // What a condition and the block layout come to. The test asks whether the byte a comparison
     // wrote is zero, and the jump that follows it goes to the block's first successor when the
@@ -2168,6 +2170,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("jcc_np", Jcc),
     ("jmp", Jmp),
     ("jmp_away", JmpAway),
+    // The same with `cs` in front, for a jump to a retpoline thunk through `r8` to `r15`.
+    ("jmp_away_cs", JmpAway),
     // The same jump through a register, which is where a computed goto ends up. It is a separate
     // name for the reason `call_reg` is one: the assembler writes the register with a star in
     // front of it and the machine reads a different opcode byte, and both come from the target
@@ -2194,6 +2198,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // The instruction a program stops on, which `__builtin_trap` asks for. Nothing selects one:
     // `rucc_codegen::lower` writes it by name where the builtin stood.
     ("ud2", Trap),
+    // The breakpoint, which `-mharden-sls=` puts after a return and a jump through a register so
+    // that nothing past them runs even speculatively. Written by a late pass, never selected.
+    ("int3", Trap),
     // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
     // `-fcf-protection=branch` and nothing else produces one.
     ("endbr64", Landing),
@@ -2494,7 +2501,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 742);
+        assert_eq!(described, 745);
     }
 
     #[test]
