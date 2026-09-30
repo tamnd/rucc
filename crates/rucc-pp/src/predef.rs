@@ -924,7 +924,11 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     d.set("__SIZEOF_INT__", "4");
     d.set("__SIZEOF_LONG__", &long.to_string());
     d.set("__SIZEOF_LONG_LONG__", "8");
-    d.set("__SIZEOF_INT128__", "16");
+    // gcc has a 128-bit integer only where a register is 64 bits, and a program that finds this
+    // macro takes it as the promise that `__int128` compiles. So i686 does not see it.
+    if target.pointer_width == 64 {
+        d.set("__SIZEOF_INT128__", "16");
+    }
     d.set("__SIZEOF_FLOAT__", "4");
     d.set("__SIZEOF_DOUBLE__", "8");
     d.set("__SIZEOF_LONG_DOUBLE__", &long_double.to_string());
@@ -2009,6 +2013,14 @@ mod tests {
         assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 64"));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __LDBL_MANT_DIG__ 113"));
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __LDBL_MANT_DIG__ 53"));
+    }
+
+    #[test]
+    fn the_size_of_int128_is_defined_only_where_a_register_is_sixty_four_bits() {
+        let line = "#define __SIZEOF_INT128__ 16";
+        assert!(has(&set_for("x86_64-unknown-linux-gnu"), line));
+        assert!(has(&set_for("aarch64-unknown-linux-gnu"), line));
+        assert!(!set_for_tuple("i686-linux-gnu").contains("__SIZEOF_INT128__"));
     }
 
     #[test]

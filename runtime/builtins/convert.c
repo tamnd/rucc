@@ -45,6 +45,11 @@
  * exact arithmetic and the truncation C asks for happens where C asks for it.
  */
 
+/* None of this exists on a target with no 128-bit integer, such as i686, where nothing it compiles
+ * can ask for these names.
+ */
+#ifdef __SIZEOF_INT128__
+
 typedef unsigned __int128 uwide;
 typedef __int128 wide;
 
@@ -186,3 +191,5 @@ __int128 __fixdfti(double value) {
 __int128 __fixsfti(float value) {
     return __fixdfti((double)value);
 }
+
+#endif
