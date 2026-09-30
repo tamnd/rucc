@@ -434,6 +434,14 @@ fn what_the_body_does(func: &Func, graph: &CallGraph, answers: &[Purity], facts:
                     // Moving the stack pointer. The caller cannot name the storage and it is
                     // gone by the time control is back with them.
                     Opcode::Alloca => Purity::Const,
+                    // The end of one of those, which is the same argument from the other end: the
+                    // storage it names is this call's, whether or not its address went anywhere,
+                    // and saying nothing more will be done with it is not something a caller sees.
+                    Opcode::LifetimeEnd
+                        if matches!(origin(func, func[data.args][0]).0, Origin::Local(_)) =>
+                    {
+                        Purity::Const
+                    }
                     Opcode::Load if plain(func, data) => {
                         let escapes = escapes.get_or_insert_with(|| Escapes::of(func));
                         match ours(func, escapes, func[data.args][0]) {

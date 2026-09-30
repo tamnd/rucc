@@ -1680,9 +1680,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // target here, which is the machine the whole question was invented for.
             // Whether a local and a spilled value that are never both wanted may be the same bytes
             // of the frame. gcc's three values, and two of them mean the same thing here: what rucc
-            // shares is a local whose address provably never leaves the function, which is narrower
-            // than `named_vars` and narrower still than `all`, so both of them get it. `none` is
-            // the one that changes anything, and it is the flag a program that reads a local
+            // shares is a local whose address provably never leaves the function, or one declared
+            // in a block whose address stops meaning anything when the block is left, which is no
+            // wider than `named_vars` and narrower still than `all`, so both of them get it. `none`
+            // is the one that changes anything, and it is the flag a program that reads a local
             // through a pointer it kept past the end of the block writes.
             _ if arg.starts_with("-fstack-reuse=") => {
                 let how = &arg["-fstack-reuse=".len()..];

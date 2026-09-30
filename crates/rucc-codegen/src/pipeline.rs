@@ -48,6 +48,7 @@ use crate::fold;
 use crate::frame::{self, Frame, Layout};
 use crate::kept;
 use crate::layout;
+use crate::lifetimes;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
 use crate::pressure::{Cost, Pressure};
@@ -672,6 +673,11 @@ pub fn compile_recording(
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
+    // The ends of lifetimes the front end wrote, which only the sharing of slots reads and which
+    // are only worth anything where no value the optimizer made carries an address past one. After
+    // [`tail::comes_back`] because that is what says whether anything will share. See
+    // [`crate::lifetimes`].
+    lifetimes::settle(source, flags.reuse && !alone);
     // Before selection, which would otherwise pick a register the command line said is not there.
     // Read after the lowerings above, since a value one of them makes is a value in the function.
     // A function that owes back every register owes back the vector registers and the x87 stack
@@ -877,8 +883,10 @@ pub fn compile_recording(
     // Only asked at all where the locals are allowed to share, since this is the whole of what says
     // whether a local may. The spill slots are laid out either way and this says nothing about
     // them.
-    let reach = (flags.reuse && !alone)
-        .then(|| slots::reach(&func, &stack.addresses, stack.locals.len(), machine.insts, names));
+    let reach = (flags.reuse && !alone).then(|| {
+        let count = stack.locals.len();
+        slots::reach(&func, &stack.addresses, &stack.ends, count, machine.insts, names)
+    });
 
     // The instructions as they are now, for the locals the front end kept in values. The
     // allocator's liveness is counted along this order and the rewrite is about to put spills,
@@ -921,6 +929,13 @@ pub fn compile_recording(
     } else {
         Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths)
     };
+    // The ends of lifetimes have said all they had to, and they are markers the target has no
+    // encoding for, so they come out before anything is laid out or written.
+    for &(inst, _) in &stack.ends {
+        if func.block_of(inst).is_some() {
+            func.remove_inst(inst);
+        }
+    }
     let mut layout = Layout { share: Some(&share), ..layout };
     let mut frame = Frame::of(&func, &allocation, &layout);
     // A frame bigger than a page is taken by calling the platform's routine for it, and on a

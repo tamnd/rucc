@@ -174,6 +174,7 @@ pub mod half;
 pub mod holding;
 pub mod kept;
 pub mod layout;
+pub mod lifetimes;
 pub mod lower;
 pub mod lowering;
 pub mod pipeline;

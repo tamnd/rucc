@@ -298,6 +298,7 @@ The W5 release, for AArch64 Windows. aarch64-windows-gnu is tier 2: rung 0 passe
 - The register allocator finds what an instruction insists on by searching only the one register's points, instead of every constraint in the function (#2243).
 - Folding addresses into their readers moves the frame's pending entries in one walk at the end, instead of searching the list of locals for each fold (#2248).
 - The backend's maps and sets hash with the shared hasher instead of SipHash (#2251).
+- Locals declared in blocks that never run at the same time share their stack bytes even when their addresses are passed to a call. The front end marks where each such local's lifetime ends when stack reuse is on, which is above `-O0` or with `-fstack-reuse=all`, and the slot allocator treats the local as live from where its address is first taken until one of those ends on every path. A function that fills in a large structure in each arm of an `if` and hands it to a parser, which is how Postgres writes its redo routines, no longer gets a copy of the structure per arm: the reduced program in #2201 took 1216 bytes where gcc takes 336. A `goto` or `return` out of a block writes no end, so a local left that way keeps its own bytes as before, and nothing changes under `-fsafety` (#2201).
 
 ### Fixed
 

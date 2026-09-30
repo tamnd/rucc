@@ -952,6 +952,15 @@ pub struct Stack {
     /// after allocation, so the instruction is written here with nothing in its displacement and
     /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
     pub addresses: Vec<(mir::Inst, usize)>,
+    /// Where the lifetime of which of those locals ends, one entry for every `lifetime_end` the
+    /// front end wrote.
+    ///
+    /// Each is a marker in the code that emits nothing and that no pass before the frame is laid
+    /// out may move a touch of the local past, which it is not able to do anyway, since an opcode
+    /// the target does not know is a wall to every pass that reorders. [`crate::slots`] reads the
+    /// markers to let a local whose address got away share its bytes with one that comes after
+    /// it, and they are taken out again once it has.
+    pub ends: Vec<(mir::Inst, usize)>,
     /// Which of those locals is which declaration in the source, for the ones the program declared.
     ///
     /// The number is the one the IR function carries and means nothing here. What it is for is the
@@ -1701,6 +1710,10 @@ impl<'a> Lowering<'a> {
                 }
                 Opcode::StackRestore => {
                     self.stack_pointer(inst, true)?;
+                    continue;
+                }
+                Opcode::LifetimeEnd => {
+                    self.lifetime_end(inst);
                     continue;
                 }
                 // The address of a name, built here for the same reason an `alloca` is: what a
@@ -5479,6 +5492,22 @@ impl<'a> Lowering<'a> {
             return None;
         }
         i32::try_from(offset).ok().map(|disp| (symbol, disp))
+    }
+
+    /// The end of a local's lifetime, which is a marker in the code and an entry on
+    /// [`Stack::ends`].
+    ///
+    /// Only for a local of the frame's own, which is the only kind the front end writes one for.
+    /// Anything else is dropped rather than refused, because an end nobody knows about is a local
+    /// wanted for longer, which is always allowed.
+    fn lifetime_end(&mut self, inst: Inst) {
+        let Some(&object) = self.source[self.source[inst].args].first() else { return };
+        let Some(index) = self.local_of(object) else { return };
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let marker = self.named("lifetime_end");
+        let made = self.out.build(block, marker).at(span).finish();
+        self.stack.ends.push((made, index));
     }
 
     /// The object in this function's frame a value is the address of, for one an `alloca` of a

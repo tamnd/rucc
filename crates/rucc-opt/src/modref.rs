@@ -544,6 +544,16 @@ fn add_access(func: &Func, entry: Block, escapes: &Escapes, summary: &mut Summar
     match data.opcode {
         // Storage this call made, which no caller has a name for.
         Opcode::Alloca => {}
+        // The end of the lifetime of a local, which to everything but the frame layout is a write
+        // of the object it names. A caller has no name for that object even when its address went
+        // somewhere, since it is gone by the time control is back with them, so ending it adds
+        // nothing. Anything that is not one of this call's locals is asked through the operand
+        // like a store, which is not something the front end writes but costs nothing to get right.
+        Opcode::LifetimeEnd => {
+            if !matches!(origin(func, args[0]).0, Origin::Local(_)) {
+                through(0, Effect::Writes);
+            }
+        }
         Opcode::Load | Opcode::AtomicLoad | Opcode::Prefetch => through(0, Effect::Reads),
         Opcode::Store | Opcode::AtomicStore => through(1, Effect::Writes),
         Opcode::AtomicRmw | Opcode::Cmpxchg | Opcode::Memset => through(0, Effect::Writes),

@@ -704,6 +704,17 @@ pub enum Opcode {
     StackSave,
     /// The stack pointer, restored after one.
     StackRestore,
+    /// The end of the lifetime of a local whose address was taken.
+    ///
+    /// One operand, the `alloca` the local lives in, and no result. The front end writes one
+    /// where the block the local was declared in is left by falling out of it or by a `break` or
+    /// `continue`, and nothing anywhere else, so a local with none is simply one whose lifetime
+    /// nobody said anything about. What it promises is that nothing reads or writes the object
+    /// again until control comes back round to the declaration, which is what lets the frame
+    /// layout hand the same bytes to two locals whose lifetimes never meet. To everything else
+    /// it is a write of the object it names that nothing reads, which keeps a store into the
+    /// object from moving past it in either direction.
+    LifetimeEnd,
     /// The marker a `setjmp` leaves, which pins everything live across it.
     ///
     /// One operand, the buffer, and one result, which is the `int` the save answers with: zero
@@ -892,6 +903,7 @@ impl Opcode {
             Self::VaCopy => "va_copy",
             Self::StackSave => "stacksave",
             Self::StackRestore => "stackrestore",
+            Self::LifetimeEnd => "lifetime_end",
             Self::SetjmpMarker => "setjmp_marker",
             Self::LongjmpMarker => "longjmp_marker",
             Self::Unwound => "unwound",
@@ -1240,6 +1252,7 @@ impl Opcode {
             | Self::VaEnd
             | Self::VaCopy
             | Self::StackRestore
+            | Self::LifetimeEnd
             | Self::UnreachableHint
             | Self::Trap
             | Self::LongjmpMarker
@@ -1644,6 +1657,7 @@ static ALL: &[Opcode] = &[
     Opcode::VaCopy,
     Opcode::StackSave,
     Opcode::StackRestore,
+    Opcode::LifetimeEnd,
     Opcode::SetjmpMarker,
     Opcode::LongjmpMarker,
     Opcode::Unwound,

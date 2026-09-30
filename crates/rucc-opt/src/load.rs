@@ -283,6 +283,8 @@ fn act(func: &Func, inst: Inst) -> Act {
     let args = &func[data.args];
     match data.opcode {
         Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => Act::Ask,
+        // The end of a local's lifetime, which the oracle knows is about that local alone.
+        Opcode::LifetimeEnd => Act::Ask,
         other if other.touches_only_planes() => Act::Ask,
         Opcode::Load => {
             let mut results = data.results();
