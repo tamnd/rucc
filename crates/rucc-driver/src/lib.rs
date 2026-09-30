@@ -661,6 +661,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // else today, and `None` is a command line that named no target, which is this machine.
     let mut pinned: Option<TargetTuple> = None;
     let mut min_version: Option<rucc_tuple::Version> = None;
+    // What the `-fpic` family and the `-fpie` family last said, if anything, kept apart because gcc
+    // keeps them apart. A positive spelling of either clears the other, since gcc's option table
+    // chains the four so that the last one written wins, and a negative one only speaks for its
+    // own family. The answer is worked out after the loop.
+    let mut pic: Option<bool> = None;
+    let mut pie: Option<bool> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
@@ -1218,11 +1224,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // cmake build puts `-fPIC` on the compile line, so a compiler that rejects it cannot
             // be the `CC` of a project that has a configure script, whatever else it can do. That
             // is how this was found: building SQLite's test fixture stopped on it.
-            "-fPIC" | "-fpic" => opts.pic = Pic::Library,
+            "-fPIC" | "-fpic" => {
+                pic = Some(true);
+                pie = None;
+            }
             // Not a synonym of the pair above, which is what they were treated as until #756. The
             // library is the expensive answer and gcc makes it the one that has to be asked for,
             // so this is also what nothing at all means.
-            "-fPIE" | "-fpie" => opts.pic = Pic::Executable,
+            "-fPIE" | "-fpie" => {
+                pie = Some(true);
+                pic = None;
+            }
             // A different question from the pair above, and the one every distribution build of a
             // shared library answers. `-fPIC` decides how an address is reached, and this decides
             // whether the optimizer may believe a body it can see, because an exported name is one
@@ -1239,8 +1251,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-asynchronous-unwind-tables" => opts.async_unwind_tables = false,
             "-funwind-tables" => opts.unwind_tables = true,
             "-fno-unwind-tables" => opts.unwind_tables = false,
-            // The other direction, `-fno-pic` and its spellings, is in the table in `kbuild`,
-            // refused with the issue that would add it.
+            // The other direction, which is a request rather than a description: the output is
+            // linked where it runs, as a kernel and a `-no-pie` executable are, and nothing is to
+            // be reached through a global offset table. The capital spellings are gcc's too, and
+            // `-fno-PIE` is the one every x86 kernel from 4.9 on writes. What the pair of them
+            // comes to is worked out after the loop, because gcc keeps the two questions apart and
+            // `-fPIC -fno-pie` is still a library. See tamnd/rucc#2276.
+            "-fno-pic" | "-fno-PIC" => pic = Some(false),
+            "-fno-pie" | "-fno-PIE" => pie = Some(false),
             // A section per function and a section per variable, which is what makes
             // `--gc-sections` able to drop anything: a linker can leave out a section nothing
             // reaches and cannot leave out half of one. Both directions are taken, and the off
@@ -2489,6 +2507,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // the last `--target=`.
     let assembler = assembler_words(&asm_words, opts.target)?;
     opts.asm_fatal_warnings = assembler.fatal_warnings;
+    // gcc's `finish_options`, read as a table. An executable is what nothing at all means, and
+    // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
+    // independent. A library needs `-fpic` and no `-fpie` after it, and anything else that said
+    // no is the position dependent answer: `-fno-pie` alone, `-fno-pic` alone, or both.
+    opts.pic = match (pie, pic) {
+        (Some(true), _) | (None, None) => Pic::Executable,
+        (_, Some(true)) => Pic::Library,
+        _ => Pic::Absolute,
+    };
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -5108,21 +5135,34 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_position_dependent_code_is_told_why_it_is_not_coming() {
-        for flag in ["-fno-pic", "-fno-pie", "-fno-PIC", "-fno-PIE"] {
-            let e = parse_args(&args(&[flag, "a.c"])).unwrap_err();
-            assert!(e.message.contains("global offset table"), "{flag}: {}", e.message);
-            // The one it may have meant, since the two are a letter apart and one of them is
-            // about linking and is taken.
-            assert!(e.message.contains("-no-pie"), "{flag}: {}", e.message);
+    fn position_dependent_code_is_taken_in_every_spelling_gcc_has() {
+        for flag in ["-fno-pic", "-fno-PIC", "-fno-pie", "-fno-PIE"] {
+            assert_eq!(compile(&[flag, "a.c"]).0.pic, Pic::Absolute, "{flag}");
         }
-        // The issue that adds it is a different one on each of the two kernels' architectures.
-        for (target, issue) in
-            [("x86_64-unknown-linux-gnu", "#2276"), ("aarch64-unknown-linux-gnu", "#2286")]
-        {
-            let failed = refused(&[&format!("--target={target}"), "-fno-PIE", "-c", "a.c"]);
-            assert!(failed.contains(issue), "{target}: {failed}");
-        }
+    }
+
+    #[test]
+    fn the_pic_and_pie_families_are_settled_the_way_gcc_settles_them() {
+        let pic = |line: &[&str]| {
+            let mut line = line.to_vec();
+            line.push("a.c");
+            compile(&line).0.pic
+        };
+        assert_eq!(pic(&[]), Pic::Executable);
+        assert_eq!(pic(&["-fPIC"]), Pic::Library);
+        assert_eq!(pic(&["-fpie"]), Pic::Executable);
+        // A no only speaks for its own family, so a library asked for stays one.
+        assert_eq!(pic(&["-fPIC", "-fno-pie"]), Pic::Library);
+        assert_eq!(pic(&["-fPIE", "-fno-pic"]), Pic::Executable);
+        // And the last yes wins over a no before it, in either family.
+        assert_eq!(pic(&["-fno-pic", "-fPIC"]), Pic::Library);
+        assert_eq!(pic(&["-fno-pie", "-fpie"]), Pic::Executable);
+        assert_eq!(pic(&["-fPIC", "-fno-pic"]), Pic::Absolute);
+        assert_eq!(pic(&["-fpie", "-fno-pie"]), Pic::Absolute);
+        assert_eq!(pic(&["-fno-pie", "-fno-pic"]), Pic::Absolute);
+        // A later yes in one family clears the other, as gcc's chain of negatives does.
+        assert_eq!(pic(&["-fPIE", "-fPIC"]), Pic::Library);
+        assert_eq!(pic(&["-fPIC", "-fPIE"]), Pic::Executable);
     }
 
     #[test]

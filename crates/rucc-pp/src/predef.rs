@@ -771,7 +771,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // `__PIE__`, and a program reads it to find out whether a name it exports is one something
     // else may replace. gcc defines it under `-fPIE` and under the default on a distribution
     // where the default is an executable, which is the default here too.
-    if !matches!(triple.os, Os::Windows) {
+    //
+    // Neither pair under `-fno-pic` and `-fno-pie`, which is what gcc does and what the claim
+    // above stops being true for.
+    if !matches!(triple.os, Os::Windows) && opts.pic != Pic::Absolute {
         d.set("__PIC__", "2");
         d.set("__pic__", "2");
         if opts.pic == Pic::Executable {

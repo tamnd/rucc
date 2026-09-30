@@ -864,9 +864,17 @@ fn optimize(
 /// so a variable defined elsewhere needs the table whichever link is coming. COFF decides what
 /// leaves a DLL by an export table the linker is handed. Neither has an object writer here yet, so
 /// what this does is decline to say the ELF answer about them.
+///
+/// `-fno-pic` reaches the back end on x86-64 ELF only, which is the one row that writes anything
+/// different for it (tamnd/rucc#2276). Everywhere else the position independent executable's code
+/// is what it gets, and that is still right for a link that is not position independent: it reads
+/// some names out of a table the linker then has to build, which costs a load and is correct.
 fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
     match (target.tuple.os().object_format(), opts.pic) {
         (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
+        (Some(ObjectFormat::Elf), Pic::Absolute) if target.tuple.arch() == Arch::X86_64 => {
+            IrPic::Absolute
+        }
         _ => IrPic::Executable,
     }
 }
