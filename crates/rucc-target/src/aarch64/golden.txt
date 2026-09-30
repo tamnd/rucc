@@ -485,3 +485,10 @@ b100041f	cmp x0, #-1
 0ea11c20	mov v0.8b, v1.8b
 93407c00	sxtw x0, w0
 2a0103e0	uxtw x0, w1
+9a030041	adc x1, x2, x3
+1a030041	adc w1, w2, w3
+ba1f00f1	adcs x17, x7, xzr
+da030041	sbc x1, x2, x3
+7a0303e1	sbcs w1, wzr, w3
+da0203e1	ngc x1, x2
+7a0203e1	ngcs w1, w2

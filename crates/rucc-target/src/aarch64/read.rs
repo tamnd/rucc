@@ -87,6 +87,8 @@ pub fn read(text: &str) -> Result<Line, Error> {
                 }
             }
             line.values.push(Value::Mem(addr));
+        } else if piece.starts_with('{') {
+            line.values.push(list(piece)?);
         } else if at + 1 == pieces.len() && takes_label(&line.mnemonic) && !piece.starts_with('#') {
             // Where the instruction wants a label a bare word is a symbol, whatever else it could
             // spell. A C global called `le` or `eq` is written `adrp x0, le`, and reading that as
@@ -113,14 +115,50 @@ fn takes_label(mnemonic: &str) -> bool {
     ) || mnemonic.starts_with("b.")
 }
 
+/// A list of vector registers, `{v0.16b, v1.16b}` or `{v0.16b - v3.16b}`, which have to follow
+/// each other and be of one arrangement. The one after `v31` is `v0`.
+fn list(piece: &str) -> Result<Value, Error> {
+    let inner = piece.strip_prefix('{').and_then(|inner| inner.strip_suffix('}'));
+    let inner = inner.ok_or_else(|| error(piece))?.to_ascii_lowercase();
+    let vector = |name: &str| match register(name.trim()) {
+        Some(Value::Vector(arrangement, number)) => Ok((arrangement, number)),
+        _ => Err(error(piece)),
+    };
+    let (arrangement, first, count) = match inner.split_once('-') {
+        Some((from, to)) => {
+            let ((arrangement, first), (other, last)) = (vector(from)?, vector(to)?);
+            if other != arrangement {
+                return Err(error(piece));
+            }
+            (arrangement, first, (last + 32 - first) % 32 + 1)
+        }
+        None => {
+            let mut names = inner.split(',');
+            let (arrangement, first) = vector(names.next().unwrap_or(""))?;
+            let mut count = 1;
+            for name in names {
+                if vector(name)? != (arrangement, (first + count) % 32) {
+                    return Err(error(piece));
+                }
+                count += 1;
+            }
+            (arrangement, first, count)
+        }
+    };
+    if count > 4 {
+        return Err(error(piece));
+    }
+    Ok(Value::List(arrangement, first, count))
+}
+
 /// The operands, split at the commas that are not inside an address.
 fn split(text: &str) -> Vec<&str> {
     let mut pieces = Vec::new();
     let (mut depth, mut start) = (0, 0);
     for (at, c) in text.char_indices() {
         match c {
-            '[' => depth += 1,
-            ']' => depth -= 1,
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
             ',' if depth == 0 => {
                 pieces.push(text[start..at].trim());
                 start = at + 1;
@@ -240,14 +278,23 @@ fn register(name: &str) -> Option<Value> {
         "lr" => return Some(Value::Gpr(Width::X, 30)),
         _ => {}
     }
-    if let Some((number, lanes)) = name.strip_prefix('v').and_then(|rest| rest.split_once('.')) {
-        let arrangement = match lanes {
-            "8b" => Arrangement::B8,
-            "16b" => Arrangement::B16,
-            "2d" => Arrangement::D2,
-            _ => return None,
-        };
-        return Some(Value::Vector(arrangement, numbered(number, 32)?));
+    if let Some((digits, lanes)) = name.strip_prefix('v').and_then(|rest| rest.split_once('.')) {
+        let register = numbered(digits, 32)?;
+        // One lane, `v0.s[1]`. GNU as also takes the count in front of the letter, `v0.4s[1]`,
+        // and the count says nothing the letter does not.
+        if let Some((lane, index)) = lanes.strip_suffix(']').and_then(|lanes| lanes.split_once('['))
+        {
+            let scalar = match lane.trim_start_matches(|c: char| c.is_ascii_digit()) {
+                "b" => Scalar::B,
+                "h" => Scalar::H,
+                "s" => Scalar::S,
+                "d" => Scalar::D,
+                _ => return None,
+            };
+            let index = number(index.trim())?;
+            return Some(Value::Element(scalar, register, u8::try_from(index).ok()?));
+        }
+        return Some(Value::Vector(Arrangement::named(lanes)?, register));
     }
     let (first, number) = name.split_at(name.char_indices().nth(1)?.0);
     Some(match first {

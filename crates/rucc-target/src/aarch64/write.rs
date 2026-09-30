@@ -16,7 +16,7 @@
 use std::fmt::Write;
 
 use crate::aarch64::encode::{
-    Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
+    Addr, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
 use crate::aarch64::read::{BARRIERS, SYSTEM, prefetch_name, system_field};
 
@@ -54,28 +54,40 @@ struct Named<'a> {
     page: bool,
 }
 
+/// The letter a scalar register or a lane of that size is named with.
+fn lane_letter(scalar: Scalar) -> char {
+    match scalar {
+        Scalar::B => 'b',
+        Scalar::H => 'h',
+        Scalar::S => 's',
+        Scalar::D => 'd',
+        Scalar::Q => 'q',
+    }
+}
+
 fn operand(line: &mut String, value: &Value, named: Named<'_>) {
     match *value {
         Value::Gpr(width, number) => line.push_str(&gpr(width, number)),
         Value::Sp(Width::X) => line.push_str("sp"),
         Value::Sp(Width::W) => line.push_str("wsp"),
         Value::Fp(scalar, number) => {
-            let letter = match scalar {
-                Scalar::B => 'b',
-                Scalar::H => 'h',
-                Scalar::S => 's',
-                Scalar::D => 'd',
-                Scalar::Q => 'q',
-            };
-            let _ = write!(line, "{letter}{number}");
+            let _ = write!(line, "{}{number}", lane_letter(scalar));
         }
         Value::Vector(arrangement, number) => {
-            let lanes = match arrangement {
-                Arrangement::B8 => "8b",
-                Arrangement::B16 => "16b",
-                Arrangement::D2 => "2d",
-            };
-            let _ = write!(line, "v{number}.{lanes}");
+            let _ = write!(line, "v{number}.{}", arrangement.name());
+        }
+        Value::Element(scalar, number, index) => {
+            let _ = write!(line, "v{number}.{}[{index}]", lane_letter(scalar));
+        }
+        Value::List(arrangement, first, count) => {
+            line.push('{');
+            for at in 0..count {
+                if at > 0 {
+                    line.push_str(", ");
+                }
+                let _ = write!(line, "v{}.{}", (first + at) % 32, arrangement.name());
+            }
+            line.push('}');
         }
         Value::Imm(imm) => {
             let _ = write!(line, "#{imm}");
