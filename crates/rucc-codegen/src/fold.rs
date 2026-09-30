@@ -125,6 +125,7 @@
 use std::collections::HashMap;
 
 use rucc_base::Interner;
+use rucc_base::hash::Set;
 use rucc_mir as mir;
 use rucc_target::{FrameInsts, MachineInsts, Role};
 
@@ -197,11 +198,14 @@ impl Pending<'_> {
             && dynamic(one) == dynamic(other)
     }
 
-    /// Whether this instruction is on one of the lists, which is how many readers it may go to.
-    fn holds(&self, inst: mir::Inst) -> bool {
+    /// Every instruction on one of the lists, which is how many readers each may go to.
+    ///
+    /// A set rather than a question about one instruction, because the pass asks it of every `lea`
+    /// in the function and a function with a lot of locals has a long list to walk each time.
+    fn held(&self) -> Set<mir::Inst> {
         let named = self.addresses.iter().map(|&(at, _)| at);
         let listed = named.chain(self.arguments.iter().map(|&(at, _)| at));
-        listed.chain(self.dynamic.iter().copied()).any(|at| at == inst)
+        listed.chain(self.dynamic.iter().copied()).collect()
     }
 }
 
@@ -262,6 +266,7 @@ pub fn addresses(
     let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
     let sum = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sum)));
     let mut reads = Reads::of(func);
+    let mut held = pending.held();
     let mut folded = 0;
     for block in func.blocks().collect::<Vec<_>>() {
         // One `lea` per register it wrote, along with the folds its readers so far have agreed to.
@@ -288,6 +293,9 @@ pub fn addresses(
                     folded += ready.folds.len();
                     let took: Vec<mir::Inst> = ready.folds.iter().map(|fold| fold.into).collect();
                     pending.moved(ready.from, &took);
+                    if held.remove(&ready.from) {
+                        held.extend(took.iter().copied());
+                    }
                     // Anything still open that was going to fold into the instruction just removed
                     // is holding a plan for an instruction that is not there any more. That is a
                     // chain whose middle went first, and the outer address waits for the next run
@@ -311,7 +319,7 @@ pub fn addresses(
                 open.retain(|reg, held| *reg != written && !touches(func, held, written));
             }
             if func[inst].opcode == lea {
-                let room = if pending.holds(inst) { FRAME_READERS } else { usize::MAX };
+                let room = if held.contains(&inst) { FRAME_READERS } else { usize::MAX };
                 let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
                 match folding_def(func, &reads, inst) {
                     Some((reg, wanted))
