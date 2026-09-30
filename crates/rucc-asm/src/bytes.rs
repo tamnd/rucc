@@ -38,7 +38,7 @@ use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
-use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width, Written};
+use rucc_target::x86_64::{self, Addr, Arg, Mode, RAX, Value, Width, Written};
 use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
@@ -753,7 +753,7 @@ impl Assembler<'_> {
             // this function, which is patched once every block has a place.
             if let Some((symbol, kind, disp)) = wanted {
                 let kind = match kind {
-                    Reference::Got => slot(&self.text.bytes[start..end]),
+                    Reference::Got => slot(&self.text.bytes[start..end], Mode::Bits64),
                     kind => kind,
                 };
                 let at = match kind {
@@ -882,15 +882,16 @@ pub(crate) fn absolute_only(amode: &Amode) -> bool {
 /// from memory, `test`, the eight that do arithmetic from memory into a register, and a `call` or
 /// `jmp` through memory, none of them behind a `0x66`. gas asks for the relocation that allows it
 /// in those and the plain one everywhere else, and says whether there is a REX prefix, which is
-/// what the linker needs to know to rewrite the instruction in place.
-pub(crate) fn slot(bytes: &[u8]) -> Reference {
+/// what the linker needs to know to rewrite the instruction in place. In thirty two bit mode
+/// `0x40` to `0x4F` are `inc` and `dec` rather than a REX prefix, so they are the instruction.
+pub(crate) fn slot(bytes: &[u8], mode: Mode) -> Reference {
     let mut rest = bytes;
     let mut rex = false;
     while let [first, tail @ ..] = rest {
         match first {
             0x66 => return Reference::GotKept,
             0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3 => rest = tail,
-            0x40..=0x4F => {
+            byte if mode.rex(*byte).is_some() => {
                 rex = true;
                 rest = tail;
             }
@@ -1536,5 +1537,16 @@ mod tests {
         let text = laid(10);
         assert_eq!(text.bytes.len(), 20 + 35);
         assert_eq!(hex(&text.bytes[20..22]), "01 c8");
+    }
+
+    #[test]
+    fn a_byte_from_0x40_to_0x4f_is_a_rex_prefix_only_in_sixty_four_bit_mode() {
+        let load = [0x48, 0x8B, 0x05, 0, 0, 0, 0];
+        assert_eq!(slot(&load, Mode::Bits64), Reference::Got);
+        assert_eq!(slot(&load[1..], Mode::Bits64), Reference::GotBare);
+        // In thirty two bit mode `0x48` is `decl %eax`, which is not an instruction the linker
+        // may rewrite.
+        assert_eq!(slot(&load, Mode::Bits32), Reference::GotKept);
+        assert_eq!(slot(&load[1..], Mode::Bits32), Reference::GotBare);
     }
 }

@@ -28,7 +28,7 @@
 //! reaches its data. Those come back as holes too, for the whole address rather than a distance.
 
 use rucc_target::x86_64::{
-    Addr, Encoding, ImmSize, Length, Opmask, RAX, RBX, RCX, RDX, Value, Width, encode_masked,
+    Addr, Encoding, ImmSize, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width, encode_masked,
     encoding, gpr_name, gpr_named, xmm,
 };
 use rucc_target::{PhysReg, Segment};
@@ -246,7 +246,7 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         }
     }
     if holes.dest.is_none() {
-        shorter(&mut bytes, &operands);
+        shorter(&mut bytes, &operands, Mode::Bits64);
     }
 
     let mut wanted = Vec::new();
@@ -330,7 +330,8 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         // it there. The hole is what goes in those bytes, and a hole the linker fills is read as
         // nothing plus its addend, which is what gas leaves: `pushq $sym` is `68 00 00 00 00`.
         bytes[at..].fill(0);
-        let sort = if width == 4 && extends(&bytes) { Sort::Extended } else { Sort::Value };
+        let sort =
+            if width == 4 && extends(&bytes, Mode::Bits64) { Sort::Extended } else { Sort::Value };
         wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort });
     }
     Ok(Written { bytes, holes: wanted })
@@ -470,7 +471,8 @@ fn special(word: &str, mnemonic: &str, operands: &[Operand]) -> Result<(), Strin
 /// Read off the bytes rather than off the mnemonic, since the suffix is optional and the operand
 /// size is what the encoding settled on either way. The prefixes this machine writes in front of an
 /// instruction with an immediate are stepped over to get to the REX byte, which is last of them.
-fn extends(bytes: &[u8]) -> bool {
+/// In thirty two bit mode there is no REX byte and nothing is eight bytes, so nothing extends.
+fn extends(bytes: &[u8], mode: Mode) -> bool {
     let mut at = 0;
     while bytes
         .get(at)
@@ -478,10 +480,10 @@ fn extends(bytes: &[u8]) -> bool {
     {
         at += 1;
     }
-    match bytes.get(at) {
-        Some(rex) if rex & 0xF0 == 0x40 => rex & 0x08 != 0,
-        Some(0x68) => true,
-        _ => false,
+    let Some(&first) = bytes.get(at) else { return false };
+    match mode.rex(first) {
+        Some(rex) => rex & 0x08 != 0,
+        None => mode == Mode::Bits64 && first == 0x68,
     }
 }
 
@@ -519,12 +521,17 @@ pub(crate) fn short(long: &Written) -> Option<Written> {
 ///
 /// Only the prefixes this machine puts in front of these, the operand size one and a REX byte, are
 /// stepped over, and a REX byte that moves the register past the first eight means it is not the
-/// accumulator. Anything else is left alone.
-fn shorter(bytes: &mut Vec<u8>, operands: &[Operand]) {
+/// accumulator. Anything else is left alone, which in thirty two bit mode includes `0x40` to `0x4F`,
+/// since there they are `inc` and `dec` rather than a prefix.
+fn shorter(bytes: &mut Vec<u8>, operands: &[Operand], mode: Mode) {
     let mut at = 0;
     let mut far = false;
-    while at < bytes.len() && (bytes[at] == 0x66 || (bytes[at] & 0xF0 == 0x40)) {
-        far |= bytes[at] & 0xF0 == 0x40 && bytes[at] & 1 != 0;
+    while let Some(&byte) = bytes.get(at) {
+        match mode.rex(byte) {
+            Some(rex) => far |= rex & 1 != 0,
+            None if byte == 0x66 => {}
+            None => break,
+        }
         at += 1;
     }
     let (Some(&code), Some(&modrm)) = (bytes.get(at), bytes.get(at + 1)) else { return };
@@ -2231,5 +2238,27 @@ mod tests {
         assert!(refused("push %ds").contains("fs and gs"));
         assert!(refused("pop %es").contains("fs and gs"));
         assert!(refused("movl %xs:(%rax), %eax").contains("segment"));
+    }
+
+    #[test]
+    fn a_byte_from_0x40_to_0x4f_is_read_as_a_prefix_only_where_it_is_one() {
+        // `addq $big, %rax` sign extends its four bytes in sixty four bit mode because of the
+        // REX byte in front. The same bytes in thirty two bit mode are `decl %eax` and then an
+        // add of four bytes into `eax`, and nothing there is eight bytes.
+        let add = [0x48, 0x81, 0xC0, 0, 0, 0, 0];
+        assert!(extends(&add, Mode::Bits64));
+        assert!(!extends(&add, Mode::Bits32));
+        assert!(extends(&[0x68, 0, 0, 0, 0], Mode::Bits64));
+        assert!(!extends(&[0x68, 0, 0, 0, 0], Mode::Bits32));
+
+        // `cmpq $1000, %rax` takes the accumulator's short form behind its REX byte, and in
+        // thirty two bit mode the byte in front is an instruction and the rest is left alone.
+        let cmp = vec![0x48, 0x81, 0xF8, 0xE8, 0x03, 0, 0];
+        let mut long = cmp.clone();
+        shorter(&mut long, &[], Mode::Bits64);
+        assert_eq!(long, [0x48, 0x3D, 0xE8, 0x03, 0, 0]);
+        let mut legacy = cmp.clone();
+        shorter(&mut legacy, &[], Mode::Bits32);
+        assert_eq!(legacy, cmp);
     }
 }
