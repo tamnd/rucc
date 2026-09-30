@@ -288,6 +288,9 @@ impl Call {
             Test::FloatPair => float_pair(shape, integer_width, float_width),
             Test::X87Stack => x87_stack(shape),
             Test::LoneFloat => lone_float(shape),
+            Test::ComplexFloat => {
+                (shape.complex && shape.is_all_of(Format::Single) && shape.size == 8).then(Vec::new)
+            }
             Test::Eightbytes { limit } => eightbytes(shape, limit),
         }
     }

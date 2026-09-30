@@ -744,6 +744,23 @@ fn i386_returns_an_aggregate_of_any_size_in_memory() {
 }
 
 #[test]
+fn i386_brings_back_a_complex_float_in_eax_and_edx_where_a_record_of_two_goes_to_memory() {
+    // gcc returns `_Complex float` in edx:eax, the real part in eax, and libgcc's `__mulsc3` and
+    // `__divsc3` answer the same way. The larger complex types come back through the hidden
+    // pointer like any record does.
+    let floats = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    let complex = Shape { complex: true, ..record(&floats) };
+    assert_eq!(i386().returns(&Arg::Aggregate(complex)), Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)]));
+    assert_eq!(i386().returns(&Arg::Aggregate(record(&floats))), Pass::Reference);
+    // As an argument it is eight bytes in the argument area like the record.
+    assert_eq!(i386().argument(&Arg::Aggregate(complex)), Pass::Memory);
+
+    let doubles = pieces(&[float(Format::Double, 8), float(Format::Double, 8)]);
+    let complex = Shape { complex: true, ..record(&doubles) };
+    assert_eq!(i386().returns(&Arg::Aggregate(complex)), Pass::Reference);
+}
+
+#[test]
 fn i386_never_has_a_register_to_spend() {
     let mut call = i386();
     assert_eq!(call.integer_left(), 0);

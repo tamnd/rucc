@@ -222,7 +222,12 @@ pub fn float_on_x87(returns: &[Type], conv: &CallRegs) -> bool {
 }
 
 /// How much room one takes in the argument area, as a size and an alignment.
-pub(crate) const X87_AREA: (u32, u32) = (16, 16);
+///
+/// Sixteen aligned to sixteen on x86-64 and twelve aligned to a word on i386, which is the size
+/// and the alignment the type has there, under mingw as well as under System V.
+pub(crate) fn x87_area(conv: &CallRegs) -> (u32, u32) {
+    if conv.word == 4 { (12, 4) } else { (16, 16) }
+}
 
 /// Why a value of that type cannot travel at all, or nothing if it can.
 ///
@@ -332,7 +337,7 @@ pub fn entry(
         // bytes. What arrives is the address of those bytes, which is what an object in the
         // argument area always hands over.
         if on_the_stack(ty) {
-            let (size, align) = X87_AREA;
+            let (size, align) = x87_area(conv);
             where_from.push((
                 ty,
                 places.on_stack(size, align),
@@ -701,7 +706,7 @@ pub fn call(
         // the copy any other sixteen byte object gets.
         let abi = match abi {
             _ if on_the_stack(ty) => {
-                let (size, align) = X87_AREA;
+                let (size, align) = x87_area(conv);
                 Abi::ByVal { size: size.into(), align, drains: Drains::Nothing }
             }
             abi => abi,
