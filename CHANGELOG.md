@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The nightly run builds SQLite's veryquick suite for `aarch64-windows-gnu` natively on `windows-11-arm` with rucc and with llvm-mingw's clang, over a Tcl clang builds, and fails when a test fails only in rucc's build. `tests/sqlite/windows.sh` takes `ARCH=aarch64` and `REF_CC`, and runs without Wine under a Windows shell. (#2071)
+- The AArch64 assembler reads and encodes the Advanced SIMD instructions, so the listings gcc writes at `-O2` and `-O3`, where it vectorizes loops, now assemble. That covers every lane layout from `8b` to `2d`, single lanes like `v0.s[1]`, register lists like `{v0.16b - v3.16b}`, and the arithmetic, compare, shift, widening, narrowing, permute, reduction, by-element, immediate move and structure load and store families. Each word was checked against GNU as on nearly two thousand lines, and every line GNU as refuses from the same list is refused too.
 
 ### Changed
 
