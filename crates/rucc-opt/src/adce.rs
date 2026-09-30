@@ -292,10 +292,14 @@ impl<'a> Mark<'a> {
         for &value in &func[func[inst].args] {
             self.value(value);
         }
-        for call in func.successors(inst) {
-            for (at, param) in func[call.block].params.iter().enumerate() {
-                if self.params.contains(param) {
-                    self.value(func[call.args][at]);
+        // A `block_addr` names its block the way a branch does, with no arguments, and passes
+        // nothing, so only a terminator's targets are edges.
+        if func.is_terminator(inst) {
+            for call in func.successors(inst) {
+                for (at, param) in func[call.block].params.iter().enumerate() {
+                    if self.params.contains(param) {
+                        self.value(func[call.args][at]);
+                    }
                 }
             }
         }
@@ -387,6 +391,29 @@ block3(%6: i32):
         assert!(!out.contains("add") && !out.contains("sub"), "{out}");
         assert!(!out.contains(": i32):\n    return"), "the parameter went too, {out}");
         assert!(out.contains("return %1"), "{out}");
+    }
+
+    /// The address of a block that takes a parameter is not an edge into it, and the value the
+    /// indirect branch passes is what the parameter needs.
+    #[test]
+    fn the_address_of_a_block_with_a_parameter_passes_nothing() {
+        let out = cleaned(
+            r#"
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = block_addr block1
+    %2 = iconst.i32 1
+    %3 = add %0, %2
+    indirect_br %1, block1(%3)
+
+block1(%4: i32):
+    return %4
+}
+"#,
+        );
+        assert!(out.contains("block_addr block1"), "{out}");
+        assert!(out.contains("add"), "{out}");
+        assert!(out.contains("return %4"), "{out}");
     }
 
     /// The same diamond with the join returning what the arms computed keeps all of it.
