@@ -344,6 +344,23 @@ pub fn known(line: &str, widths: &[Option<Width>], memory: &[bool]) -> bool {
             .is_some_and(|named| machine(&named, &shapes).is_some())
 }
 
+/// Whether one line of a template is an instruction this knows and refused for a reason of its own,
+/// which is [`known`] and then [`read_in`] saying no to the instruction on that line.
+///
+/// The labels in front of the instruction are left out of both questions. A label on its own is a
+/// place [`read_in`] refuses whenever nothing in the same text jumps to it, and a line on its own
+/// has nothing else in it, so `1: movl (%1),%0` would be refused for the label when the question
+/// was about the load. That is the first line of every `get_user` in the kernel, whose `1b` is
+/// named by an exception table entry further down the template and settled by the assembler.
+#[must_use]
+pub fn refused(line: &str, widths: &[Option<Width>], memory: &[bool]) -> bool {
+    let mut text = uncommented(line).trim();
+    while let Some((_, rest)) = labelled(text) {
+        text = rest.trim_start();
+    }
+    known(text, widths, memory) && read_in(text, widths, memory).is_none()
+}
+
 /// Every step of that template, or nothing when any of them is not one this can place.
 ///
 /// Nothing rather than a partial answer, because half a template is not a smaller program, it is a

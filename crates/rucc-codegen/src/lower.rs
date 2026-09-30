@@ -4658,10 +4658,7 @@ impl<'a> Lowering<'a> {
         let registered = |index: usize| def_of[index].is_some() || use_of[index].is_some();
         if !a64 && (0..list.len()).any(registered) {
             for line in template.split(['\n', ';']) {
-                if names_one(line, registered)
-                    && x86_64::known(line, widths, memory)
-                    && x86_64::read_in(line, widths, memory).is_none()
-                {
+                if names_one(line, registered) && x86_64::refused(line, widths, memory) {
                     return Err(refused());
                 }
             }
