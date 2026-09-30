@@ -211,21 +211,6 @@ pub(crate) const TABLE: &[Row] = &[
     only(X86, refused("-mno-fp-ret-in-387", NO_VECTOR, Some(2277))),
     only(X86, refused("-msoft-float", NO_VECTOR, Some(2277))),
     only(X86, refused("-mgeneral-regs-only", NO_VECTOR, Some(2277))),
-    only(
-        X86,
-        same(
-            "-mpreferred-stack-boundary=4",
-            "it is the sixteen byte boundary the psABI asks for, which every frame here keeps",
-        ),
-    ),
-    only(
-        X86,
-        refused(
-            "-mpreferred-stack-boundary=*",
-            "every frame here is kept on the psABI's sixteen byte boundary",
-            Some(2278),
-        ),
-    ),
     only(X86, same("-mstack-protector-guard=tls", "the canary is the thread's own, the default")),
     only(X86, same("-mstack-protector-guard-reg=fs", "the canary is read through %fs")),
     only(X86, same("-mstack-protector-guard-offset=40", "the canary is read from %fs:40")),

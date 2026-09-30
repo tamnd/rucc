@@ -2079,6 +2079,30 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
                     })?;
             }
+            // The boundary the stack pointer is kept on at a call, as a power of two, which the
+            // x86-64 kernel sets to 3 because interrupt entry leaves its stack on eight bytes.
+            // gcc's range is 4 to 12 while the vector registers are in use, because a spilled
+            // vector is stored with an instruction that needs sixteen, and 3 only once they are
+            // not. Nothing here turns them off yet (#2277), so 3 is refused the way gcc refuses
+            // it with SSE on. Only on x86-64, where gcc has the flag at all.
+            _ if arch == rucc_target::Arch::X86_64
+                && arg.starts_with("-mpreferred-stack-boundary=") =>
+            {
+                let text = &arg["-mpreferred-stack-boundary=".len()..];
+                let power = text.parse::<u32>().ok();
+                if power == Some(3) {
+                    return Err(err(kbuild::refusal(
+                        arg,
+                        "gcc takes 3 only once -mno-sse has kept the vector registers out of every \
+                         function, and nothing here does that yet",
+                        Some(2277),
+                    )));
+                }
+                let power = power.filter(|power| (4..=12).contains(power)).ok_or_else(|| {
+                    err(format!("{arg}: the boundary is a power of two between 4 and 12"))
+                })?;
+                opts.stack_boundary = Some(1 << power);
+            }
             // A floor under every function that `-falign-functions` cannot lower, which is gcc's
             // difference between the two: the kernel passes this one because ftrace and the call
             // padding it writes need every function on the boundary, the cold ones included. It is
@@ -7969,7 +7993,6 @@ mod tests {
             "-mskip-rax-setup",
             "-maccumulate-outgoing-args",
             "-mno-apx-features=egpr",
-            "-mpreferred-stack-boundary=4",
             "-mstack-protector-guard=tls",
             "-mindirect-branch=keep",
             "-mfunction-return=keep",
@@ -7990,6 +8013,24 @@ mod tests {
         compile(&["-mno-outline-atomics", KERNEL_ARM64, "-c", "a.c"]);
     }
 
+    /// The boundary is a power of two, as gcc spells it, and only on x86-64, where gcc has the
+    /// flag. 3 is the kernel's and waits on the vector registers being kept out.
+    #[test]
+    fn the_preferred_stack_boundary_is_a_power_of_two_on_x86_64() {
+        let boundary = |flag: &str| compile(&[KERNEL_X86, flag, "-c", "a.c"]).0.stack_boundary;
+        assert_eq!(compile(&[KERNEL_X86, "-c", "a.c"]).0.stack_boundary, None);
+        assert_eq!(boundary("-mpreferred-stack-boundary=4"), Some(16));
+        assert_eq!(boundary("-mpreferred-stack-boundary=5"), Some(32));
+        assert_eq!(boundary("-mpreferred-stack-boundary=12"), Some(4096));
+        for bad in ["-mpreferred-stack-boundary=13", "-mpreferred-stack-boundary=2"] {
+            assert!(refused(&[KERNEL_X86, bad, "-c", "a.c"]).contains("between 4 and 12"));
+        }
+        let three = refused(&[KERNEL_X86, "-mpreferred-stack-boundary=3", "-c", "a.c"]);
+        assert!(three.contains("-mno-sse"), "{three}");
+        let arm = refused(&[KERNEL_ARM64, "-mpreferred-stack-boundary=4", "-c", "a.c"]);
+        assert!(arm.contains("unknown option"), "{arm}");
+    }
+
     /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
@@ -7998,7 +8039,7 @@ mod tests {
             ("-mno-sse", 2277),
             ("-mno-80387", 2277),
             ("-mgeneral-regs-only", 2277),
-            ("-mpreferred-stack-boundary=3", 2278),
+            ("-mpreferred-stack-boundary=3", 2277),
             ("-mstack-protector-guard-reg=gs", 2279),
             ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
             ("-mindirect-branch=thunk-extern", 2280),

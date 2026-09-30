@@ -425,7 +425,8 @@ pub struct CallRegs {
     ///
     /// Sixteen on every convention here, and it is a real obligation rather than a preference,
     /// because a callee is entitled to use an aligned vector store on its own frame and gets a
-    /// fault rather than a wrong answer when a caller got this wrong.
+    /// fault rather than a wrong answer when a caller got this wrong. A command line can ask for
+    /// another with `-mpreferred-stack-boundary=`, which is [`CallRegs::aligned_to`].
     pub stack_align: u32,
     /// How many bytes the call instruction itself pushes before the callee starts running.
     ///
@@ -583,6 +584,37 @@ impl CallRegs {
             return *self;
         }
         CallRegs { shadow: self.home, shared_positions: true, sse_args: &[], ..*self }
+    }
+
+    /// The same convention with the stack pointer kept on a multiple of `bytes` at every call
+    /// rather than on [`CallRegs::stack_align`], which is what `-mpreferred-stack-boundary=` asks
+    /// for.
+    ///
+    /// Everything that reads a convention holds it for as long as the compilation, so the answer
+    /// is made once for each convention and boundary and kept. There are a handful of each, which
+    /// bounds what is kept to a few dozen of these however many units are compiled.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `bytes` is not a power of two.
+    #[must_use]
+    pub fn aligned_to(&'static self, bytes: u32) -> &'static CallRegs {
+        use std::sync::Mutex;
+
+        static MADE: Mutex<Vec<&'static CallRegs>> = Mutex::new(Vec::new());
+
+        assert!(bytes.is_power_of_two(), "a stack boundary that is not a power of 2");
+        if bytes == self.stack_align {
+            return self;
+        }
+        let wanted = CallRegs { stack_align: bytes, ..*self };
+        let mut made = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&regs) = made.iter().find(|&&regs| *regs == wanted) {
+            return regs;
+        }
+        let regs: &'static CallRegs = Box::leak(Box::new(wanted));
+        made.push(regs);
+        regs
     }
 
     /// The number DWARF gives that register, or `None` for one it has no column for.

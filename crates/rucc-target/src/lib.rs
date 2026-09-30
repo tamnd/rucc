@@ -1458,6 +1458,12 @@ mod tests {
         assert_eq!(arm.call_regs.map(|regs| regs.int_args[0]), Some(aarch64::x(0)));
         assert_eq!(arm.call_regs.map(|regs| regs.red_zone), Some(0));
         assert_eq!(of("aarch64-apple-darwin").call_regs.map(|regs| regs.red_zone), Some(128));
+        // Another stack boundary is the same convention with one number changed, made once.
+        let sysv = linux.call_regs.expect("a convention");
+        let eight = sysv.aligned_to(8);
+        assert_eq!((eight.stack_align, eight.int_args), (8, sysv.int_args));
+        assert!(std::ptr::eq(eight, sysv.aligned_to(8)));
+        assert!(std::ptr::eq(sysv, sysv.aligned_to(16)));
         // Windows on AArch64 has registers of its own rather than Linux's, both runtimes alike.
         for triple in ["aarch64-pc-windows-msvc", "aarch64-pc-windows-gnu"] {
             let regs = of(triple).call_regs.expect("a convention");

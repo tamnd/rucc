@@ -910,6 +910,12 @@ fn generate(
             target.tuple
         ))]);
     };
+    // Once for the whole unit rather than for each function, because the boundary is the command
+    // line's and every function in the unit is compiled against it.
+    let machine = match opts.stack_boundary {
+        Some(bytes) => machine.aligned_to(bytes),
+        None => machine,
+    };
     // Refused rather than dropped. A command line that asks for a stack protector on a target
     // that has nowhere to keep the word one is compared against would otherwise get code with no
     // protection in it and no indication that the flag did nothing, which is the one outcome worse

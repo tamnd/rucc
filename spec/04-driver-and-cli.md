@@ -337,6 +337,7 @@ Honored, by doing what gcc does:
 | `-fshort-wchar`, `-fno-short-wchar` | `wchar_t` is a 16 bit unsigned type, in `L""`, in `__WCHAR_TYPE__` and its neighbours and in the checker, because the session puts it into the target the way it puts `-funsigned-char` there. The negative form is the target's own `wchar_t`. |
 | `-fmin-function-alignment=N` | A floor under every function, rounded up to a power of two the way gcc rounds `-falign-functions=`. `-falign-functions` may raise it and cannot lower it, in whichever order the two are written. |
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
+| `-mpreferred-stack-boundary=N` (x86-64) | The stack pointer is kept on a multiple of 2 to the N at every call and counted on to be no more than that on entry, for N from 4 to 12. A frame is rounded to that and not to sixteen, and a local that asks for more is aligned by the prologue behind a frame pointer with `and`, which is gcc's sequence and the one objtool reads. 3, which the x86-64 kernel passes, waits on `-mno-sse`. |
 | `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
 
 Taken because what they ask for is what happens:
@@ -360,7 +361,6 @@ Taken because what they ask for is what happens:
 | `-ftrivial-auto-var-init=uninitialized` | The default. |
 | `-fzero-call-used-regs=skip` | The default. |
 | `-gz=none` | The debug sections are not compressed. |
-| `-mpreferred-stack-boundary=4` (x86-64) | The psABI's sixteen bytes, which every frame keeps. |
 | `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=fs`, `-mstack-protector-guard-offset=40` (x86-64) | Where the canary is read from already, `%fs:40`. |
 | `-mindirect-branch=keep`, `-mfunction-return=keep`, `-mno-indirect-branch-register` (x86-64), `-mharden-sls=none` | Branches and returns are left as they are. |
 | `-mno-record-mcount`, `-mno-nop-mcount` (x86-64) | The defaults. |
@@ -376,7 +376,7 @@ Refused, with the issue that would honor them:
 | Flag | Why | Issue |
 |---|---|---|
 | `-mno-sse`, `-mno-sse2`, `-mno-mmx`, `-mno-80387`, `-mno-fp-ret-in-387`, `-msoft-float`, `-mgeneral-regs-only` | Any function may use the vector registers, for copies, fills and the variadic save area as well as for floating point. On AArch64 it is `-mgeneral-regs-only` alone. | #2277 |
-| `-mpreferred-stack-boundary=*` (x86-64) | Every frame is kept on sixteen bytes. | #2278 |
+| `-mpreferred-stack-boundary=3` (x86-64) | gcc takes 3 only with the vector registers off, since a spilled vector is stored with an instruction that needs sixteen. | #2277 |
 | `-mstack-protector-guard*` | The canary is read from where the C library keeps it. | #2279 |
 | `-mindirect-branch=*`, `-mfunction-return=*`, `-mindirect-branch-register`, `-mindirect-branch-cs-prefix`, `-mharden-sls=*` (x86-64), `-fno-jump-tables` | No thunks, no `int3` after a return and jump tables where a switch wants one. | #2280 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
