@@ -2127,6 +2127,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // scheduler and hoisting pass blow up the register pressure.
             "-fschedule-insns" | "-fno-schedule-insns" => {}
             "-fcode-hoisting" | "-fno-code-hoisting" => {}
+            // gcc's global common subexpression pass, which the kernel's BPF interpreter turns off
+            // because it undoes the computed goto dispatch the interpreter is written around.
+            "-fgcse" | "-fno-gcse" => {}
             // The scheduler's own knobs, which serpent asks for with `-fsched-pressure`. Every
             // name under `-fsched-` and `-fsched2-` tunes that pass and nothing else, so the family
             // is taken whole like the two above.
@@ -5181,6 +5184,8 @@ mod tests {
             "-fno-schedule-insns",
             "-fschedule-insns",
             "-fno-code-hoisting",
+            "-fno-gcse",
+            "-fgcse",
             "-fsched-pressure",
             "-fno-sched-interblock",
             "-fsched-stalled-insns=2",
