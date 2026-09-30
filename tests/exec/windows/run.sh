@@ -13,10 +13,10 @@
 # A program whose first lines have "args:" in them is run with those arguments, read with the shell's
 # quoting and no wildcard expansion, from this directory so that a wildcard has something to match.
 # One whose first lines have "flags:" in them is compiled with those flags as well, such as
-# -municode for a program that starts at wmain. "gcc flags:" go after the source and only when CC is gcc,
-# for a program that asks rucc for something gcc does not do, such as a library named in a pragma.
-# "gcc skip:" gives the reason gcc's build of that program is not run, and the program is skipped
-# when CC is gcc.
+# -municode for a program that starts at wmain. "gcc flags:" go after the source and only when CC is gcc
+# or clang, the reference compilers, for a program that asks rucc for something they do not do, such
+# as a library named in a pragma. "gcc skip:" gives the reason the reference build of that program
+# is not run, and the program is skipped when CC is gcc or clang.
 #
 # A directory here is one program in several files. Every .c in it other than main.c is built with
 # -shared into a DLL of the same name, with the .def file of that name if there is one, and writes
@@ -29,6 +29,11 @@
 # msvcrt and the universal CRT. "msvc flags:" go after the source there, for a link option that
 # is lld-link's rather than GNU ld's. The directories are skipped there too, since they are built
 # with GNU ld's options.
+#
+# When CC compiles for AArch64, which it says by having aarch64 somewhere in it, a program whose
+# first lines have "x86_64 only:" in them is skipped, with the reason after it, and one with a
+# NAME.aarch64.out beside it is compared with that rather than with NAME.out, for a program whose
+# output is a layout rule that AAPCS64 sets differently.
 set -euo pipefail
 
 bless=0
@@ -47,6 +52,17 @@ msvc=0
 case " ${cc[*]} " in
     *windows-msvc*) msvc=1 ;;
 esac
+arm=0
+case " ${cc[*]} " in
+    *aarch64*) arm=1 ;;
+esac
+
+# A program that never finishes is a failure like any other rather than a job that runs until
+# the CI system gives up on it, where timeout(1) is there to say so.
+limit=()
+if command -v timeout >/dev/null; then
+    limit=(timeout -k 10 "${RUN_TIMEOUT:-300}")
+fi
 
 here=$(cd "$(dirname "$0")" && pwd)
 work=${WORK:-$(mktemp -d)}
@@ -63,7 +79,7 @@ judge() {
     local got="$exe.txt" status=0
     # A compiler run through WSL's interop writes the file without the execute bit.
     chmod +x "$exe" 2>/dev/null || true
-    (cd "$here" && "${runner[@]}" "$exe" "$@") </dev/null >"$got" 2>"$exe.err" || status=$?
+    (cd "$here" && ${limit[@]+"${limit[@]}"} "${runner[@]}" "$exe" "$@") </dev/null >"$got" 2>"$exe.err" || status=$?
     # A Windows program writes CRLF to a text stream, and Wine and a Windows host agree on that, so
     # the carriage returns go before comparing rather than into the .out files.
     tr -d '\r' <"$got" >"$got.lf"
@@ -93,6 +109,14 @@ judge() {
 for src in "$here"/*.c; do
     name=$(basename "$src" .c)
     want="$here/$name.out"
+    if [ $arm = 1 ]; then
+        why=$(sed -n '1,3s|^/\* x86_64 only: \(.*\) \*/$|\1|p' "$src")
+        if [ -n "$why" ]; then
+            echo "skip $name: $why"
+            continue
+        fi
+        [ -f "$here/$name.aarch64.out" ] && want="$here/$name.aarch64.out"
+    fi
     if [ $msvc = 1 ]; then
         why=$(sed -n '1,3s|^/\* not on msvc: \(.*\) \*/$|\1|p' "$src")
         if [ -n "$why" ]; then
@@ -112,7 +136,7 @@ for src in "$here"/*.c; do
     read -r -a flags <<<"$flags"
     theirs=()
     case "${cc[0]##*/}" in
-        *gcc*)
+        *gcc* | *clang*)
             why=$(sed -n '1,3s|^/\* gcc skip: \(.*\) \*/$|\1|p' "$src")
             if [ -n "$why" ]; then
                 echo "skip $name: $why"

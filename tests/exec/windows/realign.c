@@ -1,3 +1,4 @@
+/* gcc flags: -fno-omit-frame-pointer */
 /* Frames that force their own alignment, which on Windows are laid out the way clang lays them out:
  * the whole prologue the unwind record describes first, and the stack pointer rounded down after it.
  *
@@ -5,7 +6,10 @@
  * RtlCaptureStackBackTrace, which needs a record for each of them, and then either returns normally
  * or longjmps out through all of them, which unwinds them the same way. The fifth and sixth arguments
  * of deep are read from the caller's stack through the frame pointer, and middle and outer keep
- * doubles live across the call, which puts vector registers in the saves. tamnd/rucc#1422. */
+ * doubles live across the call, which puts vector registers in the saves. tamnd/rucc#1422.
+ *
+ * On AArch64, RtlCaptureStackBackTrace follows the chain of frame records that x29 heads, which
+ * clang for mingw leaves out of a frame unless it is asked for one, so the reference build asks. */
 #include <windows.h>
 #include <setjmp.h>
 #include <stdint.h>
