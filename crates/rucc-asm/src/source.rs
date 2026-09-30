@@ -1496,8 +1496,8 @@ impl Reader {
             // Said for a debugger or a reader and holding nothing a link depends on. Passed over
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
-            "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "att_syntax"
-            | "intel_syntax" => {}
+            "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "arch_extension"
+            | "att_syntax" | "intel_syntax" => {}
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
             }

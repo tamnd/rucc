@@ -133,6 +133,43 @@ def fn(ret, nm, params, body):
     w("}")
 
 
+def fabs(e):
+    """The builtin that is FABS on a lane of this type, which is the sign bit cleared."""
+    return "__builtin_fabsf" if e == "f32" else "__builtin_fabs"
+
+
+def fmax(x, y):
+    """FMAX in C. Past the two orderings the operands are equal or one is a NaN. Equal and not
+    zero they are the same value. Otherwise the sum is the answer: a NaN operand comes back from an
+    add the way FMAX gives it back, the first signalling one quietened and then the first quiet
+    one, and two zeros add to -0.0 only when both are, which is the larger of them."""
+    return f"{x} > {y} ? {x} : {x} < {y} ? {y} : {x} == {y} && {x} != 0 ? {x} : {x} + {y}"
+
+
+def fmin(x, y):
+    """FMIN in C, which is FMAX's NaN rule and the zero that has its sign bit set when either
+    does."""
+    return (
+        f"{x} < {y} ? {x} : {x} > {y} ? {y} : {x} != {x} || {y} != {y} ? {x} + {y} : "
+        f"__builtin_signbit({x}) ? {x} : {y}"
+    )
+
+
+def pairwise(c, n, op):
+    """The lanes of a combined by op the way the across-lanes instructions do, each half of the
+    vector first and then the two halves with the lower one on the left, as a body. The halves
+    of four lanes are held in lo and hi, so that op is handed names rather than expressions."""
+    if n == 1:
+        return "return a[0];"
+    if n == 2:
+        return f"return {op('a[0]', 'a[1]')};"
+    assert n == 4
+    return (
+        f"{c} lo = {op('a[0]', 'a[1]')}; {c} hi = {op('a[2]', 'a[3]')}; "
+        f"return {op('lo', 'hi')};"
+    )
+
+
 def lanewise(ret_e, ret_q, nm, params, expr, n):
     rt = vt(ret_e, ret_q)
     fn(
@@ -335,16 +372,29 @@ def emit():
             lanewise(
                 e, q, name("vmla", e, q, "_n"), f"{v} a, {v} b, {c} c", f"({c})(a[i] + b[i] * c)", n
             )
-            lanewise(e, q, name("vmax", e, q), f"{v} a, {v} b", "a[i] > b[i] ? a[i] : b[i]", n)
-            lanewise(e, q, name("vmin", e, q), f"{v} a, {v} b", "a[i] < b[i] ? a[i] : b[i]", n)
-            lanewise(
-                e,
-                q,
-                name("vabd", e, q),
-                f"{v} a, {v} b",
-                f"({c})(a[i] > b[i] ? a[i] - b[i] : b[i] - a[i])",
-                n,
-            )
+            if BY[e][3] == "f":
+                # FMAX and FMIN, which answer a NaN when either operand is one and put -0.0 below
+                # +0.0, and FABD, which is FABS of the difference.
+                lanewise(e, q, name("vmax", e, q), f"{v} a, {v} b", fmax("a[i]", "b[i]"), n)
+                lanewise(e, q, name("vmin", e, q), f"{v} a, {v} b", fmin("a[i]", "b[i]"), n)
+                lanewise(
+                    e, q, name("vabd", e, q), f"{v} a, {v} b", f"{fabs(e)}(a[i] - b[i])", n
+                )
+            else:
+                lanewise(
+                    e, q, name("vmax", e, q), f"{v} a, {v} b", "a[i] > b[i] ? a[i] : b[i]", n
+                )
+                lanewise(
+                    e, q, name("vmin", e, q), f"{v} a, {v} b", "a[i] < b[i] ? a[i] : b[i]", n
+                )
+                lanewise(
+                    e,
+                    q,
+                    name("vabd", e, q),
+                    f"{v} a, {v} b",
+                    f"({c})(a[i] > b[i] ? a[i] - b[i] : b[i] - a[i])",
+                    n,
+                )
             ops = (("vceq", "=="), ("vcge", ">="), ("vcgt", ">"), ("vcle", "<="), ("vclt", "<"))
             u = ut(e)
             uc = ct(u)
@@ -356,24 +406,34 @@ def emit():
                     lanewise(
                         u, q, name(op + "z", e, q), f"{v} a", f"a[i] {sym} 0 ? ({uc})-1 : 0", n
                     )
-            fn(
-                c,
-                name("vaddv", e, q),
-                f"{v} a",
-                f"{c} r = 0; for (int i = 0; i < {n}; i++) r += a[i]; return r;",
-            )
-            fn(
-                c,
-                name("vmaxv", e, q),
-                f"{v} a",
-                f"{c} r = a[0]; for (int i = 1; i < {n}; i++) if (a[i] > r) r = a[i]; return r;",
-            )
-            fn(
-                c,
-                name("vminv", e, q),
-                f"{v} a",
-                f"{c} r = a[0]; for (int i = 1; i < {n}; i++) if (a[i] < r) r = a[i]; return r;",
-            )
+            if BY[e][3] == "f":
+                # FADDP, FMAXP and FMAXV and the rest take the lanes in pairs and then the pairs,
+                # with no value to start from, and the order is the answer when the rounding or a
+                # NaN makes it one.
+                fn(c, name("vaddv", e, q), f"{v} a", pairwise(c, n, lambda x, y: f"{x} + {y}"))
+                fn(c, name("vmaxv", e, q), f"{v} a", pairwise(c, n, fmax))
+                fn(c, name("vminv", e, q), f"{v} a", pairwise(c, n, fmin))
+            else:
+                fn(
+                    c,
+                    name("vaddv", e, q),
+                    f"{v} a",
+                    f"{c} r = 0; for (int i = 0; i < {n}; i++) r += a[i]; return r;",
+                )
+                fn(
+                    c,
+                    name("vmaxv", e, q),
+                    f"{v} a",
+                    f"{c} r = a[0]; for (int i = 1; i < {n}; i++) if (a[i] > r) r = a[i]; "
+                    "return r;",
+                )
+                fn(
+                    c,
+                    name("vminv", e, q),
+                    f"{v} a",
+                    f"{c} r = a[0]; for (int i = 1; i < {n}; i++) if (a[i] < r) r = a[i]; "
+                    "return r;",
+                )
             lanewise(
                 e,
                 q,
@@ -386,7 +446,11 @@ def emit():
         for e in SIGNED + FLOATS:
             v, c, n = vt(e, q), ct(e), lanes(e, q)
             lanewise(e, q, name("vneg", e, q), f"{v} a", f"({c})-a[i]", n)
-            lanewise(e, q, name("vabs", e, q), f"{v} a", f"a[i] < 0 ? ({c})-a[i] : a[i]", n)
+            if BY[e][3] == "f":
+                # FABS clears the sign bit whatever the value is, -0.0 and a NaN included.
+                lanewise(e, q, name("vabs", e, q), f"{v} a", f"{fabs(e)}(a[i])", n)
+            else:
+                lanewise(e, q, name("vabs", e, q), f"{v} a", f"a[i] < 0 ? ({c})-a[i] : a[i]", n)
         for e in FLOATS:
             v, c, n = vt(e, q), ct(e), lanes(e, q)
             lanewise(e, q, name("vdiv", e, q), f"{v} a, {v} b", "a[i] / b[i]", n)
@@ -511,22 +575,16 @@ def emit():
                 n,
             )
             ones = f"(({'uint64_t'})-1 >> {64 - bits})"
-            lanewise(
-                e,
-                q,
-                name("vsli", e, q, "_n"),
-                f"{v} a, {v} b, const int n",
-                f"({c})(((uint64_t)b[i] << n) | ((uint64_t)a[i] & ({ones} >> ({bits} - n))))",
-                n,
-            )
-            lanewise(
-                e,
-                q,
-                name("vsri", e, q, "_n"),
-                f"{v} a, {v} b, const int n",
-                f"({c})((((uint64_t)b[i] & {ones}) >> n) | ((uint64_t)a[i] & ~({ones} >> n)))",
-                n,
-            )
+            # The bits a keeps are a shift of a 64 bit mask, and for 64 bit lanes that is a shift
+            # by 64 at vsli_n's 0 and vsri_n's 64, which C does not define. Those two keep none of
+            # a and all of it, so they are written out.
+            sli = f"({c})(((uint64_t)b[i] << n) | ((uint64_t)a[i] & ({ones} >> ({bits} - n))))"
+            sri = f"({c})((((uint64_t)b[i] & {ones}) >> n) | ((uint64_t)a[i] & ~({ones} >> n)))"
+            if bits == 64:
+                sli = f"n == 0 ? b[i] : {sli}"
+                sri = f"n == 64 ? a[i] : {sri}"
+            lanewise(e, q, name("vsli", e, q, "_n"), f"{v} a, {v} b, const int n", sli, n)
+            lanewise(e, q, name("vsri", e, q, "_n"), f"{v} a, {v} b, const int n", sri, n)
             if bits < 64:
                 lanewise(
                     e,

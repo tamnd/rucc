@@ -125,6 +125,59 @@ aarch64*)
 			fi
 		done
 	done
+
+	# The same program as assembly for GNU as, which knows nothing of the flag rucc was given or of
+	# the attribute on a function, so the listing has to turn crc on itself wherever the steps are
+	# used. The assembler is given no -march of its own, which is how gcc's driver runs it on a
+	# listing written by another compiler. See tamnd/rucc#2304.
+	for march in armv8-a+crc none; do
+		flag=-march=$march
+		[ "$march" = none ] && flag=
+		listing=$out/acle-$march.s
+		# shellcheck disable=SC2086
+		if ! $rucc --target="$triple" -O2 $flag -S -o "$listing" "$acle" 2>"$out/build.log"; then
+			printf 'acle %-11s -S   did not build\n' "$march"
+			sed 's/^/    /' "$out/build.log"
+			failed=$((failed + 1))
+		elif ! grep -q '^[[:space:]]*\.arch_extension[[:space:]]*crc$' "$listing"; then
+			printf 'acle %-11s -S   never turns crc on\n' "$march"
+			failed=$((failed + 1))
+		elif ! "$triple-as" -o "$listing.o" "$listing" 2>"$out/build.log"; then
+			printf 'acle %-11s -S   did not assemble\n' "$march"
+			head -20 "$out/build.log" | sed 's/^/    /'
+			failed=$((failed + 1))
+		else
+			printf 'acle %-11s -S   ok\n' "$march"
+			passed=$((passed + 1))
+		fi
+	done
+
+	# The float intrinsics of <arm_neon.h> whose answer turns on a signed zero, on which NaN comes
+	# back or on the order the lanes are added in, and the 64 bit shift and insert forms at the
+	# ends of their range. float.c prints bits, so gcc's build with its own header is the
+	# reference down to the payload of a NaN. See tamnd/rucc#2300 to #2303.
+	neon=$here/tests/qemu/neon/float.c
+	"$triple-gcc" -O2 -o "$out/neon-reference" "$neon"
+	"$qemu" "$out/neon-reference" >"$out/neon-reference.txt"
+	for level in 0 1 2; do
+		binary=$out/neon-O$level
+		if ! $rucc --target="$triple" -O$level -o "$binary" "$neon" 2>"$out/build.log"; then
+			printf 'neon -O%s  did not build\n' "$level"
+			sed 's/^/    /' "$out/build.log"
+			failed=$((failed + 1))
+		elif ! "$qemu" "$binary" >"$binary.txt" 2>&1; then
+			printf 'neon -O%s  exited nonzero\n' "$level"
+			tail -5 "$binary.txt" | sed 's/^/    /'
+			failed=$((failed + 1))
+		elif diff -u "$out/neon-reference.txt" "$binary.txt" >"$out/diff"; then
+			printf 'neon -O%s  ok, %s lines\n' "$level" "$(wc -l <"$binary.txt")"
+			passed=$((passed + 1))
+		else
+			printf 'neon -O%s  printed something else than gcc\n' "$level"
+			head -20 "$out/diff" | sed 's/^/    /'
+			failed=$((failed + 1))
+		fi
+	done
 	;;
 esac
 

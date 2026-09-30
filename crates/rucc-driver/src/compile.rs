@@ -1881,6 +1881,7 @@ fn output(opts: &Options, target: &TargetInfo) -> rucc_object::Output {
             data: opts.data_sections,
         },
         property: rucc_object::Property { features },
+        isa: opts.isa,
     }
 }
 
@@ -2636,6 +2637,8 @@ mod tests {
             for step in ["crc32cb", "crc32ch", "crc32cw", "crc32cx"] {
                 assert!(text.contains(step), "{march}: no {step} in:\n{text}");
             }
+            // tamnd/rucc#2304. The assembler that reads this is told the extension is on.
+            assert!(text.starts_with("\t.arch_extension\tcrc\n"), "{march}:\n{text}");
         }
         let source = concat!(
             "#include <arm_acle.h>\n",
@@ -2691,6 +2694,14 @@ mod tests {
         let cd = &cd[..cd.find("ret").expect("cd returns")];
         assert!(cd.contains("crc32cx") && !cd.contains("__crc32"), "{cd}");
         assert!(text.contains("crc32cb"), "{text}");
+        // tamnd/rucc#2304. The unit is not built for the extension and each of the two functions
+        // is, so the assembler is told so around each of them and not at the top.
+        assert!(!text.starts_with("\t.arch_extension"), "{text}");
+        let on = text.find("\t.arch_extension\tcrc\n").expect("switched on");
+        assert!(on < text.find("\ncd:").expect("cd"), "{text}");
+        let switched = text.matches("\t.arch_extension\tcrc\n").count();
+        assert!(switched >= 2, "{text}");
+        assert_eq!(text.matches("\t.arch_extension\tnocrc\n").count(), switched, "{text}");
     }
 
     /// The header is AArch64's alone, as gcc's is.
