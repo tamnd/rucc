@@ -344,6 +344,10 @@ struct Reader {
     /// times as it likes, and each use means the value it had where the use was written, so a
     /// second setting is a second entry and this says which one is current.
     current: Map<String, String>,
+    /// The names set to a register, `X0 = %xmm4` or `.set KEY, %rdi`, with the register. gas lets
+    /// an instruction name the register that way, and the kernel's crypto code names nearly every
+    /// register it uses so, setting the same name again as it rotates them round a loop.
+    registers: Map<String, String>,
     /// The numbered entries a relocation names, which are kept in the symbol table so that the
     /// relocation has something to point at. That is a numbered local label or a set name reached
     /// from another section, and is rare.
@@ -536,7 +540,56 @@ impl Reader {
             };
             (word, rest) = (next.to_owned(), after);
         }
-        self.instruction(&word, rest, &prefixes)
+        let rest = self.unaliased(rest);
+        self.instruction(&word, &rest, &prefixes)
+    }
+
+    /// The operands with every name that was set to a register written as the register, and every
+    /// name set to a plain number written as the number.
+    ///
+    /// The number matters because the operand is read apart from the rest of the file, and
+    /// `8*t+frame_W(%rsp)` inside a `.rept` is arithmetic on two such names that would otherwise be
+    /// read as two names added together. gas puts the numbers in the same way.
+    ///
+    /// A name only counts where it stands on its own: not after `%`, which is a register already,
+    /// not after `\`, which is a macro argument nothing replaced, and not in the middle of a
+    /// longer name or a number.
+    fn unaliased(&self, rest: &str) -> String {
+        if self.registers.is_empty() && self.values.is_empty() {
+            return rest.to_owned();
+        }
+        let bytes = rest.as_bytes();
+        let mut out = String::with_capacity(rest.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            let byte = bytes[at];
+            // `$` may be part of a name, but in front of one in an operand it says an immediate.
+            if !carries_on(byte) || byte == b'$' {
+                let ch = rest[at..].chars().next().unwrap_or(' ');
+                out.push(ch);
+                at += ch.len_utf8();
+                continue;
+            }
+            let end =
+                at + rest[at..].find(|ch: char| !carries_on(ch as u8)).unwrap_or(rest.len() - at);
+            let word = &rest[at..end];
+            let after = at.checked_sub(1).map(|before| bytes[before]);
+            let alone = starts(byte) && !matches!(after, Some(b'%' | b'\\'));
+            if !alone {
+                out.push_str(word);
+            } else if let Some(register) = self.registers.get(word) {
+                out.push_str(register);
+            } else if let Some(&value) = self.values.get(word) {
+                match value < 0 {
+                    true => out.push_str(&format!("({value})")),
+                    false => out.push_str(&value.to_string()),
+                }
+            } else {
+                out.push_str(word);
+            }
+            at = end;
+        }
+        out
     }
 
     /// One instruction, as the bytes of it.
@@ -739,6 +792,16 @@ impl Reader {
     /// is set again, and a file can count on it. The value is read before the new entry is made,
     /// so `x = x + 1` means the one before.
     fn assign(&mut self, name: &str, what: &str) -> Result<(), Trouble> {
+        let what = what.trim();
+        let register = match what.strip_prefix('%') {
+            Some(_) => Some(what.to_owned()),
+            None => self.registers.get(what).cloned(),
+        };
+        if let Some(register) = register.filter(|_| !self.aarch64) {
+            self.registers.insert(name.to_owned(), register);
+            return Ok(());
+        }
+        self.registers.remove(name);
         let sum = self.expression(what)?;
         let held = match self.current.get(name) {
             Some(_) => format!("{name}\u{1}={}", self.syms.len()),
@@ -1374,6 +1437,9 @@ impl Reader {
             // refusing would turn a note into a failure.
             "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64" | "att_syntax"
             | "intel_syntax" => {}
+            // gas takes every name it does not know to be defined elsewhere, so `.extern` says
+            // nothing it would not have assumed anyway.
+            "extern" => {}
             // The one warning this assembler has. gas prints it and carries on, and nothing here has
             // anywhere to print to, so it is passed over like the notes above. Under
             // `--fatal-warnings` gas stops on it instead, and so does this, since a build that
@@ -2097,7 +2163,18 @@ impl Reader {
     }
 
     /// `.type name,@function` and the other spellings of the same thing.
+    ///
+    /// gas also takes the name and the type with only a space between them, `.type foo STT_FUNC`,
+    /// which is how the kernel's crypto code copied from OpenSSL writes it.
     fn type_directive(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let spaced: Vec<String>;
+        let args = match args {
+            [one] if one.trim().contains(char::is_whitespace) => {
+                spaced = one.split_whitespace().map(str::to_owned).collect();
+                &spaced[..]
+            }
+            _ => args,
+        };
         let [name, what] = self.two(args, ".type")?;
         let what = unquoted(what.trim().trim_start_matches(['@', '%']));
         let sort = match what.trim_start_matches("STT_").to_ascii_lowercase().as_str() {
@@ -5612,5 +5689,34 @@ g:
         assert_eq!(code.bytes, expected);
         let Err(trouble) = read("\tlock lock incl (%rax)\n", Arch::X86_64) else { panic!("read") };
         assert!(trouble.why.contains("same kind"), "{}", trouble.why);
+    }
+
+    #[test]
+    fn a_name_set_to_a_register_is_that_register_until_it_is_set_again() {
+        // How the kernel's SHA code names its registers and rotates them round the rounds.
+        let aliased = assembled(
+            "X0 = %xmm4\nX1 = %xmm5\n.set KEY, %rdi\nmovdqa X0, X1\nmovq 8(KEY), %rax\n\
+             TMP = X0\nX0 = X1\nX1 = TMP\nmovdqa X0, X1\nKEY = 16\nmovq KEY(%rsi), %rax\n",
+        );
+        let plain = assembled(
+            "movdqa %xmm4, %xmm5\nmovq 8(%rdi), %rax\nmovdqa %xmm5, %xmm4\nmovq 16(%rsi), %rax\n",
+        );
+        assert_eq!(bytes(&aliased, ".text"), bytes(&plain, ".text"));
+    }
+
+    #[test]
+    fn a_name_set_to_a_number_is_that_number_in_an_operand() {
+        let set = assembled(
+            "frame_W = 0\nt = 2\nmovdqa %xmm0, 8*t+frame_W(%rsp)\nVL = 64\n\
+             lea (512 + (16 * 16))-VL(%rdi), %rsi\nsub $VL, %rsi\n",
+        );
+        let plain = assembled("movdqa %xmm0, 16(%rsp)\nlea 704(%rdi), %rsi\nsub $64, %rsi\n");
+        assert_eq!(bytes(&set, ".text"), bytes(&plain, ".text"));
+    }
+
+    #[test]
+    fn a_type_written_with_a_space_and_an_extern_are_read() {
+        let out = assembled(".extern g\n.globl f\n.type f STT_FUNC\nf:\n\tret\n");
+        assert_eq!(name(&out, "f").sort, Sort::Func);
     }
 }

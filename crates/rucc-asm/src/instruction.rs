@@ -162,6 +162,39 @@ const STANDING: i64 = 0x1000_0000;
 /// A sentence saying what about the line could not be read, with no line number on it, since the
 /// caller is the one that knows which line this was.
 pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
+    let mut written = full(word, args)?;
+    // An address made of thirty two bit registers is the same address with the top half of the
+    // sum thrown away, which is one prefix byte in front of the instruction and otherwise the
+    // same bytes. It goes behind a segment and in front of everything else, where gas puts it.
+    if args.iter().any(|arg| narrow(arg)) {
+        let at = written.bytes.iter().take_while(|&&byte| segment_prefix(byte)).count();
+        written.bytes.insert(at, 0x67);
+        for hole in &mut written.holes {
+            hole.at += 1;
+        }
+    }
+    Ok(written)
+}
+
+/// Whether the operand is an address whose registers are thirty two bits wide.
+fn narrow(arg: &str) -> bool {
+    let text = arg.trim();
+    let Some(cut) = grouped(text) else { return false };
+    text[cut + 1..text.len() - 1].split(',').take(2).any(|part| {
+        part.trim()
+            .strip_prefix('%')
+            .and_then(gpr_named)
+            .is_some_and(|(_, width)| width == Width::Long)
+    })
+}
+
+/// Whether the byte is one of the six segment prefixes.
+fn segment_prefix(byte: u8) -> bool {
+    matches!(byte, 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65)
+}
+
+/// [`one`], for an address of whole registers.
+fn full(word: &str, args: &[String]) -> Result<Written, String> {
     let mut mask = Opmask::default();
     let mut operands = Vec::with_capacity(args.len());
     let ported = matches!(word, "in" | "inb" | "inw" | "inl" | "out" | "outb" | "outw" | "outl");
@@ -673,13 +706,23 @@ fn spelled(
             return Ok((name.clone(), row));
         }
     }
-    if let Some(width) = stated(word, operands)? {
-        let letter = match width {
-            Width::Byte => 'b',
-            Width::Word => 'w',
-            Width::Long => 'l',
-            Width::Quad => 'q',
+    // Intel's name for a widening move, which gas takes in AT&T too and reads both widths off the
+    // registers, so `movzx %bl, %edi` is `movzbl`.
+    if let (Some(kind @ ("movzx" | "movsx")), [from, to]) = (Some(word), operands) {
+        let width = |operand: &Operand| match operand {
+            Operand::Reg(_, width) => Some(*width),
+            Operand::High(_) => Some(Width::Byte),
+            _ => None,
         };
+        if let (Some(from), Some(to)) = (width(from), width(to)) {
+            let spelled = format!("mov{}{}{}", &kind[3..4], letter(from), letter(to));
+            if let Some(row) = encoding(&spelled, &kinds, imm) {
+                return Ok((spelled, row));
+            }
+        }
+    }
+    if let Some(width) = stated(word, operands)? {
+        let letter = letter(width);
         for name in names.iter().flatten() {
             let spelled = format!("{name}{letter}");
             if let Some(row) = encoding(&spelled, &kinds, imm) {
@@ -694,6 +737,16 @@ fn spelled(
         "'{word}' with {} of those operands is not an instruction this compiler writes yet",
         kinds.len()
     ))
+}
+
+/// The letter gas puts on a mnemonic for an operand of that width.
+fn letter(width: Width) -> char {
+    match width {
+        Width::Byte => 'b',
+        Width::Word => 'w',
+        Width::Long => 'l',
+        Width::Quad => 'q',
+    }
 }
 
 /// The two names of each condition a program can branch on, the other one first.
@@ -883,8 +936,13 @@ fn operand(text: &str) -> Result<Operand, String> {
     if let Some(rest) = text.strip_prefix('$') {
         // A number where it is one, and otherwise an expression the file works out once its
         // labels have places, which is what `$4f-3b` is.
-        return Ok(number(rest.trim())
-            .map_or_else(|_| Operand::Expr(rest.trim().to_owned()), Operand::Imm));
+        // Arithmetic on numbers alone, `$~31` or `$(1 << 4)`, is a number too, and gas picks the
+        // short form for it the same way.
+        let rest = rest.trim();
+        return Ok(number(rest)
+            .ok()
+            .or_else(|| crate::source::constant(rest))
+            .map_or_else(|| Operand::Expr(rest.to_owned()), Operand::Imm));
     }
     if let Some(depth) = stack(text) {
         return Ok(Operand::Stack(depth));
@@ -1007,15 +1065,21 @@ fn address(text: &str) -> Result<Operand, String> {
         rest = rest[cut + 1..].trim();
     }
 
+    // The registers are in the last pair of brackets, and only when what is in them is registers:
+    // `(0*16)(%rsp)` and `(K_table-8)(%rip)` have arithmetic in brackets in front of them, and
+    // `(4*8)` on its own is a displacement with no register at all.
     let (front, inside) = match rest.find('(') {
-        Some(cut) => {
-            let Some(end) = rest.rfind(')') else {
-                return Err(format!("'{text}' opens a bracket and does not close it"));
-            };
-            if end < cut || rest[end + 1..].trim() != "" {
+        Some(_) => {
+            let Some(cut) = grouped(rest) else {
                 return Err(format!("'{text}' is not an address this compiler reads"));
+            };
+            let end = rest.len() - 1;
+            let inside = rest[cut + 1..end].trim();
+            if inside.is_empty() || inside.starts_with(['%', ',']) {
+                (rest[..cut].trim(), Some(inside))
+            } else {
+                (rest.trim(), None)
             }
-            (rest[..cut].trim(), Some(rest[cut + 1..end].trim()))
         }
         None => (rest.trim(), None),
     };
@@ -1043,6 +1107,15 @@ fn address(text: &str) -> Result<Operand, String> {
     });
     if parts.len() > 3 {
         return Err(format!("'{text}' has more than a base, an index and a scale in it"));
+    }
+    let widths: Vec<Width> = parts
+        .iter()
+        .take(2)
+        .filter_map(|part| part.strip_prefix('%').and_then(gpr_named))
+        .map(|(_, width)| width)
+        .collect();
+    if widths.len() == 2 && widths[0] != widths[1] {
+        return Err(format!("'{text}' adds registers of two widths"));
     }
     if let Some(base) = parts.first().filter(|base| !base.is_empty()) {
         if *base == "%rip" {
@@ -1085,13 +1158,36 @@ fn address(text: &str) -> Result<Operand, String> {
     Ok(Operand::Mem(addr, named))
 }
 
+/// Where the bracket that the last one in the text closes was opened, when the text ends in one.
+fn grouped(text: &str) -> Option<usize> {
+    let text = text.trim_end();
+    if !text.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (at, ch) in text.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A register inside the brackets of an address, which has to be a whole one.
 fn whole(text: &str) -> Result<PhysReg, String> {
     let Some(name) = text.strip_prefix('%') else {
         return Err(format!("'{text}' is not a register"));
     };
     match gpr_named(name) {
-        Some((reg, Width::Quad)) => Ok(reg),
+        // A thirty two bit one is the same register under the prefix [`one`] puts in front.
+        Some((reg, Width::Quad | Width::Long)) => Ok(reg),
         Some((_, width)) => Err(format!(
             "'%{name}' is {} bits, and an address on this machine is made of whole registers",
             width.bits()
@@ -1117,8 +1213,13 @@ fn parted(text: &str) -> Result<(i64, Option<String>), String> {
     if let Some(value) = crate::source::constant(text) {
         return Ok((value, None));
     }
+    // Brackets round the whole of it say nothing, and `(K_table-8)` is `K_table-8`.
+    if text.starts_with('(') && grouped(text) == Some(0) {
+        return parted(&text[1..text.len() - 1]);
+    }
     let mut total: i64 = 0;
     let mut sign: i64 = 1;
+    let mut depth = 0usize;
     let mut start = 0usize;
     let mut named: Option<String> = None;
     // A term may be arithmetic of its own, as `K256+8*16` is.
@@ -1127,6 +1228,24 @@ fn parted(text: &str) -> Result<(i64, Option<String>), String> {
         Ok(value) => {
             total = total.wrapping_add(sign.wrapping_mul(value));
             Ok(())
+        }
+        // A bracketed term with a name in it, `((s1) + (64*8))`, which a macro that builds one
+        // table's address from the one before it writes, is read the same way inside.
+        Err(_) if term.trim().starts_with('(') && grouped(term.trim()) == Some(0) => {
+            let (value, inner) = parted(term)?;
+            total = total.wrapping_add(sign.wrapping_mul(value));
+            match inner {
+                Some(_) if named.is_some() => {
+                    Err("two names added together, which is not a place a linker can find"
+                        .to_owned())
+                }
+                Some(_) if sign < 0 => Err(format!("'{term}' takes a name away")),
+                Some(inner) => {
+                    *named = Some(inner);
+                    Ok(())
+                }
+                None => Ok(()),
+            }
         }
         Err(why) => {
             if named.is_some() {
@@ -1142,9 +1261,14 @@ fn parted(text: &str) -> Result<(i64, Option<String>), String> {
         }
     };
     for (at, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
         // Not at the start of a term, where a sign belongs to the number behind it rather than
-        // joining it to anything.
-        if at == start || !matches!(ch, '+' | '-') {
+        // joining it to anything, and not inside brackets, where it is part of one term.
+        if at == start || depth > 0 || !matches!(ch, '+' | '-') {
             continue;
         }
         fold(&text[start..at], sign, &mut named)?;
@@ -1784,8 +1908,42 @@ mod tests {
     fn an_address_made_of_a_register_that_is_not_whole_is_refused() {
         // The machine has no such addressing mode on this target, and reading it as the whole
         // register would be an address off by whatever the top half holds.
-        let why = refused("movq (%eax), %rbx");
-        assert!(why.contains("32 bits"), "{why}");
+        let why = refused("movq (%ax), %rbx");
+        assert!(why.contains("16 bits"), "{why}");
+        let why = refused("movq (%rax,%ecx), %rbx");
+        assert!(why.contains("two widths"), "{why}");
+    }
+
+    #[test]
+    fn an_address_of_thirty_two_bit_registers_has_the_prefix_in_front() {
+        // The CRC code multiplies an index by three this way. The segment goes first, as gas has it.
+        assert_eq!(bytes("leal (%eax,%eax,2), %eax"), [0x67, 0x8d, 0x04, 0x40]);
+        assert_eq!(bytes("movq (%eax), %rbx"), [0x67, 0x48, 0x8b, 0x18]);
+        assert_eq!(bytes("movl %gs:(%edx), %eax"), [0x65, 0x67, 0x8b, 0x02]);
+    }
+
+    #[test]
+    fn brackets_in_front_of_the_registers_are_part_of_the_displacement() {
+        assert_eq!(bytes("movdqa (0*16)(%rsp), %xmm0"), bytes("movdqa 0(%rsp), %xmm0"));
+        assert_eq!(bytes("movl 0 +4*(3)(%r12), %eax"), bytes("movl 12(%r12), %eax"));
+        assert_eq!(bytes("movl (4*8), %eax"), bytes("movl 32, %eax"));
+        let with = written("movdqa (K_table-8)(%rip), %xmm0");
+        assert_eq!((with.holes[0].name.as_str(), with.holes[0].addend), ("K_table", -8));
+        let nested = written("movq (((s1) + (64*8)) + (64*8))(,%rax,8), %rbx");
+        assert_eq!((nested.holes[0].name.as_str(), nested.holes[0].addend), ("s1", 1024));
+    }
+
+    #[test]
+    fn arithmetic_on_numbers_in_an_immediate_takes_the_short_form() {
+        assert_eq!(bytes("andq $~31, %rsp"), [0x48, 0x83, 0xe4, 0xe0]);
+        assert_eq!(bytes("subq $(4*8), %rsp"), [0x48, 0x83, 0xec, 0x20]);
+    }
+
+    #[test]
+    fn movzx_and_movsx_read_both_widths_off_the_registers() {
+        assert_eq!(bytes("movzx %bl, %edi"), bytes("movzbl %bl, %edi"));
+        assert_eq!(bytes("movzx %ah, %esi"), bytes("movzbl %ah, %esi"));
+        assert_eq!(bytes("movsx %cx, %rax"), bytes("movswq %cx, %rax"));
     }
 
     /// What a line was read as, holes and all.
