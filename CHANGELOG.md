@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - `-Wno-error` takes back an earlier `-Werror`, as it does in gcc. Before, it was accepted and did nothing, so the build still stopped on the first warning. `-Wno-attributes` and `-Werror=attributes` now reach an attribute ignored where it does nothing, such as `constructor` on an object or a calling convention on the wrong target. The reserved constructor priority answers to `-Wprio-ctor-dtor`, as in gcc, and a comparison of pointers to distinct types to `-Wcompare-distinct-pointer-types`. Each of those shared a code with a warning gcc files under another name or none, so they have codes of their own, E0769 and E0768.
+- `weak` written next to a star, as in `struct execmem_info * __weak execmem_arch_setup(void)`, now makes the function weak. Before this, three kernel functions written this way were defined twice at link time.
 
 ## 0.18.4
 
