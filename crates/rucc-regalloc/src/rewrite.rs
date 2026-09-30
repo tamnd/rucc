@@ -108,6 +108,9 @@ pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<E
 
     let preds = preds(func, &blocks);
     for &block in &blocks {
+        behind_the_end(func, block, &preds, &mut edits);
+    }
+    for &block in &blocks {
         edges(func, assignment, env, block, &preds, &mut edits);
     }
     for &block in &blocks {
@@ -141,6 +144,42 @@ fn instruction(
         mov,
         class,
     }));
+}
+
+/// Moves what has to happen behind the last instruction of a block that leaves several ways to the
+/// start of every block it goes to.
+///
+/// That instruction is an `asm goto`, the one thing that both writes values and ends a block with
+/// more than one edge out of it. Behind it in its own block is the fall through only, since the
+/// template has already jumped to a label by then when it was going to, so a value it wrote that
+/// has to be taken somewhere else has to be taken there on every edge. Each of those goes to a
+/// block with no other way in, which `rucc_codegen::split::critical` sees to, and these are filed
+/// before the edge's own moves because those may read what these put in place.
+///
+/// A branch writes nothing and has nothing behind it, and neither does any other instruction a
+/// block that leaves several ways ends in, so this is nothing for all of those.
+fn behind_the_end(func: &Func, block: Block, preds: &[usize], edits: &mut Vec<Edit>) {
+    let succs = &func[block].succs;
+    if succs.len() < 2 {
+        return;
+    }
+    let Some(last) = func.insts(block).last() else { return };
+    if !func[func[last].operands].iter().any(|operand| operand.role.is_def()) {
+        return;
+    }
+    let behind: Vec<Edit> =
+        edits.iter().filter(|edit| edit.at == At::After(last)).copied().collect();
+    if behind.is_empty() {
+        return;
+    }
+    edits.retain(|edit| edit.at != At::After(last));
+    for call in succs {
+        assert!(
+            preds[call.block.index()] == 1,
+            "an edge out of an asm goto that writes something has to be split before allocation"
+        );
+        edits.extend(behind.iter().map(|&edit| Edit { at: At::StartOf(call.block), ..edit }));
+    }
 }
 
 /// The moves the edges out of a block turn into.

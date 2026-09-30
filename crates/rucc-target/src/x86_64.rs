@@ -44,7 +44,8 @@ pub use crate::x86_64::encode::{
 };
 pub use crate::x86_64::insts::{
     ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,
-    form, packed, template_filled, template_name, template_reg, unpacked,
+    form, packed, template_arm, template_arms, template_filled, template_jumps, template_name,
+    template_reg, unpacked,
 };
 pub use crate::x86_64::read::{
     At, Disp, Line, Piece, Step, known, read, read_in, refused, unlabelled,
@@ -367,6 +368,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     if_false: "jcc_e",
     jump: "jmp",
     indirect: "jmp_reg",
+    goto: "template",
     conditional: &CONDITIONAL,
     fused: &FUSED,
     moves: &MOVES,

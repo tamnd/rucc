@@ -116,10 +116,10 @@ const SCALE: u128 = mir::Weight::SCALE as u128;
 /// # Panics
 ///
 /// Panics on a block with more than two successors that does not end in the jump through a
-/// register, which is the only thing that lowers to one, and on a block with two whose last
-/// instruction is not the conditional branch the target named. Both are a function that was built
-/// wrongly somewhere earlier, and both are worth finding here rather than as a jump to the wrong
-/// place.
+/// register or an `asm goto`, which are the only things that lower to one, and on a block with two
+/// whose last instruction is neither of those nor the conditional branch the target named. Both
+/// are a function that was built wrongly somewhere earlier, and both are worth finding here rather
+/// than as a jump to the wrong place.
 pub fn blocks(
     func: &mut mir::Func,
     insts: &BranchInsts,
@@ -628,6 +628,13 @@ impl Writer<'_> {
         if self.leaves_indirectly(block) {
             return None;
         }
+        // An `asm goto` has jumped to every label already, from inside its text, so what is left
+        // is its fall through, which is the first arm. That is either the block laid out next or
+        // a jump in a block of its own, since nothing may follow the template in its block.
+        if self.func[block].succs.len() >= 2 && self.jumps_from_text(block) {
+            let first = self.func[block].succs[0].block;
+            return (next != Some(first)).then(|| self.bridge(block, 0));
+        }
         match self.func[block].succs.len() {
             0 => None,
             1 => {
@@ -635,7 +642,7 @@ impl Writer<'_> {
                 None
             }
             2 => self.two(block, next),
-            arms => panic!("a block with {arms} arms, and nothing lowers to one"),
+            arms => panic!("a block with {arms} arms, and nothing else lowers to one"),
         }
     }
 
@@ -644,6 +651,13 @@ impl Writer<'_> {
         let Some(last) = self.func.terminator(block) else { return false };
         let indirect = self.opcode(self.insts.indirect);
         self.func[last].opcode == indirect
+    }
+
+    /// Whether the block ends in an `asm goto` template, which jumps to its labels itself.
+    fn jumps_from_text(&mut self, block: mir::Block) -> bool {
+        let Some(last) = self.func.terminator(block) else { return false };
+        let goto = self.opcode(self.insts.goto);
+        self.func[last].opcode == goto
     }
 
     /// Whether the block already ends in a jump on the condition state, which an `asm` template
@@ -676,7 +690,7 @@ impl Writer<'_> {
         // needs when it is not the one laid out next.
         if self.jumps_already(block) {
             let second = self.func[block].succs[1].block;
-            return (next != Some(second)).then(|| self.bridge(block));
+            return (next != Some(second)).then(|| self.bridge(block, 1));
         }
 
         // Asked before the branch is taken out, because what it looks at is the instruction in
@@ -699,7 +713,7 @@ impl Writer<'_> {
             self.func.succs_mut(block).swap(0, 1);
             (if_false, None)
         } else {
-            (if_true, Some(self.bridge(block)))
+            (if_true, Some(self.bridge(block, 1)))
         };
 
         match fused {
@@ -773,15 +787,17 @@ impl Writer<'_> {
         condition
     }
 
-    /// Puts an empty block on a branch's second edge, so that the branch has something to fall
-    /// into and the jump the edge really needs is in a block of its own.
-    fn bridge(&mut self, block: mir::Block) -> mir::Block {
+    /// Puts an empty block on one edge of a branch, so that the branch has something to fall into
+    /// and the jump the edge really needs is in a block of its own. That is the second edge of a
+    /// branch the layout writes and the first of an `asm goto`, whose first edge is its fall
+    /// through.
+    fn bridge(&mut self, block: mir::Block, arm: usize) -> mir::Block {
         let bridge = self.func.create_block();
-        let edge = self.func[block].succs[1].clone();
+        let edge = self.func[block].succs[arm].clone();
         let weight = edge.weight;
         self.func.set_weight(bridge, weight);
         *self.func.succs_mut(bridge) = vec![edge];
-        self.func.succs_mut(block)[1] = mir::BlockCall::to(bridge).taken(weight);
+        self.func.succs_mut(block)[arm] = mir::BlockCall::to(bridge).taken(weight);
         bridge
     }
 

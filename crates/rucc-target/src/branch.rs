@@ -103,6 +103,13 @@ pub struct BranchInsts {
     /// and the layout only has to know the name so that it can tell a block that already ends in
     /// one from a block that still wants a jump.
     pub indirect: &'static str,
+    /// The template an `asm goto` is kept as, which jumps to its labels from inside its own text.
+    ///
+    /// A block that ends in one has an arm for the fall through and one for each label, and the
+    /// jumps to the labels are already written. The layout only has to know the name so that it
+    /// can tell such a block from one with two arms that still wants its branch written, and write
+    /// a jump to the fall through when that is not the block laid out next.
+    pub goto: &'static str,
     /// Every jump that reads the condition state and goes to the block's first successor when what
     /// it reads holds.
     ///

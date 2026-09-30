@@ -574,7 +574,8 @@ impl Unported {
 pub enum Written {
     /// A template with instructions in it.
     Template,
-    /// An `asm goto`, whose labels make the statement a terminator.
+    /// An `asm goto` with instructions in it on a machine that does not write one yet, which is
+    /// every machine but x86-64.
     Goto,
     /// An operand this cannot put where the constraint says it goes.
     Operand,
@@ -4196,9 +4197,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[asm];
-        if self.jumps_from_text(inst) {
-            return Err(Unsupported::Assembly { inst, refused: Written::Goto });
-        }
+        let goto = self.jumps_from_text(inst);
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
 
         let constraints = self.names.resolve(info.constraints).to_string();
@@ -4227,8 +4226,10 @@ impl<'a> Lowering<'a> {
         // A clobber list naming a vector register goes the way a template this cannot read does.
         // The instructions read here are all in the general purpose file, and what keeps the text
         // already takes every vector register a call may use away from the allocator across it.
+        // So does an `asm goto` with instructions in it, whose jumps go to blocks the layout has
+        // not placed yet and so are written as text the listing fills in. See [`Self::kept`].
         let clobbers = self.names.resolve(info.clobbers);
-        if clobbers.split(',').any(|entry| vector_named(entry).is_some()) {
+        if goto || clobbers.split(',').any(|entry| vector_named(entry).is_some()) {
             return self.kept(inst, &template, &list, &widths, &memory);
         }
         let steps = if template.trim().is_empty() {
@@ -4441,6 +4442,14 @@ impl<'a> Lowering<'a> {
     /// every such template but one written with empty colons around it.
     ///
     /// The registers a call may write are taken as written, see below for why.
+    ///
+    /// # An `asm goto`
+    ///
+    /// A label is named as `%l` and a number past the operands, which is how the front end spells
+    /// `%l[name]` as well, and it is a hole too: the block the label is has no name until the layout
+    /// has numbered the blocks. What the hole says is the arm of this block the label is, and
+    /// [`Self::edges`] gives the block an arm for every label as well as the fall through, so the
+    /// allocator sees every way out of the statement and the writer spells the one each jump takes.
     fn kept(
         &mut self,
         inst: Inst,
@@ -4455,7 +4464,10 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let clobbers = self.names.resolve(self.source[asm].clobbers).to_string();
-        let basic = list.is_empty() && clobbers.trim().is_empty();
+        // How many labels an `asm goto` has, each of which is an arm after the fall through. A
+        // statement with a label is never basic, since only one with colons can have one.
+        let labels = self.source[self.source[asm].targets].len().saturating_sub(1);
+        let basic = list.is_empty() && clobbers.trim().is_empty() && labels == 0;
 
         // Every register a call may leave anything in, as well as the ones the list names. The
         // text can write any register it likes without saying so, and tcc's tests do: gcc gets
@@ -4655,7 +4667,10 @@ impl<'a> Lowering<'a> {
         // one the reader refused for a reason of its own, and keeping it as text would hand the
         // assembler what the reader already said no to. `addq %1, %k0` is that: a quadword add
         // into half a register. What is kept is a line with an instruction nothing here knows.
-        let registered = |index: usize| def_of[index].is_some() || use_of[index].is_some();
+        let registered = |index: usize| {
+            def_of.get(index).is_some_and(Option::is_some)
+                || use_of.get(index).is_some_and(Option::is_some)
+        };
         if !a64 && (0..list.len()).any(registered) {
             for line in template.split(['\n', ';']) {
                 let line = x86_64::unlabelled(line);
@@ -4723,6 +4738,16 @@ impl<'a> Lowering<'a> {
                     chars.next();
                 }
                 let index: usize = digits.parse().map_err(|_| refused())?;
+                // A label, numbered after every operand. Arm 0 is the fall through, so the first
+                // label is arm 1.
+                if modifier == Some('l') && index >= list.len() && !a64 {
+                    let label = index - list.len();
+                    if label >= labels {
+                        return Err(refused());
+                    }
+                    text.push_str(&x86_64::template_arm(label + 1));
+                    continue;
+                }
                 let operand = list.get(index).ok_or_else(refused)?;
                 if operand.memory && a64 {
                     let at = use_of[index].map(|at| first_use + at).ok_or_else(refused)?;
@@ -5870,9 +5895,10 @@ impl<'a> Lowering<'a> {
         // instruction in it to jump with, so the only edge the machine block gets is the first
         // one. The labels it names are still arms in the IR, which is what kept the passes above
         // from assuming anything about the way into them, and here they are blocks nothing jumps
-        // to, the same as a label no `goto` names. One that does have instructions was refused by
-        // [`Self::jumps_from_text`] before this.
-        if self.source[term].opcode == Opcode::InlineAsm {
+        // to, the same as a label no `goto` names. One that does have instructions gets every arm,
+        // below, since its text jumps to each of them.
+        let goto = self.jumps_from_text(term);
+        if self.source[term].opcode == Opcode::InlineAsm && !goto {
             let Some(call) = self.source.successors(term).next() else { return Ok(()) };
             let args: Vec<Value> = self.source[call.args].to_vec();
             let regs =
@@ -5898,8 +5924,11 @@ impl<'a> Lowering<'a> {
             }
             return Ok(());
         }
-        let leaves =
-            matches!(self.source[term].opcode, Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch);
+        let leaves = goto
+            || matches!(
+                self.source[term].opcode,
+                Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch
+            );
         let branch = if leaves { self.out.terminator(out) } else { None };
 
         let calls: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
@@ -6020,9 +6049,8 @@ impl<'a> Lowering<'a> {
     /// One with an empty template is what a program writes to tell the optimizer that control may
     /// arrive at a label without saying how, and the torture suite has several of them. It never
     /// jumps, so it is written as the statement it would be without its labels and a fall through
-    /// into its first arm. See [`Self::edges`]. One with anything in it needs the labels it names
-    /// written into the text and an edge for each of them the allocator knows about, and that is
-    /// still refused.
+    /// into its first arm. See [`Self::edges`]. One with anything in it is kept as text with the
+    /// labels it names as holes, and its block gets an edge for each of them. See [`Self::kept`].
     fn jumps_from_text(&self, inst: Inst) -> bool {
         let Extra::Asm(asm) = self.source[inst].extra else { return false };
         let info = self.source[asm];
