@@ -159,7 +159,12 @@ fn an_upper_half_with_nothing_under_it_gets_a_register_of_its_own() {
     for level in ["-O0", "-O2"] {
         let text = asm("mixed", level);
         assert!(names(&text, "take_mixed", "%rdi"), "{level}: the integer eightbyte:\n{text}");
-        assert!(names(&text, "take_mixed", "%xmm0"), "{level}: the one above it:\n{text}");
+        // At `-O2` the vector half is never read, so the body is gcc's `movq %rdi, %rax` and
+        // names no vector register at all. Only `-O0` stores the whole argument and shows where
+        // the upper half arrived.
+        if level == "-O0" {
+            assert!(names(&text, "take_mixed", "%xmm0"), "{level}: the one above it:\n{text}");
+        }
         assert!(
             !names(&text, "take_mixed", "%rsi"),
             "{level}: two general purpose registers is the __int128 answer:\n{text}"
