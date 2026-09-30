@@ -177,7 +177,10 @@ impl Checker<'_> {
             // An enumerator is a constant. The declaration it came from is not in the tree and
             // does not need to be: what the program can do with it is exactly what it can do
             // with the number, and every reader of the tree would otherwise have to look it up.
-            Some(Binding::Enumerator { value, ty }) => self.constant(Const::Int(value), ty, span),
+            Some(Binding::Enumerator { value, ty }) => {
+                self.heed_deprecated_enumerator(name, value, ty, span);
+                self.constant(Const::Int(value), ty, span)
+            }
             Some(Binding::Typedef(_)) => {
                 let name = self.text(name).to_owned();
                 self.report(Diagnostic::error(
@@ -961,7 +964,17 @@ impl Checker<'_> {
         // An anonymous member is reached through the member that holds it, so `u.x` where `x`
         // is inside an anonymous union is two nodes and not one. Writing the chain out here is
         // what lets everything downstream treat a member access as one step.
-        for index in path {
+        let last = path.len();
+        for (at, index) in path.into_iter().enumerate() {
+            // The member named is in the record the last step starts from, which is an anonymous
+            // member's own record when the name was reached through one.
+            if at + 1 == last {
+                if let TypeKind::Record(holder) =
+                    self.types.kind(self.types.canonical(self.tast[base].ty))
+                {
+                    self.heed_deprecated_member(holder, name, span);
+                }
+            }
             base = self.member_node(base, index, span);
         }
         base

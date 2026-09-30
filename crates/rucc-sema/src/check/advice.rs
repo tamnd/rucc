@@ -16,6 +16,10 @@
 //!
 //! * `deprecated` is said at every use of the name in an expression, a call inside the function's
 //!   own body included, with the message when one was given and a note at the declaration.
+//! * `deprecated` on a typedef, a tag, a member or an enumerator is said at a use of that too: a
+//!   typedef name in a type, a tag written without a body, a member reached with `.` or `->`, and
+//!   an enumerator in an expression. Defining the tag is not a use and neither is `sizeof` of an
+//!   object of the type. A typedef gets no note, as in gcc.
 //! * `warn_unused_result` is said of a call whose value an expression statement, the step of a
 //!   `for` or the left side of a comma throws away, and a cast to `void` does not keep it quiet,
 //!   since the attribute is for the answer a program must not ignore even on purpose. gcc says
@@ -35,16 +39,14 @@
 //!   without the attribute.
 //! * `designated_init` on a structure is said of each value an initializer list gives one of its
 //!   members by position, at the value, which includes `{0}` and not `{}`. It is on by default.
-//!
-//! What is not here yet: `deprecated` on a type, a tag, an enumerator or a member, all of which gcc
-//! also reports a use of. A program using one of those compiles the same and is not told.
 
 use rucc_ast::{AttrArg, AttrList, AttrSyntax, Attribute};
+use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Span};
 use rucc_gnu::{Kind, Status};
 use rucc_lex::Encoding;
-use rucc_types::{FunctionType, RecordId, TypeKind, is_void};
+use rucc_types::{FunctionType, RecordId, TypeId, TypeKind, is_void};
 
 use crate::check::Checker;
 use crate::check::format::Format;
@@ -82,6 +84,26 @@ pub(in crate::check) struct Advice {
     sentinel: Map<DeclId, usize>,
     /// The structures marked `designated_init`.
     designated: Set<RecordId>,
+    /// Typedef names marked `deprecated`, by the name and the type. A plain typedef is bound to
+    /// the type it names rather than to a type of its own, so the type alone would mark `int`
+    /// along with it.
+    typedefs: Map<(Symbol, TypeId), Option<String>>,
+    /// Structures, unions and enumerations marked `deprecated`, by the type their tag names.
+    tags: Map<TypeId, Marked>,
+    /// Members marked `deprecated`, by the record they are directly in and their name.
+    members: Map<(RecordId, Symbol), Marked>,
+    /// Enumerators marked `deprecated`, by name, value and type, which is everything a use of one
+    /// resolves to.
+    enumerators: Map<(Symbol, i128, TypeId), Marked>,
+}
+
+/// What `deprecated` said about a name that has no declaration of its own to point the note at.
+#[derive(Debug, Clone)]
+struct Marked {
+    /// The message it was given, if it was given one.
+    message: Option<String>,
+    /// Where the name was declared, for the note.
+    at: Span,
 }
 
 /// The one attribute of the three an attribute is, if it is one of them.
@@ -282,15 +304,139 @@ impl Checker<'_> {
     pub(in crate::check) fn heed_deprecated(&mut self, decl: DeclId, span: Span) {
         let Some(message) = self.advice.deprecated.get(&decl).cloned() else { return };
         let Some(name) = self.tast[decl].name else { return };
+        let at = self.tast.decl_span(decl);
+        self.say_deprecated(name, message, span, Some(at));
+    }
+
+    /// What `deprecated` asked of a name that is not a declaration, and nothing when it was not
+    /// written. The last message given is the one kept, as for a declaration.
+    fn deprecation(&mut self, lists: &[AttrList]) -> Option<Option<String>> {
+        let mut found = None;
+        for &list in lists {
+            let written = self.ast[list].to_vec();
+            for attr in written {
+                if self.which(&attr) != Some(Which::Deprecated) {
+                    continue;
+                }
+                let message = self.advice_message(attr);
+                if message.is_some() || found.is_none() {
+                    found = Some(message);
+                }
+            }
+        }
+        found
+    }
+
+    /// Reads `deprecated` off a typedef.
+    pub(in crate::check) fn read_deprecated_typedef(
+        &mut self,
+        name: Symbol,
+        ty: TypeId,
+        lists: &[AttrList],
+    ) {
+        if let Some(message) = self.deprecation(lists) {
+            self.advice.typedefs.insert((name, ty), message);
+        }
+    }
+
+    /// Reads `deprecated` off the list a structure, union or enumeration was defined with.
+    pub(in crate::check) fn read_deprecated_tag(&mut self, ty: TypeId, attrs: AttrList, at: Span) {
+        if let Some(message) = self.deprecation(&[attrs]) {
+            self.advice.tags.insert(ty, Marked { message, at });
+        }
+    }
+
+    /// Reads `deprecated` off a member, from its own list and its specifiers'.
+    pub(in crate::check) fn read_deprecated_member(
+        &mut self,
+        record: RecordId,
+        name: Symbol,
+        lists: &[AttrList],
+        at: Span,
+    ) {
+        if let Some(message) = self.deprecation(lists) {
+            self.advice.members.insert((record, name), Marked { message, at });
+        }
+    }
+
+    /// Reads `deprecated` off an enumerator, once its type is settled.
+    pub(in crate::check) fn read_deprecated_enumerator(
+        &mut self,
+        name: Symbol,
+        value: i128,
+        ty: TypeId,
+        attrs: AttrList,
+        at: Span,
+    ) {
+        if let Some(message) = self.deprecation(&[attrs]) {
+            self.advice.enumerators.insert((name, value, ty), Marked { message, at });
+        }
+    }
+
+    /// Says that a typedef name marked `deprecated` was used, which gcc gives no note.
+    pub(in crate::check) fn heed_deprecated_typedef(&mut self, name: Symbol, ty: TypeId, span: Span) {
+        if let Some(message) = self.advice.typedefs.get(&(name, ty)).cloned() {
+            self.say_deprecated(name, message, span, None);
+        }
+    }
+
+    /// Says that a tag marked `deprecated` was written without a body.
+    pub(in crate::check) fn heed_deprecated_tag(
+        &mut self,
+        name: Option<Symbol>,
+        ty: TypeId,
+        span: Span,
+    ) {
+        let Some(name) = name else { return };
+        if let Some(Marked { message, at }) = self.advice.tags.get(&ty).cloned() {
+            self.say_deprecated(name, message, span, Some(at));
+        }
+    }
+
+    /// Says that a member marked `deprecated` was reached, by the record it is directly in.
+    pub(in crate::check) fn heed_deprecated_member(
+        &mut self,
+        record: RecordId,
+        name: Symbol,
+        span: Span,
+    ) {
+        if let Some(Marked { message, at }) = self.advice.members.get(&(record, name)).cloned() {
+            self.say_deprecated(name, message, span, Some(at));
+        }
+    }
+
+    /// Says that an enumerator marked `deprecated` was used.
+    pub(in crate::check) fn heed_deprecated_enumerator(
+        &mut self,
+        name: Symbol,
+        value: i128,
+        ty: TypeId,
+        span: Span,
+    ) {
+        let key = (name, value, ty);
+        if let Some(Marked { message, at }) = self.advice.enumerators.get(&key).cloned() {
+            self.say_deprecated(name, message, span, Some(at));
+        }
+    }
+
+    /// The warning itself, in gcc's words, with the note where there is one to give.
+    fn say_deprecated(
+        &mut self,
+        name: Symbol,
+        message: Option<String>,
+        span: Span,
+        declared: Option<Span>,
+    ) {
         let name = self.text(name).to_owned();
         let what = match message {
             Some(message) => format!("'{name}' is deprecated: {message}"),
             None => format!("'{name}' is deprecated"),
         };
-        let at = self.tast.decl_span(decl);
-        self.report(
-            Diagnostic::warning(what, span).with_code(DEPRECATED).note("declared here", at),
-        );
+        let mut said = Diagnostic::warning(what, span).with_code(DEPRECATED);
+        if let Some(at) = declared {
+            said = said.note("declared here", at);
+        }
+        self.report(said);
     }
 
     /// Keeps a value a statement throws away, to be looked at once the body is finished.

@@ -1025,6 +1025,7 @@ impl Checker<'_> {
             None => {}
         }
         self.declare_typedef(name, ty);
+        self.read_deprecated_typedef(name, ty, &[specs.attrs, item.attrs]);
         self.type_decl(Some(name), ty, span)
     }
 
