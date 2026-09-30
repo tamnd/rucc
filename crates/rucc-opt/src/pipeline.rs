@@ -1901,11 +1901,11 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
         let report = super::run(&mut module, &mut names, &opts);
-        // The level folds three times, twice at the top on either side of `image` and once after
-        // the loop pipeline, and what a dump request names is a pass rather than a position, so
-        // every run is written out. The side is what this is about: not one of the three is a
-        // `before`.
-        assert_eq!(report.dumps.len(), 3, "every run of the pass, one dump each");
+        // The level folds four times, twice at the top on either side of `image`, once in front
+        // of the second `sroa` and once after the loop pipeline, and what a dump request names is
+        // a pass rather than a position, so every run is written out. The side is what this is
+        // about: not one of the four is a `before`.
+        assert_eq!(report.dumps.len(), 4, "every run of the pass, one dump each");
         assert!(
             report.dumps.iter().all(|dump| dump.name.ends_with("-after-fold")),
             "{:?}",
