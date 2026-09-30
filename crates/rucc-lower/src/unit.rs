@@ -2552,10 +2552,16 @@ fn take_run(bytes: &mut BTreeMap<u64, u8>, start: u64) -> Option<Vec<u8>> {
 /// way out. So on Mach-O a label's own underscore comes off here and goes back on there, which is
 /// how Apple's `FILE *fopen(...) __asm("_fopen")` stays `_fopen` rather than becoming `__fopen`.
 /// A Mach-O label with no underscore names a symbol no C name decorates to, and is left alone.
+///
+/// COFF on i386 decorates the same way, and mingw-w64's headers rename a function to its
+/// underscored name with `__asm__("_" "name")` exactly as Apple's do.
 fn assembler_name(tast: &Tast, target: &TargetInfo, id: StrId) -> String {
     let spelled: String =
         tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
-    if target.object_format == ObjectFormat::MachO {
+    let underscored = target.object_format == ObjectFormat::MachO
+        || (target.object_format == ObjectFormat::Coff
+            && target.tuple.arch() == rucc_tuple::Arch::X86);
+    if underscored {
         if let Some(bare) = spelled.strip_prefix('_') {
             return bare.to_string();
         }

@@ -923,6 +923,9 @@ impl Writer<'_> {
     /// the profiler's hook makes a few lines above. The row goes behind the subtraction, where the
     /// stack pointer has actually moved.
     ///
+    /// Microsoft's routine on i386 is the exception, see [`Chkstk::moves`]. It takes the frame
+    /// itself, so there is no subtraction and the row goes behind the call.
+    ///
     /// No register here has to be asked about. The size goes in one the convention passes no
     /// argument in, which is what lets the platform name it at all, and the routine destroys two
     /// that are exactly the two the allocator was told to hold back. A prologue is also the one
@@ -960,6 +963,10 @@ impl Writer<'_> {
         let symbol = self.names.intern(chkstk.name);
         let inst = self.func.build_loose(call).symbol(symbol).finish();
         out.push(inst);
+        // Microsoft's i386 routine has already taken the frame by the time it comes back.
+        if chkstk.moves {
+            return inst;
+        }
         let scaled = self.insts.scaled.filter(|_| chkstk.shift > 0);
         let grow = self.opcode(scaled.unwrap_or(self.insts.grow));
         let inst =

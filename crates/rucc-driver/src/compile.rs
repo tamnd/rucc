@@ -1475,13 +1475,13 @@ fn placed(
     };
     let mut text = rucc_object::Text::default();
     let mut lines = Vec::with_capacity(funcs.len());
-    // The name the listing gave each function, which on Mach-O has the underscore in front. The
-    // debug information keeps the C name, and the object writer puts the underscore back on when
-    // it looks one up.
-    let symbol = rucc_asm::Directives::of(target.object_format).symbol();
+    // The name the listing gave each function, which on Mach-O and on i386 COFF has the underscore
+    // in front. The debug information keeps the C name, and the object writer puts the underscore
+    // back on when it looks one up.
+    let directives = rucc_asm::Directives::for_target(target);
     for (which, func) in funcs.iter().enumerate() {
         let name = names.resolve(func.name);
-        let Some((part, start)) = offset(&format!("{symbol}{name}")) else {
+        let Some((part, start)) = offset(&directives.spell(name)) else {
             return Err(format!("the listing has no label for the function '{name}'"));
         };
         let mut rows = Vec::with_capacity(func.inst_count() + 1);

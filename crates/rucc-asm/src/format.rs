@@ -17,7 +17,8 @@ use std::fmt::Write as _;
 
 use rucc_mir as mir;
 use rucc_object::{Alias, Array, Binding, Holds, Place, Property, Sections, Visibility};
-use rucc_target::ObjectFormat;
+use rucc_target::{ObjectFormat, TargetInfo};
+use rucc_tuple::Arch;
 
 use crate::data::Variable;
 
@@ -30,6 +31,10 @@ pub enum Directives {
     MachO,
     /// COFF, which is Windows.
     Coff,
+    /// COFF for i386, which is 32 bit Windows. The directives are COFF's, and the names are the
+    /// ones cdecl has there: a C name has an underscore in front, and a label of the compiler's own
+    /// starts with a bare `L`, which is how gcc and clang for this target write both.
+    CoffI386,
 }
 
 impl Directives {
@@ -47,15 +52,47 @@ impl Directives {
         }
     }
 
+    /// The directives a target's listing is written with, which is [`Directives::of`] its format
+    /// but for i386 on COFF, whose names are spelled differently. See [`Directives::CoffI386`].
+    #[must_use]
+    pub fn for_target(target: &TargetInfo) -> Directives {
+        match Directives::of(target.object_format) {
+            Directives::Coff if target.tuple.arch() == Arch::X86 => Directives::CoffI386,
+            directives => directives,
+        }
+    }
+
+    /// Whether these are COFF's, for either kind of machine.
+    #[must_use]
+    pub const fn coff(self) -> bool {
+        matches!(self, Directives::Coff | Directives::CoffI386)
+    }
+
+    /// The name the linker sees for a C name.
+    ///
+    /// [`Directives::symbol`] in front of it, except on i386 COFF, where the rule is the object
+    /// writer's own, [`rucc_object::decorate`]: a `__fastcall` name that starts with `@` is left as
+    /// it is, and a DLL import pointer is `__imp__puts` rather than `___imp_puts`. One rule for
+    /// both is what makes a listing and an object written straight from the code agree.
+    #[must_use]
+    pub fn spell(self, name: &str) -> String {
+        match self {
+            Directives::CoffI386 => rucc_object::decorate(name),
+            _ => format!("{}{name}", self.symbol()),
+        }
+    }
+
     /// What goes in front of a C name to make the name the linker sees.
     ///
     /// Mach-O keeps the underscore that every Unix linker once had, so `main` in C is `_main` in
-    /// the object, and a listing that leaves it off refers to a symbol nothing defines.
+    /// the object, and a listing that leaves it off refers to a symbol nothing defines. So does
+    /// COFF on i386, where the underscore is part of what cdecl is. [`Directives::spell`] is the
+    /// one to use for a whole name.
     #[must_use]
     pub const fn symbol(self) -> &'static str {
         match self {
             Directives::Elf | Directives::Coff => "",
-            Directives::MachO => "_",
+            Directives::MachO | Directives::CoffI386 => "_",
         }
     }
 
@@ -64,7 +101,7 @@ impl Directives {
     pub const fn local(self) -> &'static str {
         match self {
             Directives::Elf | Directives::Coff => ".L",
-            Directives::MachO => "L",
+            Directives::MachO | Directives::CoffI386 => "L",
         }
     }
 
@@ -72,7 +109,7 @@ impl Directives {
     #[must_use]
     pub const fn text(self) -> &'static str {
         match self {
-            Directives::Elf | Directives::Coff => "\t.text",
+            Directives::Elf | Directives::Coff | Directives::CoffI386 => "\t.text",
             Directives::MachO => "\t.section\t__TEXT,__text,regular,pure_instructions",
         }
     }
@@ -99,8 +136,8 @@ impl Directives {
             Directives::Elf => {
                 let _ = writeln!(out, "\t.section\t.text.{name},\"ax\",@progbits");
             }
-            Directives::Coff => {
-                let _ = writeln!(out, "\t.section\t.text,\"xr\",one_only,{name}");
+            Directives::Coff | Directives::CoffI386 => {
+                let _ = writeln!(out, "\t.section\t.text,\"xr\",one_only,{}", self.spell(name));
             }
             Directives::MachO => {}
         }
@@ -120,7 +157,7 @@ impl Directives {
     pub fn named_code(self, section: &str) -> String {
         match self {
             Directives::Elf => format!("\t.section\t{section},\"ax\",@progbits"),
-            Directives::Coff => format!("\t.section\t{section},\"xr\""),
+            Directives::Coff | Directives::CoffI386 => format!("\t.section\t{section},\"xr\""),
             Directives::MachO => format!("\t.section\t{section},regular,pure_instructions"),
         }
     }
@@ -150,7 +187,6 @@ impl Directives {
         visibility: Visibility,
         ahead: &str,
     ) {
-        let symbol = self.symbol();
         let power = align.max(1).trailing_zeros();
         let _ = match fill {
             Some(byte) => writeln!(out, "\t.p2align\t{power}, {byte:#x}"),
@@ -163,14 +199,15 @@ impl Directives {
                 let _ = writeln!(out, "\t.type\t{name}, @function");
             }
             // Windows says the storage class and the type code, and thirty two is a function.
-            Directives::Coff => {
+            Directives::Coff | Directives::CoffI386 => {
                 let scl = if binding == Binding::Local { 3 } else { 2 };
+                let name = self.spell(name);
                 let _ = writeln!(out, "\t.def\t{name}\n\t.scl\t{scl}\n\t.type\t32\n\t.endef");
             }
             Directives::MachO => {}
         }
         out.push_str(ahead);
-        let _ = writeln!(out, "{symbol}{name}:");
+        let _ = writeln!(out, "{}:", self.spell(name));
     }
 
     /// Where the room a patcher was promised at the top of this function is, as the record a
@@ -227,7 +264,8 @@ impl Directives {
             (Directives::MachO, Visibility::Hidden) => {
                 let _ = writeln!(out, "\t.private_extern\t{symbol}{name}");
             }
-            (Directives::MachO, Visibility::Protected) | (Directives::Coff, _) => {}
+            (Directives::MachO, Visibility::Protected)
+            | (Directives::Coff | Directives::CoffI386, _) => {}
             (_, Visibility::Default) => unreachable!("returned above"),
         }
     }
@@ -263,12 +301,13 @@ impl Directives {
             }
             // COFF gives every one of them the name of the section it came out of and tells the
             // linker which symbol the group is about, which is the same COMDAT the code above is.
-            Directives::Coff => {
+            Directives::Coff | Directives::CoffI386 => {
                 let (named, flags) = match place {
                     Place::Zero => (".bss", "\"bw\""),
                     Place::ReadOnly | Place::RelocReadOnly { .. } => (".rdata", "\"dr\""),
                     _ => (".data", "\"dw\""),
                 };
+                let name = self.spell(name);
                 let _ = writeln!(out, "\t.section\t{named},{flags},one_only,{name}");
             }
             Directives::MachO => return false,
@@ -311,10 +350,15 @@ impl Directives {
             // A tentative definition is not in a section at all, and the caller is what decides
             // that. It is answered here as the section it would otherwise have gone in, so that
             // the match stays about sections and nothing has to be said twice.
-            (Directives::Elf | Directives::Coff, Place::Written | Place::Merged) => {
+            (
+                Directives::Elf | Directives::Coff | Directives::CoffI386,
+                Place::Written | Place::Merged,
+            ) => {
                 out.push_str("\t.data\n");
             }
-            (Directives::Elf | Directives::Coff, Place::Zero) => out.push_str("\t.bss\n"),
+            (Directives::Elf | Directives::Coff | Directives::CoffI386, Place::Zero) => {
+                out.push_str("\t.bss\n");
+            }
             // The flags are spelled out because no assembler has a one word directive for either
             // of these, and `T` is the one that matters: it is `SHF_TLS`, and it is what tells the
             // linker the section is the template every thread gets a copy of rather than storage
@@ -328,7 +372,9 @@ impl Directives {
             // The section every thread gets a copy of, which the linker sorts in after the `.tls`
             // the C runtime starts it with. There is no zeroed half, so [`crate::globals`] never
             // gives this format a zeroed one.
-            (Directives::Coff, Place::Thread { .. }) => out.push_str("\t.section\t.tls$,\"dw\"\n"),
+            (Directives::Coff | Directives::CoffI386, Place::Thread { .. }) => {
+                out.push_str("\t.section\t.tls$,\"dw\"\n");
+            }
             (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
             // `M` and `S` with an entry a byte wide, which is the line gcc writes for its literals.
             (Directives::Elf, Place::Strings { align }) => {
@@ -344,7 +390,7 @@ impl Directives {
             // write writable for as long as it is writing them and puts them back afterwards, so
             // an address in a read only section costs a base relocation and nothing else.
             (
-                Directives::Coff,
+                Directives::Coff | Directives::CoffI386,
                 Place::ReadOnly | Place::RelocReadOnly { .. } | Place::Strings { .. },
             ) => {
                 out.push_str("\t.section\t.rdata,\"dr\"\n");
@@ -366,7 +412,7 @@ impl Directives {
                 let kind = Array::of(name).map_or(kind, Array::asm);
                 let _ = writeln!(out, "\t.section\t{name},\"{flags}\",{kind}");
             }
-            (Directives::Coff, Place::Named(name, holds)) => {
+            (Directives::Coff | Directives::CoffI386, Place::Named(name, holds)) => {
                 let flags = match holds {
                     Holds::Written => "dw",
                     Holds::ReadOnly => "dr",
@@ -379,7 +425,7 @@ impl Directives {
             // the symbol the group is about is the pointer itself. See [`Place::Pointer`]. Written
             // with `.linkonce` as gcc writes it rather than with the two extra operands clang puts
             // on `.section`, because GNU as refuses those and llvm-mc takes both.
-            (Directives::Coff, Place::Pointer) => {
+            (Directives::Coff | Directives::CoffI386, Place::Pointer) => {
                 let _ = writeln!(out, "\t.section\t.rdata${name},\"dr\"\n\t.linkonce\tdiscard");
             }
             // Nothing but COFF is ever handed one, and the section a read only address would be
@@ -423,7 +469,8 @@ impl Directives {
                 // Apple's assembler takes the alignment as a power of two and gas as a count of
                 // bytes, which are the same number only for one byte.
                 let boundary = if self == Directives::MachO { u64::from(align) } else { var.align };
-                let _ = writeln!(out, "\t{comm}\t{symbol}{name},{},{boundary}", var.size);
+                let name = self.spell(name);
+                let _ = writeln!(out, "\t{comm}\t{name},{},{boundary}", var.size);
                 return false;
             }
             // Apple's `.tbss` is `.zerofill` for the per thread image, and the name a program uses is
@@ -471,7 +518,7 @@ impl Directives {
             };
             let _ = writeln!(out, "\t.type\t{}, {kind}", var.name);
         }
-        let _ = writeln!(out, "{symbol}{}:", var.name);
+        let _ = writeln!(out, "{}:", self.spell(&var.name));
         true
     }
 
@@ -504,7 +551,7 @@ impl Directives {
         let symbol = self.symbol();
         match binding {
             Binding::Global => {
-                let _ = writeln!(out, "\t.globl\t{symbol}{name}");
+                let _ = writeln!(out, "\t.globl\t{}", self.spell(name));
             }
             // Apple's assembler reads `.weak` as nothing it knows. A weak definition there is an
             // external name with a second directive saying another object may beat it.
@@ -513,7 +560,7 @@ impl Directives {
                 let _ = writeln!(out, "\t.weak_definition\t{symbol}{name}");
             }
             Binding::Weak => {
-                let _ = writeln!(out, "\t.weak\t{symbol}{name}");
+                let _ = writeln!(out, "\t.weak\t{}", self.spell(name));
             }
             // Nothing, which is what makes it invisible outside the file. A name no directive
             // mentions is still in the symbol table as a local one, which is what `static` is.
@@ -559,7 +606,7 @@ impl Directives {
         if alias.ifunc {
             let _ = writeln!(out, "\t.type\t{}, @gnu_indirect_function", alias.name);
         }
-        let _ = writeln!(out, "\t.set\t{symbol}{},{symbol}{}", alias.name, alias.target);
+        let _ = writeln!(out, "\t.set\t{},{}", self.spell(&alias.name), self.spell(&alias.target));
     }
 
     /// A name this file uses and does not define, which the link may leave undefined.
@@ -577,7 +624,7 @@ impl Directives {
     /// Apple's assembler has a directive of its own for the reference, `.weak_reference`.
     pub fn absent(self, out: &mut String, name: &str) {
         let weak = if self == Directives::MachO { ".weak_reference" } else { ".weak" };
-        let _ = writeln!(out, "\t{weak}\t{}{name}", self.symbol());
+        let _ = writeln!(out, "\t{weak}\t{}", self.spell(name));
     }
 
     /// What is said once, after every function.
@@ -600,7 +647,7 @@ impl Directives {
             // What lets the linker throw away a function nothing calls, which it cannot do
             // without being told that the boundaries between them are real.
             Directives::MachO => out.push_str("\t.subsections_via_symbols\n"),
-            Directives::Coff => {}
+            Directives::Coff | Directives::CoffI386 => {}
         }
     }
 

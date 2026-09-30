@@ -189,7 +189,8 @@ pub(crate) fn i386(reference: Reference) -> Option<pe::RelocationType> {
 ///
 /// The other machines are left alone, and so is a name from a file of assembly, which is already
 /// what it says.
-pub(crate) fn decorate(name: &str) -> String {
+#[must_use]
+pub fn decorate(name: &str) -> String {
     match name.strip_prefix(IMPORT) {
         Some(rest) => format!("{IMPORT}{}", decorate(rest)),
         None if name.starts_with('@') => name.to_owned(),

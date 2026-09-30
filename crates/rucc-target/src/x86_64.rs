@@ -1413,7 +1413,7 @@ static WIN64_INT_ORDER: [PhysReg; 14] =
 /// which is the whole point of a calling convention.
 pub static WIN64: CallRegs = CallRegs {
     conventions: Conventions(&WIN64_CONVENTIONS),
-    ..win64(Chkstk { name: "__chkstk", size: RAX, shift: 0 })
+    ..win64(Chkstk { name: "__chkstk", size: RAX, shift: 0, moves: false })
 };
 
 /// The same convention where the GNU runtime provides the routine rather than Microsoft's.
@@ -1424,7 +1424,7 @@ pub static WIN64: CallRegs = CallRegs {
 /// it, which is why nothing but the name changes here.
 pub static MINGW64: CallRegs = CallRegs {
     conventions: Conventions(&MINGW64_CONVENTIONS),
-    ..win64(Chkstk { name: "___chkstk_ms", size: RAX, shift: 0 })
+    ..win64(Chkstk { name: "___chkstk_ms", size: RAX, shift: 0, moves: false })
 };
 
 /// The two conventions a function on Windows under Microsoft's runtime may have: its own, and the
@@ -1440,13 +1440,13 @@ static MINGW64_CONVENTIONS: [(Convention, &CallRegs); 2] =
 /// A function written `__attribute__((sysv_abi))` on Windows under Microsoft's runtime.
 pub static SYSV_ON_WIN64: CallRegs = CallRegs {
     conventions: Conventions(&WIN64_CONVENTIONS),
-    ..sysv_on_windows(Chkstk { name: "__chkstk", size: RAX, shift: 0 })
+    ..sysv_on_windows(Chkstk { name: "__chkstk", size: RAX, shift: 0, moves: false })
 };
 
 /// A function written `__attribute__((sysv_abi))` on Windows under the GNU runtime.
 pub static SYSV_ON_MINGW64: CallRegs = CallRegs {
     conventions: Conventions(&MINGW64_CONVENTIONS),
-    ..sysv_on_windows(Chkstk { name: "___chkstk_ms", size: RAX, shift: 0 })
+    ..sysv_on_windows(Chkstk { name: "___chkstk_ms", size: RAX, shift: 0, moves: false })
 };
 
 /// The SysV convention on Windows, given the routine the runtime in question provides.

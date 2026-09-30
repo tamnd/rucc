@@ -811,7 +811,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // and that stringifies `__USER_LABEL_PREFIX__`, so a compiler that leaves it undefined
     // does not get an error, it gets the name of the macro as the string and renames the
     // function.
-    d.set("__USER_LABEL_PREFIX__", if triple.os == Os::Darwin { "_" } else { "" });
+    // COFF on i386 is the other one that kept it, as part of what cdecl is there.
+    let underscored =
+        triple.os == Os::Darwin || (triple.os == Os::Windows && triple.arch == Arch::X86);
+    d.set("__USER_LABEL_PREFIX__", if underscored { "_" } else { "" });
     // Its counterpart, what the assembler puts in front of a register name. Empty on every
     // target here, since all three assemble in a syntax that does not mark registers, and
     // defined anyway for the same reason as the line above: it is used inside a stringize.
@@ -1915,8 +1918,10 @@ mod tests {
         {
             assert!(has(&set_for(triple), "#define __USER_LABEL_PREFIX__ "), "{triple}");
         }
-        // Mach-O keeps the underscore that ELF dropped.
+        // Mach-O keeps the underscore that ELF dropped, and so does i386 Windows.
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __USER_LABEL_PREFIX__ _"));
+        assert!(has(&set_for("i686-w64-windows-gnu"), "#define __USER_LABEL_PREFIX__ _"));
+        assert!(has(&set_for("x86_64-w64-windows-gnu"), "#define __USER_LABEL_PREFIX__ "));
     }
 
     /// `-ffast-math` as gcc 16 spells it on x86-64 Linux: one macro per licence, the finite promise

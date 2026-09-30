@@ -172,7 +172,7 @@ pub fn assemble(
         let name = names.resolve(func.name).to_owned();
         let mut assembler = Assembler {
             names,
-            directives: Directives::of(target.object_format),
+            directives: Directives::for_target(target),
             func,
             name: &name,
             text: &mut text,
