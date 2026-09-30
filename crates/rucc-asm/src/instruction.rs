@@ -28,8 +28,8 @@
 //! reaches its data. Those come back as holes too, for the whole address rather than a distance.
 
 use rucc_target::x86_64::{
-    Addr, Encoding, ImmSize, Length, Opmask, RAX, Value, Width, encode_masked, encoding, gpr_named,
-    xmm,
+    Addr, Encoding, ImmSize, Length, Opmask, RAX, RBX, RCX, RDX, Value, Width, encode_masked,
+    encoding, gpr_name, gpr_named, xmm,
 };
 use rucc_target::{PhysReg, Segment};
 
@@ -127,6 +127,12 @@ enum Operand {
     Mask(u8),
     /// A place on the x87 stack, by its depth.
     Stack(u8),
+    /// A control register, `cr0` to `cr15`.
+    Control(u8),
+    /// A debug register, `dr0` to `dr15`, which gas also takes spelled `db0` and so on.
+    Debug(u8),
+    /// A segment register named on its own rather than in front of an address.
+    Seg(Segment),
     /// An address, and the name in its displacement when it has one.
     Mem(Addr, Option<Named>),
     /// A number the instruction carries.
@@ -158,6 +164,7 @@ const STANDING: i64 = 0x1000_0000;
 pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
     let mut mask = Opmask::default();
     let mut operands = Vec::with_capacity(args.len());
+    let ported = matches!(word, "in" | "inb" | "inw" | "inl" | "out" | "outb" | "outw" | "outl");
     for arg in args {
         let (text, said) = masked(arg.trim())?;
         if let Some(said) = said {
@@ -166,8 +173,15 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             }
             mask = said;
         }
+        // gas takes the port of an `in` or an `out` in brackets as well as bare, since it is where
+        // the value comes from or goes to, and it is the register all the same.
+        let text = if ported && text.replace(' ', "") == "(%dx)" { "%dx" } else { text };
         operands.push(operand(text)?);
     }
+    if let Some(written) = segmented(word, &operands)? {
+        return Ok(written);
+    }
+    implied(word, &operands)?;
     let predicated = predicated(word);
     let word = match &predicated {
         Some((name, which)) => {
@@ -221,6 +235,7 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
     {
         return Err(format!("'{word}' only writes the status word into ax"));
     }
+    special(word, &mnemonic, &operands)?;
 
     let mut bytes = Vec::with_capacity(16);
     let holes =
@@ -319,6 +334,134 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
         wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort });
     }
     Ok(Written { bytes, holes: wanted })
+}
+
+/// A push or a pop of a segment register, written, or nothing for any other line.
+///
+/// Long mode pushes and pops `fs` and `gs` and no other segment register, and each of the four is
+/// an opcode of its own rather than a register in an addressing byte, so the encoder has a row for
+/// each under a name that says which register it is. The other four are refused here, since the
+/// opcodes that pushed them on thirty two bits are not instructions on sixty four.
+fn segmented(word: &str, operands: &[Operand]) -> Result<Option<Written>, String> {
+    let [Operand::Seg(segment)] = operands else { return Ok(None) };
+    let way = match word {
+        "push" | "pushq" => "pushq",
+        "pop" | "popq" => "popq",
+        _ => return Ok(None),
+    };
+    if !matches!(segment, Segment::Fs | Segment::Gs) {
+        return Err(format!(
+            "'{word} %{}' is not an instruction in long mode, which pushes and pops fs and gs only",
+            segment.name()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(2);
+    let mnemonic = format!("{way} %{}", segment.name());
+    encode_masked(&mnemonic, &[], Opmask::default(), &mut bytes).map_err(|why| why.to_string())?;
+    Ok(Some(Written { bytes, holes: Vec::new() }))
+}
+
+/// Whether the operand is the general purpose register of that number and width.
+fn is(operand: &Operand, reg: PhysReg, width: Width) -> bool {
+    *operand == Operand::Reg(reg, width)
+}
+
+/// The registers an instruction reads or writes without an addressing byte to say so, checked
+/// against the ones the line named.
+///
+/// These are instructions whose registers are fixed, so the bytes are the same whichever ones the
+/// line names and the encoder's rows do not look at them. That makes this the only place a line
+/// that names the wrong one is caught, and a line that names the wrong one means something other
+/// than what the processor will do, so it is refused the way gas refuses it.
+fn implied(word: &str, operands: &[Operand]) -> Result<(), String> {
+    let fixed: &[(PhysReg, Width)] = match word {
+        "monitor" | "monitorx" => &[(RAX, Width::Quad), (RCX, Width::Long), (RDX, Width::Long)],
+        "mwait" => &[(RAX, Width::Long), (RCX, Width::Long)],
+        "mwaitx" => &[(RAX, Width::Long), (RCX, Width::Long), (RBX, Width::Long)],
+        "invlpga" => &[(RAX, Width::Quad), (RCX, Width::Long)],
+        "vmrun" | "vmload" | "vmsave" => &[(RAX, Width::Quad)],
+        "skinit" => &[(RAX, Width::Long)],
+        _ => return ported(word, operands),
+    };
+    if operands.is_empty() {
+        return Ok(());
+    }
+    let named = operands.len() == fixed.len()
+        && operands.iter().zip(fixed).all(|(operand, &(reg, width))| is(operand, reg, width));
+    if !named {
+        let names: Vec<String> = fixed
+            .iter()
+            .map(|&(reg, width)| format!("%{}", gpr_name(reg, width).unwrap_or("?")))
+            .collect();
+        return Err(format!("'{word}' takes {} and no other registers", names.join(", ")));
+    }
+    Ok(())
+}
+
+/// The same for port I/O, whose port is `dx` or a byte the instruction carries and whose value is
+/// in the accumulator, as wide as the letter says when there is one.
+fn ported(word: &str, operands: &[Operand]) -> Result<(), String> {
+    let (inward, letter) = if let Some(letter) = word.strip_prefix("in") {
+        (true, letter)
+    } else if let Some(letter) = word.strip_prefix("out") {
+        (false, letter)
+    } else {
+        return Ok(());
+    };
+    let said = match letter {
+        "" => None,
+        "b" => Some(Width::Byte),
+        "w" => Some(Width::Word),
+        "l" => Some(Width::Long),
+        _ => return Ok(()),
+    };
+    let [first, second] = operands else { return Ok(()) };
+    let (port, value) = if inward { (first, second) } else { (second, first) };
+    let port_ok = matches!(port, Operand::Imm(_) | Operand::Expr(_)) || is(port, RDX, Width::Word);
+    let value_ok = match value {
+        Operand::Reg(reg, width) => {
+            *reg == RAX && *width != Width::Quad && said.is_none_or(|said| said == *width)
+        }
+        _ => false,
+    };
+    if !port_ok || !value_ok {
+        return Err(format!(
+            "'{word}' moves a value in %al, %ax or %eax as wide as it says, through a port in %dx \
+             or a number"
+        ));
+    }
+    Ok(())
+}
+
+/// The checks on a system instruction that the row it was written with cannot make, since the
+/// encoder chooses a row by what kinds its operands are and not by how wide the registers are.
+///
+/// A control or a debug register is moved to and from a whole general purpose register and no
+/// part of one. A segment register is read into, or loaded from, a register as wide as the letter
+/// on the mnemonic says.
+fn special(word: &str, mnemonic: &str, operands: &[Operand]) -> Result<(), String> {
+    let system = operands.iter().any(|op| matches!(op, Operand::Control(_) | Operand::Debug(_)));
+    let partial =
+        operands.iter().any(|op| matches!(op, Operand::Reg(_, width) if *width != Width::Quad));
+    if system && partial {
+        return Err(format!(
+            "'{word}' moves a control or a debug register to or from a sixty four bit register"
+        ));
+    }
+    if operands.iter().any(|op| matches!(op, Operand::Seg(_))) {
+        let wanted = match mnemonic {
+            "movw" => Width::Word,
+            "movl" => Width::Long,
+            "movq" => Width::Quad,
+            _ => return Ok(()),
+        };
+        if operands.iter().any(|op| matches!(op, Operand::Reg(_, width) if *width != wanted)) {
+            return Err(format!(
+                "'{word}' names a register of a different width from the one it moves"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether an instruction sign extends a four byte immediate to eight bytes, which is one whose REX
@@ -630,6 +773,15 @@ fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
             _ => None,
         });
     }
+    // Port I/O names `dx` for the port, which is a word whatever is moved through it, so the width
+    // is the accumulator's, which is the operand that is not the port.
+    if matches!(word, "in" | "out") {
+        let accumulator = if word == "in" { operands.last() } else { operands.first() };
+        return Ok(match accumulator {
+            Some(Operand::Reg(_, width)) => Some(*width),
+            _ => None,
+        });
+    }
     let mut width = None;
     let counted = COUNTED.contains(&word) && operands.len() > 1;
     for operand in operands.iter().skip(usize::from(counted)) {
@@ -698,6 +850,9 @@ fn value(operand: &Operand, standing: i64) -> Value {
         Operand::Vector(number, length) => Value::Vector(*number, *length),
         Operand::Mask(number) => Value::Mask(*number),
         Operand::Stack(_) => Value::Stack,
+        Operand::Control(number) => Value::Control(*number),
+        Operand::Debug(number) => Value::Debug(*number),
+        Operand::Seg(segment) => Value::Seg(*segment),
         Operand::Mem(addr, _) => Value::Mem(*addr),
         Operand::Imm(number) => Value::Imm(*number),
         Operand::Expr(_) => Value::Imm(standing),
@@ -803,6 +958,23 @@ fn register(name: &str) -> Result<Operand, String> {
             return Ok(Operand::Mask(number));
         }
     }
+    if let Some(segment) = Segment::named(name) {
+        return Ok(Operand::Seg(segment));
+    }
+    // The control and debug registers, which only a move to or from a general purpose register
+    // names. Sixteen of each have a number, though most of them are not there on any processor,
+    // and which ones are is the processor's to refuse rather than this.
+    type Make = fn(u8) -> Operand;
+    let special: [(&str, Make); 3] =
+        [("cr", Operand::Control), ("dr", Operand::Debug), ("db", Operand::Debug)];
+    for (prefix, make) in special {
+        let Some(rest) = name.strip_prefix(prefix) else { continue };
+        if let Ok(number) = rest.parse::<u8>() {
+            if number < 16 && (rest == "0" || !rest.starts_with('0')) {
+                return Ok(make(number));
+            }
+        }
+    }
     Err(format!("'%{name}' is not a register this compiler has"))
 }
 
@@ -817,11 +989,14 @@ fn address(text: &str) -> Result<Operand, String> {
 
     if let Some(cut) = rest.find(':') {
         let name = rest[..cut].trim();
-        addr.segment = Some(match name {
-            "%fs" => Segment::Fs,
-            "%gs" => Segment::Gs,
-            _ => return Err(format!("'{name}' is not a segment this machine reaches through")),
-        });
+        // All six, though only `fs` and `gs` move an address in long mode. The other four are a
+        // prefix byte the processor ignores there, which a kernel writes anyway: `%ds:` in front of
+        // a load is how an alternative instruction is padded to the length of the one it replaces.
+        let segment = name.strip_prefix('%').and_then(Segment::named);
+        let Some(segment) = segment else {
+            return Err(format!("'{name}' is not a segment this machine reaches through"));
+        };
+        addr.segment = Some(segment);
         rest = rest[cut + 1..].trim();
     }
 
@@ -1762,5 +1937,299 @@ mod tests {
         assert!(refused("addq %rax, %rbx{%k1}").contains("mask"));
         assert!(refused("paddq %xmm16, %xmm1").contains("argument"));
         assert!(refused("vmovdqu64 %zmm32, %zmm1").contains("register"));
+    }
+
+    /// The system instructions a kernel writes by hand, each against the bytes llvm-mc writes for
+    /// the same line, except `int $3`, which gas writes as the two byte form and llvm-mc as `int3`.
+    /// This follows gas.
+    #[test]
+    fn the_system_instructions_a_kernel_writes_come_out_as_gas_and_llvm_write_them() {
+        let lines: &[(&str, &[u8])] = &[
+            ("mov %cr0, %rax", &[0x0f, 0x20, 0xc0]),
+            ("mov %rax, %cr0", &[0x0f, 0x22, 0xc0]),
+            ("mov %cr2, %rdx", &[0x0f, 0x20, 0xd2]),
+            ("mov %cr3, %r9", &[0x41, 0x0f, 0x20, 0xd9]),
+            ("mov %r9, %cr3", &[0x41, 0x0f, 0x22, 0xd9]),
+            ("mov %cr8, %rax", &[0x44, 0x0f, 0x20, 0xc0]),
+            ("mov %rax, %cr8", &[0x44, 0x0f, 0x22, 0xc0]),
+            ("movq %rax, %cr3", &[0x0f, 0x22, 0xd8]),
+            ("mov %db0, %rax", &[0x0f, 0x21, 0xc0]),
+            ("mov %dr7, %rax", &[0x0f, 0x21, 0xf8]),
+            ("mov %rax, %dr7", &[0x0f, 0x23, 0xf8]),
+            ("mov %r10, %dr1", &[0x41, 0x0f, 0x23, 0xca]),
+            ("mov %ds, %eax", &[0x8c, 0xd8]),
+            ("mov %ds, %ax", &[0x66, 0x8c, 0xd8]),
+            ("mov %ds, %rax", &[0x48, 0x8c, 0xd8]),
+            ("movl %ds, %eax", &[0x8c, 0xd8]),
+            ("mov %es, %ecx", &[0x8c, 0xc1]),
+            ("mov %ss, %eax", &[0x8c, 0xd0]),
+            ("mov %fs, %eax", &[0x8c, 0xe0]),
+            ("mov %gs, %r8d", &[0x41, 0x8c, 0xe8]),
+            ("mov %cs, %eax", &[0x8c, 0xc8]),
+            ("mov %eax, %ds", &[0x8e, 0xd8]),
+            ("mov %ax, %ds", &[0x8e, 0xd8]),
+            ("movl %eax, %ds", &[0x8e, 0xd8]),
+            ("mov %rax, %ss", &[0x48, 0x8e, 0xd0]),
+            ("mov %r8d, %gs", &[0x41, 0x8e, 0xe8]),
+            ("movw %ax, %es", &[0x8e, 0xc0]),
+            ("mov %ds, (%rax)", &[0x8c, 0x18]),
+            ("movw %ds, (%rax)", &[0x8c, 0x18]),
+            ("mov (%rax), %ds", &[0x8e, 0x18]),
+            ("movw (%rax), %ds", &[0x8e, 0x18]),
+            ("push %fs", &[0x0f, 0xa0]),
+            ("push %gs", &[0x0f, 0xa8]),
+            ("pop %fs", &[0x0f, 0xa1]),
+            ("popq %gs", &[0x0f, 0xa9]),
+            ("lgdt (%rax)", &[0x0f, 0x01, 0x10]),
+            ("lidt (%rax)", &[0x0f, 0x01, 0x18]),
+            ("sgdt (%rax)", &[0x0f, 0x01, 0x00]),
+            ("sidt (%rax)", &[0x0f, 0x01, 0x08]),
+            ("lidtq 8(%rsp)", &[0x0f, 0x01, 0x5c, 0x24, 0x08]),
+            ("lldt %ax", &[0x0f, 0x00, 0xd0]),
+            ("lldt (%rax)", &[0x0f, 0x00, 0x10]),
+            ("sldt %ax", &[0x66, 0x0f, 0x00, 0xc0]),
+            ("sldt %eax", &[0x0f, 0x00, 0xc0]),
+            ("sldt %rax", &[0x48, 0x0f, 0x00, 0xc0]),
+            ("sldt (%rax)", &[0x0f, 0x00, 0x00]),
+            ("ltr %ax", &[0x0f, 0x00, 0xd8]),
+            ("ltr %di", &[0x0f, 0x00, 0xdf]),
+            ("ltr (%rax)", &[0x0f, 0x00, 0x18]),
+            ("str %ax", &[0x66, 0x0f, 0x00, 0xc8]),
+            ("str %eax", &[0x0f, 0x00, 0xc8]),
+            ("str %rax", &[0x48, 0x0f, 0x00, 0xc8]),
+            ("str (%rax)", &[0x0f, 0x00, 0x08]),
+            ("verw (%rax)", &[0x0f, 0x00, 0x28]),
+            ("verw %ax", &[0x0f, 0x00, 0xe8]),
+            ("verr %ax", &[0x0f, 0x00, 0xe0]),
+            ("lmsw %ax", &[0x0f, 0x01, 0xf0]),
+            ("smsw %eax", &[0x0f, 0x01, 0xe0]),
+            ("smsw %rax", &[0x48, 0x0f, 0x01, 0xe0]),
+            ("smsw (%rax)", &[0x0f, 0x01, 0x20]),
+            ("lsl %eax, %eax", &[0x0f, 0x03, 0xc0]),
+            ("lsl %ax, %ax", &[0x66, 0x0f, 0x03, 0xc0]),
+            ("lsl (%rax), %eax", &[0x0f, 0x03, 0x00]),
+            ("lar %eax, %eax", &[0x0f, 0x02, 0xc0]),
+            ("larl (%rdi), %eax", &[0x0f, 0x02, 0x07]),
+            ("clts", &[0x0f, 0x06]),
+            ("rdmsr", &[0x0f, 0x32]),
+            ("wrmsr", &[0x0f, 0x30]),
+            ("wrmsrns", &[0x0f, 0x01, 0xc6]),
+            ("rdpmc", &[0x0f, 0x33]),
+            ("rdtsc", &[0x0f, 0x31]),
+            ("rdtscp", &[0x0f, 0x01, 0xf9]),
+            ("swapgs", &[0x0f, 0x01, 0xf8]),
+            ("sysretq", &[0x48, 0x0f, 0x07]),
+            ("sysretl", &[0x0f, 0x07]),
+            ("sysexitq", &[0x48, 0x0f, 0x35]),
+            ("syscall", &[0x0f, 0x05]),
+            ("sysenter", &[0x0f, 0x34]),
+            ("iretq", &[0x48, 0xcf]),
+            ("iret", &[0xcf]),
+            ("iretw", &[0x66, 0xcf]),
+            ("cli", &[0xfa]),
+            ("sti", &[0xfb]),
+            ("hlt", &[0xf4]),
+            ("invlpg (%rax)", &[0x0f, 0x01, 0x38]),
+            ("invlpg 8(%r12)", &[0x41, 0x0f, 0x01, 0x7c, 0x24, 0x08]),
+            ("invpcid (%rax), %rdx", &[0x66, 0x0f, 0x38, 0x82, 0x10]),
+            ("invpcid (%r8), %r9", &[0x66, 0x45, 0x0f, 0x38, 0x82, 0x08]),
+            ("wbinvd", &[0x0f, 0x09]),
+            ("wbnoinvd", &[0xf3, 0x0f, 0x09]),
+            ("invd", &[0x0f, 0x08]),
+            ("clflush (%rax)", &[0x0f, 0xae, 0x38]),
+            ("clflushopt (%rax)", &[0x66, 0x0f, 0xae, 0x38]),
+            ("clwb (%rax)", &[0x66, 0x0f, 0xae, 0x30]),
+            ("clflush 64(%r13)", &[0x41, 0x0f, 0xae, 0x7d, 0x40]),
+            ("xsave (%rdi)", &[0x0f, 0xae, 0x27]),
+            ("xsave64 (%rdi)", &[0x48, 0x0f, 0xae, 0x27]),
+            ("xsaveopt (%rdi)", &[0x0f, 0xae, 0x37]),
+            ("xsaveopt64 (%rdi)", &[0x48, 0x0f, 0xae, 0x37]),
+            ("xsaves (%rdi)", &[0x0f, 0xc7, 0x2f]),
+            ("xsaves64 (%rdi)", &[0x48, 0x0f, 0xc7, 0x2f]),
+            ("xsavec (%rdi)", &[0x0f, 0xc7, 0x27]),
+            ("xsavec64 (%rdi)", &[0x48, 0x0f, 0xc7, 0x27]),
+            ("xrstor (%rdi)", &[0x0f, 0xae, 0x2f]),
+            ("xrstor64 (%rdi)", &[0x48, 0x0f, 0xae, 0x2f]),
+            ("xrstors (%rdi)", &[0x0f, 0xc7, 0x1f]),
+            ("xrstors64 (%rdi)", &[0x48, 0x0f, 0xc7, 0x1f]),
+            ("fxsave (%rdi)", &[0x0f, 0xae, 0x07]),
+            ("fxsave64 (%rdi)", &[0x48, 0x0f, 0xae, 0x07]),
+            ("fxrstor (%rdi)", &[0x0f, 0xae, 0x0f]),
+            ("fxrstorq (%rdi)", &[0x48, 0x0f, 0xae, 0x0f]),
+            ("ldmxcsr 4(%rsp)", &[0x0f, 0xae, 0x54, 0x24, 0x04]),
+            ("stmxcsr (%rdi)", &[0x0f, 0xae, 0x1f]),
+            ("fnsave (%rdi)", &[0xdd, 0x37]),
+            ("fsave (%rdi)", &[0x9b, 0xdd, 0x37]),
+            ("frstor (%rdi)", &[0xdd, 0x27]),
+            ("fldenv (%rdi)", &[0xd9, 0x27]),
+            ("fnclex", &[0xdb, 0xe2]),
+            ("fwait", &[0x9b]),
+            ("emms", &[0x0f, 0x77]),
+            ("stac", &[0x0f, 0x01, 0xcb]),
+            ("clac", &[0x0f, 0x01, 0xca]),
+            ("monitor", &[0x0f, 0x01, 0xc8]),
+            ("mwait", &[0x0f, 0x01, 0xc9]),
+            ("monitor %rax, %ecx, %edx", &[0x0f, 0x01, 0xc8]),
+            ("mwait %eax, %ecx", &[0x0f, 0x01, 0xc9]),
+            ("monitorx %rax, %ecx, %edx", &[0x0f, 0x01, 0xfa]),
+            ("mwaitx %eax, %ecx, %ebx", &[0x0f, 0x01, 0xfb]),
+            ("lfence", &[0x0f, 0xae, 0xe8]),
+            ("sfence", &[0x0f, 0xae, 0xf8]),
+            ("ud1 %eax, %ecx", &[0x0f, 0xb9, 0xc8]),
+            ("ud1l (%rax), %ecx", &[0x0f, 0xb9, 0x08]),
+            ("int3", &[0xcc]),
+            ("int $0x80", &[0xcd, 0x80]),
+            ("int $3", &[0xcd, 0x03]),
+            ("int1", &[0xf1]),
+            ("ljmp *(%rax)", &[0xff, 0x28]),
+            ("ljmpq *(%rax)", &[0x48, 0xff, 0x28]),
+            ("lcall *(%rax)", &[0xff, 0x18]),
+            ("lcallq *8(%rsp)", &[0x48, 0xff, 0x5c, 0x24, 0x08]),
+            ("lret", &[0xcb]),
+            ("lretq", &[0x48, 0xcb]),
+            ("lret $8", &[0xca, 0x08, 0x00]),
+            ("lretq $8", &[0x48, 0xca, 0x08, 0x00]),
+            ("rdfsbase %rax", &[0xf3, 0x48, 0x0f, 0xae, 0xc0]),
+            ("rdfsbase %eax", &[0xf3, 0x0f, 0xae, 0xc0]),
+            ("rdgsbase %rax", &[0xf3, 0x48, 0x0f, 0xae, 0xc8]),
+            ("wrfsbase %rax", &[0xf3, 0x48, 0x0f, 0xae, 0xd0]),
+            ("wrgsbase %r9", &[0xf3, 0x49, 0x0f, 0xae, 0xd9]),
+            ("wrfsbase %edi", &[0xf3, 0x0f, 0xae, 0xd7]),
+            ("endbr32", &[0xf3, 0x0f, 0x1e, 0xfb]),
+            ("serialize", &[0x0f, 0x01, 0xe8]),
+            ("rdrand %rax", &[0x48, 0x0f, 0xc7, 0xf0]),
+            ("rdrand %ax", &[0x66, 0x0f, 0xc7, 0xf0]),
+            ("rdrand %r10", &[0x49, 0x0f, 0xc7, 0xf2]),
+            ("rdseed %eax", &[0x0f, 0xc7, 0xf8]),
+            ("rdpid %r9", &[0xf3, 0x41, 0x0f, 0xc7, 0xf9]),
+            ("rdpkru", &[0x0f, 0x01, 0xee]),
+            ("wrpkru", &[0x0f, 0x01, 0xef]),
+            ("vmcall", &[0x0f, 0x01, 0xc1]),
+            ("vmmcall", &[0x0f, 0x01, 0xd9]),
+            ("vmlaunch", &[0x0f, 0x01, 0xc2]),
+            ("vmresume", &[0x0f, 0x01, 0xc3]),
+            ("vmxoff", &[0x0f, 0x01, 0xc4]),
+            ("vmfunc", &[0x0f, 0x01, 0xd4]),
+            ("vmrun", &[0x0f, 0x01, 0xd8]),
+            ("vmload %rax", &[0x0f, 0x01, 0xda]),
+            ("vmsave", &[0x0f, 0x01, 0xdb]),
+            ("stgi", &[0x0f, 0x01, 0xdc]),
+            ("clgi", &[0x0f, 0x01, 0xdd]),
+            ("skinit", &[0x0f, 0x01, 0xde]),
+            ("invlpga %rax, %ecx", &[0x0f, 0x01, 0xdf]),
+            ("vmgexit", &[0xf3, 0x0f, 0x01, 0xd9]),
+            ("vmxon (%rax)", &[0xf3, 0x0f, 0xc7, 0x30]),
+            ("vmclear (%rax)", &[0x66, 0x0f, 0xc7, 0x30]),
+            ("vmptrld (%rax)", &[0x0f, 0xc7, 0x30]),
+            ("vmptrst (%rax)", &[0x0f, 0xc7, 0x38]),
+            ("vmread %rax, %rbx", &[0x0f, 0x78, 0xc3]),
+            ("vmread %rax, (%rbx)", &[0x0f, 0x78, 0x03]),
+            ("vmwrite %rbx, %rax", &[0x0f, 0x79, 0xc3]),
+            ("vmwrite (%rbx), %rax", &[0x0f, 0x79, 0x03]),
+            ("invept (%rax), %rdx", &[0x66, 0x0f, 0x38, 0x80, 0x10]),
+            ("invvpid (%rax), %rdx", &[0x66, 0x0f, 0x38, 0x81, 0x10]),
+            ("tdcall", &[0x66, 0x0f, 0x01, 0xcc]),
+            ("seamcall", &[0x66, 0x0f, 0x01, 0xcf]),
+            ("seamret", &[0x66, 0x0f, 0x01, 0xcd]),
+            ("seamops", &[0x66, 0x0f, 0x01, 0xce]),
+            ("encls", &[0x0f, 0x01, 0xcf]),
+            ("enclu", &[0x0f, 0x01, 0xd7]),
+            ("enclv", &[0x0f, 0x01, 0xc0]),
+            ("pconfig", &[0x0f, 0x01, 0xc5]),
+            ("pvalidate", &[0xf2, 0x0f, 0x01, 0xff]),
+            ("rmpadjust", &[0xf3, 0x0f, 0x01, 0xfe]),
+            ("rmpupdate", &[0xf2, 0x0f, 0x01, 0xfe]),
+            ("psmash", &[0xf3, 0x0f, 0x01, 0xff]),
+            ("enqcmds (%rsi), %rdi", &[0xf3, 0x0f, 0x38, 0xf8, 0x3e]),
+            ("enqcmd (%rsi), %rdi", &[0xf2, 0x0f, 0x38, 0xf8, 0x3e]),
+            ("movdir64b (%rsi), %rdi", &[0x66, 0x0f, 0x38, 0xf8, 0x3e]),
+            ("movdiri %eax, (%rdi)", &[0x0f, 0x38, 0xf9, 0x07]),
+            ("movdiri %rax, (%rdi)", &[0x48, 0x0f, 0x38, 0xf9, 0x07]),
+            ("wrussq %rax, (%rdi)", &[0x66, 0x48, 0x0f, 0x38, 0xf5, 0x07]),
+            ("wrussd %eax, (%rdi)", &[0x66, 0x0f, 0x38, 0xf5, 0x07]),
+            ("wrssq %rax, (%rdi)", &[0x48, 0x0f, 0x38, 0xf6, 0x07]),
+            ("wrssd %eax, (%rdi)", &[0x0f, 0x38, 0xf6, 0x07]),
+            ("rdsspq %rax", &[0xf3, 0x48, 0x0f, 0x1e, 0xc8]),
+            ("rdsspd %eax", &[0xf3, 0x0f, 0x1e, 0xc8]),
+            ("incsspq %rax", &[0xf3, 0x48, 0x0f, 0xae, 0xe8]),
+            ("incsspd %eax", &[0xf3, 0x0f, 0xae, 0xe8]),
+            ("rstorssp (%rax)", &[0xf3, 0x0f, 0x01, 0x28]),
+            ("saveprevssp", &[0xf3, 0x0f, 0x01, 0xea]),
+            ("setssbsy", &[0xf3, 0x0f, 0x01, 0xe8]),
+            ("clrssbsy (%rax)", &[0xf3, 0x0f, 0xae, 0x30]),
+            ("eretu", &[0xf3, 0x0f, 0x01, 0xca]),
+            ("erets", &[0xf2, 0x0f, 0x01, 0xca]),
+            ("xsetbv", &[0x0f, 0x01, 0xd1]),
+            ("xend", &[0x0f, 0x01, 0xd5]),
+            ("xtest", &[0x0f, 0x01, 0xd6]),
+            ("tpause %ecx", &[0x66, 0x0f, 0xae, 0xf1]),
+            ("umwait %ecx", &[0xf2, 0x0f, 0xae, 0xf1]),
+            ("umonitor %rax", &[0xf3, 0x0f, 0xae, 0xf0]),
+            ("rsm", &[0x0f, 0xaa]),
+            ("lahf", &[0x9f]),
+            ("sahf", &[0x9e]),
+            ("cld", &[0xfc]),
+            ("std", &[0xfd]),
+            ("inb %dx, %al", &[0xec]),
+            ("inw %dx, %ax", &[0x66, 0xed]),
+            ("inl %dx, %eax", &[0xed]),
+            ("inb $0x80, %al", &[0xe4, 0x80]),
+            ("inw $0x80, %ax", &[0x66, 0xe5, 0x80]),
+            ("inl $0x80, %eax", &[0xe5, 0x80]),
+            ("in %dx, %al", &[0xec]),
+            ("in $0x71, %al", &[0xe4, 0x71]),
+            ("outb %al, %dx", &[0xee]),
+            ("outw %ax, %dx", &[0x66, 0xef]),
+            ("outl %eax, %dx", &[0xef]),
+            ("outb %al, $0x80", &[0xe6, 0x80]),
+            ("outw %ax, $0x80", &[0x66, 0xe7, 0x80]),
+            ("outl %eax, $0x80", &[0xe7, 0x80]),
+            ("out %al, $0x80", &[0xe6, 0x80]),
+            ("out %eax, %dx", &[0xef]),
+            ("inb (%dx), %al", &[0xec]),
+            ("outb %al, (%dx)", &[0xee]),
+            ("insb", &[0x6c]),
+            ("insw", &[0x66, 0x6d]),
+            ("insl", &[0x6d]),
+            ("outsb", &[0x6e]),
+            ("outsw", &[0x66, 0x6f]),
+            ("outsl", &[0x6f]),
+            ("cs", &[0x2e]),
+            ("ds", &[0x3e]),
+            ("es", &[0x26]),
+            ("ss", &[0x36]),
+            ("fs", &[0x64]),
+            ("gs", &[0x65]),
+            ("data16", &[0x66]),
+            ("addr32", &[0x67]),
+            ("rex64", &[0x48]),
+            ("xacquire", &[0xf2]),
+            ("xrelease", &[0xf3]),
+            ("notrack", &[0x3e]),
+            ("movl %ds:8(%rax), %eax", &[0x3e, 0x8b, 0x40, 0x08]),
+            ("movl %es:(%rdi), %eax", &[0x26, 0x8b, 0x07]),
+            ("movl %cs:(%rax), %eax", &[0x2e, 0x8b, 0x00]),
+            ("movl %ss:(%rsp), %eax", &[0x36, 0x8b, 0x04, 0x24]),
+        ];
+        for (line, expected) in lines {
+            assert_eq!(bytes(line), *expected, "{line}");
+        }
+    }
+
+    /// A system instruction that names a register the processor does not use for it is refused,
+    /// since the bytes would be the same and the line would say something they do not do.
+    #[test]
+    fn a_system_instruction_naming_the_wrong_register_is_refused() {
+        assert!(refused("monitor %rbx, %ecx, %edx").contains("%rax, %ecx, %edx"));
+        assert!(refused("mwait %eax, %edx").contains("%eax, %ecx"));
+        assert!(refused("inb %dx, %bl").contains("%al"));
+        assert!(refused("inb %cx, %al").contains("%dx"));
+        assert!(refused("inw %dx, %al").contains("as wide"));
+        assert!(refused("outl %rax, %dx").contains("%eax"));
+        assert!(refused("movq %cr0, %eax").contains("sixty four"));
+        assert!(refused("movw %ds, %eax").contains("width"));
+        assert!(refused("push %ds").contains("fs and gs"));
+        assert!(refused("pop %es").contains("fs and gs"));
+        assert!(refused("movl %xs:(%rax), %eax").contains("segment"));
     }
 }

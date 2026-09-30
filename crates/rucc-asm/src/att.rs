@@ -57,7 +57,7 @@ use rucc_base::hash::Map;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
-use rucc_target::{CallRegs, PhysReg, RegClass, Segment, TargetInfo, aarch64};
+use rucc_target::{CallRegs, PhysReg, RegClass, TargetInfo, aarch64};
 use rucc_tuple::Arch;
 
 use crate::Error;
@@ -896,10 +896,8 @@ impl Writer<'_> {
         let mut out = String::new();
         // In front of everything, which is where an assembler wants it: the segment says which
         // storage the rest of the address is counted in, so `%fs:40` reads left to right.
-        match amode.segment {
-            Some(Segment::Fs) => out.push_str("%fs:"),
-            Some(Segment::Gs) => out.push_str("%gs:"),
-            None => {}
+        if let Some(segment) = amode.segment {
+            let _ = write!(out, "%{}:", segment.name());
         }
         if let Some(symbol) = amode.symbol {
             let _ = write!(out, "{}{}", self.directives.symbol(), self.names.resolve(symbol));
@@ -1298,7 +1296,7 @@ mod tests {
             let load = Opcode::new(names.intern("x64.mov_rm_64"));
             func.build(block, load)
                 .operand(Operand::write(Reg::physical(RAX), GPR))
-                .mem(Mem::in_segment(Segment::Fs, 40))
+                .mem(Mem::in_segment(rucc_target::Segment::Fs, 40))
                 .finish();
         });
         // The first line of every function this compiler protects. No base and no index, because

@@ -429,13 +429,15 @@ impl<'a> Parser<'a, '_> {
         // In front of everything as well, and behind the marker above only because that is the
         // order they read in. Both are facts about how the address is come by rather than about
         // what is added to what, which is what the loop below reads.
-        mem.segment = if self.eat("fs:") {
-            Some(Segment::Fs)
-        } else if self.eat("gs:") {
-            Some(Segment::Gs)
-        } else {
-            None
-        };
+        mem.segment = None;
+        for segment in
+            [Segment::Es, Segment::Cs, Segment::Ss, Segment::Ds, Segment::Fs, Segment::Gs]
+        {
+            if self.eat(&format!("{}:", segment.name())) {
+                mem.segment = Some(segment);
+                break;
+            }
+        }
         let mut negative = false;
         loop {
             self.spaces();

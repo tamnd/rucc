@@ -1093,11 +1093,7 @@ fn spelled(text: &str) -> Option<Given> {
     // A segment register is the one name that is followed by an address rather than being an
     // argument on its own, and it is the only way anything here reaches the block a thread owns.
     if let Some((name, rest)) = after.split_once(':') {
-        let segment = match name {
-            "fs" => Segment::Fs,
-            "gs" => Segment::Gs,
-            _ => return None,
-        };
+        let segment = Segment::named(name)?;
         return address(rest, Some(segment)).map(Given::Mem);
     }
     let (reg, width) = gpr_named(after)?;
@@ -1646,7 +1642,7 @@ mod tests {
         assert_eq!(read("again:\njc again\nagain:", &[]), None, "one name on two labels");
         assert_eq!(plain(".skip 16", &[]), None, "a directive that is not one of the two read");
         assert_eq!(plain("movq (%%rax,%%rbx,8), %0", &[]), None, "a scaled index");
-        assert_eq!(plain("movq %%cs:0, %0", &[]), None, "a segment nothing here reaches");
+        assert_eq!(plain("movq %%xs:0, %0", &[]), None, "a segment the machine does not have");
         assert_eq!(plain("movq %%xmm0, %0", &[]), None, "a register in the other file");
     }
 
