@@ -88,6 +88,28 @@ fn a_build_bug_on_the_inliner_settles_true_is_an_error_quoting_the_message_at_th
     }
 }
 
+/// A local's address handed to an inline function is not null, which is what landlock's
+/// `copy_min_struct_from_user` checks with `BUILD_BUG_ON (!dst)`. gcc settles it the same way under
+/// the kernel's `-fno-delete-null-pointer-checks`.
+#[test]
+fn a_build_bug_on_that_a_locals_address_is_null_says_nothing() {
+    let source = format!(
+        "{KERNEL}struct attr {{ int a, b; }};
+static inline __attribute__((always_inline)) int copy(void *const dst, unsigned long size) {{
+\tBUILD_BUG_ON(!dst);
+\t__builtin_memset(dst, 0, size);
+\treturn 0;
+}}
+int user(void) {{ struct attr at; copy(&at, sizeof(at)); return at.a; }}
+"
+    );
+    for flags in [&["-O2"][..], &["-O2", "-fno-delete-null-pointer-checks"], &["-Os"]] {
+        let (ok, _, said) = compile("local-address", flags, &source);
+        assert!(ok, "{flags:?}: {said}");
+        assert!(said.is_empty(), "{flags:?}: {said}");
+    }
+}
+
 /// A call in a branch the optimizer took out is not in the program, at every level: gcc folds an
 /// `if (0)` at `-O0` as well, and so does this compiler.
 #[test]

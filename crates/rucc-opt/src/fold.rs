@@ -259,7 +259,21 @@ fn round_trip(func: &Func, pointer: Value, ty: Type) -> Option<Imm> {
 /// one type are one address. Two that differ in their low thirty two bits are two addresses on
 /// every target, since no address is narrower than that. Two that differ only above those bits
 /// are the same address on a thirty two bit target and not on a sixty four bit one, and are left.
+///
+/// A stack slot against null is the other thing this answers. A slot is never at address zero,
+/// which gcc also takes as given, even under `-fno-delete-null-pointer-checks`. Landlock's
+/// `copy_min_struct_from_user` checks `BUILD_BUG_ON (!dst)` with `dst` the address of a local once
+/// it is inlined, and that only builds once the comparison is a number.
 fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<Imm> {
+    let (first, second) = (*args.first()?, *args.get(1)?);
+    let null = |value| cast(func, value).is_some_and(|(imm, _)| imm.unsigned() == 0);
+    if (on_stack(func, first) && null(second)) || (null(first) && on_stack(func, second)) {
+        return match pred {
+            IntPred::Eq => Some(Imm::int(0, ty)),
+            IntPred::Ne => Some(Imm::int(1, ty)),
+            _ => None,
+        };
+    }
     let (lhs, from) = cast(func, *args.first()?)?;
     let (rhs, other) = cast(func, *args.get(1)?)?;
     if from != other {
@@ -278,6 +292,12 @@ fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<
         IntPred::Ne => Some(Imm::int(i128::from(!same), ty)),
         _ => None,
     }
+}
+
+/// Whether this value is the address of a stack slot.
+fn on_stack(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    func[inst].opcode == Opcode::Alloca
 }
 
 /// The single result of an instruction that folded.
