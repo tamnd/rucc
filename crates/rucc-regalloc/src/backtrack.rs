@@ -256,14 +256,19 @@ fn placed(
             "a value in class {}, which the target hands out no registers from",
             value.class.number()
         );
+        // Allowed and not Clear, at each step that asks. A register something insists on only in a
+        // hole between this value's pieces costs it nothing, since the value is dead there and the
+        // instruction takes the register without a move. Clear is asked over the hull, and it
+        // turned a parameter read before an early return that calls away from the register it
+        // arrived in and into a saved one, which is a push, a move and a pop nobody needed.
         let chosen = state
             .coalesced(value, &reused[number])
-            .or_else(|| state.hinted(value, &hints[number], Want::Clear))
+            .or_else(|| state.hinted(value, &hints[number], Want::Allowed))
             .or_else(|| {
                 let partners = passed[number].iter().chain(&received[number]);
                 let partners: Vec<PhysReg> =
                     partners.filter_map(|&other| state.reg_of(other)).collect();
-                state.hinted(value, &partners, Want::Clear)
+                state.hinted(value, &partners, Want::Allowed)
             })
             .or_else(|| state.swapped(value, &seconds[number]))
             .or_else(|| {
@@ -275,7 +280,6 @@ fn placed(
                 let wanted: Vec<PhysReg> = tied.chain(env.order(value.class)).copied().collect();
                 state.together(value, &ties, &wanted)
             })
-            .or_else(|| state.hinted(value, env.order(value.class), Want::Clear))
             .or_else(|| state.hinted(value, env.order(value.class), Want::Allowed));
         if state.work > state.budget {
             return None;
