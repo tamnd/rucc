@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The backtracking register allocator finds the values in the way of the one it is placing from a sorted list of each register's pieces rather than a walk over every value in the register, which takes about 6.6% off an optimized build of jtckdint (#2396).
+
 ### Added
 
 - The assembler reads more of the kernel's x86 crypto code the way gas does. A name set to a register, `X0 = %xmm4` or `.set KEY, %rdi`, stands for that register in an instruction until it is set to something else, and a name set to a number is that number in an operand, so `8*t+frame_W(%rsp)` inside a `.rept` works. An address may have arithmetic in brackets in front of its registers, as in `(0*16)(%rsp)` and `(K_table-8)(%rip)`, and may be made of 32-bit registers, which puts the `0x67` prefix in front. `$~31` and other immediates that are arithmetic on numbers take the short form. `movzx` and `movsx` read both widths from the registers, `.type f STT_FUNC` with no comma is read, and `.extern` is passed over. 14 of the 48 x86-64 crypto files in a 6.12 allmodconfig now assemble, and each object has the same bytes and relocations as the one gas writes. The rest stop on AVX and AES-NI instructions the encoder has no rows for yet. See tamnd/rucc-kernel#6.

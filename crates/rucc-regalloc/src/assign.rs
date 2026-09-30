@@ -427,7 +427,7 @@ impl<'a> Active<'a> {
 /// How many values a register can hold before its pieces are kept in a list. A register with no
 /// more than this in it, which is most of them without optimization, is quicker to ask about by
 /// walking its values, and keeping a list for every one of those cost more than it saved.
-const FEW: usize = 4;
+pub(crate) const FEW: usize = 4;
 
 /// The list for one class and register number, made when it is first asked for.
 fn pieces_mut(pieces: &mut Vec<Vec<Pieces>>, class: RegClass, slot: usize) -> &mut Pieces {
@@ -456,19 +456,19 @@ fn pieces_mut(pieces: &mut Vec<Vec<Pieces>>, class: RegClass, slot: usize) -> &m
 /// they are not is answered by the walk over its values instead, so the answer is the same either
 /// way.
 #[derive(Default)]
-struct Pieces {
+pub(crate) struct Pieces {
     /// Start, end and whose, sorted by start and then by end.
     list: Vec<(Point, Point, Reg)>,
     /// Whether a piece went in that ends before one in front of it.
     broken: bool,
     /// Whether the list is kept at all, which it is from the first time the register holds more
     /// than [`FEW`] values.
-    kept: bool,
+    pub(crate) kept: bool,
 }
 
 impl Pieces {
     #[inline(never)]
-    fn insert(&mut self, piece: Range, reg: Reg) {
+    pub(crate) fn insert(&mut self, piece: Range, reg: Reg) {
         let key = (piece.start, piece.end);
         let at = self.list.partition_point(|&(start, end, _)| (start, end) <= key);
         let after = at == 0 || self.list[at - 1].1 <= piece.end;
@@ -479,7 +479,7 @@ impl Pieces {
         self.list.insert(at, (piece.start, piece.end, reg));
     }
 
-    fn remove(&mut self, piece: Range, reg: Reg) {
+    pub(crate) fn remove(&mut self, piece: Range, reg: Reg) {
         let from = self.list.partition_point(|&(start, _, _)| start < piece.start);
         let found = self.list[from..]
             .iter()
@@ -509,6 +509,26 @@ impl Pieces {
                 .find(|&&(_, _, owner)| Some(owner) != except)
                 .is_some_and(|&(_, end, _)| end >= piece.start)
         })
+    }
+
+    /// Every value with a piece that touches the area, each once and in order, or `None` for a
+    /// list whose ends are out of order. With the ends in order the pieces that touch one of the
+    /// area's are the last few that start before it ends, back to the first that ends before it
+    /// starts.
+    pub(crate) fn owners(&self, area: Area<'_>) -> Option<Vec<Reg>> {
+        if self.broken {
+            return None;
+        }
+        let mut owners = Vec::new();
+        for piece in area.pieces() {
+            let below = self.list.partition_point(|&(start, _, _)| start <= piece.end);
+            let touching =
+                self.list[..below].iter().rev().take_while(|&&(_, end, _)| end >= piece.start);
+            owners.extend(touching.map(|&(_, _, owner)| owner));
+        }
+        owners.sort_unstable();
+        owners.dedup();
+        Some(owners)
     }
 }
 
@@ -1890,6 +1910,39 @@ mod tests {
                 assert_eq!(pieces.touch(area, except), walked, "{list:?} except {except:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_owners_of_the_pieces_an_area_touches_are_the_values_a_walk_would_find() {
+        let held = [
+            (Reg::virtual_reg(0), ranges(&[(0, 4), (20, 30)])),
+            (Reg::virtual_reg(1), ranges(&[(5, 9)])),
+            (Reg::virtual_reg(2), ranges(&[(10, 19), (30, 40)])),
+        ];
+        let mut pieces = Pieces::default();
+        for (reg, list) in &held {
+            for &piece in list {
+                pieces.insert(piece, *reg);
+            }
+        }
+        let asked = [
+            ranges(&[(41, 50)]),
+            ranges(&[(30, 30)]),
+            ranges(&[(3, 12)]),
+            ranges(&[(3, 3), (25, 42)]),
+            ranges(&[(0, 50)]),
+        ];
+        for list in &asked {
+            let area = Area::of_pieces(list);
+            let walked: Vec<Reg> = held
+                .iter()
+                .filter(|(_, pieces)| Area::of_pieces(pieces).overlaps(area))
+                .map(|&(reg, _)| reg)
+                .collect();
+            assert_eq!(pieces.owners(area), Some(walked), "{list:?}");
+        }
+        pieces.insert(Range { start: 2, end: 3 }, Reg::virtual_reg(3));
+        assert_eq!(pieces.owners(Area::of_pieces(&asked[0])), None);
     }
 
     #[test]

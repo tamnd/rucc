@@ -82,7 +82,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_mir::{Func, Inst, Reg};
 use rucc_target::{PhysReg, RegClass};
 
-use crate::assign::{self, Assignment, Blocks, Env, Place, Reuse, Want};
+use crate::assign::{self, Assignment, Blocks, Env, FEW, Pieces, Place, Reuse, Want};
 use crate::live::{Area, Live, Range};
 use crate::order::Order;
 use crate::pressure::Pressure;
@@ -238,6 +238,7 @@ fn placed(
         reuses: &reuses,
         values: &values,
         held: Vec::new(),
+        pieces: Vec::new(),
         at: vec![None; count],
         commuted: vec![None; count],
         work: 0,
@@ -335,6 +336,9 @@ struct State<'a, 'v> {
     /// line it covers. Most values in a register are nowhere near the one being placed, and having
     /// the stretch here tells so without reading the value itself from wherever it is in `values`.
     held: Vec<((RegClass, PhysReg), Vec<Held>)>,
+    /// The pieces of the values in each register of `held`, at the same index, made the first time
+    /// a register with more than [`FEW`] values in it is asked about.
+    pieces: Vec<Pieces>,
     /// Which register each value is in now, if one.
     at: Vec<Option<PhysReg>>,
     /// The instruction whose sources were swapped for the answer written by each value, if its
@@ -349,24 +353,55 @@ impl<'a> State<'a, '_> {
         self.at.get(usize::try_from(reg.number()?).ok()?).copied().flatten()
     }
 
-    fn slot(&mut self, class: RegClass, at: PhysReg) -> &mut Vec<Held> {
+    fn slot(&mut self, class: RegClass, at: PhysReg) -> usize {
         let found = self.held.iter().position(|(key, _)| *key == (class, at));
-        let index = found.unwrap_or_else(|| {
+        found.unwrap_or_else(|| {
             self.held.push(((class, at), Vec::new()));
+            self.pieces.push(Pieces::default());
             self.held.len() - 1
-        });
-        &mut self.held[index].1
+        })
+    }
+
+    /// Takes values out of a register, and their pieces with them.
+    fn remove(&mut self, index: usize, gone: &[usize]) {
+        self.held[index].1.retain(|(other, _)| !gone.contains(other));
+        let pieces = &mut self.pieces[index];
+        if pieces.kept {
+            for value in gone.iter().filter_map(|&other| self.values[other]) {
+                for piece in value.area.pieces() {
+                    pieces.remove(piece, value.reg);
+                }
+            }
+        }
     }
 
     /// The values in `at` that are wanted while `value` is, leaving out the one a two address
     /// instruction lets it share the register with.
     fn clashes(&mut self, value: Value<'_>, at: PhysReg) -> Vec<usize> {
-        let Some(index) = self.held.iter().position(|(key, _)| *key == (value.class, at)) else {
+        let Some(found) = self.held.iter().position(|(key, _)| *key == (value.class, at)) else {
             return Vec::new();
         };
+        let held = &self.held[found].1;
+        // Counted as a walk over every value in the register, so that the budget runs out at the
+        // same place whichever way the question is answered.
+        self.work += held.len() as u64;
+        if held.len() > FEW {
+            let pieces = &mut self.pieces[found];
+            if !pieces.kept {
+                pieces.kept = true;
+                for other in held.iter().filter_map(|&(other, _)| self.values[other]) {
+                    for piece in other.area.pieces() {
+                        pieces.insert(piece, other.reg);
+                    }
+                }
+            }
+            if let Some(owners) = pieces.owners(value.area) {
+                let clash = owners.into_iter().filter(|&other| !self.shares(value.reg, other));
+                return clash.map(index).collect();
+            }
+        }
         let mut clashes = Vec::new();
-        for &(other, range) in &self.held[index].1 {
-            self.work += 1;
+        for &(other, range) in held {
             if !range.overlaps(value.range) {
                 continue;
             }
@@ -528,7 +563,8 @@ impl<'a> State<'a, '_> {
     /// Takes `at` back from the values in it that are in the way of `value`, and says which.
     fn evict(&mut self, value: Value<'_>, at: PhysReg) -> Vec<usize> {
         let clashes = self.clashes(value, at);
-        self.slot(value.class, at).retain(|(other, _)| !clashes.contains(other));
+        let index = self.slot(value.class, at);
+        self.remove(index, &clashes);
         for &other in &clashes {
             self.at[other] = None;
             self.commuted[other] = None;
@@ -577,7 +613,8 @@ impl<'a> State<'a, '_> {
                     continue;
                 }
                 better.sort_by_key(|&(count, _)| Reverse(count));
-                self.slot(value.class, now).retain(|&(other, _)| other != number);
+                let index = self.slot(value.class, now);
+                self.remove(index, &[number]);
                 self.at[number] = None;
                 let was = self.commuted[number];
                 let mut to = now;
@@ -603,7 +640,14 @@ impl<'a> State<'a, '_> {
     fn take(&mut self, value: Value<'_>, at: PhysReg) {
         let number = index(value.reg);
         self.at[number] = Some(at);
-        self.slot(value.class, at).push((number, value.range));
+        let index = self.slot(value.class, at);
+        self.held[index].1.push((number, value.range));
+        let pieces = &mut self.pieces[index];
+        if pieces.kept {
+            for piece in value.area.pieces() {
+                pieces.insert(piece, value.reg);
+            }
+        }
     }
 }
 
