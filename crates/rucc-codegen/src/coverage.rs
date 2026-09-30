@@ -313,7 +313,7 @@ pub fn table(arch: Arch) -> Option<&'static Table> {
     match arch {
         Arch::X86_64 => Some(&crate::select::x86_64::TABLE),
         Arch::Aarch64 => Some(&crate::select::aarch64::TABLE),
-        Arch::Riscv64 => None,
+        Arch::Riscv64 | Arch::X86 => None,
     }
 }
 
