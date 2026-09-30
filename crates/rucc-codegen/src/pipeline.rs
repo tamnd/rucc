@@ -269,6 +269,16 @@ pub enum Profile {
     Late,
 }
 
+/// What `-mrecord-mcount` and `-mnop-mcount` ask of the call `-pg` writes. Both are x86 flags and
+/// both do nothing on a function that has no such call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mcount {
+    /// Whether the call's address goes in `__mcount_loc`.
+    pub record: bool,
+    /// Whether the call is a five byte nop instead.
+    pub nop: bool,
+}
+
 /// How much room every function opens with for something to be written over it later.
 ///
 /// What `-fpatchable-function-entry=` asks for, as the two halves a prologue deals in rather than
@@ -326,6 +336,9 @@ pub struct Flags {
     pub jump_tables: bool,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
+    /// What else is done with that call: listed in `__mcount_loc` for `-mrecord-mcount`, and
+    /// written as a nop for `-mnop-mcount`. See [`rucc_mir::Mcount`].
+    pub mcount: Mcount,
     /// How much room every function opens with for a patcher, which
     /// `-fpatchable-function-entry=` asks for. See [`Room`].
     pub patch: Room,
@@ -400,6 +413,7 @@ impl Default for Flags {
             speculation: Speculation::default(),
             jump_tables: true,
             profile: Profile::No,
+            mcount: Mcount::default(),
             patch: Room::default(),
             reorder: false,
             reuse: false,
@@ -830,8 +844,8 @@ pub fn compile_recording(
         .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
     let trace = machine.conv.trace.and_then(|trace| match profile {
         Profile::No => None,
-        Profile::Early => Some(Tracing { name: trace.early, early: true }),
-        Profile::Late => Some(Tracing { name: trace.late, early: false }),
+        Profile::Early => Some(Tracing { name: trace.early, early: true, mcount: flags.mcount }),
+        Profile::Late => Some(Tracing { name: trace.late, early: false, mcount: flags.mcount }),
     });
     // And once more for the room a patcher was promised, which is a run of the shortest
     // instruction that does nothing and so needs the target to have one. Nothing is written on a

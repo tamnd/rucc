@@ -54,6 +54,11 @@ use crate::unwind::{self, Rows};
 /// The prefix every x86-64 opcode carries in the machine IR.
 const PREFIX: &str = "x64.";
 
+/// The nop `-mnop-mcount` writes in place of the profiler's call, which is gcc's `nopl
+/// 0x0(%rax,%rax,1)`: one instruction as long as the call, so that a tracer writes the call back
+/// in one store and nothing can be running in the middle of it.
+pub(crate) const MCOUNT_NOP: [u8; 5] = [0x0f, 0x1f, 0x44, 0x00, 0x00];
+
 /// The one byte instruction that does nothing, which is what the space in front of a function is.
 ///
 /// Also what the room a patcher was promised is made of. The two are the same byte and not the same
@@ -462,7 +467,17 @@ impl Assembler<'_> {
                     self.lines.push(Row { at, span: self.func.span(inst), inst: Some(inst) });
                 }
                 let began = self.text.bytes.len() - self.start;
-                self.inst(block, inst)?;
+                // The profiler's call, listed where it begins and written as the nop of the same
+                // length when those were asked for. See [`rucc_mir::Mcount`].
+                let mcount = self.func.mcount.filter(|mcount| mcount.inst == inst);
+                if mcount.is_some_and(|mcount| mcount.record) {
+                    self.text.mcount.push(self.text.bytes.len());
+                }
+                if mcount.is_some_and(|mcount| mcount.nop) {
+                    self.text.bytes.extend_from_slice(&MCOUNT_NOP);
+                } else {
+                    self.inst(block, inst)?;
+                }
                 // A call an unwind lands somewhere from, as the bytes it is. See [`Site`].
                 if let Some(&pad) = pads.get(&inst) {
                     self.sites.push((began, self.text.bytes.len() - self.start, pad));

@@ -211,3 +211,125 @@ fn a_target_whose_profiler_is_a_different_one_is_refused() {
     assert!(!ok, "a flag that cannot be honoured is news rather than nothing");
     assert!(err.contains("-pg is not supported"), "{err}");
 }
+
+/// With `-mrecord-mcount` each hook's call is named and the name goes in `__mcount_loc` right
+/// after it, which is gcc's layout: a kernel before 5.12 reads that section at boot to find every
+/// call it can turn into a nop. Without the flag there is no such section.
+#[test]
+fn every_hook_is_listed_in_mcount_loc_when_asked() {
+    let text = asm("record", &["-pg", "-mfentry", "-mrecord-mcount"], THREE);
+    for name in ["leaf", "calls", "deep"] {
+        let label = format!(".Lmcount_{name}:");
+        let listed = format!("\t.quad\t.Lmcount_{name}\n\t.previous");
+        let at = text.find(&label).unwrap_or_else(|| panic!("{label} in\n{text}"));
+        let call = &text[at..];
+        assert!(call[label.len()..].trim_start().starts_with("call"), "{name}:\n{call}");
+        assert!(text.contains(&listed), "{name}:\n{text}");
+    }
+    assert_eq!(text.matches("\t.section\t__mcount_loc,\"a\",@progbits").count(), 3, "{text}");
+    let plain = asm("unrecorded", &["-pg", "-mfentry"], THREE);
+    assert!(!plain.contains("__mcount_loc"), "{plain}");
+}
+
+/// `-mnop-mcount` writes gcc's five byte nop where the call would be, so nothing is called until a
+/// tracer writes the call back, and the nop is still what `__mcount_loc` points at.
+#[test]
+fn the_hook_is_a_nop_of_the_same_length_when_asked() {
+    let text = asm("nop", &["-pg", "-mfentry", "-mnop-mcount", "-mrecord-mcount"], THREE);
+    assert!(!text.contains("__fentry__"), "{text}");
+    for name in ["leaf", "calls", "deep"] {
+        let nop = format!(".Lmcount_{name}:\n\t.byte\t0x0f, 0x1f, 0x44, 0x00, 0x00\n");
+        assert!(text.contains(&nop), "{name}:\n{text}");
+    }
+}
+
+/// The flags are x86 flags, as they are to gcc, and unknown anywhere else.
+#[test]
+fn the_mcount_flags_are_unknown_off_x86() {
+    let (ok, _, err) = run("arm", "aarch64-unknown-linux-gnu", &["-mrecord-mcount"], THREE);
+    assert!(!ok && err.contains("unknown option"), "{err}");
+}
+
+/// The object is the listing's: one eight byte address per hook in an allocated `__mcount_loc`,
+/// each an `R_X86_64_64` against the section the function is in, pointing at the call, for either
+/// hook and with a section per function or without.
+#[test]
+fn the_object_lists_the_address_of_every_call() {
+    for (what, flags) in [
+        ("obj-fentry", &["-mfentry"][..]),
+        ("obj-mcount", &["-mno-fentry"]),
+        ("obj-split", &["-mfentry", "-ffunction-sections"]),
+    ] {
+        let path = fixture(what, THREE);
+        let object = path.with_extension("o");
+        let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .arg(format!("--target={TARGET}"))
+            .args(["-O2", "-pg", "-mrecord-mcount", "-c", "-o"])
+            .arg(&object)
+            .args(flags)
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+        let bytes = std::fs::read(&object).expect("the object was written");
+        let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+        let elf = Elf(&bytes);
+        let loc = elf.section("__mcount_loc").unwrap_or_else(|| panic!("{what}: no __mcount_loc"));
+        assert_eq!((elf.kind(loc), elf.flags(loc) & 2, elf.size(loc)), (1, 2, 24), "{what}");
+        let rela = elf.section(".rela__mcount_loc").expect("its relocations");
+        let symtab = elf.word(elf.header(rela) + 40, 4);
+        let mut calls = 0;
+        for n in 0..elf.size(rela) / 24 {
+            let entry = elf.offset(rela) + n * 24;
+            let info = elf.word(entry + 8, 8);
+            assert_eq!(info & 0xffff_ffff, 1, "{what}: R_X86_64_64");
+            let symbol = elf.offset(symtab) + (info >> 32) * 24;
+            let target = elf.word(symbol + 6, 2);
+            let at = elf.offset(target) + elf.word(entry + 16, 8);
+            assert!(elf.name(target).starts_with(".text"), "{what}: {}", elf.name(target));
+            assert_eq!(bytes[at], 0xe8, "{what}: entry {n} points at a call");
+            calls += 1;
+        }
+        assert_eq!(calls, 3, "{what}");
+    }
+}
+
+/// Just enough of a 64-bit little endian ELF file to find a section and read its relocations.
+struct Elf<'a>(&'a [u8]);
+
+impl Elf<'_> {
+    fn word(&self, at: usize, width: usize) -> usize {
+        self.0[at..at + width].iter().rev().fold(0, |sum, &byte| sum << 8 | usize::from(byte))
+    }
+
+    fn header(&self, index: usize) -> usize {
+        self.word(0x28, 8) + index * self.word(0x3a, 2)
+    }
+
+    fn kind(&self, index: usize) -> usize {
+        self.word(self.header(index) + 4, 4)
+    }
+
+    fn flags(&self, index: usize) -> usize {
+        self.word(self.header(index) + 8, 8)
+    }
+
+    fn offset(&self, index: usize) -> usize {
+        self.word(self.header(index) + 24, 8)
+    }
+
+    fn size(&self, index: usize) -> usize {
+        self.word(self.header(index) + 32, 8)
+    }
+
+    fn name(&self, index: usize) -> String {
+        let strings = self.offset(self.word(0x3e, 2));
+        let at = strings + self.word(self.header(index), 4);
+        let end = self.0[at..].iter().position(|&byte| byte == 0).expect("a name ends");
+        String::from_utf8_lossy(&self.0[at..at + end]).into_owned()
+    }
+
+    fn section(&self, name: &str) -> Option<usize> {
+        (0..self.word(0x3c, 2)).find(|&index| self.name(index) == name)
+    }
+}

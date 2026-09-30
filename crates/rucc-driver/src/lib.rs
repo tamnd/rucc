@@ -1051,6 +1051,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // directory is a build system that would otherwise fail on every other directory.
             "-mfentry" => opts.hook = Hook::Early,
             "-mno-fentry" => opts.hook = Hook::Late,
+            // Only on x86-64, as with gcc, where they are the i386 back end's and unknown to the
+            // others. Taken on their own like `-mfentry`, and doing nothing without `-pg`.
+            "-mrecord-mcount" | "-mno-record-mcount" if arch == rucc_target::Arch::X86_64 => {
+                opts.record_mcount = arg == "-mrecord-mcount";
+            }
+            "-mnop-mcount" | "-mno-nop-mcount" if arch == rucc_target::Arch::X86_64 => {
+                opts.nop_mcount = arg == "-mnop-mcount";
+            }
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -8154,8 +8162,6 @@ mod tests {
             ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
-            ("-mrecord-mcount", 2283),
-            ("-mnop-mcount", 2283),
             ("-fconserve-stack", 2284),
             ("-gdwarf-4", 2287),
             ("-gz=zlib", 2288),

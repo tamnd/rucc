@@ -169,6 +169,23 @@ pub struct Patch {
     pub after: Option<Inst>,
 }
 
+/// What `-mrecord-mcount` and `-mnop-mcount` asked of the call `-pg` wrote into a function.
+///
+/// Kept beside the function rather than in the call, because the call is an ordinary call to
+/// everything between the prologue and the writers, and it is only the writers that treat it
+/// differently: one lists where it is and the other writes five bytes that do nothing in its place.
+/// gcc's nop is `nopl 0x0(%rax,%rax,1)`, the same length as the call, so that a tracer can write
+/// the call back over it in one store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mcount {
+    /// The call.
+    pub inst: Inst,
+    /// Whether its address goes in `__mcount_loc`.
+    pub record: bool,
+    /// Whether it is written as a nop.
+    pub nop: bool,
+}
+
 /// Where one declaration in the source is, over one stretch of one function.
 ///
 /// The answer to what [`Func::named`] asks, and the shape it is in is the shape a debugger's
@@ -265,6 +282,9 @@ pub struct Func {
     /// that do nothing is indistinguishable from any other run of them once it is in the stream,
     /// so which one was reserved has to be said rather than looked for.
     pub patch: Option<Patch>,
+    /// The profiler's call when `-mrecord-mcount` or `-mnop-mcount` asked for something to be done
+    /// with it, written by the prologue for the reason [`Func::patch`] is. See [`Mcount`].
+    pub mcount: Option<Mcount>,
     /// The name each block something outside the function refers to was given, in block order.
     ///
     /// What asks for one is GNU's address of a label in the initializer of an object with static
@@ -418,6 +438,7 @@ impl Func {
             visibility: Visibility::Default,
             cfi: Vec::new(),
             patch: None,
+            mcount: None,
             labels: Vec::new(),
             landings: Vec::new(),
             declared: Span::DUMMY,

@@ -2197,6 +2197,16 @@ pub struct Options {
     /// See [`Hook`]. Read even on a command line that did not ask for the call, since gcc accepts
     /// the flag on its own and does nothing with it.
     pub hook: Hook,
+    /// Whether every call the profiler's hook gets is listed in a `__mcount_loc` section, from
+    /// `-mrecord-mcount`.
+    ///
+    /// The list is how a kernel finds the calls to turn into nops at boot and back into calls when
+    /// a function is traced. Kernels before 5.12 read it from the compiler, and later ones have
+    /// objtool write it, so kbuild only passes the flag on the older ones.
+    pub record_mcount: bool,
+    /// Whether that call is written as a five byte nop rather than a call, from `-mnop-mcount`,
+    /// which leaves the patching entirely to whoever reads the list.
+    pub nop_mcount: bool,
     /// How much room every function opens with for somebody to write over later, from
     /// `-fpatchable-function-entry=`.
     ///
@@ -2650,6 +2660,8 @@ impl Options {
             jump_tables: true,
             profile: false,
             hook: Hook::default(),
+            record_mcount: false,
+            nop_mcount: false,
             patchable: Patchable::default(),
             wrapping: Wrapping::NONE,
             char_signed: None,
