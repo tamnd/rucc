@@ -7821,6 +7821,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(body(both).contains("add.nsw"), "and so does the one with three arguments");
     }
 
+    /// Both are the address they were handed, and neither is a call to anything.
+    #[test]
+    fn the_return_address_builtins_that_adjust_one_hand_it_back() {
+        let text = body("void *f(void *p) { return __builtin_extract_return_addr(p); }\n");
+        assert!(!text.contains("call"), "{text}");
+        let text = body("void *f(void *p) { return __builtin_frob_return_addr(p); }\n");
+        assert!(!text.contains("call"), "{text}");
+    }
+
     /// A point control does not arrive at ends the path it is on, at every level.
     ///
     /// `__builtin_unreachable()` is the promise written down, and nothing after it is compiled:

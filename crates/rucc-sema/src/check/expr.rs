@@ -760,6 +760,11 @@ impl Checker<'_> {
         if let Some(value) = self.frame_address_builtin(function, &args, signature.ret, span) {
             return value;
         }
+        // The two that make a return address one a program can compare and back again, which on
+        // every target here is the address unchanged. In `check/builtin/frame.rs` beside them.
+        if let Some(value) = self.return_address_value(function, &args) {
+            return value;
+        }
         // Bytes off this function's own frame, which is the stack pointer moving and not a call to
         // anything. In `check/builtin/alloca.rs`, with what makes it different from a local.
         if let Some(value) = self.alloca_builtin(callee, function, &args, signature.ret, span) {
