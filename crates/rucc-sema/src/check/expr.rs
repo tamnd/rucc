@@ -1122,7 +1122,14 @@ impl Checker<'_> {
         // `*p` on a structure nobody has defined yet is an lvalue like any other, and only reading
         // it needs the definition. The kernel's `PERCPU_PTR(&runqueues)` takes `typeof(*p)` of
         // one without a definition in sight, and gcc accepts it, so the refusal waits for `value`.
-        if !self.incomplete_record(target) && !self.target_of_indirection(target, span) {
+        // An array of unknown length is the same, and less of a question: it decays to a pointer
+        // to its first element, whose type is complete, so `(*layers)[0]` is fine. Landlock hands
+        // its rules around as `const struct landlock_layer (*)[]`.
+        let unsized_array = is_array(&self.types, target);
+        if !self.incomplete_record(target)
+            && !unsized_array
+            && !self.target_of_indirection(target, span)
+        {
             return self.poison(span);
         }
         // Dereferencing a function pointer gives the function back, which is why `(*f)()` and
