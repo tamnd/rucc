@@ -290,8 +290,12 @@ impl Table {
     /// caller's job and not this one's.
     #[must_use]
     pub fn find<S: Subject>(&self, subject: &S, term: S::Node) -> Option<Match<S::Node>> {
-        let mut bindings = Vec::new();
-        let rule = self.run(subject, 0, &mut vec![term], &mut bindings)?;
+        // Both start with room for a pattern of the usual size. Starting them empty grew them a
+        // few times on every instruction selected, and that was most of what the walk allocated.
+        let mut left = Vec::with_capacity(16);
+        left.push(term);
+        let mut bindings = Vec::with_capacity(8);
+        let rule = self.run(subject, 0, &mut left, &mut bindings)?;
         Some(Match { rule, bindings })
     }
 
