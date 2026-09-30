@@ -54,7 +54,8 @@
 
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, BlockCall, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value, ValueList,
+    Block, BlockCall, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Type,
+    Value, ValueList,
 };
 
 use crate::range::ops::{self, Truth};
@@ -75,6 +76,29 @@ const DEAD_EDGE: &str = "branch edge proved never taken";
 
 /// Recorded for each branch on a value the fixpoint never settled, which then takes every edge.
 const UNDECIDED: &str = "branch on an undefined value given all its edges";
+
+/// Recorded for each access whose address was proved more aligned than the access said.
+const ALIGNED: &str = "access alignment raised to what its address is proved to be";
+
+/// Recorded for an access that could have been given a larger alignment after the fuel ran out.
+const NO_FUEL_ALIGN: &str = "access alignment not raised, the pass ran out of fuel";
+
+/// How many bits a pointer is followed at.
+///
+/// The IR gives a pointer no width, because that belongs to the target, so the fixpoint follows
+/// one at 64 bits and keeps only what it knows of the low [`POINTER_KNOWN`] of them. Every
+/// target has pointers at least that wide, so an address worked out in that many bits is the same
+/// whichever target it is for, and what a 32-bit `inttoptr` puts above them is never assumed.
+const POINTER: u32 = 64;
+
+/// How many of a pointer's low bits the fixpoint may know. See [`POINTER`].
+const POINTER_KNOWN: u32 = 32;
+
+/// The most an access is aligned to on the strength of its address, in bytes.
+///
+/// Sixteen is the widest access either x86-64 or AArch64 asks an alignment of, so more than that
+/// buys nothing and only makes the IR say more than anything reads.
+const ALIGN_LIMIT: u32 = 16;
 
 /// The pass. It holds nothing, because everything it knows it works out from the function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +124,7 @@ impl Pass for Sccp {
         let mut stats = Stats::new();
         let Some(solved) = Solver::solve(func, &mut stats) else { return stats };
         replace(func, &solved, fuel, &mut stats);
+        align(func, &solved, fuel, &mut stats);
         stats
     }
 }
@@ -127,19 +152,36 @@ impl Fact {
 }
 
 /// Whether this pass keeps bits for a value of this type.
+///
+/// An address is one, for its low bits, which is what says how aligned it is. It is never turned
+/// into a constant, because its high bits are never known. See [`POINTER`].
 fn tracked(ty: Type) -> bool {
-    ty.is_int() && ty.is_scalar()
+    (ty.is_int() && ty.is_scalar()) || ty.is_ptr()
+}
+
+/// How many bits a value of this type is followed at.
+fn followed(ty: Type) -> u32 {
+    if ty.is_ptr() { POINTER } else { ty.bits() }
 }
 
 /// The fact for a value this pass knows nothing about, which is every bit unknown for an integer.
 fn nothing(ty: Type) -> Fact {
-    if tracked(ty) { Fact::Known(Bits::unknown(ty.bits())) } else { Fact::Varying }
+    if tracked(ty) { Fact::Known(Bits::unknown(followed(ty))) } else { Fact::Varying }
 }
 
 /// The value, as a constant, when every one of its bits is known.
 fn constant(fact: Fact, ty: Type) -> Option<u128> {
     let Fact::Known(bits) = fact else { return None };
-    (tracked(ty) && bits.unknown_bits() == 0).then_some(bits.value())
+    (ty.is_int() && ty.is_scalar() && bits.unknown_bits() == 0).then_some(bits.value())
+}
+
+/// What may be known of an address, which is its low [`POINTER_KNOWN`] bits and nothing above.
+fn address(fact: Fact) -> Fact {
+    let Fact::Known(bits) = fact else { return fact };
+    let low = (1u128 << POINTER_KNOWN) - 1;
+    let all = (1u128 << POINTER) - 1;
+    let unknown = bits.unknown_bits() | (all & !low);
+    Fact::Known(Bits::from_parts(bits.value() & low, unknown, POINTER))
 }
 
 /// What the fixpoint came to, apart from the function so the function can be rewritten with it.
@@ -360,12 +402,30 @@ impl<'a> Solver<'a> {
 
     /// What an instruction's one result is known to be, from what its operands are.
     fn transfer(&self, inst: Inst, ty: Type) -> Fact {
+        let fact = self.bits_of(inst, ty);
+        if ty.is_ptr() { address(fact) } else { fact }
+    }
+
+    /// What [`Solver::transfer`] works out, before an address has its high bits forgotten.
+    fn bits_of(&self, inst: Inst, ty: Type) -> Fact {
         if !tracked(ty) {
             return Fact::Varying;
         }
         let data = &self.func[inst];
         let args = &self.func[data.args];
-        let width = ty.bits();
+        let width = followed(ty);
+        // A local is at an address that is a multiple of its alignment, which is what the frame
+        // promises when it places one.
+        if data.opcode == Opcode::Alloca {
+            let Extra::Mem(mem) = data.extra else { return nothing(ty) };
+            let align = self.func[mem].align.max(1);
+            if !align.is_power_of_two() {
+                return nothing(ty);
+            }
+            let low = u128::from(align - 1);
+            let all = (1u128 << POINTER) - 1;
+            return Fact::Known(Bits::from_parts(0, all & !low, POINTER));
+        }
         if data.opcode == Opcode::IConst {
             let Extra::Imm(at) = data.extra else { return nothing(ty) };
             return Fact::Known(Bits::exactly(self.func[at].unsigned(), width));
@@ -388,7 +448,7 @@ impl<'a> Solver<'a> {
             match self.facts[arg.index()] {
                 Fact::Undefined => return Fact::Undefined,
                 Fact::Known(bits) if tracked(arg_ty) => {
-                    ranges.push(Range::full(arg_ty.bits()).narrow(bits));
+                    ranges.push(Range::full(followed(arg_ty)).narrow(bits));
                 }
                 _ => return nothing(ty),
             }
@@ -423,6 +483,9 @@ const fn reads(opcode: Opcode) -> bool {
             | Opcode::Ctlz
             | Opcode::Cttz
             | Opcode::Ctpop
+            | Opcode::PtrAdd
+            | Opcode::PtrToInt
+            | Opcode::IntToPtr
     )
 }
 
@@ -444,6 +507,29 @@ fn arithmetic(data: &InstData, ranges: &[Range], width: u32) -> Option<Range> {
         Opcode::Shl => pair().map(|(a, b)| ops::shl(a, b, flags))?,
         Opcode::LShr => pair().map(|(a, b)| ops::lshr(a, b, flags))?,
         Opcode::AShr => pair().map(|(a, b)| ops::ashr(a, b, flags))?,
+        // The offset is as wide as the target's addresses, which may be narrower than the width a
+        // pointer is followed at, and the low bits of a sum do not depend on how it was widened.
+        Opcode::PtrAdd => {
+            let [base, offset] = *ranges else { return None };
+            let offset = if offset.width() < base.width() {
+                ops::sext(offset, base.width())
+            } else {
+                offset
+            };
+            if offset.width() != base.width() {
+                return None;
+            }
+            let sum = ops::add(base, offset, Flags::NONE);
+            sum.narrow(low_sum(base.bits(), offset.bits(), base.width()))
+        }
+        Opcode::PtrToInt | Opcode::IntToPtr => {
+            let from = *ranges.first()?;
+            match from.width().cmp(&width) {
+                std::cmp::Ordering::Greater => ops::trunc(from, width),
+                std::cmp::Ordering::Equal => from,
+                std::cmp::Ordering::Less => ops::zext(from, width),
+            }
+        }
         Opcode::Trunc => ops::trunc(*ranges.first()?, width),
         Opcode::ZExt => ops::zext(*ranges.first()?, width),
         Opcode::SExt => ops::sext(*ranges.first()?, width),
@@ -516,6 +602,66 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
     }
     if !forward.is_empty() {
         uses::substitute(func, &forward);
+    }
+}
+
+/// What a sum's low bits are, from the low bits both operands have known.
+///
+/// Below the lowest bit either operand does not know, no carry can come from anything unknown, so
+/// those bits of the sum are the sum of what is known. The intervals lose this, and it is what
+/// says `alloca` plus 8 is still a multiple of 8.
+fn low_sum(a: Bits, b: Bits, width: u32) -> Bits {
+    let known = (a.unknown_bits() | b.unknown_bits()).trailing_zeros().min(width);
+    let all = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
+    let low = if known >= 128 { u128::MAX } else { (1u128 << known) - 1 };
+    Bits::from_parts(a.value().wrapping_add(b.value()) & low, all & !low, width)
+}
+
+/// Gives each access the alignment its address is proved to have, when that is more than it says.
+///
+/// Section 14.2: a pointer whose low three bits are known zero makes an eight byte access aligned,
+/// which is gcc's `get_value_from_alignment`. What the access records is what the backend reads
+/// when it decides whether one move does it, so this is the one place the fact changes code. An
+/// atomic access is left as it is, since its alignment is part of what it promises and was
+/// settled when it was written. A bulk operation takes the smaller of its two addresses.
+fn align(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
+    let blocks: Vec<Block> = func.blocks().filter(|block| solved.reached[block.index()]).collect();
+    for block in blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
+            let Extra::Mem(mem) = func[inst].extra else { continue };
+            let info = func[mem];
+            if info.order != MemOrder::NotAtomic {
+                continue;
+            }
+            let args = &func[func[inst].args];
+            let addresses: Vec<Value> = match (func[inst].opcode, args) {
+                (Opcode::Load | Opcode::Memset, [at, ..]) | (Opcode::Store, [_, at, ..]) => {
+                    vec![*at]
+                }
+                (Opcode::Memcpy | Opcode::Memmove, [to, from, ..]) => vec![*to, *from],
+                _ => continue,
+            };
+            let mut zeros = u32::MAX;
+            for at in addresses {
+                let Fact::Known(bits) = solved.facts[at.index()] else {
+                    zeros = 0;
+                    break;
+                };
+                zeros = zeros.min(bits.low_zeros());
+            }
+            let proved = 1u32 << zeros.min(ALIGN_LIMIT.trailing_zeros());
+            if proved <= info.align {
+                continue;
+            }
+            if !fuel.take() {
+                stats.missed(NO_FUEL_ALIGN);
+                continue;
+            }
+            let raised = func.add_mem(MemInfo { align: proved, ..info });
+            func[inst].extra = Extra::Mem(raised);
+            stats.optimized(ALIGNED);
+        }
     }
 }
 
@@ -727,5 +873,101 @@ block3:
         );
         assert!(out.contains("br_if %4"), "an unreachable branch is left as it was, {out}");
         assert!(out.contains("block2(%4: i1)"), "and so is its parameter, {out}");
+    }
+
+    /// A load through a pointer eight bytes into a local aligned to sixteen, with one byte of
+    /// alignment on the access, which is what a packed or a `char *` access looks like.
+    const INTO_LOCAL: &str = "
+func @f() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 32, align 16
+    %1 = iconst.i64 8
+    %2 = ptr_add %0, %1
+    %3 = load.i64 %2, align 1
+    return %3
+}
+";
+
+    #[test]
+    fn an_access_into_an_aligned_local_takes_the_alignment_its_address_has() {
+        let out = solved(INTO_LOCAL);
+        assert!(out.contains("load.i64 %2, align 8"), "{out}");
+    }
+
+    #[test]
+    fn an_odd_offset_proves_nothing() {
+        let out = solved(&INTO_LOCAL.replace("iconst.i64 8", "iconst.i64 9"));
+        assert!(out.contains("load.i64 %2, align 1"), "{out}");
+    }
+
+    #[test]
+    fn an_address_that_came_in_as_an_argument_proves_nothing() {
+        let out = solved(
+            "
+func @f(ptr) -> i64, linkage(external) {
+block0(%0: ptr):
+    %1 = load.i64 %0, align 1
+    return %1
+}
+",
+        );
+        assert!(out.contains("load.i64 %0, align 1"), "{out}");
+    }
+
+    #[test]
+    fn the_low_bits_of_an_aligned_local_are_known_as_an_integer() {
+        let out = solved(
+            "
+func @f() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = ptrtoint.i64 %0
+    %2 = iconst.i64 7
+    %3 = and %1, %2
+    return %3
+}
+",
+        );
+        assert!(out.contains("%3 = iconst.i64 0"), "{out}");
+    }
+
+    #[test]
+    fn a_pointer_is_never_a_constant_whatever_its_low_bits_are() {
+        let out = solved(
+            "
+func @f() -> i64, linkage(external) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = ptrtoint.i64 %0
+    return %1
+}
+",
+        );
+        assert!(out.contains("ptrtoint"), "{out}");
+    }
+
+    #[test]
+    fn a_parameter_that_joins_two_locals_is_as_aligned_as_the_lesser() {
+        let out = solved(
+            "
+func @f(i1) -> i32, linkage(external) {
+block0(%0: i1):
+    %1 = alloca, size 16, align 16
+    %2 = alloca, size 16, align 4
+    br_if %0, block1(%1), block1(%2)
+
+block1(%3: ptr):
+    %4 = load.i32 %3, align 1
+    return %4
+}
+",
+        );
+        assert!(out.contains("load.i32 %3, align 4"), "{out}");
+    }
+
+    #[test]
+    fn fuel_stops_the_raising() {
+        let out = run(INTO_LOCAL, &mut Fuel::of(0));
+        assert!(out.contains("align 1"), "{out}");
     }
 }
