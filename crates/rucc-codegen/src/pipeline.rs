@@ -705,8 +705,21 @@ pub fn compile_recording(
     } else {
         Slots::share(&func, reach.as_ref(), &allocation, &stack.locals, &widths)
     };
-    let layout = Layout { share: Some(&share), ..layout };
-    let frame = Frame::of(&func, &allocation, &layout);
+    let mut layout = Layout { share: Some(&share), ..layout };
+    let mut frame = Frame::of(&func, &allocation, &layout);
+    // A frame bigger than a page is taken by calling the platform's routine for it, and on a
+    // machine whose call leaves the return address in a register that call writes over it. So such
+    // a function is not a leaf, whatever the program called, and has to save the register the way
+    // any other caller does. AArch64 Windows is the one, and clang saves x29 and x30 there too.
+    let page = machine.insts.probe.as_ref().map_or(u32::MAX, |probe| probe.interval);
+    if layout.leaf
+        && machine.conv.chkstk.is_some()
+        && machine.conv.link.is_some()
+        && frame.size() > page
+    {
+        layout = Layout { leaf: false, ..layout };
+        frame = Frame::of(&func, &allocation, &layout);
+    }
     // The one thing a naked function cannot be given. Everything else the attribute asks for is
     // something left out, and leaving something out always works; bytes are the one thing the body
     // may want that only a prologue provides. A local, a spilled value and the arguments of a call
