@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- Under `-mcmodel=kernel` a jump table holds eight byte addresses and is loaded with `movq table(,%index,8)`, which is the shape gcc writes for the kernel and the only one objtool on 6.1 and 6.12 can read. It is also two instructions and one register shorter than the position independent shape. See tamnd/rucc-kernel#4.
 - A call in tail position is now a `b` on AArch64, the way it was already a `jmp` on x86-64, and a function whose only calls became jumps takes no frame for them on either machine. On sqlite at -O2 this is 481 fewer instructions on x86-64 and 1475 fewer on AArch64. See tamnd/rucc-kernel#4.
 - The register allocator used at `-O1` and above now takes a register that some instruction needs only where the value is already dead. Before, it looked at the whole span from the first to the last use, so a parameter read before an early `return g(1)` was moved out of the register it arrived in and into a callee saved one, which cost a push, a move and a pop. On `sqlite3.c` this removes about 1.2 percent of instructions on x86-64 and on AArch64, with about 7 percent fewer pushes on x86-64 and 6 percent fewer `stp` pairs on AArch64.
 - Code after `__builtin_trap()`, after `__builtin_unreachable()`, and after a call to a function declared `noreturn` is no longer compiled, and neither is a `ret` behind it, at every level. Before, a function ending in `__builtin_trap()` came out as `ud2` then `ret`, and a call to `panic()` was followed by a jump back to the epilogue, both of which objtool reports as instructions nothing reaches. A branch arm that goes only where the program promised control never arrives is now dropped, so `if (x > 3) __builtin_unreachable();` writes no compare, and a `switch` with `default: __builtin_unreachable();` loses the default test. This is the unreachable ends part of the objtool item in tamnd/rucc-kernel#4.
@@ -45,7 +46,6 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - About fifty passes stop collecting each block's instructions into a vector of its own on the way to collecting the whole function's (#2349).
 - Scalar replacement keeps a list of the readers of each value and looks only at those, where before it walked the whole function for every local it planned and again for every local it rewrote. An optimized build of jtckdint goes from 243G instructions back down to 52G (#2360).
 - The register allocator's rewrite stops copying the moves in front of an instruction that borrowed no scratch register, and collects the function's instructions once rather than once a block (#2364).
-- Scalar replacement renames each local over only the blocks that use it, take a parameter for it or pass one, rather than walking the whole dominator tree for every local, which takes about 8% off an optimized build of jtckdint (#2372).
 
 ### Fixed
 

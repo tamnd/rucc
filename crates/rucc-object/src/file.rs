@@ -1080,13 +1080,24 @@ fn tables(
         } else {
             obj.section_id(StandardSection::ReadOnlyData)
         };
-        let offset = obj.append_section_data(section, &vec![0; 4 * table.cells.len()], 4);
+        // Eight bytes of address a cell under the kernel code model, which is counted from the
+        // front of the code section alone rather than from the cell.
+        let (width, flags) = if table.absolute {
+            let wide = flavour.reloc(Reference::Address { bytes: 8 }, 0).ok_or_else(|| {
+                Error::Refused { why: "no relocation is an address in eight bytes".to_owned() }
+            })?;
+            (8, wide)
+        } else {
+            (4, flags)
+        };
+        let offset =
+            obj.append_section_data(section, &vec![0; width * table.cells.len()], width as u64);
         placed.insert(table.name.clone(), (section, offset));
         let (code, at) = split[table.func];
         let symbol = obj.section_symbol(code);
         for (index, &cell) in table.cells.iter().enumerate() {
-            let place = 4 * index as u64;
-            let addend = at as i64 + cell as i64 + place as i64;
+            let place = (width * index) as u64;
+            let addend = at as i64 + cell as i64 + if table.absolute { 0 } else { place as i64 };
             let record = Relocation { offset: offset + place, symbol, addend, flags };
             obj.add_relocation(section, record)
                 .map_err(|why| Error::Refused { why: why.to_string() })?;
@@ -1802,7 +1813,7 @@ mod tests {
     fn switching() -> Text {
         let mut text = two();
         let name = ".Lg_j0".to_owned();
-        text.tables.push(crate::Table { name, func: 1, cells: vec![0, 5] });
+        text.tables.push(crate::Table { name, func: 1, cells: vec![0, 5], absolute: false });
         text
     }
 

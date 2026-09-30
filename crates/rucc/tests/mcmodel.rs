@@ -171,3 +171,47 @@ int kernel(void) { return 1; }
     let text = asm("macro", &["-mcmodel=kernel", "-fno-pie"], source);
     assert!(text.contains("kernel:"), "{text}");
 }
+
+/// A `switch` dense enough for a jump table, with twelve arms.
+const SWITCH: &str = "\
+int a(int); int b(int);
+int sw(int x) {
+    switch (x) {
+    case 0: return a(1); case 1: return b(2); case 2: return a(3); case 3: return b(4);
+    case 4: return a(5); case 5: return b(6); case 6: return a(7); case 7: return b(8);
+    case 8: return a(9); case 9: return b(10); case 10: return a(11); case 11: return 7;
+    }
+    return 0;
+}
+";
+
+/// A jump table under the kernel model is the one objtool reads: loaded by its own address with the
+/// index scaled by eight, and each cell the address of an arm in eight bytes. The distances from
+/// the table that position independent code uses are a table objtool says it cannot find.
+#[test]
+fn a_kernel_model_jump_table_holds_addresses_where_objtool_looks() {
+    let text = asm("table", &["-mcmodel=kernel", "-fno-pic", "-O2"], SWITCH);
+    assert!(text.contains("movq\t.Lsw_j0(,%rax,8), %rax"), "{text}");
+    let cells = text.lines().skip_while(|line| *line != ".Lsw_j0:").skip(1);
+    let cells: Vec<&str> = cells.take_while(|line| line.starts_with("\t.quad")).collect();
+    assert_eq!(cells.len(), 12, "{text}");
+    assert!(cells.iter().all(|cell| cell.starts_with("\t.quad\t.Lsw_")), "{cells:#?}");
+    assert!(!text.contains("\t.long\t.Lsw_"), "{text}");
+
+    // Without the unwind table, as the kernel builds, whose one record is a distance of its own.
+    let line = ["-c", "-mcmodel=kernel", "-fno-pic", "-O2", "-fno-asynchronous-unwind-tables"];
+    let (ok, object, err) = run("table-object", &line, SWITCH);
+    assert!(ok, "{err}");
+    let types = relocation_types(&object);
+    // `R_X86_64_64` for each cell, `R_X86_64_32S` for the load, and no distance at all.
+    assert_eq!(types.iter().filter(|&&kind| kind == 1).count(), 12, "{types:?}");
+    assert!(types.contains(&SIGNED) && !types.contains(&2), "{types:?}");
+}
+
+/// The small model keeps the table of distances, which needs nothing from a linker at load time.
+#[test]
+fn a_small_model_jump_table_is_still_distances() {
+    let text = asm("small", &["-fno-pic", "-O2"], SWITCH);
+    assert!(text.contains("\t.long\t.Lsw_"), "{text}");
+    assert!(!text.contains(".quad"), "{text}");
+}

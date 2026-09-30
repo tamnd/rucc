@@ -241,6 +241,10 @@ pub struct Table {
     pub jump: Inst,
     /// For each value from zero up, which successor of the jump's block it goes to.
     pub cells: Vec<u32>,
+    /// Whether each cell is the address of its block in eight bytes rather than the distance to it
+    /// from the table in four, which is what the kernel code model writes. See
+    /// `rucc_codegen::fold::tables`.
+    pub absolute: bool,
 }
 
 /// One function, in machine instructions.

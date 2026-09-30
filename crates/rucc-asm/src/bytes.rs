@@ -545,7 +545,8 @@ impl Assembler<'_> {
                     })
                     .collect();
                 let name = self.table(index);
-                self.text.tables.push(Table { name, func: self.text.funcs.len(), cells });
+                let func = self.text.funcs.len();
+                self.text.tables.push(Table { name, func, cells, absolute: table.absolute });
             }
             return Ok(starts);
         }
@@ -704,10 +705,14 @@ impl Assembler<'_> {
                             labelled = Some((To::Block(block), i64::from(addr.disp)));
                         }
                         if let Some(table) = amode.and_then(|mem| mem.table) {
-                            // In another section, so the linker's to fill in like any symbol.
-                            if self.apart && addr.rip {
+                            // In another section, so the linker's to fill in like any symbol. The
+                            // kernel code model's table is reached by its own address, which is
+                            // the four bytes the machine sign extends.
+                            if self.apart && (addr.rip || addr.linked) {
                                 let name = self.table(table as usize);
-                                wanted = Some((name, Reference::Data, i64::from(addr.disp)));
+                                let kind =
+                                    if addr.linked { Reference::Signed } else { Reference::Data };
+                                wanted = Some((name, kind, i64::from(addr.disp)));
                             } else {
                                 labelled = Some((To::Table(table), i64::from(addr.disp)));
                             }
@@ -845,12 +850,15 @@ impl Assembler<'_> {
         // fills them in, which is this file rather than the linker, and that is the caller's to
         // sort out: what it needs from here is that the address was written that way at all.
         let names = symbol.is_some() || amode.block.is_some() || amode.table.is_some();
-        let absolute = symbol.is_some() && amode.reach == Reach::Absolute;
+        let absolute =
+            (symbol.is_some() || amode.table.is_some()) && amode.reach == Reach::Absolute;
         let rip = names && base.is_none() && index.is_none() && !absolute;
         // Or a symbol's offset in its section added to a register, which is the linker's to fill
         // in as well but is not counted from the instruction. The symbol's own address under the
-        // kernel code model is the same four bytes, with or without registers added to it.
-        let linked = symbol.is_some() && matches!(amode.reach, Reach::Section | Reach::Absolute);
+        // kernel code model is the same four bytes, with or without registers added to it, and so
+        // is a jump table's under that model.
+        let linked = (symbol.is_some() && matches!(amode.reach, Reach::Section | Reach::Absolute))
+            || absolute;
         let segment = amode.segment;
         let addr = Addr { base, index, scale: amode.scale, disp: amode.disp, rip, segment, linked };
         Ok((addr, if rip || linked { symbol } else { None }))
@@ -1112,7 +1120,7 @@ mod tests {
         func.succs_mut(head).push(BlockCall::to(second));
         func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
         func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
-        func.tables.push(Table { jump, cells: vec![0, 1, 0] });
+        func.tables.push(Table { jump, cells: vec![0, 1, 0], absolute: false });
         func
     }
 
@@ -1136,8 +1144,12 @@ mod tests {
             }]
         );
         // The two returns are nine and ten bytes into the function.
-        let table =
-            rucc_object::Table { name: ".Lf_j0".to_owned(), func: 0, cells: vec![9, 10, 9] };
+        let table = rucc_object::Table {
+            name: ".Lf_j0".to_owned(),
+            func: 0,
+            cells: vec![9, 10, 9],
+            absolute: false,
+        };
         assert_eq!(text.tables, [table]);
     }
 

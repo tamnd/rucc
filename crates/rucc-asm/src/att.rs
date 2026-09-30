@@ -974,7 +974,8 @@ impl Writer<'_> {
                 let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
             }
         } else if let Some(table) = amode.table {
-            // A jump table of this function, which is a place in it the way a label is.
+            // A jump table of this function, which is a place in it the way a label is. Under the
+            // kernel code model it is the table's own address instead, with an index beside it.
             out.push_str(&self.table(func_name, table as usize));
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
@@ -999,7 +1000,7 @@ impl Writer<'_> {
             out.push(')');
         } else if (amode.symbol.is_some() && amode.reach != Reach::Absolute)
             || amode.block.is_some()
-            || amode.table.is_some()
+            || (amode.table.is_some() && amode.reach != Reach::Absolute)
         {
             out.push_str("(%rip)");
         }
@@ -1014,6 +1015,9 @@ impl Writer<'_> {
     /// own section afterwards so that what follows is still inside it. The assembler turns each
     /// cell into a relocation, since its two ends are in different sections. Everywhere else they
     /// stay after the last instruction, where the assembler works each cell out itself.
+    ///
+    /// A table the kernel code model rewrote holds each block's address in eight bytes instead,
+    /// which is what gcc writes there and what objtool reads. See `rucc_codegen::fold::tables`.
     fn tables(&mut self, func: &Func, func_name: &str) {
         if func.tables.is_empty() {
             return;
@@ -1025,7 +1029,8 @@ impl Writer<'_> {
             } else {
                 writeln!(self.out, "\t.section\t.rodata")
             };
-            let _ = writeln!(self.out, "\t.p2align\t2");
+            let wide = func.tables.iter().any(|table| table.absolute);
+            let _ = writeln!(self.out, "\t.p2align\t{}", if wide { 3 } else { 2 });
         } else {
             let _ = match self.fill() {
                 Some(byte) => writeln!(self.out, "\t.p2align\t2, {byte:#x}"),
@@ -1039,7 +1044,11 @@ impl Writer<'_> {
             let succs = &func[block].succs;
             for &cell in &table.cells {
                 let to = self.label(func_name, succs[cell as usize].block);
-                let _ = writeln!(self.out, "\t.long\t{to}-{label}");
+                let _ = if table.absolute {
+                    writeln!(self.out, "\t.quad\t{to}")
+                } else {
+                    writeln!(self.out, "\t.long\t{to}-{label}")
+                };
             }
         }
         if apart {
@@ -1416,7 +1425,7 @@ mod tests {
         func.succs_mut(head).push(rucc_mir::BlockCall::to(second));
         func.build(first, Opcode::new(names.intern("x64.ret"))).finish();
         func.build(second, Opcode::new(names.intern("x64.ret"))).finish();
-        func.tables.push(rucc_mir::Table { jump, cells: vec![0, 1, 0] });
+        func.tables.push(rucc_mir::Table { jump, cells: vec![0, 1, 0], absolute: false });
         let output = Output { sections, ..Output::default() };
         print(&[func], &Globals::default(), &[], &names, &target(os), true, output)
             .expect("a function that was allocated")
