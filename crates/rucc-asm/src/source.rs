@@ -46,6 +46,8 @@ use rucc_tuple::Arch;
 use crate::instruction::Sort as Reach;
 use crate::unwind::{Named, Prologue, Seh};
 
+mod macros;
+
 /// A file this could not read, and where in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trouble {
@@ -324,6 +326,14 @@ struct Reader {
     fixups: Vec<Fixup>,
     /// `.set` and `.equ`, as the symbol they name and the expression they were given.
     sets: Vec<(usize, Sum, usize)>,
+    /// Which of `sets` each set entry is, so that a conditional can look through a name to what it
+    /// was set to while the file is still being read. See [`macros`].
+    setting: Map<usize, usize>,
+    /// The names whose current setting is a plain number, by the name the file writes, with that
+    /// number. gas puts the number in wherever such a name is used, so `.long type + (n << 8)` is
+    /// arithmetic on numbers when `n` was set to one, which is what the kernel's exception table
+    /// macros count on.
+    values: Map<String, i64>,
     /// `.size`, the same way.
     sizes: Vec<(usize, Sum, usize)>,
     /// Which entry a name that has been set means from here on. A file may set one name as many
@@ -387,6 +397,8 @@ struct Reader {
     subsections: bool,
     /// Whether a warning stops the file, which is `-Wa,--fatal-warnings`.
     fatal_warnings: bool,
+    /// The macros defined so far and the conditionals and repetitions that are open.
+    macros: macros::Macros,
     line: usize,
 }
 
@@ -404,14 +416,12 @@ impl Reader {
         for (index, raw) in text.lines().enumerate() {
             self.line = index + 1;
             let line = self.strip(raw, &mut commenting)?;
-            for statement in split(&line, ';') {
-                self.statement(statement.trim())?;
-            }
+            self.feed(&line)?;
         }
         if commenting {
             return Err(self.bad("a block comment was opened and never closed"));
         }
-        Ok(())
+        self.finish_macros()
     }
 
     /// One line without its comments.
@@ -715,6 +725,11 @@ impl Reader {
             return Err(self.bad(&what));
         }
         self.current.insert(name.to_owned(), held);
+        match sum.flat() {
+            Some(value) => self.values.insert(name.to_owned(), value),
+            None => self.values.remove(name),
+        };
+        self.setting.insert(sym, self.sets.len());
         self.sets.push((sym, sum, self.line));
         Ok(())
     }
@@ -2413,6 +2428,7 @@ impl Reader {
             text: text.trim(),
             at: 0,
             here,
+            values: Some(&self.values),
             reader: Some(&*self),
             guessed: Some(&mut guessed),
         }
@@ -3334,7 +3350,14 @@ impl Sum {
 /// is. busybox's SHA code writes `80+0*16(%rdi)` so that the offsets line up with the rounds, and
 /// its TLS code writes `1*8(%r12)` for the words of a number.
 pub(crate) fn constant(text: &str) -> Option<i64> {
-    let mut parser = Parser { text: text.trim(), at: 0, here: (0, 0), reader: None, guessed: None };
+    let mut parser = Parser {
+        text: text.trim(),
+        at: 0,
+        here: (0, 0),
+        values: None,
+        reader: None,
+        guessed: None,
+    };
     parser.whole().ok()?.flat()
 }
 
@@ -3343,6 +3366,9 @@ struct Parser<'a> {
     text: &'a str,
     at: usize,
     here: (usize, i64),
+    /// The names set to a number so far, which are that number wherever they are written. See
+    /// [`Reader::values`].
+    values: Option<&'a Map<String, i64>>,
     /// The file the expression is in, which is where a label has a place for an operator that wants
     /// a number to ask about. Nothing for a displacement read on its own, which has no file around
     /// it and so only takes numbers.
@@ -3567,6 +3593,9 @@ impl Parser<'_> {
                 return Err(format!(
                     "'{name}@' asks for a relocation only an instruction can carry"
                 ));
+            }
+            if let Some(&value) = self.values.and_then(|values| values.get(&name)) {
+                return Ok(Sum::just(value));
             }
             return Ok(Sum::of(What::Symbol(name)));
         }

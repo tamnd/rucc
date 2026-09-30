@@ -12,7 +12,7 @@
 //! version script's worth of `.set` is the same shape again.
 //!
 //! So a template made of directives is read here and becomes the globals it defines. A template
-//! with an instruction in it is handed back as [`Failed::Instruction`], and on ELF the unit keeps
+//! with an instruction or a macro in it is handed back as [`Failed::Instruction`], and on ELF the unit keeps
 //! it as text and is assembled from its listing, the way gcc hands one to gas. Elsewhere there is
 //! no reader for the listing and it is refused by name.
 //!
@@ -66,9 +66,10 @@ pub(crate) enum Failed {
     /// The string completes a sentence that ends in "is not supported yet", so it reads as a
     /// noun phrase and names the construct rather than describing the reader.
     Unsupported(String),
-    /// An instruction, which is the one thing this reader leaves to the assembler, named so the
-    /// message can say which when there is no assembler to leave it to. See
-    /// [`crate::unit`], which keeps such a template as text.
+    /// An instruction, which this reader leaves to the assembler, named so the message can say
+    /// which when there is no assembler to leave it to. A macro, a condition or a repetition is
+    /// left to it the same way and comes back as this too. See [`crate::unit`], which keeps such a
+    /// template as text.
     Instruction(String),
     /// A file `.incbin` named that could not be read, with the reason the operating system gave.
     Missing(String, String),
@@ -452,6 +453,14 @@ impl<'a> Assembler<'a> {
             ".asciz" | ".string" => self.ascii(operands, true)?,
             ".zero" | ".space" | ".skip" => self.space(operands)?,
             ".incbin" => self.incbin(operands)?,
+            // Macros, conditions and repetition, which the assembler's macro layer reads. The
+            // template goes to it the same way one with an instruction does, since a macro
+            // defined here is meant for the templates further down the unit.
+            ".macro" | ".endm" | ".purgem" | ".exitm" | ".rept" | ".irp" | ".irpc" | ".endr"
+            | ".altmacro" | ".noaltmacro" | ".else" | ".elseif" | ".endif" => {
+                return Err(Failed::Instruction(name.to_owned()));
+            }
+            _ if name.starts_with(".if") => return Err(Failed::Instruction(name.to_owned())),
             _ => return Err(unsupported(format!("the '{name}' directive at file scope"))),
         }
         Ok(())
@@ -1603,6 +1612,21 @@ gSize:
     fn a_template_with_an_instruction_in_it_is_refused_by_name() {
         let failed = read(".text\nf:\n movq %rsp, %rbp\n ret\n").expect_err("it is refused");
         assert_eq!(failed, Failed::Instruction("movq".to_owned()));
+    }
+
+    /// A macro, a condition or a repetition goes to the assembler the way an instruction does, so
+    /// the kernel's macros defined at file scope reach the templates that call them.
+    #[test]
+    fn a_macro_is_left_to_the_assembler_like_an_instruction() {
+        for (template, word) in [
+            (".macro ANNOTATE type:req\n.long \\type\n.endm\n", ".macro"),
+            (".data\nx:\n.rept 2\n.byte 1\n.endr\n", ".rept"),
+            (".ifdef CONFIG_X\n.endif\n", ".ifdef"),
+            (".irp r,a,b\n.endr\n", ".irp"),
+        ] {
+            let failed = read(template).expect_err(template);
+            assert_eq!(failed, Failed::Instruction(word.to_owned()), "{template}");
+        }
     }
 
     /// The rest of what is refused, each with a message that names what was written.

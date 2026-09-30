@@ -46,7 +46,9 @@ pub use crate::x86_64::insts::{
     ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,
     form, packed, template_filled, template_name, template_reg, unpacked,
 };
-pub use crate::x86_64::read::{At, Disp, Line, Piece, Step, known, read, read_in, refused};
+pub use crate::x86_64::read::{
+    At, Disp, Line, Piece, Step, known, read, read_in, refused, unlabelled,
+};
 pub use crate::x86_64::text::{
     Arg, Shape, Width, Written, gpr_high, gpr_letter, gpr_name, gpr_named, machine, operand_width,
     written,
