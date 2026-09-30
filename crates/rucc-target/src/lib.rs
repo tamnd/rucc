@@ -1635,7 +1635,7 @@ mod tests {
         assert!(std::ptr::eq(i386.call_regs.expect("i386 SysV"), &x86::SYSV));
         let i686_windows = of("i686-pc-windows-gnu");
         assert_eq!(i686_windows.regs.len(x86::GPR), 8);
-        assert!(i686_windows.call_regs.is_none(), "no ABI is described for it yet");
+        assert!(i686_windows.call_regs.is_none(), "its registers wait on the i386 Windows backend");
         let riscv = of("riscv64-unknown-linux-gnu");
         assert!(riscv.regs.is_empty());
         assert!(riscv.call_regs.is_none());

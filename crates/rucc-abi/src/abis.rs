@@ -48,7 +48,7 @@
 //! written down so the next person to reach for LoongArch finds the reason it is absent rather
 //! than the absence.
 
-use rucc_tuple::{Arch, Os, TargetTuple};
+use rucc_tuple::{Arch, Env, Os, TargetTuple};
 
 use crate::describe::{
     AbiDescription, Banks, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel,
@@ -329,9 +329,8 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
 /// Returning a small structure in edx:eax is a real convention and it is not this one. GCC calls
 /// it `-freg-struct-return`, Darwin and some BSDs default to it, and Linux does not, so the
 /// return list below says memory for every size. Getting that backwards is the failure this crate
-/// exists to avoid, and it is why the dispatch below answers for the ELF systems and declines
-/// i686 Windows, whose stdcall and fastcall decoration is a different ABI wearing the same
-/// architecture.
+/// exists to avoid, and it is why i686 Windows, where the small structure rule is the default,
+/// has [`I386_MINGW`] and [`I386_MSVC`] rather than this one.
 pub static I386_SYSV: AbiDescription = AbiDescription {
     name: "i386 SysV",
     banks: Banks { integer: 0, float: 0, shared: false, integer_width: 4, float_width: 8 },
@@ -358,6 +357,64 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+};
+
+/// i686 Windows as mingw-w64 has it, with gcc or clang.
+///
+/// Arguments are what they are on i386 SysV: every one of them in the argument area, in source
+/// order, rounded up to four bytes. The return value is where the two part. A structure of one,
+/// two, four or eight bytes comes back in al, ax, eax or edx:eax, the way Windows x64 returns one
+/// in rax, and every other size comes back through a hidden first argument. A structure whose
+/// only member is a `float` or a `double` comes back in st(0) instead, which is gcc's rule and
+/// the one thing that keeps this description apart from [`I386_MSVC`].
+///
+/// The hidden pointer itself is also different, and the difference is not in this table. On
+/// Linux the callee pops it with `ret $4`, and here the caller does, so a function returning a
+/// structure ends in a plain `ret` on Windows.
+///
+/// The widths are the ones [`I386_SYSV`] has, for the reason given there. The eight byte `long
+/// long` and `double` alignment inside a structure is a layout fact, and `crate::layout` already
+/// answers it for this target.
+pub static I386_MINGW: AbiDescription = AbiDescription {
+    name: "i386 Windows (mingw)",
+    banks: Banks { integer: 0, float: 0, shared: false, integer_width: 4, float_width: 8 },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+    },
+    returns: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::LoneFloat, Travel::AsFound),
+        Rule::new(Test::SizeOneOf(&[1, 2, 4, 8]), Travel::AsIntegers),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    arguments: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::Anything, Travel::InMemory),
+    ],
+    return_pointer: ReturnPointer::FirstArgument,
+    variadic: Variadic::SameAsFixed,
+    stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
+};
+
+/// i686 Windows as Microsoft's compiler has it, and clang for `i686-pc-windows-msvc`.
+///
+/// [`I386_MINGW`] with one rule fewer: a structure holding a lone `float` or `double` is not
+/// special, so it comes back in eax or edx:eax by its size like any other structure of one, two,
+/// four or eight bytes.
+pub static I386_MSVC: AbiDescription = AbiDescription {
+    name: "i386 Windows (MSVC)",
+    returns: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::SizeOneOf(&[1, 2, 4, 8]), Travel::AsIntegers),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    ..I386_MINGW
 };
 
 /// Which calling convention one function is defined and called with.
@@ -440,8 +497,17 @@ pub fn for_convention(
 }
 
 /// Every ABI described here, which is what the report and the tests iterate.
-pub static DESCRIBED: &[&AbiDescription] =
-    &[&SYSV_AMD64, &AAPCS64, &DARWIN_ARM64, &WINDOWS_ARM64, &WIN64, &RISCV_LP64D, &I386_SYSV];
+pub static DESCRIBED: &[&AbiDescription] = &[
+    &SYSV_AMD64,
+    &AAPCS64,
+    &DARWIN_ARM64,
+    &WINDOWS_ARM64,
+    &WIN64,
+    &RISCV_LP64D,
+    &I386_SYSV,
+    &I386_MINGW,
+    &I386_MSVC,
+];
 
 /// The ABI this target follows, and [`None`] for one whose ABI is not described yet.
 ///
@@ -454,12 +520,13 @@ pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
     Some(match (target.arch(), target.os()) {
         (Arch::X86_64, Os::Windows) => &WIN64,
         (Arch::X86_64, _) => &SYSV_AMD64,
-        // Windows on 32-bit x86 is not this one. stdcall, fastcall and thiscall each pass and
-        // clean up differently and each decorates the symbol name, which makes it the only place
-        // C has mangling, per `spec/cross-compile/04-target-matrix.md`. Answering i386 SysV for it
-        // would be right for the arguments and wrong for the name, and a link failure is the good
-        // outcome there.
-        (Arch::X86, Os::Windows) => return None,
+        // Windows on 32-bit x86 is not i386 SysV: small structures come back in registers. This
+        // is the cdecl half. stdcall, fastcall and thiscall each clean up differently and each
+        // decorates the symbol name, which makes it the only place C has mangling, per
+        // `spec/cross-compile/04-target-matrix.md`, and those are a convention a function asks
+        // for rather than the target's.
+        (Arch::X86, Os::Windows) if target.env() == Env::Msvc => &I386_MSVC,
+        (Arch::X86, Os::Windows) => &I386_MINGW,
         (Arch::X86, _) => &I386_SYSV,
         (Arch::Aarch64, os) if os.is_darwin() => &DARWIN_ARM64,
         // AAPCS64 with a different variadic rule, per section 6.1, and not AAPCS64 itself, which
