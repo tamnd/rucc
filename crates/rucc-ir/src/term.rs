@@ -147,6 +147,17 @@ impl<'a> Terms<'a> {
     pub fn constant(&self, value: Value) -> Option<i128> {
         let inst = self.def_of(value)?;
         let data = &self.func[inst];
+        // A number made a pointer, which is how the front end writes `NULL`, is still the number:
+        // the cast is no instruction at all, and without this `p == NULL` put a zero in a register
+        // to compare with rather than comparing with the zero.
+        if data.opcode == Opcode::IntToPtr && self.func[value].ty.is_ptr() {
+            let &[number] = self.args(inst) else { return None };
+            let ty = self.func[number].ty;
+            let width = slot(Type::PTR, self.address);
+            let same =
+                ty.is_int() && !is_bit(ty) && width.is_some() && slot(ty, self.address) == width;
+            return if same { self.constant(number) } else { None };
+        }
         if data.opcode != Opcode::IConst {
             return None;
         }
@@ -651,7 +662,8 @@ fn value_head(ty: Type, address: u32) -> Option<&'static str> {
 /// these is the number, and [`Terms::constant`] only has a number for an integer, so a term that
 /// named an address would be one a rule could match and then find nothing behind.
 fn iconst_head(ty: Type, address: u32) -> Option<&'static str> {
-    if !ty.is_int() {
+    // A pointer is named at the width of an address, which is what a constant made one is.
+    if !ty.is_int() && !ty.is_ptr() {
         return None;
     }
     if is_bit(ty) {
@@ -1215,8 +1227,8 @@ mod tests {
         assert_eq!(load_head(Type::PTR, 64), Some("load.i64"));
         assert_eq!(store_head(Type::PTR, 64), Some("store.i64"));
         assert_eq!(ret_head(Type::PTR, 64), Some("ret.i64"));
-        // Not a constant, since nothing writes an address down as one.
-        assert_eq!(iconst_head(Type::PTR, 64), None);
+        // And a constant, which is a number the front end made a pointer, as it writes `NULL`.
+        assert_eq!(iconst_head(Type::PTR, 64), Some("iconst.i64"));
         // And on a thirty two bit target it is an integer of thirty two bits, so an i386 rule for
         // `load.i32` is the one a load of a pointer reaches.
         assert_eq!(value_head(Type::PTR, 32), Some("value.i32"));
