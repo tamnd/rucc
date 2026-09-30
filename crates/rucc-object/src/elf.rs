@@ -30,8 +30,9 @@ use crate::section::{Array, Binding, Property, Reference, Visibility};
 /// nobody else defines it. The linker only knows how to undo it in a few instructions and has to
 /// know whether there is a REX prefix, so the load comes in three kinds that say which. After them
 /// is a table slot as well, which holds an offset into a thread's own block rather than an
-/// address, because a thread-local variable has a copy per thread and no address at all. Last is
-/// the address itself, at the two widths this machine writes one at.
+/// address, because a thread-local variable has a copy per thread and no address at all. Then the
+/// distance written as data, at four bytes and at eight, and last the address itself, at the four
+/// widths gas writes one at. A byte or two of an address is rare and is what `.byte sym` asks for.
 ///
 /// Nothing for how far something is from the front of the image. This format has no relocation of
 /// that kind because nothing it writes wants one, and a file asking for one here is a file whose
@@ -44,8 +45,11 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::GotBare => elf::R_X86_64_GOTPCRELX,
         Reference::GotKept => elf::R_X86_64_GOTPCREL,
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
+        Reference::AwayWide => elf::R_X86_64_PC64,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
+        Reference::Address { bytes: 2 } => elf::R_X86_64_16,
+        Reference::Address { bytes: 1 } => elf::R_X86_64_8,
         Reference::Signed => elf::R_X86_64_32S,
         Reference::Address { .. } | Reference::Image | Reference::Section | Reference::Field(_) => {
             return None;
@@ -66,6 +70,7 @@ pub(crate) fn r_type_aarch64(reference: Reference) -> Option<elf::RelocationType
         Reference::Address { bytes: 8 } => elf::R_AARCH64_ABS64,
         Reference::Address { bytes: 4 } => elf::R_AARCH64_ABS32,
         Reference::Data | Reference::Away => elf::R_AARCH64_PREL32,
+        Reference::AwayWide => elf::R_AARCH64_PREL64,
         _ => return None,
     })
 }

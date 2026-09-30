@@ -801,6 +801,10 @@ pub enum Reference {
     /// meant is what lets each writer answer for itself rather than one of them be quietly four
     /// out.
     Away,
+    /// The same distance written into eight bytes, which is `.quad target - .`. The kernel's jump
+    /// label table says where each key is that way on x86-64, and the key is in another section
+    /// from the table, so it is a relocation. `R_X86_64_PC64` on ELF.
+    AwayWide,
     /// How far the thing is from the front of the loaded image, written into four bytes.
     ///
     /// What every field of a Windows unwind table is. The table is read at run time by code that

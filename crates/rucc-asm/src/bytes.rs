@@ -760,6 +760,7 @@ impl Assembler<'_> {
                     Reference::Address { .. }
                     | Reference::Image
                     | Reference::Away
+                    | Reference::AwayWide
                     | Reference::Field(_) => {
                         unreachable!("an instruction wanting an address")
                     }

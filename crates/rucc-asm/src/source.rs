@@ -121,13 +121,21 @@ pub fn read_with(
     // did not reach written long, until none is left over. A branch made long never goes back, so
     // each pass has more long ones than the last and there are only so many branches, which is how
     // gas does it and why the two come out the same size.
+    //
+    // A count worked out from labels further down is the other thing that sends the file round
+    // again, with each label where the last pass put it, until the places stop moving. That has no
+    // such guarantee, so it is given a number of passes and a file that is still moving after them
+    // is refused rather than read for ever.
     let mut long = Set::default();
+    let mut guesses = Map::default();
+    let mut moving = 0;
     loop {
         let aarch64 = arch == Arch::Aarch64;
         let macho = format == ObjectFormat::MachO;
         let coff = format == ObjectFormat::Coff;
         let mut reader = Reader {
             long: long.clone(),
+            guesses,
             aarch64,
             macho,
             coff,
@@ -137,9 +145,47 @@ pub fn read_with(
         reader.run(text)?;
         match reader.finish()? {
             Ok(done) => return Ok(done),
-            Err(grow) => long.extend(grow),
+            Err(again) => {
+                if again.grow.is_empty() {
+                    moving += 1;
+                    if moving > MOST_PASSES {
+                        let why = format!(
+                            "the size of this depends on where labels end up, and after \
+                             {MOST_PASSES} passes they still move"
+                        );
+                        return Err(Trouble { line: again.line, why });
+                    }
+                }
+                long.extend(again.grow);
+                guesses = again.places;
+            }
         }
     }
+}
+
+/// How many times the file is laid out again because a count depended on where a label ended up,
+/// on top of the passes that make branches long.
+///
+/// gas settles the kernel's alternatives in two or three and so does this. A file that has not
+/// settled after this many is one whose sizes chase each other, and gas gives up on those too.
+const MOST_PASSES: usize = 64;
+
+/// The most bytes a count worked out from guessed places may come to.
+///
+/// A count that feeds on itself, like `.fill (1f - 0b) * 2` between the two labels, doubles on
+/// every pass, and it would run out of memory long before it ran out of passes. A real count that
+/// is still a guess is never near this, so one that is has to be one of those.
+const MOST_GUESSED: u64 = 1 << 24;
+
+/// Why a pass over the file was not the answer, and what the next one needs to know.
+#[derive(Debug)]
+struct Again {
+    /// The branches written short that do not reach.
+    grow: Vec<usize>,
+    /// Where every name ended up, which the next pass guesses from. See [`Reader::guesses`].
+    places: Map<String, Held>,
+    /// The first line that guessed, for a message about a file that never settles.
+    line: usize,
 }
 
 /// One name, while the file is still being read.
@@ -315,6 +361,21 @@ struct Reader {
     branches: usize,
     /// Every alignment in the file, in the order it was written.
     aligns: Vec<Aligned>,
+    /// Where every name was when the pass before this one ended, which is the place a label
+    /// further down the file is taken to have when an expression wants a number out of it now.
+    ///
+    /// That is what `.skip -((144f - 143f) > 0) * (144f - 143f)` needs, and the kernel writes one
+    /// behind every alternative: how much padding goes here depends on how long some instructions
+    /// in another section came out, which is not known until the whole file has been laid out, and
+    /// the padding moves everything after it. gas makes such a `.skip` a piece of variable size and
+    /// lays the file out again until nothing moves, and so does this, one whole pass at a time.
+    guesses: Map<String, Held>,
+    /// Every place this pass took from [`Reader::guesses`], with the line that took it. A pass is
+    /// the answer only when every one of them turns out to be where it was guessed to be.
+    guessed: Vec<(String, Held, usize)>,
+    /// What would be wrong with this pass if its guesses held, which is a `.org` that went
+    /// backwards on the strength of one. Said only once the guesses are known to be right.
+    doubts: Vec<Trouble>,
     /// Whether the file is for AArch64 rather than x86-64.
     aarch64: bool,
     /// Whether the file is for Mach-O, where a section is named by its segment as well.
@@ -1148,8 +1209,7 @@ impl Reader {
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.bad(&format!(".{word} wants a size and an optional fill")));
                 }
-                let size = self.number(&args[0])?;
-                let size = self.count(size)?;
+                let size = self.size(&args[0])?;
                 let fill = match args.get(1) {
                     Some(arg) => self.byte(arg)?,
                     None => 0,
@@ -1163,8 +1223,7 @@ impl Reader {
                 if args.is_empty() || args.len() > 3 {
                     return Err(self.bad(".fill wants a count and an optional width and value"));
                 }
-                let count = self.number(&args[0])?;
-                let count = self.count(count)?;
+                let count = self.size(&args[0])?;
                 let width = match args.get(1) {
                     Some(arg) => {
                         let width = self.number(arg)?;
@@ -1190,8 +1249,8 @@ impl Reader {
                 let Some(first) = args.first() else {
                     return Err(self.bad(".org with nothing after it"));
                 };
-                let to = self.number(first)?;
-                let to = self.count(to)?;
+                let guessed = self.guessed.len();
+                let to = self.origin(first)?;
                 let fill = match args.get(1) {
                     Some(arg) => self.byte(arg)?,
                     None => 0,
@@ -1199,9 +1258,16 @@ impl Reader {
                 let at = self.at();
                 if to < at {
                     let what = format!(".org back to {to} from {at}, which would overwrite bytes");
-                    return Err(self.bad(&what));
+                    // On the strength of a guess it may only be the guess that is wrong, so it is
+                    // said only if the guess turns out right. See [`Reader::guesses`].
+                    if self.guessed.len() > guessed {
+                        self.doubts.push(self.bad(&what));
+                    } else {
+                        return Err(self.bad(&what));
+                    }
+                } else {
+                    self.pad(to - at, fill)?;
                 }
-                self.pad(to - at, fill)?;
             }
 
             "globl" | "global" => self.bind(&args, Binding::Global)?,
@@ -2111,12 +2177,211 @@ impl Reader {
     }
 
     /// An expression whose value has to be known now rather than at the end.
+    ///
+    /// Labels are allowed in it as long as they cancel, since a distance between two places in one
+    /// section is a number. See [`Reader::guesses`] for one that is further down the file.
     fn number(&mut self, text: &str) -> Result<i64, Trouble> {
         let sum = self.expression(text)?;
-        sum.flat().ok_or_else(|| Trouble {
-            line: self.line,
-            why: format!("'{}' has to be a number here and it names something", text.trim()),
-        })
+        self.absolute(&sum).ok_or_else(|| self.not_number(text))
+    }
+
+    /// What is wrong with an expression that had to be a number and was not one.
+    fn not_number(&self, text: &str) -> Trouble {
+        self.bad(&format!("'{}' has to be a number here and it names something", text.trim()))
+    }
+
+    /// A count of bytes, which a file may work out from labels.
+    ///
+    /// A negative number the file wrote is refused. A negative distance between labels is nothing,
+    /// which is what gas makes of it: the padding of an alternative whose replacement is shorter
+    /// than the original is exactly that, and it comes out as no padding.
+    fn size(&mut self, text: &str) -> Result<u64, Trouble> {
+        let guessed = self.guessed.len();
+        let sum = self.expression(text)?;
+        // A sum that is flat may still have come from labels, when an operator in it had to settle
+        // them to get a number, and a guess that is wrong can make it negative for a pass.
+        let value = match sum.flat() {
+            Some(value) if self.guessed.len() == guessed => self.count(value)?,
+            Some(value) => u64::try_from(value).unwrap_or(0),
+            None => {
+                let value = self.absolute(&sum).ok_or_else(|| self.not_number(text))?;
+                u64::try_from(value).unwrap_or(0)
+            }
+        };
+        self.not_runaway(value, guessed)?;
+        Ok(value)
+    }
+
+    /// Refuses a count past [`MOST_GUESSED`] that rests on a place guessed since `guessed`.
+    fn not_runaway(&self, value: u64, guessed: usize) -> Result<(), Trouble> {
+        if value > MOST_GUESSED && self.guessed.len() > guessed {
+            let what = format!(
+                "this comes to {value} bytes from where labels further down were guessed to be, \
+                 and a count that grows like that is one that depends on itself"
+            );
+            return Err(self.bad(&what));
+        }
+        Ok(())
+    }
+
+    /// Where `.org` goes to, as an offset into the current section.
+    ///
+    /// A number is one already. So is a place in the current section, which is how a file says
+    /// `.org . + (2f - 1f)` or `.org 0b + 16`, and it is as far into the section as it is.
+    fn origin(&mut self, text: &str) -> Result<u64, Trouble> {
+        let guessed = self.guessed.len();
+        let sum = self.expression(text)?;
+        let value = match sum.flat() {
+            Some(value) => value,
+            None => match self.placed(&sum) {
+                Some((constant, net)) if net.is_empty() => constant,
+                Some((constant, net))
+                    if net.len() == 1 && net.get(&self.here).copied() == Some(1) =>
+                {
+                    constant
+                }
+                _ => {
+                    let what = format!(
+                        "'{}' is not a place in this section, so there is nowhere for .org to go",
+                        text.trim()
+                    );
+                    return Err(self.bad(&what));
+                }
+            },
+        };
+        let value = self.count(value)?;
+        self.not_runaway(value, guessed)?;
+        Ok(value)
+    }
+
+    /// The number a sum comes to, if the labels in it cancel.
+    fn absolute(&mut self, sum: &Sum) -> Option<i64> {
+        if let Some(value) = sum.flat() {
+            return Some(value);
+        }
+        let (constant, net) = self.placed(sum)?;
+        net.is_empty().then_some(constant)
+    }
+
+    /// What a sum comes to with every name in it given a place, noting down the places that were
+    /// guessed.
+    fn placed(&mut self, sum: &Sum) -> Option<(i64, BTreeMap<usize, i64>)> {
+        let mut guessed = Vec::new();
+        let found = self.evaluate(sum, false, &mut guessed, 0);
+        let line = self.line;
+        self.guessed.extend(guessed.into_iter().map(|(name, held)| (name, held, line)));
+        found
+    }
+
+    /// What a sum comes to with every name in it given a place: a number, and how many times the
+    /// start of each section is still counted in it, with the sections it cancels out of left out.
+    ///
+    /// A name is where this pass put it if it has got there, and otherwise where the last pass
+    /// put it, which goes into `guessed`. `raw` says the names are as the file wrote them rather
+    /// than the entries they mean, which is so for an expression still being parsed. Nothing for
+    /// a name that is not a place in this file at all.
+    fn evaluate(
+        &self,
+        sum: &Sum,
+        raw: bool,
+        guessed: &mut Vec<(String, Held)>,
+        depth: usize,
+    ) -> Option<(i64, BTreeMap<usize, i64>)> {
+        let mut constant = sum.constant;
+        let mut net: BTreeMap<usize, i64> = BTreeMap::new();
+        for term in &sum.terms {
+            let (part, offset) = match &term.what {
+                What::Here { part, at } => (*part, *at),
+                What::Symbol(name) => match self.place(name, raw, guessed, depth)? {
+                    Held::Absolute(value) => {
+                        constant = constant.wrapping_add(term.coeff.wrapping_mul(value as i64));
+                        continue;
+                    }
+                    Held::In { part, offset } => (part, offset as i64),
+                    Held::Common { .. } | Held::Undefined => return None,
+                },
+            };
+            constant = constant.wrapping_add(term.coeff.wrapping_mul(offset));
+            *net.entry(part).or_insert(0) += term.coeff;
+        }
+        net.retain(|_, coeff| *coeff != 0);
+        Some((constant, net))
+    }
+
+    /// Where one name is on this pass, or where it was on the last one when this pass has not got
+    /// to it yet. See [`Reader::evaluate`].
+    ///
+    /// A name set to an expression is worked out from that expression, since a set is only given
+    /// its value at the end of the file and a count that names one is wanted now. A label with no
+    /// place on the last pass either, which is every one further down on the first pass, is taken
+    /// to be here, and the next pass puts it right.
+    fn place(
+        &self,
+        name: &str,
+        raw: bool,
+        guessed: &mut Vec<(String, Held)>,
+        depth: usize,
+    ) -> Option<Held> {
+        let held = if raw { self.named(name).ok()? } else { name.to_owned() };
+        if let Some(&sym) = self.known.get(&held) {
+            match self.syms[sym].at {
+                at @ (Held::In { .. } | Held::Absolute(_)) => return Some(at),
+                Held::Common { .. } => return None,
+                Held::Undefined => {
+                    if let Some((_, sum, _)) = self.sets.iter().find(|(set, ..)| *set == sym) {
+                        // Deep enough for any chain of sets a file writes, and short of looping
+                        // for ever on two that name each other, which the end of the file refuses.
+                        if depth > 64 {
+                            return None;
+                        }
+                        let (constant, net) = self.evaluate(sum, false, guessed, depth + 1)?;
+                        let net: Vec<(usize, i64)> = net.into_iter().collect();
+                        return match net.as_slice() {
+                            [] => Some(Held::Absolute(constant as u64)),
+                            [(part, 1)] => Some(Held::In { part: *part, offset: constant as u64 }),
+                            _ => None,
+                        };
+                    }
+                }
+            }
+        }
+        let guess = self
+            .guesses
+            .get(&held)
+            .copied()
+            .unwrap_or(Held::In { part: self.here, offset: self.at() });
+        guessed.push((held, guess));
+        Some(guess)
+    }
+
+    /// Whether every place this pass guessed is where the pass put it, which is what makes the pass
+    /// the answer.
+    ///
+    /// A name that turned out not to be a place in this file at all is refused on the line that
+    /// wanted a number out of it, since no number of passes will give it one.
+    fn guesses_held(&self) -> Result<bool, Trouble> {
+        let now =
+            |name: &String| self.known.get(name).map_or(Held::Undefined, |&sym| self.syms[sym].at);
+        for (name, _, line) in &self.guessed {
+            if !matches!(now(name), Held::In { .. } | Held::Absolute(_)) {
+                let shown = name.split('\u{1}').next().unwrap_or(name);
+                let why = format!(
+                    "'{shown}' is not a place in this file, and it is in something that has to be \
+                     a number"
+                );
+                return Err(Trouble { line: *line, why });
+            }
+        }
+        Ok(self.guessed.iter().all(|(name, guess, _)| now(name) == *guess))
+    }
+
+    /// Where every name is at the end of this pass, for the next one to guess from.
+    fn places(&self) -> Map<String, Held> {
+        self.syms
+            .iter()
+            .filter(|sym| matches!(sym.at, Held::In { .. } | Held::Absolute(_)))
+            .map(|sym| (sym.name.clone(), sym.at))
+            .collect()
     }
 
     /// One of those that has to fit in a byte.
@@ -2143,8 +2408,18 @@ impl Reader {
 
     /// The same, with `.` meaning `here`.
     fn expression_at(&mut self, text: &str, here: (usize, i64)) -> Result<Sum, Trouble> {
-        let mut parser = Parser { text: text.trim(), at: 0, here };
-        let mut sum = parser.whole().map_err(|why| Trouble { line: self.line, why })?;
+        let mut guessed = Vec::new();
+        let parsed = Parser {
+            text: text.trim(),
+            at: 0,
+            here,
+            reader: Some(&*self),
+            guessed: Some(&mut guessed),
+        }
+        .whole();
+        let line = self.line;
+        self.guessed.extend(guessed.into_iter().map(|(name, held)| (name, held, line)));
+        let mut sum = parsed.map_err(|why| Trouble { line, why })?;
         // Every name it mentioned gets a symbol table entry, so that a relocation against one has
         // something to point at and so that an undefined one is asked of the linker.
         for term in &mut sum.terms {
@@ -2164,9 +2439,11 @@ impl Reader {
 
     /// Work out everything that was waiting for the end of the file.
     ///
-    /// Or the branches written short that do not reach, when there are any, for the file to be read
-    /// again with those long.
-    fn finish(mut self) -> Result<Result<Assembled, Vec<usize>>, Trouble> {
+    /// Or what the next pass has to do differently, when this one is not the answer: the branches
+    /// written short that do not reach, for the file to be read again with those long, and where
+    /// everything ended up, for a count that guessed at a place further down to be worked out
+    /// again from where it really is.
+    fn finish(mut self) -> Result<Result<Assembled, Again>, Trouble> {
         if self.frame.is_some() {
             return Err(self.bad("a '.cfi_startproc' that is never ended"));
         }
@@ -2177,10 +2454,17 @@ impl Reader {
         self.unwind_table();
         self.seh_table()?;
         self.resolve_sets()?;
+        let held = self.guesses_held()?;
+        if held {
+            if let Some(doubt) = self.doubts.first() {
+                return Err(doubt.clone());
+            }
+        }
         self.resolve_sizes()?;
         let grow = self.too_far()?;
-        if !grow.is_empty() {
-            return Ok(Err(grow));
+        if !grow.is_empty() || !held {
+            let line = self.guessed.first().map_or(self.line, |(_, _, line)| *line);
+            return Ok(Err(Again { grow, places: self.places(), line }));
         }
         self.resolve_fixups()?;
         self.leaders()?;
@@ -2666,10 +2950,14 @@ impl Reader {
                                 .to_owned(),
                         ));
                     }
-                    if fixup.width != 4 {
+                    // Four bytes or eight, and eight only from a directive, since no instruction
+                    // counts eight bytes of distance. `.quad key - .` is how the kernel's jump
+                    // label table says where each key is.
+                    let wide = fixup.width == 8 && fixup.reach == Reach::Near;
+                    if fixup.width != 4 && !wide {
                         return Err(bad(format!(
-                            "a distance written into {} bytes, and four is the only width a \
-                             relocation says one at",
+                            "a distance written into {} bytes, and four and eight are the only \
+                             widths a relocation says one at",
                             fixup.width
                         )));
                     }
@@ -2686,7 +2974,9 @@ impl Reader {
                         self.syms[sym].binding == Binding::Local
                             && matches!(self.syms[sym].at, Held::In { .. })
                     });
-                    let kind = if fixup.reach == Reach::Branch && !near {
+                    let kind = if wide {
+                        Reference::AwayWide
+                    } else if fixup.reach == Reach::Branch && !near {
                         Reference::Call
                     } else {
                         Reference::Data
@@ -2724,7 +3014,13 @@ impl Reader {
                     )));
                 }
             }
-            if matches!(kind, Reference::Address { bytes } if bytes != 4 && bytes != 8) {
+            // x86-64 has a relocation for an address in one byte and in two as well, which is
+            // what `.byte sym` and `movw $sym, %ax` ask for and gas writes. The linker checks that
+            // the address fits.
+            let narrow = !self.aarch64 && !self.coff && !self.macho;
+            if matches!(kind, Reference::Address { bytes }
+                if bytes != 4 && bytes != 8 && !(narrow && bytes < 4))
+            {
                 return Err(bad(format!(
                     "the address of '{symbol}' written into {} bytes, and this machine relocates \
                      an address at four or eight",
@@ -3038,7 +3334,7 @@ impl Sum {
 /// is. busybox's SHA code writes `80+0*16(%rdi)` so that the offsets line up with the rounds, and
 /// its TLS code writes `1*8(%r12)` for the words of a number.
 pub(crate) fn constant(text: &str) -> Option<i64> {
-    let mut parser = Parser { text: text.trim(), at: 0, here: (0, 0) };
+    let mut parser = Parser { text: text.trim(), at: 0, here: (0, 0), reader: None, guessed: None };
     parser.whole().ok()?.flat()
 }
 
@@ -3047,12 +3343,19 @@ struct Parser<'a> {
     text: &'a str,
     at: usize,
     here: (usize, i64),
+    /// The file the expression is in, which is where a label has a place for an operator that wants
+    /// a number to ask about. Nothing for a displacement read on its own, which has no file around
+    /// it and so only takes numbers.
+    reader: Option<&'a Reader>,
+    /// The places this expression took from the pass before rather than from this one, for the
+    /// file to check once it has been laid out. See [`Reader::guesses`].
+    guessed: Option<&'a mut Vec<(String, Held)>>,
 }
 
 impl Parser<'_> {
     /// The whole of it, and nothing left over.
     fn whole(&mut self) -> Result<Sum, String> {
-        let sum = self.bitwise()?;
+        let sum = self.logical()?;
         self.space();
         if self.at < self.text.len() {
             return Err(format!(
@@ -3063,55 +3366,113 @@ impl Parser<'_> {
         Ok(sum)
     }
 
-    /// The loosest binding of them, which is why it is the outermost.
-    fn bitwise(&mut self) -> Result<Sum, String> {
-        let mut left = self.shift()?;
+    /// `&&` and `||`, which bind loosest of all and come out as one or nothing, the way gas has
+    /// them. `||` is the looser of the two, as it is in C.
+    fn logical(&mut self) -> Result<Sum, String> {
+        let mut left = self.both()?;
         loop {
             self.space();
-            let Some(op) = self.one_of(&["|", "^", "&"]) else { return Ok(left) };
-            let right = self.shift()?;
-            left = self.arithmetic(left, right, op)?;
+            if !self.eat("||") {
+                return Ok(left);
+            }
+            let right = self.both()?;
+            let (a, b) = (self.number(left, "||")?, self.number(right, "||")?);
+            left = Sum::just(i64::from(a != 0 || b != 0));
         }
     }
 
-    /// Shifts, which bind tighter than the bitwise operators and looser than addition.
-    fn shift(&mut self) -> Result<Sum, String> {
+    /// `&&`, one step tighter than `||`.
+    fn both(&mut self) -> Result<Sum, String> {
+        let mut left = self.comparison()?;
+        loop {
+            self.space();
+            if !self.eat("&&") {
+                return Ok(left);
+            }
+            let right = self.comparison()?;
+            let (a, b) = (self.number(left, "&&")?, self.number(right, "&&")?);
+            left = Sum::just(i64::from(a != 0 && b != 0));
+        }
+    }
+
+    /// The six comparisons, which bind looser than addition and come out as minus one when they
+    /// hold and nothing when they do not. That is gas's truth, and it is what the kernel's
+    /// `.skip -((new - old) > 0) * (new - old)` counts on: the minus in front turns it back into
+    /// one.
+    ///
+    /// Two sides that name labels are compared by their difference when neither is a number on its
+    /// own, which is what `(1f - 0f) == 5` needs when both labels are in one section.
+    fn comparison(&mut self) -> Result<Sum, String> {
         let mut left = self.sum()?;
         loop {
             self.space();
-            let Some(op) = self.one_of(&["<<", ">>"]) else { return Ok(left) };
+            let Some(op) = self.one_of(&["==", "!=", "<>", "<=", ">=", "<", ">"]) else {
+                return Ok(left);
+            };
             let right = self.sum()?;
-            left = self.arithmetic(left, right, op)?;
+            let order = match (self.settle(&left), self.settle(&right)) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => {
+                    let apart = left.clone().plus(right.clone().minus());
+                    self.number(apart, op)?.cmp(&0)
+                }
+            };
+            let holds = match op {
+                "==" => order.is_eq(),
+                "!=" | "<>" => order.is_ne(),
+                "<=" => order.is_le(),
+                ">=" => order.is_ge(),
+                "<" => order.is_lt(),
+                _ => order.is_gt(),
+            };
+            left = Sum::just(if holds { -1 } else { 0 });
         }
     }
 
     /// Addition and subtraction, which are the two that keep working when names are involved.
     fn sum(&mut self) -> Result<Sum, String> {
-        let mut left = self.product()?;
+        let mut left = self.bitwise()?;
         loop {
             self.space();
-            // Not the start of `<<` or `>>`, and not a `-` that belongs to nothing.
             let Some(op) = self.one_of(&["+", "-"]) else { return Ok(left) };
-            let right = self.product()?;
+            let right = self.bitwise()?;
             left = if op == "+" { left.plus(right) } else { left.plus(right.minus()) };
         }
     }
 
-    /// Multiplication and the two that go with it.
+    /// The bitwise operators, which gas binds tighter than addition and looser than
+    /// multiplication, unlike C. `!` between two numbers is the first or'd with the complement of
+    /// the second.
+    fn bitwise(&mut self) -> Result<Sum, String> {
+        let mut left = self.product()?;
+        loop {
+            self.space();
+            // Not the first half of `||`, `&&` or `!=`, which belong to the levels above.
+            let rest = &self.text[self.at..];
+            if rest.starts_with("||") || rest.starts_with("&&") || rest.starts_with("!=") {
+                return Ok(left);
+            }
+            let Some(op) = self.one_of(&["|", "^", "&", "!"]) else { return Ok(left) };
+            let right = self.product()?;
+            left = self.arithmetic(left, right, op)?;
+        }
+    }
+
+    /// Multiplication, division, remainder and the two shifts, which are gas's tightest binary
+    /// operators.
     fn product(&mut self) -> Result<Sum, String> {
         let mut left = self.unary()?;
         loop {
             self.space();
-            let Some(op) = self.one_of(&["*", "/", "%"]) else { return Ok(left) };
+            let Some(op) = self.one_of(&["*", "/", "%", "<<", ">>"]) else { return Ok(left) };
             let right = self.unary()?;
             // A name times a number is still a name counted that many times, which is worth keeping
             // because `foo*2 - foo` is a thing a macro produces. Everything else here wants two
-            // numbers, and a name in one of them is a mistake rather than something to guess at.
+            // numbers, and labels whose distance apart is known are one.
             left = match (op, left.flat(), right.flat()) {
                 ("*", _, Some(factor)) => left.times(factor),
                 ("*", Some(factor), _) => right.times(factor),
-                (_, Some(a), Some(b)) => Sum::just(self.arithmetic_number(a, b, op)?),
-                _ => return Err(format!("'{op}' of something that names a symbol")),
+                _ => self.arithmetic(left, right, op)?,
             };
         }
     }
@@ -3127,19 +3488,36 @@ impl Parser<'_> {
         }
         if self.eat("~") {
             let inner = self.unary()?;
-            let value = inner
-                .flat()
-                .ok_or_else(|| "a complement of something that names a symbol".to_owned())?;
-            return Ok(Sum::just(!value));
+            return Ok(Sum::just(!self.number(inner, "~")?));
         }
         if self.eat("!") {
             let inner = self.unary()?;
-            let value = inner
-                .flat()
-                .ok_or_else(|| "a negation of something that names a symbol".to_owned())?;
-            return Ok(Sum::just(i64::from(value == 0)));
+            return Ok(Sum::just(i64::from(self.number(inner, "!")? == 0)));
         }
         self.primary()
+    }
+
+    /// What one side of an operator that wants a number comes to, or a message naming the
+    /// operator when it names something that is not a number here.
+    fn number(&mut self, sum: Sum, op: &str) -> Result<i64, String> {
+        self.settle(&sum).ok_or_else(|| format!("'{op}' of something that names a symbol"))
+    }
+
+    /// The number a sum comes to, when it is one.
+    ///
+    /// Either it names nothing, or every label in it is in the file and they cancel section by
+    /// section, which is a distance between places and so a number however the sections end up
+    /// being placed. A label further down the file has no place yet on this pass, so the place it
+    /// had on the last one is used, and the file checks at the end that the guess held. See
+    /// [`Reader::guesses`].
+    fn settle(&mut self, sum: &Sum) -> Option<i64> {
+        if let Some(value) = sum.flat() {
+            return Some(value);
+        }
+        let reader = self.reader?;
+        let guessed = self.guessed.as_deref_mut()?;
+        let (constant, net) = reader.evaluate(sum, true, guessed, 0)?;
+        net.values().all(|coeff| *coeff == 0).then_some(constant)
     }
 
     /// A number, a name, a character, `.`, or the whole thing again in brackets.
@@ -3150,7 +3528,7 @@ impl Parser<'_> {
             return Err("an expression that stops before it says anything".to_owned());
         }
         if self.eat("(") {
-            let inner = self.bitwise()?;
+            let inner = self.logical()?;
             self.space();
             if !self.eat(")") {
                 return Err("a bracket that was opened and never closed".to_owned());
@@ -3252,21 +3630,24 @@ impl Parser<'_> {
     }
 
     /// An operator on two things that both have to be numbers.
-    fn arithmetic(&self, left: Sum, right: Sum, op: &str) -> Result<Sum, String> {
-        let (Some(a), Some(b)) = (left.flat(), right.flat()) else {
-            return Err(format!("'{op}' of something that names a symbol"));
-        };
+    fn arithmetic(&mut self, left: Sum, right: Sum, op: &str) -> Result<Sum, String> {
+        let a = self.number(left, op)?;
+        let b = self.number(right, op)?;
         Ok(Sum::just(self.arithmetic_number(a, b, op)?))
     }
 
     /// The same, once both are numbers.
+    ///
+    /// A shift right is of the bits and not of the signed number, which is how gas does it: `-1 >>
+    /// 60` is fifteen.
     fn arithmetic_number(&self, a: i64, b: i64, op: &str) -> Result<i64, String> {
         Ok(match op {
             "|" => a | b,
             "^" => a ^ b,
             "&" => a & b,
+            "!" => a | !b,
             "<<" => a.wrapping_shl(shift(b)?),
-            ">>" => a.wrapping_shr(shift(b)?),
+            ">>" => (a as u64).wrapping_shr(shift(b)?) as i64,
             "*" => a.wrapping_mul(b),
             "/" if b == 0 => return Err("a division by zero".to_owned()),
             "%" if b == 0 => return Err("a remainder of a division by zero".to_owned()),
@@ -4269,8 +4650,23 @@ _tls$tlv$init:
     }
 
     #[test]
-    fn a_name_in_an_immediate_too_narrow_for_an_address_is_refused() {
-        let why = refused("\t.text\n\tmovw $message, %ax\n");
+    fn a_name_in_one_or_two_bytes_is_an_address_that_narrow_on_elf_and_refused_on_windows() {
+        // gas writes `R_X86_64_16` and `R_X86_64_8` for these and leaves the linker to check the
+        // address fits. A Windows object has no relocation that narrow.
+        let out = assembled("\t.text\n\tmovw $message, %ax\n\t.data\n\t.byte sym\n\t.short sym\n");
+        let text = out.parts.iter().find(|part| part.name == ".text").unwrap();
+        assert_eq!(text.bytes, [0x66, 0xb8, 0, 0]);
+        assert_eq!(text.relocs[0].kind, Reference::Address { bytes: 2 });
+        let data = out.parts.iter().find(|part| part.name == ".data").unwrap();
+        let kinds: Vec<_> = data.relocs.iter().map(|reloc| (reloc.at, reloc.kind)).collect();
+        assert_eq!(
+            kinds,
+            [(0, Reference::Address { bytes: 1 }), (1, Reference::Address { bytes: 2 })]
+        );
+        let Err(why) = read_as("\t.text\n\tmovw $message, %ax\n", Arch::X86_64, ObjectFormat::Coff)
+        else {
+            panic!("read");
+        };
         assert!(why.why.contains("bytes"), "{why}");
     }
 
@@ -4894,5 +5290,116 @@ g:
             };
             assert!(why.contains(what), "{why}");
         }
+    }
+
+    /// The padding the kernel's ALTERNATIVE macro puts after the original instructions, with the
+    /// replacement further down in a section of its own. When the replacement is longer the
+    /// original is padded with that many `nop` bytes, which is thirteen here, and the table's
+    /// distances and lengths come out as gas writes them.
+    #[test]
+    fn the_padding_of_an_alternative_with_a_longer_replacement_is_the_difference() {
+        let out = assembled(
+            "140: call foo\n141:\n\
+             .skip -(((144f-143f)-(141b-140b)) > 0) * ((144f-143f)-(141b-140b)),0x90\n142:\n\
+             .pushsection .altinstructions,\"a\"\n.long 140b - .\n.long 143f - .\n\
+             .byte 142b-140b\n.byte 144f-143f\n.popsection\n\
+             .pushsection .altinstr_replacement,\"ax\"\n\
+             143: movq %gs:0x28, %rax\n movq %rax, %gs:0x30\n144:\n.popsection\nret\n",
+        );
+        let text = bytes(&out, ".text");
+        assert_eq!(text.len(), 19, "{text:x?}");
+        assert!(text[5..18].iter().all(|&byte| byte == 0x90), "{text:x?}");
+        assert_eq!(text[18], 0xc3);
+        let table = bytes(&out, ".altinstructions");
+        assert_eq!(table[8..], [18, 18]);
+    }
+
+    /// The same padding when the replacement is shorter, which is a negative count that the
+    /// comparison zeroes, so there is no padding at all.
+    #[test]
+    fn the_padding_of_an_alternative_with_a_shorter_replacement_is_nothing() {
+        let out = assembled(
+            "140: movq %gs:0x28, %rax\n movq %rax, %gs:0x30\n141:\n\
+             .skip -(((144f-143f)-(141b-140b)) > 0) * ((144f-143f)-(141b-140b)),0x90\n142:\n\
+             .pushsection .altinstr_replacement,\"ax\"\n143: nop\n144:\n.popsection\nret\n",
+        );
+        assert_eq!(bytes(&out, ".text").len(), 19);
+    }
+
+    /// The operators gas has, with its precedence rather than C's: `|` binds tighter than `+`, a
+    /// comparison is all ones when it holds, `!` between two numbers is or-not and `>>` shifts
+    /// zeroes in.
+    #[test]
+    fn every_operator_gas_has_works_with_the_precedence_gas_gives_it() {
+        let out = assembled(
+            ".byte 1 == 1, 1 != 1, 2 < 3, 3 <= 2, 3 > 2, 2 >= 2, 1 <> 2\n\
+             .byte 1 && 0, 1 || 0, !0, 7 % 3, 1 << 3, 0x80 >> 4, 5 ^ 1, ~0\n\
+             .byte 1 + 2 == 3, 2 * 3 + 1, 1 | 2 + 4, 6 & 3 ! 0, 2 | 1 + 1, -1 >> 60\n",
+        );
+        assert_eq!(
+            bytes(&out, ".text"),
+            [
+                0xff, 0x00, 0xff, 0x00, 0xff, 0xff, 0xff, 0x00, 0x01, 0x01, 0x01, 0x08, 0x08, 0x04,
+                0xff, 0xff, 0x07, 0x07, 0xff, 0x04, 0x0f
+            ]
+        );
+    }
+
+    /// The kernel's `(1f - 0f) == 5`, a comparison of a distance between two labels that are both
+    /// further down, is worked out once they are placed.
+    #[test]
+    fn a_comparison_of_labels_further_down_is_worked_out() {
+        let out = assembled(
+            ".byte (1f - 0f) == 5, (1f - 0f) == 4\n0: .byte 1, 2, 3, 4, 5\n1:\n\
+             .equ five, 1b - 0b\n.byte five\n",
+        );
+        assert_eq!(bytes(&out, ".text"), [0xff, 0, 1, 2, 3, 4, 5, 5]);
+    }
+
+    /// Counts of `.fill`, `.skip` and `.org` may be distances between labels on either side, and
+    /// a negative distance is no bytes, which is what gas makes of it.
+    #[test]
+    fn fill_skip_and_org_take_their_counts_from_labels() {
+        let out = assembled(
+            "0: nop\nnop\n1:\n.fill 1b - 0b, 1, 0xcc\n.org 0b + 8\n.byte 1\n\
+             .fill 3f - 2f, 1, 0x90\n2: .long 0\n3:\n.skip 2b - 3b\n.byte 7\n",
+        );
+        assert_eq!(
+            bytes(&out, ".text"),
+            [0x90, 0x90, 0xcc, 0xcc, 0, 0, 0, 0, 1, 0x90, 0x90, 0x90, 0x90, 0, 0, 0, 0, 7]
+        );
+    }
+
+    /// Eight bytes of distance to a place in another section, the way the kernel's jump table
+    /// writes `.quad key - .`, is a relocation that counts from where it is.
+    #[test]
+    fn eight_bytes_of_distance_to_another_section_is_a_wide_relocation() {
+        let out = assembled("\t.text\nx: nop\n\t.data\n\t.quad x - .\n\t.quad sym - .\n");
+        let data = out.parts.iter().find(|part| part.name == ".data").unwrap();
+        let kinds: Vec<_> = data.relocs.iter().map(|reloc| (reloc.at, reloc.kind)).collect();
+        assert_eq!(kinds, [(0, Reference::AwayWide), (8, Reference::AwayWide)]);
+    }
+
+    /// `movq sym, %rax` with no `%rip` and `pushq $sym`, both of which the kernel writes, are a
+    /// sign extended address, and the bytes the linker writes over are zero as gas leaves them.
+    #[test]
+    fn an_absolute_address_and_a_pushed_one_are_sign_extended_and_zero() {
+        let out = assembled("\tmovq sym, %rax\n\tpushq $sym\n");
+        let text = out.parts.iter().find(|part| part.name == ".text").unwrap();
+        assert_eq!(text.bytes, [0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0x68, 0, 0, 0, 0]);
+        let kinds: Vec<_> = text.relocs.iter().map(|reloc| (reloc.at, reloc.kind)).collect();
+        assert_eq!(kinds, [(4, Reference::Signed), (9, Reference::Signed)]);
+    }
+
+    /// A name in a count that is never placed is refused, and so is a count that feeds on itself
+    /// or a layout that never settles, rather than read forever.
+    #[test]
+    fn a_count_that_cannot_be_worked_out_is_refused() {
+        let why = refused("0: .skip sym - 0b\n");
+        assert!(why.why.contains("'sym' is not a place"), "{why}");
+        let why = refused("0: nop\n.fill (1f - 0b) * 2, 1, 0xcc\n1: nop\n");
+        assert!(why.why.contains("depends on itself"), "{why}");
+        let why = refused("0: nop\n.org 1f\n.byte 1\n1:\n");
+        assert!(why.why.contains("still move"), "{why}");
     }
 }

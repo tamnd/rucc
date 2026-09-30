@@ -311,6 +311,10 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             _ => return Err(format!("'{word}' carries '{text}' somewhere this cannot write one")),
         };
         let at = bytes.len() - width;
+        // The row was chosen with [`STANDING`] in place of the expression and the encoder wrote
+        // it there. The hole is what goes in those bytes, and a hole the linker fills is read as
+        // nothing plus its addend, which is what gas leaves: `pushq $sym` is `68 00 00 00 00`.
+        bytes[at..].fill(0);
         let sort = if width == 4 && extends(&bytes) { Sort::Extended } else { Sort::Value };
         wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort });
     }
