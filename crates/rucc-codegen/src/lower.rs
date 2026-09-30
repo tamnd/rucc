@@ -266,12 +266,27 @@ impl Off {
 /// It reads the values rather than the types the program declared. A structure with a `double` in
 /// it is copied as bytes and asks for no vector register, which is what gcc does too.
 ///
+/// `x87_return` is `-mno-fp-ret-in-387` read the other way round. The kernel's display code turns
+/// the x87 stack back on with `-mhard-float` and leaves that flag in place, so a `long double` may
+/// be computed with and not returned, and gcc refuses only a function that returns one.
+///
 /// # Errors
 ///
 /// [`Unsupported::Registers`] for the first value that wants a file that is off.
-pub fn off_registers(source: &Func, vector: bool, x87: bool) -> Result<(), Unsupported> {
-    if vector && x87 {
+pub fn off_registers(
+    source: &Func,
+    vector: bool,
+    x87: bool,
+    x87_return: bool,
+) -> Result<(), Unsupported> {
+    if vector && x87 && x87_return {
         return Ok(());
+    }
+    let signature = source.signature();
+    for ret in &signature.returns {
+        if x87 && !x87_return && on_x87(ret.ty) {
+            return Err(Unsupported::Registers { inst: None, ty: Some(ret.ty), off: Off::X87 });
+        }
     }
     let wants = |ty: Type| {
         if on_x87(ty) {
@@ -283,7 +298,6 @@ pub fn off_registers(source: &Func, vector: bool, x87: bool) -> Result<(), Unsup
         }
     };
     let refuse = |inst, ty| wants(ty).map(|off| Unsupported::Registers { inst, ty: Some(ty), off });
-    let signature = source.signature();
     for param in signature.params.iter().chain(&signature.returns) {
         if let Some(refused) = refuse(None, param.ty) {
             return Err(refused);

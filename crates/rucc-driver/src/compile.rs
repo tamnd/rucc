@@ -996,6 +996,7 @@ fn generate(
         code_model: opts.code_model,
         vector: opts.vector,
         x87: opts.x87,
+        x87_return: opts.x87_return,
         zero: opts.zero_regs.map(|(all, arg)| rucc_codegen::zero::Zeroing { all, arg }),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
@@ -4305,6 +4306,30 @@ decl #0 x : int object external static defined
         assert!(!text.contains("xmm"), "{text}");
         // Nothing asks for more than eight, so no frame is realigned by hand.
         assert!(!text.contains("$-16"), "{text}");
+    }
+
+    /// The kernel's display code, which turns SSE and the x87 stack back on over the kernel's flags
+    /// and keeps `-mno-fp-ret-in-387` and a boundary of eight. A `long double` can be worked with
+    /// and not returned, and a vector kept across a call gets a frame the prologue aligns, which is
+    /// what gcc does with the same flags.
+    #[test]
+    fn a_unit_with_the_vector_registers_back_on_the_kernel_boundary_realigns_its_frame() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.x87_return = false;
+        opts.stack_boundary = Some(8);
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&opts, "long double same(long double x) { return x; }\n");
+        assert!(result.messages[0].contains("a `f80` is kept in the x87 registers"), "{result:?}");
+
+        let source = "typedef float v4 __attribute__((vector_size(16)));\n\
+                      void g(void);\n\
+                      double mean(double a, double b) { long double s = a; s += b; return s / 2; }\n\
+                      v4 kept(v4 a) { g(); return a; }\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{result:?}");
+        let text = result.text();
+        assert!(text.contains("andq\t$-16, %rsp"), "{text}");
     }
 
     /// A variable length array walks its pages under the flag that says every page is touched.
