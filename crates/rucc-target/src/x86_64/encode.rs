@@ -1967,6 +1967,14 @@ static ENCODINGS: &[Encoding] = &[
     // which is how a program written in C reads a register C has no name for.
     bytes("pushfq", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
     bytes("popfq", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
+    // Two bytes pushed and popped, which is the same opcodes behind the `0x66` prefix in either
+    // mode. The kernel's `relocate_kernel_64.S` builds a far return frame out of these.
+    bytes("pushw", &R, Word, &[0x50], plus(0), NO_IMM),
+    bytes("popw", &R, Word, &[0x58], plus(0), NO_IMM),
+    bytes("pushw", &M, Word, &[0xFF], ext(0, 6), NO_IMM),
+    bytes("popw", &M, Word, &[0x8F], ext(0, 0), NO_IMM),
+    takes("pushw", &I, Signed8, Word, &[0x6A], NO_MODRM, ImmSize::Ib),
+    takes("pushw", &I, Fits::Word, Word, &[0x68], NO_MODRM, ImmSize::Iw),
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
     // The same with a count of bytes to take off the stack after the return address, which is how
     // an i386 function gives back the address its result went through.
@@ -3939,6 +3947,20 @@ static ENCODINGS: &[Encoding] = &[
     avx("vpextrq", &IVM, WordQuad, Map::Escape3A, &[0x16], None, pair(2, 1)),
     avx("vpinsrq", &IRVV, WordQuad, Map::Escape3A, &[0x22], Some(2), pair(1, 3)),
     avx("vpinsrq", &IMVV, WordQuad, Map::Escape3A, &[0x22], Some(2), pair(1, 3)),
+    // The narrower lanes of the same two, which the kernel's CRC code writes through a macro that
+    // puts a `v` in front of the SSE name when it is built for AVX.
+    avx("vpextrb", &IVR, Word, Map::Escape3A, &[0x14], None, pair(2, 1)),
+    avx("vpextrb", &IVM, Word, Map::Escape3A, &[0x14], None, pair(2, 1)),
+    avx("vpextrw", &IVR, Word, Map::Escape, &[0xC5], None, pair(1, 2)),
+    avx("vpextrw", &IVM, Word, Map::Escape3A, &[0x15], None, pair(2, 1)),
+    avx("vpextrd", &IVR, Word, Map::Escape3A, &[0x16], None, pair(2, 1)),
+    avx("vpextrd", &IVM, Word, Map::Escape3A, &[0x16], None, pair(2, 1)),
+    avx("vpinsrb", &IRVV, Word, Map::Escape3A, &[0x20], Some(2), pair(1, 3)),
+    avx("vpinsrb", &IMVV, Word, Map::Escape3A, &[0x20], Some(2), pair(1, 3)),
+    avx("vpinsrw", &IRVV, Word, Map::Escape, &[0xC4], Some(2), pair(1, 3)),
+    avx("vpinsrw", &IMVV, Word, Map::Escape, &[0xC4], Some(2), pair(1, 3)),
+    avx("vpinsrd", &IRVV, Word, Map::Escape3A, &[0x22], Some(2), pair(1, 3)),
+    avx("vpinsrd", &IMVV, Word, Map::Escape3A, &[0x22], Some(2), pair(1, 3)),
     avx("vzeroupper", &NO_ARGS, Long, Map::Escape, &[0x77], None, NO_MODRM),
     Encoding {
         vex: Some(Vex { map: Map::Escape, vvvv: None, long: true }),
@@ -3981,6 +4003,13 @@ static ONLY32: &[Encoding] = &[
     takes("pushl", &I, Fits::Long, Long, &[0x68], NO_MODRM, ImmSize::Id),
     bytes("pushfl", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
     bytes("popfl", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
+    // The descriptor table loads and stores with the suffix that says six bytes, which is what
+    // they move in this mode. The EFI mixed mode entry in the kernel saves the firmware's table
+    // with `sgdtl`.
+    bytes("sgdtl", &M, Long, &[0x0F, 0x01], ext(0, 0), NO_IMM),
+    bytes("sidtl", &M, Long, &[0x0F, 0x01], ext(0, 1), NO_IMM),
+    bytes("lgdtl", &M, Long, &[0x0F, 0x01], ext(0, 2), NO_IMM),
+    bytes("lidtl", &M, Long, &[0x0F, 0x01], ext(0, 3), NO_IMM),
 ];
 
 /// The mnemonics of the shared table that move eight bytes in sixty four bit mode without a size
