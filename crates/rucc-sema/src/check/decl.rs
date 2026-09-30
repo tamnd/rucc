@@ -292,6 +292,8 @@ impl Checker<'_> {
         // below reads only the specifiers for the same reason. The usual place to write one on a
         // function is the declaration above the definition anyway, and the merge keeps it.
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, AttrList::EMPTY, ty));
+        // `section` and `used` beside a star, which are the declaration's, as in [`Self::starred`].
+        let starred = self.starred(declarator);
         let gnu_inline = self.gnu_inlined(specs.attrs);
         // Checked and not kept, since nothing reads a format string yet. The specifiers only, for
         // the reason `retained` below reads them only.
@@ -306,7 +308,7 @@ impl Checker<'_> {
             initialized: false,
             alignment,
             constant: false,
-            retained: self.retains(specs.attrs),
+            retained: self.retains(specs.attrs) || starred.iter().any(|&a| self.retains(a)),
             // A definition has no declarator of its own to write one after, which is a rule of
             // the grammar rather than of this compiler: gcc stops at the brace as well. The
             // declaration above the definition is where one goes and the merge keeps it.
@@ -365,9 +367,12 @@ impl Checker<'_> {
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
-        // The specifiers only, for the reason `noreturn` above reads them only. A kernel writes
-        // `__init` between the return type and the name, which is still the specifiers.
-        let section = self.sectioned(specs.attrs, duration);
+        // The specifiers, for the reason `noreturn` above reads them. A kernel writes `__init`
+        // between the return type and the name, which is still the specifiers, or beside the star
+        // of a pointer it returns, as `void * __init memblock_alloc_try_nid(...)`.
+        let section = self
+            .sectioned(specs.attrs, duration)
+            .or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)));
         let id = self.merge(declared);
         self.record_section(id, section);
         // The return type's name, kept for the debug information the way an object's is below.
@@ -678,17 +683,8 @@ impl Checker<'_> {
         // reason `retained` below reads both, and a header writes it after the declarator.
         self.format_archetypes(specs.attrs);
         self.format_archetypes(item.attrs);
-        // `static void * __used __section(".discard.addressable") name`, which is how the kernel
-        // spells `__ADDRESSABLE`. gcc gives an attribute that only a declaration can have to the
-        // declaration wherever in the declarator it was written, so `section` and `used` beside a
-        // star are read as if they were written after the name.
-        let starred: Vec<AttrList> = self.ast[node.derived]
-            .iter()
-            .filter_map(|step| match *step {
-                ast::Derived::Pointer { attrs, .. } => Some(attrs),
-                _ => None,
-            })
-            .collect();
+        // `section` and `used` beside a star, which are the declaration's, as in [`Self::starred`].
+        let starred = self.starred(item.declarator);
         // One string with two readings, so one call answers both and the string is looked at once.
         let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
         let mut declared = Declared {
@@ -834,6 +830,21 @@ impl Checker<'_> {
     /// It gives back a declaration only for the one typedef that has something to do where it
     /// stands, which is a block-scope name for a variably modified type. Every other one is
     /// resolved where it is written and leaves nothing in the tree.
+    /// The attributes written beside each star in a declarator, as in
+    /// `static void * __used __section(".discard.addressable") name`, which is how the kernel
+    /// spells `__ADDRESSABLE`, or `void * __init f(void)`. gcc gives an attribute that only a
+    /// declaration can have to the declaration wherever in the declarator it was written, so
+    /// `section` and `used` there are read as if they were written after the name.
+    fn starred(&self, declarator: ast::DeclaratorId) -> Vec<AttrList> {
+        self.ast[self.ast[declarator].derived]
+            .iter()
+            .filter_map(|step| match *step {
+                ast::Derived::Pointer { attrs, .. } => Some(attrs),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn typedef(
         &mut self,
         name: Symbol,

@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `section` or `used` attribute beside the star of a function that returns a pointer, as in `void * __init f(void)`, now places the function too, on a definition as well as a declaration.
 - A `section` or `used` attribute written between a `*` and the name, as the kernel's `__ADDRESSABLE` does, now applies to the declaration the way gcc applies it, so the object lands in its section instead of `.data`.
 - The assembler reads `.incbin`, with its optional skip and count, so the kernel's `rmpiggy.S` can carry the real mode blob.
 - A static initializer may now add a number to an address that was cast to a full width integer, so `(unsigned long)&init_stack + sizeof(init_stack)` is kept as one relocation with an addend, as gcc does.
