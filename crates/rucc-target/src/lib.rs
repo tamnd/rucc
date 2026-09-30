@@ -795,6 +795,31 @@ impl TargetInfo {
         self.tuple.arch() == tuple::Arch::Aarch64 && name == "x18"
     }
 
+    /// Whether an unnamed bit-field raises the record's alignment under `style`, which is the
+    /// target's own rule or the one a `gcc_struct` or `ms_struct` attribute chose.
+    ///
+    /// Under the target's own rule it is [`TargetInfo::unnamed_bit_field_aligns`]. Microsoft's rule
+    /// says yes everywhere. The Itanium rule that `gcc_struct` asks for on Windows says what it
+    /// says on the same architecture's other rows: no on x86-64, and yes on AArch64, where AAPCS64
+    /// says so. So `struct { char c; int :20; } __attribute__((gcc_struct))` is four bytes aligned
+    /// to one from mingw-w64 gcc on x86-64 and four aligned to four from llvm-mingw's clang on
+    /// AArch64, which is also what gcc for AArch64 Linux makes of it without the attribute.
+    #[must_use]
+    pub fn unnamed_bit_field_aligns_under(&self, style: BitFieldStyle) -> bool {
+        if style == self.bit_field_style {
+            return self.unnamed_bit_field_aligns;
+        }
+        match style {
+            BitFieldStyle::Microsoft => true,
+            BitFieldStyle::Itanium => {
+                matches!(
+                    self.tuple.arch(),
+                    tuple::Arch::Aarch64 | tuple::Arch::Arm | tuple::Arch::Arm64Ec
+                ) && !self.tuple.os().is_darwin()
+            }
+        }
+    }
+
     /// The description of `target`.
     ///
     /// Every row of the target table has one of these, whether or not there is a backend that can
