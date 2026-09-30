@@ -908,6 +908,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 link.compress = opts.compress;
             }
             "-Werror" => opts.warnings_are_errors = true,
+            // Takes back an earlier `-Werror`, the way gcc reads it, which is how a build that has
+            // `-Werror` in flags it does not own gets its warnings back as warnings.
+            "-Wno-error" => opts.warnings_are_errors = false,
             // Nothing that is not fatal is said at all. Read at the one place a diagnostic goes
             // through rather than here, so that a warning `-w` dropped is not counted either.
             "-w" => opts.warnings = false,
@@ -6972,6 +6975,8 @@ mod tests {
         // The two spellings that do mean something are still read.
         let (opts, _) = compile(&["-Werror", "-c", "a.c"]);
         assert!(opts.warnings_are_errors);
+        let (opts, _) = compile(&["-Werror", "-Wno-error", "-c", "a.c"]);
+        assert!(!opts.warnings_are_errors);
         let (opts, _) = compile(&["-w", "-c", "a.c"]);
         assert!(!opts.warnings);
         // Off without being asked, the way gcc has it off, and both spellings are read.
