@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `section` or `used` attribute written between a `*` and the name, as the kernel's `__ADDRESSABLE` does, now applies to the declaration the way gcc applies it, so the object lands in its section instead of `.data`.
 - The assembler reads `.incbin`, with its optional skip and count, so the kernel's `rmpiggy.S` can carry the real mode blob.
 - A static initializer may now add a number to an address that was cast to a full width integer, so `(unsigned long)&init_stack + sizeof(init_stack)` is kept as one relocation with an addend, as gcc does.
 - `lar` and `lsl` take their width from the register they write, so `lar %ax, %eax`, which the kernel's signal_64.c writes, assembles. A word read into a sixty four bit register has no `REX.W`, as in gas.

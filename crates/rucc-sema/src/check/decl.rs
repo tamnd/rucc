@@ -678,6 +678,17 @@ impl Checker<'_> {
         // reason `retained` below reads both, and a header writes it after the declarator.
         self.format_archetypes(specs.attrs);
         self.format_archetypes(item.attrs);
+        // `static void * __used __section(".discard.addressable") name`, which is how the kernel
+        // spells `__ADDRESSABLE`. gcc gives an attribute that only a declaration can have to the
+        // declaration wherever in the declarator it was written, so `section` and `used` beside a
+        // star are read as if they were written after the name.
+        let starred: Vec<AttrList> = self.ast[node.derived]
+            .iter()
+            .filter_map(|step| match *step {
+                ast::Derived::Pointer { attrs, .. } => Some(attrs),
+                _ => None,
+            })
+            .collect();
         // One string with two readings, so one call answers both and the string is looked at once.
         let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
         let mut declared = Declared {
@@ -693,7 +704,9 @@ impl Checker<'_> {
             // Written on the specifiers it is shared with the declarators beside this one, and
             // written after the declarator it is this declaration's alone. Either place asks for
             // the same thing, so either place is read.
-            retained: self.retains(specs.attrs) || self.retains(item.attrs),
+            retained: self.retains(specs.attrs)
+                || self.retains(item.attrs)
+                || starred.iter().any(|&attrs| self.retains(attrs)),
             asm_label,
             register,
             // Read from both places for the same reason `retained` above is.
@@ -757,6 +770,8 @@ impl Checker<'_> {
             Some(section) => Some(section),
             None => self.sectioned(item.attrs, duration),
         };
+        let section =
+            section.or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)));
         let id = self.merge(declared);
         self.record_section(id, section);
         // Kept for the debug information, which names the typedef where the program did.

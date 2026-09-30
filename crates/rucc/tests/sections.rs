@@ -212,3 +212,24 @@ fn a_windows_listing_names_the_section_with_coff_flags() {
         assert!(text.contains(line), "{line:?} in\n{text}");
     }
 }
+
+#[test]
+fn a_section_written_beside_the_star_is_the_declarations() {
+    // The kernel's `__ADDRESSABLE`, with the attributes between the star and the name. gcc puts
+    // the object in the section, and modpost refuses a vmlinux where it lands in `.data`.
+    let source = "void f(void);\n\
+                  static void * __attribute__((__used__)) \
+                  __attribute__((__section__(\".discard.addressable\"))) \
+                  keep_f = (void *)(unsigned long)&f;\n";
+    for level in ["-O0", "-O2"] {
+        let dir = fixture(&format!("starred{level}"), source);
+        let text = run(&dir, LINUX, &["-S", level], "one.s");
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8(text).expect("a listing is text");
+        assert!(
+            text.contains("\t.section\t.discard.addressable,\"aw\",@progbits\n"),
+            "{level}:\n{text}"
+        );
+        assert!(text.contains("keep_f:\n"), "`used` keeps it at {level}:\n{text}");
+    }
+}
