@@ -1361,6 +1361,66 @@ impl<'a> Verifier<'a> {
                     self.pointer(opcode, arg(0), 0);
                 }
             }
+            // The lanes. Which lane is written in the instruction, so it is checked here against
+            // the vector it is a lane of rather than left for the back end to find out of range.
+            Opcode::ExtractLane => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    let (from, to) = (arg(0), res(0));
+                    let lane = match data.extra {
+                        Extra::Lane(lane) => u32::from(lane),
+                        _ => 0,
+                    };
+                    if !from.is_vector() {
+                        self.error(format!("extractlane reads a vector and this one reads {from}"));
+                    } else if to != from.lane() {
+                        self.error(format!("a lane of {from} is {} and not {to}", from.lane()));
+                    } else if lane >= from.lanes() {
+                        self.error(format!("{from} has no lane {lane}"));
+                    }
+                }
+            }
+            Opcode::InsertLane => {
+                if self.takes(opcode, arity, 2) && results == 1 {
+                    let (into, value, to) = (arg(0), arg(1), res(0));
+                    let lane = match data.extra {
+                        Extra::Lane(lane) => u32::from(lane),
+                        _ => 0,
+                    };
+                    if !into.is_vector() || to != into {
+                        self.error(format!(
+                            "insertlane gives back the vector it was given and this one takes \
+                             {into} and gives {to}"
+                        ));
+                    } else if value != into.lane() {
+                        self.error(format!("a lane of {into} is {} and not {value}", into.lane()));
+                    } else if lane >= into.lanes() {
+                        self.error(format!("{into} has no lane {lane}"));
+                    }
+                }
+            }
+            Opcode::Shuffle => {
+                if self.takes(opcode, arity, 1) && results == 1 {
+                    let (from, to) = (arg(0), res(0));
+                    if let Extra::Shuffle(shuffle) = data.extra {
+                        if !from.is_vector() || !to.is_vector() || from.lane() != to.lane() {
+                            self.error(format!(
+                                "a shuffle makes a vector of the lanes of another and this one \
+                                 takes {from} and gives {to}"
+                            ));
+                        } else if usize::try_from(to.lanes()).ok() != Some(shuffle.len()) {
+                            self.error(format!(
+                                "{to} has {} lanes and this shuffle names {}",
+                                to.lanes(),
+                                shuffle.len()
+                            ));
+                        } else if let Some(lane) =
+                            shuffle.lanes().find(|&lane| u32::from(lane) >= from.lanes())
+                        {
+                            self.error(format!("{from} has no lane {lane}"));
+                        }
+                    }
+                }
+            }
             Opcode::ObjectSize => {
                 if self.takes(opcode, arity, 1) {
                     self.pointer(opcode, arg(0), 0);
@@ -2340,6 +2400,46 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     fn reports(text: &str, message: &str) {
         let found = errors(text);
         assert!(found.iter().any(|error| error.contains(message)), "{message}\nin {found:#?}");
+    }
+
+    /// The lanes of a vector read, replaced and put in another order, which is well formed, and
+    /// the ways each of the three can name a lane the vector does not have.
+    #[test]
+    fn a_lane_is_one_the_vector_has() {
+        let body = "block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = insertlane %1, %0, lane 3
+    %3 = shuffle %2, lanes [3, 2, 1, 0]
+    %4 = extractlane.i32 %3, lane 0
+    return %4
+";
+        assert_eq!(errors(&wrap("(i32) -> i32", body)), Vec::<String>::new());
+
+        let past = "block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = extractlane.i32 %1, lane 4
+    return %2
+";
+        assert_eq!(only(&wrap("(i32) -> i32", past)), "@f block0 extractlane: i32x4 has no lane 4");
+
+        let wrong = "block0(%0: i64):
+    %1 = splat.i32x4 7
+    %2 = insertlane %1, %0, lane 1
+    %3 = extractlane.i32 %2, lane 0
+    return %3
+";
+        assert_eq!(
+            only(&wrap("(i64) -> i32", wrong)),
+            "@f block0 insertlane: a lane of i32x4 is i32 and not i64"
+        );
+
+        let short = "block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = shuffle.i32x2 %1, lanes [0, 5]
+    %3 = extractlane.i32 %2, lane 0
+    return %3
+";
+        assert_eq!(only(&wrap("(i32) -> i32", short)), "@f block0 shuffle: i32x4 has no lane 5");
     }
 
     #[test]

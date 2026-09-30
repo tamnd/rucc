@@ -42,7 +42,7 @@ use crate::attrs::{AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
     Abi, AsmInfo, Block, BlockCall, CallInfo, Drains, Hint, Imm, Inst, InstData, MemInfo, Meta,
-    MetaNode, Param, PlaneNode, Restrict, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
+    MetaNode, Param, PlaneNode, Restrict, Shuffle, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Dll, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -172,6 +172,8 @@ enum PendingExtra<'a> {
     Prefetch(PrefetchHint),
     Depth(u32),
     Question(u8),
+    Lane(u8),
+    Shuffle(Shuffle),
     Class(StorageClass),
     Owner(Owner),
     Node(Meta),
@@ -868,6 +870,44 @@ impl<'a, 'n> Parser<'a, 'n> {
                 };
                 PendingExtra::Question(kind)
             }
+            // `extractlane.i32 %0, lane 2` and `insertlane.i32x4 %0, %1, lane 2`. The operands,
+            // and then which lane, with a name in front the way a kind is.
+            ExtraKind::Lane => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                self.expect("lane")?;
+                let word = self.word();
+                let Ok(lane) = word.parse::<u8>() else {
+                    return self.fail(format!("`{word}` is not a lane"));
+                };
+                PendingExtra::Lane(lane)
+            }
+            // `shuffle.i32x4 %0, lanes [1, 2, 3, 0]`, one lane number per lane of the answer.
+            ExtraKind::Shuffle => {
+                args = self.value_list()?;
+                self.expect(",")?;
+                self.expect("lanes")?;
+                self.expect("[")?;
+                let mut lanes = Vec::new();
+                loop {
+                    let word = self.word();
+                    let Ok(lane) = word.parse::<u8>() else {
+                        return self.fail(format!("`{word}` is not a lane"));
+                    };
+                    lanes.push(lane);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect("]")?;
+                let Some(shuffle) = Shuffle::new(&lanes) else {
+                    return self.fail(format!(
+                        "a shuffle takes one to {} lanes each below sixteen",
+                        Shuffle::MAX
+                    ));
+                };
+                PendingExtra::Shuffle(shuffle)
+            }
             // The plane writes. Each reads its range and then the one thing it needs beyond it,
             // written with a name in front the way the fields of an access are.
             ExtraKind::Class => {
@@ -1370,6 +1410,8 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Prefetch(hint) => Extra::Prefetch(*hint),
             PendingExtra::Depth(depth) => Extra::Depth(*depth),
             PendingExtra::Question(kind) => Extra::Question(*kind),
+            PendingExtra::Lane(lane) => Extra::Lane(*lane),
+            PendingExtra::Shuffle(shuffle) => Extra::Shuffle(*shuffle),
             PendingExtra::Class(class) => Extra::Class(*class),
             PendingExtra::Owner(owner) => Extra::Owner(*owner),
             PendingExtra::Node(node) => Extra::Node(*node),
@@ -1946,6 +1988,26 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
         assert_eq!(round_trip(EXAMPLE), EXAMPLE);
     }
 
+    /// The three lane instructions, each with the payload that says which lane or lanes.
+    #[test]
+    fn a_lane_comes_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+func @f(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = splat.i32x4 7
+    %2 = insertlane %1, %0, lane 3
+    %3 = shuffle %2, lanes [3, 2, 1, 0]
+    %4 = extractlane.i32 %3, lane 0
+    return %4
+}}
+"
+        );
+        assert_eq!(round_trip(&text), text);
+        let bad = text.replace("lanes [3, 2, 1, 0]", "lanes [3, 2, 1, 16]");
+        assert_eq!(error(&bad), "line 10: a shuffle takes one to 8 lanes each below sixteen");
+    }
+
     #[test]
     fn one_of_almost_everything_comes_back_byte_for_byte() {
         assert_eq!(round_trip(ZOO), ZOO);
@@ -2507,6 +2569,8 @@ global @x : cap = 0, align 8, linkage(internal)
                 Opcode::Prefetch => ExtraKind::Prefetch,
                 Opcode::FrameAddress | Opcode::ReturnAddress => ExtraKind::Depth,
                 Opcode::ObjectSize => ExtraKind::Question,
+                Opcode::ExtractLane | Opcode::InsertLane => ExtraKind::Lane,
+                Opcode::Shuffle => ExtraKind::Shuffle,
                 Opcode::AtomicRmw => ExtraKind::Rmw,
                 Opcode::Switch => ExtraKind::Switch,
                 Opcode::InlineAsm => ExtraKind::Asm,
