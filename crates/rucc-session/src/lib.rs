@@ -2069,6 +2069,14 @@ pub struct Options {
     /// Where the code and static data are promised to be, which is `-mcmodel=`. The kernel model is
     /// x86-64 ELF only and only beside `-fno-pic`, which the driver checks. tamnd/rucc#2275.
     pub code_model: CodeModel,
+    /// The boundary in bytes the stack pointer is kept on at every call, from
+    /// `-mpreferred-stack-boundary=`, or `None` for the convention's own.
+    ///
+    /// The x86-64 kernel passes 3, which is eight bytes, because interrupt entry does not align the
+    /// stack and the psABI's sixteen cannot be counted on there. A function is then entitled to
+    /// no more than this on entry and owes no more than this at its calls, and a local that asks
+    /// for more is aligned by the prologue behind a frame pointer, as gcc does.
+    pub stack_boundary: Option<u32>,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2610,6 +2618,7 @@ impl Options {
             frame_pointer: None,
             red_zone: true,
             code_model: CodeModel::Small,
+            stack_boundary: None,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 Arch::Aarch64 | Arch::Riscv64 => Isa::NONE,

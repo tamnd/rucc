@@ -211,13 +211,28 @@ impl Machine {
     /// again from it, because which registers the function owes back is the thing that differs,
     /// and a scratch register has to be one it does not owe.
     #[must_use]
+    ///
+    /// The boundary the stack is kept on is the command line's rather than the convention's, so
+    /// a machine made with [`Machine::aligned_to`] gives one with the same boundary.
     pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
-        let conv = self.conv.under(convention)?;
+        let conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Some(Self::aarch64(conv))
         } else {
             Some(Self::x86_64(conv))
         }
+    }
+
+    /// The same machine with the stack pointer kept on a multiple of `bytes` at every call rather
+    /// than on the convention's boundary, which is what `-mpreferred-stack-boundary=` asks for.
+    ///
+    /// Nothing but the frame reads the boundary. A function may count on no more than it on entry
+    /// and owes no more than it at a call, and a local that asks for more is aligned by the
+    /// prologue behind a frame pointer, which is what [`crate::frame`] already does for a local
+    /// that asks for more than sixteen.
+    #[must_use]
+    pub fn aligned_to(self, bytes: u32) -> Self {
+        Self { conv: self.conv.aligned_to(bytes), ..self }
     }
 
     /// The machine a target describes, or `None` when no backend in this crate covers it.
