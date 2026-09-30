@@ -304,6 +304,10 @@ impl Plan {
     /// Writes the tree in front of its old root and answers the value it comes to.
     fn build(&self, func: &mut Func, before: Inst, op: Op, ty: Type) -> Value {
         let mut acc: Option<Value> = None;
+        // A subtracted term met before any added one waits for the first added one, so that
+        // `acc + (0 - z)` becomes `acc - z` and not `(0 - z) + acc`, which costs a negation and
+        // leaves the sum in the register of the wrong operand.
+        let mut waiting: Vec<Value> = Vec::new();
         for &(value, count) in &self.terms {
             let magnitude = count.unsigned_abs();
             let term = if op == Op::Sum && magnitude > 1 {
@@ -312,15 +316,28 @@ impl Plan {
             } else {
                 value
             };
-            acc = Some(match acc {
+            acc = match acc {
                 None if count < 0 => {
-                    let zero = constant(func, before, ty, 0);
-                    binary(func, before, Opcode::Sub, zero, term, ty)
+                    waiting.push(term);
+                    None
                 }
-                None => term,
-                Some(had) if count < 0 => binary(func, before, Opcode::Sub, had, term, ty),
-                Some(had) => binary(func, before, op.opcode(), had, term, ty),
-            });
+                None => {
+                    let mut had = term;
+                    for early in waiting.drain(..) {
+                        had = binary(func, before, Opcode::Sub, had, early, ty);
+                    }
+                    Some(had)
+                }
+                Some(had) if count < 0 => Some(binary(func, before, Opcode::Sub, had, term, ty)),
+                Some(had) => Some(binary(func, before, op.opcode(), had, term, ty)),
+            };
+        }
+        if !waiting.is_empty() {
+            let mut had = constant(func, before, ty, 0);
+            for early in waiting {
+                had = binary(func, before, Opcode::Sub, had, early, ty);
+            }
+            acc = Some(had);
         }
         let identity = op.identity();
         match acc {
@@ -527,6 +544,37 @@ block2:
         );
         assert!(out.contains("= add %1, %2"), "the invariant pair first, {out}");
         assert!(out.lines().any(|line| line.contains("= add ") && line.ends_with(", %5")), "{out}");
+    }
+
+    /// `x + (0 - z)` in a loop is `x - z`: the subtracted term waits for the accumulator, so there
+    /// is no negation and the sum stays in the accumulator's register.
+    #[test]
+    fn a_subtracted_term_waits_for_the_accumulator() {
+        let out = cleaned(
+            r#"
+func @g(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 0
+    jump block1(%2, %2)
+
+block1(%3: i32, %4: i32):
+    %5 = icmp slt %3, %1
+    %6 = zext.i32 %5
+    %7 = iconst.i32 0
+    %8 = sub %7, %6
+    %9 = add %4, %8
+    %10 = iconst.i32 1
+    %11 = add %3, %10
+    %12 = icmp slt %11, %0
+    br_if %12, block1(%11, %9), block2
+
+block2:
+    return %9
+}
+"#,
+        );
+        assert!(out.contains("= sub %4, %6"), "the accumulator minus the term, {out}");
+        assert_eq!(count(&out, "sub"), 1, "{out}");
     }
 
     /// A tree already in rank order with nothing to combine keeps its shape and its flags.
