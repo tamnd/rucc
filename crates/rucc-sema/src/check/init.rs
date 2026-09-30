@@ -1082,8 +1082,18 @@ impl<'a> Checker<'a> {
     }
 
     /// What one level of the object takes.
+    ///
+    /// `_Atomic` is looked through, because an atomic structure or union is filled member by
+    /// member from a braced list the way the plain one is, which is what gcc does with
+    /// `_Atomic struct pair p = { 1, 2 }`. Initialization is not an atomic access, since nothing
+    /// else can see the object yet, so the stores are the ordinary ones. There is no atomic
+    /// array type, and an atomic scalar is a scalar either way.
     fn kind_of(&self, ty: TypeId) -> Kind {
-        match self.types.kind(self.types.canonical(ty)) {
+        let mut ty = self.types.canonical(ty);
+        if let TypeKind::Atomic(inner) = self.types.kind(ty) {
+            ty = self.types.canonical(inner);
+        }
+        match self.types.kind(ty) {
             TypeKind::Array { elem, len } => {
                 let size = layout(&self.types, elem, self.cx.target).map_or(0, |l| l.size);
                 let len = match len {
@@ -1710,6 +1720,41 @@ decl #0 s : struct S object automatic defined
             "the member nobody wrote is not an entry, since what has no entry is zero"
         );
         assert!(c.errors.is_empty());
+    }
+
+    /// `_Atomic struct pair p = { 1, 2 }` is filled a member at a time like the plain structure,
+    /// which is what gcc does. It used to be taken for a scalar in braces, so the first value was
+    /// refused as a whole structure and the second as one too many.
+    #[test]
+    fn an_atomic_struct_takes_its_members_from_braces_like_the_plain_one() {
+        let mut f = Fixture::new();
+        let x = f.field(f.int_specs(), "x", &[]);
+        let y = f.field(f.int_specs(), "y", &[]);
+        let mut specs = f.record(RecordKind::Struct, Some("S"), &[x, y]);
+        specs.quals = Quals::ATOMIC;
+        let one = f.int(1);
+        let first = f.plain(one);
+        let two = f.int(2);
+        let second = f.plain(two);
+        let init = f.list(&[first, second]);
+        let decl = f.var(specs, "s", &[], Some(init));
+
+        let mut c = f.checker();
+        c.scopes.push();
+        let id = check(&mut c, decl);
+
+        assert_eq!(
+            dump(&c, id),
+            "\
+decl #0 s : _Atomic(struct S) object automatic defined
+  init
+    +0
+      const 1 : int
+    +4
+      const 2 : int
+"
+        );
+        assert!(c.errors.is_empty(), "{:?}", messages(&c));
     }
 
     #[test]
