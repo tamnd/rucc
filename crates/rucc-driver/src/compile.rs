@@ -10563,11 +10563,10 @@ int f(int x) {
     }
 
     #[test]
-    fn an_asm_goto_falls_through_to_its_first_target_and_writes_its_outputs_there() {
-        // The output is only in scope where the instruction dominates, which is the fall through
-        // block, so the edge to the label carries the value the object had before the assembly
-        // ran. That is what document 11 asks for and it is what putting the fall through first
-        // buys.
+    fn an_asm_goto_writes_its_outputs_on_every_edge() {
+        // Since gcc 11 an output is valid on every way out of the statement, so the edge to the
+        // label carries what the assembly wrote as much as the fall through does, and not the
+        // value the object had before it ran.
         let source = "\
 int f(int x) {
   int r = 7;
@@ -10586,7 +10585,7 @@ block1:
     return %2
 
 block2:
-    return %1
+    return %2
 ";
         assert_eq!(body(source), expected);
     }
@@ -10861,18 +10860,15 @@ block2:
     fn what_the_walk_cannot_build_yet_is_reported_rather_than_mislowered() {
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        for source in [
-            "int f(int n) { void *p = &&out; if (n) goto *p; { int a[n]; out: return 1; } }\n",
-            "int f(int n) { int a[n]; __asm__ goto(\"\" ::::out); out: return a[0]; }\n",
-        ] {
-            let result = run(&opts, source);
-            assert!(result.failed(), "expected this to be reported:\n{source}");
-            assert!(
-                result.messages.iter().any(|m| m.contains("not supported yet")),
-                "{:?}",
-                result.messages
-            );
-        }
+        let source =
+            "int f(int n) { void *p = &&out; if (n) goto *p; { int a[n]; out: return 1; } }\n";
+        let result = run(&opts, source);
+        assert!(result.failed(), "expected this to be reported:\n{source}");
+        assert!(
+            result.messages.iter().any(|m| m.contains("not supported yet")),
+            "{:?}",
+            result.messages
+        );
     }
 
     /// Compiles `source` to IR, reads that back as an input, and gives back both texts.

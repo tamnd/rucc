@@ -339,7 +339,7 @@ block1:
     return %2
 
 block2:
-    return %1
+    return %2
 }
 
 func @three_names() -> i32, linkage(external) {
