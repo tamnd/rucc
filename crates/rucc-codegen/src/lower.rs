@@ -1230,6 +1230,9 @@ struct Lowering<'a> {
     /// The machine opcode each head a rule builds is and the operands it has, by where the head's
     /// name is in the rule table. See [`Self::head`].
     heads: Map<(usize, usize), (mir::Opcode, &'static [OperandDesc])>,
+    /// The register the global offset table's address is in, in i386 position independent code,
+    /// once something in the function has asked for it. See [`Self::table_base`].
+    got: Option<mir::Reg>,
 }
 
 /// What a `va_start` in a variadic function writes into the list it is given.
@@ -1369,6 +1372,7 @@ impl<'a> Lowering<'a> {
             unwinding: Map::default(),
             effectless: Vec::new(),
             heads: Map::default(),
+            got: None,
         }
     }
 
@@ -1397,6 +1401,7 @@ impl<'a> Lowering<'a> {
         for block in self.order() {
             self.block(block)?;
         }
+        self.find_table();
         self.unread();
         // And the name each block an image holds the address of was given, which nothing in the
         // walk above would ask for: the `lea` a label address is inside the function needs no
@@ -2117,6 +2122,19 @@ impl<'a> Lowering<'a> {
             args.push(abi::Passing { ty, reg, abi });
         }
         let block = self.at.expect("a block is being filled");
+        // Through the procedure linkage table in i386 position independent code, for a name this
+        // file does not define or one the link may replace, and then the table's entry wants the
+        // table's address in `%ebx`. A call through a register never reaches the table, but a
+        // structure it passes by value may be copied by a call to the runtime, which does.
+        let linked = match callee {
+            abi::Callee::Named(symbol) if self.elsewhere.linked(symbol) => self.table_base(),
+            abi::Callee::Through(_)
+                if args.iter().any(|arg| matches!(arg.abi, Abi::ByVal { .. })) =>
+            {
+                self.table_base()
+            }
+            _ => None,
+        };
         let what = abi::Calling {
             callee,
             args: &args,
@@ -2124,6 +2142,7 @@ impl<'a> Lowering<'a> {
             variadic,
             named: named.len(),
             at: self.source.span(inst),
+            linked: linked.map(|got| (got, x86_64::RBX)),
         };
         // The callee's convention and not this function's, since the two differ when either was
         // written `ms_abi` or `sysv_abi`: where the arguments go, what the callee leaves alone and
@@ -2221,7 +2240,10 @@ impl<'a> Lowering<'a> {
         let values: Vec<Value> = self.source[inst].results().collect();
         let x87 = self.x87_values(&values);
         self.returned(inst, values)?;
-        if outgoing == 0 && !x87 && self.sret().is_none() {
+        // Not a call through the procedure linkage table, whose entry reads `%ebx` after the
+        // epilogue has put the caller's back in it. gcc makes no such call a jump either.
+        let linked = self.out[call].flags.contains(mir::Flags::PLT);
+        if outgoing == 0 && !x87 && !linked && self.sret().is_none() {
             let returns =
                 std::iter::successors(self.out.next_inst(call), |&at| self.out.next_inst(at))
                     .collect();
@@ -3324,6 +3346,7 @@ impl<'a> Lowering<'a> {
         match if far { symbols.far } else { symbols.near } {
             Reach::Mode(name) => {
                 let mem = if far { mir::Mem::got(symbol) } else { mir::Mem::of(symbol) };
+                let mem = self.counted_from_table(mem);
                 let opcode = self.named(name);
                 self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
             }
@@ -3441,7 +3464,7 @@ impl<'a> Lowering<'a> {
         match self.selector.symbols.thread {
             Reach::Mode(name) => {
                 let load = self.named(name);
-                let mem = mir::Mem::thread(symbol);
+                let mem = self.counted_from_table(mir::Mem::thread(symbol));
                 self.out.build(block, load).at(span).def(offset, gpr).mem(mem).finish();
             }
             Reach::Own(name) => {
@@ -3519,6 +3542,7 @@ impl<'a> Lowering<'a> {
             variadic: false,
             named: 1,
             at: span,
+            linked: None,
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
@@ -3661,7 +3685,7 @@ impl<'a> Lowering<'a> {
         let reg = self.new_reg(result);
         let span = self.source.span(inst);
         let opcode = self.named(self.selector.jumps.near);
-        let mem = mir::Mem::block(self.out_block(call.block));
+        let mem = self.counted_from_table(mir::Mem::block(self.out_block(call.block)));
         self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
         Ok(())
     }
@@ -3731,7 +3755,8 @@ impl<'a> Lowering<'a> {
 
         let base = self.out.new_vreg(gpr);
         let near = self.named(jumps.near);
-        self.out.build(block, near).at(span).def(base, gpr).mem(mir::Mem::table(table)).finish();
+        let mem = self.counted_from_table(mir::Mem::table(table));
+        self.out.build(block, near).at(span).def(base, gpr).mem(mem).finish();
         let offset = self.out.new_vreg(gpr);
         let cell =
             mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4);
@@ -3822,7 +3847,8 @@ impl<'a> Lowering<'a> {
         let found = self.frame_address(at, answer);
         self.write_word(at, span, store, found, buf, JUMP_ANSWER);
         let pc = self.out.new_vreg(gpr);
-        self.out.build(at, lea).at(span).def(pc, gpr).mem(mir::Mem::block(back)).finish();
+        let mem = self.counted_from_table(mir::Mem::block(back));
+        self.out.build(at, lea).at(span).def(pc, gpr).mem(mem).finish();
         self.write_word(at, span, store, pc, buf, JUMP_PC);
         let frame = mir::Reg::physical(self.conv.frame_pointer);
         self.write_word(at, span, store, frame, buf, JUMP_FRAME);
@@ -5701,14 +5727,72 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
+    /// The register holding the global offset table's address, in i386 position independent code,
+    /// and nothing on any other target.
+    ///
+    /// i386 has no addressing relative to the instruction pointer, so code that may be loaded
+    /// anywhere reaches a name from the table's address instead: `sym@GOTOFF(%reg)` for a name in
+    /// this image and `sym@GOT(%reg)` for the slot holding one that may not be. The address is
+    /// worked out once, at the top of the function, into a register the allocator keeps or spills
+    /// like any other. See [`Self::find_table`].
+    fn table_base(&mut self) -> Option<mir::Reg> {
+        if !self.elsewhere.based() {
+            return None;
+        }
+        if let Some(got) = self.got {
+            return Some(got);
+        }
+        let got = self.out.new_vreg(self.gpr);
+        self.got = Some(got);
+        Some(got)
+    }
+
+    /// The same address counted from the global offset table, in i386 position independent code,
+    /// and left as it is everywhere else. See [`Self::table_base`].
+    fn counted_from_table(&mut self, mem: mir::Mem) -> mir::Mem {
+        match self.table_base() {
+            Some(got) => mem.from_table(mir::Operand::read(got, self.gpr)),
+            None => mem,
+        }
+    }
+
+    /// Works out the global offset table's address at the top of the function, when something in
+    /// it asked for the address. Nothing is written for a function that did not.
+    ///
+    /// The two instructions gcc writes, kept as one template because the first is a call to a
+    /// routine that only writes `%ebx` and the second adds the distance from the instruction after
+    /// the call to the table, which only the pair of them means anything as:
+    ///
+    /// ```text
+    /// call    __x86.get_pc_thunk.bx
+    /// addl    $_GLOBAL_OFFSET_TABLE_, %ebx
+    /// ```
+    ///
+    /// The answer is in `%ebx` and the allocator is told so, and is free to move it from there. A
+    /// call through the procedure linkage table wants it back in `%ebx`, which is said on the call.
+    /// The routine itself is written once for the file. See [`crate::thunks::pc_thunk`].
+    fn find_table(&mut self) {
+        let Some(got) = self.got else { return };
+        let Some(entry) = self.source.entry() else { return };
+        let entry = self.out_block(entry);
+        let opcode = self.named(x86_64::TEMPLATE);
+        let text = self.names.intern(crate::thunks::TABLE_BASE);
+        let found = mir::Operand::write(got, self.gpr).with(Constraint::Fixed(x86_64::RBX));
+        let inst = self.out.build_loose(opcode).symbol(text).operand(found).finish();
+        self.out.prepend_inst(entry, inst);
+    }
+
     /// The name a value is the address of and how far past it, when an instruction can reach it
     /// from the instruction pointer: not thread local, not read through a slot of the global offset
     /// table, and on a target that reaches a name that way at all. See [`Self::address_of`].
     fn near_name(&self, value: Value) -> Option<(Symbol, i32)> {
         let (symbol, offset) = self.named_address(value)?;
+        // i386 position independent code reaches a name from a register, which is no name at all
+        // as far as a template is concerned.
         let far = self.elsewhere.thread(symbol)
             || self.elsewhere.slot(symbol).is_some()
-            || self.elsewhere.holds(symbol);
+            || self.elsewhere.holds(symbol)
+            || self.elsewhere.based();
         if far || !matches!(self.selector.symbols.near, Reach::Mode(_)) {
             return None;
         }
@@ -7406,6 +7490,7 @@ impl<'a> Lowering<'a> {
             variadic: true,
             named: args.len(),
             at: span,
+            linked: None,
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;

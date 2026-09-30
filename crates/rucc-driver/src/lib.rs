@@ -2942,6 +2942,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             rucc_target::Guard::in_segment(reg, guard_offset.unwrap_or(40))
         });
     }
+    // i386 position independent code calls the hidden copy of the failure routine that the C
+    // library's static half carries, as gcc does: a call to the shared one would go through the
+    // procedure linkage table, which wants the global offset table's address in `%ebx`, and the
+    // check runs in the epilogue after `%ebx` has been put back. See tamnd/rucc#2247.
+    if opts.guard.is_none()
+        && opts.target.arch == rucc_target::Arch::X86
+        && opts.target.os.object_format() == ObjectFormat::Elf
+        && opts.pic != Pic::Absolute
+    {
+        let guard = rucc_target::Guard::in_segment(rucc_target::Segment::Gs, 20);
+        opts.guard = Some(rucc_target::Guard { fail: "__stack_chk_fail_local", ..guard });
+    }
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a

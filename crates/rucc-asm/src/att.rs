@@ -71,7 +71,7 @@ use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_base::hash::Map;
-use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
+use rucc_mir::{Amode, Block, CfiOp, Flags, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{CallRegs, Feature, Isa, PhysReg, RegClass, TargetInfo, aarch64};
@@ -1094,6 +1094,11 @@ impl Writer<'_> {
                         None => "0".to_owned(),
                     },
                     Arg::Symbol => match data.symbol {
+                        // Through the procedure linkage table, which only the suffix says. See
+                        // [`Flags::PLT`].
+                        Some(symbol) if data.flags.contains(Flags::PLT) => {
+                            format!("{}@PLT", self.directives.spell(self.names.resolve(symbol)))
+                        }
                         Some(symbol) => self.directives.spell(self.names.resolve(symbol)),
                         None => "0".to_owned(),
                     },
@@ -1198,6 +1203,8 @@ impl Writer<'_> {
                 // The address itself as a number, which needs no suffix and no `(%rip)`: gas
                 // writes `R_X86_64_32S` for four bytes of it the machine sign extends.
                 Reach::Absolute => {}
+                // How far from the global offset table, whose address is in the base register.
+                Reach::GotOff => out.push_str("@GOTOFF"),
             }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
@@ -1208,6 +1215,11 @@ impl Writer<'_> {
             // symbol is, and is neither: what the assembler puts in the four bytes is a distance it
             // works out itself, since both ends are in the section it is writing.
             out.push_str(&self.label(func_name, block));
+            // i386 position independent code has no instruction pointer to count from, so the
+            // label is counted from the global offset table in the base register instead.
+            if amode.reach == Reach::GotOff {
+                out.push_str("@GOTOFF");
+            }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
                 let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
@@ -1216,6 +1228,9 @@ impl Writer<'_> {
             // A jump table of this function, which is a place in it the way a label is. Under the
             // kernel code model it is the table's own address instead, with an index beside it.
             out.push_str(&self.table(func_name, table as usize));
+            if amode.reach == Reach::GotOff {
+                out.push_str("@GOTOFF");
+            }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
                 let _ = write!(out, "{sign}{}", i64::from(amode.disp).abs());
@@ -2383,6 +2398,58 @@ mod tests {
                 "movl\taway@INDNTPOFF, %eax",
             ]
         );
+    }
+
+    #[test]
+    fn i386_position_independent_code_counts_from_the_table_and_calls_through_its_entries() {
+        use rucc_mir::Flags;
+        use rucc_target::x86::{EAX, EBX, ECX};
+        let text = write_i386(|func, names| {
+            let block = func.create_block();
+            let after = func.create_block();
+            let lea = Opcode::new(names.intern("x64.lea_32"));
+            let load = Opcode::new(names.intern("x64.mov_rm_32"));
+            let table = Operand::read(Reg::physical(EBX), GPR);
+            func.build(block, lea)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem::got_off(table, names.intern("near")))
+                .finish();
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(
+                    Mem::of(names.intern("arr"))
+                        .from_table(table)
+                        .indexed(Operand::read(Reg::physical(ECX), GPR), 4)
+                        .plus(8),
+                )
+                .finish();
+            func.build(block, lea)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem::block(after).from_table(table))
+                .finish();
+            // A slot stays a slot when it is counted from the register.
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem::got(names.intern("away")).from_table(table))
+                .finish();
+            func.build(block, Opcode::new(names.intern("x64.call")))
+                .symbol(names.intern("strlen"))
+                .flags(Flags::PLT)
+                .operand(Operand::read(Reg::physical(EBX), GPR))
+                .finish();
+            func.build(after, Opcode::new(names.intern("x64.ret"))).finish();
+        })
+        .expect("an i386 function");
+        let body = body(&text);
+        assert_eq!(
+            body[..2],
+            ["leal\tnear@GOTOFF(%ebx), %eax", "movl\tarr@GOTOFF+8(%ebx,%ecx,4), %eax"]
+        );
+        assert!(
+            body[2].starts_with("leal\t.L") && body[2].ends_with("@GOTOFF(%ebx), %eax"),
+            "{text}"
+        );
+        assert_eq!(body[3..5], ["movl\taway@GOT(%ebx), %eax", "call\tstrlen@PLT"]);
     }
 
     #[test]

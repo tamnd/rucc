@@ -670,6 +670,12 @@ pub struct Calling<'a> {
     /// [`Span::DUMMY`] in a call this crate builds for itself, which is the copy into the argument
     /// area that the runtime does, since that one is under whatever the call it belongs to is under.
     pub at: Span,
+    /// The register holding the global offset table's address and the register it has to be in,
+    /// when a call to a name goes through the procedure linkage table and the table's entry reads
+    /// that register. i386 position independent code is the one place that is, where the entry
+    /// jumps through `name@GOT(%ebx)`. `None` everywhere else, and for a call through a register,
+    /// which never reaches the table.
+    pub linked: Option<(mir::Reg, PhysReg)>,
 }
 
 /// Builds one call: what it passes, what comes back, and what it destroys.
@@ -692,7 +698,7 @@ pub fn call(
     insts: &Insts,
     names: &mut Interner,
 ) -> Result<Made, Refused> {
-    let &Calling { callee, args, returns, variadic, named, at: span } = made;
+    let &Calling { callee, args, returns, variadic, named, at: span, linked } = made;
     // Where everything goes, worked out before anything is built, so that a call this cannot make
     // leaves no half of one behind.
     let mut places = Places::new(conv);
@@ -866,7 +872,7 @@ pub fn call(
     for (from, up, count, plan) in as_bytes {
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
         let Some(plan) = plan else {
-            let what = Copying { from, up, count, span };
+            let what = Copying { from, up, count, span, linked };
             nested = nested.max(by_runtime(out, block, conv, insts, names, what));
             continue;
         };
@@ -978,6 +984,16 @@ pub fn call(
         operands.push(mir::Operand::read(count, conv.int_class).with(Constraint::Fixed(at)));
     }
 
+    // Last, where nothing else is looked for by place: the table's address, in the register the
+    // procedure linkage table's entry reads it from.
+    let linked = match callee {
+        Callee::Named(_) => linked,
+        Callee::Through(_) => None,
+    };
+    if let Some((got, at)) = linked {
+        operands.push(mir::Operand::read(got, conv.int_class).with(Constraint::Fixed(at)));
+    }
+
     let opcode = mir::Opcode::new(names.intern(match callee {
         Callee::Named(_) => insts.call,
         Callee::Through(_) => insts.call_reg,
@@ -985,6 +1001,9 @@ pub fn call(
     let mut build = out.build(block, opcode).at(span);
     if let Callee::Named(symbol) = callee {
         build = build.symbol(symbol);
+    }
+    if linked.is_some() {
+        build = build.flags(mir::Flags::PLT);
     }
     for operand in operands {
         build = build.operand(operand);
@@ -1029,6 +1048,9 @@ struct Copying {
     count: i32,
     /// Where the call it is an argument of was written.
     span: Span,
+    /// The global offset table's register, as the call it is an argument of has it. See
+    /// [`Calling::linked`].
+    linked: Option<(mir::Reg, PhysReg)>,
 }
 
 /// One object with more words than a copy into the argument area unrolls to, copied there by a
@@ -1046,7 +1068,7 @@ fn by_runtime(
     names: &mut Interner,
     what: Copying,
 ) -> u32 {
-    let Copying { from, up, count, span } = what;
+    let Copying { from, up, count, span, linked } = what;
     let routine = capability::libcall(rucc_ir::Opcode::Memcpy, "big")
         .expect("the runtime copies a block too large to unroll");
 
@@ -1083,6 +1105,7 @@ fn by_runtime(
         variadic: false,
         named: args.len(),
         at: span,
+        linked,
     };
     // Three pointer sized arguments and nothing coming back is a call every convention here has
     // registers for, so the only way this could refuse is a convention with fewer than three
@@ -1592,7 +1615,15 @@ mod tests {
             })
             .collect();
         let callee = Callee::Named(names.intern("g"));
-        let what = Calling { callee, args: &passed, returns, variadic, named, at: Span::DUMMY };
+        let what = Calling {
+            callee,
+            args: &passed,
+            returns,
+            variadic,
+            named,
+            at: Span::DUMMY,
+            linked: None,
+        };
         let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
         (names, out, made)
     }
@@ -1753,6 +1784,7 @@ mod tests {
             variadic: false,
             named: passed.len(),
             at: Span::DUMMY,
+            linked: None,
         };
         call(&mut out, block, &what, &SYSV, &X86_64, &mut names)
             .expect("one integer fits in a register");
@@ -1818,6 +1850,7 @@ mod tests {
             variadic: false,
             named: args.len(),
             at: Span::DUMMY,
+            linked: None,
         };
         let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
         (names, out, made)

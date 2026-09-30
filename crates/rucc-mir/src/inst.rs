@@ -200,6 +200,12 @@ pub enum Reach {
     /// that a register can be added to it: `sym(,%rdi,8)` indexes a static array in one
     /// instruction, and `movq $sym, %rax` is the address itself. See tamnd/rucc#2275.
     Absolute,
+    /// How far the symbol is from the global offset table, added to the table's own address in the
+    /// base register. `R_386_GOTOFF`, which is how i386 position independent code reaches a name
+    /// in this same image, since the machine has no addressing relative to the instruction
+    /// pointer. A label and a jump table of the function are reached the same way. See
+    /// [`Mem::got_off`].
+    GotOff,
 }
 
 /// A memory addressing mode, as the instruction holds it.
@@ -410,6 +416,28 @@ impl Mem {
         Self { reach: Reach::Thread, ..Self::of(symbol) }
     }
 
+    /// That symbol's distance from the global offset table, added to the table's address in that
+    /// register, which is how i386 position independent code reaches a name in its own image. See
+    /// [`Reach::GotOff`].
+    #[must_use]
+    pub const fn got_off(base: Operand, symbol: Symbol) -> Self {
+        Self { symbol: Some(symbol), reach: Reach::GotOff, ..Self::at(base) }
+    }
+
+    /// The same address counted from the global offset table whose address is in that register,
+    /// rather than from the instruction pointer, for a mode that names a symbol, a block or a jump
+    /// table and no register. The name, the label or the table itself becomes `@GOTOFF`, and a
+    /// slot of the table stays a slot, read as `@GOT` or `@GOTNTPOFF` from the register. i386 has
+    /// no other way to write any of them.
+    #[must_use]
+    pub const fn from_table(mut self, base: Operand) -> Self {
+        self.base = Some(base);
+        if matches!(self.reach, Reach::Itself) {
+            self.reach = Reach::GotOff;
+        }
+        self
+    }
+
     /// That symbol's own address as a number, which is how the kernel code model writes it. See
     /// [`Reach::Absolute`].
     #[must_use]
@@ -591,6 +619,13 @@ impl Flags {
     /// before allocation, so no pass above that has to carry it. See tamnd/rucc#1895.
     pub const COMMUTES: Self = Self(2);
 
+    /// A call to a name goes through the procedure linkage table, which the listing says with
+    /// `@PLT` after the name. i386 position independent code is the one place it is written: the
+    /// entry a shared object's table has for a name jumps through the global offset table from the
+    /// address in `%ebx`, so the call also reads the table's address there, and nothing else can
+    /// tell the assembler which relocation to write. See tamnd/rucc#2247.
+    pub const PLT: Self = Self(4);
+
     /// Both of them at once.
     #[must_use]
     pub const fn with(self, other: Self) -> Self {
@@ -621,6 +656,9 @@ impl fmt::Display for Flags {
         }
         if self.contains(Self::COMMUTES) {
             f.write_str(" commutes")?;
+        }
+        if self.contains(Self::PLT) {
+            f.write_str(" plt")?;
         }
         Ok(())
     }

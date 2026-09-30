@@ -166,6 +166,35 @@ pub fn bodies(
         .collect()
 }
 
+/// The two instructions that put the global offset table's address in `%ebx`, which i386 position
+/// independent code writes at the top of a function that reaches a name. Kept as a template by
+/// `crate::lower`, and looked for by [`pc_thunk`].
+pub const TABLE_BASE: &str = "call\t__x86.get_pc_thunk.bx\naddl\t$_GLOBAL_OFFSET_TABLE_, %ebx";
+
+/// The routine [`TABLE_BASE`] calls, which reads its own return address into `%ebx`, when some
+/// function in `funcs` calls it, and nothing otherwise.
+///
+/// Written the way gcc writes it: hidden, and in a group of its own so that the link keeps one copy
+/// out of however many objects carry it. The name is gcc's too, so an object from either compiler
+/// can be linked with the other's and the two copies are still one.
+#[must_use]
+pub fn pc_thunk(funcs: &[mir::Func], names: &Interner) -> Option<String> {
+    let called = funcs.iter().any(|func| {
+        func.blocks().any(|block| {
+            func.insts(block)
+                .any(|inst| func[inst].symbol.is_some_and(|text| names.resolve(text) == TABLE_BASE))
+        })
+    });
+    let name = "__x86.get_pc_thunk.bx";
+    called.then(|| {
+        format!(
+            ".section .text.{name},\"axG\",@progbits,{name},comdat\n.globl {name}\n\
+             .hidden {name}\n.type {name}, @function\n{name}:\nmovl (%esp), %ebx\nret\n\
+             .size {name}, .-{name}"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;

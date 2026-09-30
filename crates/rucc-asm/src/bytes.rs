@@ -700,6 +700,17 @@ impl Assembler<'_> {
                                 Reach::Thread => Reference::Thread,
                                 Reach::Section => Reference::Section,
                                 Reach::Absolute => Reference::Signed,
+                                // i386 only, which this does not encode: a listing takes it to
+                                // the assembler instead.
+                                Reach::GotOff => {
+                                    return Err(Error::Encode {
+                                        func: self.name.to_owned(),
+                                        opcode: spelled.to_owned(),
+                                        why: "an address counted from the global offset table is \
+                                              i386's, and this writes x86-64"
+                                            .to_owned(),
+                                    });
+                                }
                             };
                             wanted = Some((symbol, kind, i64::from(addr.disp)));
                         }

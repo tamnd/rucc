@@ -799,6 +799,12 @@ fn candidate(
             reach = mir::Reach::Absolute;
             reading.index.and_then(|at| reader.get(usize::from(at))).map(|op| (*op, reading.scale))
         }
+        // Counted from the global offset table in a register rather than from the instruction
+        // pointer, which is i386 position independent code, and then there is room for the index
+        // beside the base: `arr@GOTOFF(%ebx,%eax,4)` is what gcc writes for `arr[i]`.
+        (None, Some(at)) if address.reach == mir::Reach::GotOff && address.base.is_some() => {
+            Some((*reader.get(usize::from(at))?, reading.scale))
+        }
         (None, Some(_)) if address.symbol.is_some() || address.block.is_some() => return None,
         (Some(at), None) => Some((*taken.get(usize::from(at))?, address.scale)),
         (None, Some(at)) => Some((*reader.get(usize::from(at))?, reading.scale)),
