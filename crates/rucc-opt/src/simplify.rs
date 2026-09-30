@@ -368,8 +368,15 @@ impl Pass for Simplify {
         Preserved::ALL.without(Analysis::Liveness)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
+        // How wide an address is, which is the width the rules see a pointer at. A module that
+        // does not say is one written for a test, and those are all sixty four bit ones.
+        let address = an
+            .outside()
+            .pointer_bytes()
+            .and_then(|bytes| u32::try_from(bytes * 8).ok())
+            .unwrap_or(64);
         // What a rule that produced a value decided, applied to the whole function at the end.
         // Rewriting each one where it is found would be a walk over every instruction for every
         // rewrite, and there is nothing to be gained by it: what a pattern asks about is the
@@ -438,7 +445,7 @@ impl Pass for Simplify {
                     stats.optimized(BOUNDED);
                     continue;
                 }
-                let Some((rewrite, pattern)) = identity(func, inst) else { continue };
+                let Some((rewrite, pattern)) = identity(func, inst, address) else { continue };
                 if !fuel.take() {
                     stats.missed(NO_FUEL_RULE);
                     continue;
@@ -549,12 +556,12 @@ struct Nested {
 /// The plans are tried in order and the first that matches wins. A plan is how the operands are
 /// shown rather than what they are, so trying three of them is three walks over a trie, each of
 /// which fails in its first node or two when the instruction is not one any rule is about.
-fn identity(func: &Func, inst: Inst) -> Option<(Rewrite, &'static str)> {
+fn identity(func: &Func, inst: Inst, address: u32) -> Option<(Rewrite, &'static str)> {
     let result = func[inst].first_result?;
     for (table, plan) in
         TABLES.into_iter().flat_map(|(table, plans)| plans.iter().map(move |&plan| (table, plan)))
     {
-        let terms = Terms::new(func, inst, plan);
+        let terms = Terms::new(func, inst, plan, address);
         let Some(found) = table.find(&terms, Term::Root) else { continue };
         let rule = table.rule(&found);
         let rewrite = match rule.replacement {

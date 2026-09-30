@@ -99,13 +99,16 @@ pub struct Terms<'a> {
     func: &'a Func,
     root: Inst,
     plan: Plan,
+    /// How wide an address is on the target, which is the width a pointer is named at.
+    address: u32,
 }
 
 impl<'a> Terms<'a> {
-    /// The instruction, shown the way the plan says.
+    /// The instruction, shown the way the plan says, on a target whose addresses are `address`
+    /// bits wide.
     #[must_use]
-    pub fn new(func: &'a Func, root: Inst, plan: Plan) -> Self {
-        Self { func, root, plan }
+    pub fn new(func: &'a Func, root: Inst, plan: Plan, address: u32) -> Self {
+        Self { func, root, plan, address }
     }
 
     /// The instruction this is about.
@@ -118,7 +121,7 @@ impl<'a> Terms<'a> {
     /// rule file.
     #[must_use]
     pub fn name(&self, inst: Inst) -> Option<&'static str> {
-        head_of(self.func, inst)
+        head_of(self.func, inst, self.address)
     }
 
     /// The value operands of an instruction.
@@ -168,11 +171,11 @@ impl<'a> Terms<'a> {
     fn leaf_head(&self, value: Value, shown: Shown) -> Option<(&'static str, usize)> {
         let ty = self.func[value].ty;
         let name = match shown {
-            Shown::Reg => value_head(ty)?,
-            Shown::Const => iconst_head(ty)?,
+            Shown::Reg => value_head(ty, self.address)?,
+            Shown::Const => iconst_head(ty, self.address)?,
             // A constant shown this way is not shown at all. The head is the only place that can
             // refuse it, since a binding says nothing about what the operand was called.
-            Shown::Var if self.constant(value).is_none() => value_head(ty)?,
+            Shown::Var if self.constant(value).is_none() => value_head(ty, self.address)?,
             Shown::Var => return None,
             // An expansion is not a leaf, and nothing asks this about one.
             Shown::Expand => return None,
@@ -231,7 +234,7 @@ impl Subject for Terms<'_> {
     fn head(&self, node: Term) -> Option<(&str, usize)> {
         match node {
             Term::Root => {
-                let name = head_of(self.func, self.root)?;
+                let name = head_of(self.func, self.root, self.address)?;
                 let data = &self.func[self.root];
                 // A constant has no operands and its term has one, which is the constant, so it
                 // is the one instruction whose arity is not the length of its operand list.
@@ -244,7 +247,7 @@ impl Subject for Terms<'_> {
                 match self.plan[usize::from(index)] {
                     Shown::Expand => {
                         let (inst, args) = self.expansion(index)?;
-                        Some((head_of(self.func, inst)?, args.len()))
+                        Some((head_of(self.func, inst, self.address)?, args.len()))
                     }
                     shown => self.leaf_head(value, shown),
                 }
@@ -316,7 +319,7 @@ impl Subject for Terms<'_> {
 /// a file whose reader has to look at the line above to find out. Which widths there are names
 /// for is the rule language's business and not this crate's: an instruction at a width nothing
 /// is written about has no name here, and the answer to it is that no rule matches.
-pub fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
+pub fn head_of(func: &Func, inst: Inst, address: u32) -> Option<&'static str> {
     let data = &func[inst];
 
     // A store is the one instruction with a name here that computes nothing, so the width in
@@ -335,7 +338,7 @@ pub fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
     // plain access, so by the time anything is selected there is none to miss.
     if data.opcode == Opcode::Store {
         let value = *func[data.args].first()?;
-        return store_head(func[value].ty);
+        return store_head(func[value].ty, address);
     }
 
     // A return is the other one, and the width comes from the operand for the same reason. A
@@ -345,7 +348,7 @@ pub fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
     // about it. A return of nothing needs no rule at all, since the epilogue is the whole of it.
     if data.opcode == Opcode::Return {
         let [value] = &func[data.args] else { return None };
-        return ret_head(func[*value].ty);
+        return ret_head(func[*value].ty, address);
     }
 
     // A conditional branch is the third instruction here that computes nothing. Where it goes is
@@ -360,8 +363,8 @@ pub fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
     let result = data.first_result?;
     let ty = func[result].ty;
     match data.opcode {
-        Opcode::IConst => iconst_head(ty),
-        Opcode::Load => load_head(ty),
+        Opcode::IConst => iconst_head(ty, address),
+        Opcode::Load => load_head(ty, address),
         Opcode::ICmp => {
             let Extra::IntPred(pred) = data.extra else { return None };
             Some(icmp_head(pred))
@@ -374,22 +377,22 @@ pub fn head_of(func: &Func, inst: Inst) -> Option<&'static str> {
         }
         Opcode::SExt | Opcode::ZExt | Opcode::Trunc => {
             let from = func[*func[data.args].first()?].ty;
-            convert_head(data.opcode, from, ty)
+            convert_head(data.opcode, from, ty, address)
         }
         // The conversions with a float on one side or both. A separate row because what is on
         // each side is part of the name and a width alone would not say which register file the
         // value is in, which is the whole difference between these and the three above.
         Opcode::FPExt | Opcode::FPTrunc | Opcode::FPToSI | Opcode::SIToFP | Opcode::Bitcast => {
             let from = func[*func[data.args].first()?].ty;
-            cross_head(data.opcode, from, ty)
+            cross_head(data.opcode, from, ty, address)
         }
         // Address arithmetic is an add at the address width, which is all it is once both
         // operands are in registers: the offset is already in bytes, which the IR guarantees and
         // the front end is what did the multiplying. Calling it that is what lets every rule
         // written about an add reach it, including the ones that fold it into an addressing mode,
         // and there is nothing in any of them it could get wrong.
-        Opcode::PtrAdd => binary_head(Opcode::Add, ty),
-        opcode => binary_head(opcode, ty),
+        Opcode::PtrAdd => binary_head(Opcode::Add, ty, address),
+        opcode => binary_head(opcode, ty, address),
     }
 }
 
@@ -412,6 +415,10 @@ const BRIF: &str = "brif.i1";
 /// A width with no name contributes nothing and costs nothing, and the day one of them gets a name
 /// it appears here without anybody remembering to add it, which is the property that makes this
 /// worth generating rather than writing down.
+///
+/// A pointer is named at sixty four bits here, and naming it at thirty two would add nothing: a
+/// pointer's names are an integer's at the address width, and both of those widths are swept as
+/// integers already.
 pub fn heads() -> Vec<(Opcode, &'static str)> {
     let types = [
         Type::int(1),
@@ -436,12 +443,12 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
         // order it has them, so that a name reachable there is reachable here.
         for &ty in &types {
             let name = match opcode {
-                Opcode::Store => store_head(ty),
-                Opcode::Return => ret_head(ty),
-                Opcode::IConst => iconst_head(ty),
-                Opcode::Load => load_head(ty),
-                Opcode::PtrAdd => binary_head(Opcode::Add, ty),
-                _ => binary_head(opcode, ty),
+                Opcode::Store => store_head(ty, 64),
+                Opcode::Return => ret_head(ty, 64),
+                Opcode::IConst => iconst_head(ty, 64),
+                Opcode::Load => load_head(ty, 64),
+                Opcode::PtrAdd => binary_head(Opcode::Add, ty, 64),
+                _ => binary_head(opcode, ty, 64),
             };
             if let Some(name) = name {
                 found.push((opcode, name));
@@ -459,13 +466,13 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
             }
             Opcode::SExt | Opcode::ZExt | Opcode::Trunc => {
                 for &from in &types {
-                    let named = types.iter().filter_map(|&to| convert_head(opcode, from, to));
+                    let named = types.iter().filter_map(|&to| convert_head(opcode, from, to, 64));
                     found.extend(named.map(|name| (opcode, name)));
                 }
             }
             Opcode::FPExt | Opcode::FPTrunc | Opcode::FPToSI | Opcode::SIToFP | Opcode::Bitcast => {
                 for &from in &types {
-                    let named = types.iter().filter_map(|&to| cross_head(opcode, from, to));
+                    let named = types.iter().filter_map(|&to| cross_head(opcode, from, to, 64));
                     found.extend(named.map(|name| (opcode, name)));
                 }
             }
@@ -478,30 +485,21 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
     found
 }
 
-/// How wide an address is on the machine this lowers for.
-///
-/// The rule set has no term for a pointer and needs none. An address in a register is an integer
-/// of the machine's address width, every rule that could compute one is a rule about an integer
-/// of that width, and the only thing missing was a name. [`slot`] used to ask the type how wide
-/// it was, and a pointer answers nothing, because how wide an address is belongs to the target
-/// rather than to the IR. So this is where the target's answer is written down.
-///
-/// Sixty four, and a constant rather than something asked of a target, because every
-/// architecture `rucc_target::Arch` names is a sixty four bit one. There is no target in the
-/// compiler that would want a different number, and a thirty two bit one would want more from
-/// the rule sets than a number.
-pub const ADDRESS: u32 = 64;
-
 /// Which of the four widths a type is, or nothing for a width no rule is written at.
 ///
-/// A pointer is one of them, at [`ADDRESS`]. A vector is none of them however wide its lane is,
+/// A pointer is one of them, at `address`, which is how wide an address is on the machine this
+/// lowers for. The rule set has no term for a pointer and needs none: an address in a register is
+/// an integer of the machine's address width, and every rule that could compute one is a rule
+/// about an integer of that width. How wide that is belongs to the target rather than to the IR,
+/// so it is asked for here rather than read off the type, and i386 answers thirty two where every
+/// other target answers sixty four. A vector is none of them however wide its lane is,
 /// because a rule at a width says nothing about how many lanes it acts on and lowering an add of
 /// four lanes to an add of one would be wrong rather than incomplete.
-pub fn slot(ty: Type) -> Option<usize> {
+pub fn slot(ty: Type, address: u32) -> Option<usize> {
     if !ty.is_scalar() {
         return None;
     }
-    let bits = if ty.is_ptr() { ADDRESS } else { ty.is_int().then(|| ty.bits())? };
+    let bits = if ty.is_ptr() { address } else { ty.is_int().then(|| ty.bits())? };
     match bits {
         8 => Some(0),
         16 => Some(1),
@@ -607,7 +605,7 @@ pub fn is_bit(ty: Type) -> bool {
 }
 
 /// What a value in a register is called at that width.
-fn value_head(ty: Type) -> Option<&'static str> {
+fn value_head(ty: Type, address: u32) -> Option<&'static str> {
     if is_bit(ty) {
         return Some("value.i1");
     }
@@ -620,7 +618,7 @@ fn value_head(ty: Type) -> Option<&'static str> {
     if let Some(at) = float_slot(ty) {
         return Some(["value.f32", "value.f64"][at]);
     }
-    Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty)?])
+    Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty, address)?])
 }
 
 /// What a constant is called at that width.
@@ -628,18 +626,18 @@ fn value_head(ty: Type) -> Option<&'static str> {
 /// An integer and not an address, unlike everything else here. What a pattern binds inside one of
 /// these is the number, and [`Terms::constant`] only has a number for an integer, so a term that
 /// named an address would be one a rule could match and then find nothing behind.
-fn iconst_head(ty: Type) -> Option<&'static str> {
+fn iconst_head(ty: Type, address: u32) -> Option<&'static str> {
     if !ty.is_int() {
         return None;
     }
     if is_bit(ty) {
         return Some("iconst.i1");
     }
-    Some(["iconst.i8", "iconst.i16", "iconst.i32", "iconst.i64"][slot(ty)?])
+    Some(["iconst.i8", "iconst.i16", "iconst.i32", "iconst.i64"][slot(ty, address)?])
 }
 
 /// What a load is called, which is the width of the value it produced.
-fn load_head(ty: Type) -> Option<&'static str> {
+fn load_head(ty: Type, address: u32) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("load.f128");
     }
@@ -652,12 +650,12 @@ fn load_head(ty: Type) -> Option<&'static str> {
     if is_bit(ty) {
         return Some("load.i1");
     }
-    Some(["load.i8", "load.i16", "load.i32", "load.i64"][slot(ty)?])
+    Some(["load.i8", "load.i16", "load.i32", "load.i64"][slot(ty, address)?])
 }
 
 /// What a store is called, which is the width of the value it writes, since it produces nothing
 /// to take a width from.
-fn store_head(ty: Type) -> Option<&'static str> {
+fn store_head(ty: Type, address: u32) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("store.f128");
     }
@@ -667,11 +665,11 @@ fn store_head(ty: Type) -> Option<&'static str> {
     if is_bit(ty) {
         return Some("store.i1");
     }
-    Some(["store.i8", "store.i16", "store.i32", "store.i64"][slot(ty)?])
+    Some(["store.i8", "store.i16", "store.i32", "store.i64"][slot(ty, address)?])
 }
 
 /// What a return is called, which is the width of the value it gives back, for the same reason.
-fn ret_head(ty: Type) -> Option<&'static str> {
+fn ret_head(ty: Type, address: u32) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("ret.f128");
     }
@@ -684,7 +682,7 @@ fn ret_head(ty: Type) -> Option<&'static str> {
     if is_bit(ty) {
         return Some("ret.i1");
     }
-    Some(["ret.i8", "ret.i16", "ret.i32", "ret.i64"][slot(ty)?])
+    Some(["ret.i8", "ret.i16", "ret.i32", "ret.i64"][slot(ty, address)?])
 }
 
 /// What a comparison is called, which does not carry the width of what it compared: the result
@@ -767,18 +765,22 @@ fn fcmp_head(pred: FloatPred, ty: Type) -> Option<&'static str> {
 /// one bit is what a bit field of width one whose type is a `_Bool` needs, where the front end has
 /// already brought the bit down to the bottom of a wider value and what is left is to say that the
 /// bottom of it is the whole of the value.
-fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
+fn convert_head(opcode: Opcode, from: Type, to: Type, address: u32) -> Option<&'static str> {
     if is_bit(from) {
         if opcode != Opcode::ZExt {
             return None;
         }
-        return Some(["zext.i1.i8", "zext.i1.i16", "zext.i1.i32", "zext.i1.i64"][slot(to)?]);
+        return Some(
+            ["zext.i1.i8", "zext.i1.i16", "zext.i1.i32", "zext.i1.i64"][slot(to, address)?],
+        );
     }
     if is_bit(to) {
         if opcode != Opcode::Trunc {
             return None;
         }
-        return Some(["trunc.i8.i1", "trunc.i16.i1", "trunc.i32.i1", "trunc.i64.i1"][slot(from)?]);
+        return Some(
+            ["trunc.i8.i1", "trunc.i16.i1", "trunc.i32.i1", "trunc.i64.i1"][slot(from, address)?],
+        );
     }
     let table: &[[Option<&'static str>; 4]; 4] = match opcode {
         Opcode::SExt => &SEXT,
@@ -786,7 +788,7 @@ fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
         Opcode::Trunc => &TRUNC,
         _ => return None,
     };
-    table[slot(from)?][slot(to)?]
+    table[slot(from, address)?][slot(to, address)?]
 }
 
 /// Which of the two integer widths a conversion to or from a float is written at, or nothing for
@@ -797,8 +799,8 @@ fn convert_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
 /// and the front end is what writes the truncation, so a narrower conversion arriving here has no
 /// name and is reported rather than lowered to an instruction that would round it in the wrong
 /// place.
-fn cross_slot(ty: Type) -> Option<usize> {
-    match slot(ty)? {
+fn cross_slot(ty: Type, address: u32) -> Option<usize> {
+    match slot(ty, address)? {
         2 => Some(0),
         3 => Some(1),
         _ => None,
@@ -827,7 +829,7 @@ fn paired_int(ty: Type, at: usize) -> bool {
 /// register wider than anything this allocates, so each is several instructions and belongs in a
 /// pass that rewrites it into these rather than in a rule that would have to be several
 /// instructions long.
-fn cross_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
+fn cross_head(opcode: Opcode, from: Type, to: Type, address: u32) -> Option<&'static str> {
     match opcode {
         // Between the two formats, one name each way. There is no third format with a name here,
         // so these two are the whole of it rather than the first two of a table.
@@ -837,8 +839,8 @@ fn cross_head(opcode: Opcode, from: Type, to: Type) -> Option<&'static str> {
         Opcode::FPTrunc => {
             (float_slot(from)? == 1 && float_slot(to)? == 0).then_some("fptrunc.f64.f32")
         }
-        Opcode::FPToSI => Some(FPTOSI[float_slot(from)?][cross_slot(to)?]),
-        Opcode::SIToFP => Some(SITOFP[cross_slot(from)?][float_slot(to)?]),
+        Opcode::FPToSI => Some(FPTOSI[float_slot(from)?][cross_slot(to, address)?]),
+        Opcode::SIToFP => Some(SITOFP[cross_slot(from, address)?][float_slot(to)?]),
         // A reinterpretation, which is a `movd` or a `movq` between the two register files and is
         // the one conversion here that changes no bit. Between two integers or between two floats
         // it is nothing at all, since the IR keeps the width the same, so the four that cross the
@@ -883,7 +885,7 @@ static SITOFP: [[&str; 2]; 2] =
 /// two truth values and a `&&` folded to one instruction become, and each of them takes two bytes
 /// that are a zero or a one to a byte that is a zero or a one. There is nothing to be gained by an
 /// add or a shift at this width and no front end writes one.
-fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
+fn binary_head(opcode: Opcode, ty: Type, address: u32) -> Option<&'static str> {
     if is_bit(ty) {
         return match opcode {
             Opcode::And => Some("and.i1"),
@@ -908,7 +910,7 @@ fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
     // A high multiply is only ever the width of a register, which is where a division by a
     // constant asks for one, so it has one name rather than four.
     if matches!(opcode, Opcode::UMulHigh | Opcode::SMulHigh) {
-        return match (opcode, slot(ty)) {
+        return match (opcode, slot(ty, address)) {
             (Opcode::UMulHigh, Some(3)) => Some("umulh.i64"),
             (Opcode::SMulHigh, Some(3)) => Some("smulh.i64"),
             _ => None,
@@ -934,7 +936,7 @@ fn binary_head(opcode: Opcode, ty: Type) -> Option<&'static str> {
         Opcode::Select => &["select.i8", "select.i16", "select.i32", "select.i64"],
         _ => return None,
     };
-    Some(names[slot(ty)?])
+    Some(names[slot(ty, address)?])
 }
 
 /// The widening conversions, from the width down the side to the width across the top. The
@@ -995,7 +997,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, x, k, Flags::default());
         let add = inst_of(&func, sum);
 
-        let terms = Terms::new(&func, add, PLAIN);
+        let terms = Terms::new(&func, add, PLAIN, 64);
         assert_eq!(terms.head(Term::Root), Some(("add.i32", 2)));
         assert_eq!(terms.head(Term::Arg(0)), Some(("value.i32", 1)));
         assert_eq!(terms.arg(Term::Arg(0), 0), Term::Reg(x));
@@ -1017,13 +1019,13 @@ mod tests {
         let both = build.binary(Opcode::And, x, x, Flags::default());
         let apart = build.binary(Opcode::And, x, y, Flags::default());
 
-        let terms = Terms::new(&func, inst_of(&func, both), PLAIN);
+        let terms = Terms::new(&func, inst_of(&func, both), PLAIN, 64);
         let left = terms.arg(Term::Arg(0), 0);
         let right = terms.arg(Term::Arg(1), 0);
         assert_ne!(Term::Arg(0), Term::Arg(1));
         assert!(terms.same(left, right));
 
-        let terms = Terms::new(&func, inst_of(&func, apart), PLAIN);
+        let terms = Terms::new(&func, inst_of(&func, apart), PLAIN, 64);
         let left = terms.arg(Term::Arg(0), 0);
         let right = terms.arg(Term::Arg(1), 0);
         assert!(!terms.same(left, right));
@@ -1041,7 +1043,7 @@ mod tests {
         let y = build.iconst(i32, 3);
         let sum = build.binary(Opcode::Add, x, y, Flags::default());
 
-        let terms = Terms::new(&func, inst_of(&func, sum), [Shown::Const; MAX_ARGS]);
+        let terms = Terms::new(&func, inst_of(&func, sum), [Shown::Const; MAX_ARGS], 64);
         let left = terms.arg(Term::Arg(0), 0);
         let right = terms.arg(Term::Arg(1), 0);
         assert_ne!(x, y);
@@ -1062,13 +1064,13 @@ mod tests {
         let sum = build.binary(Opcode::Add, x, k, Flags::default());
         let add = inst_of(&func, sum);
 
-        let terms = Terms::new(&func, add, [Shown::Reg, Shown::Const, Shown::Reg]);
+        let terms = Terms::new(&func, add, [Shown::Reg, Shown::Const, Shown::Reg], 64);
         assert_eq!(terms.head(Term::Arg(1)), Some(("iconst.i32", 1)));
         assert_eq!(terms.arg(Term::Arg(1), 0), Term::Num(-7));
         assert_eq!(terms.int(Term::Num(-7)), Some(-7));
         // The same operand shown as a register is a register, and a guard asking what number it
         // is gets no answer, which is what makes a rule about a number decline it.
-        let plain = Terms::new(&func, add, PLAIN);
+        let plain = Terms::new(&func, add, PLAIN, 64);
         assert_eq!(plain.head(Term::Arg(1)), Some(("value.i32", 1)));
         assert_eq!(plain.int(plain.arg(Term::Arg(1), 0)), None);
     }
@@ -1090,13 +1092,13 @@ mod tests {
         let add = inst_of(&func, sum);
 
         // Operand zero is the parameter, so it is shown, and it is shown as a register.
-        let terms = Terms::new(&func, add, [Shown::Var, Shown::Var, Shown::Reg]);
+        let terms = Terms::new(&func, add, [Shown::Var, Shown::Var, Shown::Reg], 64);
         assert_eq!(terms.head(Term::Arg(0)), Some(("value.i32", 1)));
         assert_eq!(terms.arg(Term::Arg(0), 0), Term::Reg(x));
         // Operand one is the constant, so there is no head and no rule reaches past it. Shown as
         // a plain register it would be `value.i32` and the rule would match.
         assert_eq!(terms.head(Term::Arg(1)), None);
-        assert_eq!(Terms::new(&func, add, PLAIN).head(Term::Arg(1)), Some(("value.i32", 1)));
+        assert_eq!(Terms::new(&func, add, PLAIN, 64).head(Term::Arg(1)), Some(("value.i32", 1)));
     }
 
     #[test]
@@ -1106,7 +1108,7 @@ mod tests {
         let k = build.iconst(Type::int(64), 12);
         let inst = inst_of(&func, k);
 
-        let terms = Terms::new(&func, inst, PLAIN);
+        let terms = Terms::new(&func, inst, PLAIN, 64);
         assert_eq!(terms.head(Term::Root), Some(("iconst.i64", 1)));
         assert_eq!(terms.arg(Term::Root, 0), Term::Num(12));
     }
@@ -1124,7 +1126,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, x, scaled, Flags::default());
         let add = inst_of(&func, sum);
 
-        let terms = Terms::new(&func, add, [Shown::Reg, Shown::Expand, Shown::Reg]);
+        let terms = Terms::new(&func, add, [Shown::Reg, Shown::Expand, Shown::Reg], 64);
         assert_eq!(terms.head(Term::Root), Some(("add.i64", 2)));
         assert_eq!(terms.head(Term::Arg(1)), Some(("mul.i64", 2)));
         assert_eq!(terms.head(Term::Deep(1, 0)), Some(("value.i64", 1)));
@@ -1144,11 +1146,11 @@ mod tests {
         let wide = build.unary(Opcode::SExt, x, Type::int(64));
         let narrow = build.unary(Opcode::Trunc, x, Type::int(8));
         let cmp = inst_of(&func, less);
-        assert_eq!(Terms::new(&func, cmp, PLAIN).head(Term::Root), Some(("icmp_slt.i1", 2)));
+        assert_eq!(Terms::new(&func, cmp, PLAIN, 64).head(Term::Root), Some(("icmp_slt.i1", 2)));
         let sext = inst_of(&func, wide);
-        assert_eq!(Terms::new(&func, sext, PLAIN).head(Term::Root), Some(("sext.i32.i64", 1)));
+        assert_eq!(Terms::new(&func, sext, PLAIN, 64).head(Term::Root), Some(("sext.i32.i64", 1)));
         let trunc = inst_of(&func, narrow);
-        assert_eq!(Terms::new(&func, trunc, PLAIN).head(Term::Root), Some(("trunc.i32.i8", 1)));
+        assert_eq!(Terms::new(&func, trunc, PLAIN, 64).head(Term::Root), Some(("trunc.i32.i8", 1)));
     }
 
     #[test]
@@ -1157,19 +1159,25 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let x = build.iconst(Type::int(128), 1);
         let inst = inst_of(&func, x);
-        assert_eq!(Terms::new(&func, inst, PLAIN).head(Term::Root), None);
+        assert_eq!(Terms::new(&func, inst, PLAIN, 64).head(Term::Root), None);
     }
 
     /// An address is an integer of the machine's width to every term here, which is what lets one
     /// be loaded from, stored through, returned and added to by rules written about integers.
     #[test]
     fn an_address_is_an_integer_as_wide_as_the_machine_addresses() {
-        assert_eq!(value_head(Type::PTR), Some("value.i64"));
-        assert_eq!(load_head(Type::PTR), Some("load.i64"));
-        assert_eq!(store_head(Type::PTR), Some("store.i64"));
-        assert_eq!(ret_head(Type::PTR), Some("ret.i64"));
+        assert_eq!(value_head(Type::PTR, 64), Some("value.i64"));
+        assert_eq!(load_head(Type::PTR, 64), Some("load.i64"));
+        assert_eq!(store_head(Type::PTR, 64), Some("store.i64"));
+        assert_eq!(ret_head(Type::PTR, 64), Some("ret.i64"));
         // Not a constant, since nothing writes an address down as one.
-        assert_eq!(iconst_head(Type::PTR), None);
+        assert_eq!(iconst_head(Type::PTR, 64), None);
+        // And on a thirty two bit target it is an integer of thirty two bits, so an i386 rule for
+        // `load.i32` is the one a load of a pointer reaches.
+        assert_eq!(value_head(Type::PTR, 32), Some("value.i32"));
+        assert_eq!(load_head(Type::PTR, 32), Some("load.i32"));
+        assert_eq!(binary_head(Opcode::Add, Type::PTR, 32), Some("add.i32"));
+        assert_eq!(slot(Type::PTR, 32), Some(2));
     }
 
     /// One bit is a width with names of its own, and they are not the four the tables hold. What
@@ -1178,17 +1186,17 @@ mod tests {
     #[test]
     fn one_bit_is_a_width_with_a_name_for_what_a_truth_value_is_written_with() {
         let bit = Type::int(1);
-        assert_eq!(slot(bit), None);
-        assert_eq!(value_head(bit), Some("value.i1"));
-        assert_eq!(iconst_head(bit), Some("iconst.i1"));
-        assert_eq!(binary_head(Opcode::And, bit), Some("and.i1"));
-        assert_eq!(binary_head(Opcode::Or, bit), Some("or.i1"));
-        assert_eq!(binary_head(Opcode::Xor, bit), Some("xor.i1"));
-        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(8)), Some("zext.i1.i8"));
-        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(32)), Some("zext.i1.i32"));
-        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(64)), Some("zext.i1.i64"));
-        assert_eq!(convert_head(Opcode::Trunc, Type::int(8), bit), Some("trunc.i8.i1"));
-        assert_eq!(convert_head(Opcode::Trunc, Type::int(64), bit), Some("trunc.i64.i1"));
+        assert_eq!(slot(bit, 64), None);
+        assert_eq!(value_head(bit, 64), Some("value.i1"));
+        assert_eq!(iconst_head(bit, 64), Some("iconst.i1"));
+        assert_eq!(binary_head(Opcode::And, bit, 64), Some("and.i1"));
+        assert_eq!(binary_head(Opcode::Or, bit, 64), Some("or.i1"));
+        assert_eq!(binary_head(Opcode::Xor, bit, 64), Some("xor.i1"));
+        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(8), 64), Some("zext.i1.i8"));
+        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(32), 64), Some("zext.i1.i32"));
+        assert_eq!(convert_head(Opcode::ZExt, bit, Type::int(64), 64), Some("zext.i1.i64"));
+        assert_eq!(convert_head(Opcode::Trunc, Type::int(8), bit, 64), Some("trunc.i8.i1"));
+        assert_eq!(convert_head(Opcode::Trunc, Type::int(64), bit, 64), Some("trunc.i64.i1"));
     }
 
     /// The three that reach an object of this width, which are the reason a `_Bool` in memory
@@ -1197,9 +1205,9 @@ mod tests {
     #[test]
     fn the_places_a_truth_value_is_an_object_have_a_name() {
         let bit = Type::int(1);
-        assert_eq!(load_head(bit), Some("load.i1"));
-        assert_eq!(store_head(bit), Some("store.i1"));
-        assert_eq!(ret_head(bit), Some("ret.i1"));
+        assert_eq!(load_head(bit, 64), Some("load.i1"));
+        assert_eq!(store_head(bit, 64), Some("store.i1"));
+        assert_eq!(ret_head(bit, 64), Some("ret.i1"));
     }
 
     /// Everything else at one bit has no name, which is what keeps the byte holding one a zero or
@@ -1207,14 +1215,14 @@ mod tests {
     #[test]
     fn nothing_else_at_one_bit_has_a_name() {
         let bit = Type::int(1);
-        assert_eq!(binary_head(Opcode::Add, bit), None);
-        assert_eq!(binary_head(Opcode::Shl, bit), None);
+        assert_eq!(binary_head(Opcode::Add, bit, 64), None);
+        assert_eq!(binary_head(Opcode::Shl, bit, 64), None);
         // Not a sign extension either, which would be a truth value spread over every bit.
-        assert_eq!(convert_head(Opcode::SExt, bit, Type::int(32)), None);
+        assert_eq!(convert_head(Opcode::SExt, bit, Type::int(32), 64), None);
         // And not a widening to it or a narrowing from it, since neither is a conversion: the
         // two widths would be the same one.
-        assert_eq!(convert_head(Opcode::ZExt, Type::int(32), bit), None);
-        assert_eq!(convert_head(Opcode::Trunc, bit, Type::int(32)), None);
+        assert_eq!(convert_head(Opcode::ZExt, Type::int(32), bit, 64), None);
+        assert_eq!(convert_head(Opcode::Trunc, bit, Type::int(32), 64), None);
     }
 
     /// A one bit constant is the truth value it stands for. The signed reading of a one bit
@@ -1227,7 +1235,7 @@ mod tests {
         let bit = Type::int(1);
         let no = build.iconst(bit, 0);
         let yes = build.iconst(bit, 1);
-        let terms = Terms::new(&func, inst_of(&func, yes), PLAIN);
+        let terms = Terms::new(&func, inst_of(&func, yes), PLAIN, 64);
         assert_eq!(terms.constant(no), Some(0));
         assert_eq!(terms.constant(yes), Some(1));
         assert_eq!(terms.head(Term::Root), Some(("iconst.i1", 1)));
@@ -1242,23 +1250,23 @@ mod tests {
     fn a_float_is_a_term_of_its_own_at_each_width_the_machine_computes_in() {
         let f32 = Type::float(Float::F32);
         let f64 = Type::float(Float::F64);
-        assert_eq!(value_head(f32), Some("value.f32"));
-        assert_eq!(value_head(f64), Some("value.f64"));
-        assert_eq!(load_head(f32), Some("load.f32"));
-        assert_eq!(store_head(f64), Some("store.f64"));
-        assert_eq!(ret_head(f32), Some("ret.f32"));
-        assert_eq!(binary_head(Opcode::FAdd, f32), Some("fadd.f32"));
-        assert_eq!(binary_head(Opcode::FSub, f64), Some("fsub.f64"));
-        assert_eq!(binary_head(Opcode::FMul, f32), Some("fmul.f32"));
-        assert_eq!(binary_head(Opcode::FDiv, f64), Some("fdiv.f64"));
+        assert_eq!(value_head(f32, 64), Some("value.f32"));
+        assert_eq!(value_head(f64, 64), Some("value.f64"));
+        assert_eq!(load_head(f32, 64), Some("load.f32"));
+        assert_eq!(store_head(f64, 64), Some("store.f64"));
+        assert_eq!(ret_head(f32, 64), Some("ret.f32"));
+        assert_eq!(binary_head(Opcode::FAdd, f32, 64), Some("fadd.f32"));
+        assert_eq!(binary_head(Opcode::FSub, f64, 64), Some("fsub.f64"));
+        assert_eq!(binary_head(Opcode::FMul, f32, 64), Some("fmul.f32"));
+        assert_eq!(binary_head(Opcode::FDiv, f64, 64), Some("fdiv.f64"));
         // Not one of the four widths an integer rule is written at, and not a constant either,
         // since what a pattern binds inside an `iconst` is a number and a float is not one.
-        assert_eq!(slot(f32), None);
-        assert_eq!(slot(f64), None);
-        assert_eq!(iconst_head(f64), None);
+        assert_eq!(slot(f32, 64), None);
+        assert_eq!(slot(f64, 64), None);
+        assert_eq!(iconst_head(f64, 64), None);
         // An integer add at thirty two bits is a different name from a float add at the same
         // width, which is the whole of what keeps the two rule sets apart.
-        assert_ne!(binary_head(Opcode::Add, Type::int(32)), binary_head(Opcode::FAdd, f32));
+        assert_ne!(binary_head(Opcode::Add, Type::int(32), 64), binary_head(Opcode::FAdd, f32, 64));
     }
 
     /// What the machine has no scalar instruction for has no name, so it is reported rather than
@@ -1266,12 +1274,12 @@ mod tests {
     /// x87 stack, and neither is anything a rule in this set is written about.
     #[test]
     fn a_float_operation_the_machine_lacks_has_no_name() {
-        assert_eq!(binary_head(Opcode::FRem, Type::float(Float::F32)), None);
+        assert_eq!(binary_head(Opcode::FRem, Type::float(Float::F32), 64), None);
         let long = Type::float(Float::F80);
         assert_eq!(float_slot(long), None);
-        assert_eq!(value_head(long), None);
-        assert_eq!(binary_head(Opcode::FAdd, long), None);
-        assert_eq!(ret_head(long), None);
+        assert_eq!(value_head(long, 64), None);
+        assert_eq!(binary_head(Opcode::FAdd, long, 64), None);
+        assert_eq!(ret_head(long, 64), None);
     }
 
     /// The quad format has a name for each of the three things that move a value and for nothing
@@ -1287,14 +1295,14 @@ mod tests {
         assert!(is_quad(quad));
         assert_eq!(float_slot(quad), None);
         assert!(in_vector_file(quad));
-        assert_eq!(value_head(quad), Some("value.f128"));
-        assert_eq!(load_head(quad), Some("load.f128"));
-        assert_eq!(store_head(quad), Some("store.f128"));
-        assert_eq!(ret_head(quad), Some("ret.f128"));
-        assert_eq!(binary_head(Opcode::FAdd, quad), None);
+        assert_eq!(value_head(quad, 64), Some("value.f128"));
+        assert_eq!(load_head(quad, 64), Some("load.f128"));
+        assert_eq!(store_head(quad, 64), Some("store.f128"));
+        assert_eq!(ret_head(quad, 64), Some("ret.f128"));
+        assert_eq!(binary_head(Opcode::FAdd, quad, 64), None);
         assert_eq!(fcmp_head(FloatPred::Oeq, quad), None);
-        assert_eq!(cross_head(Opcode::FPExt, Type::float(Float::F64), quad), None);
-        assert_eq!(cross_head(Opcode::FPTrunc, quad, Type::float(Float::F64)), None);
+        assert_eq!(cross_head(Opcode::FPExt, Type::float(Float::F64), quad, 64), None);
+        assert_eq!(cross_head(Opcode::FPTrunc, quad, Type::float(Float::F64), 64), None);
         // The eighty bit format is in neither file and has none of the three, which is what keeps
         // this from being a claim about every float wider than a `double`.
         assert!(!in_vector_file(Type::float(Float::F80)));
@@ -1306,9 +1314,9 @@ mod tests {
     #[test]
     fn a_vector_is_not_the_width_of_its_lane() {
         let i32x4 = Type::vector(Type::int(32), 4);
-        assert_eq!(slot(i32x4), None);
-        assert_eq!(value_head(i32x4), None);
-        assert_eq!(binary_head(Opcode::Add, i32x4), None);
+        assert_eq!(slot(i32x4, 64), None);
+        assert_eq!(value_head(i32x4, 64), None);
+        assert_eq!(binary_head(Opcode::Add, i32x4, 64), None);
     }
 
     /// The sweep says the same thing about an instruction that looking the instruction up does,
@@ -1326,7 +1334,7 @@ mod tests {
 
         let names = heads();
         for inst in [inst_of(&func, sum), inst_of(&func, x), branch] {
-            let name = head_of(&func, inst).expect("all three have a name");
+            let name = head_of(&func, inst, 64).expect("all three have a name");
             let opcode = func[inst].opcode;
             assert!(
                 names.contains(&(opcode, name)),
@@ -1435,7 +1443,7 @@ mod tests {
             .value(crate::InstData { args, ..crate::InstData::new(Opcode::PtrAdd) }, Type::PTR);
         let inst = inst_of(&func, next);
 
-        let terms = Terms::new(&func, inst, [Shown::Reg, Shown::Const, Shown::Reg]);
+        let terms = Terms::new(&func, inst, [Shown::Reg, Shown::Const, Shown::Reg], 64);
         assert_eq!(terms.head(Term::Root), Some(("add.i64", 2)));
         assert_eq!(terms.head(Term::Arg(0)), Some(("value.i64", 1)));
         assert_eq!(terms.head(Term::Arg(1)), Some(("iconst.i64", 1)));

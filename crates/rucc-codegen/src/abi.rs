@@ -1041,8 +1041,10 @@ fn places_back(
 /// set that one bit is a byte, and then every byte rule in the file would match a term that is not
 /// one. What the convention needs is narrower: a name for the register an argument arrives in, and
 /// that name says a width because a listing is easier to read when it does.
+///
+/// An address travels at sixty four bits, because the pseudos these name are x86-64's.
 fn place(ty: Type) -> Option<usize> {
-    if crate::term::is_bit(ty) { Some(0) } else { crate::term::slot(ty) }
+    if crate::term::is_bit(ty) { Some(0) } else { crate::term::slot(ty, 64) }
 }
 
 /// What the pseudo for an argument of that type is called.
