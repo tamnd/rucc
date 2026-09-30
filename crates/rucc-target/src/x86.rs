@@ -1,4 +1,5 @@
-//! The i386 register file, and where the System V convention over it puts things.
+//! The i386 register file, where the System V convention over it puts things, and which of the
+//! x86-64 instructions it has.
 //!
 //! Design: `spec/10-backend.md` section 10.8 and `spec/12-abi-and-runtime.md` section 12.2, and
 //! issue #2247, which is the backend this is the first piece of.
@@ -11,16 +12,29 @@
 //! The names are the thirty two bit ones, and `al` and `ax` are ways of writing part of `eax`
 //! rather than registers of their own, as they are on x86-64.
 //!
+//! The instructions are x86-64's. i386 is the same instruction set with the REX prefix taken away
+//! and addresses thirty two bits wide, so rather than a second description this file holds the
+//! tables that say which part of [`crate::x86_64`]'s one an i386 function may use: [`MACHINE`]
+//! refuses every opcode the encoder cannot write in [`Mode::Bits32`], and [`FRAME`] and [`BRANCH`]
+//! name the thirty two bit forms where x86-64's name the sixty four bit ones. The opcodes keep
+//! their `x64.` prefix, since they are the same instructions, and what tells an i386 function
+//! apart is its target.
+//!
 //! # What is not here yet
 //!
-//! Everything but the registers and the convention over them. The instruction tables, the frame,
-//! the branches and the encoder arrive with the rules that select them, and nothing reaches this
-//! file to generate code until `rucc_codegen::Machine::for_target` says so. The convention is here
-//! ahead of that for the reason AArch64's was: the ABI tests and the debugging information read it.
+//! Nothing reaches this file to generate code until `rucc_codegen::Machine::for_target` says so,
+//! which waits on the cdecl call lowering: arguments on the stack and a 64-bit result in
+//! `edx:eax`. The byte registers are another piece still to come, since only the first four
+//! general purpose registers have one on this machine and the allocator has no way to say so yet.
 
+use crate::branch::{BranchInsts, Fusion, Move};
+use crate::frame::{ClassMoves, FrameInsts, Thunks};
+use crate::machine::MachineInsts;
+use crate::operand::OperandDesc;
 use crate::regs::{
     CallRegs, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
+use crate::x86_64::{Form, Kind, Mode, encoding_in, form, written};
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -192,6 +206,171 @@ pub static SYSV: CallRegs = CallRegs {
 /// through every call it makes.
 pub static SYSV_PIC: CallRegs = CallRegs { int_order: &SYSV_PIC_INT_ORDER, ..SYSV };
 
+// Aligned vector moves for the reason `crate::x86_64` gives. The frame keeps its sixteen byte
+// alignment here too, which [`SYSV`] says the psABI promises.
+static X86_MOVES: [ClassMoves; 2] = [
+    ClassMoves { mov: "mov_rr_32", load: "mov_rm_32", store: "mov_mr_32" },
+    ClassMoves { mov: "movaps_rr", load: "movaps_rm", store: "movaps_mr" },
+];
+
+/// What an i386 prologue, epilogue, spill and reload are made of.
+///
+/// [`crate::x86_64::FRAME`] at thirty two bits: a register and an address are both four bytes, so
+/// every instruction that moves one, adjusts the stack pointer or computes an address is the `l`
+/// form rather than the `q` one. The probe is the same instruction, since it touches a byte.
+pub static FRAME: FrameInsts = FrameInsts {
+    prefix: "x64.",
+    classes: &X86_MOVES,
+    push: "push_32",
+    pop: "pop_32",
+    pair: None,
+    kept: None,
+    add: "add_ri_32",
+    sub: "sub_ri_32",
+    grow: "sub_rr_32",
+    scaled: None,
+    insert: None,
+    align: "and_ri_32",
+    imm: "mov_ri_32",
+    lea: "lea_32",
+    sum: "add_rr_32",
+    ret: "ret",
+    differ: "cmp_set_ne_32",
+    above: "cmp_set_a_32",
+    away: Some("jmp_away"),
+    call: "call",
+    probe: Some(crate::x86_64::PROBE),
+    landing: Some("endbr32"),
+    pad: Some("nop"),
+    step_bits: None,
+    reaches: None,
+    thunks: Some(THUNKS),
+};
+
+/// What the speculation hardening flags rewrite branches into on i386.
+///
+/// The names are x86-64's with the thirty two bit register on the end, which is what the kernel's
+/// `arch/x86/lib/retpoline.S` defines when it is built for this machine. No register takes a REX
+/// byte here, so none of the calls needs the override that pads one.
+pub static THUNKS: Thunks = Thunks { regs: &GPR_NAMES, padded_from: 8, ..crate::x86_64::THUNKS };
+
+/// What an i386 instruction has to look like for this machine to have one.
+///
+/// [`crate::x86_64::MACHINE`] with one more question: whether every instruction the opcode writes
+/// is one the encoder has in [`Mode::Bits32`]. That is what takes out the sixty four bit forms,
+/// whose `q` suffix is a REX.W byte this machine does not have, and `pushq` and `popq`, which have
+/// no thirty two bit encoding at all. The answer is the encoder's rather than a list kept here, so
+/// an opcode added to the description is on this machine exactly when it can be written for it.
+///
+/// The addressing modes are the same four scales with an index and a displacement together.
+pub static MACHINE: MachineInsts = MachineInsts {
+    prefix: "x64.",
+    operands: machine_operands,
+    takes_imm: machine_takes_imm,
+    takes_mem: machine_takes_mem,
+    touches_mem: machine_touches_mem,
+    calls: machine_calls,
+    commutes: machine_commutes,
+    scales: &[1, 2, 4, 8],
+    index_and_disp: true,
+};
+
+/// The form of an opcode this machine has, or `None` if it has no such opcode or cannot write it.
+#[must_use]
+pub fn form_here(name: &str) -> Option<Form> {
+    let found = form(name)?;
+    let insts = written(name)?;
+    insts
+        .iter()
+        .all(|inst| {
+            let args: Vec<Kind> = inst.args.iter().map(|&arg| Kind::of(arg)).collect();
+            // A row with the REX wide bit is found in either mode and refused only when it is
+            // written, so it is refused here too.
+            encoding_in(Mode::Bits32, inst.mnemonic, &args, 0).is_some_and(|row| !row.size.wide())
+        })
+        .then_some(found)
+}
+
+#[must_use]
+fn machine_operands(name: &str) -> Option<&'static [OperandDesc]> {
+    form_here(name).map(Form::operands)
+}
+
+#[must_use]
+fn machine_takes_imm(name: &str) -> bool {
+    form_here(name).is_some_and(Form::takes_imm)
+}
+
+#[must_use]
+fn machine_takes_mem(name: &str) -> bool {
+    form_here(name).is_some_and(Form::takes_mem)
+}
+
+#[must_use]
+fn machine_touches_mem(name: &str) -> bool {
+    form_here(name).is_some_and(Form::touches_mem)
+}
+
+#[must_use]
+fn machine_calls(name: &str) -> bool {
+    form_here(name) == Some(Form::Call)
+}
+
+#[must_use]
+fn machine_commutes(name: &str) -> bool {
+    form_here(name).is_some() && (crate::x86_64::MACHINE.commutes)(name)
+}
+
+/// What an i386 conditional branch becomes once the blocks are in an order.
+///
+/// [`crate::x86_64::BRANCH`] without the sixty four bit comparisons and selects, which this
+/// machine does not have. The test, the jumps and the conditions are the same instructions.
+pub static BRANCH: BranchInsts =
+    BranchInsts { fused: &FUSED, moves: &MOVES, ..crate::x86_64::BRANCH };
+
+/// Whether an opcode's name ends in the width this machine has no registers of.
+const fn is_wide(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let n = bytes.len();
+    n >= 3 && bytes[n - 3] == b'_' && bytes[n - 2] == b'6' && bytes[n - 1] == b'4'
+}
+
+/// The x86-64 fusions whose comparison is at eight, sixteen or thirty two bits.
+const fn narrow_fused<const N: usize>(all: &[Fusion]) -> [Fusion; N] {
+    let mut out = [all[0]; N];
+    let (mut at, mut kept) = (0, 0);
+    while at < all.len() {
+        if !is_wide(all[at].set) {
+            out[kept] = all[at];
+            kept += 1;
+        }
+        at += 1;
+    }
+    assert!(kept == N, "the count of narrow comparisons");
+    out
+}
+
+/// The x86-64 moves whose select is at eight, sixteen or thirty two bits.
+const fn narrow_moves<const N: usize>(all: &[Move]) -> [Move; N] {
+    let mut out = [all[0]; N];
+    let (mut at, mut kept) = (0, 0);
+    while at < all.len() {
+        if !is_wide(all[at].select) {
+            out[kept] = all[at];
+            kept += 1;
+        }
+        at += 1;
+    }
+    assert!(kept == N, "the count of narrow selects");
+    out
+}
+
+/// Ten conditions at three widths, against a register, a constant and memory.
+static FUSED: [Fusion; 120] = narrow_fused(&crate::x86_64::FUSED);
+
+/// Ten conditions at the three widths a select has here.
+static MOVES: [Move; 30] = narrow_moves(&crate::x86_64::MOVES);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +480,92 @@ mod tests {
                     .all(|&reg| convention.preserves_int(reg)),
                 "the preserved registers are not one run at the end"
             );
+        }
+    }
+
+    /// Every instruction a prologue, an epilogue, a spill or a branch is made of is one this
+    /// machine has. One that was not would compile under `-S` and fail to assemble, or worse,
+    /// assemble as the sixty four bit form and do something else.
+    #[test]
+    fn every_opcode_the_frame_and_the_branches_name_is_one_this_machine_has() {
+        let mut names = vec![
+            FRAME.push,
+            FRAME.pop,
+            FRAME.add,
+            FRAME.sub,
+            FRAME.grow,
+            FRAME.align,
+            FRAME.imm,
+            FRAME.lea,
+            FRAME.sum,
+            FRAME.ret,
+            FRAME.differ,
+            FRAME.above,
+            FRAME.call,
+        ];
+        names.extend(FRAME.away);
+        names.extend(FRAME.landing);
+        names.extend(FRAME.pad);
+        names.extend(FRAME.probe.map(|probe| probe.inst));
+        for class in FRAME.classes {
+            names.extend([class.mov, class.load, class.store]);
+        }
+        let thunks = FRAME.thunks.expect("the frame has thunks");
+        names.extend([
+            thunks.call_through,
+            thunks.jump_through,
+            thunks.call,
+            thunks.jump,
+            thunks.trap,
+        ]);
+        names.extend([BRANCH.cond, BRANCH.test, BRANCH.if_true, BRANCH.if_false]);
+        names.extend([BRANCH.jump, BRANCH.indirect]);
+        names.extend(BRANCH.conditional);
+        for fusion in BRANCH.fused {
+            names.extend([fusion.set, fusion.cmp, fusion.if_true, fusion.if_false]);
+        }
+        for entry in BRANCH.moves {
+            names.extend([entry.select, entry.when, entry.cmov]);
+        }
+        for name in names {
+            assert!(form_here(name).is_some(), "{name} is not an i386 instruction");
+        }
+    }
+
+    /// The sixty four bit forms are x86-64's alone, and the thirty two bit frame moves are not.
+    #[test]
+    fn the_machine_has_the_thirty_two_bit_forms_and_not_the_sixty_four_bit_ones() {
+        for name in ["add_rr_64", "mov_rr_64", "mov_ri_64", "lea_64", "push_64", "pop_64"] {
+            assert_eq!(form_here(name), None, "{name}");
+            assert_eq!((MACHINE.operands)(name), None, "{name}");
+        }
+        for name in ["add_rr_32", "mov_rr_32", "mov_ri_32", "lea_32", "push_32", "pop_32"] {
+            assert!(form_here(name).is_some(), "{name}");
+        }
+        assert!((MACHINE.commutes)("add_rr_32"));
+        assert!(!(MACHINE.commutes)("add_rr_64"));
+        assert!(!(MACHINE.commutes)("sub_rr_32"));
+        assert!((MACHINE.calls)("call"));
+    }
+
+    /// Every comparison this machine has can have its test taken off, and every select on one has
+    /// the move for every condition, which is the x86-64 table's claim held to what is left of it.
+    #[test]
+    fn the_branch_tables_are_x86_64_s_at_the_widths_this_machine_has() {
+        let here = |shapes: &[Form]| -> Vec<&str> {
+            crate::x86_64::INSTS
+                .iter()
+                .filter(|&&(name, shape)| shapes.contains(&shape) && form_here(name).is_some())
+                .map(|&(name, _)| name)
+                .collect()
+        };
+        let sets = here(&[Form::CmpSet, Form::CmpSetRi, Form::CmpSetRm, Form::CmpSetMi]);
+        let entries: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.set).collect();
+        assert_eq!(entries, sets);
+        let selects = here(&[Form::TestCmov]);
+        assert_eq!(BRANCH.moves.len(), selects.len() * 10);
+        for entry in BRANCH.moves {
+            assert!(selects.contains(&entry.select), "{}", entry.select);
         }
     }
 }

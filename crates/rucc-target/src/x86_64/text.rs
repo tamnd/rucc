@@ -877,6 +877,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("bswap_64", &[spell("bswapq", &[Reg(0, Quad)])]),
     // The address computation the addressing modes are reached through.
     ("lea_64", &[spell("leaq", &[Mem, Reg(0, Quad)])]),
+    ("lea_32", &[spell("leal", &[Mem, Reg(0, Long)])]),
     // Reading and writing memory. The width is the width of what is moved rather than of the
     // address, which is sixty four bits in every one of them.
     ("mov_rm_8", &[spell("movb", &[Mem, Reg(0, Byte)])]),
@@ -1067,6 +1068,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mov_rr_64", &[spell("movq", &[Reg(1, Quad), Reg(0, Quad)])]),
     ("push_64", &[spell("pushq", &[Reg(0, Quad)])]),
     ("pop_64", &[spell("popq", &[Reg(0, Quad)])]),
+    ("mov_rr_32", &[spell("movl", &[Reg(1, Long), Reg(0, Long)])]),
+    ("push_32", &[spell("pushl", &[Reg(0, Long)])]),
+    ("pop_32", &[spell("popl", &[Reg(0, Long)])]),
     ("ret", &[spell("ret", &[])]),
     ("mfence", &[spell("mfence", &[])]),
     // The four hints. One operand each and it is the address, the way `fldcw` above has one and it
@@ -1085,6 +1089,7 @@ static TEXT: &[(&str, &[Written])] = &[
     // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
     // because there is only one of it on this machine and its name is the whole of it.
     ("endbr64", &[spell("endbr64", &[])]),
+    ("endbr32", &[spell("endbr32", &[])]),
     // The byte that does nothing. No operands and one spelling, and the name is the whole of it
     // the way the landing pad's is.
     ("nop", &[spell("nop", &[])]),

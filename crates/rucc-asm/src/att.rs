@@ -7,6 +7,11 @@
 //! An AArch64 file is written by the same walk, since sections, labels, unwind rows and variables
 //! are spelled the same way for both machines. Only the instruction is handed to [`crate::a64`].
 //!
+//! An i386 file is x86-64's, since the instructions are the same ones. What differs is written
+//! where it comes up: an address is thirty two bits, so its registers are `%ecx` rather than
+//! `%rcx`; there is nothing relative to the instruction pointer, so a symbol on its own is its
+//! address; and the registers x86-64 added are refused rather than written.
+//!
 //! So there is almost nothing about x86-64 in this file. What an opcode is called, how many
 //! instructions it really is, which operand each of them is given and how wide each of those is
 //! written are all read out of the target. What is here is the syntax: a register carries a `%`,
@@ -160,7 +165,7 @@ fn listing(
 ) -> Result<String, Error> {
     let Output { sections, property } = output;
     let arch = target.tuple.arch();
-    if !matches!(arch, Arch::X86_64 | Arch::Aarch64) {
+    if !matches!(arch, Arch::X86_64 | Arch::X86 | Arch::Aarch64) {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let directives = Directives::of(target.object_format);
@@ -800,6 +805,7 @@ impl Writer<'_> {
                 why: "it jumps to a block, which only the whole listing can name".to_owned(),
             })?;
             let prefix = self.directives.symbol();
+            let word = self.word();
             let reg = |at: usize, width: char| {
                 let Some(operand) = operands.get(at) else { return String::from("?") };
                 let phys = operand.reg.phys().expect("every operand was checked above");
@@ -810,7 +816,7 @@ impl Writer<'_> {
                     'w' => name_of(operand.class, phys, Width::Word),
                     'k' => name_of(operand.class, phys, Width::Long),
                     'h' => x86_64::gpr_high(phys).unwrap_or("?"),
-                    _ => name_of(operand.class, phys, Width::Quad),
+                    _ => name_of(operand.class, phys, word),
                 };
                 if bare { named.to_owned() } else { format!("%{named}") }
             };
@@ -869,7 +875,7 @@ impl Writer<'_> {
                     // through. Everything in front of it is a register the call writes.
                     Arg::Through => {
                         let operand = operands[defs(operands)];
-                        format!("*{}", self.reg(operand, Width::Quad, func_name, spelled)?)
+                        format!("*{}", self.reg(operand, self.word(), func_name, spelled)?)
                     }
                     Arg::Imm => match data.imm {
                         Some(imm) => format!("${}", func[imm].0),
@@ -922,7 +928,24 @@ impl Writer<'_> {
         let Some(phys) = operand.reg.phys() else {
             return Err(Error::Virtual { func: func_name.to_owned(), opcode: opcode.to_owned() });
         };
+        // i386 has the first eight of each file and no general purpose one at sixty four bits. The description
+        // is x86-64's and names both, so what keeps them out of an i386 listing is this, rather
+        // than a name the assembler would read as something else or refuse.
+        let missing = phys.number() >= 8 || (operand.class == x86_64::GPR && width == Width::Quad);
+        if self.arch == Arch::X86 && operand.class != x86_64::X87 && missing {
+            return Err(Error::Encode {
+                func: func_name.to_owned(),
+                opcode: opcode.to_owned(),
+                why: format!("i386 has no register {}", name_of(operand.class, phys, width)),
+            });
+        }
         Ok(format!("%{}", name_of(operand.class, phys, width)))
+    }
+
+    /// How wide a register holding an address is, which is the width a base, an index and a
+    /// register called through are written at.
+    fn word(&self) -> Width {
+        if self.arch == Arch::X86 { Width::Long } else { Width::Quad }
     }
 
     /// One address, which is a displacement and then whichever registers it names.
@@ -951,8 +974,16 @@ impl Writer<'_> {
             // what it holds is an offset into a thread's own block rather than an address. On
             // Mach-O the slot holds the address of the variable's descriptor instead, which is
             // what the code calls through.
+            // i386 has no addressing relative to the instruction pointer, so a slot is reached from
+            // the table's own address in a register and the suffixes are the ones that count from
+            // there. A thread's offset comes out of the table with nothing in front of it, or
+            // from the table's address when there is one.
+            let i386 = self.arch == Arch::X86;
             match amode.reach {
                 Reach::Itself => {}
+                Reach::Table if i386 => out.push_str("@GOT"),
+                Reach::Thread if i386 && amode.base.is_some() => out.push_str("@GOTNTPOFF"),
+                Reach::Thread if i386 => out.push_str("@INDNTPOFF"),
                 Reach::Table => out.push_str("@GOTPCREL"),
                 Reach::Thread if self.directives == Directives::MachO => out.push_str("@TLVP"),
                 Reach::Thread => out.push_str("@GOTTPOFF"),
@@ -993,13 +1024,15 @@ impl Writer<'_> {
         if base.is_some() || index.is_some() {
             out.push('(');
             if let Some(operand) = base {
-                out.push_str(&self.reg(*operand, Width::Quad, func_name, opcode)?);
+                out.push_str(&self.reg(*operand, self.word(), func_name, opcode)?);
             }
             if let Some(operand) = index {
-                let reg = self.reg(*operand, Width::Quad, func_name, opcode)?;
+                let reg = self.reg(*operand, self.word(), func_name, opcode)?;
                 let _ = write!(out, ",{reg},{}", amode.scale);
             }
             out.push(')');
+        } else if self.arch == Arch::X86 {
+            // Nothing: with no register in it, an address on i386 is the number itself.
         } else if (amode.symbol.is_some() && amode.reach != Reach::Absolute)
             || amode.block.is_some()
             || (amode.table.is_some() && amode.reach != Reach::Absolute)
@@ -2035,6 +2068,107 @@ mod tests {
         let error = print(&[], &Globals::default(), &[], &names, &riscv, true, Output::default())
             .expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
+    }
+
+    /// One i386 function of one block, with those instructions in it, written out.
+    fn write_i386(build: impl FnOnce(&mut Func, &mut Interner)) -> Result<String, Error> {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        build(&mut func, &mut names);
+        let target = TargetInfo::new(Triple::new(Arch::X86, Os::Linux, Env::Gnu));
+        print(&[func], &Globals::default(), &[], &names, &target, true, Output::default())
+    }
+
+    #[test]
+    fn an_i386_instruction_names_its_registers_and_its_addresses_at_thirty_two_bits() {
+        use rucc_target::x86::{EAX, EBP, ECX, EDX};
+        let text = write_i386(|func, names| {
+            let block = func.create_block();
+            func.build(block, Opcode::new(names.intern("x64.push_32")))
+                .operand(Operand::read(Reg::physical(EBP), GPR))
+                .finish();
+            func.build(block, Opcode::new(names.intern("x64.lea_32")))
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(
+                    Mem::at(Operand::read(Reg::physical(ECX), GPR))
+                        .indexed(Operand::read(Reg::physical(EDX), GPR), 4)
+                        .plus(-16),
+                )
+                .finish();
+            func.build(block, Opcode::new(names.intern("x64.call_reg")))
+                .operand(Operand::read(Reg::physical(EAX), GPR))
+                .finish();
+            func.build(block, Opcode::new(names.intern("x64.pop_32")))
+                .operand(Operand::write(Reg::physical(EBP), GPR))
+                .finish();
+        })
+        .expect("an i386 function");
+        assert_eq!(
+            body(&text),
+            ["pushl\t%ebp", "leal\t-16(%ecx,%edx,4), %eax", "call\t*%eax", "popl\t%ebp"]
+        );
+    }
+
+    #[test]
+    fn an_i386_address_with_nothing_but_a_symbol_in_it_is_the_symbol() {
+        use rucc_target::x86::{EAX, EBX};
+        let text = write_i386(|func, names| {
+            let block = func.create_block();
+            let load = Opcode::new(names.intern("x64.mov_rm_32"));
+            let counter = names.intern("counter");
+            let away = names.intern("away");
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem::of(counter))
+                .finish();
+            // The table's address in a register, which is how position independent code on this
+            // machine reaches a slot, and a thread's offset read with and without it.
+            let table = Some(Operand::read(Reg::physical(EBX), GPR));
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem { base: table, ..Mem::got(away) })
+                .finish();
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem { base: table, ..Mem::thread(away) })
+                .finish();
+            func.build(block, load)
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .mem(Mem::thread(away))
+                .finish();
+        })
+        .expect("an i386 function");
+        assert_eq!(
+            body(&text),
+            [
+                "movl\tcounter, %eax",
+                "movl\taway@GOT(%ebx), %eax",
+                "movl\taway@GOTNTPOFF(%ebx), %eax",
+                "movl\taway@INDNTPOFF, %eax",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_i386_listing_refuses_a_register_the_machine_does_not_have() {
+        use rucc_target::x86::{EAX, ECX};
+        let wide = write_i386(|func, names| {
+            let block = func.create_block();
+            func.build(block, Opcode::new(names.intern("x64.add_rr_64")))
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .operand(Operand::read(Reg::physical(EAX), GPR))
+                .operand(Operand::read(Reg::physical(ECX), GPR))
+                .finish();
+        });
+        assert!(matches!(wide, Err(Error::Encode { .. })), "{wide:?}");
+        let high = write_i386(|func, names| {
+            let block = func.create_block();
+            func.build(block, Opcode::new(names.intern("x64.mov_rr_32")))
+                .operand(Operand::write(Reg::physical(EAX), GPR))
+                .operand(Operand::read(Reg::physical(x86_64::R8), GPR))
+                .finish();
+        });
+        assert!(matches!(high, Err(Error::Encode { .. })), "{high:?}");
     }
 
     /// One AArch64 function of one block, with those instructions in it, written out.
