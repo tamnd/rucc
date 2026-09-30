@@ -199,6 +199,16 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::UNINITIALIZED) {
             head.push_str(" uninitialized");
         }
+        if node.flags.contains(DeclFlags::ZERO_SKIP) {
+            head.push_str(" zero_call_used_regs(skip)");
+        }
+        for (flag, choice) in [(DeclFlags::ZERO_USED, "used-gpr"), (DeclFlags::ZERO_ALL, "all-gpr")]
+        {
+            if node.flags.contains(flag) {
+                let arg = if node.flags.contains(DeclFlags::ZERO_ARG) { "-arg" } else { "" };
+                head.push_str(&format!(" zero_call_used_regs({choice}{arg})"));
+            }
+        }
         // Written under the name the attribute was written under rather than the name of the
         // bit it becomes, because what a dump of the tree shows is what the source said.
         match node.effects {

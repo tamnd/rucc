@@ -59,6 +59,7 @@ use crate::tail;
 use crate::thunks;
 use crate::usage::{StackUsage, Usage};
 use crate::weights;
+use crate::zero::{self, Zeroing};
 pub use rucc_regalloc::Allocator;
 
 /// Everything about a machine that compiling a function for it needs.
@@ -394,6 +395,9 @@ pub struct Flags {
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` turns off. That is the
     /// eighty bit `long double`, and a function with one in it is refused too.
     pub x87: bool,
+    /// Which registers `-fzero-call-used-regs=` has every `ret` clear, `None` for `skip`, which a
+    /// function's `zero_call_used_regs` attribute replaces for that function. See [`crate::zero`].
+    pub zero: Option<Zeroing>,
 }
 
 impl Default for Flags {
@@ -428,6 +432,7 @@ impl Default for Flags {
             debug: false,
             vector: true,
             x87: true,
+            zero: None,
         }
     }
 }
@@ -554,6 +559,7 @@ pub fn compile_recording(
     let mut speculation = flags.speculation;
     speculation.returns &= !source.attrs.set.contains(ir::AttrSet::RETURN_KEEP);
     speculation.indirect &= !source.attrs.set.contains(ir::AttrSet::INDIRECT_KEEP);
+    let zeroing = zeroing(flags.zero, source.attrs.set);
     // Last thing before selection, because a `tail_call` ends its block and every lowering above
     // is written against blocks that end the way the middle end left them. Only on a machine that
     // can jump to a name, since the call stays a call on one that cannot.
@@ -966,6 +972,10 @@ pub fn compile_recording(
         "a leaf whose tail calls did not all become jumps"
     );
 
+    // After the tail calls, because a `ret` a tail call replaced leaves through the callee's, and
+    // before the mitigations, which may turn a `ret` into a jump.
+    zero::apply(&mut func, zeroing, machine.shapes, &machine.file, names);
+
     // After the tail jumps, because a `ret` that became a jump to a callee is a direct jump and no
     // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
     // branch goes to is named after the register the allocator gave it.
@@ -980,6 +990,21 @@ pub fn compile_recording(
         None => Vec::new(),
     };
     Ok(func)
+}
+
+/// Which registers a function's returns clear: what its `zero_call_used_regs` said if it said
+/// anything, and what `-fzero-call-used-regs=` said if not.
+fn zeroing(command: Option<Zeroing>, set: ir::AttrSet) -> Option<Zeroing> {
+    let arg = set.contains(ir::AttrSet::ZERO_ARG);
+    if set.contains(ir::AttrSet::ZERO_SKIP) {
+        None
+    } else if set.contains(ir::AttrSet::ZERO_ALL) {
+        Some(Zeroing { all: true, arg })
+    } else if set.contains(ir::AttrSet::ZERO_USED) {
+        Some(Zeroing { all: false, arg })
+    } else {
+        command
+    }
 }
 
 /// Marks every instruction the machine says reads its two sources either way round.

@@ -1029,10 +1029,10 @@ impl Checker<'_> {
     /// the bits it can set.
     ///
     /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`,
-    /// `stack_protect`, `cold`, `hot`, `function_return("keep")` and `indirect_branch("keep")`, and
-    /// the `optimize` options that stand for two of them, and `uninitialized`, which is about an
-    /// object and not a function but is read in the same two places, under the namespace test
-    /// [`Self::never_returns`] is under and through the same
+    /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
+    /// `zero_call_used_regs`, and the `optimize` options that stand for two of them, and
+    /// `uninitialized`, which is about an object and not a function but is read in the same two
+    /// places, under the namespace test [`Self::never_returns`] is under and through the same
     /// unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
     /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
     /// declaration.
@@ -1061,6 +1061,7 @@ impl Checker<'_> {
                 "indirect_branch" if self.optimize_options(attr) == ["keep"] => {
                     flags |= DeclFlags::INDIRECT_KEEP;
                 }
+                "zero_call_used_regs" => flags |= self.zero_choice(attr),
                 // An option is written with or without its `-f`. `no-stack-protector` here is
                 // what the kernel's `__nostackprotector` was before gcc 11 had the attribute, and
                 // what it still falls back to on a compiler that says it does not have it.
@@ -1101,6 +1102,39 @@ impl Checker<'_> {
             }
         }
         flags
+    }
+
+    /// The bits one `zero_call_used_regs` sets, reporting a choice gcc does not have and the four
+    /// that zero the vector registers as well, which are not done yet.
+    ///
+    /// Refused rather than read as the choice without the vector registers, because a function
+    /// written this way is asking for less to be left behind and zeroing fewer registers than it
+    /// asked for would be a quiet way of not doing that.
+    fn zero_choice(&mut self, attr: Attribute) -> DeclFlags {
+        let choice = self.optimize_options(attr);
+        match choice.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+            ["skip"] => DeclFlags::ZERO_SKIP,
+            ["used-gpr"] => DeclFlags::ZERO_USED,
+            ["used-gpr-arg"] => DeclFlags::ZERO_USED | DeclFlags::ZERO_ARG,
+            ["all-gpr"] => DeclFlags::ZERO_ALL,
+            ["all-gpr-arg"] => DeclFlags::ZERO_ALL | DeclFlags::ZERO_ARG,
+            [vector @ ("used" | "used-arg" | "all" | "all-arg")] => {
+                let what = format!(
+                    "zero_call_used_regs(\"{vector}\") also zeroes the vector registers, which is \
+                     not supported yet (tamnd/rucc#2335)"
+                );
+                self.report(Diagnostic::error(what, attr.span).with_code("E0688"));
+                DeclFlags::NONE
+            }
+            _ => {
+                let what = format!(
+                    "unrecognized 'zero_call_used_regs' attribute argument '{}'",
+                    choice.join(",")
+                );
+                self.report(Diagnostic::error(what, attr.span).with_code("E0688"));
+                DeclFlags::NONE
+            }
+        }
     }
 
     /// The options an `optimize` attribute names, one for each string and each comma in one.

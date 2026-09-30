@@ -954,6 +954,18 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::INDIRECT_KEEP) {
             func.attrs.set |= AttrSet::INDIRECT_KEEP;
         }
+        // What a function said about zeroing registers on the way out, which overrides the
+        // command line for its body.
+        for (said, kept) in [
+            (DeclFlags::ZERO_SKIP, AttrSet::ZERO_SKIP),
+            (DeclFlags::ZERO_USED, AttrSet::ZERO_USED),
+            (DeclFlags::ZERO_ALL, AttrSet::ZERO_ALL),
+            (DeclFlags::ZERO_ARG, AttrSet::ZERO_ARG),
+        ] {
+            if node.flags.contains(said) {
+                func.attrs.set |= kept;
+            }
+        }
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);

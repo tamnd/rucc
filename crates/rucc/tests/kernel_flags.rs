@@ -55,15 +55,17 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
         "-gz=zstd",
         "-ftrivial-auto-var-init=zero",
         "-ftrivial-auto-var-init=pattern",
+        "-fzero-call-used-regs=used-gpr",
     ] {
         assert!(cc_option(X86, flag), "{flag}");
     }
     assert!(cc_option(ARM64, "-mno-outline-atomics"));
+    assert!(cc_option(ARM64, "-fzero-call-used-regs=used-gpr"));
 }
 
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    for flag in ["-mindirect-branch=thunk"] {
+    for flag in ["-mindirect-branch=thunk", "-fzero-call-used-regs=all"] {
         assert!(!cc_option(X86, flag), "{flag}");
     }
     assert!(!cc_option(ARM64, "-mbranch-protection=pac-ret+bti"));
