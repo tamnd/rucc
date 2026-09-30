@@ -1267,10 +1267,24 @@ impl Preprocessor {
                 0
             }
             Op::Table(kind) => {
-                let Some(name) = attribute_name(operand, cx.interner) else {
+                let Some(Named { scope, name }) = attribute_name(operand, cx.interner) else {
                     self.bad_operand(tok, at, cx.interner);
                     return 0;
                 };
+                // A scoped attribute is asked of the vendor the scope names, whichever of the
+                // two operators asks. GCC is the only vendor here, so `gnu::packed` and
+                // `__gnu__::packed` answer one when `packed` is a GNU attribute rucc has, and
+                // `clang::packed` answers zero. That is one and not the standard's number even
+                // for a name the standard also has, so `gnu::fallthrough` is one and
+                // `gnu::nodiscard`, which is only a standard attribute, is zero, as in gcc 16.
+                let scoped = matches!(kind, Kind::Attribute | Kind::CAttribute);
+                let gnu = match scope {
+                    Some(scope) if scoped => rucc_gnu::unarmour(scope) == "gnu",
+                    _ => false,
+                };
+                if scoped && scope.is_some() && !gnu {
+                    return 0;
+                }
                 match kind {
                     // The two conventions are attributes of x86-64 only, however the table
                     // answers, since gcc ignores both anywhere else.
@@ -1280,6 +1294,7 @@ impl Preprocessor {
                     {
                         0
                     }
+                    Kind::Attribute | Kind::CAttribute if gnu => rucc_gnu::has_gnu_attribute(name),
                     Kind::Attribute => rucc_gnu::has_attribute(name),
                     Kind::CAttribute => rucc_gnu::has_c_attribute(name),
                     Kind::Builtin if !self.aarch64 && name == "__builtin_sponentry" => 0,
@@ -1961,18 +1976,31 @@ fn arguments(line: &[Tok], at: usize) -> Option<(&[Tok], usize)> {
     None
 }
 
-/// The name `__has_attribute` and its relatives are asked about.
+/// The name `__has_attribute` and its relatives are asked about, and the scope it was written
+/// with, if any.
+struct Named<'i> {
+    /// The vendor before the `::`, such as `gnu` in `gnu::always_inline`, as it was spelled.
+    scope: Option<&'i str>,
+    /// The name itself, as it was spelled.
+    name: &'i str,
+}
+
+/// Reads the operand of `__has_attribute` and its relatives.
 ///
 /// A bare identifier, or the scoped form `gnu::always_inline` that C23 gives the attributes
-/// that came from GCC. The scope is dropped: `__has_c_attribute(gnu::x)` and
-/// `__has_attribute(x)` are the same question, and the matrix has one row for it.
-fn attribute_name<'i>(operand: &[Tok], interner: &'i Interner) -> Option<&'i str> {
-    let name = match operand {
-        [one] => one,
-        [_, scope, name] if scope.is(Punct::ColonColon) => name,
+/// that came from GCC. The scope is kept, because it changes the answer: a scoped name is asked
+/// of that vendor's attributes only, which is what [`Named::scope`] is read for by the caller.
+fn attribute_name<'i>(operand: &[Tok], interner: &'i Interner) -> Option<Named<'i>> {
+    let (scope, name) = match operand {
+        [one] => (None, one),
+        [scope, colons, name] if colons.is(Punct::ColonColon) => (Some(scope), name),
         _ => return None,
     };
-    name.ident().map(|sym| interner.resolve(sym))
+    let scope = match scope {
+        None => None,
+        Some(scope) => Some(interner.resolve(scope.ident()?)),
+    };
+    Some(Named { scope, name: interner.resolve(name.ident()?) })
 }
 
 /// Which of the three sweeps over a line is resolving the `__has_*` operators.
@@ -3327,13 +3355,22 @@ mod tests {
 
     #[test]
     fn the_scoped_spelling_of_an_attribute_is_the_same_question() {
-        // `[[gnu::packed]]` and `__attribute__((packed))` are one attribute, and
-        // `__has_c_attribute` answers with the value the standard gives it rather than with
-        // one. The scoped one answers zero even though the attribute is implemented, because
-        // the scope is dropped and what is left is asked of the C attribute rows, which are the
-        // seven the standard has. GCC answers one there, which is issue #315.
-        assert_eq!(clean("#if __has_c_attribute(gnu::packed)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "yes");
+        // `[[gnu::packed]]` and `__attribute__((packed))` are one attribute, so both operators
+        // answer one for the scoped spelling, as gcc 16 does. A scoped name is asked of the
+        // GNU attributes only, so it answers one rather than the standard's number, a name
+        // only the standard has answers zero, and a vendor that is not GCC answers zero.
+        let ask = |line: &str| clean(&format!("{line}\n"));
+        assert_eq!(ask("c __has_c_attribute(gnu::packed)"), "c 1");
+        assert_eq!(ask("c __has_c_attribute(__gnu__::__packed__)"), "c 1");
+        assert_eq!(ask("c __has_attribute(gnu::packed)"), "c 1");
+        assert_eq!(ask("c __has_c_attribute(gnu::fallthrough)"), "c 1");
+        assert_eq!(ask("c __has_attribute(gnu::deprecated)"), "c 1");
+        assert_eq!(ask("c __has_c_attribute(gnu::nodiscard)"), "c 0");
+        assert_eq!(ask("c __has_c_attribute(gnu::no_such_attribute)"), "c 0");
+        assert_eq!(ask("c __has_attribute(clang::packed)"), "c 0");
+        assert_eq!(ask("c __has_c_attribute(clang::packed)"), "c 0");
+        assert_eq!(ask("c __has_c_attribute(deprecated)"), "c 202311");
+        assert_eq!(ask("c __has_attribute(deprecated)"), "c 202311");
     }
 
     /// Every name the kernel's `include/linux/compiler_attributes.h` asks about, from v6.12, with

@@ -175,6 +175,16 @@ pub fn has_attribute(name: &str) -> u32 {
     }
 }
 
+/// What `__has_attribute(gnu::name)` and `__has_c_attribute(gnu::name)` answer.
+///
+/// A scoped name is asked of the GNU attributes alone, so the answer is one when the matrix has
+/// the name as a GNU attribute rucc has, and zero otherwise, even for a name the standard also
+/// has. That is gcc 16's answer: `gnu::fallthrough` is one rather than 202311, and
+/// `gnu::nodiscard`, which GCC only has as a standard attribute, is zero.
+pub fn has_gnu_attribute(name: &str) -> u32 {
+    u32::from(answer(Kind::Attribute, name) != 0)
+}
+
 /// What `__has_c_attribute(name)` answers, which is the number the standard gives the
 /// attribute rather than one.
 pub fn has_c_attribute(name: &str) -> u32 {
