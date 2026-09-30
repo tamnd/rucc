@@ -1051,8 +1051,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-reorder-blocks" => opts.reorder_blocks = Some(false),
             // gcc's name for the scheduler that runs after the registers are handed out, which is
             // the only one rucc has: see `schedule_insns` in `rucc_session`. gcc also takes
-            // `-fschedule-insns` for the pass before allocation, and taking that one here would be
-            // a flag that says a pass ran when none did.
+            // `-fschedule-insns` for the pass before allocation, and reading that one as this would
+            // be a flag that says a pass ran when none did, so it is dropped with gcc's other pass
+            // names further down.
             "-fschedule-insns2" => opts.schedule_insns = Some(true),
             "-fno-schedule-insns2" => opts.schedule_insns = Some(false),
             // A call in tail position as a jump: see `sibling_calls` in `rucc_session`.
@@ -2114,6 +2115,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-fvect-cost-model=") || arg.starts_with("-fsimd-cost-model=") => {
             }
             "-fearly-inlining" | "-fno-early-inlining" => {}
+            // The kernel's crypto directory turns both off for the table heavy ciphers, where gcc's
+            // scheduler and hoisting pass blow up the register pressure.
+            "-fschedule-insns" | "-fno-schedule-insns" => {}
+            "-fcode-hoisting" | "-fno-code-hoisting" => {}
             // The one of the family that does reach the optimizer, since the step it names is built:
             // `-fno-inline` stops a function declared `inline` from being inlined and leaves
             // `always_inline` alone, which is what it does in gcc.
@@ -4666,6 +4671,9 @@ mod tests {
 
         let (none, _) = compile(&["-c", "a.c"]);
         assert!(!none.opt_level.schedules(), "at no optimization it says no");
+
+        let (before, _) = compile(&["-c", "-O2", "-fno-schedule-insns", "a.c"]);
+        assert_eq!(before.schedule_insns, None, "the scheduler before allocation is not this one");
     }
 
     /// Tail calls, which gcc spells as sibling calls and turns on at `-O2` and `-Os`.
@@ -5156,6 +5164,9 @@ mod tests {
             "-finline-functions",
             "-foptimize-strlen",
             "-fno-ira-share-spill-slots",
+            "-fno-schedule-insns",
+            "-fschedule-insns",
+            "-fno-code-hoisting",
         ] {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
