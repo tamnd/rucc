@@ -36,6 +36,19 @@
 //! include, because following one means reading files, and [`Model::read`] takes text and only
 //! remembers that there was one.
 //!
+//! # How wide an address is
+//!
+//! Sixty four bits unless the model says otherwise, which a model for a thirty two bit machine
+//! does with one line:
+//!
+//! ```text
+//! (address 32)
+//! ```
+//!
+//! That is the width of every address a rule reads or writes memory at, so it is the index sort
+//! of the memory a query declares. A model may say it once, and a file it includes may say it
+//! too if it says the same number.
+//!
 //! # Widths
 //!
 //! Every term is some number of bits wide and [`Widths`] is what says how many. A head that ends
@@ -249,12 +262,10 @@ const MEMORY: [&str; 3] = ["mem", "select", "store"];
 /// [`BUILTIN`] because its arguments are one width and its result is their total.
 const CONCAT: &str = "concat";
 
-/// How wide an address is.
+/// How wide an address is when the model does not say.
 ///
-/// Every target `spec/12-abi-and-runtime.md` implements for 1.0 is sixty four bit, so this is a
-/// constant rather than something the model file says. When a thirty two bit target arrives it
-/// becomes something the model file says, and the rules that read memory will be the ones that
-/// notice.
+/// Every target `spec/12-abi-and-runtime.md` implements for 1.0 is sixty four bit, which is why
+/// this is the answer for a model that is silent. i386 is not, and its model says `(address 32)`.
 pub const ADDRESS_WIDTH: u32 = 64;
 
 /// How wide a byte is, which is the element of memory.
@@ -345,6 +356,8 @@ pub const DEFAULT_WIDTH: u32 = 64;
 /// the narrow width were simply substituted everywhere.
 #[derive(Debug, Clone, Default)]
 pub struct Widths {
+    /// How wide an address is, before scaling.
+    address: u32,
     /// The width the rule is written in.
     natural: u32,
     /// The width it is being asked at, which is the same number unless this is a bounded proof.
@@ -364,7 +377,7 @@ impl Widths {
     #[must_use]
     pub fn at(pattern: &Term, asked: u32) -> Widths {
         let natural = rule_width(pattern);
-        let mut widths = Widths { natural, asked, at: BTreeMap::new() };
+        let mut widths = Widths { address: ADDRESS_WIDTH, natural, asked, at: BTreeMap::new() };
         widths.bind(pattern, Sort::Bits(asked));
         widths
     }
@@ -408,10 +421,16 @@ impl Widths {
         out
     }
 
+    /// The same widths on a machine whose addresses are that many bits wide.
+    #[must_use]
+    pub fn addressed(self, address: u32) -> Widths {
+        Widths { address, ..self }
+    }
+
     /// How wide an address is here, scaled like everything else.
     #[must_use]
     pub fn address(&self) -> u32 {
-        self.scale(ADDRESS_WIDTH)
+        self.scale(self.address)
     }
 
     /// How wide a byte is here, scaled like everything else.
@@ -566,6 +585,19 @@ fn absorb(
         }
     };
 
+    // The file named on the command line is read first, so what it says is what a file it
+    // includes has to agree with.
+    if let Some(bits) = one.address {
+        match model.address {
+            Some(had) if had != bits => {
+                let said =
+                    format!("{shown} says an address is {bits} bits and {had} was said first");
+                errors.push(here(said));
+            }
+            _ => model.address = Some(bits),
+        }
+    }
+
     // Sorted, because a map has no order and two runs of a gate that disagree about the order
     // they say things in are two runs somebody has to diff by hand.
     let mut heads: Vec<(String, Meaning)> = one.heads.into_iter().collect();
@@ -671,6 +703,8 @@ struct Included {
 pub struct Model {
     heads: HashMap<String, Meaning>,
     includes: Vec<Included>,
+    /// How wide an address is, when the model said.
+    address: Option<u32>,
 }
 
 impl Model {
@@ -734,6 +768,28 @@ impl Model {
                 }
                 continue;
             }
+            if head == "address" {
+                let bits = match args.as_slice() {
+                    [arg] => match arg.kind {
+                        TermKind::Int(32) => Some(32),
+                        TermKind::Int(64) => Some(64),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match bits {
+                    None => {
+                        let said = "an address is 32 or 64 bits wide";
+                        errors.push(fail(path, &term, said.to_owned()));
+                    }
+                    Some(_) if model.address.is_some() => {
+                        let said = "how wide an address is is said twice";
+                        errors.push(fail(path, &term, said.to_owned()));
+                    }
+                    Some(bits) => model.address = Some(bits),
+                }
+                continue;
+            }
             if head != "semantics" || args.len() != 2 {
                 errors.push(fail(path, &term, "expected a `(semantics ...)` form".to_owned()));
                 continue;
@@ -762,6 +818,12 @@ impl Model {
         }
 
         if errors.is_empty() { Ok(model) } else { Err(errors) }
+    }
+
+    /// How wide an address is on the machine this model is for.
+    #[must_use]
+    pub fn address(&self) -> u32 {
+        self.address.unwrap_or(ADDRESS_WIDTH)
     }
 
     /// Whether this model gives a head a meaning.

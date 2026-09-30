@@ -186,10 +186,76 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
     ("bitcast.i16.f16", "the same, the other way", "tamnd/rucc#2105"),
 ];
 
+/// [`NAMES`] for `i386.rules`.
+///
+/// Every name here is at sixty four bits, which is twice what an i386 register holds. Most of them
+/// never reach the selector on this machine, since [`crate::wide`] splits the value into two
+/// thirty two bit halves first, and they are written down so the report says that rather than
+/// calling them missing rules. The last four have no split yet, and the two high halves are the
+/// only names their opcodes have, so on i386 nothing lowers those two opcodes at all.
+pub static X86_NAMES: &[(&str, &str, &str)] = &[
+    (
+        "add.i64",
+        "a sixty four bit integer, which `crate::wide` splits into two registers before selection",
+        "tamnd/rucc#2247",
+    ),
+    ("and.i64", "the same", "tamnd/rucc#2247"),
+    ("ashr.i64", "the same", "tamnd/rucc#2247"),
+    ("fptosi.f32.i64", "the same", "tamnd/rucc#2247"),
+    ("fptosi.f64.i64", "the same", "tamnd/rucc#2247"),
+    ("iconst.i64", "the same", "tamnd/rucc#2247"),
+    ("load.i64", "the same", "tamnd/rucc#2247"),
+    ("lshr.i64", "the same", "tamnd/rucc#2247"),
+    ("mul.i64", "the same", "tamnd/rucc#2247"),
+    ("or.i64", "the same", "tamnd/rucc#2247"),
+    ("ret.i64", "the same", "tamnd/rucc#2247"),
+    ("sdiv.i64", "the same", "tamnd/rucc#2247"),
+    ("select.i64", "the same", "tamnd/rucc#2247"),
+    ("sext.i16.i64", "the same", "tamnd/rucc#2247"),
+    ("sext.i32.i64", "the same", "tamnd/rucc#2247"),
+    ("sext.i8.i64", "the same", "tamnd/rucc#2247"),
+    ("shl.i64", "the same", "tamnd/rucc#2247"),
+    ("sitofp.i64.f32", "the same", "tamnd/rucc#2247"),
+    ("sitofp.i64.f64", "the same", "tamnd/rucc#2247"),
+    ("srem.i64", "the same", "tamnd/rucc#2247"),
+    ("store.i64", "the same", "tamnd/rucc#2247"),
+    ("sub.i64", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i1", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i16", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i32", "the same", "tamnd/rucc#2247"),
+    ("trunc.i64.i8", "the same", "tamnd/rucc#2247"),
+    ("udiv.i64", "the same", "tamnd/rucc#2247"),
+    ("urem.i64", "the same", "tamnd/rucc#2247"),
+    ("xor.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i1.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i16.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i32.i64", "the same", "tamnd/rucc#2247"),
+    ("zext.i8.i64", "the same", "tamnd/rucc#2247"),
+    (
+        "bitcast.f64.i64",
+        "a double's bits as one integer, which nothing splits yet",
+        "tamnd/rucc#2247",
+    ),
+    ("bitcast.i64.f64", "the same, the other way", "tamnd/rucc#2247"),
+    (
+        "smulh.i64",
+        "the high half of a sixty four bit product, which only a division by a constant writes \
+         and nothing splits yet",
+        "tamnd/rucc#2247",
+    ),
+    ("umulh.i64", "the same, unsigned", "tamnd/rucc#2247"),
+];
+
 /// The names left for later in the rule file `table` is built from.
 #[must_use]
 pub fn names(table: &Table) -> &'static [(&'static str, &'static str, &'static str)] {
-    if table.source == crate::select::aarch64::TABLE.source { AARCH64_NAMES } else { NAMES }
+    if table.source == crate::select::aarch64::TABLE.source {
+        AARCH64_NAMES
+    } else if table.source == crate::select::x86::TABLE.source {
+        X86_NAMES
+    } else {
+        NAMES
+    }
 }
 
 /// What a target's rules cover, and what they do not.
@@ -214,7 +280,8 @@ pub struct Report {
     /// The opcodes nothing lowers.
     pub gaps: Vec<Opcode>,
     /// The opcodes on none of the three lists, which is what a new opcode is until somebody says
-    /// where it goes.
+    /// where it goes. An opcode with a name on [`NAMES`] is not one of these, since that entry is
+    /// somebody saying so.
     pub unaccounted: Vec<Opcode>,
 }
 
@@ -284,6 +351,7 @@ pub fn report(table: &Table) -> Report {
             !by_rule.contains(opcode)
                 && !elsewhere.contains(opcode)
                 && !gaps.contains(opcode)
+                && !deferred.iter().any(|&(at, _)| at == *opcode)
                 && !capability::LIBCALLS.iter().any(|&(at, ..)| at == *opcode)
         })
         .collect();
@@ -313,7 +381,8 @@ pub fn table(arch: Arch) -> Option<&'static Table> {
     match arch {
         Arch::X86_64 => Some(&crate::select::x86_64::TABLE),
         Arch::Aarch64 => Some(&crate::select::aarch64::TABLE),
-        Arch::Riscv64 | Arch::X86 => None,
+        Arch::X86 => Some(&crate::select::x86::TABLE),
+        Arch::Riscv64 => None,
     }
 }
 
@@ -408,8 +477,8 @@ mod tests {
     use crate::select::x86_64::TABLE;
 
     /// Every rule file there is, since each claim below is about a rule set and holds for each.
-    fn tables() -> [&'static Table; 2] {
-        [&TABLE, &crate::select::aarch64::TABLE]
+    fn tables() -> [&'static Table; 3] {
+        [&TABLE, &crate::select::aarch64::TABLE, &crate::select::x86::TABLE]
     }
 
     /// The claim the whole module is for, in the direction that matters: a name an instruction
@@ -518,7 +587,12 @@ mod tests {
                 );
             }
             let report = report(table);
-            assert_eq!(report.deferred.len(), later.len(), "{:?}", report.deferred);
+            // Counted by name, since two opcodes can share one: a pointer add is an `add` at the
+            // width of an address.
+            let mut deferred: Vec<&str> = report.deferred.iter().map(|&(_, name)| name).collect();
+            deferred.sort_unstable();
+            deferred.dedup();
+            assert_eq!(deferred.len(), later.len(), "{:?}", report.deferred);
         }
     }
 
@@ -531,7 +605,8 @@ mod tests {
             .map(|&(_, _, issue)| issue)
             .chain(WIDTHS.iter().map(|&(_, _, issue)| issue))
             .chain(NAMES.iter().map(|&(_, _, issue)| issue))
-            .chain(AARCH64_NAMES.iter().map(|&(_, _, issue)| issue));
+            .chain(AARCH64_NAMES.iter().map(|&(_, _, issue)| issue))
+            .chain(X86_NAMES.iter().map(|&(_, _, issue)| issue));
         for issue in issues {
             let number = issue
                 .strip_prefix("tamnd/rucc#")
@@ -589,7 +664,7 @@ mod tests {
         }
     }
 
-    /// The two targets with a rule file, and the one still waiting for one. A machine that can be
+    /// The three targets with a rule file, and the one still waiting for one. A machine that can be
     /// compiled for has rules to report the coverage of, and one that cannot has none rather than
     /// an empty set of them, which are different answers and would read the same as a number.
     #[test]
@@ -600,6 +675,9 @@ mod tests {
         let arm = table(Arch::Aarch64).expect("aarch64 has a rule file");
         assert_eq!(arm.source, crate::select::aarch64::TABLE.source);
         assert!(!arm.rules.is_empty());
+        let i386 = table(Arch::X86).expect("i386 has a rule file");
+        assert_eq!(i386.source, crate::select::x86::TABLE.source);
+        assert!(!i386.rules.is_empty());
         assert!(table(Arch::Riscv64).is_none(), "there is no riscv64 rule file yet");
     }
 

@@ -154,3 +154,29 @@ fn a_model_that_has_the_byte_order_backwards_is_refuted() {
         "a backwards byte order got through: {report}"
     );
 }
+
+/// The same load on a machine whose addresses are thirty two bits wide, which its model says.
+#[test]
+fn a_model_that_says_how_wide_an_address_is_asks_about_that_memory() {
+    let text = format!("(address 32)\n{MODEL}\n(semantics (value.i32 v) v)");
+    let narrow = Model::read("t.model", &text).expect("a model with an address width");
+    assert_eq!(narrow.address(), 32);
+    assert_eq!(model().address(), 64);
+    let load = "\
+(rule (lower (load.i8 (value.i32 a)))
+      (x64.mov_rm_8 (amode_base a))
+      (spec (= (select (mem) a) (result))))";
+    let asked = query("t.rules", &rules(load)[0], &narrow).expect("the model covers this rule");
+    assert!(asked.contains("(declare-const mem (Array (_ BitVec 32) (_ BitVec 8)))"), "{asked}");
+    if let Some(solver) = solver() {
+        let report = verify("t.rules", &rules(load), &narrow, &solver).expect("asked");
+        assert!(matches!(report.verdicts[0], Verdict::Discharged), "{report}");
+    }
+}
+
+#[test]
+fn an_address_width_is_said_once_and_is_one_a_machine_has() {
+    for text in ["(address 16)", "(address)", "(address 32 64)", "(address 32)\n(address 32)"] {
+        assert!(Model::read("t.model", text).is_err(), "{text}");
+    }
+}

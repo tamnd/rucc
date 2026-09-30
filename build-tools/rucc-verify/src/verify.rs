@@ -128,7 +128,7 @@ pub fn query(path: &str, rule: &Rule, model: &Model) -> Result<String, Error> {
 /// Anything the model cannot write out, which is any term nobody has said the meaning of, and
 /// anything whose widths do not fit together.
 pub fn query_at(path: &str, rule: &Rule, model: &Model, width: u32) -> Result<String, Error> {
-    let widths = Widths::at(&rule.pattern, width);
+    let widths = Widths::at(&rule.pattern, width).addressed(model.address());
 
     // A rule that reaches memory needs the theory of arrays and a constant to stand for the
     // memory it starts from, and a rule that reaches a float needs the theory of floats. A rule
