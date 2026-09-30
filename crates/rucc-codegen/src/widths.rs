@@ -100,6 +100,10 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Trunc
             | Opcode::SExt
             | Opcode::ZExt
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::FPToSI
+            | Opcode::FPToUI
             | Opcode::Load
             | Opcode::Store
             | Opcode::Jump
@@ -221,6 +225,12 @@ fn rewrite(func: &mut Func, narrow: &[Option<u32>], inst: Inst) {
         Opcode::Trunc => truncate(func, narrow, inst),
         Opcode::SExt => extend(func, narrow, inst, true),
         Opcode::ZExt => extend(func, narrow, inst, false),
+        // A conversion to a float reads every bit of the integer, so the integer is put into
+        // shape the way the conversion reads it. The other way needs nothing: a value in range
+        // for the narrow width has the same low bits at the wide one, and a value out of range is
+        // one C does not give an answer for.
+        Opcode::SIToFP => shape_operand(func, narrow, inst, 0, true),
+        Opcode::UIToFP => shape_operand(func, narrow, inst, 0, false),
         // The value written goes into the object's padding as well as into the object, and it is
         // cleared so that the padding is the same on every run rather than being whatever was in
         // the register. C says those bits hold nothing in particular; a compiler that writes a
@@ -614,6 +624,35 @@ mod tests {
         assert!(text.contains("iconst.i128 63"), "the spare bits are counted: {text}");
         assert_eq!(text.matches(" = ashr ").count(), 1, "the sign is spread once: {text}");
         assert_eq!(super::low_bits(127), i128::MAX);
+    }
+
+    /// `(double)x` for a `_BitInt(40)` holding a negative number, which stopped the whole function
+    /// before because the conversion was not on the list. The integer has its sign spread first,
+    /// since the conversion reads the whole register, and the conversion back needs nothing.
+    #[test]
+    fn a_conversion_to_a_float_reads_the_integer_the_way_its_sign_says() {
+        for (to, from, shifts) in
+            [(Opcode::SIToFP, Opcode::FPToSI, 1), (Opcode::UIToFP, Opcode::FPToUI, 0)]
+        {
+            let mut names = Interner::new();
+            let (mut func, entry) = shell(&mut names);
+            let narrow = Type::int(40);
+            let mut build = Builder::new(&mut func, entry);
+            let value = seed(&mut build, narrow);
+            let real = build.unary(to, value, Type::float(rucc_ir::Float::F64));
+            let back = build.unary(from, real, narrow);
+            let answer = build.unary(Opcode::Trunc, back, Type::int(32));
+            build.ret(&[answer]);
+
+            assert!(integers(&mut func), "{to:?} is understood");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i40"), "no forty bit value is left: {text}");
+            assert_eq!(
+                text.matches(" = shl ").count(),
+                shifts,
+                "{to:?} shapes its operand: {text}"
+            );
+        }
     }
 
     #[test]
