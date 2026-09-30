@@ -1268,3 +1268,21 @@ fn a_template_with_empty_colons_and_a_doubled_percent_is_extended() {
     let body = body(&text, "f");
     assert!(body.contains("vpxorq %zmm5,%zmm5,%zmm5"), "{body}");
 }
+
+/// A width modifier on a constant is ignored and the constant written as an immediate, which is
+/// how gcc prints it. The kernel's `clear_bit` on a bit it can see is `lock; andb %b1,%0` with the
+/// mask in `"iq"`, and the `lock` is what keeps the template as text.
+#[test]
+fn a_width_modifier_on_a_constant_spells_it_as_an_immediate() {
+    let source = "\
+void clear(unsigned long *a) {
+    asm volatile(\"lock; andb %b1,%0\" : \"+m\" (*(volatile char *)a) : \"iq\" (~(1 << 1)));
+}
+void mask(unsigned long *a) {
+    asm volatile(\"lock; andl %k1,%0\" : \"+m\" (*(volatile int *)a) : \"i\" (0x7f));
+}
+";
+    let text = asm("width-on-constant", source);
+    assert!(text.contains("andb $-3,"), "{text}");
+    assert!(text.contains("andl $127,"), "{text}");
+}

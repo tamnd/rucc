@@ -5133,6 +5133,11 @@ impl<'a> Lowering<'a> {
                         text.push(suffix_of(bits).ok_or_else(refused)?);
                         continue;
                     }
+                    // The widths of a register, which say nothing about a constant, and gcc
+                    // prints one as `$-2` whichever of them it was given. The kernel's
+                    // `clear_bit` writes `andb %b1` for a mask that is `"iq"`, and a mask it can
+                    // see is a constant.
+                    Some('b' | 'w' | 'k' | 'q') if !a64 => false,
                     Some(_) => return Err(refused()),
                 };
                 // A constant is bare on AArch64 whatever the modifier, which is how gcc prints one
