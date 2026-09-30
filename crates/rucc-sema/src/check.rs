@@ -95,6 +95,9 @@ pub struct Context<'a> {
     pub permissive: bool,
     /// Whether the whole unit is under GNU's reading of `inline`, which is `-fgnu89-inline`.
     pub gnu89_inline: bool,
+    /// Which trailing arrays are flexible, from `-fstrict-flex-arrays=`, which is read where
+    /// `__builtin_object_size` is answered. See `check/builtin/size.rs`.
+    pub strict_flex_arrays: u8,
     /// How many errors to report before stopping, with zero meaning no limit.
     pub error_limit: usize,
     /// Whether a C library function written under its own plain name may be taken to mean that
@@ -136,6 +139,7 @@ impl<'a> Context<'a> {
             pedantic: false,
             permissive: false,
             gnu89_inline: false,
+            strict_flex_arrays: 0,
             error_limit: DEFAULT_ERROR_LIMIT,
             builtins: true,
             no_builtin: &[],

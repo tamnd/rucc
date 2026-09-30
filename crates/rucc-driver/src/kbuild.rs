@@ -146,18 +146,6 @@ pub(crate) const TABLE: &[Row] = &[
          this compiler does",
         None,
     ),
-    same(
-        "-fstrict-flex-arrays=0",
-        "every trailing array is treated as flexible, which is how __builtin_object_size here \
-         already treats one",
-    ),
-    same("-fno-strict-flex-arrays", "every trailing array is treated as flexible already"),
-    refused(
-        "-fstrict-flex-arrays*",
-        "__builtin_object_size here gives no size for a trailing array reached through a pointer \
-         at any level, so the bounds a build turns this on for would not be checked",
-        None,
-    ),
     // The default of a family whose other members are refused below.
     same("-fzero-call-used-regs=skip", "no registers are cleared on return, the default"),
     refused(

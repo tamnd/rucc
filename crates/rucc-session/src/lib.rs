@@ -2381,6 +2381,13 @@ pub struct Options {
     /// whatever this says, since that is where the older reading came from, so this is the flag a
     /// program written against it reaches for when it is being compiled under a later dialect.
     pub gnu89_inline: bool,
+    /// Which arrays at the end of a structure count as flexible, from `-fstrict-flex-arrays=`.
+    ///
+    /// Zero, the default, takes every trailing array as flexible. One takes `[]`, `[0]` and `[1]`,
+    /// two takes `[]` and `[0]`, and three takes only `[]`. A trailing array that is not flexible
+    /// has the size it was declared with when `__builtin_object_size` is asked about it through a
+    /// pointer, which is what lets a fortified copy into one be checked.
+    pub strict_flex_arrays: u8,
     /// What a name that nothing in the source said anything about reaches, from `-fvisibility=`.
     pub visibility: Visibility,
     /// What every function is aligned to unless it asked for more itself, from
@@ -2709,6 +2716,7 @@ impl Options {
             pedantic: false,
             permissive: false,
             gnu89_inline: false,
+            strict_flex_arrays: 0,
             visibility: Visibility::default(),
             align_functions: None,
             instrument_functions: false,

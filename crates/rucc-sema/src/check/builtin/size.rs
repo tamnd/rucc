@@ -28,9 +28,17 @@
 //! A declared object, a string literal or a compound literal, with members and constant subscripts
 //! on top of it and a constant displacement added to the whole. That is an address this compiler
 //! knows the object of by looking at it, and no analysis is involved: every number comes from the
-//! layout of a type. A dereference stops the walk, since what is behind `p->f` is a fact about
-//! where `p` came from rather than about the expression, and so does an array with no size, which
-//! is the flexible array member at the end of a structure.
+//! layout of a type. An array with no size stops the walk, which is the flexible array member at
+//! the end of a structure.
+//!
+//! A dereference is half a stop. What is behind `p` is a fact about where `p` came from rather
+//! than about the expression, so the whole object is not known, but `p->name` is a member whose
+//! size is in its type, and the kinds that ask about the closest object have that answer. The
+//! exception is a trailing array, which a program may allocate past the end of, and which ones
+//! count is `-fstrict-flex-arrays`: at the default every trailing array does, and at three, which
+//! the kernel builds with, only one written `[]`. A member of a union reached through a pointer
+//! gets no answer at any level, which is gcc 15 at `-O2`. Only the record the pointer points at
+//! is looked at this way, since a record nested in it is followed by the rest of the outer one.
 //!
 //! The storage duration does not matter. A local is as knowable as a global here, unlike in a
 //! constant expression, where the difference is the whole question.
@@ -68,7 +76,7 @@
 use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, integer_info, layout};
+use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, integer_info, layout};
 
 use crate::check::Checker;
 use crate::decl::{DeclKind, StorageDuration};
@@ -90,15 +98,20 @@ const CODE: &str = "E0709";
 /// The largest the second argument may be, which is the two bits it is made of.
 const KINDS: i128 = 3;
 
-/// An address whose object this compiler can see, and where in it the address lands.
+/// An address whose object this compiler can see some of, and where in it the address lands.
+///
+/// Either size can be missing. The outermost object is missing when the walk went through a
+/// pointer, since what the pointer points into is not in the expression, and the closest one is
+/// missing when it is a trailing array that `-fstrict-flex-arrays` counts as flexible. A kind that
+/// asks about the missing one has no answer here.
 #[derive(Debug, Clone, Copy)]
 struct Reach {
     /// The size of the outermost object the address is inside.
-    whole: u64,
+    whole: Option<u64>,
     /// How far into that the address is.
     into_whole: u64,
     /// The size of the closest member or complete object containing the address.
-    closest: u64,
+    closest: Option<u64>,
     /// How far into that the address is.
     into_closest: u64,
 }
@@ -106,14 +119,17 @@ struct Reach {
 impl Reach {
     /// An object whose own start this address is.
     const fn all(size: u64) -> Reach {
-        Reach { whole: size, into_whole: 0, closest: size, into_closest: 0 }
+        Reach { whole: Some(size), into_whole: 0, closest: Some(size), into_closest: 0 }
     }
+
+    /// An object reached through a pointer, of which nothing is known until a member is taken.
+    const UNSEEN: Reach = Reach { whole: None, into_whole: 0, closest: None, into_closest: 0 };
 
     /// A member `size` bytes long, reached by going `offset` bytes into whatever holds it.
     ///
     /// The member becomes the closest object and the outermost one is unchanged, which is the
     /// whole of the difference the low bit of the kind asks about.
-    const fn member(self, offset: u64, size: u64) -> Reach {
+    const fn member(self, offset: u64, size: Option<u64>) -> Reach {
         Reach {
             whole: self.whole,
             into_whole: self.into_whole.saturating_add(offset),
@@ -140,10 +156,10 @@ impl Reach {
     /// Zero rather than a negative number for an address past the end of what it names. Such an
     /// address is either the one past the end C allows and has nothing in front of it, or it is
     /// one C says nothing about, and zero is the right answer to both.
-    const fn left(self, closest: bool) -> u64 {
+    fn left(self, closest: bool) -> Option<u64> {
         let (size, into) =
             if closest { (self.closest, self.into_closest) } else { (self.whole, self.into_whole) };
-        size.saturating_sub(into)
+        Some(size?.saturating_sub(into))
     }
 }
 
@@ -172,7 +188,7 @@ impl Checker<'_> {
             return Some(self.poison(span));
         };
         let ty = self.size_type();
-        let reach = self.behind(address);
+        let answer = self.behind(address).and_then(|reach| reach.left(kind & 1 == 1));
         // Inside a function, an address read out of a local is asked about again once the function
         // is IR, where a pointer chosen by a branch or a loop is a block parameter whose every
         // argument is in front of the walk. Only where lowering the address does nothing a
@@ -180,13 +196,13 @@ impl Checker<'_> {
         // initializer, which has to be a constant by the time this is done. A pointer read out of
         // a global or a parameter came from somewhere the IR cannot see either, so it is answered
         // here and now, which is what lets a `_chk` call over one be the plain call at `-O0`.
-        if reach.is_none() && self.body.is_some() && self.quiet(address) && self.local(address) {
+        if answer.is_none() && self.body.is_some() && self.quiet(address) && self.local(address) {
             let kind = u8::try_from(kind).ok()?;
             let node = ExprKind::ObjectSize { address, kind };
             return Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span));
         }
-        let answer = match reach {
-            Some(reach) => i128::from(reach.left(kind & 1 == 1)),
+        let answer = match answer {
+            Some(answer) => i128::from(answer),
             // Nothing is known, so the answer is the one that says so. The two spellings of it
             // are the extremes of the range, because a kind asking for the largest has to name a
             // size no object is bigger than and one asking for the smallest has to name a size no
@@ -255,6 +271,9 @@ impl Checker<'_> {
     /// What the object this lvalue names is part of, or nothing when the walk cannot say.
     fn inside(&mut self, expr: ExprId) -> Option<Reach> {
         match self.tast[expr].kind {
+            // What a pointer points at, which has no size until a member of it is taken. `p[i]`
+            // is the same object as `*(p + i)`, so both spellings arrive here.
+            _ if self.through_pointer(expr) => Some(Reach::UNSEEN),
             ExprKind::Decl(decl) => {
                 // A parameter of array type is a pointer by the time it is declared, so what is
                 // measured here is a pointer and not the array the program wrote, which is right:
@@ -263,18 +282,30 @@ impl Checker<'_> {
             }
             ExprKind::CompoundLiteral(decl) => Some(Reach::all(self.bytes_of(self.tast[decl].ty)?)),
             ExprKind::Str(_) => Some(Reach::all(self.bytes_of(self.tast[expr].ty)?)),
-            ExprKind::Member { base, field } => {
+            ExprKind::Member { base, field: index } => {
                 let reach = self.inside(base)?;
                 let TypeKind::Record(record) = bare(&self.types, self.tast[base].ty) else {
                     return None;
                 };
-                let field = self.types.record_info(record).fields.get(field as usize).copied()?;
+                let info = self.types.record_info(record);
+                let last = info.fields.len().checked_sub(1) == Some(index as usize);
+                let union = info.kind == RecordKind::Union;
+                let field = info.fields.get(index as usize).copied()?;
                 // A bit-field has no address, so nothing may ask this about one, and the member
                 // is skipped rather than measured in bytes it does not own.
                 if field.bits.is_some() {
                     return None;
                 }
-                Some(reach.member(field.offset, self.bytes_of(field.ty)?))
+                // Through a pointer the record may be longer than its type says, when its last
+                // member is an array the program allocates more of. Which arrays count is what
+                // `-fstrict-flex-arrays` says, and a member of a union has no size gcc will
+                // answer with at any level. Only the record the pointer points at, since a
+                // record inside it is followed by the rest of the outer one.
+                let size = self.bytes_of(field.ty);
+                if self.through_pointer(base) && (union || last && self.flexible(field.ty)) {
+                    return Some(reach.member(field.offset, None));
+                }
+                Some(reach.member(field.offset, Some(size?)))
             }
             ExprKind::Subscript { base, index } => {
                 // The closest object is the array and not the element, which is gcc's rule and is
@@ -284,11 +315,15 @@ impl Checker<'_> {
                 let reach = self.inside(array)?;
                 let element = i128::from(self.bytes_of(self.tast[expr].ty)?);
                 let into = u64::try_from(count.checked_mul(element)?).ok()?;
-                let whole = self.bytes_of(self.tast[array].ty)?;
+                // An array the member walk left without a size has none as an array either.
+                let closest = match reach.closest {
+                    Some(_) => Some(self.bytes_of(self.tast[array].ty)?),
+                    None => None,
+                };
                 Some(Reach {
                     whole: reach.whole,
                     into_whole: reach.into_whole.saturating_add(into),
-                    closest: whole,
+                    closest,
                     into_closest: into,
                 })
             }
@@ -342,11 +377,43 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
+    fn through_pointer(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Unary { op: UnaryOp::Deref, .. } => true,
+            ExprKind::Subscript { base, .. } => self.decayed(base).is_none(),
+            _ => false,
+        }
+    }
+
+    /// Whether an array at the end of a record reached through a pointer may run past its type,
+    /// at the level `-fstrict-flex-arrays` set.
+    ///
+    /// Zero takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`
+    /// and three takes only `[]`, which are gcc 15's four levels as measured through a pointer at
+    /// `-O2`. Something that is not an array is not flexible at any level.
+    fn flexible(&self, ty: TypeId) -> bool {
+        let TypeKind::Array { len, .. } = bare(&self.types, ty) else {
+            return false;
+        };
+        let count = match len {
+            ArrayLen::Unknown | ArrayLen::Star => return true,
+            ArrayLen::Fixed(count) => count,
+            ArrayLen::Variable(_) => return false,
+        };
+        match self.cx.strict_flex_arrays {
+            0 => true,
+            1 => count <= 1,
+            2 => count == 0,
+            _ => false,
+        }
+    }
+
     /// The lvalue an array to pointer conversion was applied to, if that is what this is.
     ///
     /// A subscript whose base is a real pointer rather than a decayed array stops the walk, since
     /// where that pointer came from is not a fact about the expression.
-    fn decayed(&mut self, base: ExprId) -> Option<ExprId> {
+    fn decayed(&self, base: ExprId) -> Option<ExprId> {
         let mut expr = base;
         loop {
             match self.tast[expr].kind {
@@ -449,10 +516,10 @@ mod tests {
     #[test]
     fn an_address_past_the_end_has_nothing_left_in_front_of_it() {
         let reach = Reach::all(8).moved(8).expect("one past the end is an address");
-        assert_eq!(reach.left(false), 0);
-        assert_eq!(reach.left(true), 0);
+        assert_eq!(reach.left(false), Some(0));
+        assert_eq!(reach.left(true), Some(0));
         let reach = Reach::all(8).moved(40).expect("further is still an address");
-        assert_eq!(reach.left(false), 0);
+        assert_eq!(reach.left(false), Some(0));
     }
 
     /// An address before the object it was built from has no answer at all.
@@ -473,11 +540,11 @@ mod tests {
     /// almost everywhere and be wrong exactly where `_FORTIFY_SOURCE` is most useful.
     #[test]
     fn the_low_bit_of_the_kind_picks_the_member_out_of_the_object_it_is_in() {
-        let reach = Reach::all(24).member(12, 12).moved(2).expect("two bytes into a member");
-        assert_eq!(reach.left(false), 10, "twenty four bytes with fourteen used");
-        assert_eq!(reach.left(true), 10, "twelve bytes with two used");
-        let reach = Reach::all(24).member(0, 8);
-        assert_eq!(reach.left(false), 24);
-        assert_eq!(reach.left(true), 8);
+        let reach = Reach::all(24).member(12, Some(12)).moved(2).expect("two bytes into a member");
+        assert_eq!(reach.left(false), Some(10), "twenty four bytes with fourteen used");
+        assert_eq!(reach.left(true), Some(10), "twelve bytes with two used");
+        let reach = Reach::all(24).member(0, Some(8));
+        assert_eq!(reach.left(false), Some(24));
+        assert_eq!(reach.left(true), Some(8));
     }
 }
