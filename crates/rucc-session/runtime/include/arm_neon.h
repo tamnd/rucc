@@ -5652,18 +5652,22 @@ static __inline__ float32x2_t vmla_n_f32(float32x2_t __a, float32x2_t __b, float
 }
 static __inline__ float32x2_t vmax_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __a[__i] < __b[__i] ? __b[__i]
+        : __a[__i] == __b[__i] && __a[__i] != 0 ? __a[__i] : __a[__i] + __b[__i];
   return __r;
 }
 static __inline__ float32x2_t vmin_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __a[__i] > __b[__i] ? __b[__i]
+        : __a[__i] != __a[__i] || __b[__i] != __b[__i] ? __a[__i] + __b[__i]
+        : __builtin_signbit(__a[__i]) ? __a[__i] : __b[__i];
   return __r;
 }
 static __inline__ float32x2_t vabd_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (float32_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_fabsf(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vceq_f32(float32x2_t __a, float32x2_t __b) {
@@ -5717,19 +5721,16 @@ static __inline__ uint32x2_t vcltz_f32(float32x2_t __a) {
   return __r;
 }
 static __inline__ float32_t vaddv_f32(float32x2_t __a) {
-  float32_t __r = 0;
-  for (int __i = 0; __i < 2; __i++) __r += __a[__i];
-  return __r;
+  return __a[0] + __a[1];
 }
 static __inline__ float32_t vmaxv_f32(float32x2_t __a) {
-  float32_t __r = __a[0];
-  for (int __i = 1; __i < 2; __i++) if (__a[__i] > __r) __r = __a[__i];
-  return __r;
+  return __a[0] > __a[1] ? __a[0] : __a[0] < __a[1] ? __a[1] : __a[0] == __a[1] && __a[0] != 0
+      ? __a[0] : __a[0] + __a[1];
 }
 static __inline__ float32_t vminv_f32(float32x2_t __a) {
-  float32_t __r = __a[0];
-  for (int __i = 1; __i < 2; __i++) if (__a[__i] < __r) __r = __a[__i];
-  return __r;
+  return __a[0] < __a[1] ? __a[0] : __a[0] > __a[1] ? __a[1]
+      : __a[0] != __a[0] || __a[1] != __a[1] ? __a[0] + __a[1] : __builtin_signbit(__a[0])
+      ? __a[0] : __a[1];
 }
 static __inline__ float32x2_t vpadd_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
@@ -5770,18 +5771,22 @@ static __inline__ float64x1_t vmls_f64(float64x1_t __a, float64x1_t __b, float64
 }
 static __inline__ float64x1_t vmax_f64(float64x1_t __a, float64x1_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 1; __i++)
+    __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __a[__i] < __b[__i] ? __b[__i]
+        : __a[__i] == __b[__i] && __a[__i] != 0 ? __a[__i] : __a[__i] + __b[__i];
   return __r;
 }
 static __inline__ float64x1_t vmin_f64(float64x1_t __a, float64x1_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 1; __i++)
+    __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __a[__i] > __b[__i] ? __b[__i]
+        : __a[__i] != __a[__i] || __b[__i] != __b[__i] ? __a[__i] + __b[__i]
+        : __builtin_signbit(__a[__i]) ? __a[__i] : __b[__i];
   return __r;
 }
 static __inline__ float64x1_t vabd_f64(float64x1_t __a, float64x1_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (float64_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __builtin_fabs(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vceq_f64(float64x1_t __a, float64x1_t __b) {
@@ -5881,7 +5886,7 @@ static __inline__ float32x2_t vneg_f32(float32x2_t __a) {
 }
 static __inline__ float32x2_t vabs_f32(float32x2_t __a) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (float32_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_fabsf(__a[__i]);
   return __r;
 }
 static __inline__ float64x1_t vneg_f64(float64x1_t __a) {
@@ -5891,7 +5896,7 @@ static __inline__ float64x1_t vneg_f64(float64x1_t __a) {
 }
 static __inline__ float64x1_t vabs_f64(float64x1_t __a) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (float64_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __builtin_fabs(__a[__i]);
   return __r;
 }
 static __inline__ float32x2_t vdiv_f32(float32x2_t __a, float32x2_t __b) {
@@ -6585,14 +6590,15 @@ static __inline__ int64x1_t vshl_s64(int64x1_t __a, int64x1_t __b) {
 static __inline__ int64x1_t vsli_n_s64(int64x1_t __a, int64x1_t __b, const int __n) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (int64_t)(((uint64_t)__b[__i] << __n)
+    __r[__i] = __n == 0 ? __b[__i] : (int64_t)(((uint64_t)__b[__i] << __n)
         | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ int64x1_t vsri_n_s64(int64x1_t __a, int64x1_t __b, const int __n) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (int64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
+    __r[__i] = __n == 64 ? __a[__i]
+        : (int64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
         | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
   return __r;
 }
@@ -6862,14 +6868,15 @@ static __inline__ uint64x1_t vshl_u64(uint64x1_t __a, int64x1_t __b) {
 static __inline__ uint64x1_t vsli_n_u64(uint64x1_t __a, uint64x1_t __b, const int __n) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (uint64_t)(((uint64_t)__b[__i] << __n)
+    __r[__i] = __n == 0 ? __b[__i] : (uint64_t)(((uint64_t)__b[__i] << __n)
         | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ uint64x1_t vsri_n_u64(uint64x1_t __a, uint64x1_t __b, const int __n) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (uint64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
+    __r[__i] = __n == 64 ? __a[__i]
+        : (uint64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
         | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
   return __r;
 }
@@ -7692,18 +7699,22 @@ static __inline__ float32x4_t vmlaq_n_f32(float32x4_t __a, float32x4_t __b, floa
 }
 static __inline__ float32x4_t vmaxq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __a[__i] < __b[__i] ? __b[__i]
+        : __a[__i] == __b[__i] && __a[__i] != 0 ? __a[__i] : __a[__i] + __b[__i];
   return __r;
 }
 static __inline__ float32x4_t vminq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __a[__i] > __b[__i] ? __b[__i]
+        : __a[__i] != __a[__i] || __b[__i] != __b[__i] ? __a[__i] + __b[__i]
+        : __builtin_signbit(__a[__i]) ? __a[__i] : __b[__i];
   return __r;
 }
 static __inline__ float32x4_t vabdq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (float32_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_fabsf(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vceqq_f32(float32x4_t __a, float32x4_t __b) {
@@ -7757,19 +7768,26 @@ static __inline__ uint32x4_t vcltzq_f32(float32x4_t __a) {
   return __r;
 }
 static __inline__ float32_t vaddvq_f32(float32x4_t __a) {
-  float32_t __r = 0;
-  for (int __i = 0; __i < 4; __i++) __r += __a[__i];
-  return __r;
+  float32_t __lo = __a[0] + __a[1];
+  float32_t __hi = __a[2] + __a[3];
+  return __lo + __hi;
 }
 static __inline__ float32_t vmaxvq_f32(float32x4_t __a) {
-  float32_t __r = __a[0];
-  for (int __i = 1; __i < 4; __i++) if (__a[__i] > __r) __r = __a[__i];
-  return __r;
+  float32_t __lo = __a[0] > __a[1] ? __a[0] : __a[0] < __a[1] ? __a[1]
+      : __a[0] == __a[1] && __a[0] != 0 ? __a[0] : __a[0] + __a[1];
+  float32_t __hi = __a[2] > __a[3] ? __a[2] : __a[2] < __a[3] ? __a[3]
+      : __a[2] == __a[3] && __a[2] != 0 ? __a[2] : __a[2] + __a[3];
+  return __lo > __hi ? __lo : __lo < __hi ? __hi : __lo == __hi && __lo != 0 ? __lo : __lo + __hi;
 }
 static __inline__ float32_t vminvq_f32(float32x4_t __a) {
-  float32_t __r = __a[0];
-  for (int __i = 1; __i < 4; __i++) if (__a[__i] < __r) __r = __a[__i];
-  return __r;
+  float32_t __lo = __a[0] < __a[1] ? __a[0] : __a[0] > __a[1] ? __a[1]
+      : __a[0] != __a[0] || __a[1] != __a[1] ? __a[0] + __a[1] : __builtin_signbit(__a[0])
+      ? __a[0] : __a[1];
+  float32_t __hi = __a[2] < __a[3] ? __a[2] : __a[2] > __a[3] ? __a[3]
+      : __a[2] != __a[2] || __a[3] != __a[3] ? __a[2] + __a[3] : __builtin_signbit(__a[2])
+      ? __a[2] : __a[3];
+  return __lo < __hi ? __lo : __lo > __hi ? __hi : __lo != __lo || __hi != __hi ? __lo + __hi
+      : __builtin_signbit(__lo) ? __lo : __hi;
 }
 static __inline__ float32x4_t vpaddq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
@@ -7810,18 +7828,22 @@ static __inline__ float64x2_t vmlsq_f64(float64x2_t __a, float64x2_t __b, float6
 }
 static __inline__ float64x2_t vmaxq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = __a[__i] > __b[__i] ? __a[__i] : __a[__i] < __b[__i] ? __b[__i]
+        : __a[__i] == __b[__i] && __a[__i] != 0 ? __a[__i] : __a[__i] + __b[__i];
   return __r;
 }
 static __inline__ float64x2_t vminq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __b[__i];
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = __a[__i] < __b[__i] ? __a[__i] : __a[__i] > __b[__i] ? __b[__i]
+        : __a[__i] != __a[__i] || __b[__i] != __b[__i] ? __a[__i] + __b[__i]
+        : __builtin_signbit(__a[__i]) ? __a[__i] : __b[__i];
   return __r;
 }
 static __inline__ float64x2_t vabdq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (float64_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_fabs(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vceqq_f64(float64x2_t __a, float64x2_t __b) {
@@ -7875,19 +7897,16 @@ static __inline__ uint64x2_t vcltzq_f64(float64x2_t __a) {
   return __r;
 }
 static __inline__ float64_t vaddvq_f64(float64x2_t __a) {
-  float64_t __r = 0;
-  for (int __i = 0; __i < 2; __i++) __r += __a[__i];
-  return __r;
+  return __a[0] + __a[1];
 }
 static __inline__ float64_t vmaxvq_f64(float64x2_t __a) {
-  float64_t __r = __a[0];
-  for (int __i = 1; __i < 2; __i++) if (__a[__i] > __r) __r = __a[__i];
-  return __r;
+  return __a[0] > __a[1] ? __a[0] : __a[0] < __a[1] ? __a[1] : __a[0] == __a[1] && __a[0] != 0
+      ? __a[0] : __a[0] + __a[1];
 }
 static __inline__ float64_t vminvq_f64(float64x2_t __a) {
-  float64_t __r = __a[0];
-  for (int __i = 1; __i < 2; __i++) if (__a[__i] < __r) __r = __a[__i];
-  return __r;
+  return __a[0] < __a[1] ? __a[0] : __a[0] > __a[1] ? __a[1]
+      : __a[0] != __a[0] || __a[1] != __a[1] ? __a[0] + __a[1] : __builtin_signbit(__a[0])
+      ? __a[0] : __a[1];
 }
 static __inline__ float64x2_t vpaddq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
@@ -7943,7 +7962,7 @@ static __inline__ float32x4_t vnegq_f32(float32x4_t __a) {
 }
 static __inline__ float32x4_t vabsq_f32(float32x4_t __a) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (float32_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_fabsf(__a[__i]);
   return __r;
 }
 static __inline__ float64x2_t vnegq_f64(float64x2_t __a) {
@@ -7953,7 +7972,7 @@ static __inline__ float64x2_t vnegq_f64(float64x2_t __a) {
 }
 static __inline__ float64x2_t vabsq_f64(float64x2_t __a) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (float64_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_fabs(__a[__i]);
   return __r;
 }
 static __inline__ float32x4_t vdivq_f32(float32x4_t __a, float32x4_t __b) {
@@ -8647,14 +8666,15 @@ static __inline__ int64x2_t vshlq_s64(int64x2_t __a, int64x2_t __b) {
 static __inline__ int64x2_t vsliq_n_s64(int64x2_t __a, int64x2_t __b, const int __n) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(((uint64_t)__b[__i] << __n)
+    __r[__i] = __n == 0 ? __b[__i] : (int64_t)(((uint64_t)__b[__i] << __n)
         | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ int64x2_t vsriq_n_s64(int64x2_t __a, int64x2_t __b, const int __n) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
+    __r[__i] = __n == 64 ? __a[__i]
+        : (int64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
         | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
   return __r;
 }
@@ -8925,14 +8945,15 @@ static __inline__ uint64x2_t vshlq_u64(uint64x2_t __a, int64x2_t __b) {
 static __inline__ uint64x2_t vsliq_n_u64(uint64x2_t __a, uint64x2_t __b, const int __n) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(((uint64_t)__b[__i] << __n)
+    __r[__i] = __n == 0 ? __b[__i] : (uint64_t)(((uint64_t)__b[__i] << __n)
         | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ uint64x2_t vsriq_n_u64(uint64x2_t __a, uint64x2_t __b, const int __n) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
+    __r[__i] = __n == 64 ? __a[__i]
+        : (uint64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
         | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
   return __r;
 }

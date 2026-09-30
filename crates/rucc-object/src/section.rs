@@ -88,15 +88,19 @@ impl Property {
 /// What the command line decided about the file being written, as against what the code in it
 /// decided.
 ///
-/// Two answers with nothing to do with each other, together because they arrive together: neither
-/// can be worked out from a function, and the listing and the byte writer have to be handed the
-/// same pair or the two outputs of one command line would not be the same file.
+/// Answers with nothing to do with each other, together because they arrive together: none of
+/// them can be worked out from a function, and the listing and the byte writer have to be handed
+/// the same ones or the two outputs of one command line would not be the same file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Output {
     /// Whether each function and each variable gets a section to itself.
     pub sections: Sections,
     /// What the file says it was built to have checked.
     pub property: Property,
+    /// The extensions the unit is built for, which is what `-march=` said. Only the listing reads
+    /// it, since an assembler reading the file has to be told about an extension whose
+    /// instructions are in it, and bytes need no telling.
+    pub isa: rucc_target::Isa,
 }
 
 /// A text section, and what the linker has to be told about it.

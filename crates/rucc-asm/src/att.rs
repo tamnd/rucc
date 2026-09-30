@@ -54,6 +54,18 @@
 //! An opcode that is not an instruction is written as nothing. Three of them exist to hold a
 //! value in a register until something reads it, which is a fact the allocator needed and the
 //! machine does not, and by here it has been acted on: the register in the operand is the answer.
+//!
+//! # What the assembler is told about extensions
+//!
+//! An AArch64 unit built for the CRC32 extension, by `-march=armv8-a+crc` or an architecture that
+//! has it, opens with `.arch_extension crc`, and a function built for it by
+//! `__attribute__((target("+crc")))` in a unit that is not has the directive before it and
+//! `.arch_extension nocrc` after it, the other way round for a function that takes it away. The
+//! `crc32` instructions come out of `<arm_acle.h>` as text, and an assembler not told about the
+//! extension refuses them. gcc says the same with `.arch armv8-a+crc` at the top of the file and
+//! around such a function. The extension is named rather than an architecture, because the CRC32
+//! extension is all of `-march=` that is kept, and a directive naming the extension leaves
+//! whatever else the assembler was told on its own command line alone.
 
 use std::fmt::Write as _;
 
@@ -62,7 +74,7 @@ use rucc_base::hash::Map;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
-use rucc_target::{CallRegs, PhysReg, RegClass, TargetInfo, aarch64};
+use rucc_target::{CallRegs, Feature, Isa, PhysReg, RegClass, TargetInfo, aarch64};
 use rucc_tuple::Arch;
 
 use crate::Error;
@@ -163,7 +175,7 @@ fn listing(
     output: Output,
     marks: bool,
 ) -> Result<String, Error> {
-    let Output { sections, property } = output;
+    let Output { sections, property, isa } = output;
     let arch = target.tuple.arch();
     if !matches!(arch, Arch::X86_64 | Arch::X86 | Arch::Aarch64) {
         return Err(Error::Machine { triple: target.tuple.to_string() });
@@ -183,7 +195,11 @@ fn listing(
         sections,
         marks: marks.then_some(0),
         moved: false,
+        crc: crc(isa),
     };
+    if arch == Arch::Aarch64 && writer.crc {
+        writer.out.push_str("\t.arch_extension\tcrc\n");
+    }
     writer.out.push_str(writer.directives.text());
     writer.out.push('\n');
     // The `asm` at file scope that is instructions, first and between the markers gcc writes
@@ -251,6 +267,7 @@ pub(crate) fn template(
         sections: Sections::default(),
         marks: None,
         moved: false,
+        crc: false,
     };
     writer.inst(func, block, inst, names.resolve(func.name))?;
     Ok(writer.out)
@@ -280,6 +297,14 @@ struct Writer<'a> {
     /// Whether the function written last was in a section the program named, which leaves the
     /// assembler somewhere the next function must not follow it into.
     moved: bool,
+    /// Whether the unit is built for AArch64's CRC32 extension, which is what the assembler was
+    /// told at the top of the file. See the module documentation.
+    crc: bool,
+}
+
+/// Whether a set of extensions has AArch64's CRC32 one.
+fn crc(isa: Isa) -> bool {
+    Feature::aarch64("crc").is_some_and(|crc| isa.has(crc))
 }
 
 impl Writer<'_> {
@@ -297,6 +322,13 @@ impl Writer<'_> {
         let binding = binding(func.binding);
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
+        // A function built for other extensions than the unit is written between directives that
+        // say so, which is what lets a `crc32` in it through the assembler.
+        let wants = func.target.map_or(self.crc, crc);
+        let switched = self.arch == Arch::Aarch64 && wants != self.crc;
+        if switched {
+            self.extension(wants);
+        }
         // A function the program put in a section of its own goes there, and the one after it
         // goes back to wherever it would have gone, which is `.text` unless it has a section of
         // its own too. See [`Self::home`].
@@ -476,10 +508,19 @@ impl Writer<'_> {
             }
         }
         self.directives.close(&mut self.out, &name);
+        if switched {
+            self.extension(self.crc);
+        }
         if let Some(which) = &mut self.marks {
             *which += 1;
         }
         Ok(())
+    }
+
+    /// Tells the assembler that the CRC32 extension is on from here, or off.
+    fn extension(&mut self, on: bool) {
+        let name = if on { "crc" } else { "nocrc" };
+        let _ = writeln!(self.out, "\t.arch_extension\t{name}");
     }
 
     /// The codes a COFF function's prologue is described with, keyed by each instruction's place in
@@ -2274,6 +2315,51 @@ mod tests {
         })
         .expect_err("not an AArch64 opcode");
         assert!(matches!(error, Error::Opcode { .. }), "{error:?}");
+    }
+
+    /// Three empty AArch64 functions, the middle one carrying the extensions `middle` says, in
+    /// a unit built for `unit`, written out.
+    fn extensions(unit: Isa, middle: Option<Isa>, arch: Arch) -> String {
+        let mut names = Interner::new();
+        let mut funcs = Vec::new();
+        for (name, target) in [("before", None), ("middle", middle), ("after", None)] {
+            let mut func = Func::new(names.intern(name));
+            func.target = target;
+            func.create_block();
+            funcs.push(func);
+        }
+        let target = TargetInfo::new(Triple::new(arch, Os::Linux, Env::Gnu));
+        let output = Output { isa: unit, ..Output::default() };
+        print(&funcs, &Globals::default(), &[], &names, &target, true, output).expect("a listing")
+    }
+
+    /// tamnd/rucc#2304. A unit built for the CRC32 extension says so at the top, so that an
+    /// assembler reading it takes the `crc32` instructions `<arm_acle.h>` writes, and a function
+    /// built for it in a unit that is not says so around itself and puts the unit back after.
+    #[test]
+    fn the_assembler_is_told_about_the_crc_extension_where_it_is_on() {
+        let crc = Isa::aarch64_march("armv8-a+crc");
+        let plain = Isa::aarch64_march("armv8-a");
+        let unit = extensions(crc, None, Arch::Aarch64);
+        assert!(unit.starts_with("\t.arch_extension\tcrc\n"), "{unit}");
+        assert_eq!(unit.matches(".arch_extension").count(), 1, "{unit}");
+        let text = extensions(plain, Some(crc), Arch::Aarch64);
+        let on = text.find("\t.arch_extension\tcrc\n").expect("switched on");
+        let off = text.find("\t.arch_extension\tnocrc\n").expect("switched off");
+        let before = text.find("\nbefore:").expect("before");
+        let middle = text.find("\nmiddle:").expect("middle");
+        let after = text.find("\nafter:").expect("after");
+        assert!(before < on && on < middle && middle < off && off < after, "{text}");
+        assert_eq!(text.matches(".arch_extension").count(), 2, "{text}");
+        // And the other way round for a function that takes it away.
+        let text = extensions(crc, Some(plain), Arch::Aarch64);
+        let off = text.find("\t.arch_extension\tnocrc\n").expect("switched off");
+        let on = text.rfind("\t.arch_extension\tcrc\n").expect("switched back on");
+        assert!(off < text.find("\nmiddle:").expect("middle") && off < on, "{text}");
+        // Nothing for a unit and functions that agree, and nothing on x86-64.
+        let text = extensions(plain, Some(plain), Arch::Aarch64);
+        assert!(!text.contains(".arch"), "{text}");
+        assert!(!extensions(crc, Some(plain), Arch::X86_64).contains(".arch"));
     }
 
     #[test]

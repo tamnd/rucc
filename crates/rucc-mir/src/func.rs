@@ -29,7 +29,7 @@ use std::ops::{Index, IndexMut};
 
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
-use rucc_target::{PhysReg, RegClass};
+use rucc_target::{Isa, PhysReg, RegClass};
 
 use crate::inst::{
     Amode, Block, BlockCall, BlockData, Flags, Imm, ImmRef, Inst, InstData, InstLayout, Mem,
@@ -272,6 +272,13 @@ pub struct Func {
     /// How far the name reaches outside a shared library, from the visibility of the IR function
     /// it was lowered from. Carried for the reason the binding above is carried.
     pub visibility: Visibility,
+    /// The extensions the function is built for when `__attribute__((target(...)))` said, from
+    /// the IR function it was lowered from, and `None` for one built for whatever the unit is.
+    ///
+    /// Carried for the reason [`Func::binding`] is. The listing is what reads it: an assembler
+    /// has to be told that a function built for more than the unit may use the instructions of
+    /// the extensions it adds, which is what gcc's `.arch` around such a function is for.
+    pub target: Option<Isa>,
     /// What the frame looks like as the function runs, as rows attached to the instructions they
     /// take effect after. See [`CfiOp`].
     ///
@@ -440,6 +447,7 @@ impl Func {
             align: None,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            target: None,
             cfi: Vec::new(),
             patch: None,
             mcount: None,

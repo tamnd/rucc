@@ -1323,6 +1323,7 @@ impl<'a> Lowering<'a> {
         out.declared = source.declared;
         out.binding = binding(source.linkage);
         out.visibility = visibility(source.visibility);
+        out.target = source.target;
         Self {
             source,
             names,

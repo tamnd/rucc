@@ -365,7 +365,7 @@ pub fn write(
     output: Output,
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
-    let Output { sections, property } = output;
+    let Output { sections, property, .. } = output;
     let Some((flavour, machine)) = written(target) else {
         return Err(Error::Format { triple: target.tuple.to_string() });
     };
