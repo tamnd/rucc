@@ -40,7 +40,9 @@ const ARM64: &str = "aarch64-unknown-linux-gnu";
 
 #[test]
 fn a_flag_that_asks_for_what_happens_passes_the_probe() {
-    for flag in ["-fno-allow-store-data-races", "-fzero-init-padding-bits=all", "-fshort-wchar"] {
+    for flag in
+        ["-fno-allow-store-data-races", "-fzero-init-padding-bits=all", "-fshort-wchar", "-fno-PIE"]
+    {
         assert!(cc_option(X86, flag), "{flag}");
     }
     assert!(cc_option(ARM64, "-mno-outline-atomics"));
@@ -48,7 +50,12 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
 
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    for flag in ["-fno-PIE", "-mindirect-branch=thunk-extern", "-gz=zlib", "-fconserve-stack"] {
+    for flag in [
+        "-ftrivial-auto-var-init=zero",
+        "-mindirect-branch=thunk-extern",
+        "-gz=zlib",
+        "-fconserve-stack",
+    ] {
         assert!(!cc_option(X86, flag), "{flag}");
     }
     assert!(!cc_option(ARM64, "-mbranch-protection=pac-ret+bti"));
