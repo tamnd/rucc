@@ -7928,39 +7928,28 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
     }
 
-    /// A builtin nothing lowers is refused where it is written, rather than at the link.
+    /// A signal fence is a wall for the compiler and nothing at all for the machine.
     ///
-    /// One name is left, which is the last of the atomic family that is refused and is also the
-    /// one whose prefix is not `__builtin_`; its older half has nothing left in it at all, and so
-    /// does the half of the family that carries a prototype. What the message has to carry is the
-    /// name, because the whole complaint about the link error this replaces is that the name in it
-    /// was one the compiler chose.
+    /// A signal handler runs on the core the code it interrupted was running on, so the machine
+    /// already sees that thread's accesses in the order they were made, and what is left for the
+    /// fence to do is keep the optimizer from moving or merging an access across it. So the listing
+    /// has no `mfence` at any ordering, and the first of two stores to the same object survives at
+    /// `-O2`: without the fence it is dead, since nothing reads it before the second one, and with
+    /// it a handler arriving between the two could.
     #[test]
-    fn a_builtin_nothing_lowers_is_refused_by_name() {
-        let mut opts = options();
-        opts.emit = EmitKind::Ir;
-        let builtin = "__atomic_signal_fence";
-        let source = format!("int counter;\nint f(void) {{ return ({builtin}(5), 0); }}\n");
-        let messages = run(&opts, &source).messages;
-        let named = messages.iter().any(|m| m.contains(builtin) && m.contains("E0686"));
-        assert!(named, "expected {builtin} to be refused by name in {messages:?}");
-    }
-
-    /// The refusal is about a call and not about the name, so a program that defines the name
-    /// itself gets the function it wrote.
-    ///
-    /// That is not the reason the refusal exists, but a definition in front of us is a definition
-    /// and the call to it links. It works here because the name is one with no prototype and no
-    /// meaning the front end knows, which is what is left once the rest of the family is
-    /// implemented: a `__builtin_` name the front end does answer is answered whatever the program
-    /// declares, the way gcc answers one.
-    #[test]
-    fn what_is_refused_is_the_call_and_not_the_name() {
-        let text = ir(concat!(
-            "void __atomic_signal_fence(int order) { (void)order; }\n",
-            "void f(void) { __atomic_signal_fence(5); }\n",
+    fn a_signal_fence_keeps_the_compiler_back_and_asks_nothing_of_the_machine() {
+        for order in ["0", "2", "3", "5"] {
+            let source = format!("void f(void) {{ __atomic_signal_fence({order}); }}\n");
+            assert!(!asm(&source).contains("mfence"), "{order} is no instruction");
+        }
+        let fenced = optimized(concat!(
+            "int flag;\n",
+            "void f(void) { flag = 1; __atomic_signal_fence(__ATOMIC_SEQ_CST); flag = 2; }\n",
         ));
-        assert!(text.contains("call @__atomic_signal_fence"), "{text}");
+        let first = fenced.find("$1,").unwrap_or_else(|| panic!("the first store stays: {fenced}"));
+        let second = fenced.find("$2,").unwrap_or_else(|| panic!("so does the second: {fenced}"));
+        assert!(first < second, "in the order they were written: {fenced}");
+        assert!(!fenced.contains("mfence"), "{fenced}");
     }
 
     /// How many bytes are behind an address is read off the layout, for every shape the walk

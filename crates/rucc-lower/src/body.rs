@@ -7168,6 +7168,10 @@ impl<'u> Body<'_, 'u> {
             self.build(span).fence(order);
             return None;
         }
+        if op == AtomicOp::SignalFence {
+            self.compiler_barrier(span);
+            return None;
+        }
         let object = self.tast()[args][0];
         let addr = self.value(object);
         match op {
@@ -7280,8 +7284,26 @@ impl<'u> Body<'_, 'u> {
                 let none = self.build(span).iconst(byte, 0);
                 Some(self.build(span).icmp(IntPred::Ne, old, none))
             }
-            AtomicOp::Fence => None,
+            AtomicOp::Fence | AtomicOp::SignalFence => None,
         }
+    }
+
+    /// A wall the compiler moves no access through and the machine never sees, which is what
+    /// `__atomic_signal_fence` is at every ordering.
+    ///
+    /// It is the statement the kernel spells `barrier()`, an empty volatile `asm` that clobbers
+    /// memory, built here rather than written by the program. That is also what gcc makes of the
+    /// builtin, and building the same thing means the one rule every pass already keeps for such a
+    /// statement is the rule this keeps, rather than a second kind of barrier each pass has to be
+    /// taught about.
+    fn compiler_barrier(&mut self, span: Span) {
+        let info = AsmInfo {
+            template: self.unit.names.intern(""),
+            constraints: self.unit.names.intern(""),
+            clobbers: self.unit.names.intern("memory"),
+            targets: rucc_ir::BlockCallList::EMPTY,
+        };
+        self.build(span).inline_asm(info, &[], &[], Flags::VOLATILE);
     }
 
     /// The barrier after a `__sync_` read modify write or compare and exchange that makes it the

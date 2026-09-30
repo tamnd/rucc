@@ -102,12 +102,23 @@ impl Parser<'_> {
 
         let mut at = self.cursor.span();
         let mut declarator = self.declarator();
+        let of_the_type = self.function_type_attributes(declarator);
         if self.at_definition(declarator) {
+            // A definition has one declarator, so what appertains to its type can travel with the
+            // specifiers, which is where the checker already reads a definition's attributes. The
+            // specifiers are copied rather than written over because the table only grows.
+            let specs = if of_the_type.is_empty() {
+                specs
+            } else {
+                let mut with = self.ast[specs];
+                with.attrs = self.join_attrs(with.attrs, of_the_type);
+                self.ast.add_specs(with)
+            };
             return self.function_definition(specs, declarator, start);
         }
 
         let mut items = Vec::new();
-        let mut before_name = AttrList::EMPTY;
+        let mut before_name = of_the_type;
         loop {
             let item = self.init_declarator(specs, declarator, before_name, at);
             items.push(item);
@@ -130,6 +141,28 @@ impl Parser<'_> {
         let declarators = self.ast.add_init_declarator_list(&items);
         let span = self.span_from(start);
         self.add_decl(Decl::Var { specs, declarators }, span)
+    }
+
+    /// The C23 attributes written straight after a function declarator's parameter list, as in
+    /// `int square(int x) [[unsequenced]] { ... }`, and an empty list anywhere else.
+    ///
+    /// C23 6.7.7.1 puts an attribute specifier sequence there and says it appertains to the
+    /// function type, so it is part of the declarator rather than something after it, and it is
+    /// the same in a definition as in a declaration. The declarator itself stops at `[[`, for the
+    /// reason `declarator_suffixes` gives, and a declaration reads whatever is left over as the
+    /// init-declarator's attributes. A definition never gets that far: it is recognised by the
+    /// `{` straight after the declarator, and with the attributes still in the way it was read as
+    /// a declaration missing its `;`. So they are read here, before that question is asked, and
+    /// the answer decides where they go.
+    ///
+    /// Only the standard spelling, because gcc takes no `__attribute__` between a definition's
+    /// parameter list and its body, and a keyword attribute in that place in a declaration is
+    /// already read where it always was.
+    fn function_type_attributes(&mut self, declarator: DeclaratorId) -> AttrList {
+        if !self.at_standard_attribute() || !self.declares_a_function(declarator) {
+            return AttrList::EMPTY;
+        }
+        self.attributes()
     }
 
     /// One declarator of a declaration, with the assembler name, the attributes and the

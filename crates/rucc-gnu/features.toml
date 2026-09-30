@@ -1039,19 +1039,21 @@ notes = "C23's spelling of the row above, read by the same code."
 name = "unsequenced"
 kind = "c-attribute"
 gcc_version = "13.0"
-status = "unimplemented"
-value = "202207"
+status = "implemented"
+value = "202311"
 used_by = []
-tests = []
+tests = ["rucc-parse::a_function_type_attribute_may_sit_between_a_definition_s_parameters_and_its_body", "tests/accept/c23-function-type-attributes.c"]
+notes = "A promise about the function that a compiler may use to merge or drop calls to it and may equally ignore, which is what this does, so nothing is lost by taking it in silence. 202311 is the value C23 as published gives it and what gcc 16 answers."
 
 [[feature]]
 name = "reproducible"
 kind = "c-attribute"
 gcc_version = "13.0"
-status = "unimplemented"
-value = "202207"
+status = "implemented"
+value = "202311"
 used_by = []
-tests = []
+tests = ["rucc-parse::a_function_type_attribute_may_sit_between_a_definition_s_parameters_and_its_body", "tests/accept/c23-function-type-attributes.c"]
+notes = "A promise about the function that a compiler may use to merge or drop calls to it and may equally ignore, which is what this does, so nothing is lost by taking it in silence. 202311 is the value C23 as published gives it and what gcc 16 answers."
 
 # Builtins, from section 13.5. The list is the part of the several hundred that real code
 # reaches for first, and it grows as the matrix fills in.
@@ -3299,9 +3301,10 @@ tests = ["rucc-driver::a_barrier_is_one_instruction_at_the_strongest_ordering_an
 name = "__atomic_signal_fence"
 kind = "builtin"
 gcc_version = "4.7"
-status = "unimplemented"
-used_by = []
-tests = []
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_signal_fence_keeps_the_compiler_back_and_asks_nothing_of_the_machine"]
+notes = "An empty volatile `asm` that clobbers memory, which is what gcc builds for it at every ordering: no instruction, and no access moved across it."
 
 [[feature]]
 name = "__atomic_always_lock_free"

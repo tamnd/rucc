@@ -601,6 +601,26 @@ fn a_standard_attribute_after_the_name_is_the_declarations_and_not_an_array() {
     parsed("void g(void) { int local [[maybe_unused]]; local = 0; }");
 }
 
+/// C23 6.7.7.1 lets an attribute follow a function declarator's parameter list and appertain to
+/// the function type, and a definition is allowed one there as much as a declaration is. The
+/// definition used to be read as a declaration missing its `;`, because it is told apart by the
+/// `{` after the declarator and the attribute was in the way.
+#[test]
+fn a_function_type_attribute_may_sit_between_a_definition_s_parameters_and_its_body() {
+    let out = parsed("static int square(int x) [[unsequenced]] { return x * x; }");
+    let Decl::Function { specs, .. } = only_decl(&out) else { panic!("expected a definition") };
+    assert_eq!(out.ast[specs].attrs.len(), 1);
+
+    let out = parsed("int twice(int x) [[reproducible]] [[gnu::hot]] { return 2 * x; }");
+    let Decl::Function { specs, .. } = only_decl(&out) else { panic!("expected a definition") };
+    assert_eq!(out.ast[specs].attrs.len(), 2);
+
+    // A declaration keeps them on the declarator the way it always has.
+    let out = parsed("int twice(int x) [[reproducible]];");
+    let Decl::Var { declarators, .. } = only_decl(&out) else { panic!("expected a declaration") };
+    assert_eq!(out.ast[declarators][0].attrs.len(), 1);
+}
+
 #[test]
 fn an_attribute_can_open_a_grouping_parenthesis() {
     // `int (ATTR *)(void)` is a pointer to a function, and the attribute in front of the `*` is

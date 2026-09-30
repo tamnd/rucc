@@ -755,6 +755,9 @@ pub enum AtomicOp {
     Store,
     /// A barrier, which touches no object and is the ordering by itself.
     Fence,
+    /// A barrier against the compiler alone, `__atomic_signal_fence`, which keeps every access on
+    /// the side of it the program wrote it on and asks nothing of the machine.
+    SignalFence,
     /// A compare and exchange whose second operand is a pointer to the value expected, which is
     /// where what was found is written back when the two did not match. Answers whether they did.
     CompareExchange,
@@ -801,6 +804,7 @@ impl AtomicOp {
             AtomicOp::LoadInto => "load_into",
             AtomicOp::Store => "store",
             AtomicOp::Fence => "fence",
+            AtomicOp::SignalFence => "signal_fence",
             AtomicOp::CompareExchange => "compare_exchange",
             AtomicOp::SwapBool => "swap_bool",
             AtomicOp::SwapValue => "swap_value",
