@@ -173,15 +173,22 @@ impl Checker<'_> {
             };
             let spelled = self.spelled_with(field.specs);
             let Some((decl, at)) = self.member_decl(field) else { continue };
-            if let Some(name) = decl.name {
-                if !named.insert(name) {
-                    let spelled = self.text(name).to_owned();
-                    self.report(
-                        Diagnostic::error(format!("duplicate member '{spelled}'"), at)
-                            .with_code("E0548"),
-                    );
-                    continue;
-                }
+            // An anonymous member's names are reached as if they were written here, so they clash
+            // with the record's own the same way. The kernel's `struct pi_desc` once had a `rsvd`
+            // both inside its anonymous union and after it, which gcc refuses.
+            let mut reached = Vec::new();
+            match decl.name {
+                Some(name) => reached.push(name),
+                None if decl.bits.is_none() => self.reached_through(decl.ty, &mut reached),
+                None => {}
+            }
+            if let Some(&twice) = reached.iter().find(|&&name| !named.insert(name)) {
+                let spelled = self.text(twice).to_owned();
+                self.report(
+                    Diagnostic::error(format!("duplicate member '{spelled}'"), at)
+                        .with_code("E0548"),
+                );
+                continue;
             }
             // Kept for the debug information, which names the typedef where the program did.
             if let (Some(member), Some((name, of))) = (decl.name, spelled) {
@@ -412,6 +419,19 @@ impl Checker<'_> {
         self.types.record_info(id).fields.iter().any(|field| {
             field.name.is_some() || self.names_a_member(&FieldDecl::new(None, field.ty))
         })
+    }
+
+    /// Every name an anonymous member makes reachable, through any anonymous member of its own.
+    fn reached_through(&self, ty: TypeId, out: &mut Vec<Symbol>) {
+        let TypeKind::Record(id) = self.types.kind(self.types.canonical(ty)) else {
+            return;
+        };
+        for field in &self.types.record_info(id).fields {
+            match field.name {
+                Some(name) => out.push(name),
+                None => self.reached_through(field.ty, out),
+            }
+        }
     }
 
     /// The width of a bit-field, folded and measured against the type it was declared in.
@@ -1091,6 +1111,38 @@ mod tests {
         let first = fixture.declarator(Some("x"), &[]);
         let again = fixture.declarator(Some("x"), &[]);
         let specs = structure(&mut fixture, Some("S"), &[member(int, first), member(int, again)]);
+        let hole = defined(&mut fixture, specs);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, hole);
+        assert_eq!(message(&checker), "duplicate member 'x'");
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
+    }
+
+    /// A name an anonymous member reaches clashes with the record's own, in either order, and
+    /// through an anonymous member nested in another one.
+    #[test]
+    fn a_member_reached_through_an_anonymous_one_clashes_with_its_neighbours() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let inner_x = fixture.declarator(Some("x"), &[]);
+        let inner = structure(&mut fixture, None, &[member(int, inner_x)]);
+        let outer = structure(&mut fixture, None, &[bare(inner)]);
+        let x = fixture.declarator(Some("x"), &[]);
+        let specs = structure(&mut fixture, Some("S"), &[bare(outer), member(int, x)]);
+        let hole = defined(&mut fixture, specs);
+
+        let mut checker = fixture.checker();
+        let ty = checker.declared_type(specs, hole);
+        assert_eq!(message(&checker), "duplicate member 'x'");
+        assert_eq!(placed(&checker, ty), (4, 4, vec![0]));
+
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let x = fixture.declarator(Some("x"), &[]);
+        let inner_x = fixture.declarator(Some("x"), &[]);
+        let inner = structure(&mut fixture, None, &[member(int, inner_x)]);
+        let specs = structure(&mut fixture, Some("T"), &[member(int, x), bare(inner)]);
         let hole = defined(&mut fixture, specs);
 
         let mut checker = fixture.checker();
