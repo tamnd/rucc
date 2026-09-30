@@ -18,6 +18,9 @@ use rucc_session::{Deps, runtime};
 /// first time it was used on one.
 const WIDTH: usize = 72;
 
+/// The name a source read from standard input goes by.
+const STDIN: &str = "-";
+
 /// A file name with the characters `make` gives meaning to escaped.
 ///
 /// Three of them and each one differently, which is `make`'s own doing rather than a scheme. A
@@ -71,10 +74,15 @@ fn write_name(out: &mut String, column: &mut usize, name: &str) {
 /// which is where `a.o` comes from for `sub/a.c`. That is the only place in the family where a
 /// path is shortened, and it is GCC's rule rather than a good one: it is what an unadorned
 /// `make` would have named the object, from the days when everything was built in one directory.
+///
+/// Standard input has no name to shorten, and GCC calls its target `-` as it is.
 #[must_use]
 pub fn default_target(source: &str, output: Option<&str>) -> String {
     if let Some(name) = output {
         return escaped(name);
+    }
+    if source == STDIN {
+        return STDIN.to_owned();
     }
     escaped(&with_suffix(base_name(source), "o"))
 }
@@ -131,6 +139,11 @@ fn base_name(name: &str) -> &str {
 /// under [`runtime::DIR`], which is not a directory, so `make` would stop on it as a prerequisite
 /// with no rule and kbuild's fixdep stops on it as a file it cannot open. gcc lists its own
 /// headers because they are files in its install tree, and ours change only when the compiler does.
+///
+/// A source read from standard input is not a prerequisite either, since there is no file called
+/// `-` for `make` to look at, and kbuild's fixdep stops when it tries to open one. That is how
+/// `scripts/checksyscalls.sh` compiles. When nothing else is left GCC writes no rule at all, so the
+/// text is empty.
 #[must_use]
 pub fn rule(opts: &Deps, targets: &[String], source: &str, found: &[Dependency]) -> String {
     let listed: Vec<String> = found
@@ -139,6 +152,10 @@ pub fn rule(opts: &Deps, targets: &[String], source: &str, found: &[Dependency])
         .filter(|dep| !dep.path.starts_with(runtime::DIR))
         .map(|dep| escaped(&dep.path.to_string_lossy()))
         .collect();
+    let stdin = source == STDIN;
+    if stdin && listed.is_empty() {
+        return String::new();
+    }
 
     let mut out = String::new();
     let mut column = 0;
@@ -155,7 +172,9 @@ pub fn rule(opts: &Deps, targets: &[String], source: &str, found: &[Dependency])
     }
     out.push(':');
     column += 1;
-    write_name(&mut out, &mut column, &escaped(source));
+    if !stdin {
+        write_name(&mut out, &mut column, &escaped(source));
+    }
     for name in &listed {
         write_name(&mut out, &mut column, name);
     }
@@ -186,6 +205,29 @@ mod tests {
 
     fn plain() -> Deps {
         Deps { emit: true, system_headers: true, ..Deps::default() }
+    }
+
+    #[test]
+    fn standard_input_is_not_a_prerequisite() {
+        let found = [dep("sub/loc.h", false)];
+        let text = rule(&plain(), &["x.o".to_owned()], "-", &found);
+        assert_eq!(text, "x.o: sub/loc.h\n");
+    }
+
+    #[test]
+    fn standard_input_with_nothing_included_writes_no_rule() {
+        // What `-MMD` leaves for `echo 'int x;' | gcc -MMD -E -x c -`, and the file fixdep reads
+        // for `.tmp_missing-syscalls`.
+        let quiet = Deps { system_headers: false, ..plain() };
+        let found = [dep("/usr/include/stdc-predef.h", true)];
+        assert_eq!(rule(&quiet, &["-".to_owned()], "-", &found), "");
+        assert_eq!(rule(&plain(), &["-".to_owned()], "-", &[]), "");
+    }
+
+    #[test]
+    fn standard_input_is_its_own_target_when_there_is_no_output() {
+        assert_eq!(default_target("-", None), "-");
+        assert_eq!(default_target("-", Some("x.o")), "x.o");
     }
 
     #[test]
