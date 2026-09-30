@@ -27,7 +27,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
     let mut deps = Vec::new();
     let mut temps = Temps::default();
     let text = if cpp {
-        let out = preprocess(opts, name, fs);
+        let out = preprocess(opts, name, true, fs);
         messages.extend(out.messages.iter().cloned());
         deps = out.deps.clone();
         if out.failed() {

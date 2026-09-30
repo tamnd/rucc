@@ -149,6 +149,11 @@ pub struct Predef {
     /// The instruction set extensions the unit is built for, which decides `__SSE4_2__` and the
     /// rest of that family on x86-64 and nothing anywhere else.
     pub isa: Isa,
+    /// Whether the file is assembly on its way to the assembler, `.S` or `-x assembler-with-cpp`.
+    /// It defines `__ASSEMBLER__`, which every header that is also read from assembly tests to
+    /// leave its C declarations out, and it takes away the macros that describe the C language
+    /// rather than the machine, the way gcc's `-lang-asm` does.
+    pub assembler: bool,
 }
 
 impl Predef {
@@ -174,6 +179,7 @@ impl Predef {
             defines: Vec::new(),
             undefines: Vec::new(),
             isa: Isa::baseline(),
+            assembler: false,
         }
     }
 }
@@ -205,6 +211,7 @@ impl Predef {
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
             isa: opts.isa,
+            assembler: false,
         }
     }
 }
@@ -362,14 +369,19 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.flag("__STDC__");
     d.set_if(opts.hosted, "__STDC_HOSTED__", "1");
     d.set_if(!opts.hosted, "__STDC_HOSTED__", "0");
-    if let Some(version) = opts.std.stdc_version() {
+    // A file of assembly is told so, and is not told which C it is or what its literals hold.
+    // Those three are the whole of the difference gcc 16 makes between `-dM` for C and for
+    // `assembler-with-cpp`, and every other name here stays, since kernel headers read the
+    // machine's macros from `.S` files as much as from C.
+    d.flag_if(opts.assembler, "__ASSEMBLER__");
+    if let Some(version) = opts.std.stdc_version().filter(|_| !opts.assembler) {
         d.set("__STDC_VERSION__", version);
     }
     // Defined exactly when the extensions are off, which is the whole difference between
     // `-std=c23` and `-std=gnu23` as far as the preprocessor is concerned.
     d.flag_if(!opts.gnu_extensions, "__STRICT_ANSI__");
-    d.flag("__STDC_UTF_16__");
-    d.flag("__STDC_UTF_32__");
+    d.flag_if(!opts.assembler, "__STDC_UTF_16__");
+    d.flag_if(!opts.assembler, "__STDC_UTF_32__");
     // What glibc's `<pthread.h>` reads to spell `pthread_cleanup_push` with a `cleanup` attribute
     // rather than with `setjmp`, and gcc defines it in C for `-fexceptions` and for
     // `-fnon-call-exceptions` alone.
@@ -424,7 +436,10 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // `regexec`'s match array as `_REGEX_NELTS (__nmatch)`, which is the parameter when the
     // dialect has them and nothing at all when a compiler says it does not, so the claim
     // silently changes a declaration in a header rather than turning something off.
-    if opts.std.has_c11() {
+    //
+    // Not in assembly, where they would qualify a `__STDC_VERSION__` that is not there and where
+    // gcc, which has none of them in any mode, defines nothing like them.
+    if opts.std.has_c11() && !opts.assembler {
         d.flag("__STDC_NO_ATOMICS__");
         d.flag("__STDC_NO_THREADS__");
         d.flag("__STDC_NO_COMPLEX__");
@@ -1577,6 +1592,35 @@ mod tests {
         assert_eq!(field("0.10.68-rc.1", 2), "68");
         assert_eq!(field("1.0", 2), "0");
         assert_eq!(field("", 0), "0");
+    }
+
+    #[test]
+    fn assembly_is_told_it_is_assembly_and_loses_only_the_c_language_macros() {
+        let triple: Triple = "x86_64-unknown-linux-gnu".parse().expect("a supported triple");
+        let target = TargetInfo::new(triple);
+        let c = built_in(&target, &Predef::new());
+        let asm = built_in(&target, &Predef { assembler: true, ..Predef::new() });
+        assert!(has(&asm, "#define __ASSEMBLER__ 1"), "{asm}");
+        assert!(!c.contains("__ASSEMBLER__"), "{c}");
+
+        // These are the lines gcc 16 leaves out of `-dM` for `assembler-with-cpp`, plus rucc's
+        // own `__STDC_NO_*` ones, and nothing else goes.
+        let gone: Vec<&str> = c.lines().filter(|l| !asm.lines().any(|a| a == *l)).collect();
+        let mut names: Vec<&str> =
+            gone.iter().map(|l| l.split_whitespace().nth(1).unwrap_or_default()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "__STDC_NO_ATOMICS__",
+                "__STDC_NO_COMPLEX__",
+                "__STDC_NO_THREADS__",
+                "__STDC_UTF_16__",
+                "__STDC_UTF_32__",
+                "__STDC_VERSION__",
+            ]
+        );
+        assert!(has(&asm, "#define __x86_64__ 1") && has(&asm, "#define __STDC__ 1"), "{asm}");
     }
 
     #[test]

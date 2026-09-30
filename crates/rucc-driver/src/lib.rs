@@ -3082,7 +3082,8 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
             continue;
         }
         let started = std::time::Instant::now();
-        let result = preprocess(opts, &job.input, &fs);
+        let assembly = job.kind == InputKind::AssemblerWithCpp;
+        let result = preprocess(opts, &job.input, assembly, &fs);
         if opts.time {
             say_time(&job.input, started.elapsed(), &mut stderr);
         }

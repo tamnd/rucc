@@ -76,8 +76,13 @@ impl Preprocessed {
 /// `name` is the path as the user wrote it, which is the name the output and every diagnostic
 /// about the file use. It is not canonicalised, because a message naming a path nobody typed
 /// is a message that is harder to act on.
+///
+/// `assembly` is whether the file is assembly on its way to the assembler, a `.S` or anything
+/// under `-x assembler-with-cpp`. Such a file is read the way gcc reads it: `__ASSEMBLER__` is
+/// defined, a `$` is not part of a name, a `#` line that is not a directive is text, and an
+/// apostrophe with no partner is not an error.
 #[must_use]
-pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocessed {
+pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSystem) -> Preprocessed {
     let mut sess = Session::new(opts.clone());
     let bytes = match fs.read(Path::new(name)) {
         Ok(bytes) => bytes,
@@ -88,9 +93,10 @@ pub fn preprocess(opts: &Options, name: &str, fs: &dyn FileSystem) -> Preprocess
     };
 
     let mut pp = Preprocessor::with_prefix_map(opts.prefix_map.macros.clone());
-    let predef = Predef::for_options(opts);
+    let predef = Predef { assembler: assembly, ..Predef::for_options(opts) };
     let mut cx = Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
-    cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+    let lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+    cx.lex = if assembly { lex.for_assembly() } else { lex };
     cx.pedantic = opts.pedantic;
     if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
         return failure(format!("{name}: the source map has no room left for the built in macros"));
@@ -211,16 +217,32 @@ mod tests {
         for (path, text) in files {
             fs.insert(*path, (*text).to_owned().into_bytes());
         }
-        preprocess(opts, files[0].0, &fs)
+        preprocess(opts, files[0].0, false, &fs)
     }
 
     #[test]
     fn a_file_that_is_not_there_says_so_and_produces_nothing() {
         let fs = MemoryFileSystem::new();
-        let result = preprocess(&options(), "/nope.c", &fs);
+        let result = preprocess(&options(), "/nope.c", false, &fs);
         assert!(result.failed());
         assert!(result.messages[0].contains("/nope.c"), "{:?}", result.messages);
         assert!(result.text.is_empty());
+    }
+
+    #[test]
+    fn assembly_is_read_as_assembly_and_c_as_c() {
+        let mut fs = MemoryFileSystem::new();
+        let src = "#ifdef __ASSEMBLER__\n# it's a comment\n#define N 3\nmovq $N, %rax\n#endif\n";
+        fs.insert("/a.S", src.as_bytes().to_vec());
+        let asm = preprocess(&options(), "/a.S", true, &fs);
+        assert!(!asm.failed(), "{:?}", asm.messages);
+        assert!(asm.text.contains("# it's a comment\n"), "{}", asm.text);
+        assert!(asm.text.contains("movq $3, %rax"), "{}", asm.text);
+
+        // Read as C the same bytes produce nothing, because nobody told them they were assembly.
+        let c = preprocess(&options(), "/a.S", false, &fs);
+        assert!(!c.failed(), "{:?}", c.messages);
+        assert!(!c.text.contains("movq"), "{}", c.text);
     }
 
     #[test]
