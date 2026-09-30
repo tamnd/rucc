@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A stack slot's address compared against null folds to a constant, as gcc does, so landlock's `BUILD_BUG_ON(!dst)` on the address of a local builds.
 - A pointer to an array of unknown size can be dereferenced, since the array decays to a pointer and is never read, so i915's `intel_quirks.c` builds. `sizeof` of it is still refused.
 - A call to a `warn_unused_result` function at the end of a statement expression with other statements in front of it is quiet when the whole is thrown away, as in gcc 14, so `drmm_mutex_init` in i915's `intel_guc_log.c` builds under `-Werror`.
 - A GNU attribute written right after a named label belongs to the label, as in gcc, so `out: __maybe_unused` in `fs/ext4/super.c` no longer warns that the attribute on the next statement is ignored.
