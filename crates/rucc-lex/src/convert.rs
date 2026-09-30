@@ -365,14 +365,21 @@ fn number(
     // grammars overlap at the front and only one of them can tell where the number stops.
     match crate::number::integer(text, cx.std, cx.target) {
         Ok(value) => {
-            report(value.remarks, None, token.span, cx, diagnostics);
+            report(value.remarks, None, token.span, token.flags, cx, diagnostics);
             ints.push(value);
             let index = u32::try_from(ints.len() - 1).expect("that many constants in one file");
             Token { kind: TokenKind::Int, flags: token.flags, value: index, span: token.span }
         }
         Err(IntError::Floating) => match crate::number::floating(text, cx.std, cx.target) {
             Ok(value) => {
-                report(value.remarks, Some(value.ty.name()), token.span, cx, diagnostics);
+                report(
+                    value.remarks,
+                    Some(value.ty.name()),
+                    token.span,
+                    token.flags,
+                    cx,
+                    diagnostics,
+                );
                 floats.push(value);
                 let index =
                     u32::try_from(floats.len() - 1).expect("that many constants in one file");
@@ -423,7 +430,7 @@ fn char_const(
     let text = spelling_bytes(token, cx);
     let value = match crate::literal::character(text, cx.std, cx.gnu, cx.target) {
         Ok(value) => {
-            report(value.remarks, None, token.span, cx, diagnostics);
+            report(value.remarks, None, token.span, token.flags, cx, diagnostics);
             value
         }
         Err(error) => {
@@ -452,7 +459,14 @@ fn string_lit(
     let texts: Vec<&[u8]> = run.iter().map(|token| spelling_bytes(*token, cx)).collect();
     let value = match crate::literal::strings(&texts, cx.std, cx.gnu, cx.target) {
         Ok(value) => {
-            report(value.remarks, None, span, cx, diagnostics);
+            // A run is the header's only when every piece of it is, since a literal the user
+            // wrote next to one from a macro is still something the user wrote.
+            let flags = if run.iter().all(|token| token.flags.has(TokenFlags::SYSTEM_MACRO)) {
+                TokenFlags::SYSTEM_MACRO
+            } else {
+                TokenFlags::EMPTY
+            };
+            report(value.remarks, None, span, flags, cx, diagnostics);
             value
         }
         Err(error) => {
@@ -481,10 +495,13 @@ fn report(
     remarks: Remarks,
     type_name: Option<&str>,
     span: Span,
+    flags: TokenFlags,
     cx: &Convert<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if remarks.is_none() {
+    // A spelling out of a system header's macro is the header's to answer for, however the
+    // line that used it is written.
+    if remarks.is_none() || flags.has(TokenFlags::SYSTEM_MACRO) {
         return;
     }
 
@@ -520,7 +537,7 @@ fn report(
     let pedantic: [(Remarks, &str); 9] = [
         (Remarks::NON_ISO_ESCAPE, "non-ISO-standard escape sequence"),
         (Remarks::DOUBLE_SUFFIX, "suffix for double constant is a GCC extension"),
-        (Remarks::IMAGINARY, "imaginary constants are a GCC extension"),
+        (Remarks::IMAGINARY, "imaginary constants are a C2Y feature or GCC extension"),
         (Remarks::BINARY, "binary constants are a C23 feature or GCC extension"),
         (Remarks::EXTENDED_SUFFIX, "non-standard suffix on floating constant"),
         (Remarks::HEX_FLOAT, "use of C99 hexadecimal floating constant"),
@@ -529,6 +546,11 @@ fn report(
         (Remarks::BIT_INT, "'_BitInt' constants are a C23 feature"),
     ];
     for (remark, message) in pedantic {
+        // C2Y gave the `i` and `j` suffixes a place in the language, so from there on they are
+        // no more remarkable than an `f`.
+        if remark == Remarks::IMAGINARY && cx.std >= Std::C2y {
+            continue;
+        }
         if remarks.has(remark) {
             diagnostics.push(Diagnostic::warning(message, span));
         }
@@ -570,8 +592,17 @@ mod tests {
 
         /// Lexes and converts `src`, which is what a translation unit with no directives does.
         fn run(&mut self, src: &str) -> (Tokens, Vec<String>) {
-            let (pp, lex_diagnostics) =
+            self.run_with(src, TokenFlags::EMPTY)
+        }
+
+        /// The same, with `flags` added to every token, which is how a test stands in for the
+        /// preprocessor having said where the tokens came from.
+        fn run_with(&mut self, src: &str, flags: TokenFlags) -> (Tokens, Vec<String>) {
+            let (mut pp, lex_diagnostics) =
                 tokenize(src.as_bytes(), 0, Options::new(), &mut self.interner);
+            for token in &mut pp {
+                token.flags = token.flags.with(flags);
+            }
             assert!(lex_diagnostics.is_empty(), "the scanner disliked the source: {src}");
             let cx = Convert {
                 keywords: &self.keywords,
@@ -714,11 +745,30 @@ mod tests {
             diagnostics,
             vec![
                 "suffix for double constant is a GCC extension".to_owned(),
-                "imaginary constants are a GCC extension".to_owned(),
+                "imaginary constants are a C2Y feature or GCC extension".to_owned(),
                 "binary constants are a C23 feature or GCC extension".to_owned(),
                 "non-ISO-standard escape sequence".to_owned(),
             ]
         );
+    }
+
+    /// glibc's `I` is `(__extension__ 1.0iF)`, and gcc builds a program using it under
+    /// `-pedantic-errors` because the constant is spelled in a system header. The same constant
+    /// written by the user is still reported, and C2Y, which made the suffix standard, reports
+    /// neither.
+    #[test]
+    fn a_constant_out_of_a_system_header_macro_is_the_headers_business() {
+        let mut fixture = Fixture::new(Std::C99);
+        fixture.pedantic = true;
+        let (_, diagnostics) = fixture.run_with(r#"1.0iF 1LL '\e' "\e""#, TokenFlags::SYSTEM_MACRO);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let (_, diagnostics) = fixture.run("1.0iF");
+        assert_eq!(diagnostics, vec!["imaginary constants are a C2Y feature or GCC extension"]);
+
+        let mut later = Fixture::new(Std::C2y);
+        later.pedantic = true;
+        let (_, diagnostics) = later.run("1.0i 2j");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]

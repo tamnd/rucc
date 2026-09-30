@@ -23,7 +23,7 @@ use rucc_codegen::usage::StackUsage;
 use rucc_cost::Goal;
 use rucc_diag::{Diagnostic, SourceMap, Span};
 use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
-use rucc_lex::{Convert, Keywords, PpToken, convert};
+use rucc_lex::{Convert, Keywords, PpToken, TokenFlags, convert};
 use rucc_lower::Protector as LowerProtector;
 use rucc_sema::{Checker, Context as CheckContext};
 use rucc_session::{
@@ -267,7 +267,21 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 rucc_pp::PrintOptions { line_markers: opts.line_markers },
             ));
         }
-        tokens.iter().map(|token| token.to_pp()).collect()
+        // A token spelled in a system header's macro keeps the fact, since the span it carries
+        // from here on is the line that used the macro and the source map can no longer tell.
+        // `-Wsystem-headers` is how somebody porting a header hears all of it, so it keeps
+        // these as well.
+        let quiet = !opts.system_header_warnings;
+        tokens
+            .iter()
+            .map(|token| {
+                let mut out = token.to_pp();
+                if quiet && !token.expansion.is_dummy() && sess.sources.is_system(token.span.lo) {
+                    out.flags = out.flags.with(TokenFlags::SYSTEM_MACRO);
+                }
+                out
+            })
+            .collect()
     };
     diagnostics.extend(pp.take_diagnostics());
     // Taken here rather than at the end, because the preprocessor is done with and everything

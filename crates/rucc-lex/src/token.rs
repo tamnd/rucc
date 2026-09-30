@@ -63,6 +63,12 @@ impl TokenFlags {
     /// The punctuator was written in its digraph spelling, `<:` for `[` and so on. The token
     /// means the same thing either way, and `-E` has to print back what was written.
     pub const DIGRAPH: TokenFlags = TokenFlags(8);
+    /// The token was spelled in the replacement list of a macro defined in a system header and
+    /// reached the program by expanding it. A diagnostic about the spelling points at the line
+    /// that used the macro, which is the user's, but what the spelling says is the header's
+    /// business, so gcc keeps quiet about it the way it would inside the header. glibc's `I` is
+    /// `(__extension__ 1.0iF)`, and a program using it under `-pedantic-errors` builds.
+    pub const SYSTEM_MACRO: TokenFlags = TokenFlags(16);
 
     /// No flags.
     pub const EMPTY: TokenFlags = TokenFlags(0);
