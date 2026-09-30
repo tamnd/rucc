@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler reads `.incbin`, with its optional skip and count, so the kernel's `rmpiggy.S` can carry the real mode blob.
 - A static initializer may now add a number to an address that was cast to a full width integer, so `(unsigned long)&init_stack + sizeof(init_stack)` is kept as one relocation with an addend, as gcc does.
 - `lar` and `lsl` take their width from the register they write, so `lar %ax, %eax`, which the kernel's signal_64.c writes, assembles. A word read into a sixty four bit register has no `REX.W`, as in gas.
 - An `"i"` operand that is an address turned into a number and back, `(void *)(unsigned long)&gdt_page`, is spelled into the template as the name it is, instead of the whole statement being refused. The kernel's gdt_idt.c hands `rip_rel_ptr` its per cpu GDT that way.
