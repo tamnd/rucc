@@ -122,7 +122,11 @@ fn an_aggregate_holding_a_quad_travels_in_one_vector_register() {
     for level in ["-O0", "-O2"] {
         let text = asm("one", level);
         for function in ["take_one", "make_one"] {
-            assert!(names(&text, function, "%xmm0"), "{level} {function}:\n{text}");
+            // At `-O2` both pass the value through where it already is, gcc's `ret`, so only
+            // `-O0` stores it and shows the register it arrived in.
+            if level == "-O0" {
+                assert!(names(&text, function, "%xmm0"), "{level} {function}:\n{text}");
+            }
             assert!(
                 !names(&text, function, "%xmm1"),
                 "{level} {function} spent a second vector register:\n{text}"
@@ -172,7 +176,9 @@ fn an_upper_half_with_nothing_under_it_gets_a_register_of_its_own() {
 
         // The same union with a `double` in it instead keeps both eightbytes in the vector file,
         // so it is the one register the quad on its own gets.
-        assert!(names(&text, "take_both", "%xmm0"), "{level}:\n{text}");
+        if level == "-O0" {
+            assert!(names(&text, "take_both", "%xmm0"), "{level}:\n{text}");
+        }
         assert!(!names(&text, "take_both", "%rdi"), "{level}:\n{text}");
         assert!(!names(&text, "take_both", "%xmm1"), "{level}:\n{text}");
     }

@@ -484,12 +484,13 @@ mod tests {
         }
     }
 
-    /// A division of a value by itself, which is a body reading its parameter and nothing else.
+    /// A division of a value by zero, which is a body reading its parameter and nothing else.
     ///
-    /// A division because the folding at the end of a sweep leaves one alone, so the instruction
+    /// By zero because the folding at the end of a sweep leaves that one alone, so the instruction
     /// is still there afterwards for [`Unit::reads`] to read the operand off.
     fn reads(build: &mut Builder<'_>, value: Value) {
-        build.binary(Opcode::SDiv, value, value, Flags::NONE);
+        let zero = build.iconst(INT, 0);
+        build.binary(Opcode::SDiv, value, zero, Flags::NONE);
     }
 
     /// Calls that function with those arguments, under a signature matching what it takes.
