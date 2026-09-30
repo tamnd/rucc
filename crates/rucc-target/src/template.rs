@@ -15,6 +15,12 @@
 /// program wrote into an `asm` statement is text an assembler reads.
 pub const TEMPLATE_MEM: &str = "\u{1}m\u{2}";
 
+/// The address a kept template names, that many bytes further on. See [`TEMPLATE_MEM`].
+#[must_use]
+pub fn template_mem_at(offset: i64) -> String {
+    format!("\u{1}m{offset}\u{2}")
+}
+
 /// A name a kept template names, held the same way so the writer can spell it the way the object
 /// format wants names spelled. See [`TEMPLATE_MEM`].
 #[must_use]
@@ -24,8 +30,8 @@ pub fn template_name(name: &str) -> String {
 
 /// A register a kept template names, held the same way. What it says is the instruction's operand
 /// at `at` and the width to spell it at, as the letter gcc's modifier for that width is. On x86-64
-/// that is `b`, `w`, `k`, `q`, or `h` for the second byte, and on AArch64 it is `w` or `x`. The
-/// register is only known once the allocator has run, which is after the text is written down. See
+/// that is `b`, `w`, `k`, `q`, or `h` for the second byte, and a capital of one of the first four
+/// is that width with no `%` in front. On AArch64 it is `w` or `x`. The register is only known once the allocator has run, which is after the text is written down. See
 /// [`TEMPLATE_MEM`].
 #[must_use]
 pub fn template_reg(at: usize, width: char) -> String {
@@ -82,7 +88,13 @@ pub fn template_filled(
         let hole = &rest[at + 1..];
         let end = hole.find('\u{2}').unwrap_or(hole.len());
         match hole[..end].split_at_checked(1) {
-            Some(("m", _)) => out.push_str(mem),
+            // An address further on is the same address with the distance in front, which the
+            // assembler adds to whatever displacement is there already.
+            Some(("m", offset)) => match offset.parse::<i64>() {
+                Ok(offset) if mem.starts_with('(') => out.push_str(&format!("{offset}{mem}")),
+                Ok(offset) => out.push_str(&format!("{offset}+{mem}")),
+                Err(_) => out.push_str(mem),
+            },
             Some(("n", named)) => out.push_str(&name(named)),
             Some(("r", held)) => {
                 let (at, width) = held.split_at(held.len().saturating_sub(1));
