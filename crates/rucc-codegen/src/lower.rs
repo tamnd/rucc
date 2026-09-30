@@ -1391,6 +1391,28 @@ impl<'a> Lowering<'a> {
         Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired, blocks: self.blocks })
     }
 
+    /// Writes down what was built for an IR instruction since `before`, when the instruction has
+    /// no effects and all of it went into the block it started in. See [`Self::unread`].
+    fn effectless_since(
+        &mut self,
+        inst: Inst,
+        started: Option<mir::Block>,
+        before: Option<mir::Inst>,
+    ) {
+        let opcode = self.source[inst].opcode;
+        if opcode.has_effects() || opcode == Opcode::Load || self.at != started {
+            return;
+        }
+        let Some(at) = self.at else { return };
+        let first = match before {
+            Some(before) => self.out.next_inst(before),
+            None => self.out.insts(at).next(),
+        };
+        let Some(first) = first else { return };
+        let built: Vec<mir::Inst> = self.out.insts(at).skip_while(|&one| one != first).collect();
+        self.effectless.push(built);
+    }
+
     /// Takes out what was built for an IR instruction with no effects when nothing reads it.
     ///
     /// The IR reads the value, which is why it was built, but the reader did not need it in a
@@ -1811,7 +1833,10 @@ impl<'a> Lowering<'a> {
                 // machine is every one the front end writes. No instruction at all, so no rule
                 // could name one.
                 Opcode::PtrToInt | Opcode::IntToPtr => {
+                    let started = self.at;
+                    let before = self.at.and_then(|at| self.out.insts(at).last());
                     self.rename(inst)?;
+                    self.effectless_since(inst, started, before);
                     continue;
                 }
                 // A barrier, which is one instruction or none depending on the ordering. Written
@@ -1904,22 +1929,7 @@ impl<'a> Lowering<'a> {
             let started = self.at;
             let before = self.at.and_then(|at| self.out.insts(at).last());
             self.emit(inst, &matched)?;
-            let opcode = self.source[inst].opcode;
-            if !opcode.has_effects() && opcode != Opcode::Load && self.at == started {
-                if let Some(at) = self.at {
-                    let first = match before {
-                        Some(before) => self.out.next_inst(before),
-                        None => self.out.insts(at).next(),
-                    };
-                    let built: Vec<mir::Inst> = self
-                        .out
-                        .insts(at)
-                        .skip_while(|&one| Some(one) != first)
-                        .take_while(|_| first.is_some())
-                        .collect();
-                    self.effectless.push(built);
-                }
-            }
+            self.effectless_since(inst, started, before);
             // A load, a store or a division with an unwind edge, which `-fnon-call-exceptions`
             // gives one that can fault. What the table covers is the one instruction of what the
             // rule wrote that does the access or the divide: the first for a load, where anything
