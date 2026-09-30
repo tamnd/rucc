@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Sharing frame slots skips ahead through a cell's list of pieces rather than stepping one at a time when it asks whether a local or a spill slot clashes with it, which takes about 9% off an optimized build of jtckdint (#2502).
+- Choosing a register to spill in the linear scan asks the register's list of pieces which values touch the interval rather than asking every value in flight, which takes about 5% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2514).
 
 ### Added
 

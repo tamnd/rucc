@@ -380,6 +380,14 @@ impl<'a> Active<'a> {
         (pieces.kept && !pieces.broken).then(|| pieces.touch(area, except))
     }
 
+    /// The values of the class in register number `slot` that touch the area, from its list of
+    /// pieces, or nothing when the list is not kept or not in order.
+    #[inline(never)]
+    fn owners(&self, class: RegClass, slot: usize, area: Area<'_>) -> Option<Vec<Reg>> {
+        let pieces = self.pieces.get(usize::from(class.number()))?.get(slot)?;
+        if pieces.kept { pieces.owners(area) } else { None }
+    }
+
     /// Takes the values of the class in `at` whose areas `goes` says to, and hands each to `gone`.
     fn evict(
         &mut self,
@@ -863,17 +871,33 @@ fn spill_one<'a>(
     // them was given the register, and sorting by it puts the registers in the order the values
     // were given them, which is what settles a tie.
     let mut costs: Vec<(usize, PhysReg, usize, Point)> = Vec::new();
-    for held in active.by.iter().flatten() {
-        if held.class != interval.class || !held.area.overlaps(interval.area) {
-            continue;
-        }
-        match costs.iter_mut().find(|(_, at, _, _)| *at == held.at) {
-            Some((first, _, count, reach)) => {
-                *first = (*first).min(held.since);
-                *count += 1;
-                *reach = (*reach).max(held.range.end);
+    for (slot, values) in active.by.iter().enumerate() {
+        // A register with a list of its pieces says which values touch the area, which is quicker
+        // than asking each value in it when it holds many.
+        let owners = if values.len() > FEW {
+            active.owners(interval.class, slot, interval.area)
+        } else {
+            None
+        };
+        for held in values {
+            if held.class != interval.class {
+                continue;
             }
-            None => costs.push((held.since, held.at, 1, held.range.end)),
+            let touches = match &owners {
+                Some(owners) => owners.binary_search(&held.reg).is_ok(),
+                None => held.area.overlaps(interval.area),
+            };
+            if !touches {
+                continue;
+            }
+            match costs.iter_mut().find(|(_, at, _, _)| *at == held.at) {
+                Some((first, _, count, reach)) => {
+                    *first = (*first).min(held.since);
+                    *count += 1;
+                    *reach = (*reach).max(held.range.end);
+                }
+                None => costs.push((held.since, held.at, 1, held.range.end)),
+            }
         }
     }
     costs.sort_unstable_by_key(|&(first, _, _, _)| first);
