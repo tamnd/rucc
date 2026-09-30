@@ -5353,10 +5353,8 @@ mod tests {
             target("aarch64-linux-gnu-gcc", &["--target=x86_64-linux-gnu", "-c", "a.c"]),
             Ok(x86_64)
         );
-        // No i686 back end yet, so the name is refused with the triple it implied rather than
-        // quietly building for the host.
-        let e = target("i686-linux-gnu-gcc", &["-c", "a.c"]).unwrap_err();
-        assert!(e.contains("i686-linux-gnu"), "{e}");
+        let i686: Triple = "i686-unknown-linux-gnu".parse().unwrap();
+        assert_eq!(target("i686-linux-gnu-gcc", &["-c", "a.c"]), Ok(i686));
     }
 
     #[test]
