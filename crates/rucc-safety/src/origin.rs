@@ -66,8 +66,7 @@
 //! parameter is made, because the capability an edge passes is often a `cap_load` behind a load the
 //! walk has not reached yet, and asking for it early would put a `cap_of` there instead.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, BlockCall, Def, Func, Inst, InstData, Opcode, Type, Value};
 
 /// The capability each pointer in one function has.
@@ -76,7 +75,7 @@ use rucc_ir::{Block, BlockCall, Def, Func, Inst, InstData, Opcode, Type, Value};
 #[derive(Debug, Default)]
 pub(crate) struct Origins {
     /// What each pointer's capability is, including the derived ones that share a base's.
-    held: HashMap<Value, Value>,
+    held: Map<Value, Value>,
     /// The capability parameters made for pointer parameters, with the block and the position of
     /// the pointer, in the order they were made, which is the order their arguments go on the edges.
     joins: Vec<(Block, usize, Value)>,
@@ -181,7 +180,7 @@ impl Origins {
                 let Some(at) = func[block].params.iter().position(|&param| param == cap) else {
                     continue;
                 };
-                let arriving: HashSet<Value> =
+                let arriving: Set<Value> =
                     edges(func, block).map(|args| func[args][at]).filter(|&v| v != cap).collect();
                 let Some(&only) = arriving.iter().next() else { continue };
                 if arriving.len() != 1 {
@@ -307,9 +306,9 @@ fn joinable(func: &Func, pointer: Value) -> Option<(Block, usize)> {
 /// with tamnd/rucc#1241 and was never added, and `cap_result` was added here by hand while the
 /// question itself still answered nothing for it, which left the two disagreeing about the same
 /// opcode.
-pub(crate) fn existing(func: &Func) -> HashMap<Value, Value> {
+pub(crate) fn existing(func: &Func) -> Map<Value, Value> {
     let alive = kept(func);
-    let mut held = HashMap::new();
+    let mut held = Map::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
             // The ones that name a pointer. A `cap_narrow` is a capability as well but it names
@@ -336,7 +335,7 @@ pub(crate) fn existing(func: &Func) -> HashMap<Value, Value> {
 /// edge into the block passes it the capability of what that edge passes the pointer, or passes
 /// each parameter back to itself. To a fixpoint, because the capability an edge passes can be a
 /// parameter of another join.
-fn joins(func: &Func, alive: &HashSet<Value>, held: &mut HashMap<Value, Value>) {
+fn joins(func: &Func, alive: &Set<Value>, held: &mut Map<Value, Value>) {
     loop {
         let mut again = false;
         for block in func.blocks() {
@@ -367,7 +366,7 @@ fn joins(func: &Func, alive: &HashSet<Value>, held: &mut HashMap<Value, Value>) 
 /// pointer parameter, as [`joins`] asks.
 fn paired(
     func: &Func,
-    held: &HashMap<Value, Value>,
+    held: &Map<Value, Value>,
     block: Block,
     (index, pointer): (usize, Value),
     (at, cap): (usize, Value),
@@ -403,8 +402,8 @@ fn paired(
 /// after the rewrite, when what is dead is simply what nothing reads, and it can afford to look
 /// forwards. Anything running before the rewrite has to predict which readers survive it, and the
 /// one thing it has to know is which checks keep a capability, which is `crate::lower::keeps`.
-fn kept(func: &Func) -> HashSet<Value> {
-    let mut alive: HashSet<Value> = HashSet::new();
+fn kept(func: &Func) -> Set<Value> {
+    let mut alive: Set<Value> = Set::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
             if !crate::lower::keeps(func[inst].opcode) {
@@ -455,7 +454,7 @@ fn kept(func: &Func) -> HashSet<Value> {
 /// hand to a callee rather than a weaker capability made at the call. A pointer that has walked off
 /// the end of its object carries its object's capability here and the callee refuses through it,
 /// where a capability worked out from the address would be whatever object the address landed in.
-pub(crate) fn already(func: &Func, held: &HashMap<Value, Value>, pointer: Value) -> Option<Value> {
+pub(crate) fn already(func: &Func, held: &Map<Value, Value>, pointer: Value) -> Option<Value> {
     held.get(&root(func, pointer)).copied()
 }
 

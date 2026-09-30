@@ -127,9 +127,8 @@
 //! is not so is a function with checks and no pointer parameters, which takes nothing, and it is a
 //! box on tamnd/rucc#1241 rather than something to paper over here.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{Def, Doms, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
 use crate::frame::ARGS;
@@ -159,7 +158,7 @@ pub enum Frame {
 /// the same either way. A name missing from the table is a name this unit does not define, which is
 /// what [`wanted`] reads it as.
 #[must_use]
-pub fn remaining(module: &Module) -> HashMap<Symbol, usize> {
+pub fn remaining(module: &Module) -> Map<Symbol, usize> {
     module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
@@ -171,7 +170,7 @@ pub fn remaining(module: &Module) -> HashMap<Symbol, usize> {
 ///
 /// `left` is [`remaining`] over the module this function belongs to.
 #[must_use]
-pub fn wanted(func: &Func, inst: Inst, left: &HashMap<Symbol, usize>) -> Option<Frame> {
+pub fn wanted(func: &Func, inst: Inst, left: &Map<Symbol, usize>) -> Option<Frame> {
     if !matches!(func[inst].opcode, Opcode::Call | Opcode::TailCall | Opcode::CallIndirect) {
         return None;
     }
@@ -281,7 +280,7 @@ pub fn arrange(module: &mut Module) -> usize {
 /// had, so a pointer that came in as a parameter, went down into a call and came back out of another
 /// is the same value at each step and travels the whole way as a frame read however this is ordered.
 /// Writing it in the order the values flow is for the reader.
-fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
+fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
     if checks_left(func) > 0 {
         from_the_frame(func, word);
     }
@@ -321,7 +320,7 @@ fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
 /// walk rather than instead of it.
 fn from_the_frame(func: &mut Func, word: Type) -> usize {
     let Some(entry) = func.entry() else { return 0 };
-    let mut position: HashMap<Value, usize> = HashMap::new();
+    let mut position: Map<Value, usize> = Map::default();
     let mut at = 0;
     for &param in &func[entry].params {
         if !func[param].ty.is_ptr() {
@@ -394,7 +393,7 @@ fn from_the_call(func: &mut Func, inst: Inst) -> bool {
 /// Nothing is made here, as everywhere else in this pass: `held` holds the capabilities the function
 /// is paying for already, and a returned pointer that is not in it leaves the caller reading the
 /// bottom capability the publish wrote, which is the recovery the caller was doing anyway.
-fn giving_back(func: &mut Func, held: &HashMap<Value, Value>, doms: &Doms) -> usize {
+fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize {
     let mut done = 0;
     for inst in all(func) {
         if func[inst].opcode != Opcode::Return {
@@ -430,7 +429,7 @@ fn behind(func: &Func, inst: Inst) -> Option<Inst> {
 /// clear instead, which is the same saving taken all the way and is what the verifier asks for
 /// anyway: a publish describing nothing is a clear spelled at length, and the two mean opposite
 /// things.
-fn over(func: &mut Func, inst: Inst, held: &HashMap<Value, Value>, doms: &Doms) -> bool {
+fn over(func: &mut Func, inst: Inst, held: &Map<Value, Value>, doms: &Doms) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
     let found: Vec<Option<Value>> =
         carried.iter().map(|&value| seen(func, held, doms, value, inst)).collect();
@@ -463,7 +462,7 @@ fn over(func: &mut Func, inst: Inst, held: &HashMap<Value, Value>, doms: &Doms) 
 /// counts as none, which leaves the callee to recover, the same as for a pointer nothing checked.
 fn seen(
     func: &Func,
-    held: &HashMap<Value, Value>,
+    held: &Map<Value, Value>,
     doms: &Doms,
     pointer: Value,
     inst: Inst,
@@ -559,7 +558,7 @@ mod tests {
         let mut names = Interner::new();
         let func = through_a_pointer(&mut names);
         let call = only(&func);
-        assert_eq!(wanted(&func, call, &HashMap::new()), Some(Frame::Unknown));
+        assert_eq!(wanted(&func, call, &Map::default()), Some(Frame::Unknown));
     }
 
     #[test]
@@ -571,7 +570,7 @@ mod tests {
             .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
             .find(|&inst| func[inst].opcode == Opcode::Return)
             .expect("the function returns");
-        assert_eq!(wanted(&func, ret, &HashMap::new()), None);
+        assert_eq!(wanted(&func, ret, &Map::default()), None);
     }
 
     /// A function holding one check of `opcode` over its own parameter.

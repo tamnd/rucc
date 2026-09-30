@@ -43,9 +43,8 @@
 //! linker already knows how to do, it costs the same one instruction the index cost, and the
 //! reporter reads it by dereferencing it.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{
     CallInfo, Datum, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Meta, Module,
     Opcode, Signature, Type, Value,
@@ -143,13 +142,13 @@ fn calls(
     func: &mut Func,
     names: &mut Interner,
     word: Type,
-    numbers: &HashMap<Meta, u32>,
+    numbers: &Map<Meta, u32>,
     table: &mut Vec<Descriptor>,
 ) {
     let insts: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
     let pairs = pairs(func, &insts);
-    let fused: HashSet<Inst> = pairs.values().copied().collect();
+    let fused: Set<Inst> = pairs.values().copied().collect();
     let kept = kept(func, &insts);
     for &inst in &insts {
         // The init check of a pair is lowered by its type check, which asks both questions in one
@@ -376,7 +375,7 @@ fn deriv(
     names: &mut Interner,
     word: Type,
     table: &mut Vec<Descriptor>,
-    kept: &HashSet<Value>,
+    kept: &Set<Value>,
     inst: Inst,
 ) {
     let [capability, base, derived, stride] = func[func[inst].args] else { return };
@@ -390,7 +389,7 @@ fn deriv(
 }
 
 /// The capabilities something that [`keeps`] one reads, taken before any of them is rewritten.
-fn kept(func: &Func, insts: &[Inst]) -> HashSet<Value> {
+fn kept(func: &Func, insts: &[Inst]) -> Set<Value> {
     insts
         .iter()
         .filter(|&&inst| keeps(func[inst].opcode))
@@ -423,8 +422,8 @@ fn nothing(func: &mut Func, inst: Inst, word: Type) -> Value {
 /// the other often enough that the second half of this file's work has to check rather than trust,
 /// and a type check fused with an init check belonging to some later read would be an init check
 /// asked earlier than the program asks it, which is a refusal of a correct program.
-fn pairs(func: &Func, insts: &[Inst]) -> HashMap<Inst, Inst> {
-    let mut found = HashMap::new();
+fn pairs(func: &Func, insts: &[Inst]) -> Map<Inst, Inst> {
+    let mut found = Map::default();
     for &inst in insts {
         if func[inst].opcode != Opcode::CheckType {
             continue;
@@ -510,7 +509,7 @@ fn typed(
     func: &mut Func,
     names: &mut Interner,
     word: Type,
-    numbers: &HashMap<Meta, u32>,
+    numbers: &Map<Meta, u32>,
     table: &mut Vec<Descriptor>,
     inst: Inst,
     partner: Option<Inst>,
@@ -800,7 +799,7 @@ fn judgement(
     func: &mut Func,
     names: &mut Interner,
     word: Type,
-    numbers: &HashMap<Meta, u32>,
+    numbers: &Map<Meta, u32>,
     inst: Inst,
 ) {
     let [pointer, length] = func[func[inst].args] else { return };
@@ -1139,7 +1138,7 @@ mod tests {
     /// Every function in these tests reads or derives and none of them stores, so there is nothing
     /// to record and the entries are never named. What the two are for is that [`crate::insert`]
     /// and [`calls`] take them whether or not the function has a store in it.
-    fn planeless(names: &mut Interner) -> (Plane, HashMap<Meta, u32>) {
+    fn planeless(names: &mut Interner) -> (Plane, Map<Meta, u32>) {
         let mut module = Module::new(names.intern("planeless.c"), &target());
         let plane = Plane::build(&mut module);
         let numbers = plane::numbers(&module, names);

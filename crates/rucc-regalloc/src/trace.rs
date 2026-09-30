@@ -62,9 +62,9 @@
 //! every edge, because a checker runs in debug builds and the thing it is checking is the thing
 //! that has to be fast.
 
-use std::collections::HashMap;
 use std::fmt;
 
+use rucc_base::hash::Map;
 use rucc_mir::{Block, Constraint, Func, Inst, Operand, Param, Reg, Role};
 use rucc_target::RegClass;
 
@@ -195,7 +195,7 @@ pub fn trace(func: &Func, shape: &Shape, assignment: &Assignment, edits: &[Edit]
     // yet. A value the allocator placed and the function reads before writing is the assignment
     // checker's question rather than this one's, and a register the function names itself is not
     // read as a value at all.
-    entry[start.index()] = Some(State::new());
+    entry[start.index()] = Some(State::default());
     let mut queue = vec![start];
     let mut ignored = Vec::new();
     while let Some(block) = queue.pop() {
@@ -244,7 +244,7 @@ pub fn report(faults: &[Fault]) -> String {
 /// A place with no entry is one nothing is known about, which is either a place nothing has
 /// written yet or one the paths into a block disagree about. Reading one is a fault, since the
 /// machine will read whatever is there.
-type State = HashMap<Spot, Reg>;
+type State = Map<Spot, Reg>;
 
 /// A place and the file it is in.
 ///

@@ -36,9 +36,8 @@
 //! at load time, and neither the reporter that would read it nor the merge exists. The names are
 //! recoverable when it does: a hash of a spelling is a spelling the compiler still has.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_ir::{Meta, MetaNode, Module, PlaneNode};
 
 /// The type of a byte nothing has stored through, which `rucc_safe_rt::types::UNTYPED` fixes at
@@ -87,7 +86,7 @@ pub struct Plane {
     /// What a store through a character type records.
     character: Meta,
     /// The entry for each aliasing node that is a type.
-    types: HashMap<Meta, Meta>,
+    types: Map<Meta, Meta>,
 }
 
 impl Plane {
@@ -138,7 +137,7 @@ impl Plane {
 ///
 /// One walk of the metadata table rather than a lookup per instruction, because the table is a
 /// handful of nodes and the instructions are every store in the module.
-pub(crate) fn numbers(module: &Module, names: &Interner) -> HashMap<Meta, u32> {
+pub(crate) fn numbers(module: &Module, names: &Interner) -> Map<Meta, u32> {
     module
         .metadata()
         .filter_map(|meta| Some((meta, number(module, names, module[meta].plane()?))))
