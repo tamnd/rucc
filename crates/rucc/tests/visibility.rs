@@ -191,3 +191,33 @@ fn a_visibility_nobody_defined_is_refused() {
     assert!(!ok, "expected this to be refused: {said}");
     assert!(said.contains("E0701"), "{said}");
 }
+
+/// `#pragma GCC visibility push(hidden)` speaks for an `extern` as well, unlike the flag, so
+/// under `-fPIC` the variable is reached relative to the instruction pointer rather than through
+/// the GOT. The kernel's early startup code is built this way and runs before anything has
+/// relocated the GOT, which is where a load through it faulted.
+#[test]
+fn a_pushed_hidden_reaches_an_extern_without_the_got() {
+    let text = asm(
+        "pragma",
+        &["-fPIC", "-O2"],
+        "\
+#pragma GCC visibility push(hidden)
+extern unsigned int inside;
+void set(void) { inside = 1; }
+#pragma GCC visibility pop
+extern unsigned int outside;
+unsigned int get(void) { return outside; }
+",
+    );
+
+    assert!(text.contains("inside(%rip)"), "{text}");
+    assert!(!text.contains("inside@GOTPCREL"), "{text}");
+    assert!(
+        text.contains("\t.hidden\tset\n"),
+        "a definition under the pragma is hidden too: {text}"
+    );
+    // After the pop the ordinary rule is back.
+    assert!(text.contains("outside@GOTPCREL(%rip)"), "{text}");
+    assert!(!text.contains("\t.hidden\tget\n"), "{text}");
+}

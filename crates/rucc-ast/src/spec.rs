@@ -45,8 +45,29 @@ pub struct DeclSpecs {
     pub align: Option<AlignSpec>,
     /// Attributes that appertain to the declaration as a whole.
     pub attrs: AttrList,
+    /// What `#pragma GCC visibility push` left in effect where the declaration starts, which
+    /// is what the declaration gets when no attribute on it says otherwise.
+    pub pushed: Option<PushedVisibility>,
     /// From the first specifier to the last.
     pub span: Span,
+}
+
+/// What `#pragma GCC visibility push(...)` asks for.
+///
+/// This is not `-fvisibility=`. The command line only speaks for definitions, and the pragma
+/// speaks for declarations as well, so an `extern int x;` written under `push(hidden)` is a
+/// promise that the definition is in the same image and can be reached without the GOT. The
+/// kernel's `include/linux/hidden.h` is that one line, and code that runs before the kernel is
+/// at the address it was linked for leans on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushedVisibility {
+    /// `push(default)`.
+    Default,
+    /// `push(hidden)` and `push(internal)`, the second read as the first for the reason the
+    /// attribute reads it that way.
+    Hidden,
+    /// `push(protected)`.
+    Protected,
 }
 
 impl DeclSpecs {
@@ -62,6 +83,7 @@ impl DeclSpecs {
             func: FuncSpecs::NONE,
             align: None,
             attrs: AttrList::EMPTY,
+            pushed: None,
             span,
         }
     }

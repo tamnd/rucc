@@ -76,6 +76,7 @@ mod init;
 mod pack;
 mod spec;
 mod stmt;
+mod visibility;
 
 pub use crate::comment::Comment;
 pub use crate::cursor::{Cursor, MAX_LOOKAHEAD, Mark};

@@ -547,6 +547,7 @@ impl Parser<'_> {
     /// them, decides, and hands them back here.
     pub(crate) fn decl_specs_with(&mut self, leading: AttrList, start: Span) -> DeclSpecsId {
         let mut specs = DeclSpecs::empty(start);
+        specs.pushed = self.visibility_in_effect();
         let mut builtin = Builtin::NONE;
         let mut attrs = self.ast[leading].to_vec();
         // Whether something other than the built-in keywords has named a type, which is what

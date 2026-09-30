@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `#pragma GCC visibility push(hidden)` and `pop` now set the visibility of the declarations and definitions between them, as gcc does. The kernel wraps its early startup code in it so that an `extern` is reached from the instruction pointer and not through the GOT, and without it `__startup_64` faulted before the kernel was relocated.
 - An octal constant with a digit separator straight after its leading zero, such as `0'17`, is octal, so it is fifteen as in gcc. It used to be read as decimal seventeen, because the zero followed by a separator did not look like the start of an octal constant.
 - A program using `I` from `<complex.h>` builds under `-pedantic-errors`. glibc spells it `(__extension__ 1.0iF)`, and the remark about the imaginary constant pointed at the user's line and so was not recognised as coming from a system header. A constant, character or string spelled in a system header's macro is now the header's business, as in gcc, unless `-Wsystem-headers` asks. The remark itself now reads "imaginary constants are a C2Y feature or GCC extension", as gcc 16 says it, and is not given under `-std=c2y`.
 - Trigraphs are replaced under `-std=c89`, `-ansi`, `c99`, `c11` and `c17`, and in any mode under `-trigraphs`, which is now accepted. The lexer had them all along and nothing ever turned them on, so `??=` stayed three characters in a mode where the standard says it is `#`. The GNU modes and C23 on still leave them alone, as gcc 16 does.
