@@ -40,45 +40,42 @@ set_with() { # lib stems-var swapstem replacement
     done
 }
 
-look() { # project root
-    local p=$1 root=$2 lib=$top/target/libraries/$1
-    stems=$(cd "$lib" && ls *-O2.s | sed 's/-O2\.s$//')
-    say "$p: all -O2: $(run "$lib" $(set_with "$lib" none none))"
-    head -c 3000 /tmp/look/out
-    echo
-    local culprits=""
-    for s in $stems; do
+
+stems_of() { (cd "$top/target/libraries/$1" && ls *-O2.s | sed 's/-O2\.s$//'); }
+
+narrow() { # project root stem function
+    local p=$1 root=$2 s=$3 f=$4 lib=$top/target/libraries/$1
+    stems=$(stems_of "$p")
+    compile "$p" "$root" "$s" /tmp/one.s RUCC_REMAT_ONLY="$f:0:0" 2>/tmp/said
+    cat /tmp/said
+    local n
+    n=$(grep -oP '\d+(?= locals in '"$f"')' /tmp/said | head -1)
+    say "$p: $f has $n locals; none rebuilt: $(run "$lib" $(set_with "$lib" "$s" /tmp/one.s))"
+    compile "$p" "$root" "$s" /tmp/one.s RUCC_REMAT_ONLY="$f:0:$n" 2>/dev/null
+    say "$p: $f all rebuilt: $(run "$lib" $(set_with "$lib" "$s" /tmp/one.s))"
+    local k first=""
+    for k in $(seq 0 $((n - 1))); do
+        compile "$p" "$root" "$s" /tmp/one.s RUCC_REMAT_ONLY="$f:$k:$((k + 1))" 2>/dev/null
         local r
-        r=$(run "$lib" $(set_with "$lib" "$s" "$lib/$s-O0.s"))
-        echo "$p: $s at -O0: $r"
-        [ "$r" = good ] && culprits="$culprits $s"
+        r=$(run "$lib" $(set_with "$lib" "$s" /tmp/one.s))
+        echo "$p: $f only local $k: $r"
+        if [ "$r" != good ] && [ -z "$first" ]; then first=$k; fi
     done
-    say "$p: files that fix it alone:$culprits"
-    for s in $culprits; do
-        for toggle in RUCC_NO_SHARE='*' RUCC_KEEP_LOCALS='*' RUCC_KEEP_NAMES=1 RUCC_NO_PASS_LATE=1; do
-            compile "$p" "$root" "$s" /tmp/one.s "$toggle" || { echo "$s $toggle: no compile"; continue; }
-            local r
-            r=$(run "$lib" $(set_with "$lib" "$s" /tmp/one.s))
-            echo "$p: $s with $toggle: $r"
-            if [ "$r" = good ] && [ "${toggle#*=}" = '*' ]; then
-                local var=${toggle%%=*}
-                for f in $(grep -oP '^\s*\.type\s+\K[^,]+(?=,\s*@function)' "$lib/$s-O2.s"); do
-                    compile "$p" "$root" "$s" /tmp/one.s "$var=$f" || continue
-                    r=$(run "$lib" $(set_with "$lib" "$s" /tmp/one.s))
-                    if [ "$r" = good ]; then
-                        say "$p: $s: $var=$f fixes it"
-                        compile "$p" "$root" "$s" /tmp/fixed.s "$var=$f"
-                        compile "$p" "$root" "$s" /tmp/broken.s
-                        awk -v f="$f" '$0 ~ "^"f":" {on=1} on {print} on && /\.size/ {exit}' /tmp/broken.s >/tmp/b.s
-                        awk -v f="$f" '$0 ~ "^"f":" {on=1} on {print} on && /\.size/ {exit}' /tmp/fixed.s >/tmp/f.s
-                        echo "--- broken $f"; cat /tmp/b.s | head -1500
-                        echo "--- fixed $f"; cat /tmp/f.s | head -1500
-                    fi
-                done
-            fi
-        done
+    for k in $(seq 1 "$n"); do
+        compile "$p" "$root" "$s" /tmp/one.s RUCC_REMAT_ONLY="$f:0:$k" 2>/dev/null
+        echo "$p: $f locals below $k: $(run "$lib" $(set_with "$lib" "$s" /tmp/one.s))"
     done
+    if [ -n "$first" ]; then
+        compile "$p" "$root" "$s" /tmp/broken.s RUCC_REMAT_ONLY="$f:$first:$((first + 1))" 2>/dev/null
+        compile "$p" "$root" "$s" /tmp/fixed.s RUCC_REMAT_ONLY="$f:0:0" 2>/dev/null
+        awk -v f="$f" '$0 ~ "^"f":" {on=1} on {print} on && /\.size/ {exit}' /tmp/broken.s >/tmp/b.s
+        awk -v f="$f" '$0 ~ "^"f":" {on=1} on {print} on && /\.size/ {exit}' /tmp/fixed.s >/tmp/f.s
+        echo "--- broken $f with local $first"; cat /tmp/b.s
+        echo "--- fixed $f"; cat /tmp/f.s
+        echo "--- end"
+    fi
 }
 
-look brotli "$RUCC_BROTLI_SOURCE"
-look lua "$RUCC_LUA_SOURCE"
+narrow brotli "$RUCC_BROTLI_SOURCE" c-dec-decode ReadCommandInternal
+narrow lua "$RUCC_LUA_SOURCE" ltable luaH_resize
+cat "$RUCC_LUA_SOURCE/ltable.c" | sed -n '/^void luaH_resize/,/^}/p'

@@ -925,6 +925,8 @@ struct Lowering<'a> {
     keep_locals: bool,
     /// Scratch: whether names are rebuilt.
     remat_names: bool,
+    /// Scratch: the only locals rebuilt.
+    only: Option<HashSet<Inst>>,
     /// How many times each IR value is read, which is what says whether an instruction may be
     /// folded into the one that reads it.
     uses: Vec<u32>,
@@ -1113,6 +1115,32 @@ impl<'a> Lowering<'a> {
             list.split(',').any(|one| one == "*" || one == called)
         });
         let remat_names = std::env::var_os("RUCC_KEEP_NAMES").is_none();
+        let mut only = None;
+        if let Ok(said) = std::env::var("RUCC_REMAT_ONLY") {
+            let parts: Vec<&str> = said.split(':').collect();
+            if let [called, lo, hi] = parts[..] {
+                if called == names.resolve(name) {
+                    let lo: usize = lo.parse().unwrap_or(0);
+                    let hi: usize = hi.parse().unwrap_or(usize::MAX);
+                    let mut chosen = HashSet::new();
+                    let mut count = 0;
+                    for block in source.blocks() {
+                        for inst in source.insts(block) {
+                            if source[inst].opcode == Opcode::Alloca
+                                && source[source[inst].args].is_empty()
+                            {
+                                if count >= lo && count < hi {
+                                    chosen.insert(inst);
+                                }
+                                count += 1;
+                            }
+                        }
+                    }
+                    eprintln!("rucc: {count} locals in {called}");
+                    only = Some(chosen);
+                }
+            }
+        }
         let mut out = mir::Func::new(name);
         out.align = source.align;
         // Carried rather than worked out here, because where a function was declared is a fact
@@ -1129,6 +1157,7 @@ impl<'a> Lowering<'a> {
             crossed: 0,
             keep_locals,
             remat_names,
+            only,
             blocks: vec![None; counts.blocks],
             uses,
             at: None,
@@ -1932,7 +1961,7 @@ impl<'a> Lowering<'a> {
         if let Some(&size) = self.source[data.args].first() {
             return self.grow(inst, size);
         }
-        if self.keep_locals {
+        if self.keep_locals || self.only.as_ref().is_some_and(|only| !only.contains(&inst)) {
             let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
             return self.local_address(inst, result).map(|_| ());
         }
@@ -6838,7 +6867,11 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         match data.opcode {
             Opcode::IConst => Some(Rebuilt::Constant(inst)),
-            Opcode::Alloca if self.source[data.args].is_empty() && !self.keep_locals => {
+            Opcode::Alloca
+                if self.source[data.args].is_empty()
+                    && !self.keep_locals
+                    && self.only.as_ref().is_none_or(|only| only.contains(&inst)) =>
+            {
                 Some(Rebuilt::Local(inst))
             }
             Opcode::GlobalAddr => match data.extra {
