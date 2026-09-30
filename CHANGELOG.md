@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
 - The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
+
 ### Added
 
 - Under the GNU dialects a `const` object of integer type that is not `volatile` and was initialized with a constant is read as its value in the size of an array and in the initializer of an object with static storage, the two places gcc reads one. `const int n = 4; char buf[n];` is an array of four rather than a variable length array, one at file scope compiles, and `static int x = n;` does too, with a warning under `-pedantic` for the array as gcc gives. `_Static_assert`, `case`, enumerators and the other places a constant is required still refuse it, as gcc 16 does, and the strict dialects are unchanged. Linux 7.2 relies on this (#2262).
