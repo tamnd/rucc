@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The optimizer's maps and sets hash with the shared hasher instead of SipHash (#2291).
+- The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 
 ## 0.18.0
 

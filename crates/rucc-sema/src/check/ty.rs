@@ -30,12 +30,11 @@
 //! initialization. `_Imaginary` is a keyword gcc has never implemented, so it is refused where
 //! it is written rather than given a type it is not.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_ast::{
     self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
 };
 use rucc_base::float::Format;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Symbol, sym};
 use rucc_diag::{Diagnostic, Span};
 use rucc_session::Std;
@@ -71,14 +70,14 @@ pub(crate) struct Built {
     /// declares one structure and not two, so building the type a second time is not a slow way
     /// to get the same answer, it is a different answer. Every specifier list is written at one
     /// place in the source and is checked once, so remembering what it named is enough.
-    specified: HashMap<ast::DeclSpecsId, TypeId>,
+    specified: Map<ast::DeclSpecsId, TypeId>,
     /// The tag types whose body has been read.
     ///
     /// This is what tells a redefinition from a completion, and the type table cannot answer it
     /// on its own. A record is complete exactly when its body has been read, but C23's
     /// `enum E : int;` is a complete type that has never had one, so `enum E : int;` followed by
     /// `enum E : int { A };` is a definition of something already complete and is allowed.
-    defined: HashSet<TypeId>,
+    defined: Set<TypeId>,
     /// What the named parameters of each prototype were declared as, by the first parameter of
     /// the list.
     ///
@@ -87,7 +86,7 @@ pub(crate) struct Built {
     /// rather than two that happen to share a name. The key is the first parameter because a run
     /// of indices is not something a map can be keyed by, and a prototype always has at least one
     /// parameter in it: `(void)` and `()` are parameter lists of other kinds.
-    params: HashMap<Idx<ast::Param>, Vec<DeclId>>,
+    params: Map<Idx<ast::Param>, Vec<DeclId>>,
     /// The target's `__builtin_va_list`, once something has asked for it.
     ///
     /// Every mention of the keyword names one type, so this is not only a cache. On the targets

@@ -8,9 +8,9 @@
 //! each entry stores the id of its own canonical type, so stripping a stack of typedefs is one
 //! array read rather than a walk.
 
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+use rucc_base::hash::Map;
 use rucc_base::{Idx, Symbol};
 
 use crate::kind::{
@@ -160,9 +160,9 @@ pub struct Spelled {
 #[derive(Debug)]
 pub struct Types {
     entries: Vec<Entry>,
-    map: HashMap<Type, TypeId>,
+    map: Map<Type, TypeId>,
     functions: Vec<FunctionType>,
-    function_map: HashMap<FunctionType, FunctionId>,
+    function_map: Map<FunctionType, FunctionId>,
     records: Vec<RecordInfo>,
     enums: Vec<EnumInfo>,
     aliases: Vec<Alias>,
@@ -189,9 +189,9 @@ impl Types {
     pub fn new() -> Types {
         let mut types = Types {
             entries: Vec::new(),
-            map: HashMap::new(),
+            map: Map::default(),
             functions: Vec::new(),
-            function_map: HashMap::new(),
+            function_map: Map::default(),
             records: Vec::new(),
             enums: Vec::new(),
             aliases: Vec::new(),

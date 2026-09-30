@@ -37,11 +37,11 @@
 //! tree, so they wait for it. A label that is defined and never used is a warning gcc only gives
 //! under `-Wall`, and it waits for the flag rather than for anything here.
 
-use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use rucc_ast::{self as ast, AsmQuals, ForInit, StorageClass};
 use rucc_base::Symbol;
+use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, Remarks, StringLiteral};
 use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
@@ -88,7 +88,7 @@ pub(in crate::check) struct Body {
     /// `__func__` with `__FUNCTION__` there is false.
     func_name: [Option<StrId>; FUNCTION_NAMES.len()],
     /// The labels of the function, by the name they were written with.
-    labels: HashMap<Symbol, Labelled>,
+    labels: Map<Symbol, Labelled>,
     /// What the enclosing blocks bound the names of their `__label__` declarations to, so that a
     /// block-local label can be undone when the block ends.
     shadowed: Vec<(Symbol, Option<Labelled>)>,
@@ -101,7 +101,7 @@ pub(in crate::check) struct Body {
     /// The names this function has already been told about, so that a name nobody declared is
     /// reported once rather than once per use. The message says `first use in this function`
     /// and gcc means it: a typo in a loop body is one mistake however many times it is written.
-    undeclared: HashSet<Symbol>,
+    undeclared: Set<Symbol>,
     /// Every declaration of a variably modified type met so far, each one saying which of them
     /// it was written inside.
     modified: Vec<Modified>,
@@ -109,7 +109,7 @@ pub(in crate::check) struct Body {
     /// is every one of them whose scope is open here.
     inside: Option<usize>,
     /// Where each label of the function is, filled in as the labels are met.
-    landings: HashMap<LabelId, Landing>,
+    landings: Map<LabelId, Landing>,
     /// Every `goto` met so far, kept until the whole function has been walked.
     jumps: Vec<Jump>,
 }
@@ -349,15 +349,15 @@ impl Checker<'_> {
             name: func.name,
             emitted: func.emitted,
             func_name: [None; FUNCTION_NAMES.len()],
-            labels: HashMap::new(),
+            labels: Map::default(),
             shadowed: Vec::new(),
             blocks: Vec::new(),
             switches: Vec::new(),
             loops: 0,
-            undeclared: HashSet::new(),
+            undeclared: Set::default(),
             modified: Vec::new(),
             inside: None,
-            landings: HashMap::new(),
+            landings: Map::default(),
             jumps: Vec::new(),
         };
         self.body.replace(body)

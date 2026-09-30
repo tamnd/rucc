@@ -13,11 +13,11 @@
 //! putting the table inside the tree would mean a pass that only wants to ask what a type is
 //! has to borrow the tree to do it.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::ops::Index;
 
 use rucc_base::float::Float;
+use rucc_base::hash::Map;
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
@@ -162,7 +162,7 @@ pub struct Tast {
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     targets: Vec<(DeclId, Isa)>,
-    defined_at: HashMap<DeclId, Span>,
+    defined_at: Map<DeclId, Span>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 

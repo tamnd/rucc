@@ -37,9 +37,8 @@
 //! and then drops the parameters and the arguments that went with them. One pass over the
 //! function rather than one walk per removal, and no use lists to keep in step.
 
-use std::collections::HashMap;
-
 use rucc_base::Idx;
+use rucc_base::hash::Map;
 use rucc_diag::Span;
 use rucc_ir::{Block, BlockCall, Extra, Func, Imm, Inst, InstData, Opcode, Start, Type, Value};
 
@@ -89,7 +88,7 @@ pub struct Ssa {
     /// The integer type a pointer has the width of, for the one value this has to invent.
     address: Type,
     /// What each variable holds at the end of each block.
-    defs: HashMap<(Var, Block), Value>,
+    defs: Map<(Var, Block), Value>,
     /// Whether each block will get more predecessors.
     sealed: Vec<bool>,
     /// The parameters of each unsealed block that are waiting for its predecessors.
@@ -97,16 +96,16 @@ pub struct Ssa {
     /// The edges into each block.
     preds: Vec<Vec<Edge>>,
     /// Which block parameters are ours, and what they stand for.
-    phis: HashMap<Value, Phi>,
+    phis: Map<Value, Phi>,
     /// For each value, the parameters of ours that read it. The use list the paper needs,
     /// restricted to the uses it actually walks.
-    users: HashMap<Value, Vec<Value>>,
+    users: Map<Value, Vec<Value>>,
     /// What each parameter that turned out to be redundant stands for instead.
-    subst: HashMap<Value, Value>,
+    subst: Map<Value, Value>,
     /// The value a read of something never written gives back, one per type.
     zero: Vec<(Type, Value)>,
     /// Which declaration each variable the caller named is, for the ones it named.
-    named: HashMap<Var, u32>,
+    named: Map<Var, u32>,
     /// Every value a named variable was given, in the order they were recorded.
     holds: Vec<(Value, u32)>,
     /// Every value a named variable was given part of the way through, because another one held
@@ -114,7 +113,7 @@ pub struct Ssa {
     starts: Vec<(Value, Start)>,
     /// Which named variable was given each value first, so that the second variable to be written
     /// the same value is not given it again. See [`Ssa::write`].
-    owned: HashMap<Value, u32>,
+    owned: Map<Value, u32>,
 }
 
 impl Ssa {
@@ -128,18 +127,18 @@ impl Ssa {
     pub fn new(address: Type) -> Ssa {
         Ssa {
             address,
-            defs: HashMap::new(),
+            defs: Map::default(),
             sealed: Vec::new(),
             incomplete: Vec::new(),
             preds: Vec::new(),
-            phis: HashMap::new(),
-            users: HashMap::new(),
-            subst: HashMap::new(),
+            phis: Map::default(),
+            users: Map::default(),
+            subst: Map::default(),
             zero: Vec::new(),
-            named: HashMap::new(),
+            named: Map::default(),
             holds: Vec::new(),
             starts: Vec::new(),
-            owned: HashMap::new(),
+            owned: Map::default(),
         }
     }
 
