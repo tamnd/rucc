@@ -1033,6 +1033,19 @@ fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
             _ => None,
         });
     }
+    // The access rights and the segment limit are read for a selector, which is a word, into a
+    // register of any width. gas takes the width from the register written, and the kernel's
+    // signal_64.c writes `lar %ax, %eax`. A word read into sixty four bits has no `REX.W` in gas,
+    // since the result is zero extended either way, so it is the thirty two bit form.
+    if matches!(word, "lar" | "lsl") {
+        return Ok(match (operands.first(), operands.last()) {
+            (Some(Operand::Reg(_, Width::Word)), Some(Operand::Reg(_, Width::Quad))) => {
+                Some(Width::Long)
+            }
+            (_, Some(Operand::Reg(_, width))) => Some(*width),
+            _ => None,
+        });
+    }
     let mut width = None;
     let counted = COUNTED.contains(&word) && operands.len() > 1;
     for operand in operands.iter().skip(usize::from(counted)) {
@@ -1609,6 +1622,14 @@ mod tests {
         assert_eq!(bytes("fprem"), [0xd9, 0xf8]);
         assert_eq!(bytes("fnstsw %ax"), [0xdf, 0xe0]);
         assert!(refused("fnstsw %bx").contains("ax"));
+    }
+
+    #[test]
+    fn lar_and_lsl_read_a_selector_into_a_wider_register() {
+        // What GNU as 2.44 writes for each, which has no REX.W for the second.
+        assert_eq!(bytes("lar %ax, %eax"), [0x0f, 0x02, 0xc0]);
+        assert_eq!(bytes("lar %cx, %rdx"), [0x0f, 0x02, 0xd1]);
+        assert_eq!(bytes("lsl %ax, %eax"), [0x0f, 0x03, 0xc0]);
     }
 
     #[test]
