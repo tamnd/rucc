@@ -108,13 +108,24 @@ impl Pass for Sroa {
         }
         let doms = an.dominators(func);
         let frontiers = an.frontiers(func);
-        let order: Vec<Block> = cfg.reverse_postorder().collect();
+        // Where each block is in reverse postorder and where it is in the layout, which are the
+        // orders the walks below have to find things in. No block comes or goes, so both hold for
+        // every local.
+        let mut rpo = vec![0; func.counts().blocks];
+        for (rank, block) in cfg.reverse_postorder().enumerate() {
+            rpo[block.index()] = rank;
+        }
+        let mut layout = vec![0; func.counts().blocks];
+        for (rank, block) in func.blocks().enumerate() {
+            layout[block.index()] = rank;
+        }
         let allocas: Vec<Inst> = func
             .insts(entry)
             .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[func[inst].args].is_empty())
             .collect();
+        let mut readers = Readers::new(func);
         for alloca in allocas {
-            let plan = match plan(func, &order, alloca, target) {
+            let plan = match plan(func, &rpo, &mut readers, alloca, target) {
                 Ok(Some(plan)) => plan,
                 Ok(None) => continue,
                 Err(reason) => {
@@ -127,7 +138,7 @@ impl Pass for Sroa {
                 continue;
             }
             let mut rewrite = Rewrite::new(func, entry, &plan, target);
-            rewrite.run(func, Graph { cfg, doms, frontiers, entry });
+            rewrite.run(func, Graph { cfg, doms, frontiers, entry, layout: &layout }, &mut readers);
             stats.optimized(SCALARIZED);
         }
         stats
@@ -150,6 +161,74 @@ struct Graph<'a> {
     doms: &'a Dominators,
     frontiers: &'a Frontiers,
     entry: Block,
+    /// Where each block is in the layout, by block.
+    layout: &'a [usize],
+}
+
+/// Every instruction that reads each value, kept up to date as the locals go.
+///
+/// The pass used to find what it needed by walking the whole function, once to plan each local
+/// and once more to point the readers of its loads at the values that replaced them. A function
+/// with a couple of thousand locals walked itself a few thousand times over, and on jtckdint that
+/// was most of an optimized compile. An instruction removed since it was filed stays on the lists,
+/// and whoever reads them skips it.
+struct Readers {
+    /// By value.
+    of: Vec<Vec<Inst>>,
+    /// How many instructions the function had the last time this looked, which makes the ones
+    /// past it the ones made since.
+    seen: usize,
+}
+
+impl Readers {
+    fn new(func: &Func) -> Self {
+        let mut readers = Self { of: vec![Vec::new(); func.counts().values], seen: 0 };
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                readers.add(func, inst);
+            }
+        }
+        readers.seen = func.counts().insts;
+        readers
+    }
+
+    /// Files an instruction under everything it reads, its own arguments and the ones it passes
+    /// along an edge.
+    fn add(&mut self, func: &Func, inst: Inst) {
+        for &value in &func[func[inst].args] {
+            self.push(value, inst);
+        }
+        for call in func.successors(inst) {
+            for &value in &func[call.args] {
+                self.push(value, inst);
+            }
+        }
+    }
+
+    fn push(&mut self, value: Value, inst: Inst) {
+        let index = value.index();
+        if self.of.len() <= index {
+            self.of.resize_with(index + 1, Vec::new);
+        }
+        self.of[index].push(inst);
+    }
+
+    /// Files the instructions made since the last look.
+    fn catch_up(&mut self, func: &Func) {
+        let count = func.counts().insts;
+        for index in self.seen..count {
+            let inst = Inst::from_usize(index);
+            if func.block_of(inst).is_some() {
+                self.add(func, inst);
+            }
+        }
+        self.seen = count;
+    }
+
+    /// The instructions filed as reading a value, some of which may have been removed since.
+    fn of(&self, value: Value) -> &[Inst] {
+        self.of.get(value.index()).map_or(&[][..], Vec::as_slice)
+    }
 }
 
 /// Whether the function is one the renaming can walk.
@@ -264,7 +343,8 @@ enum Found {
 /// The plan for one local, or nothing where its address escapes, or why it has to stay.
 fn plan(
     func: &Func,
-    order: &[Block],
+    rpo: &[usize],
+    readers: &mut Readers,
     alloca: Inst,
     target: Target,
 ) -> Result<Option<Plan>, &'static str> {
@@ -283,27 +363,73 @@ fn plan(
     let mut derived = Vec::new();
     // Reverse postorder puts every definition in front of its uses, so an address is known by the
     // time anything reads it.
-    for &block in order {
-        for inst in func.insts(block) {
-            let named = func[func[inst].args].iter().any(|value| offsets.contains_key(value))
-                || func
-                    .successors(inst)
-                    .any(|call| func[call.args].iter().any(|value| offsets.contains_key(value)));
-            if inst == alloca || !named {
-                continue;
+    readers.catch_up(func);
+    for inst in reading(func, rpo, readers, base) {
+        let named = func[func[inst].args].iter().any(|value| offsets.contains_key(value))
+            || func
+                .successors(inst)
+                .any(|call| func[call.args].iter().any(|value| offsets.contains_key(value)));
+        if inst == alloca || !named {
+            continue;
+        }
+        match access(func, inst, &offsets, size, target)? {
+            Some(Found::Derived(value, at)) => {
+                offsets.insert(value, at);
+                derived.push(inst);
             }
-            match access(func, inst, &offsets, size, target)? {
-                Some(Found::Derived(value, at)) => {
-                    offsets.insert(value, at);
-                    derived.push(inst);
-                }
-                Some(Found::Use(found)) => uses.push((inst, found)),
-                None => return Ok(None),
-            }
+            Some(Found::Use(found)) => uses.push((inst, found)),
+            None => return Ok(None),
         }
     }
     let pieces = pieces(&uses, target)?;
     Ok(Some(Plan { alloca, pieces, uses, derived }))
+}
+
+/// Every instruction that might name an address into the local, in reverse postorder and in order
+/// within a block, which is the order a walk over the whole function would meet them in.
+///
+/// That is the readers of the local's address, then the readers of what each `ptr_add` among them
+/// makes, and so on down. It is more than [`plan`] wants, since a `ptr_add` can add the address to
+/// something rather than something to it, and [`plan`] asks each of them the question it would
+/// have asked on the walk.
+fn reading(func: &Func, rpo: &[usize], readers: &Readers, base: Value) -> Vec<Inst> {
+    let mut found = Vec::new();
+    let mut seen: Set<Inst> = Set::default();
+    let mut work = vec![base];
+    while let Some(value) = work.pop() {
+        for &inst in readers.of(value) {
+            if func.block_of(inst).is_none() || !seen.insert(inst) {
+                continue;
+            }
+            found.push(inst);
+            if func[inst].opcode == Opcode::PtrAdd {
+                work.extend(func[inst].first_result);
+            }
+        }
+    }
+    let block = |inst: Inst| func.block_of(inst).expect("only placed instructions were kept");
+    found.sort_by_key(|&inst| rpo[block(inst).index()]);
+    // Which of two instructions in one block comes first is only known by walking it, so a block
+    // with more than one is walked, and only as far as the last of them.
+    let mut start = 0;
+    while start < found.len() {
+        let here = block(found[start]);
+        let end = start + found[start..].iter().take_while(|&&inst| block(inst) == here).count();
+        if end - start > 1 {
+            let mut at = start;
+            for inst in func.insts(here) {
+                if seen.contains(&inst) {
+                    found[at] = inst;
+                    at += 1;
+                    if at == end {
+                        break;
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+    found
 }
 
 /// What an instruction naming an address into the local does with it, or nothing where it is
@@ -584,20 +710,24 @@ impl<'a> Rewrite<'a> {
         (0..self.plan.pieces.len()).filter(|&k| self.plan.pieces[k].within(at, size)).collect()
     }
 
-    fn run(&mut self, func: &mut Func, graph: Graph<'_>) {
+    fn run(&mut self, func: &mut Func, graph: Graph<'_>, readers: &mut Readers) {
         let count = self.plan.pieces.len();
-        let uses: Map<Inst, Use> = self.plan.uses.iter().copied().collect();
-        let blocks: Vec<Block> = func.blocks().collect();
 
-        // What each block reads before it writes, and what it writes.
+        // Where each block's uses are in the plan. They are next to each other, since the plan
+        // lists them in reverse postorder and in order within a block.
+        let mut spans: Map<Block, (usize, usize)> = Map::default();
+        for (index, &(inst, _)) in self.plan.uses.iter().enumerate() {
+            let block = func.block_of(inst).expect("a use of the local is in a block");
+            spans.entry(block).and_modify(|span| span.1 = index + 1).or_insert((index, index + 1));
+        }
+
+        // What each block reads before it writes, and what it writes. A block with no use of the
+        // local does neither and is left out.
         let mut upward: Map<Block, u64> = Map::default();
         let mut writes: Map<Block, u64> = Map::default();
-        for &block in &blocks {
+        for (&block, &(start, end)) in &spans {
             let (mut up, mut written) = (0, 0);
-            for inst in func.insts(block) {
-                let Some(found) = uses.get(&inst) else {
-                    continue;
-                };
+            for (_, found) in &self.plan.uses[start..end] {
                 let (at, size) = found.range();
                 let mask = self.mask(at, size);
                 if found.reads() {
@@ -609,35 +739,44 @@ impl<'a> Rewrite<'a> {
             upward.insert(block, up);
             writes.insert(block, written);
         }
+        let mask = |masks: &Map<Block, u64>, block: Block| masks.get(&block).copied().unwrap_or(0);
 
-        // Where each piece is live on the way in, backwards to a fixed point.
-        let mut live = upward.clone();
-        let backwards: Vec<Block> = graph.cfg.reverse_postorder().rev().collect();
-        loop {
-            let mut changed = false;
-            for &block in &backwards {
+        // Where each piece is live on the way in, which is the least answer the equations have.
+        // Worked back from the blocks that read something before writing it, so a block the
+        // answer never reaches is never looked at.
+        let mut live: Map<Block, u64> =
+            upward.iter().filter(|&(_, &up)| up != 0).map(|(&block, &up)| (block, up)).collect();
+        let mut work: Vec<Block> = live.keys().copied().collect();
+        while let Some(block) = work.pop() {
+            for &pred in graph.cfg.predecessors(block) {
                 let out =
-                    graph.cfg.successors(block).iter().fold(0, |mask, next| mask | live[next]);
-                let now = upward[&block] | (out & !writes[&block]);
-                if now != live[&block] {
-                    live.insert(block, now);
-                    changed = true;
+                    graph.cfg.successors(pred).iter().fold(0, |out, &next| out | mask(&live, next));
+                let now = mask(&upward, pred) | (out & !mask(&writes, pred));
+                if now != mask(&live, pred) {
+                    live.insert(pred, now);
+                    work.push(pred);
                 }
-            }
-            if !changed {
-                break;
             }
         }
 
         // A parameter for each piece at the iterated frontier of the blocks that write it, where
-        // it is live. The entry block writes every piece, with the zero nobody has made yet.
+        // it is live. The entry block writes every piece, with the zero nobody has made yet. The
+        // blocks start out in layout order, which is the order a walk over them all would find
+        // them in and so the order the parameters are added in.
+        let mut writers: Vec<Block> = writes
+            .iter()
+            .filter(|&(&block, &written)| written != 0 && block != graph.entry)
+            .map(|(&block, _)| block)
+            .collect();
+        writers.push(graph.entry);
+        writers.sort_unstable_by_key(|block| graph.layout[block.index()]);
         let mut params: Map<Block, Vec<(usize, Value)>> = Map::default();
         for (k, piece) in self.plan.pieces.iter().enumerate() {
             let bit = 1u64 << k;
-            let mut work: Vec<Block> = blocks
+            let mut work: Vec<Block> = writers
                 .iter()
                 .copied()
-                .filter(|&block| block == graph.entry || writes[&block] & bit != 0)
+                .filter(|&block| block == graph.entry || mask(&writes, block) & bit != 0)
                 .collect();
             let mut seen: Set<Block> = work.iter().copied().collect();
             let mut placed: Set<Block> = Set::default();
@@ -646,7 +785,7 @@ impl<'a> Rewrite<'a> {
                     if !placed.insert(join) {
                         continue;
                     }
-                    if live[&join] & bit != 0 {
+                    if mask(&live, join) & bit != 0 {
                         let param = func.append_param(join, piece.ty);
                         params.entry(join).or_default().push((k, param));
                     }
@@ -657,26 +796,48 @@ impl<'a> Rewrite<'a> {
             }
         }
 
-        // The renaming, down the dominator tree.
+        // The renaming, down the dominator tree. What a block changes is put back on the way out
+        // of it rather than each child getting a copy of its own, and what a block ends with is
+        // kept only for a block an edge into a parameter leaves from.
+        let mut sources: Set<Block> = Set::default();
+        for &block in params.keys() {
+            sources.extend(graph.cfg.predecessors(block).iter().copied());
+        }
         let mut forward: Map<Value, Value> = Map::default();
         let mut ends: Map<Block, Vec<Option<Value>>> = Map::default();
-        let mut stack = vec![(graph.entry, vec![None; count])];
-        while let Some((block, mut current)) = stack.pop() {
+        let mut current = Current { values: vec![None; count], undo: Vec::new() };
+        let mut stack = vec![Step::Enter(graph.entry)];
+        while let Some(step) = stack.pop() {
+            let block = match step {
+                Step::Enter(block) => block,
+                Step::Leave(mark) => {
+                    current.undo_to(mark);
+                    continue;
+                }
+            };
+            let mark = current.undo.len();
             for &(k, param) in params.get(&block).into_iter().flatten() {
-                current[k] = Some(param);
+                current.set(k, param);
             }
-            for inst in func.insts(block).collect::<Vec<Inst>>() {
-                if let Some(&found) = uses.get(&inst) {
+            if let Some(&(start, end)) = spans.get(&block) {
+                let plan = self.plan;
+                for &(inst, found) in &plan.uses[start..end] {
                     self.visit(func, inst, found, &mut current, &mut forward);
                 }
             }
-            stack.extend(graph.doms.children(block).map(|child| (child, current.clone())));
-            ends.insert(block, current);
+            if sources.contains(&block) {
+                ends.insert(block, current.values.clone());
+            }
+            stack.push(Step::Leave(mark));
+            stack.extend(graph.doms.children(block).map(Step::Enter));
         }
 
         // Every edge into a block with parameters passes the values its source ended with, in
-        // the order the parameters were added.
-        for &block in &blocks {
+        // the order the parameters were added. The sources go in layout order, which is the order
+        // the zeros are made in.
+        let mut sources: Vec<Block> = sources.into_iter().collect();
+        sources.sort_unstable_by_key(|block| graph.layout[block.index()]);
+        for block in sources {
             let Some(terminator) = func.terminator(block) else {
                 continue;
             };
@@ -692,12 +853,13 @@ impl<'a> Rewrite<'a> {
                         None => self.zero(func, k),
                     };
                     args = func.append_arg(args, value);
+                    readers.push(value, terminator);
                 }
                 func.set_block_call(at, BlockCall { args, ..call });
             }
         }
 
-        crate::uses::substitute(func, &forward);
+        substitute(func, &forward, readers);
         for &(inst, _) in &self.plan.uses {
             func.remove_inst(inst);
         }
@@ -713,7 +875,7 @@ impl<'a> Rewrite<'a> {
         func: &mut Func,
         inst: Inst,
         found: Use,
-        current: &mut [Option<Value>],
+        current: &mut Current,
         forward: &mut Map<Value, Value>,
     ) {
         match found {
@@ -721,15 +883,15 @@ impl<'a> Rewrite<'a> {
                 let result = func[inst].first_result.expect("a load produces its value");
                 let value = match self.within(at, size)[..] {
                     [k] => {
-                        let value = self.value(func, k, current);
+                        let value = self.value(func, k, &current.values);
                         convert(func, inst, value, self.plan.pieces[k].ty, ty)
                     }
-                    ref several => self.compose(func, inst, several, at, ty, current),
+                    ref several => self.compose(func, inst, several, at, ty, &current.values),
                 };
                 forward.insert(result, value);
             }
             Use::Store { at, size, ty, value } => match self.within(at, size)[..] {
-                [k] => current[k] = Some(convert(func, inst, value, ty, self.plan.pieces[k].ty)),
+                [k] => current.set(k, convert(func, inst, value, ty, self.plan.pieces[k].ty)),
                 ref several => {
                     for &k in several {
                         let piece = self.plan.pieces[k];
@@ -742,14 +904,15 @@ impl<'a> Rewrite<'a> {
                         if narrow != ty {
                             part = unary(func, inst, Opcode::Trunc, part, narrow);
                         }
-                        current[k] = Some(convert(func, inst, part, narrow, piece.ty));
+                        current.set(k, convert(func, inst, part, narrow, piece.ty));
                     }
                 }
             },
             Use::Fill { at, size, byte } => {
                 for k in self.within(at, size) {
                     let piece = self.plan.pieces[k];
-                    current[k] = Some(self.pattern(func, inst, piece, byte));
+                    let value = self.pattern(func, inst, piece, byte);
+                    current.set(k, value);
                 }
             }
             Use::CopyIn { at, size, from, align } => {
@@ -757,14 +920,14 @@ impl<'a> Rewrite<'a> {
                     let piece = self.plan.pieces[k];
                     let delta = piece.at - at;
                     let address = self.offset(func, inst, from, delta);
-                    current[k] = Some(load(func, inst, piece.ty, address, aligned(align, delta)));
+                    current.set(k, load(func, inst, piece.ty, address, aligned(align, delta)));
                 }
             }
             Use::CopyOut { at, size, to, align } => {
                 for k in self.within(at, size) {
                     let piece = self.plan.pieces[k];
                     let delta = piece.at - at;
-                    let value = self.value(func, k, current);
+                    let value = self.value(func, k, &current.values);
                     let address = self.offset(func, inst, to, delta);
                     store(func, inst, value, address, aligned(align, delta));
                 }
@@ -843,6 +1006,65 @@ impl<'a> Rewrite<'a> {
         let args = func.push_values(&[base, by]);
         emit(func, before, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
     }
+}
+
+/// The value each piece has at one point of the renaming, and what to put back on the way out.
+struct Current {
+    values: Vec<Option<Value>>,
+    /// Each piece that was set and what it held before, latest last.
+    undo: Vec<(usize, Option<Value>)>,
+}
+
+impl Current {
+    fn set(&mut self, k: usize, value: Value) {
+        self.undo.push((k, self.values[k]));
+        self.values[k] = Some(value);
+    }
+
+    /// Puts back everything set since the undo list was this long.
+    fn undo_to(&mut self, mark: usize) {
+        while self.undo.len() > mark {
+            let (k, was) = self.undo.pop().expect("longer than the mark");
+            self.values[k] = was;
+        }
+    }
+}
+
+/// One step of the renaming's walk down the dominator tree.
+enum Step {
+    /// Rename in a block.
+    Enter(Block),
+    /// Leave a block, putting back what it changed, which it did from this point in the undo list.
+    Leave(usize),
+}
+
+/// Points every reader of a value in the map at the value it now stands for, and moves the names
+/// along, which is [`crate::uses::substitute`] with the readers already known.
+fn substitute(func: &mut Func, forward: &Map<Value, Value>, readers: &mut Readers) {
+    // Instructions this local's rewrite made may read a load it is replacing, a store of what an
+    // earlier load of it read being the usual one.
+    readers.catch_up(func);
+    let with = |value: Value| crate::uses::chase(forward, value);
+    for &from in forward.keys() {
+        let Some(list) = readers.of.get_mut(from.index()) else {
+            continue;
+        };
+        let list = std::mem::take(list);
+        let to = with(from);
+        for inst in list {
+            if func.block_of(inst).is_none() {
+                continue;
+            }
+            let args = func[inst].args;
+            func.rewrite(args, with);
+            for at in func.target_list(inst).iter() {
+                let args = func[at].args;
+                func.rewrite(args, with);
+            }
+            readers.push(to, inst);
+        }
+    }
+    crate::uses::rename(func, forward);
 }
 
 /// The alignment an access `delta` bytes past an address aligned to `align` still has.
