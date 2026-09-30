@@ -158,7 +158,9 @@ use std::collections::VecDeque;
 
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Block, BlockCall, Def, Extra, Func, Imm, Inst, InstData, Opcode, SwitchInfo, Value};
+use rucc_ir::{
+    Block, BlockCall, Def, Extra, Func, Imm, Inst, InstData, Opcode, SwitchInfo, Type, Value,
+};
 
 use crate::copy::addressed;
 use crate::fold::constant;
@@ -1157,11 +1159,42 @@ fn merge(func: &mut Func, head: Block, block: Block, forward: &mut Map<Value, Va
 
 /// Whether this condition is always true or always false, given what the edge binds.
 fn known(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
+    truth(func, value, subst, LOGIC_DEPTH)
+}
+
+/// How many `xor`, `and` and `or` of one bit [`truth`] looks through before it gives up.
+const LOGIC_DEPTH: u32 = 4;
+
+/// [`known`], looking through the logic of one bit values as far as `depth` allows.
+///
+/// A `!` on a `_Bool` is an `xor` with one, and an inlined function that returns a `_Bool` hands
+/// it to its caller as a block parameter. So `if (!begin(p)) return -EFAULT;` branches on the
+/// `xor` of a parameter that is a constant along each edge in, and without this the branch is
+/// decided on neither. The kernel's `user_access_begin` is that shape, and when the edge on which
+/// the check failed was not threaded, it joined the other one after the `stac`, which objtool
+/// reads as a `clac` with nothing to close.
+fn truth(func: &Func, value: Value, subst: &Bindings, depth: u32) -> Option<bool> {
     let value = resolve(subst, value);
     if let Some((imm, _)) = constant(func, value) {
         return Some(imm.unsigned() != 0);
     }
-    compared(func, value, subst)
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    let logic = matches!(data.opcode, Opcode::Xor | Opcode::And | Opcode::Or);
+    if !logic || func[value].ty != Type::I1 || depth == 0 {
+        return compared(func, value, subst);
+    }
+    let [lhs, rhs] = func[data.args] else { return None };
+    let lhs = truth(func, lhs, subst, depth - 1);
+    let rhs = truth(func, rhs, subst, depth - 1);
+    match (data.opcode, lhs, rhs) {
+        (Opcode::Xor, Some(lhs), Some(rhs)) => Some(lhs != rhs),
+        (Opcode::And, Some(false), _) | (Opcode::And, _, Some(false)) => Some(false),
+        (Opcode::And, Some(true), Some(true)) => Some(true),
+        (Opcode::Or, Some(true), _) | (Opcode::Or, _, Some(true)) => Some(true),
+        (Opcode::Or, Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
 }
 
 /// What a comparison of two constants comes out as.
