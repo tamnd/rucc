@@ -677,6 +677,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // else today, and `None` is a command line that named no target, which is this machine.
     let mut pinned: Option<TargetTuple> = None;
     let mut min_version: Option<rucc_tuple::Version> = None;
+    // The first flag that only an Apple linker understands, for the refusal after the loop when the
+    // target is not Apple, and what `-arch` asked for, which is checked against the target there.
+    let mut apple_only: Option<String> = None;
+    let mut arches: Vec<String> = Vec::new();
     // What the `-fpic` family and the `-fpie` family last said, if anything, kept apart because gcc
     // keeps them apart. A positive spelling of either clears the other, since gcc's option table
     // chains the four so that the last one written wins, and a negative one only speaks for its
@@ -1509,6 +1513,49 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-builtins-lib" => link.no_builtins_lib = true,
             "-fbuiltins-lib" => link.no_builtins_lib = false,
             "-rdynamic" | "-export-dynamic" => link.export_dynamic = true,
+            // Apple's two kinds of loadable file. `-dynamiclib` is a library other links name,
+            // which is what `-shared` is on a Mac as well, and `-bundle` is a file a program opens
+            // with `dlopen`, which is how Postgres links every module there. tamnd/rucc#2010.
+            "-dynamiclib" => {
+                link.shared = true;
+                apple_only.get_or_insert_with(|| arg.to_owned());
+            }
+            "-bundle" => {
+                link.bundle = true;
+                apple_only.get_or_insert_with(|| arg.to_owned());
+            }
+            // The rest of what clang's Darwin driver takes for `ld64`, `-bundle_loader` and
+            // `-install_name` among them, kept in order with its argument and turned into the
+            // linker's words by the link line, which is where the kind of file is known.
+            _ if link::APPLE_FLAGS.iter().any(|(flag, _)| *flag == arg) => {
+                let takes = link::APPLE_FLAGS.iter().any(|(flag, takes)| *flag == arg && *takes);
+                let value = if takes {
+                    let next =
+                        args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
+                    i += 1;
+                    Some(next.clone())
+                } else {
+                    None
+                };
+                link.apple.push((arg.to_owned(), value));
+                apple_only.get_or_insert_with(|| arg.to_owned());
+            }
+            // A run path, which clang takes on the compiler line for every target and hands to the
+            // linker where it was written. `ld64`, GNU ld, lld and mold all read `-rpath <dir>`.
+            "-rpath" => {
+                let next = args.get(i).ok_or_else(|| err("-rpath requires an argument"))?;
+                i += 1;
+                inputs.push(Input::linker("-rpath"));
+                inputs.push(Input::linker(next));
+            }
+            // The architecture on Apple's spelling, which is one more way to say what the target
+            // already says. Checked against it after the loop, since `--target=` may come later,
+            // and more than one is a universal binary, which is one compile per architecture.
+            "-arch" => {
+                let next = args.get(i).ok_or_else(|| err("-arch requires an argument"))?;
+                i += 1;
+                arches.push(next.clone());
+            }
             "-s" => link.strip = true,
             // mingw-w64's three. `-mwindows` and `-mconsole` pick the subsystem, last one wins,
             // and `-municode` picks the start file and tells the headers through `UNICODE`, which is
@@ -2820,6 +2867,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if opts.target.os == rucc_target::Os::Darwin {
         opts.os_version = min_version.or_else(|| pinned.and_then(TargetTuple::os_version));
         link.os_version = opts.os_version;
+    }
+    // The Apple linker flags on a target whose linker has never heard of them, which clang refuses
+    // with the same words rather than letting GNU ld say something less clear about it.
+    if opts.target.os != rucc_target::Os::Darwin {
+        let first = apple_only.as_deref().or_else(|| arches.first().map(|_| "-arch"));
+        if let Some(flag) = first {
+            return Err(err(format!("unsupported option '{flag}' for target '{}'", opts.target)));
+        }
+    }
+    for arch in &arches {
+        let named = match arch.as_str() {
+            "arm64" => Some(rucc_target::Arch::Aarch64),
+            "x86_64" => Some(rucc_target::Arch::X86_64),
+            _ => None,
+        };
+        if named != Some(opts.target.arch) {
+            return Err(err(format!(
+                "-arch {arch}: the target is {}, and this compiler builds for one architecture \
+                 at a time, so name the one wanted with --target= and build once for each",
+                opts.target
+            )));
+        }
     }
     // After the loop rather than where `-pthread` was read, so that it lands after the objects
     // that refer to it. A static link takes the definitions it needs from a library when it
@@ -6865,6 +6934,98 @@ mod tests {
                 link::Item::File("a.o".into()),
             ]
         );
+    }
+
+    /// The Darwin link flags Postgres writes on the compiler line, from `Makefile.shlib`,
+    /// `Makefile.darwin` and `meson.build`, each taken with its argument in the order written.
+    /// tamnd/rucc#2010.
+    #[test]
+    fn the_darwin_link_flags_postgres_writes_are_taken() {
+        let mac = "--target=aarch64-apple-darwin";
+        let (link, _) = linking(&[
+            mac,
+            "-dynamiclib",
+            "-install_name",
+            "/usr/local/pgsql/lib/libpq.5.dylib",
+            "-compatibility_version",
+            "5",
+            "-current_version",
+            "5.18",
+            "-exported_symbols_list",
+            "exports.list",
+            "-headerpad_max_install_names",
+            "-isysroot",
+            "/sdk",
+            "-mmacosx-version-min=13.0",
+            "-arch",
+            "arm64",
+            "a.c",
+        ]);
+        assert!(link.shared && !link.bundle);
+        assert_eq!(link.sysroot, Some(PathBuf::from("/sdk")));
+        assert_eq!(link.os_version, rucc_tuple::Version::parse("13.0"));
+        let apple: Vec<(&str, Option<&str>)> =
+            link.apple.iter().map(|(flag, value)| (flag.as_str(), value.as_deref())).collect();
+        assert_eq!(
+            apple,
+            [
+                ("-install_name", Some("/usr/local/pgsql/lib/libpq.5.dylib")),
+                ("-compatibility_version", Some("5")),
+                ("-current_version", Some("5.18")),
+                ("-exported_symbols_list", Some("exports.list")),
+                ("-headerpad_max_install_names", None),
+            ]
+        );
+
+        // A module, which is a bundle checked against the server that will load it.
+        let (link, _) = linking(&[mac, "a.c", "-bundle", "-bundle_loader", "postgres", "-o", "m"]);
+        assert!(link.bundle && !link.shared);
+        assert_eq!(link.apple, [("-bundle_loader".to_owned(), Some("postgres".to_owned()))]);
+
+        // `-shared` is a dynamic library on a Mac, as it is to clang.
+        let (link, _) = linking(&[mac, "-shared", "a.c"]);
+        assert!(link.shared && !link.bundle);
+
+        // And a flag at the end of the line with its argument missing is said to be.
+        let said = refused(&[mac, "a.c", "-bundle_loader"]);
+        assert_eq!(said, "-bundle_loader requires an argument");
+    }
+
+    /// A run path keeps its place among the files, as `-Wl,-rpath,<dir>` does, on every target.
+    #[test]
+    fn a_run_path_on_the_compiler_line_goes_to_the_linker_where_it_was() {
+        let (_, plan) = linking(&[LINUX, "-rpath", "/opt/lib", "a.c"]);
+        let link = plan.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![
+                link::Item::Linker("-rpath".into()),
+                link::Item::Linker("/opt/lib".into()),
+                link::Item::File("a.o".into()),
+            ]
+        );
+    }
+
+    /// The Apple flags on a target whose linker has never heard of them are refused with clang's
+    /// words, and `-arch` has to say what the target already says.
+    #[test]
+    fn the_darwin_link_flags_are_for_apple_targets_only() {
+        for flag in ["-dynamiclib", "-bundle", "-headerpad_max_install_names"] {
+            let said = refused(&[LINUX, flag, "a.c"]);
+            assert!(said.starts_with(&format!("unsupported option '{flag}' for target")), "{said}");
+        }
+        let said = refused(&[LINUX, "-bundle_loader", "postgres", "a.c"]);
+        assert!(said.starts_with("unsupported option '-bundle_loader'"), "{said}");
+        let said = refused(&[LINUX, "-arch", "x86_64", "a.c"]);
+        assert!(said.starts_with("unsupported option '-arch'"), "{said}");
+
+        let mac = "--target=aarch64-apple-darwin";
+        let (link, _) = linking(&["-arch", "arm64", mac, "a.c"]);
+        assert!(link.apple.is_empty());
+        let said = refused(&[mac, "-arch", "x86_64", "a.c"]);
+        assert!(said.starts_with("-arch x86_64: the target is"), "{said}");
+        let said = refused(&[mac, "-arch", "arm64", "-arch", "x86_64", "a.c"]);
+        assert!(said.starts_with("-arch x86_64"), "{said}");
     }
 
     #[test]
