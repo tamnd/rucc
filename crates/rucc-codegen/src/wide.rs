@@ -875,12 +875,13 @@ fn carried(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
 /// of a product are the same bits either way. The sign only matters to the bits that are being
 /// thrown away.
 ///
-/// The carry out of the low halves is the high half of a sixty four bit product, which this machine
-/// has an instruction for and this compiler has no way to ask for. [`crate::expand`] already writes
-/// that out as long multiplication one level further down, for the overflow builtins, so this calls
-/// it rather than keeping a second copy of the same arithmetic. It is the expensive part of a wide
-/// multiply by a long way, and `tamnd/rucc#309` is the rule that would make it one instruction for
-/// both callers at once.
+/// The carry out of the low halves is the high half of their product. When the halves are thirty
+/// two bits, which is a `long long` on i386, that is `umulh`, the one operand `mull` that division by
+/// a constant already uses, and the whole multiply is the low product, that `mull`, and two `imull`s for
+/// the cross products. At sixty four bits [`crate::expand`] still writes it out as long
+/// multiplication one level further down, the way it does for the overflow builtins, which is four
+/// multiplies of thirty two bit pieces where one instruction would do, and `tamnd/rucc#309` is the
+/// rule that would make that one instruction as well.
 fn multiply(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
@@ -888,7 +889,11 @@ fn multiply(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
         return;
     };
     let low = ahead(func, width, inst, Opcode::Mul, &[a_low, b_low]);
-    let carried = expand::high_half(func, inst, a_low, b_low, false, width.half());
+    let carried = if width.half == 32 {
+        ahead(func, width, inst, Opcode::UMulHigh, &[a_low, b_low])
+    } else {
+        expand::high_half(func, inst, a_low, b_low, false, width.half())
+    };
     let cross = ahead(func, width, inst, Opcode::Mul, &[a_low, b_high]);
     let other = ahead(func, width, inst, Opcode::Mul, &[a_high, b_low]);
     let high = ahead(func, width, inst, Opcode::Add, &[carried, cross]);
@@ -2600,7 +2605,11 @@ mod tests {
         let text = printed(&func, &mut names);
         assert!(!text.contains("i64"), "nothing that wide is left: {text}");
         assert!(!text.contains("call"), "no routine: {text}");
-        assert_eq!(text.matches(" = mul ").count(), 7, "three and the carry's four: {text}");
+        // The carry out of the low halves is one high multiply, `mull`, where it was four
+        // multiplies of sixteen bit pieces.
+        assert_eq!(text.matches(" = mul ").count(), 3, "the low halves and two crosses: {text}");
+        assert_eq!(text.matches(" = umulh ").count(), 1, "and one for the carry: {text}");
+        assert!(!text.contains("65535"), "nothing is cut into sixteen bit pieces: {text}");
     }
 
     #[test]
