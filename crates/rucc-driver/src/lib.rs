@@ -329,6 +329,22 @@ fn joined_or_next(
 /// an instruction may start, and the flag asks for the target's minimum rather than for none.
 const MIN_FUNC_ALIGN: u32 = 8;
 
+/// Whether `-mindirect-branch=` or `-mfunction-return=` asks for the branch to go through a thunk
+/// the program links in, which is `thunk-extern`, or to be left alone, which is `keep`.
+///
+/// `thunk` and `thunk-inline` are gcc's other two answers, and the kbuild table refuses them before
+/// this is reached, since both ask for a thunk body written into the unit and none is written here.
+fn thunked(arg: &str, flag: &str) -> Result<bool, CliError> {
+    match &arg[flag.len()..] {
+        "keep" => Ok(false),
+        "thunk-extern" => Ok(true),
+        other => Err(err(format!(
+            "`{other}` is not a way to write the branch, which is keep, thunk, thunk-inline or \
+             thunk-extern"
+        ))),
+    }
+}
+
 /// What `-falign-functions=N` asks for, as a power of two, or `None` for the target's own answer.
 ///
 /// Zero and one both mean the default, which is gcc's reading of them, and everything else is
@@ -2121,6 +2137,42 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // it is a flag the whole program has to agree on, as it is in gcc.
             "-fshort-wchar" => opts.short_wchar = true,
             "-fno-short-wchar" => opts.short_wchar = false,
+            // The speculation hardening the kernel builds with when its mitigations are
+            // configured, x86-64 only as in gcc. Each is last one wins, and the spellings of a
+            // thunk this compiler does not write, `thunk` and `thunk-inline`, are refused by the
+            // kbuild table before this. See `rucc_codegen::thunks` and tamnd/rucc#2280.
+            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mindirect-branch=") => {
+                opts.speculation.indirect = thunked(arg, "-mindirect-branch=")?;
+            }
+            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mfunction-return=") => {
+                opts.speculation.returns = thunked(arg, "-mfunction-return=")?;
+            }
+            "-mindirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
+                opts.speculation.padded = true;
+            }
+            "-mno-indirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
+                opts.speculation.padded = false;
+            }
+            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mharden-sls=") => {
+                let (after_return, after_jump) = match &arg["-mharden-sls=".len()..] {
+                    "none" => (false, false),
+                    "return" => (true, false),
+                    "indirect-jmp" => (false, true),
+                    "all" => (true, true),
+                    other => {
+                        return Err(err(format!(
+                            "`{other}` is not a place to stop straight line speculation, which \
+                             is none, return, indirect-jmp or all"
+                        )));
+                    }
+                };
+                opts.speculation.after_return = after_return;
+                opts.speculation.after_jump = after_jump;
+            }
+            // Whether a `switch` may become a table, which the kernel turns off beside the thunks
+            // because a jump through a table is an indirect branch that goes through no thunk.
+            "-fjump-tables" => opts.jump_tables = true,
+            "-fno-jump-tables" => opts.jump_tables = false,
             // The head of every hot loop, which is padded when this is asked for so that a loop that
             // fits in a 64 byte line does not cross one. Both directions of the plain form are
             // answered. A number is taken and says nothing, because the boundary here is the
@@ -8013,6 +8065,64 @@ mod tests {
         compile(&["-mno-outline-atomics", KERNEL_ARM64, "-c", "a.c"]);
     }
 
+    /// The speculation hardening flags the kernel builds with, each last one wins, and the jump
+    /// tables it turns off beside them. tamnd/rucc#2280.
+    #[test]
+    fn the_speculation_hardening_flags_are_honored() {
+        let asked = |flags: &[&str]| {
+            let line: Vec<&str> =
+                [KERNEL_X86].iter().chain(flags).chain(&["-c", "a.c"]).copied().collect();
+            compile(&line).0
+        };
+        let none = asked(&[]);
+        assert_eq!(
+            (none.speculation, none.jump_tables),
+            (rucc_target::Speculation::default(), true)
+        );
+        let kernel = asked(&[
+            "-mindirect-branch=thunk-extern",
+            "-mindirect-branch-register",
+            "-mindirect-branch-cs-prefix",
+            "-mfunction-return=thunk-extern",
+            "-mharden-sls=all",
+            "-fno-jump-tables",
+        ]);
+        let all = rucc_target::Speculation {
+            indirect: true,
+            padded: true,
+            returns: true,
+            after_return: true,
+            after_jump: true,
+        };
+        assert_eq!((kernel.speculation, kernel.jump_tables), (all, false));
+        let back = asked(&[
+            "-mindirect-branch=thunk-extern",
+            "-mindirect-branch=keep",
+            "-mfunction-return=thunk-extern",
+            "-mfunction-return=keep",
+            "-mindirect-branch-cs-prefix",
+            "-mno-indirect-branch-cs-prefix",
+            "-mharden-sls=all",
+            "-mharden-sls=none",
+            "-fno-jump-tables",
+            "-fjump-tables",
+        ]);
+        assert_eq!(
+            (back.speculation, back.jump_tables),
+            (rucc_target::Speculation::default(), true)
+        );
+        let sls = |kind| asked(&[kind]).speculation;
+        assert!(sls("-mharden-sls=return").after_return && !sls("-mharden-sls=return").after_jump);
+        let jumps = sls("-mharden-sls=indirect-jmp");
+        assert!(jumps.after_jump && !jumps.after_return);
+        let bad = refused(&[KERNEL_X86, "-mharden-sls=jmp", "-c", "a.c"]);
+        assert!(bad.contains("none, return, indirect-jmp or all"), "{bad}");
+        let bad = refused(&[KERNEL_X86, "-mindirect-branch=extern", "-c", "a.c"]);
+        assert!(bad.contains("keep, thunk, thunk-inline or thunk-extern"), "{bad}");
+        // A jump table is a question every target answers.
+        assert!(!compile(&[KERNEL_ARM64, "-fno-jump-tables", "-c", "a.c"]).0.jump_tables);
+    }
+
     /// The boundary is a power of two, as gcc spells it, and only on x86-64, where gcc has the
     /// flag. 3 is the kernel's and waits on the vector registers being kept out.
     #[test]
@@ -8042,11 +8152,6 @@ mod tests {
             ("-mpreferred-stack-boundary=3", 2277),
             ("-mstack-protector-guard-reg=gs", 2279),
             ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
-            ("-mindirect-branch=thunk-extern", 2280),
-            ("-mfunction-return=thunk-extern", 2280),
-            ("-mharden-sls=all", 2280),
-            ("-mindirect-branch-cs-prefix", 2280),
-            ("-fno-jump-tables", 2280),
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
             ("-mrecord-mcount", 2283),
@@ -8069,7 +8174,13 @@ mod tests {
             assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
         }
         // Refused with no issue, because nothing is planned for them, and still with the reason.
-        for flag in ["-fstack-check", "-fstrict-flex-arrays=3", "-fno-zero-initialized-in-bss"] {
+        for flag in [
+            "-fstack-check",
+            "-fstrict-flex-arrays=3",
+            "-fno-zero-initialized-in-bss",
+            "-mindirect-branch=thunk",
+            "-mfunction-return=thunk-inline",
+        ] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(&format!("{flag}: ")) && !failed.contains('#'), "{failed}");
         }
@@ -8089,6 +8200,9 @@ mod tests {
             (KERNEL_X86, "-mbranch-protection=none"),
             (KERNEL_ARM64, "-mskip-rax-setup"),
             (KERNEL_ARM64, "-mrecord-mcount"),
+            (KERNEL_ARM64, "-mindirect-branch=thunk-extern"),
+            (KERNEL_ARM64, "-mfunction-return=thunk-extern"),
+            (KERNEL_ARM64, "-mindirect-branch-cs-prefix"),
         ] {
             assert_eq!(refused(&[target, flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
         }

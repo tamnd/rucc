@@ -226,6 +226,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     pad: Some("nop"),
     step_bits: Some(12),
     reaches: Some(frame_reaches),
+    thunks: None,
 };
 
 /// Whether the instruction of that name can carry that displacement from the stack pointer.

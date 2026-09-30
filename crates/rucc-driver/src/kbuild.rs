@@ -59,8 +59,8 @@ const NO_VECTOR: &str = "every function here may use the vector and x87 register
                          nothing yet keeps them out";
 const GUARD: &str = "the canary is read from where the target's C library keeps it, %fs:40 on \
                      x86-64, and nothing yet moves it";
-const THUNKS: &str = "indirect branches and returns are written as they are, with no thunk, no \
-                      int3 after them and jump tables where a switch wants one";
+const THUNKS: &str = "a branch goes through a thunk the program links in, which is thunk-extern, \
+                      and no thunk body is written into the unit";
 const MCOUNT: &str = "the __fentry__ calls -pg writes are not listed in a __mcount_loc section and \
                       are not written as nops";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
@@ -164,8 +164,6 @@ pub(crate) const TABLE: &[Row] = &[
         None,
     ),
     // The default of a family whose other members are refused below.
-    same("-fjump-tables", "a switch may become a jump table, which is the default here too"),
-    refused("-fno-jump-tables", THUNKS, Some(2280)),
     same("-fzero-call-used-regs=skip", "no registers are cleared on return, the default"),
     refused(
         "-fzero-call-used-regs=*",
@@ -215,15 +213,33 @@ pub(crate) const TABLE: &[Row] = &[
     only(X86, same("-mstack-protector-guard-reg=fs", "the canary is read through %fs")),
     only(X86, same("-mstack-protector-guard-offset=40", "the canary is read from %fs:40")),
     refused("-mstack-protector-guard*", GUARD, Some(2279)),
-    only(X86, same("-mindirect-branch=keep", "indirect branches are left as they are")),
-    only(X86, refused("-mindirect-branch=*", THUNKS, Some(2280))),
-    only(X86, same("-mfunction-return=keep", "returns are left as they are")),
-    only(X86, refused("-mfunction-return=*", THUNKS, Some(2280))),
-    only(X86, same("-mno-indirect-branch-register", "an indirect branch may go through memory")),
-    only(X86, refused("-mindirect-branch-register", THUNKS, Some(2280))),
-    only(X86, refused("-mindirect-branch-cs-prefix", THUNKS, Some(2280))),
-    same("-mharden-sls=none", "nothing is put after a return or an indirect jump, the default"),
-    only(X86, refused("-mharden-sls=*", THUNKS, Some(2280))),
+    // The thunk spellings nothing here writes. `keep` and `thunk-extern` have their own arms.
+    only(X86, refused("-mindirect-branch=thunk", THUNKS, None)),
+    only(X86, refused("-mindirect-branch=thunk-inline", THUNKS, None)),
+    only(X86, refused("-mfunction-return=thunk", THUNKS, None)),
+    only(X86, refused("-mfunction-return=thunk-inline", THUNKS, None)),
+    only(
+        X86,
+        same(
+            "-mindirect-branch-register",
+            "every indirect call and jump here already goes through a register, never through \
+             memory",
+        ),
+    ),
+    only(
+        X86,
+        same(
+            "-mno-indirect-branch-register",
+            "it permits a branch through memory, and going through a register is still allowed",
+        ),
+    ),
+    only(
+        A64,
+        same(
+            "-mharden-sls=none",
+            "nothing is put after a return or an indirect branch, the default",
+        ),
+    ),
     only(
         A64,
         refused(
@@ -347,8 +363,8 @@ mod tests {
     #[test]
     fn the_default_spelling_is_found_before_its_family() {
         let answer = |arg| row(arg, Arch::X86_64).map(|row| row.answer);
-        assert!(matches!(answer("-mindirect-branch=keep"), Some(Answer::Same(_))));
-        assert!(matches!(answer("-mindirect-branch=thunk-extern"), Some(Answer::Refused(..))));
+        assert!(matches!(answer("-fzero-call-used-regs=skip"), Some(Answer::Same(_))));
+        assert!(matches!(answer("-fzero-call-used-regs=all"), Some(Answer::Refused(..))));
         assert!(matches!(answer("-ftrivial-auto-var-init=uninitialized"), Some(Answer::Same(_))));
         assert!(matches!(answer("-ftrivial-auto-var-init=zero"), Some(Answer::Refused(..))));
     }

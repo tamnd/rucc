@@ -948,6 +948,13 @@ static TEXT: &[(&str, &[Written])] = &[
     // is the whole of the difference in the text and the addressing byte is the whole of it in the
     // bytes, and both come from the argument being a register rather than a place in the program.
     ("call_reg", &[spell("call", &[Through])]),
+    // A call through an address sent to the retpoline thunk for its register, which is what
+    // `-mindirect-branch=thunk-extern` makes of `call_reg`. The name is the thunk's and the
+    // register stays in the operand vector for the allocator, so the text is a call to a name.
+    // The second is the same with the code segment override gcc writes on a line of its own in
+    // front of a thunk for `r8` to `r15` under `-mindirect-branch-cs-prefix`.
+    ("call_thunk", &[spell("call", &[Symbol])]),
+    ("call_thunk_cs", &[spell("cs", &[]), spell("call", &[Symbol])]),
     // What a condition and the block layout come to.
     // The conditional move and the test that sets the flags it reads. The eight bit form moves
     // thirty two bits for the reason `imul_rr_8` does, which is that the machine has no narrower
@@ -1051,6 +1058,10 @@ static TEXT: &[(&str, &[Written])] = &[
     // A jump through a register, which is the same mnemonic and a different instruction, the way
     // `call_reg` above is. The star is the whole of the difference in the text.
     ("jmp_reg", &[spell("jmp", &[Through])]),
+    // The same jump sent to the thunk for its register, and the same with the override, which is
+    // what the two thunk calls above are to `call_reg`.
+    ("jmp_thunk", &[spell("jmp", &[Symbol])]),
+    ("jmp_thunk_cs", &[spell("cs", &[]), spell("jmp", &[Symbol])]),
     // What a copy, a prologue, an epilogue, a spill and a reload are made of. A vector register is
     // moved with the aligned form for the reason `crate::x86_64::FRAME` gives.
     ("mov_rr_64", &[spell("movq", &[Reg(1, Quad), Reg(0, Quad)])]),
@@ -1068,6 +1079,9 @@ static TEXT: &[(&str, &[Written])] = &[
     // The instruction a program stops on. No operands and one spelling, and the name is the whole
     // of it.
     ("ud2", &[spell("ud2", &[])]),
+    // The breakpoint `-mharden-sls=` puts after a return or an indirect jump. No operands and one
+    // spelling, like the one above.
+    ("int3", &[spell("int3", &[])]),
     // The landing pad. No operands, and the mnemonic carries the width the way `ret` does not,
     // because there is only one of it on this machine and its name is the whole of it.
     ("endbr64", &[spell("endbr64", &[])]),

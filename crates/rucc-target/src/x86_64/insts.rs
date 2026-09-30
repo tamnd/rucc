@@ -2047,6 +2047,11 @@ pub static INSTS: &[(&str, Form)] = &[
     // that is the whole of why there are two names here rather than one.
     ("call", Call),
     ("call_reg", Call),
+    // The same call sent to a retpoline thunk, with and without the code segment override in
+    // front of it. What `-mindirect-branch=thunk-extern` rewrites `call_reg` into once the
+    // registers are settled, keeping every operand, so they are calls for the same reason.
+    ("call_thunk", Call),
+    ("call_thunk_cs", Call),
     // What a condition and the block layout come to. The test asks whether the byte a comparison
     // wrote is zero, and the jump that follows it goes to the block's first successor when the
     // answer is the one it names. Every condition is here twice over, once as itself and once as
@@ -2173,6 +2178,11 @@ pub static INSTS: &[(&str, Form)] = &[
     // front of it and the machine reads a different opcode byte, and both come from the target
     // being a register rather than a place in the program.
     ("jmp_reg", JmpReg),
+    // The same jump sent to a retpoline thunk, which is what `jmp_reg` becomes under
+    // `-mindirect-branch=thunk-extern`. It keeps the one operand and every successor, since the
+    // thunk goes where the register says and the register is still the address.
+    ("jmp_thunk", JmpReg),
+    ("jmp_thunk_cs", JmpReg),
     // What a copy, a prologue, an epilogue, a spill and a reload are made of, which is the other
     // set of instructions no rule reaches. The arithmetic and the address computation a frame
     // needs are already above, because a prologue taking its frame is the same instruction as a
@@ -2194,6 +2204,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // The instruction a program stops on, which `__builtin_trap` asks for. Nothing selects one:
     // `rucc_codegen::lower` writes it by name where the builtin stood.
     ("ud2", Trap),
+    // The breakpoint `-mharden-sls=` puts behind a return or an indirect jump. Nothing selects one
+    // either, and nothing reaches it but a processor speculating past the branch in front of it.
+    ("int3", Trap),
     // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
     // `-fcf-protection=branch` and nothing else produces one.
     ("endbr64", Landing),

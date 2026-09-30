@@ -240,6 +240,45 @@ pub struct FrameInsts {
     /// the one that refuses, and the finish pass asks it and writes the address into a scratch
     /// register first when the answer is no.
     pub reaches: Option<fn(&str, i32) -> bool>,
+    /// What the speculation hardening flags turn indirect branches and returns into, or `None` on
+    /// a target where nothing does. See [`Thunks`].
+    pub thunks: Option<Thunks>,
+}
+
+/// What `-mindirect-branch=thunk-extern`, `-mindirect-branch-cs-prefix`,
+/// `-mfunction-return=thunk-extern` and `-mharden-sls=` rewrite a finished function's branches
+/// into.
+///
+/// Every name here is an x86 one, since the flags are, and the thunks are the kernel's: a call
+/// through `%rax` becomes a call to `__x86_indirect_thunk_rax`, a return becomes a jump to
+/// `__x86_return_thunk`, and the thunks themselves are defined somewhere else, which is what
+/// `extern` in the flag's value says.
+#[derive(Debug, Clone, Copy)]
+pub struct Thunks {
+    /// A call through a register, which is what a thunk call replaces.
+    pub call_through: &'static str,
+    /// A jump through a register, which is what a thunk jump replaces.
+    pub jump_through: &'static str,
+    /// A call to a thunk, which keeps the operands of the call it replaces.
+    pub call: &'static str,
+    /// The same with the code segment override in front of it.
+    pub call_padded: &'static str,
+    /// A jump to a thunk, which keeps the operand and the successors of the jump it replaces.
+    pub jump: &'static str,
+    /// The same with the code segment override in front of it.
+    pub jump_padded: &'static str,
+    /// What goes after a return or an indirect jump to stop a processor speculating past it.
+    pub trap: &'static str,
+    /// What the name of an indirect branch thunk starts with. The register it goes through is the
+    /// rest of the name.
+    pub indirect: &'static str,
+    /// The name a return jumps to instead.
+    pub ret: &'static str,
+    /// The general purpose registers' names, by number, as a thunk's name spells them.
+    pub regs: &'static [&'static str],
+    /// The first register whose thunk call is given the override. The ones below it need no REX
+    /// byte, so a call to their thunk is what gcc leaves alone.
+    pub padded_from: u8,
 }
 
 impl FrameInsts {
