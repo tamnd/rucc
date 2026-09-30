@@ -920,9 +920,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // porting a header does want to hear all of it, which is what the flag is for.
             "-Wsystem-headers" => opts.system_header_warnings = true,
             "-Wno-system-headers" => opts.system_header_warnings = false,
+            // The diagnostics the standard requires, as errors, and no others. See
+            // `rucc_diag::Named::pedantic_errors` for why it is not `-Werror`.
             "-pedantic-errors" => {
                 opts.pedantic = true;
-                opts.warnings_are_errors = true;
+                opts.named_warnings.pedantic_errors();
             }
             "-P" => opts.line_markers = false,
             // Keep comments in the output of `-E`. Taken and not acted on: every comment still
@@ -7003,8 +7005,14 @@ mod tests {
         assert!(opts.system_header_warnings);
         let (opts, _) = compile(&["-Wsystem-headers", "-Wno-system-headers", "-c", "a.c"]);
         assert!(!opts.system_header_warnings);
+        // Only what the standard requires is fatal under it, which is not `-Werror`.
         let (opts, _) = compile(&["-pedantic-errors", "-c", "a.c"]);
-        assert!(opts.pedantic && opts.warnings_are_errors);
+        assert!(opts.pedantic && !opts.warnings_are_errors);
+        let warning = |code| {
+            rucc_diag::Diagnostic::warning("x".to_owned(), rucc_diag::Span::DUMMY).with_code(code)
+        };
+        assert!(opts.named_warnings.promoted(&warning("E0513"), false));
+        assert!(!opts.named_warnings.promoted(&warning("E0770"), false));
     }
 
     #[test]

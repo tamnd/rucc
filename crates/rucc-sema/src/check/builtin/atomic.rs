@@ -485,22 +485,29 @@ impl Checker<'_> {
     /// questions about the machine and answer as constants.
     ///
     /// Both take a size in bytes and a pointer that is there to say how the object is aligned, and
-    /// both come back true when an object of that size and that alignment is one this compiler
-    /// writes an instruction for rather than a call to a library. Which sizes those are is
-    /// `lock_free_width` in `rucc_target::TargetInfo`, and it is eight bytes everywhere, so the
-    /// answer here is that the size is one, two, four or eight and the object is aligned to at
-    /// least its own size.
+    /// both come back true when an object of that size is one this compiler writes an instruction
+    /// for rather than a call to a library. Which sizes those are is `lock_free_width` in
+    /// `rucc_target::TargetInfo`, and it is eight bytes everywhere, so the answer here is that the
+    /// size is one, two, four or eight, and for `__atomic_always_lock_free` also that the object is
+    /// aligned to at least its own size.
     ///
-    /// # Why the two are one answer
+    /// # Why both are constants
     ///
     /// gcc separates them: the first has to be a constant and the second may become a call into
     /// libatomic, which decides at run time by looking at the address. There is no libatomic here
     /// and nothing to call, so a second answer would be a call to a function no object file
-    /// defines. Folding both means a program that asks the second question gets the first
-    /// question's answer, which is the stronger claim and so is never wrong where it says yes. The
-    /// only thing a run time answer knows that this does not is what an address turned out to be
-    /// aligned to, and nothing on this target does eight bytes atomically at one alignment and not
-    /// at another, so there is no case where the second question has a better answer than this.
+    /// defines, and both are folded.
+    ///
+    /// # Why only the first asks about the pointer
+    ///
+    /// The generic builtins over an object of one, two, four or eight bytes are one instruction at
+    /// that width whatever the object is aligned to, because gcc resolves them by the size alone and
+    /// lowering here does the same. `__atomic_is_lock_free` asks about the operations the program is
+    /// about to do on that object, so it answers yes for those sizes whatever the pointer points at,
+    /// and `__atomic_is_lock_free(sizeof(long), &i)` with `i` an `int` is yes. libatomic answers yes
+    /// to gcc for the same call whenever `i` landed on eight, and nothing on x86-64 makes the locked
+    /// instruction divisible at any alignment. `__atomic_always_lock_free` is gcc's constant, which
+    /// reads the alignment off the type the pointer points at, and this reads it the same way.
     ///
     /// # The size, and what a size that is not a constant means
     ///
@@ -537,13 +544,16 @@ impl Checker<'_> {
         if !spelled.starts_with("__atomic_") || !LOCK_FREE.contains(&spelled) {
             return None;
         }
+        // Only the constant question asks about the pointer, for the reason the section above on
+        // the pointer gives.
+        let always = spelled == "__atomic_always_lock_free";
         let &[size, object] = args else { return None };
         let widest = u128::from(self.cx.target.lock_free_width / 8);
         let bytes = self.folded(size).and_then(|number| u128::try_from(number).ok());
         let free = bytes.is_some_and(|bytes| {
             bytes.is_power_of_two()
                 && bytes <= widest
-                && u128::from(self.aligned_to(object)) >= bytes
+                && (!always || u128::from(self.aligned_to(object)) >= bytes)
         });
         let boolean = self.types.boolean();
         Some(self.constant(Const::Int(i128::from(free)), boolean, span))

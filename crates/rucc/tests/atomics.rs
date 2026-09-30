@@ -275,6 +275,49 @@ _Bool cas(struct B *e, struct B d) { return atomic_compare_exchange_weak(&big, e
     assert!(text.contains("movl\t$32, %edi") || text.contains("movq\t$32, %rdi"), "{text}");
 }
 
+/// A structure of two `int`s with no qualifier on it is aligned to four, and the generic builtins
+/// over one are still the instructions at the width of the whole object, because gcc resolves the
+/// four by the size alone. gcc 16.2.0 swaps it with `xchgq` and compares and exchanges it with
+/// `lock cmpxchgq` at -O0 and at -O2, so a program that uses them links without libatomic there,
+/// and calling the generic routines here made the same program fail to link.
+#[test]
+fn the_generic_builtins_over_a_structure_short_of_its_size_are_the_instructions() {
+    let text = asm(
+        "under-aligned",
+        "\
+struct pair { int a, b; };
+struct pair p, q, r;
+void ld(void) { __atomic_load(&p, &q, __ATOMIC_SEQ_CST); }
+void st(void) { __atomic_store(&p, &q, __ATOMIC_SEQ_CST); }
+void ex(void) { __atomic_exchange(&p, &q, &r, __ATOMIC_SEQ_CST); }
+int ce(void) { return __atomic_compare_exchange(&p, &q, &r, 0, 5, 5); }
+",
+    );
+    assert!(!text.contains("__atomic_"), "{text}");
+    assert!(text.contains("xchgq"), "{text}");
+    assert!(text.contains("cmpxchgq"), "{text}");
+}
+
+/// `__atomic_is_lock_free` answers by the rule the builtins go by, the size alone, and the
+/// constant `__atomic_always_lock_free` still reads the alignment off the pointer's type, which
+/// is gcc's split between the two.
+#[test]
+fn only_the_constant_lock_free_question_asks_about_the_alignment() {
+    let text = asm(
+        "lock-free-align",
+        "\
+struct pair { int a, b; };
+struct pair p;
+int is(void) { return __atomic_is_lock_free(sizeof p, &p); }
+int always(void) { return __atomic_always_lock_free(sizeof p, &p); }
+",
+    );
+    assert!(!text.contains("call"), "{text}");
+    let (is, always) = text.split_once("always:").expect("both functions are there");
+    assert!(is.contains("$1"), "{text}");
+    assert!(!always.contains("$1"), "{text}");
+}
+
 /// The rest of the header after it stopped using the `_n` builtins, over the objects every program
 /// has, which is still one instruction each and no call.
 #[test]
