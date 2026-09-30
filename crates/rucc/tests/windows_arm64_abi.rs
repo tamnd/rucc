@@ -177,3 +177,15 @@ fn a_thread_local_is_found_from_the_teb_in_x18() {
         ]
     );
 }
+
+#[test]
+fn a_function_that_calls_chkstk_saves_the_link_register_first() {
+    // It calls nothing the program wrote, and it still calls `__chkstk` for a frame bigger than a
+    // page, which writes x30 over. clang saves the frame record before it too.
+    let got = insts("chkstk", "int big(int i) { volatile char a[8192]; a[i] = 1; return a[0]; }\n");
+    let call = got.iter().position(|line| line == "bl __chkstk").expect("a call to __chkstk");
+    assert_eq!(got[0], "stp x29, x30, [sp, #-16]!", "{got:#?}");
+    assert!(call > 0, "{got:#?}");
+    let ret = got.iter().position(|line| line == "ret").expect("a return");
+    assert_eq!(got[ret - 1], "ldp x29, x30, [sp], #16", "{got:#?}");
+}
