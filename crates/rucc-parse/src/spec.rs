@@ -965,8 +965,12 @@ impl Parser<'_> {
         let in_effect = self.pack_in_effect();
         let pack = if fields.is_some() { in_effect } else { None };
         // GCC takes attributes after the closing brace as well, which is where `packed` is
-        // usually written, and they appertain to the same tag as the ones before it.
-        self.collect_attributes(&mut attrs);
+        // usually written, and they appertain to the same tag as the ones before it. With no
+        // brace they are left to the specifiers and belong to the declaration, which is how the
+        // kernel's `struct mem_section __ref *sparse_index_alloc(int nid)` gets its section.
+        if fields.is_some() {
+            self.collect_attributes(&mut attrs);
+        }
         let attrs = self.ast.add_attr_list(&attrs);
         TypeSpec::Record { kind, tag, fields, attrs, pack }
     }
@@ -1083,7 +1087,10 @@ impl Parser<'_> {
             }
             None
         };
-        self.collect_attributes(&mut attrs);
+        // After the brace only, for the reason a record reads them there only.
+        if enumerators.is_some() {
+            self.collect_attributes(&mut attrs);
+        }
         let attrs = self.ast.add_attr_list(&attrs);
         TypeSpec::Enum { tag, enumerators, underlying, attrs }
     }
