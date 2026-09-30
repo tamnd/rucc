@@ -240,6 +240,10 @@ impl Live {
 /// One block at a time, because a value's live points inside one block are one stretch and the
 /// whole job is working out where one stretch stops and the next begins. What comes back is every
 /// value's pieces end to end, and where each value's are.
+///
+/// The pieces go into one list as the blocks find them and are sorted by value at the end. They
+/// used to go into a list per value, and on jtckdint, with 190084 instructions in one function,
+/// finding each value's list and growing it a piece at a time was most of working out liveness.
 fn carve(
     func: &Func,
     order: &Order,
@@ -247,7 +251,11 @@ fn carve(
     live_out: &Rows,
     vregs: usize,
 ) -> (Vec<Range>, Vec<(usize, usize)>) {
-    let mut lists: Vec<Vec<Range>> = vec![Vec::new(); vregs];
+    // Every piece with whose it is, in the order the blocks come, which for any one value is the
+    // order its pieces start in.
+    let mut found: Vec<(u32, Range)> = Vec::new();
+    // Where each value's last piece is in that list, so that the next block can carry it on.
+    let mut last = vec![u32::MAX; vregs];
     let mut here: Vec<Option<Range>> = vec![None; vregs];
     let mut touched: Vec<usize> = Vec::new();
 
@@ -289,24 +297,36 @@ fn carve(
 
         for &number in &touched {
             let Some(piece) = here[number].take() else { continue };
-            match lists[number].last_mut() {
+            match found.get_mut(last[number] as usize) {
                 // The points run on from one block into the next, so a stretch that begins where
                 // the last one stopped is the same run of blocks carried on. A gap of even one
                 // point means a block in between that the value is not live in.
-                Some(last) if last.end + 1 == piece.start => last.end = piece.end,
-                _ => lists[number].push(piece),
+                Some((_, previous)) if previous.end + 1 == piece.start => previous.end = piece.end,
+                _ => {
+                    last[number] = u32::try_from(found.len()).expect("a piece number");
+                    found.push((u32::try_from(number).expect("a register number"), piece));
+                }
             }
         }
         touched.clear();
     }
 
-    let mut pieces = Vec::new();
-    let mut spans = Vec::with_capacity(vregs);
-    for list in &lists {
-        let from = pieces.len();
-        pieces.extend_from_slice(list);
-        spans.push((from, pieces.len()));
+    // Counted out by value, which keeps each value's pieces in the order they were found.
+    let mut starts = vec![0usize; vregs + 1];
+    for &(number, _) in &found {
+        starts[number as usize + 1] += 1;
     }
+    for number in 0..vregs {
+        starts[number + 1] += starts[number];
+    }
+    let mut filled = starts.clone();
+    let mut pieces = vec![Range { start: 0, end: 0 }; found.len()];
+    for &(number, piece) in &found {
+        let at = &mut filled[number as usize];
+        pieces[*at] = piece;
+        *at += 1;
+    }
+    let spans = (0..vregs).map(|number| (starts[number], starts[number + 1])).collect();
     (pieces, spans)
 }
 
