@@ -593,8 +593,10 @@ mod tests {
                 // Ahead of the integer splitting, because the calls it writes take and give back
                 // whole words that the splitting then has nothing left to say about.
                 "half-floats",
-                "halves",
+                // The widths first, because a sixty five bit integer is held in a hundred and
+                // twenty eight and that is a width the splitting after it is for.
                 "widths",
+                "halves",
                 "divisions",
                 "bytes",
                 "counts",
