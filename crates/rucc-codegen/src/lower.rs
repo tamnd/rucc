@@ -75,10 +75,9 @@
 //! before it is used, which is true of the IR this is given because every pass before it keeps
 //! definitions ahead of uses.
 
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
@@ -997,13 +996,13 @@ struct Lowering<'a> {
     /// the IR block it is in and the instruction in front of it, and which machine instruction
     /// is the first one after it once the block has been filled. See
     /// [`rucc_ir::Func::declare_value_from`].
-    marks: HashMap<Block, Vec<Mark>>,
+    marks: Map<Block, Vec<Mark>>,
     /// The frame slot each fixed size `alloca` was given, which is what every reader of its
     /// address writes the address of. See [`Self::local`].
-    frame_slots: HashMap<Value, usize>,
+    frame_slots: Map<Value, usize>,
     /// The machine call each IR call with an unwind edge became, which [`Self::edges`] pairs with
     /// the pad the edge went to. See [`rucc_ir::Opcode::Unwound`].
-    unwinding: HashMap<Inst, mir::Inst>,
+    unwinding: Map<Inst, mir::Inst>,
     /// The machine opcode each head a rule builds is and the operands it has, by where the head's
     /// name is in the rule table. See [`Self::head`].
     heads: Map<(usize, usize), (mir::Opcode, &'static [OperandDesc])>,
@@ -1138,9 +1137,9 @@ impl<'a> Lowering<'a> {
             answer: None,
             applied: None,
             fired: Fired::new(),
-            marks: HashMap::new(),
-            frame_slots: HashMap::new(),
-            unwinding: HashMap::new(),
+            marks: Map::default(),
+            frame_slots: Map::default(),
+            unwinding: Map::default(),
             heads: Map::default(),
         }
     }
@@ -1307,7 +1306,7 @@ impl<'a> Lowering<'a> {
         // than once: a value that only some of its readers took has to be put back in a register
         // for all of them, and taking it away from those readers changes what they match.
         let insts: Vec<Inst> = self.source.insts(block).collect();
-        let mut refused: HashSet<Value> = HashSet::new();
+        let mut refused: Set<Value> = Set::default();
         let mut decided = self.decide(&insts, &refused);
         while let Some(value) = self.left_alive(&insts, &decided.plans) {
             refused.insert(value);
@@ -1319,7 +1318,7 @@ impl<'a> Lowering<'a> {
         // machine instruction in front of the place its IR instruction left off, or the block
         // for one where nothing has been written yet. What comes after it is not known until the
         // block is filled, so that is read below.
-        let wanted: HashSet<Option<Inst>> =
+        let wanted: Set<Option<Inst>> =
             self.marks.get(&block).into_iter().flatten().map(|&(after, _)| after).collect();
         let mut reached: Vec<(Option<Inst>, mir::Block, Option<mir::Inst>)> = Vec::new();
         for (index, (&inst, matched)) in insts.iter().zip(found).enumerate() {
@@ -6431,7 +6430,7 @@ impl<'a> Lowering<'a> {
     /// Backwards, because an instruction that has been folded into a later one does not get to
     /// fold anything into itself: the rule that took it only reached one level down, so what is
     /// under it is not in the term the matcher saw and cannot be replaced.
-    fn decide(&self, insts: &[Inst], refused: &HashSet<Value>) -> Decided {
+    fn decide(&self, insts: &[Inst], refused: &Set<Value>) -> Decided {
         let mut found: Vec<Option<Match<Term>>> = (0..insts.len()).map(|_| None).collect();
         let mut plans: Vec<Option<Plan>> = vec![None; insts.len()];
         let mut folded: Vec<Inst> = Vec::new();
@@ -6466,7 +6465,7 @@ impl<'a> Lowering<'a> {
     /// thousand blocks and a hundred and seventy thousand values that clearing was four percent of
     /// an optimized compile.
     fn left_alive(&self, insts: &[Inst], plans: &[Option<Plan>]) -> Option<Value> {
-        let mut taken: HashMap<Value, u32> = HashMap::new();
+        let mut taken: Map<Value, u32> = Map::default();
         for (&inst, plan) in insts.iter().zip(plans) {
             let Some(plan) = plan else { continue };
             let args = &self.source[self.source[inst].args];
@@ -6493,7 +6492,7 @@ impl<'a> Lowering<'a> {
     /// The plans are tried in order and the first that matches wins, which is the maximal munch
     /// `spec/10-backend.md` asks for: a plan that offers more to the matcher is tried before one
     /// that offers less.
-    fn select(&self, inst: Inst, refused: &HashSet<Value>) -> Option<(Plan, Match<Term>)> {
+    fn select(&self, inst: Inst, refused: &Set<Value>) -> Option<(Plan, Match<Term>)> {
         for plan in self.plans(inst, refused) {
             let terms = Terms::new(self.source, inst, plan);
             if let Some(matched) = self.selector.table.find(&terms, Term::Root) {
@@ -6509,7 +6508,7 @@ impl<'a> Lowering<'a> {
     /// changing slowest. The plans are counted out rather than collected, because this is asked
     /// for every instruction that is selected and the lists it used to build were an allocation
     /// or two per operand.
-    fn plans(&self, inst: Inst, refused: &HashSet<Value>) -> impl Iterator<Item = Plan> {
+    fn plans(&self, inst: Inst, refused: &Set<Value>) -> impl Iterator<Item = Plan> {
         let args = &self.source[self.source[inst].args];
         let mut ways = [[Shown::Reg; 3]; MAX_ARGS];
         let mut counts = [1; MAX_ARGS];
@@ -6551,7 +6550,7 @@ impl<'a> Lowering<'a> {
     /// be: when every reader takes it there is nobody left to read it and the instruction goes.
     /// An address a store and a load share is the shape that matters, since a memory operand has
     /// room for the whole of it and both readers have a memory operand.
-    fn foldable(&self, into: Inst, value: Value, refused: &HashSet<Value>) -> bool {
+    fn foldable(&self, into: Inst, value: Value, refused: &Set<Value>) -> bool {
         let Def::Result { inst, .. } = self.source[value].def else { return false };
         if self.source[inst].opcode == Opcode::IConst || refused.contains(&value) {
             return false;
@@ -6827,7 +6826,7 @@ impl<'a> Lowering<'a> {
                 // the block, and the operands of the rule that writes one are the number and
                 // nothing else.
                 let matched = self
-                    .select(inst, &HashSet::new())
+                    .select(inst, &Set::default())
                     .map(|(_, matched)| matched)
                     .ok_or_else(|| self.unsupported(inst))?;
                 self.emit(inst, &matched)?;

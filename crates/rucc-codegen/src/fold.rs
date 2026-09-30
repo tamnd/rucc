@@ -122,8 +122,6 @@
 //! arithmetic and would be reading a register file where the reader's base may have been reused
 //! for something else in between.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
@@ -311,7 +309,7 @@ pub fn addresses(
         // One `lea` per register it wrote, along with the folds its readers so far have agreed to.
         // A register leaves the table the moment the set can no longer be all of them: anything
         // writes what the address reads, or a reader turns up that cannot take it.
-        let mut open: HashMap<mir::Reg, Open> = HashMap::new();
+        let mut open: Map<mir::Reg, Open> = Map::default();
         for inst in func.insts(block).collect::<Vec<_>>() {
             if let Some(ready) = offer(func, &mut open, inst) {
                 // The set is the whole of what this fold is: every reader takes the address and
@@ -412,7 +410,7 @@ pub fn offsets(
     for block in func.blocks().collect::<Vec<_>>() {
         // Each register an addition of a constant has written so far in this block, with the
         // instruction that wrote it, the operand it added to and the constant it added.
-        let mut added: HashMap<mir::Reg, (mir::Inst, mir::Reg, i64)> = HashMap::new();
+        let mut added: Map<mir::Reg, (mir::Inst, mir::Reg, i64)> = Map::default();
         for inst in func.insts(block).collect::<Vec<_>>() {
             let opcode = func[inst].opcode;
             if opcode == add || opcode == sub {
@@ -495,7 +493,7 @@ struct Open {
 /// can fold into, and one of those is enough, so the register is dropped rather than the read being
 /// passed over. Reading it twice in the one instruction counts as that too, since only one of the
 /// two reads is the memory operand and the other would be left naming a register nothing writes.
-fn offer(func: &mir::Func, open: &mut HashMap<mir::Reg, Open>, inst: mir::Inst) -> Option<Open> {
+fn offer(func: &mir::Func, open: &mut Map<mir::Reg, Open>, inst: mir::Inst) -> Option<Open> {
     let folding = candidate(func, open, inst);
     let takes = |reg: mir::Reg| folding.as_ref().is_some_and(|fold| fold.base == reg);
     let refused: Vec<mir::Reg> = open
@@ -650,7 +648,7 @@ struct Folding {
 /// the printer and the allocator both read. Dropping the ones the reader's own address named and
 /// putting the composed address's on the end keeps it, and the indices in the new addressing mode
 /// are worked out from the length rather than carried over.
-fn candidate(func: &mir::Func, open: &HashMap<mir::Reg, Open>, inst: mir::Inst) -> Option<Folding> {
+fn candidate(func: &mir::Func, open: &Map<mir::Reg, Open>, inst: mir::Inst) -> Option<Folding> {
     let base = base_reg(func, inst)?;
     let held = open.get(&base)?;
     let (from, address) = (held.from, held.address);

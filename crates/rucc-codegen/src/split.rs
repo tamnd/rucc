@@ -36,9 +36,8 @@
 //! wants a landing pad at every one of them. Which block an address names is settled by the pass
 //! above, so the pad is written after it and not where the prologue's own pad is written.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
@@ -177,11 +176,11 @@ pub fn indirect(
     // One register per thing a branch has to give, rather than one per place it is given to. The
     // key is what every branch gives that parameter, so two parameters given the same register by
     // the same branches are given it in one register and a branch writes that register once.
-    let mut homes: HashMap<Given, mir::Reg> = HashMap::new();
+    let mut homes: Map<Given, mir::Reg> = Map::default();
     // What each branch writes in front of its jump, in the order it was first asked for, and never
     // the same register twice. Two parameters that share a register are given it by the one move.
     let mut writes: Vec<Vec<(mir::Reg, mir::Reg, RegClass)>> = vec![Vec::new(); branches.len()];
-    let mut entries: HashMap<mir::Block, mir::Block> = HashMap::new();
+    let mut entries: Map<mir::Block, mir::Block> = Map::default();
 
     for target in targets {
         let params = func[target].params.clone();

@@ -21,6 +21,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Folding addresses into their readers keeps the instructions the frame still owes an offset in a set, instead of walking the pending lists for every `lea` (#2242).
 - The register allocator finds what an instruction insists on by searching only the one register's points, instead of every constraint in the function (#2243).
 - Folding addresses into their readers moves the frame's pending entries in one walk at the end, instead of searching the list of locals for each fold (#2248).
+- The backend's maps and sets hash with the shared hasher instead of SipHash (#2251).
 
 ### Fixed
 

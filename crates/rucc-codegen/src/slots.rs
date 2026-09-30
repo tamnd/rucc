@@ -105,9 +105,10 @@
 //! would have got anyway.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_mir::{Func, Inst, Opcode, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
@@ -700,11 +701,11 @@ pub fn reach(
 fn follow(
     func: &Func,
     lea: Opcode,
-    readers: &HashMap<Reg, Vec<Inst>>,
-    crossing: &HashSet<Reg>,
+    readers: &Map<Reg, Vec<Inst>>,
+    crossing: &Set<Reg>,
     mut held: Carried,
 ) -> Option<Carried> {
-    let mut seen: HashSet<Reg> = held.regs.iter().copied().collect();
+    let mut seen: Set<Reg> = held.regs.iter().copied().collect();
     let mut queue = held.regs.clone();
     while let Some(reg) = queue.pop() {
         if crossing.contains(&reg) {
@@ -760,8 +761,8 @@ fn def(func: &Func, inst: Inst) -> Option<Reg> {
 }
 
 /// Which instructions read each virtual register.
-fn readers(func: &Func) -> HashMap<Reg, Vec<Inst>> {
-    let mut readers: HashMap<Reg, Vec<Inst>> = HashMap::new();
+fn readers(func: &Func) -> Map<Reg, Vec<Inst>> {
+    let mut readers: Map<Reg, Vec<Inst>> = Map::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
             for operand in &func[func[inst].operands] {
@@ -784,8 +785,8 @@ fn readers(func: &Func) -> HashMap<Reg, Vec<Inst>> {
 /// These are the reads that are not operands, so the walk above would not see them, and an address
 /// that goes round a loop this way is one whose local is left out rather than one followed into a
 /// second name.
-fn crossing(func: &Func) -> HashSet<Reg> {
-    let mut crossing = HashSet::new();
+fn crossing(func: &Func) -> Set<Reg> {
+    let mut crossing = Set::default();
     for block in func.blocks() {
         crossing.extend(func[block].params.iter().map(|param| param.reg));
         for call in &func[block].succs {
