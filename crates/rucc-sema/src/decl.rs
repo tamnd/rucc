@@ -356,6 +356,15 @@ impl DeclFlags {
     /// [`Self::NO_INSTRUMENT`] is, since it is a fact about the body said wherever the name is.
     pub const NO_STACK_PROTECTOR: Self = Self(1 << 16);
 
+    /// `__attribute__((function_return("keep")))` was written, so the body's returns stay `ret`
+    /// whatever `-mfunction-return=` asked for. The kernel's entry code and the thunks themselves
+    /// are written this way, since they run where a return thunk cannot.
+    pub const RETURN_KEEP: Self = Self(1 << 17);
+
+    /// `__attribute__((indirect_branch("keep")))` was written, so the body's indirect calls and
+    /// jumps stay as they are whatever `-mindirect-branch=` asked for.
+    pub const INDIRECT_KEEP: Self = Self(1 << 18);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

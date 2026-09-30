@@ -154,6 +154,12 @@ impl AttrSet {
     /// function is a declaration. An `extern inline` definition under GNU's reading, whose
     /// external definition is in some other object.
     pub const INLINE_ONLY: Self = Self(1 << 17);
+    /// Returns stay `ret` whatever `-mfunction-return=` asked for.
+    /// `__attribute__((function_return("keep")))`.
+    pub const RETURN_KEEP: Self = Self(1 << 18);
+    /// Indirect calls and jumps stay as they are whatever `-mindirect-branch=` asked for.
+    /// `__attribute__((indirect_branch("keep")))`.
+    pub const INDIRECT_KEEP: Self = Self(1 << 19);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -259,6 +265,8 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::STACK_PROTECT, "stack_protect"),
     (AttrSet::NO_STACK_PROTECTOR, "no_stack_protector"),
     (AttrSet::INLINE_ONLY, "inline_only"),
+    (AttrSet::RETURN_KEEP, "return_keep"),
+    (AttrSet::INDIRECT_KEEP, "indirect_keep"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
