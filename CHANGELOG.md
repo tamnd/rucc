@@ -22,6 +22,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - The assembler writes `loop`, `loope`, `loopz`, `loopne` and `loopnz`, which the kernel's `relocate_kernel_64.S` uses.
+- A number of any width cast to a pointer and back folds to itself, so test_printf.c's `BUILD_BUG_ON(IS_ERR(PTR))` with a 64-bit `PTR` builds.
 - `p[0][1]` with `p` a pointer to an array of unknown length is refused again, as gcc refuses it. Only `*p` is let through.
 - A stack slot's address compared against null folds to a constant, as gcc does, so landlock's `BUILD_BUG_ON(!dst)` on the address of a local builds.
 - A `static` function that asks `__builtin_constant_p` about a parameter is inlined at a call that passes a constant there, and its size is counted as what is left once that answer is known. This is how i915_hwmon's `REG_FIELD_GET` builds.
