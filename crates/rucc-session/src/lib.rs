@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Arch, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, Env, Isa, Os, TargetInfo, Triple};
 
 /// An optimisation level.
 ///
@@ -1537,6 +1537,49 @@ impl FromStr for GnucVersion {
     }
 }
 
+impl GnucVersion {
+    /// The dialect that GCC release compiles when the command line has no `-std=`.
+    ///
+    /// A build that claims an old GCC is usually an old tree, and an old tree that passes no
+    /// `-std=` was written against that release's default rather than ours. Kernels up to 3.17 are
+    /// the example that matters: they rely on gnu89, and under gnu23 their own identifiers meet
+    /// keywords. GCC 5 moved the default to gnu11, GCC 8 to gnu17 and GCC 15 to gnu23. Every one of
+    /// these is a GNU dialect, so the extensions stay on. `spec/04-driver-and-cli.md` section 4.6.
+    #[must_use]
+    pub const fn default_std(self) -> Std {
+        match self.major {
+            0..=4 => Std::C89,
+            5..=7 => Std::C11,
+            8..=14 => Std::C17,
+            _ => Std::C23,
+        }
+    }
+
+    /// Whether that GCC release put a tentative definition in a common symbol when the command
+    /// line did not say, which every release before 10 did.
+    #[must_use]
+    pub const fn common_by_default(self) -> bool {
+        self.major < 10
+    }
+
+    /// What `-dumpversion` prints for that release.
+    ///
+    /// Before GCC 7 it was the whole version, and there was nothing else to ask. GCC 7 added
+    /// `-dumpfullversion` for that and, built the way the distributions build it, prints only the
+    /// major number for `-dumpversion`, which is the shape scripts written since then expect.
+    #[must_use]
+    pub fn dumpversion(self) -> String {
+        if self.major < 7 { self.to_string() } else { self.major.to_string() }
+    }
+}
+
+impl fmt::Display for GnucVersion {
+    /// All three numbers, which is what `-dumpfullversion` prints and what ends GCC's banner.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
 /// The GNU assembler release claimed, which is the number at the end of what `-Wa,--version`
 /// prints.
 ///
@@ -2722,10 +2765,16 @@ impl Session {
     /// Whether a tentative definition is a common symbol rather than one in `.bss`.
     ///
     /// The command line answers where it said anything and the target answers otherwise, for the
-    /// reason [`Options::common`] gives.
+    /// reason [`Options::common`] gives. A claim of a GCC before 10 answers yes as well, since
+    /// those releases did and a tree written for them can define the same variable in two files.
+    /// An MSVC row is left alone, because `-fgnuc-version=` there only claims `__GNUC__`, as it
+    /// does in clang.
     #[must_use]
     pub fn common(&self) -> bool {
-        self.opts.common.unwrap_or(self.opts.target.os == Os::Darwin)
+        self.opts.common.unwrap_or_else(|| {
+            self.opts.target.os == Os::Darwin
+                || (self.opts.target.env != Env::Msvc && self.opts.gnuc.common_by_default())
+        })
     }
 
     /// Records a diagnostic.
@@ -2801,6 +2850,25 @@ mod tests {
         assert!("".parse::<GnucVersion>().is_err());
         assert!("15.".parse::<GnucVersion>().is_err(), "a trailing dot is a typo, not a zero");
         assert!("1.2.3.4".parse::<GnucVersion>().is_err());
+    }
+
+    #[test]
+    fn a_claimed_release_answers_for_its_defaults_the_way_that_gcc_did() {
+        let v = |text: &str| text.parse::<GnucVersion>().unwrap();
+        assert_eq!(v("4.9.4").default_std(), Std::C89);
+        assert_eq!(v("5.1.0").default_std(), Std::C11);
+        assert_eq!(v("7.5.0").default_std(), Std::C11);
+        assert_eq!(v("8.1.0").default_std(), Std::C17);
+        assert_eq!(v("14.2.0").default_std(), Std::C17);
+        assert_eq!(v("15.1.0").default_std(), Std::C23);
+        assert_eq!(GnucVersion::default().default_std(), Std::default());
+        assert!(v("9.5.0").common_by_default());
+        assert!(!v("10.1.0").common_by_default());
+        assert_eq!(v("4.9").to_string(), "4.9.0");
+        assert_eq!(v("4.9.4").dumpversion(), "4.9.4");
+        assert_eq!(v("6.5.0").dumpversion(), "6.5.0");
+        assert_eq!(v("7.1.0").dumpversion(), "7");
+        assert_eq!(v("14.2.0").dumpversion(), "14");
     }
 
     #[test]
