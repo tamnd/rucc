@@ -452,7 +452,10 @@ fn base_of(bytes: &[u8]) -> (u32, usize) {
     match bytes {
         [b'0', b'x' | b'X', ..] => (16, 2),
         [b'0', b'b' | b'B', ..] => (2, 2),
-        [b'0', next, ..] if next.is_ascii_digit() => (8, 1),
+        // The leading zero is read as a digit of its own rather than skipped, which changes
+        // nothing about the value and is what lets a separator follow it: `0'17` is octal
+        // fifteen in C23, as it is in gcc, and a separator needs a digit before it.
+        [b'0', next, ..] if next.is_ascii_digit() || *next == b'\'' => (8, 0),
         _ => (10, 0),
     }
 }
@@ -916,6 +919,9 @@ mod tests {
         assert_eq!(value.value, 1_000_000);
         assert!(value.remarks.is_none());
         assert_eq!(c23("0x1'0").expect("hex with a separator").value, 16);
+        assert_eq!(c23("0'17").expect("octal with a separator").value, 0o17);
+        assert_eq!(c23("0'1'7").expect("octal with two").value, 0o17);
+        assert_eq!(c23("0'8"), Err(IntError::InvalidOctalDigit));
 
         let older = integer("1'000", Std::C17, &linux()).expect("still converted");
         assert!(older.remarks.has(Remarks::SEPARATORS));
