@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A pointer made from an integer constant that fits in thirty two bits and cast back to an integer folds to that constant, so the kernel's `BUILD_BUG_ON` on `xa_mk_value (0)` in `mm/swap_table.h` builds.
 - `__has_c_attribute(gnu::packed)` answered zero, because the scope was dropped and what was left was asked of the standard attributes. A scoped name is now asked of the vendor it names, as gcc 16 does: `gnu::` and `__gnu__::` answer one for a GNU attribute rucc has, whichever of the two operators asks, and any other scope answers zero (#315).
 - `-fgcse` and `-fno-gcse` are taken and ignored like the other flags that name a gcc pass, so the kernel's `kernel/bpf/core.c` builds.
+- `(*p)[i]` where `p` points to an array of unknown length is accepted, as gcc does. Landlock indexes its rules that way.
 - The assembler writes `vandps`, `vandnps`, `vorps` and `vxorps` and their `pd` forms, which crypto/xor.c uses through xor_avx.h.
 - The assembler writes `pushw` and `popw`, `sgdtl`, `sidtl`, `lgdtl` and `lidtl` under `.code32`, and the VEX forms of `vpextrb`, `vpextrw`, `vpextrd`, `vpinsrb`, `vpinsrw` and `vpinsrd`, which the kernel's `efi-mixed.S`, `relocate_kernel_64.S` and `crc32-pclmul.S` use.
 - gcc's scheduler flags under `-fsched-` and `-fsched2-` are taken and ignored, like `-fschedule-insns`. crypto/serpent_generic.c asks for `-fsched-pressure`.
