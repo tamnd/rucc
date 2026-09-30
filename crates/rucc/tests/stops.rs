@@ -85,3 +85,15 @@ int g(int x) { switch (x) { case 1: return 5; case 2: return 7; default: __built
     let g = body(&text, "g");
     assert_eq!(g.iter().filter(|line| line.starts_with("cmp")).count(), 1, "{text}");
 }
+
+#[test]
+fn a_parameter_read_before_an_early_call_stays_where_it_arrived() {
+    let source = "\
+extern int g(int);
+int h(int x) { if (x == 1) return g(1); if (x == 2) return g(3); return 0; }
+";
+    let text = assembly("early", source);
+    let h = body(&text, "h");
+    assert!(!h.iter().any(|line| line.starts_with("push")), "{text}");
+    assert!(h.iter().any(|line| line == "cmpl\t$1, %edi"), "{text}");
+}
