@@ -93,6 +93,9 @@ pub static GAPS: &[(Opcode, &str, &str)] = &[
         "tamnd/rucc#226",
     ),
     (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
+    (Opcode::ExtractLane, "a lane of a vector, which nothing writes yet", "tamnd/rucc#2320"),
+    (Opcode::InsertLane, "the same", "tamnd/rucc#2320"),
+    (Opcode::Shuffle, "the same", "tamnd/rucc#2320"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
     // back end can be handed that reaches one. The ones the safety pass lowers are on `HAND`,

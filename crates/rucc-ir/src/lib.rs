@@ -56,8 +56,8 @@ pub use func::{Builder, Counts, Func, Notices, Start};
 pub use inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Drains,
     Extra, Hint, Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param,
-    PlaneNode, Restrict, Sig, Signature, SlotList, SwitchInfo, TbaaNode, VaInfo, Value, ValueData,
-    ValueList, ValueRef,
+    PlaneNode, Restrict, Shuffle, Sig, Signature, SlotList, SwitchInfo, TbaaNode, VaInfo, Value,
+    ValueData, ValueList, ValueRef,
 };
 pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, Dll, FuncId, Global,

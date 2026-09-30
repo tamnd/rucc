@@ -137,6 +137,16 @@ pub enum Opcode {
     /// A reinterpretation of the same bits at the same width.
     Bitcast,
 
+    // Lanes.
+    /// One lane of a vector, `extractlane.i32 %v, lane 2`, which is a value of the lane's type.
+    ExtractLane,
+    /// A vector with one lane replaced, `insertlane.i32x4 %v, %x, lane 2`.
+    InsertLane,
+    /// A vector made of the lanes of another in the order a list of lane numbers gives,
+    /// `shuffle.i32x4 %v, lanes [1, 2, 3, 0]`. One source and at most eight lanes, which is what
+    /// the one register SSE2 shuffles read.
+    Shuffle,
+
     // Memory.
     /// Memory as the function found it, which is where a memory SSA chain starts.
     ///
@@ -785,6 +795,9 @@ impl Opcode {
             Self::PtrToInt => "ptrtoint",
             Self::IntToPtr => "inttoptr",
             Self::Bitcast => "bitcast",
+            Self::ExtractLane => "extractlane",
+            Self::InsertLane => "insertlane",
+            Self::Shuffle => "shuffle",
             Self::MemEntry => "mem_entry",
             Self::Alloca => "alloca",
             Self::Load => "load",
@@ -998,6 +1011,9 @@ impl Opcode {
                 | Self::PtrToInt
                 | Self::IntToPtr
                 | Self::Bitcast
+                | Self::ExtractLane
+                | Self::InsertLane
+                | Self::Shuffle
                 | Self::PtrAdd
                 | Self::Ctlz
                 | Self::Cttz
@@ -1375,6 +1391,11 @@ impl Opcode {
             Self::Fence => ExtraKind::Order,
             Self::Prefetch => ExtraKind::Prefetch,
             Self::ObjectSize => ExtraKind::Question,
+            // Which lane, or which lanes in which order, which is a number written in the
+            // instruction for the reason a depth is: the instructions these become take the lane
+            // as an immediate, and a lane not known until the program runs is a load from memory.
+            Self::ExtractLane | Self::InsertLane => ExtraKind::Lane,
+            Self::Shuffle => ExtraKind::Shuffle,
             // How far up the chain of frames to walk, which is a number written in the instruction
             // and never a value. The builtins these came from take a constant and nothing else, for
             // the reason `prefetch` takes one: the instructions this becomes are a walk of that
@@ -1417,6 +1438,10 @@ pub enum ExtraKind {
     Depth,
     /// Which of the four object size questions.
     Question,
+    /// Which lane.
+    Lane,
+    /// Which lanes, in which order.
+    Shuffle,
     /// Branch targets.
     Targets,
     /// A call.
@@ -1462,6 +1487,8 @@ impl ExtraKind {
             Self::Owner => "an owner",
             Self::Node => "a metadata node",
             Self::Reason => "a reason",
+            Self::Lane => "a lane",
+            Self::Shuffle => "a list of lanes",
         }
     }
 }
@@ -1520,6 +1547,9 @@ static ALL: &[Opcode] = &[
     Opcode::PtrToInt,
     Opcode::IntToPtr,
     Opcode::Bitcast,
+    Opcode::ExtractLane,
+    Opcode::InsertLane,
+    Opcode::Shuffle,
     Opcode::MemEntry,
     Opcode::Alloca,
     Opcode::Load,

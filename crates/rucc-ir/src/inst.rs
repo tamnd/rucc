@@ -502,6 +502,63 @@ pub struct AsmInfo {
     pub targets: BlockCallList,
 }
 
+/// Which lanes a `shuffle` takes and in which order, one lane number per lane of the answer.
+///
+/// At most eight lanes and each number below sixteen, packed four bits apiece so the whole list
+/// fits beside the other payloads in [`Extra`] rather than in a side table. Eight is the most any
+/// one register shuffle in SSE2 builds, and a longer one is a byte shuffle this compiler has no
+/// target for yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Shuffle {
+    picks: u32,
+    len: u8,
+}
+
+impl Shuffle {
+    /// The most lanes one can have.
+    pub const MAX: usize = 8;
+
+    /// The shuffle taking those lanes in that order, or nothing when there are more than
+    /// [`Shuffle::MAX`] of them or a lane number does not fit in four bits.
+    #[must_use]
+    pub fn new(lanes: &[u8]) -> Option<Self> {
+        if lanes.is_empty() || lanes.len() > Self::MAX {
+            return None;
+        }
+        let mut picks = 0u32;
+        for (at, &lane) in lanes.iter().enumerate() {
+            if lane >= 16 {
+                return None;
+            }
+            picks |= u32::from(lane) << (4 * at);
+        }
+        Some(Self { picks, len: u8::try_from(lanes.len()).ok()? })
+    }
+
+    /// How many lanes the answer has.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.len as usize
+    }
+
+    /// Never, since a shuffle has at least one lane; here because a `len` without one is a lint.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Which lane of the source lane `at` of the answer is.
+    #[must_use]
+    pub const fn lane(self, at: usize) -> u8 {
+        ((self.picks >> (4 * at)) & 0xf) as u8
+    }
+
+    /// The lane numbers in order.
+    pub fn lanes(self) -> impl Iterator<Item = u8> {
+        (0..self.len()).map(move |at| self.lane(at))
+    }
+}
+
 /// Everything an instruction carries that is not a value operand.
 ///
 /// Anything that fits in eight bytes is here and anything larger is an index into a side
@@ -531,6 +588,10 @@ pub enum Extra {
     Depth(u32),
     /// Which question an `object_size` asks, from zero to three.
     Question(u8),
+    /// Which lane, for `extractlane` and `insertlane`.
+    Lane(u8),
+    /// Which lanes in which order, for `shuffle`. See [`Shuffle`].
+    Shuffle(Shuffle),
     /// The targets of a branch, with the default first for a `switch`.
     Targets(BlockCallList),
     /// A call.
@@ -570,6 +631,8 @@ impl Extra {
             Self::Prefetch(_) => ExtraKind::Prefetch,
             Self::Depth(_) => ExtraKind::Depth,
             Self::Question(_) => ExtraKind::Question,
+            Self::Lane(_) => ExtraKind::Lane,
+            Self::Shuffle(_) => ExtraKind::Shuffle,
             Self::Targets(_) => ExtraKind::Targets,
             Self::Call(_) => ExtraKind::Call,
             Self::Switch(_) => ExtraKind::Switch,

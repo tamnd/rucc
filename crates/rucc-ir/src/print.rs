@@ -671,6 +671,21 @@ impl<'a> Printer<'a> {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", kind {kind}");
             }
+            Extra::Lane(lane) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", lane {lane}");
+            }
+            Extra::Shuffle(shuffle) => {
+                self.value_list_spaced(args);
+                self.out.push_str(", lanes [");
+                for (at, lane) in shuffle.lanes().enumerate() {
+                    if at > 0 {
+                        self.out.push_str(", ");
+                    }
+                    let _ = write!(self.out, "{lane}");
+                }
+                self.out.push(']');
+            }
             Extra::Targets(targets) => {
                 // A conditional branch names its condition first and then both arms. A jump
                 // has no operands at all and is its target.
