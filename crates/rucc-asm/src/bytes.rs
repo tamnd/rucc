@@ -730,6 +730,7 @@ impl Assembler<'_> {
                     // makes is a distance from where the instruction ends. The field of an AArch64
                     // instruction is not something this machine has.
                     Reference::Address { .. }
+                    | Reference::Signed
                     | Reference::Image
                     | Reference::Away
                     | Reference::Field(_) => {

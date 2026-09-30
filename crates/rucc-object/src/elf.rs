@@ -46,6 +46,7 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
+        Reference::Signed => elf::R_X86_64_32S,
         Reference::Address { .. } | Reference::Image | Reference::Section | Reference::Field(_) => {
             return None;
         }

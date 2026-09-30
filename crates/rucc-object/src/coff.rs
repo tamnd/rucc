@@ -61,7 +61,9 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
         Reference::GotBare | Reference::GotKept | Reference::Field(_) => return None,
         Reference::Away => return None,
-        Reference::Address { .. } => return None,
+        // Absolute addresses in instructions are what code that is not position independent
+        // writes, which nothing on this format asks for.
+        Reference::Address { .. } | Reference::Signed => return None,
     })
 }
 

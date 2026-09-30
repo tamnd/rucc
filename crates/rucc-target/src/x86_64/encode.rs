@@ -2757,8 +2757,9 @@ pub struct Addr {
     /// Which storage the address is in, when it is not the flat one. See [`Segment`].
     pub segment: Option<Segment>,
     /// Whether the displacement is a number the linker writes, which makes it four bytes however
-    /// small it is now. A section relative offset added to a register is the one case, since the
-    /// rip relative one is four bytes anyway.
+    /// small it is now. A section relative offset added to a register is one case, and the address
+    /// of a name with or without registers added to it, which code that is not position
+    /// independent writes, is the other. The rip relative one is four bytes anyway.
     pub linked: bool,
 }
 
@@ -3406,7 +3407,12 @@ impl Writer<'_> {
             out.push((scale << 6) | (index.unwrap_or(4) << 3) | base.unwrap_or(5));
         }
         match mode {
-            0 if base.is_none() => out.extend_from_slice(&addr.disp.to_le_bytes()),
+            0 if base.is_none() => {
+                if addr.linked {
+                    holes.disp = Some(out.len());
+                }
+                out.extend_from_slice(&addr.disp.to_le_bytes());
+            }
             0 => {}
             // Counted in accesses under EVEX, and `scale` is one otherwise.
             1 => out.push((addr.disp / self.scale) as u8),
