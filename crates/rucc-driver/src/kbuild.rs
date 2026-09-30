@@ -182,7 +182,6 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     refused("-fplugin-arg-*", "there are no gcc plugins here to hand an argument to", None),
     // Debug information.
-    refused("-gz=zstd", "the debug sections are compressed with zlib and not zstd", Some(2288)),
     // x86-64.
     only(A64, refused("-mstack-protector-guard*", GUARD, Some(2279))),
     // The thunk spellings nothing here writes. `keep` and `thunk-extern` have their own arms.

@@ -3,10 +3,8 @@
 //! Design: `spec/04-driver-and-cli.md` sections 4.8 and 4.12.
 //!
 //! `-gz` says how the debug sections are compressed and `-gsplit-dwarf` says they go in a file of
-//! their own. zlib is written in both of its layouts, and `-gz=zstd` is refused until there is a
-//! zstd writer, since the kernel's `DEBUG_INFO_COMPRESSED_ZSTD` probes it and a compiler that took
-//! it would have the kernel configured for sections that are not there. Nothing writes a second
-//! file, so `-gsplit-dwarf` is refused and `-gno-split-dwarf` is taken.
+//! their own. zlib is written in both of its layouts and zstd in the one layout it has. Nothing
+//! writes a second file, so `-gsplit-dwarf` is refused and `-gno-split-dwarf` is taken.
 //!
 //! What is asserted is the object's section table, read by hand below, because the claim being
 //! made to a build that passes the flag is about the object and not about a field somewhere.
@@ -153,12 +151,31 @@ fn zlib_gnu_renames_the_section_and_gives_its_size_after_zlib() {
     named(&packed, ".rela.zdebug_info");
 }
 
+/// `-gz=zstd` is the `-gz=zlib` layout with zstd named in the header and a zstd frame after it.
+/// It is what the kernel's `DEBUG_INFO_COMPRESSED_ZSTD` asks for.
 #[test]
-fn zstd_and_a_name_nothing_has_heard_of_are_refused() {
+fn zstd_says_zstd_in_the_header_and_writes_a_zstd_frame() {
+    let dir = fixture("zstd");
+    let (ok, said) = run(&dir, &["-g"], "plain.o");
+    assert!(ok, "{said}");
+    let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
+    let (ok, said) = run(&dir, &["-g", "-gz=zstd"], "packed.o");
+    let packed = std::fs::read(dir.join("packed.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok && said.is_empty(), "{said}");
+    let (plain, packed) = (sections(&plain), sections(&packed));
+    let info = named(&packed, ".debug_info");
+    assert_eq!(info.flags & COMPRESSED, COMPRESSED, "not marked compressed");
+    assert_eq!(info.bytes[..4], [2, 0, 0, 0], "not ELFCOMPRESS_ZSTD");
+    let size = u64::from_le_bytes(info.bytes[8..16].try_into().expect("eight bytes"));
+    assert_eq!(size, named(&plain, ".debug_info").bytes.len() as u64);
+    assert_eq!(info.bytes[24..28], [0x28, 0xB5, 0x2F, 0xFD], "a zstd frame after the header");
+    assert!(info.bytes.len() < named(&plain, ".debug_info").bytes.len());
+}
+
+#[test]
+fn a_name_nothing_has_heard_of_is_refused() {
     let dir = fixture("never");
-    let (ok, said) = run(&dir, &["-g", "-gz=zstd"], "never.o");
-    assert!(!ok, "-gz=zstd is refused");
-    assert!(said.contains("#2288"), "{said}");
 
     // A value nothing has heard of stops the compilation, so that a typo in a distribution's
     // flags is found here rather than by whoever later wonders why nothing got smaller.

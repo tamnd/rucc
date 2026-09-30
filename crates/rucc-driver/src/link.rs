@@ -1130,7 +1130,7 @@ pub fn line(
     // as the objects had them, which is what the object writer does on those formats as well.
     if !matches!(target.os, Os::Darwin | Os::Windows) {
         match opts.compress {
-            Compress::None | Compress::Zstd => {}
+            Compress::None => {}
             how => args.push(format!("--compress-debug-sections={how}")),
         }
     }
@@ -1999,6 +1999,9 @@ mod tests {
         let gnu = LinkOptions { compress: Compress::ZlibGnu, ..zlib.clone() };
         let args = line(linux(), &gnu, &one("a.o"), "built-in.o").expect("a line");
         assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zlib-gnu"));
+        let zstd = LinkOptions { compress: Compress::Zstd, ..zlib.clone() };
+        let args = line(linux(), &zstd, &one("a.o"), "built-in.o").expect("a line");
+        assert_eq!(args.last().map(String::as_str), Some("--compress-debug-sections=zstd"));
         let args = line(mac(), &zlib, &one("a.o"), "b.o").expect("ld64 takes -r");
         assert!(args.iter().all(|arg| !arg.contains("compress")), "{args:?}");
     }
