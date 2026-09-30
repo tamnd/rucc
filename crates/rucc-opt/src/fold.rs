@@ -80,8 +80,12 @@
 //! and one for a byte holding it, so the constant this leaves behind lowers wherever the
 //! comparison did.
 
+use rucc_base::Symbol;
 use rucc_base::float::{Float, Status};
-use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
+use rucc_ir::{
+    Block, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
+    SymbolRef, Type, Value,
+};
 
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
@@ -142,21 +146,125 @@ pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
                 stats.missed(NO_FUEL);
                 continue;
             }
-            let ty = func[result_of(func, inst)].ty;
-            let at = func.add_imm(folded);
-            let data = &mut func[inst];
-            // Which constant instruction holds the answer is the result type's question and
-            // not the folded instruction's. An `fneg` and a bitcast out of an integer both
-            // answer in a floating point type and the rest of what folds here answers in an
-            // integer one, and an immediate is the same bits either way.
-            data.opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
-            data.flags = Flags::NONE;
-            data.args = rucc_ir::ValueList::EMPTY;
-            data.extra = Extra::Imm(at);
+            write(func, inst, folded);
             stats.optimized(FOLDED);
         }
     }
     stats
+}
+
+/// Turns the instruction into the constant it was worked out to be, keeping its result value.
+fn write(func: &mut Func, inst: Inst, folded: Imm) {
+    let ty = func[result_of(func, inst)].ty;
+    let at = func.add_imm(folded);
+    let data = &mut func[inst];
+    // Which constant instruction holds the answer is the result type's question and not the
+    // folded instruction's. An `fneg` and a bitcast out of an integer both answer in a floating
+    // point type and the rest of what folds here answers in an integer one, and an immediate is
+    // the same bits either way.
+    data.opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
+    data.flags = Flags::NONE;
+    data.args = rucc_ir::ValueList::EMPTY;
+    data.extra = Extra::Imm(at);
+}
+
+/// Decides `&f == NULL` and `&x != NULL` for every `f` and `x` this module defines, and returns
+/// how many comparisons it decided.
+///
+/// A function or an object with a body here has an address that is not null, whatever its
+/// linkage, which is gcc's rule as well and the one it keeps under the kernel's
+/// `-fno-delete-null-pointer-checks`. A name only declared here is left alone, because a weak one
+/// may never be defined and then its address is null. The kernel leans on this in
+/// `BUILD_BUG_ON (fn == NULL)`, which i915 writes around each callback it registers and which
+/// only builds once the comparison is a number.
+///
+/// Over the module rather than in [`Fold`] because whether a name has a body is a fact about the
+/// module, and a pass sees one function.
+pub fn addresses(module: &mut Module) -> usize {
+    let mut decided = 0;
+    for id in module.funcs().collect::<Vec<FuncId>>() {
+        if module[id].is_declaration() {
+            continue;
+        }
+        let func = &module[id];
+        let mut found = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let data = &func[inst];
+                let Extra::IntPred(pred) = data.extra else { continue };
+                if data.opcode != Opcode::ICmp || !matches!(pred, IntPred::Eq | IntPred::Ne) {
+                    continue;
+                }
+                let &[lhs, rhs] = &func[data.args] else { continue };
+                let null = |value| cast(func, value).is_some_and(|(imm, _)| imm.unsigned() == 0);
+                let defined = |value| named(func, value).is_some_and(|name| defined(module, name));
+                if (defined(lhs) && null(rhs)) || (null(lhs) && defined(rhs)) {
+                    let ty = func[result_of(func, inst)].ty;
+                    found.push((inst, Imm::int(i128::from(pred == IntPred::Ne), ty)));
+                }
+            }
+        }
+        for (inst, answer) in found {
+            write(&mut module[id], inst, answer);
+            decided += 1;
+        }
+    }
+    decided
+}
+
+/// The name whose address this value is, if it is one.
+fn named(func: &Func, value: Value) -> Option<Symbol> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    let Extra::Symbol(name) = data.extra else { return None };
+    (data.opcode == Opcode::GlobalAddr).then_some(name)
+}
+
+/// Whether this module gives the name a body, a function's or an object's.
+fn defined(module: &Module, name: Symbol) -> bool {
+    match module.lookup(name) {
+        Some(SymbolRef::Func(id)) => !module[id].is_declaration(),
+        Some(SymbolRef::Global(id)) => !module[id].is_declaration(),
+        _ => false,
+    }
+}
+
+/// The integer constant this pointer was cast from, with its type, if it was cast from one.
+fn cast(func: &Func, value: Value) -> Option<(Imm, Type)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IntToPtr {
+        return None;
+    }
+    constant(func, *func[func[inst].args].first()?)
+}
+
+/// Whether two integer constants cast to pointers are the same address, when that can be said
+/// without knowing how wide an address is.
+///
+/// `ERR_PTR (-ENOENT) == ERR_PTR (-EINVAL)` is this, and so is any pair of the kernel's sentinel
+/// pointers. A cast to a pointer widens with zeroes or cuts the top off, so two equal numbers of
+/// one type are one address. Two that differ in their low thirty two bits are two addresses on
+/// every target, since no address is narrower than that. Two that differ only above those bits
+/// are the same address on a thirty two bit target and not on a sixty four bit one, and are left.
+fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<Imm> {
+    let (lhs, from) = cast(func, *args.first()?)?;
+    let (rhs, other) = cast(func, *args.get(1)?)?;
+    if from != other {
+        return None;
+    }
+    let low = |imm: Imm| imm.unsigned() & u128::from(u32::MAX);
+    let same = if lhs == rhs {
+        true
+    } else if low(lhs) != low(rhs) {
+        false
+    } else {
+        return None;
+    };
+    match pred {
+        IntPred::Eq => Some(Imm::int(i128::from(same), ty)),
+        IntPred::Ne => Some(Imm::int(i128::from(!same), ty)),
+        _ => None,
+    }
 }
 
 /// The single result of an instruction that folded.
@@ -197,6 +305,10 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
         Opcode::FPToSI | Opcode::FPToUI => {
             let value = floating(func, *args.first()?)?;
             to_integer(value, ty, data.opcode == Opcode::FPToSI)
+        }
+        Opcode::ICmp if func[*args.first()?].ty.is_ptr() => {
+            let Extra::IntPred(pred) = data.extra else { return None };
+            same_address(func, pred, args, ty)
         }
         _ => arithmetic(data, args, ty, &|value| constant(func, value)),
     }

@@ -938,6 +938,13 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // front end left for the IR and nothing after this is allowed to see one. The walk is skipped
     // at `-O0`, which answers every question as not known, the way gcc does at that level.
     objsize::answer(module, opts.interposition, opts.level != OptLevel::O0);
+    // Right behind it, and for the same kind of reason: `BUILD_BUG_ON (fn == NULL)` is a call to a
+    // function declared `error` that has to be gone by the end, and whether `fn` has a body is a
+    // fact about the module that no pass after this can see. Above `-O0` only, which is where the
+    // kernel builds and where gcc folds it.
+    if opts.level != OptLevel::O0 {
+        crate::fold::addresses(module);
+    }
     // The same for `__builtin_constant_p`, but only at `-O0`, where every question is answered
     // zero the way gcc answers it there. Above that the question waits for `constant-p` in the
     // list, which is after the folding that can turn the value into a constant.

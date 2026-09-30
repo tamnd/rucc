@@ -271,3 +271,29 @@ fn an_ignored_attribute_and_a_reserved_priority_answer_to_gcc_s_names() {
     assert!(back.status.success(), "{}", String::from_utf8_lossy(&back.stderr));
     assert!(String::from_utf8_lossy(&back.stderr).contains("warning: "));
 }
+
+/// The two comparisons of addresses the kernel puts inside `BUILD_BUG_ON`, which only builds when
+/// the call to the function declared `error` is gone: a function defined here against `NULL`, as
+/// i915 checks each callback it registers, and two of `ERR_PTR`'s sentinels against each other. A
+/// function only declared is left alone, because a weak one may never be defined.
+#[test]
+fn an_address_compared_in_a_build_bug_on_is_decided() {
+    let source = "extern void bad(void) __attribute__((error(\"BUILD_BUG_ON failed\")));\n\
+        struct x { int a; };\n\
+        static int notify(struct x *p) { return p->a; }\n\
+        typedef int (*fn)(struct x *);\n\
+        static inline void *ERR_PTR(long e) { return (void *)e; }\n\
+        void t(fn f) {\n\
+            if (notify == 0) bad();\n\
+            if (ERR_PTR(-2) == ERR_PTR(-19)) bad();\n\
+            f(0);\n\
+        }\n\
+        void u(void) { t(notify); }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let weak = "extern void bad(void) __attribute__((error(\"BUILD_BUG_ON failed\")));\n\
+        extern void hook(void) __attribute__((weak));\n\
+        void t(void) { if (hook == 0) bad(); }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], weak);
+    assert!(!out.status.success(), "a weak declaration may be null");
+}
