@@ -33,20 +33,25 @@
  * macro that expands into two divisions is read twice and checked neither time.
  */
 
-typedef unsigned __int128 uwide;
-typedef __int128 wide;
-
 /* The narrower pair. libgcc spells this width di, for double integer, because it is two of the
  * sixteen bit ints the naming scheme was written around.
  */
 typedef unsigned long long ulong;
 typedef long long slong;
 
-/* How many bits a half is, which is also the width the machine divides in. */
-#define HALF 64
-
 /* And the same for the narrower pair, where a half is a register on the targets that need it. */
 #define HALF_LONG 32
+
+/* A target with no 128-bit integer has none of the six ti names to provide either, since nothing
+ * it compiles can ask for them. i686 is one, and there the whole of the wider half is left out.
+ */
+#ifdef __SIZEOF_INT128__
+
+typedef unsigned __int128 uwide;
+typedef __int128 wide;
+
+/* How many bits a half is, which is also the width the machine divides in. */
+#define HALF 64
 
 /* The quotient, with the remainder written through `rest` when it is asked for.
  *
@@ -145,6 +150,8 @@ __int128 __divmodti4(__int128 top, __int128 bottom, __int128 *rest) {
     *rest = __modti3(top, bottom);
     return __divti3(top, bottom);
 }
+
+#endif
 
 /* The same division at sixty four bits, for a target whose registers are thirty two.
  *
