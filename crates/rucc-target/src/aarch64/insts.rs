@@ -552,6 +552,7 @@ pub static INSTS: &[(&str, Form)] = &[
     // code and carried in the addressing mode, the way x86-64 carries it in a `lea`.
     ("adr_64", Lea),
     ("got_64", Address),
+    ("slot_64", Address),
     ("gottprel_64", Address),
     ("thread_64", Address),
     // Windows thread-local variables, in the three steps `text` gives. The first and the last

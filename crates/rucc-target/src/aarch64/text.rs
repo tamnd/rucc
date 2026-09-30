@@ -485,6 +485,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("addr_64", &[spell("adrp", &[Reg(0, X), Page]), spell("add", &[Reg(0, X), Reg(0, X), Low])]),
     ("adr_64", &[spell("adr", &[Reg(0, X), Symbol])]),
     ("got_64", &[spell("adrp", &[Reg(0, X), GotPage]), spell("ldr", &[Reg(0, X), GotSlot(0)])]),
+    // A pointer this image holds, which is where COFF keeps the address of a name a DLL or
+    // another object may define. The symbol is the pointer rather than the name it points to.
+    ("slot_64", &[spell("adrp", &[Reg(0, X), Page]), spell("ldr", &[Reg(0, X), LowSlot(0)])]),
     // A thread-local variable's offset from the thread pointer sits in a slot of the global offset
     // table the link fills in, and the thread pointer is read on its own. Adding the two is the
     // initial exec model, which works in a shared library as well as in the program.
@@ -1253,6 +1256,7 @@ mod tests {
         assert_eq!(listing("movk_ri_32_64", &with), ["movk x0, #42, lsl #32"]);
         assert_eq!(listing("addr_64", &with), ["adrp x0, s", "add x0, x0, :lo12:s"]);
         assert_eq!(listing("got_64", &with), ["adrp x0, :got:s", "ldr x0, [x0, :got_lo12:s]"]);
+        assert_eq!(listing("slot_64", &with), ["adrp x0, s", "ldr x0, [x0, :lo12:s]"]);
         assert_eq!(
             listing("gottprel_64", &with),
             ["adrp x0, :gottprel:s", "ldr x0, [x0, :gottprel_lo12:s]"]
