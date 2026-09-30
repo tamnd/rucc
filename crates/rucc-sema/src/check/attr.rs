@@ -657,7 +657,7 @@ impl Checker<'_> {
     }
 
     /// The string one `section` was written with, and nothing when it was not written with one.
-    fn section_argument(&mut self, attr: rucc_ast::Attribute) -> Option<StrId> {
+    fn section_argument(&mut self, attr: Attribute) -> Option<StrId> {
         let args = self.ast[attr.args].to_vec();
         let expr = match args.as_slice() {
             [AttrArg::Expr(expr)] => *expr,
