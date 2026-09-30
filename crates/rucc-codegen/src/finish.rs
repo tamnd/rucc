@@ -1899,69 +1899,6 @@ mod tests {
         );
     }
 
-    /// `-mpreferred-stack-boundary=3`, which is what the x86-64 kernel passes. The frame is
-    /// rounded to eight bytes rather than to sixteen, so a function that calls with sixteen bytes
-    /// of locals takes sixteen where the psABI would have it take twenty four.
-    #[test]
-    fn a_frame_kept_on_eight_bytes_is_not_padded_to_sixteen() {
-        let conv = SYSV.aligned_to(8);
-        let (mut func, allocation, mut names) = pressure(conv, 2, 4);
-        let locals = [Local { size: 16, align: 8 }];
-        let base = Layout::new(conv, REGS);
-        let lines = written(
-            &mut func,
-            &allocation,
-            &Layout { locals: &locals, leaf: false, ..base },
-            &mut names,
-        );
-        assert_eq!(
-            added(&lines),
-            ["$rsp = x64.sub_ri_64 $rsp, 16", "$rsp = x64.add_ri_64 $rsp, 16", "x64.ret"]
-        );
-
-        let (mut func, allocation, mut names) = pressure(&SYSV, 2, 4);
-        let base = Layout::new(&SYSV, REGS);
-        let lines = written(
-            &mut func,
-            &allocation,
-            &Layout { locals: &locals, leaf: false, ..base },
-            &mut names,
-        );
-        assert_eq!(
-            added(&lines),
-            ["$rsp = x64.sub_ri_64 $rsp, 24", "$rsp = x64.add_ri_64 $rsp, 24", "x64.ret"]
-        );
-    }
-
-    /// On an eight byte boundary a local that asks for sixteen is more than the stack is known to
-    /// be on, so the prologue forces it behind a frame pointer. It is gcc's own sequence for this,
-    /// `push %rbp`, `mov %rsp, %rbp`, `and $-16, %rsp`, which is the form objtool recognizes.
-    #[test]
-    fn a_local_on_sixteen_in_a_frame_kept_on_eight_is_realigned_the_way_gcc_does() {
-        let conv = SYSV.aligned_to(8);
-        let (mut func, allocation, mut names) = pressure(conv, 2, 4);
-        let locals = [Local { size: 16, align: 16 }];
-        let base = Layout::new(conv, REGS);
-        let lines = written(
-            &mut func,
-            &allocation,
-            &Layout { locals: &locals, leaf: false, ..base },
-            &mut names,
-        );
-        assert_eq!(
-            added(&lines),
-            [
-                "x64.push_64 $rbp",
-                "$rbp = x64.mov_rr_64 $rsp",
-                "$rsp = x64.and_ri_64 $rsp, -16",
-                "$rsp = x64.sub_ri_64 $rsp, 16",
-                "$rsp = x64.mov_rr_64 $rbp",
-                "$rbp = x64.pop_64",
-                "x64.ret",
-            ]
-        );
-    }
-
     #[test]
     fn every_block_the_function_returns_from_gets_an_epilogue() {
         let mut names = Interner::new();

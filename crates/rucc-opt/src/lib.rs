@@ -164,7 +164,6 @@ pub mod simplify_cfg;
 pub mod sink;
 pub mod speculate;
 pub mod split;
-pub mod sroa;
 pub mod stats;
 pub mod switch_conv;
 #[cfg(test)]

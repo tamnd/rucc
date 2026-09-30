@@ -421,8 +421,6 @@ impl<'a> Parser<'a, '_> {
             Reach::Thread
         } else if self.eat_word("secrel") {
             Reach::Section
-        } else if self.eat_word("abs") {
-            Reach::Absolute
         } else {
             Reach::Itself
         };
@@ -461,17 +459,7 @@ impl<'a> Parser<'a, '_> {
                     role: Role::Use,
                     constraint: Constraint::Reg,
                 };
-                // A register with a scale on it is an index even when it is the first one, which
-                // is an address with no base: `sym(,%rdi,8)` under the kernel code model.
-                if mem.base.is_none() && mem.index.is_none() && self.at("*") {
-                    self.expect("*")?;
-                    let scale = self.u32()?;
-                    match u8::try_from(scale) {
-                        Ok(scale) => mem.scale = scale,
-                        Err(_) => return self.fail(format!("{scale} is not a scale")),
-                    }
-                    mem.index = Some(operand);
-                } else if mem.base.is_none() {
+                if mem.base.is_none() {
                     mem.base = Some(operand);
                 } else if mem.index.is_none() {
                     mem.index = Some(operand);
@@ -927,21 +915,6 @@ mod tests {
 mfunc @take {
 block0:
     %0:gpr = x64.mov_rm [got @away]
-    x64.ret
-}
-",
-        );
-    }
-
-    #[test]
-    fn an_absolute_address_with_an_index_round_trips() {
-        // What the kernel code model makes of `tab[i]`: the symbol's own address as a number and a
-        // register added to it, which no other reach can carry.
-        round_trip(
-            "\
-mfunc @index {
-block0(%0:gpr):
-    %1:gpr = x64.mov_rm [abs @tab + %0*8]
     x64.ret
 }
 ",

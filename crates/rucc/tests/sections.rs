@@ -1,214 +1,187 @@
-//! What `__attribute__((section(...)))` reaches the listing and the object file as, end to end.
+//! What `__attribute__((section("name")))` reaches the assembler as, end to end, and one program
+//! that finds what it put there the way a linker set does.
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.4.
 //!
-//! The unit tests underneath cover one step each: `rucc-sema` reads the attribute, `rucc-asm`
-//! decides what the section holds and writes its directive, and `rucc-object` writes the section
-//! header. What is left is the trip from the source to the file, which is only visible from the
-//! outside, so this runs the compiler over C and reads what it writes. The case is the one in
-//! tamnd/rucc#909, checked against what gcc writes for it on x86-64 Linux: a variable, a function
-//! and a table entry that nothing in the file refers to, each in a section of its own.
+//! The attribute is on the refused list until it works, because ignoring it is wrong code rather
+//! than slow code: the kernel's `__init`, every linker set and every table a linker script gathers
+//! are built out of it, and a name that stays in `.data` is a table that comes out empty. The IR,
+//! the listing and the object writer already carried a section for a variable, and the constructor
+//! tables go through that path, so what is tested here is the part the attribute added: sema reading
+//! it, a function carrying it down to the listing, and the function after it going back to `.text`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The fixture, written under a directory of its own so that two of these running at once do not
-/// write the same file.
-fn fixture(what: &str, source: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rucc-section-{}-{what}", std::process::id()));
+/// A directory of its own for each fixture, so that two of these running at once do not write the
+/// same file.
+fn dir(what: &str) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rucc-section-{}-{n}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
-    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
     dir
 }
 
-/// What the compiler wrote for that source with those flags, taking it as text.
-fn run(dir: &Path, target: &str, flags: &[&str], out: &str) -> Vec<u8> {
-    let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .arg(format!("--target={target}"))
-        .args(flags)
-        .arg("-o")
-        .arg(dir.join(out))
-        .arg(dir.join("one.c"))
+/// What the compiler said and wrote for one source, run in `dir` with `args` after it.
+fn rucc(dir: &Path, source: &str, args: &[&str]) -> (bool, String, String) {
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .current_dir(dir)
+        .args(args)
+        .arg("one.c")
         .output()
         .expect("the compiler is built before its own tests run");
-    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
-    std::fs::read(dir.join(out)).expect("the output was written")
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    let wrote = String::from_utf8_lossy(&out.stdout).into_owned();
+    (out.status.success(), wrote, said)
 }
 
-/// The listing for that source on that target.
-fn listing(what: &str, target: &str, source: &str) -> String {
-    let dir = fixture(what, source);
-    let text = run(&dir, target, &["-S"], "one.s");
+/// The listing for source the compiler accepts on `target`.
+fn asm(what: &str, target: &str, source: &str) -> String {
+    let dir = dir(what);
+    let (ok, wrote, said) = rucc(&dir, source, &[&format!("--target={target}"), "-S", "-o", "-"]);
     let _ = std::fs::remove_dir_all(&dir);
-    String::from_utf8(text).expect("a listing is text")
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    wrote
 }
 
-/// The object for that source at that level of optimization, for x86-64 Linux.
-fn object(what: &str, level: &str, source: &str) -> Vec<u8> {
-    let dir = fixture(what, source);
-    let bytes = run(&dir, LINUX, &["-c", level], "one.o");
+/// What the compiler said about source it refuses on `target`.
+fn refused(what: &str, target: &str, source: &str) -> String {
+    let dir = dir(what);
+    let (ok, _, said) = rucc(&dir, source, &[&format!("--target={target}"), "-S", "-o", "-"]);
     let _ = std::fs::remove_dir_all(&dir);
-    bytes
+    assert!(!ok, "the compiler accepted the fixture");
+    said
 }
 
 const LINUX: &str = "x86_64-unknown-linux-gnu";
 
-/// The case from the issue with the three details it asks about beside it: zeros that have to be
-/// bytes, a constant with nothing in it the loader writes, and a page of zeros in a section whose
-/// name says it carries none.
+/// A function and an object in sections of their own, with a function after them that is not.
 const PLACED: &str = "\
-__attribute__((section(\".mine\"))) int g = 7;
-__attribute__((section(\".init.text\"))) void f(void) {}
-__attribute__((section(\".initcall\"), used)) static void (*const p)(void) = f;
-__attribute__((section(\".mine\"))) int z;
-__attribute__((section(\".mine\"))) int y = 0;
-__attribute__((section(\".roz\"))) const int k = 3;
-__attribute__((section(\".bss..page_aligned\"), aligned(4096))) char page[4096];
-void after(void) {}
-int reads(void) { static int s __attribute__((section(\".mine\"))) = 5; return s + g + k; }
+__attribute__((section(\".init.text\"))) int early(void) { return 1; }
+int table[2] __attribute__((section(\"my_table\"))) = { 1, 2 };
+int later(void) { return 2; }
 ";
 
-/// Two bytes at that offset, as a number.
-fn two(bytes: &[u8], at: usize) -> usize {
-    usize::from(u16::from_le_bytes(bytes[at..at + 2].try_into().expect("two bytes")))
-}
-
-/// Four bytes at that offset, as a number.
-fn four(bytes: &[u8], at: usize) -> usize {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes")) as usize
-}
-
-/// Eight bytes at that offset, as a number.
-fn eight(bytes: &[u8], at: usize) -> usize {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes")) as usize
-}
-
-/// One section header of an ELF file, as much of it as this looks at.
-#[derive(Debug)]
-struct Header {
-    name: String,
-    kind: usize,
-    flags: usize,
-    offset: usize,
-    size: usize,
-}
-
-/// Every section header of an ELF file, in the order they are in it.
-///
-/// Written out rather than pulled in, for the reason `debug_locals.rs` gives: this crate depends on
-/// the driver and on nothing else, and a test is a poor reason to change that.
-fn headers(object: &[u8]) -> Vec<Header> {
-    let start = eight(object, 0x28);
-    let (size, count, names) = (two(object, 0x3a), two(object, 0x3c), two(object, 0x3e));
-    let at = |which: usize| start + which * size;
-    let strings = eight(object, at(names) + 24);
-    (0..count)
-        .map(|which| {
-            let header = at(which);
-            let name = strings + four(object, header);
-            let end = object[name..].iter().position(|&byte| byte == 0).expect("a name ends");
-            Header {
-                name: String::from_utf8_lossy(&object[name..name + end]).into_owned(),
-                kind: four(object, header + 4),
-                flags: eight(object, header + 8),
-                offset: eight(object, header + 24),
-                size: eight(object, header + 32),
-            }
-        })
-        .collect()
-}
-
-const SHT_PROGBITS: usize = 1;
-const SHT_RELA: usize = 4;
-const SHT_NOBITS: usize = 8;
-const SHF_WRITE: usize = 1;
-const SHF_ALLOC: usize = 2;
-const SHF_EXECINSTR: usize = 4;
-
 #[test]
-fn an_elf_listing_puts_each_definition_in_the_section_it_named_with_gccs_flags() {
-    let text = listing("elf-s", LINUX, PLACED);
-    for line in [
-        "\t.section\t.init.text,\"ax\",@progbits\n",
-        "\t.section\t.mine,\"aw\",@progbits\n",
-        "\t.section\t.initcall,\"aw\",@progbits\n",
-        "\t.section\t.roz,\"a\",@progbits\n",
-        "\t.section\t.bss..page_aligned,\"aw\",@nobits\n",
-    ] {
-        assert!(text.contains(line), "{line:?} in\n{text}");
-    }
-    // The function after the one in a section of its own goes back to where code goes.
-    let placed = text.find("\nf:").expect("f is defined");
-    let after = text.find("\nafter:").expect("after is defined");
-    assert!(text[placed..after].contains("\t.text\n"), "{text}");
-    // The zeros in `.mine` are bytes, and the variables in it are in the order they were written.
-    let order: Vec<usize> = ["\ng:", "\nz:", "\ny:", "\ns.0:"]
-        .iter()
-        .map(|label| text.find(label).unwrap_or_else(|| panic!("{label} in\n{text}")))
-        .collect();
-    assert!(order.is_sorted(), "{text}");
-    assert!(!text.contains(".comm"), "{text}");
-    assert!(!text.contains("\t.bss\n"), "{text}");
+fn a_function_and_an_object_go_in_the_section_they_name() {
+    let text = asm("elf", LINUX, PLACED);
+    assert!(text.contains("\t.section\t.init.text,\"ax\",@progbits\n"), "{text}");
+    assert!(text.contains("\t.section\tmy_table,\"aw\",@progbits\n"), "{text}");
+    // The function after the placed one is back in the text section, and before its label, which
+    // is the whole of what keeps it out of `.init.text` and out of the memory the kernel frees.
+    let placed = text.find(".init.text").expect("the placed function");
+    let back = text[placed..].find("\t.text\n").map(|at| at + placed).expect("a return to .text");
+    let later = text.find("\nlater:\n").expect("the later function");
+    assert!(back < later, "the function after the placed one followed it in:\n{text}");
 }
 
 #[test]
-fn an_elf_object_has_the_sections_gcc_writes_for_the_same_source() {
-    for level in ["-O0", "-O2"] {
-        let bytes = object(&format!("elf-c{level}"), level, PLACED);
-        let headers = headers(&bytes);
-        let find = |name: &str| {
-            headers
-                .iter()
-                .find(|header| header.name == name)
-                .unwrap_or_else(|| panic!("{name} at {level}: {headers:?}"))
-        };
-        let code = find(".init.text");
-        assert_eq!((code.kind, code.flags), (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR), "{level}");
-        let mine = find(".mine");
-        assert_eq!((mine.kind, mine.flags), (SHT_PROGBITS, SHF_ALLOC | SHF_WRITE), "{level}");
-        // g, z, y and the static inside `reads`, in that order, with the zeros written out.
-        let contents = &bytes[mine.offset..mine.offset + mine.size];
-        assert_eq!(contents, [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0], "{level}");
-        let table = find(".initcall");
-        assert_eq!((table.kind, table.flags), (SHT_PROGBITS, SHF_ALLOC | SHF_WRITE), "{level}");
-        assert_eq!(table.size, 8, "{level}");
-        assert_eq!(find(".rela.initcall").kind, SHT_RELA, "{level}");
-        let fixed = find(".roz");
-        assert_eq!((fixed.kind, fixed.flags), (SHT_PROGBITS, SHF_ALLOC), "{level}");
-        let page = find(".bss..page_aligned");
-        assert_eq!((page.kind, page.flags), (SHT_NOBITS, SHF_ALLOC | SHF_WRITE), "{level}");
-        assert_eq!(page.size, 4096, "{level}");
-    }
+fn an_arm64_listing_names_the_section_too() {
+    let text = asm("arm64", "aarch64-unknown-linux-gnu", PLACED);
+    assert!(text.contains("\t.section\t.init.text,\"ax\",@progbits\n"), "{text}");
+    assert!(text.contains("\t.section\tmy_table,\"aw\",@progbits\n"), "{text}");
 }
 
-/// A Mach-O section is a segment and a section, so a name written for ELF is given the segment its
-/// contents belong in and the underscores every Mach-O section name starts with.
 #[test]
-fn a_darwin_listing_maps_an_elf_name_to_a_segment_and_a_section() {
-    let text = listing("darwin", "arm64-apple-darwin", PLACED);
-    for line in [
-        "\t.section\t__TEXT,__init_text,regular,pure_instructions\n",
-        "\t.section\t__DATA,__mine\n",
-        "\t.section\t__DATA,__initcall\n",
-    ] {
-        assert!(text.contains(line), "{line:?} in\n{text}");
-    }
-    let spoken = listing(
-        "darwin-own",
-        "arm64-apple-darwin",
-        "__attribute__((section(\"__DATA,__own\"))) int x = 1;\n",
+fn a_windows_listing_names_the_section_with_its_own_flags() {
+    let text = asm("coff", "x86_64-windows-gnu", PLACED);
+    assert!(text.contains("\t.section\t.init.text,\"xr\"\n"), "{text}");
+    assert!(text.contains("\t.section\tmy_table,\"dw\"\n"), "{text}");
+}
+
+#[test]
+fn a_darwin_section_names_its_segment_and_code_is_marked_as_code() {
+    let source = "\
+__attribute__((section(\"__TEXT,__early\"))) int early(void) { return 1; }
+int table[2] __attribute__((section(\"__DATA,__table\"))) = { 1, 2 };
+";
+    let text = asm("macho", "aarch64-apple-darwin", source);
+    assert!(text.contains("\t.section\t__TEXT,__early,regular,pure_instructions\n"), "{text}");
+    assert!(text.contains("\t.section\t__DATA,__table\n"), "{text}");
+}
+
+#[test]
+fn a_darwin_section_without_a_segment_is_refused() {
+    let said = refused(
+        "segment",
+        "aarch64-apple-darwin",
+        "int x __attribute__((section(\"table\"))) = 1;\n",
     );
-    assert!(spoken.contains("\t.section\t__DATA,__own\n"), "{spoken}");
+    assert!(said.contains("requires a segment and section separated by a comma"), "{said}");
 }
 
 #[test]
-fn a_windows_listing_names_the_section_with_coff_flags() {
-    let text = listing("coff", "x86_64-pc-windows-gnu", PLACED);
-    for line in [
-        "\t.section\t.init.text,\"xr\"\n",
-        "\t.section\t.mine,\"dw\"\n",
-        "\t.section\t.roz,\"dr\"\n",
-    ] {
-        assert!(text.contains(line), "{line:?} in\n{text}");
-    }
+fn a_tentative_definition_in_a_section_is_not_offered_to_the_linker_to_merge() {
+    // `-fcommon` makes `int x;` a `.comm`, which has no section, so the section would be lost. gcc
+    // keeps the section and so does this.
+    let dir = dir("common");
+    let args = [&format!("--target={LINUX}") as &str, "-fcommon", "-S", "-o", "-"];
+    let (ok, text, said) = rucc(&dir, "int x __attribute__((section(\"kept\")));\n", &args);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(text.contains("\t.section\tkept,\"aw\",@progbits\n"), "{text}");
+    assert!(!text.contains(".comm"), "{text}");
+}
+
+#[test]
+fn an_object_on_the_stack_is_in_no_section_and_saying_otherwise_is_refused() {
+    let said = refused(
+        "local",
+        LINUX,
+        "int f(void) { int x __attribute__((section(\"s\"))) = 1; return x; }\n",
+    );
+    assert!(said.contains("section attribute cannot be specified for local variables"), "{said}");
+    // A `static` one inside a function is an object like one at file scope, and is placed.
+    let text = asm(
+        "static",
+        LINUX,
+        "int f(void) { static int x __attribute__((section(\"s\"))) = 1; return x; }\n",
+    );
+    assert!(text.contains("\t.section\ts,\"aw\",@progbits\n"), "{text}");
+}
+
+#[test]
+fn a_section_named_by_anything_but_a_string_is_refused() {
+    let said = refused("number", LINUX, "int x __attribute__((section(1))) = 1;\n");
+    assert!(said.contains("'section' attribute argument not a string constant"), "{said}");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_linker_set_finds_what_was_put_in_it() {
+    // The use the attribute exists for, run rather than inspected. Each entry is put in a section
+    // whose name is a C identifier, so the linker defines `__start_` and `__stop_` around it, and
+    // the program walks from one to the other. The functions are placed as well and called through
+    // the table, which is the kernel's initcall shape reduced to three entries. An entry that stayed
+    // in `.data` is not between the two symbols, and a function whose section was dropped still
+    // runs, so the answer is only right when both halves are.
+    let dir = dir("set");
+    let source = "\
+typedef int (*entry)(void);
+__attribute__((section(\"rucc_init\"), used)) static int one(void) { return 1; }
+__attribute__((section(\"rucc_init\"), used)) static int two(void) { return 2; }
+__attribute__((section(\"rucc_init\"), used)) static int four(void) { return 4; }
+__attribute__((section(\"rucc_set\"), used)) static entry a = one;
+__attribute__((section(\"rucc_set\"), used)) static entry b = two;
+__attribute__((section(\"rucc_set\"), used)) static entry c = four;
+extern entry __start_rucc_set[], __stop_rucc_set[];
+extern char __start_rucc_init[], __stop_rucc_init[];
+int main(void) {
+    int sum = 0;
+    for (entry *e = __start_rucc_set; e < __stop_rucc_set; e++)
+        sum += (*e)();
+    char *f = (char *)one;
+    if (f < __start_rucc_init || f >= __stop_rucc_init)
+        return 1;
+    return sum == 7 ? 42 : 2;
+}
+";
+    let (ok, _, said) = rucc(&dir, source, &["-o", "prog"]);
+    assert!(ok, "the link failed:\n{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(42), "the set was not what was put in it");
 }

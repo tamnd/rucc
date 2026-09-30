@@ -915,14 +915,7 @@ impl Checker<'_> {
             return self.refused_size();
         }
 
-        // gcc reads a `const` object as its value here under the GNU dialects, so `const int n
-        // = 4; char b[n];` is an array of four rather than a variable length array, and one at
-        // file scope is not refused. See [`crate::Eval::objects`].
-        let mut eval = self.eval().objects(self.cx.gnu);
-        let folded = eval.integer(value);
-        let read_object = eval.read_object();
-        self.absorb(eval.finish());
-        match folded {
+        match self.eval_integer(value) {
             Ok(count) if count < 0 => {
                 let who = self.array_named(subject);
                 self.report(
@@ -939,22 +932,6 @@ impl Checker<'_> {
                     let message = format!("size of {who} exceeds maximum object size '{max}'");
                     self.report(Diagnostic::error(message, span).with_code("E0537"));
                     return self.refused_size();
-                }
-                if read_object && self.cx.pedantic {
-                    // gcc's words, which it says about an array in a body as well as one at file
-                    // scope, since what it is warning about is the size not being a constant in
-                    // the sense ISO C gives the word.
-                    let who = match subject.name {
-                        Some(name) => format!("'{}'", self.text(name)),
-                        None => "type name".to_string(),
-                    };
-                    self.report(
-                        Diagnostic::warning(
-                            format!("variably modified {who} at file scope"),
-                            subject.span,
-                        )
-                        .with_code("E0749"),
-                    );
                 }
                 ArrayLen::Fixed(count)
             }

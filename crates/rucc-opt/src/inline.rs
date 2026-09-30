@@ -52,10 +52,7 @@
 //! nothing is left that could reach its body. gcc does not emit one either, and the intrinsic
 //! headers depend on that: an operand such as `pextrd`'s lane number is an `i` constraint over a
 //! parameter, which is a constant in every copy spliced into a caller and a register in the out of
-//! line one, and no instruction takes its lane number in a register. A `static inline` one from
-//! `-O1` up goes as well once nothing calls it, which is what gcc does and what the kernel's
-//! `BUILD_BUG_ON` depends on: the call to its `error` function in the out of line copy is under a
-//! condition only a caller's argument settles, and a copy that is emitted is a call that survives.
+//! line one, and no instruction takes its lane number in a register.
 //!
 //! From `-O1` up the same splice takes a call to a function declared `inline` whose body, once its
 //! own calls are settled, is no larger than `max-inline-insns-single`, the limit gcc gives such a
@@ -314,9 +311,10 @@ pub fn run(
             let name = func.name;
             let gone = match kind {
                 Kind::Once => true,
-                Kind::Always | Kind::Hinted => {
+                Kind::Always => {
                     func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
                 }
+                Kind::Hinted => false,
             };
             if gone && !calls.contains_key(&name) && !elsewhere.contains(&name) {
                 module[id] = declaration(&module[id]);
@@ -1449,7 +1447,6 @@ fn declaration(func: &Func) -> Func {
     declared.target = func.target;
     declared.attrs.set = declared.attrs.set.without(AttrSet::INLINE_ONLY);
     declared.declared = func.declared;
-    declared.notices = func.notices.clone();
     declared.linkage = Linkage::External;
     declared
 }
@@ -1572,38 +1569,6 @@ block0(%0: i32):
         assert!(!out.contains("linkage(internal)"), "{out}");
         let kept = inlined(&body.replace("attrs(always_inline)", "attrs(always_inline, used)"));
         assert_eq!(kept.matches("mul ").count(), 2, "{kept}");
-    }
-
-    /// A `static inline` function every call to which went in goes too, from `-O1` up, since gcc
-    /// emits no copy of it and a copy is where a call to a function carrying `error` would survive.
-    /// One still called, or kept by `used`, stays, and so does one another unit may call.
-    #[test]
-    fn a_static_inline_function_is_not_kept_once_every_call_is_inlined() {
-        let body = r#"
-func @check(i32), linkage(internal), attrs(inline_hint) {
-block0(%0: i32):
-    call @bad() : ()
-    return
-}
-
-func @bad(), linkage(external);
-
-func @g() {
-block0:
-    %0 = iconst.i32 2
-    call @check(%0) : (i32)
-    return
-}
-"#;
-        let out = inlined_under(body, Some(40));
-        assert!(!out.contains("func @check(i32), linkage(internal)"), "{out}");
-        let kept = inlined_under(
-            &body.replace("attrs(inline_hint)", "attrs(inline_hint, used)"),
-            Some(40),
-        );
-        assert!(kept.contains("func @check(i32), linkage(internal)"), "{kept}");
-        let shared = inlined_under(&body.replace("linkage(internal), ", ""), Some(40));
-        assert!(shared.contains("block0(%0: i32):\n    call @bad"), "{shared}");
     }
 
     /// An `i` operand the caller passed as arithmetic over constants is the constant once the call

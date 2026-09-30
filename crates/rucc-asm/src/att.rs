@@ -62,7 +62,6 @@ use rucc_tuple::Arch;
 
 use crate::Error;
 use crate::a64;
-use crate::bytes::absolute_only;
 use crate::data::{Globals, Piece, Variable};
 use crate::format::{Directives, binding, visibility};
 use crate::unwind::Prologue;
@@ -176,8 +175,8 @@ fn listing(
         out: String::new(),
         labels: Vec::new(),
         sections,
+        away: false,
         marks: marks.then_some(0),
-        moved: false,
     };
     writer.out.push_str(writer.directives.text());
     writer.out.push('\n');
@@ -244,8 +243,8 @@ pub(crate) fn template(
         out: String::new(),
         labels: Vec::new(),
         sections: Sections::default(),
+        away: false,
         marks: None,
-        moved: false,
     };
     writer.inst(func, block, inst, names.resolve(func.name))?;
     Ok(writer.out)
@@ -269,22 +268,15 @@ struct Writer<'a> {
     labels: Vec<u32>,
     /// Whether each function and each variable is given a section of its own.
     sections: Sections,
+    /// Whether the function before this one was put in a section a `section` attribute named,
+    /// so that the next one has to open the text section again rather than follow it in there.
+    away: bool,
     /// Which function of the list is being written, in a listing that puts a label in front of
     /// every instruction, and `None` in one that does not. See [`print_marked`].
     marks: Option<usize>,
-    /// Whether the function written last was in a section the program named, which leaves the
-    /// assembler somewhere the next function must not follow it into.
-    moved: bool,
 }
 
 impl Writer<'_> {
-    /// The directive that goes back to the section the program put this function in, and
-    /// nothing for a function it said nothing about.
-    fn home(&self, func: &Func) -> Option<String> {
-        let section = func.section?;
-        Some(self.directives.named_code(self.names.resolve(section)))
-    }
-
     /// One function: what the assembler is told about it, then its blocks.
     fn func(&mut self, func: &Func) -> Result<(), Error> {
         let name = self.names.resolve(func.name).to_owned();
@@ -292,20 +284,19 @@ impl Writer<'_> {
         let binding = binding(func.binding);
         let seen = visibility(func.visibility);
         let align = func.align.unwrap_or(FUNC_ALIGN);
-        // A function the program put in a section of its own goes there, and the one after it
-        // goes back to wherever it would have gone, which is `.text` unless it has a section of
-        // its own too. See [`Self::home`].
-        let home = self.home(func);
-        match &home {
-            Some(section) => {
-                let _ = writeln!(self.out, "{section}");
-            }
-            None if self.moved && !self.sections.functions => {
+        // A function the program put somewhere goes there, and the one after it goes back to
+        // the text section, which is where it would have been had the one before stayed put.
+        if let Some(section) = func.section {
+            let _ =
+                writeln!(self.out, "{}", self.directives.named_code(self.names.resolve(section)));
+            self.away = true;
+        } else {
+            if self.away {
                 let _ = writeln!(self.out, "{}", self.directives.text());
+                self.away = false;
             }
-            None => self.directives.code(&mut self.out, &name, self.sections),
+            self.directives.code(&mut self.out, &name, self.sections);
         }
-        self.moved = home.is_some();
         // What has to be written between what the assembler is told about the function and the
         // function's own label, which is nothing at all unless a patcher was promised room in
         // front of the label. See `patch`.
@@ -313,8 +304,8 @@ impl Writer<'_> {
             func.patch.map(|patch| (patch, format!("{}pfe_{name}", self.directives.local())));
         let mut ahead = String::new();
         if let Some((patch, label)) = &patch {
-            let back = if let Some(section) = &home {
-                section.clone()
+            let back = if let Some(section) = func.section {
+                self.directives.named_code(self.names.resolve(section))
             } else if self.sections.functions {
                 format!("\t.section\t.text.{name}")
             } else {
@@ -850,18 +841,10 @@ impl Writer<'_> {
                     },
                 });
             }
-            // The address of a name under the kernel code model is the name as a number, and gcc
-            // writes it as the immediate of a `movq` rather than as a `leaq` of an address with
-            // no registers in it, which is a byte shorter and the same `R_X86_64_32S`.
-            let mut mnemonic = machine.mnemonic;
-            if mnemonic == "leaq" && data.mem.is_some_and(|mem| absolute_only(&func[mem])) {
-                mnemonic = "movq";
-                args[0] = format!("${}", args[0]);
-            }
             if args.is_empty() {
-                let _ = writeln!(self.out, "\t{mnemonic}");
+                let _ = writeln!(self.out, "\t{}", machine.mnemonic);
             } else {
-                let _ = writeln!(self.out, "\t{mnemonic}\t{}", args.join(", "));
+                let _ = writeln!(self.out, "\t{}\t{}", machine.mnemonic, args.join(", "));
             }
         }
         Ok(())
@@ -916,9 +899,6 @@ impl Writer<'_> {
                 Reach::Thread => out.push_str("@GOTTPOFF"),
                 // How far into its section, which is how far into a thread's copy of `.tls`.
                 Reach::Section => out.push_str("@SECREL32"),
-                // The address itself as a number, which needs no suffix and no `(%rip)`: gas
-                // writes `R_X86_64_32S` for four bytes of it the machine sign extends.
-                Reach::Absolute => {}
             }
             if amode.disp != 0 {
                 let sign = if amode.disp < 0 { '-' } else { '+' };
@@ -957,10 +937,7 @@ impl Writer<'_> {
                 let _ = write!(out, ",{reg},{}", amode.scale);
             }
             out.push(')');
-        } else if (amode.symbol.is_some() && amode.reach != Reach::Absolute)
-            || amode.block.is_some()
-            || amode.table.is_some()
-        {
+        } else if amode.symbol.is_some() || amode.block.is_some() || amode.table.is_some() {
             out.push_str("(%rip)");
         }
         Ok(out)
@@ -1003,8 +980,12 @@ impl Writer<'_> {
             }
         }
         if apart {
-            if let Some(section) = self.home(func) {
-                let _ = writeln!(self.out, "{section}");
+            if let Some(section) = func.section {
+                let _ = writeln!(
+                    self.out,
+                    "{}",
+                    self.directives.named_code(self.names.resolve(section))
+                );
             } else if self.sections.functions {
                 let _ = writeln!(self.out, "\t.section\t.text.{func_name},\"ax\",@progbits");
             } else {
@@ -1038,8 +1019,9 @@ impl Writer<'_> {
         let _ = writeln!(self.out, "{local}LSDACSE_{name}:");
         // Back to the function's section, since what closes the function measures its size from
         // where the assembler is.
-        if let Some(section) = self.home(func) {
-            let _ = writeln!(self.out, "{section}");
+        if let Some(section) = func.section {
+            let _ =
+                writeln!(self.out, "{}", self.directives.named_code(self.names.resolve(section)));
         } else if self.sections.functions {
             let _ = writeln!(self.out, "\t.section\t.text.{name},\"ax\",@progbits");
         } else {
@@ -1463,32 +1445,6 @@ mod tests {
         // this time is not an address at all: it is how far into a thread's own block the variable
         // sits, and what makes it an address is the addition that follows it.
         assert_eq!(body(&text), ["movq\taway@GOTTPOFF(%rip), %rax"]);
-    }
-
-    #[test]
-    fn a_name_under_the_kernel_model_is_written_as_a_number() {
-        let text = write(|func, names| {
-            let block = func.create_block();
-            let lea = Opcode::new(names.intern("x64.lea_64"));
-            let load = Opcode::new(names.intern("x64.mov_rm_64"));
-            let here = names.intern("here");
-            let tab = names.intern("tab");
-            func.build(block, lea)
-                .operand(Operand::write(Reg::physical(RAX), GPR))
-                .mem(Mem { disp: 4, ..Mem::absolute(here) })
-                .finish();
-            func.build(block, load)
-                .operand(Operand::write(Reg::physical(RAX), GPR))
-                .mem(Mem {
-                    index: Some(Operand::read(Reg::physical(RCX), GPR)),
-                    scale: 8,
-                    ..Mem::absolute(tab)
-                })
-                .finish();
-        });
-        // What gcc writes for the kernel: the address as an immediate, and an index added to the
-        // name with no `(%rip)`, both of which gas gives `R_X86_64_32S`.
-        assert_eq!(body(&text), ["movq\t$here+4, %rax", "movq\ttab(,%rcx,8), %rax"]);
     }
 
     #[test]

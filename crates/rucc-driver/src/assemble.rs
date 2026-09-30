@@ -27,7 +27,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
     let mut deps = Vec::new();
     let mut temps = Temps::default();
     let text = if cpp {
-        let out = preprocess(opts, name, true, fs);
+        let out = preprocess(opts, name, fs);
         messages.extend(out.messages.iter().cloned());
         deps = out.deps.clone();
         if out.failed() {
@@ -54,9 +54,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
     };
 
     let target = rucc_target::TargetInfo::new(opts.target);
-    let flags = rucc_asm::Flags { fatal_warnings: opts.asm_fatal_warnings };
-    let read = rucc_asm::read_with(&text, target.tuple.arch(), target.object_format, flags);
-    let assembled = match read {
+    let assembled = match rucc_asm::read_as(&text, target.tuple.arch(), target.object_format) {
         Ok(assembled) => assembled,
         Err(trouble) => {
             // The same shape every other diagnostic in this compiler has, so that a build log

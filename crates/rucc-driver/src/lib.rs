@@ -19,8 +19,8 @@
 //! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
 //! `-I`, `-I-`, `-iquote`, `-isystem`, `-idirafter`, `-iprefix`, `-iwithprefix`,
 //! `-iwithprefixbefore`, `-include`, `-imacros`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
-//! `-fgnuc-version=`, `-fgnu-as-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`,
-//! `-fno-builtin-<name>`, `-fgnu89-inline`, `-pedantic` and `-Werror`.
+//! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`, `-fno-builtin-<name>`,
+//! `-fgnu89-inline`, `-pedantic` and `-Werror`.
 //! The phases after them still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
@@ -36,12 +36,10 @@ pub mod dlltool;
 pub mod fetch;
 mod glibc;
 pub mod install;
-mod kbuild;
 pub mod library;
 pub mod link;
 mod map;
 pub mod msvc;
-mod notice;
 pub mod phase;
 pub mod preprocess;
 pub mod schedule;
@@ -58,7 +56,7 @@ use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
+    Compress, Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
     SaveTemps, Session, Std, Wrapping, runtime,
 };
 use rucc_sysroot::{Manifest, Sysroot};
@@ -81,6 +79,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum Action {
     /// Print usage and exit successfully.
     Help,
+    /// Print the version and exit successfully.
+    Version,
     /// Print one line and exit successfully, which is what the `-dump` and `-print` family do.
     ///
     /// A build system asks these before it compiles anything, and what it does with the answer
@@ -249,7 +249,7 @@ options:
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
   -std=<dialect>         c89 through c2y, and the gnu spellings
-  -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
+  -fgnuc-version=<v> -fms-compatibility-version=<v>   the GCC (16.0.0) or MSVC (19.40) to claim
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z, fast
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
@@ -260,7 +260,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
-  -gz=none -gno-split-dwarf   debug sections left uncompressed and in one file, -gz is refused
+  -gz[=none|zlib|zlib-gnu|zstd] -gno-split-dwarf   compress debug sections, one file not two
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
   -fprofile-use[=<path>] -fprofile-dir=<dir>   read too, where -fprofile-generate is refused
   -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
@@ -270,7 +270,7 @@ options:
   -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
-  -Wl,<arg> -Xlinker <arg> -fuse-ld=<name>, -Wa,<arg> -Xassembler <arg>   the linker, the assembler
+  -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
   -Werror -pedantic -pedantic-errors -w -W[no-]system-headers   how much to say, and how fatal
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
@@ -295,7 +295,7 @@ options:
   -j[n]                  compile n translation units at once, default all
   -v, -###               print each phase as it runs, or without running any
   -save-temps[=cwd|obj], -fstack-usage, -time   keep the .i and .s, write a .su, time each step
-  --target=<triple>      generate code for <triple>, as the names <triple>-rucc and <triple>-gcc do
+  --target=<triple>      generate code for <triple>, which a name like <triple>-rucc also does
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
                          safety-summary, type-granules
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
@@ -367,7 +367,7 @@ fn function_alignment(text: &str) -> Option<Option<u32>> {
 ///
 /// `all` is deliberately absent. gcc takes it only in the negative, so it is handled where each of
 /// those two spellings is read rather than by being on this list.
-const SANITIZERS: [&str; 35] = [
+const SANITIZERS: [&str; 34] = [
     "address",
     "kernel-address",
     "hwaddress",
@@ -399,8 +399,6 @@ const SANITIZERS: [&str; 35] = [
     "vptr",
     "pointer-overflow",
     "builtin",
-    // AArch64's, which the arm64 kernel asks for with `CONFIG_SHADOW_CALL_STACK`.
-    "shadow-call-stack",
     "alias",
     "restrict",
     "memory",
@@ -661,22 +659,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // else today, and `None` is a command line that named no target, which is this machine.
     let mut pinned: Option<TargetTuple> = None;
     let mut min_version: Option<rucc_tuple::Version> = None;
-    // What the `-fpic` family and the `-fpie` family last said, if anything, kept apart because gcc
-    // keeps them apart. A positive spelling of either clears the other, since gcc's option table
-    // chains the four so that the last one written wins, and a negative one only speaks for its
-    // own family. The answer is worked out after the loop.
-    let mut pic: Option<bool> = None;
-    let mut cmodel = rucc_target::CodeModel::Small;
-    let mut pie: Option<bool> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
-    // `--version`, answered after the loop because the banner names the GCC release claimed and
-    // `-fgnuc-version=` may come after it.
-    let mut version = false;
-    // Whether `-std=` or `-ansi` said what the dialect is. When neither did, a claimed GCC release
-    // decides it after the loop, the way that release's own default did.
-    let mut std_given = false;
     // What `--fetch` named, and whether `--offline` forbade it. Both are weighed after the loop
     // because either can be written after the other.
     let mut fetch: Option<String> = None;
@@ -721,22 +706,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // here, so with no `-iprefix` the prefix is nothing and `-iwithprefix` names a directory
     // outright.
     let mut iprefix = String::new();
-    // Every word handed to the assembler with `-Wa,` or `-Xassembler`, beside the argument it came
-    // from so that a refusal can name both.
-    let mut asm_words: Vec<(String, String)> = Vec::new();
-
-    // The architecture the kernel's flags are answered for, which is the last `--target=` on the
-    // line wherever it is written, so that `-mno-outline-atomics --target=aarch64-linux-gnu` is
-    // read for AArch64. A target that does not parse is left for the loop to refuse.
-    let arch = args
-        .iter()
-        .rev()
-        .find_map(|arg| arg.strip_prefix("--target="))
-        .and_then(|target| target.parse::<Triple>().ok())
-        .map_or(opts.target.arch, |target| target.arch);
-    // `-fmin-function-alignment=`, which is weighed after the loop against what
-    // `-falign-functions` said, in whichever order the two came.
-    let mut min_function_align: Option<u32> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -744,16 +713,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         i += 1;
         match arg {
             "-h" | "--help" => return Ok(Action::Help),
-            // The flags the kernel's build passes that nothing below answers, and a few that
-            // something below would answer without saying which issue is about them. First, so
-            // that the table's answer is the one given. See `kbuild`.
-            _ if kbuild::row(arg, arch).is_some() => {
-                let Some(row) = kbuild::row(arg, arch) else { continue };
-                if let kbuild::Answer::Refused(why, issue) = row.answer {
-                    return Err(err(kbuild::refusal(arg, why, issue)));
-                }
-            }
-            "--version" => version = true,
+            "--version" => return Ok(Action::Version),
             // The sysroot fetch, which is weighed after the loop rather than acted on here, because
             // `--offline` written after it has to be able to forbid it. Both spellings, since a
             // flag that takes a tuple gets written both ways and neither is a guess at what the
@@ -854,11 +814,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      see spec/11-debug-info.md"
                 )));
             }
-            // How the debug sections are compressed. Nothing compresses them yet, so bare `-gz`,
-            // which means `zlib`, and every named method are refused in the table in `kbuild`
-            // rather than taken: the kernel probes the flag and would otherwise say its debug
-            // information is compressed when it is not. What reaches here is `none`, which is what
-            // happens, and a name that is not a method at all, which is refused as a typo.
+            // How the debug sections are compressed. There are none yet, so every answer produces
+            // the same bytes and taking the flag promises nothing that is not kept. The value is
+            // still checked, because a typo in a distribution's flags is worth finding when the
+            // compiler reads it rather than when somebody later wonders why nothing got smaller.
+            // Bare `-gz` means `zlib`, which the manual leaves for the reader to discover.
+            "-gz" => opts.compress = Compress::Zlib,
             _ if arg.starts_with("-gz=") => {
                 let how = &arg["-gz=".len()..];
                 opts.compress = how.parse().map_err(|()| {
@@ -922,16 +883,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // The questions a build system asks before it compiles anything. Answered after the
             // loop, because each one is about the target or the library search and the command
             // line has not finished saying what those are.
-            // Of the three `-dump` questions GCC answers the first and stops, so `-dumpfullversion
-            // -dumpversion`, which is how a script asks for the whole version from a GCC old
-            // enough not to know the first flag, gets the whole version from a new one too.
-            "-dumpversion" | "-dumpfullversion" | "-dumpmachine"
-                if matches!(query, Some(Query::Machine | Query::Version | Query::FullVersion)) => {}
             "-dumpmachine" => query = Some(Query::Machine),
             // Both answer with the GCC release in `__GNUC__` rather than our own version, because
             // what asks is a build script deciding which GCC it is talking to, and `0.11` reads as
-            // a GCC too old to have anything. The first one is the whole version before GCC 7 and
-            // only the major number from 7 on, see `GnucVersion::dumpversion`.
+            // a GCC too old to have anything. GCC 7 and later print only the major number for the
+            // first one, and that is the shape the scripts were written against.
             "-dumpversion" => query = Some(Query::Version),
             "-dumpfullversion" => query = Some(Query::FullVersion),
             "-print-multiarch" => query = Some(Query::Multiarch),
@@ -966,7 +922,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-ansi" => {
                 opts.std = Std::C89;
                 opts.gnu_extensions = false;
-                std_given = true;
             }
             // `-Wpedantic` is the same flag under the name the `-W` family gives it, which is
             // the spelling a build system that groups its warning flags tends to write.
@@ -1142,7 +1097,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .ok_or_else(|| err(format!("unknown dialect `{name}`, see --help")))?;
                 opts.std = std;
                 opts.gnu_extensions = gnu;
-                std_given = true;
             }
             // Section 4.5. The claim decides which half of glibc's `sys/cdefs.h` we are
             // handed, so a differential run that does not set it is comparing two compilers
@@ -1161,11 +1115,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // something by a name this compiler has never heard of.
             _ if arg.starts_with("-fno-builtin-") => {
                 opts.no_builtin.push(arg["-fno-builtin-".len()..].to_owned());
-            }
-            // The assembler this compiler stands in for, which is what `-Wa,--version` names.
-            _ if arg.starts_with("-fgnu-as-version=") => {
-                let v = &arg["-fgnu-as-version=".len()..];
-                opts.gnu_as = v.parse().map_err(|why| err(format!("-fgnu-as-version=: {why}")))?;
             }
             _ if arg.starts_with("-fgnuc-version=") => {
                 let v = &arg["-fgnuc-version=".len()..];
@@ -1225,17 +1174,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // cmake build puts `-fPIC` on the compile line, so a compiler that rejects it cannot
             // be the `CC` of a project that has a configure script, whatever else it can do. That
             // is how this was found: building SQLite's test fixture stopped on it.
-            "-fPIC" | "-fpic" => {
-                pic = Some(true);
-                pie = None;
-            }
+            "-fPIC" | "-fpic" => opts.pic = Pic::Library,
             // Not a synonym of the pair above, which is what they were treated as until #756. The
             // library is the expensive answer and gcc makes it the one that has to be asked for,
             // so this is also what nothing at all means.
-            "-fPIE" | "-fpie" => {
-                pie = Some(true);
-                pic = None;
-            }
+            "-fPIE" | "-fpie" => opts.pic = Pic::Executable,
             // A different question from the pair above, and the one every distribution build of a
             // shared library answers. `-fPIC` decides how an address is reached, and this decides
             // whether the optimizer may believe a body it can see, because an exported name is one
@@ -1252,14 +1195,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-asynchronous-unwind-tables" => opts.async_unwind_tables = false,
             "-funwind-tables" => opts.unwind_tables = true,
             "-fno-unwind-tables" => opts.unwind_tables = false,
-            // The other direction, which is a request rather than a description: the output is
-            // linked where it runs, as a kernel and a `-no-pie` executable are, and nothing is to
-            // be reached through a global offset table. The capital spellings are gcc's too, and
-            // `-fno-PIE` is the one every x86 kernel from 4.9 on writes. What the pair of them
-            // comes to is worked out after the loop, because gcc keeps the two questions apart and
-            // `-fPIC -fno-pie` is still a library. See tamnd/rucc#2276.
-            "-fno-pic" | "-fno-PIC" => pic = Some(false),
-            "-fno-pie" | "-fno-PIE" => pie = Some(false),
+            // The other direction is a request, not a description, and it is one this compiler
+            // cannot grant, so it gets the treatment section 13.3 asks for rather than the unknown
+            // option error. Answering it by carrying on would be answering a different question:
+            // the code would still be position independent, which is correct everywhere an
+            // ordinary program runs and is wrong in a kernel, where the flag is written precisely
+            // because there is no loader to fill a global offset table in.
+            "-fno-pic" | "-fno-pie" => {
+                return Err(err(
+                    "position dependent code is not supported: an address that may be in another \
+                     object is loaded out of the global offset table, and nothing here emits the \
+                     absolute form this asks for. Use -no-pie if what you meant was how to link",
+                ));
+            }
             // A section per function and a section per variable, which is what makes
             // `--gc-sections` able to drop anything: a linker can leave out a section nothing
             // reaches and cannot leave out half of one. Both directions are taken, and the off
@@ -2079,48 +2027,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
                     })?;
             }
-            // The boundary the stack pointer is kept on at a call, as a power of two, which the
-            // x86-64 kernel sets to 3 because interrupt entry leaves its stack on eight bytes.
-            // gcc's range is 4 to 12 while the vector registers are in use, because a spilled
-            // vector is stored with an instruction that needs sixteen, and 3 only once they are
-            // not. Nothing here turns them off yet (#2277), so 3 is refused the way gcc refuses
-            // it with SSE on. Only on x86-64, where gcc has the flag at all.
-            _ if arch == rucc_target::Arch::X86_64
-                && arg.starts_with("-mpreferred-stack-boundary=") =>
-            {
-                let text = &arg["-mpreferred-stack-boundary=".len()..];
-                let power = text.parse::<u32>().ok();
-                if power == Some(3) {
-                    return Err(err(kbuild::refusal(
-                        arg,
-                        "gcc takes 3 only once -mno-sse has kept the vector registers out of every \
-                         function, and nothing here does that yet",
-                        Some(2277),
-                    )));
-                }
-                let power = power.filter(|power| (4..=12).contains(power)).ok_or_else(|| {
-                    err(format!("{arg}: the boundary is a power of two between 4 and 12"))
-                })?;
-                opts.stack_boundary = Some(1 << power);
-            }
-            // A floor under every function that `-falign-functions` cannot lower, which is gcc's
-            // difference between the two: the kernel passes this one because ftrace and the call
-            // padding it writes need every function on the boundary, the cold ones included. It is
-            // put together with `-falign-functions` after the loop, since either may come last.
-            _ if arg.starts_with("-fmin-function-alignment=") => {
-                let text = &arg["-fmin-function-alignment=".len()..];
-                let bytes =
-                    function_alignment(text).filter(|_| !text.contains(':')).ok_or_else(|| {
-                        err(format!("{arg}: the alignment has to be a number of bytes"))
-                    })?;
-                min_function_align = bytes;
-            }
-            // `wchar_t` as a 16 bit unsigned type, which is what the kernel's EFI stub and its
-            // UCS-2 strings want and what Windows has anyway. It changes what `L""` holds, what
-            // `__WCHAR_TYPE__` says and so the ABI of any function that takes one, which is why
-            // it is a flag the whole program has to agree on, as it is in gcc.
-            "-fshort-wchar" => opts.short_wchar = true,
-            "-fno-short-wchar" => opts.short_wchar = false,
             // The head of every hot loop, which is padded when this is asked for so that a loop that
             // fits in a 64 byte line does not cross one. Both directions of the plain form are
             // answered. A number is taken and says nothing, because the boundary here is the
@@ -2293,14 +2199,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     )));
                 }
             }
-            // How far apart the pieces of the program may be, and where. The small model is every
-            // hosted program's default. The kernel model is the top 2 GiB of the address space,
-            // which is where every x86-64 Linux kernel is linked, and a build that asks for it and
-            // does not get it links and then does not run. Which machine and which link it is
-            // checked against after the loop, since `--target=` may come after it.
-            // tamnd/rucc#2275.
-            "-mcmodel=small" => cmodel = rucc_target::CodeModel::Small,
-            "-mcmodel=kernel" => cmodel = rucc_target::CodeModel::Kernel,
+            // How far apart the pieces of the program may be. The small model is what we emit and
+            // it is every hosted program's default; the kernel model is a different one and a
+            // build that asks for it and does not get it links and then does not run.
+            "-mcmodel=small" => {}
             // clang's spellings of the deployment target, which it takes over a version in the
             // tuple. gcc on a Mac takes the first. A target that is not Apple ignores it, as
             // clang does, so a makefile that always passes it still builds for Linux.
@@ -2314,8 +2216,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("-mcmodel=") => {
                 return Err(err(format!(
-                    "{arg}: this compiler emits the small and kernel code models and no other, \
-                     see spec/04-driver-and-cli.md section 4.3"
+                    "{arg}: this compiler emits the small code model and no other, see \
+                     spec/12-targets.md"
                 )));
             }
             // GCC's own scripting language for how the driver builds a command line.
@@ -2328,36 +2230,22 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      section 4.4",
                 ));
             }
-            // What a build hands the assembler. gcc splits `-Wa,` at every comma and passes
-            // `-Xassembler`'s word whole, and both are kept in order and read after the loop,
-            // because whether `--64` is true depends on a `--target=` that may come later. See
-            // `assembler_words` for which of them this compiler takes.
-            _ if arg.starts_with("-Wa,") => {
-                for word in arg["-Wa,".len()..].split(',') {
-                    asm_words.push((word.to_owned(), arg.to_owned()));
-                }
-            }
-            "-Xassembler" => {
-                let word = args.get(i).ok_or_else(|| err("-Xassembler requires an argument"))?;
-                i += 1;
-                asm_words.push((word.clone(), format!("-Xassembler {word}")));
-            }
-            // Arguments meant for a separate preprocessor, which this compiler does not have: it is
-            // inside it and does not read a command line. The `-Wp,` ones this compiler understands
-            // were turned into its own flags before the loop, so one that reaches here is one it
-            // does not, and it is refused rather than dropped, because a build that asked the
-            // preprocessor for something and was silently not given it has been told something
-            // untrue.
-            _ if arg.starts_with("-Wp,") => {
+            // Arguments meant for a separate assembler, which this compiler does not have: it is
+            // inside it and does not read a command line. Refused rather than dropped, because
+            // every one of these says something about the output and a build that asked for
+            // `-Wa,--noexecstack` and was silently given an executable stack got the opposite of
+            // what it asked for. The `-Wp,` ones this compiler understands were turned into its
+            // own flags before the loop, so one that reaches here is one it does not.
+            _ if arg.starts_with("-Wa,") || arg.starts_with("-Wp,") => {
                 return Err(err(format!(
-                    "`{arg}` is an argument for a separate preprocessor, and the preprocessor is \
-                     inside this compiler rather than a program it runs"
+                    "`{arg}` is an argument for a separate assembler or preprocessor, and both \
+                     are inside this compiler rather than programs it runs"
                 )));
             }
-            "-Xpreprocessor" => {
+            "-Xassembler" | "-Xpreprocessor" => {
                 return Err(err(format!(
-                    "{arg} hands an argument to a separate preprocessor, and the preprocessor is \
-                     inside this compiler rather than a program it runs"
+                    "{arg} hands an argument to a separate assembler or preprocessor, and both \
+                     are inside this compiler rather than programs it runs"
                 )));
             }
             // Everything else in the `-W` family. `spec/04-driver-and-cli.md` section 4.1 has
@@ -2402,16 +2290,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 return Err(err(format!("unknown option `{arg}`")));
             }
             _ => inputs.push(Input { path: arg.to_owned(), forced, role: Role::File }),
-        }
-    }
-
-    // The floor `-fmin-function-alignment=` put under every function, which `-falign-functions`
-    // may raise and not lower. With no `-falign-functions` the target's own boundary stands unless
-    // the floor is above it.
-    if let Some(floor) = min_function_align {
-        let have = opts.align_functions.unwrap_or(rucc_object::FUNC_ALIGN);
-        if floor > have {
-            opts.align_functions = Some(floor);
         }
     }
 
@@ -2532,39 +2410,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
-    // After the loop, since whether `--64` or `-march=` is true of the target is a question about
-    // the last `--target=`.
-    let assembler = assembler_words(&asm_words, opts.target)?;
-    opts.asm_fatal_warnings = assembler.fatal_warnings;
-    // gcc's `finish_options`, read as a table. An executable is what nothing at all means, and
-    // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
-    // independent. A library needs `-fpic` and no `-fpie` after it, and anything else that said
-    // no is the position dependent answer: `-fno-pie` alone, `-fno-pic` alone, or both.
-    opts.pic = match (pie, pic) {
-        (Some(true), _) | (None, None) => Pic::Executable,
-        (_, Some(true)) => Pic::Library,
-        _ => Pic::Absolute,
-    };
-    // The kernel model promises every address is a 32 bit number sign extended, which is only
-    // true of code linked where it runs, so it is refused beside anything position independent,
-    // the default included, with the words gcc uses. A distribution's gcc builds position
-    // independent executables by default and says the same about `-mcmodel=kernel` on its own.
-    if cmodel == rucc_target::CodeModel::Kernel {
-        if opts.target.arch != rucc_target::Arch::X86_64
-            || opts.target.os.object_format() != ObjectFormat::Elf
-        {
-            return Err(err(format!(
-                "-mcmodel=kernel: {} has no kernel code model, which is x86-64 ELF's",
-                opts.target
-            )));
-        }
-        if opts.pic != Pic::Absolute {
-            return Err(err(
-                "code model kernel does not support PIC mode: add -fno-pie or -fno-pic".to_owned(),
-            ));
-        }
-    }
-    opts.code_model = cmodel;
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -2592,19 +2437,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if threads {
         inputs.push(Input::library("pthread"));
     }
-    // The dialect a claimed GCC release compiled when nothing said which, per
-    // `spec/04-driver-and-cli.md` section 4.6. Only when the claim was written, so the default
-    // claim leaves the default dialect alone, and not on an MSVC row, where the claim is
-    // `__GNUC__` and nothing else, as it is in clang.
-    if !std_given && opts.gnuc_given && opts.target.env != rucc_target::Env::Msvc {
-        opts.std = opts.gnuc.default_std();
-        opts.gnu_extensions = true;
-    }
     if let Some(query) = query {
         return Ok(Action::Print(answer(&query, &opts, &link)?));
-    }
-    if version {
-        return Ok(Action::Print(banner(&opts)));
     }
     // `-M` and `-MM` produce the rule and nothing else, so the run stops after phase 4 whatever
     // else the command line asked for. Read here rather than where the flag was, because a `-c`
@@ -2700,12 +2534,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             plan: Box::new(plan),
             link: Box::new(link),
         });
-    }
-    // gas answers `--version` and stops without reading its input, and gcc passes its exit status
-    // on, so a compiler asked this writes its one line and nothing else. After the plan, so that a
-    // command line gcc would refuse before it ran the assembler is refused here too.
-    if assembler.version {
-        return Ok(Action::Print(gas_banner(opts.gnu_as)));
     }
     Ok(Action::Compile {
         opts: Box::new(opts),
@@ -2932,8 +2760,10 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
     };
     Ok(match query {
         Query::Machine => opts.target.to_string(),
-        Query::Version => opts.gnuc.dumpversion(),
-        Query::FullVersion => opts.gnuc.to_string(),
+        Query::Version => opts.gnuc.major.to_string(),
+        Query::FullVersion => {
+            format!("{}.{}.{}", opts.gnuc.major, opts.gnuc.minor, opts.gnuc.patch)
+        }
         Query::Multiarch => link::multiarch(opts.target),
         // The three lines GCC prints, in its order and with its punctuation, because what reads
         // them is a script written against that shape. There is no installation directory to
@@ -2987,11 +2817,6 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
             Some(manifest) => manifest.digest(),
             None => String::new(),
         },
-        // GCC answers `plugin` with the directory its plugin headers are under, and the kernel
-        // turns `GCC_PLUGINS` on when `include/plugin-version.h` is there. This compiler loads no
-        // GCC plugin, so the answer is the bare word, which is what GCC prints for a file it does
-        // not have, and nothing a search directory holds is allowed to change that.
-        Query::FileName(name) if name == "plugin" => name.clone(),
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
@@ -3199,8 +3024,7 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
             continue;
         }
         let started = std::time::Instant::now();
-        let assembly = job.kind == InputKind::AssemblerWithCpp;
-        let result = preprocess(opts, &job.input, assembly, &fs);
+        let result = preprocess(opts, &job.input, &fs);
         if opts.time {
             say_time(&job.input, started.elapsed(), &mut stderr);
         }
@@ -3913,31 +3737,14 @@ fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
 /// The target a program name asks for, the way `aarch64-linux-gnu-gcc` is gcc for that target.
 ///
 /// `program` is the path the compiler was started as. The name without its directory and without a
-/// trailing `.exe` has to end in `-rucc`, `-gcc`, `-gcc-<version>` or `-cc`, and what comes before
-/// that has to read as a target, or there is no answer and the name means nothing. A link named
-/// `my-rucc` or `ccache-gcc` is therefore just rucc and not an error.
-///
-/// The gcc spellings are there for cross builds that put a prefix in front of `gcc`, which is how
-/// the Linux kernel's `CROSS_COMPILE=aarch64-linux-gnu-` reaches the compiler, and Debian installs
-/// the same compiler again as `aarch64-linux-gnu-gcc-14`. The prefix is read with the target model
-/// that knows every architecture a triple can name, not only the ones rucc generates code for, so
-/// `i686-linux-gnu-gcc` implies `--target=i686-linux-gnu` and that is refused by name. Compiling
-/// for the host instead would hand a 32 bit build a 64 bit object with no word said about it.
+/// trailing `.exe` has to end in `-rucc`, and what comes before that has to be a target this
+/// compiler knows, or there is no answer and the name means nothing. A link named `my-rucc` is
+/// therefore just rucc and not an error.
 pub fn target_from_program(program: &str) -> Option<String> {
     let name = program.rsplit(['/', '\\']).next()?;
     let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name);
-    let triple = name
-        .strip_suffix("-rucc")
-        .or_else(|| name.strip_suffix("-gcc"))
-        .or_else(|| name.strip_suffix("-cc"))
-        .or_else(|| {
-            let (front, version) = name.rsplit_once('-')?;
-            let versioned = !version.is_empty()
-                && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-                && version.as_bytes()[0].is_ascii_digit();
-            front.strip_suffix("-gcc").filter(|_| versioned)
-        })?;
-    triple.parse::<TargetTuple>().ok()?;
+    let triple = name.strip_suffix("-rucc")?;
+    triple.parse::<Triple>().ok()?;
     Some(triple.to_owned())
 }
 
@@ -3968,134 +3775,17 @@ pub fn run_as(program: &str, args: &[String]) -> i32 {
 
 /// What `--version` prints.
 ///
-/// Without a claimed GCC release the first line is ours and is the one every harness we have
-/// reads. With `-fgnuc-version=` it has the shape of GCC's, `gcc (<build>) <version>`, with this
-/// compiler named in the brackets where a distribution names its build. That is for the builds
-/// that tell GCC from other compilers by this line: the Linux kernel from 4.18 to 5.11 sets
-/// `CC_IS_GCC` from `grep gcc` on it, and every kernel copies it into `CONFIG_CC_VERSION_TEXT`. A
-/// build that asks for the claim gets it in the banner too, and a build that did not ask still
-/// sees `rucc`. The second line is for build systems that decide what kind of compiler they have
-/// by reading this text. Meson takes the GNU path only when it finds "Free Software Foundation"
-/// here, and otherwise stops with "Unknown compiler" before it has asked a single question. Past
-/// that point meson reads the version from `__GNUC__` and asks the preprocessor everything else,
-/// so the line decides the path and nothing more. It says what is true, that rucc speaks the
-/// dialect of that GCC release. `spec/04-driver-and-cli.md` section 4.5 has the rest.
-fn banner(opts: &Options) -> String {
-    let gnuc = opts.gnuc;
-    let first = if opts.gnuc_given {
-        format!("gcc (rucc {VERSION}, GNU C persona {gnuc}) {gnuc}")
-    } else {
-        format!("rucc {VERSION}")
-    };
+/// The first line is ours and is the one every harness we have reads. The second is for build
+/// systems that decide what kind of compiler they have by reading this text. Meson takes the GNU
+/// path only when it finds "Free Software Foundation" here, and otherwise stops with "Unknown
+/// compiler" before it has asked a single question, which is how the whole of a meson build is
+/// lost to one sentence. Past that point meson reads the version from `__GNUC__` and asks the
+/// preprocessor everything else, so the line decides the path and nothing more. It says what is
+/// true, that rucc speaks the dialect of GCC 16, and it does not claim to be GCC.
+fn banner() -> String {
     format!(
-        "{first}\nA C compiler for the GNU C dialect of GCC {} from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.",
-        gnuc.major
+        "rucc {VERSION}\nA C compiler for the GNU C dialect of GCC 16 from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.\n"
     )
-}
-
-/// The first line of what gas prints for `--version`, which is all of what this compiler prints.
-///
-/// gas writes `GNU assembler (GNU Binutils) 2.44` and then a copyright and a licence, and what
-/// reads it is the Linux kernel's `scripts/as-version.sh`, which takes the first line, wants its
-/// first two words to be `GNU assembler` and takes the last word as the version. The part in
-/// brackets is where a distribution names its build, so it is where this names itself. One line
-/// rather than gas's six, since the rest is gas's licence and not ours.
-fn gas_banner(version: rucc_session::GasVersion) -> String {
-    format!("GNU assembler (rucc {VERSION} integrated) {version}")
-}
-
-/// What the words a build handed the assembler come to.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Assembler {
-    /// `--version`, which prints the assembler's banner instead of assembling anything.
-    version: bool,
-    /// `--fatal-warnings`, which makes the assembler's one warning an error.
-    fatal_warnings: bool,
-}
-
-/// The words of every `-Wa,` and `-Xassembler`, each one honored, taken because it describes what
-/// the assembler inside this compiler already does, or refused by name.
-///
-/// There is no separate assembler here, but builds pass these as if there were, and the Linux
-/// kernel passes a good many. Refusing the ones that are not on this list matters as much as taking
-/// the ones that are: kbuild's `as-option` and `cc-option` find out whether an assembler takes an
-/// option by passing it and looking at the exit status, so an option taken and ignored is a
-/// feature switched on that the output does not have. Each word is paired with the argument it came
-/// from, so that the refusal names both. `spec/04-driver-and-cli.md` section 4.9 has the list and
-/// why each entry is on it.
-fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembler, CliError> {
-    let mut out = Assembler::default();
-    let x86 = target.arch == rucc_target::Arch::X86_64;
-    let aarch64 = target.arch == rucc_target::Arch::Aarch64;
-    let mut words = words.iter();
-    while let Some((word, from)) = words.next() {
-        let refuse = |why: &str| err(format!("`{word}` in `{from}`: {why}"));
-        match word.as_str() {
-            "--version" => out.version = true,
-            "--fatal-warnings" => out.fatal_warnings = true,
-            // Every ELF object this compiler writes, from C or from assembly, carries an empty
-            // `.note.GNU-stack` with no flags on it, which is the marker that says the stack is not
-            // executable. Mach-O and COFF have no marker and a stack that is not executable unless
-            // the link says otherwise, so on those it is true as well.
-            "--noexecstack" => {}
-            // The note gas writes on x86 with the instruction sets and features a file used. This
-            // compiler never writes it, so asking for it not to be written asks for what happens.
-            "-mx86-used-note=no" if x86 => {}
-            // The word size gas assembles for. Every x86 target this compiler has is 64 bit, so
-            // `--64` is what it does and `--32` is a machine it has no encoder for.
-            "--64" if x86 => {}
-            "--32" if x86 => {
-                return Err(refuse(
-                    "this compiler assembles only 64 bit x86, and 32 bit code would need an \
-                     assembler for the i386 encodings, which it does not have",
-                ));
-            }
-            // The data model gas assembles for on AArch64, where LP64 is the only one this compiler
-            // has.
-            "-mabi=lp64" if aarch64 => {}
-            // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
-            // and refuses both directives, so a place to look for one changes nothing.
-            "-I" => {
-                if words.next().is_none() {
-                    return Err(refuse("-I requires a directory"));
-                }
-            }
-            _ if word.starts_with("-I") => {}
-            // The architecture gas takes instructions from. The kernel passes `armv8.4-a` or
-            // `armv8.5-a` on AArch64 so that the assembler takes instructions the compiler must not
-            // generate, and this assembler takes every instruction it can encode whatever
-            // architecture is named, so a name it knows is taken. On x86 gas's names are processors
-            // rather than the compiler's levels and they narrow what it takes, which this assembler
-            // cannot do.
-            _ if word.starts_with("-march=") => {
-                let name = &word["-march=".len()..];
-                let arch = name.split_once('+').map_or(name, |(arch, _)| arch);
-                if !aarch64 || rucc_target::Isa::aarch64_arch(arch).is_none() {
-                    return Err(refuse(
-                        "the assembler inside this compiler takes every instruction it can encode \
-                         and cannot be narrowed to a processor, and on AArch64 it takes the \
-                         armv8 and armv9 architecture names",
-                    ));
-                }
-            }
-            // Line tables for a file of assembly, which gas writes from the source lines when the
-            // file has no `.loc` of its own. This assembler writes no debug information for a file
-            // of assembly at all, so the option is refused rather than taken and not done.
-            _ if word.starts_with("-gdwarf") || word.starts_with("--gdwarf") || word == "-g" => {
-                return Err(refuse(
-                    "the assembler inside this compiler writes no debug information for a file of \
-                     assembly, so it cannot write the line table this asks for",
-                ));
-            }
-            _ => {
-                return Err(refuse(
-                    "the assembler is inside this compiler, and this is not one of the options it \
-                     takes, see spec/04-driver-and-cli.md section 4.9",
-                ));
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Runs the driver and returns the process exit code.
@@ -4106,6 +3796,10 @@ pub fn run(args: &[String]) -> i32 {
     match parse_args(args) {
         Ok(Action::Help) => {
             print!("{USAGE}");
+            0
+        }
+        Ok(Action::Version) => {
+            print!("{}", banner());
             0
         }
         Ok(Action::Print(line)) => {
@@ -4210,8 +3904,7 @@ fn unlinkable(opts: &Options) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use rucc_session::{
-        Compress, Contract, GnucVersion, IncludeForm, LtoJobs, OptLevel, Partition, Patchable,
-        Visibility,
+        Contract, GnucVersion, IncludeForm, LtoJobs, OptLevel, Partition, Patchable, Visibility,
     };
 
     use super::*;
@@ -4287,9 +3980,7 @@ mod tests {
     #[test]
     fn help_and_version_win_over_everything_else() {
         assert_eq!(parse_args(&args(&["-c", "--help", "x.c"])).unwrap(), Action::Help);
-        let banner = printed(&["--version"]);
-        assert!(banner.starts_with("rucc "), "{banner}");
-        assert_eq!(printed(&["-c", "--version", "x.c"]), banner);
+        assert_eq!(parse_args(&args(&["--version"])).unwrap(), Action::Version);
     }
 
     fn compile(s: &[&str]) -> (Box<Options>, Box<Plan>) {
@@ -5184,62 +4875,14 @@ mod tests {
     }
 
     #[test]
-    fn position_dependent_code_is_taken_in_every_spelling_gcc_has() {
-        for flag in ["-fno-pic", "-fno-PIC", "-fno-pie", "-fno-PIE"] {
-            assert_eq!(compile(&[flag, "a.c"]).0.pic, Pic::Absolute, "{flag}");
+    fn asking_for_position_dependent_code_is_told_why_it_is_not_coming() {
+        for flag in ["-fno-pic", "-fno-pie"] {
+            let e = parse_args(&args(&[flag, "a.c"])).unwrap_err();
+            assert!(e.message.contains("global offset table"), "{flag}: {}", e.message);
+            // The one it may have meant, since the two are a letter apart and one of them is
+            // about linking and is taken.
+            assert!(e.message.contains("-no-pie"), "{flag}: {}", e.message);
         }
-    }
-
-    #[test]
-    fn the_kernel_code_model_is_taken_beside_position_dependent_code_on_x86_64_elf() {
-        let (opts, _) = compile(&[LINUX, "-mcmodel=kernel", "-fno-PIE", "-c", "a.c"]);
-        assert_eq!(opts.code_model, rucc_target::CodeModel::Kernel);
-        // In either order, since the target and the link are settled after the loop.
-        let (opts, _) = compile(&["-fno-pic", "-mcmodel=kernel", LINUX, "-c", "a.c"]);
-        assert_eq!(opts.code_model, rucc_target::CodeModel::Kernel);
-        // And the last one on the line counts.
-        let (opts, _) = compile(&[LINUX, "-mcmodel=kernel", "-mcmodel=small", "-c", "a.c"]);
-        assert_eq!(opts.code_model, rucc_target::CodeModel::Small);
-        assert_eq!(compile(&[LINUX, "-c", "a.c"]).0.code_model, rucc_target::CodeModel::Small);
-    }
-
-    #[test]
-    fn the_kernel_code_model_is_refused_where_it_cannot_be_true() {
-        // gcc's words, and the default is a position independent executable here as it is on a
-        // distribution's gcc.
-        for line in [&[LINUX, "-mcmodel=kernel"][..], &[LINUX, "-mcmodel=kernel", "-fPIC"]] {
-            let mut line = line.to_vec();
-            line.extend(["-c", "a.c"]);
-            let message = refused(&line);
-            assert!(message.contains("code model kernel does not support PIC mode"), "{message}");
-        }
-        let arm =
-            refused(&["--target=aarch64-linux-gnu", "-mcmodel=kernel", "-fno-pic", "-c", "a.c"]);
-        assert!(arm.contains("no kernel code model"), "{arm}");
-    }
-
-    #[test]
-    fn the_pic_and_pie_families_are_settled_the_way_gcc_settles_them() {
-        let pic = |line: &[&str]| {
-            let mut line = line.to_vec();
-            line.push("a.c");
-            compile(&line).0.pic
-        };
-        assert_eq!(pic(&[]), Pic::Executable);
-        assert_eq!(pic(&["-fPIC"]), Pic::Library);
-        assert_eq!(pic(&["-fpie"]), Pic::Executable);
-        // A no only speaks for its own family, so a library asked for stays one.
-        assert_eq!(pic(&["-fPIC", "-fno-pie"]), Pic::Library);
-        assert_eq!(pic(&["-fPIE", "-fno-pic"]), Pic::Executable);
-        // And the last yes wins over a no before it, in either family.
-        assert_eq!(pic(&["-fno-pic", "-fPIC"]), Pic::Library);
-        assert_eq!(pic(&["-fno-pie", "-fpie"]), Pic::Executable);
-        assert_eq!(pic(&["-fPIC", "-fno-pic"]), Pic::Absolute);
-        assert_eq!(pic(&["-fpie", "-fno-pie"]), Pic::Absolute);
-        assert_eq!(pic(&["-fno-pie", "-fno-pic"]), Pic::Absolute);
-        // A later yes in one family clears the other, as gcc's chain of negatives does.
-        assert_eq!(pic(&["-fPIE", "-fPIC"]), Pic::Library);
-        assert_eq!(pic(&["-fPIC", "-fPIE"]), Pic::Executable);
     }
 
     #[test]
@@ -5252,51 +4895,7 @@ mod tests {
         assert_eq!(t("/usr/local/bin/rucc"), None);
         assert_eq!(t("my-rucc"), None);
         assert_eq!(t("sparc64-linux-gnu-rucc"), None);
-    }
-
-    #[test]
-    fn a_cross_gcc_name_picks_the_target_in_front_of_it() {
-        let t = |p: &str| target_from_program(p);
-        assert_eq!(t("aarch64-linux-gnu-gcc").as_deref(), Some("aarch64-linux-gnu"));
-        assert_eq!(t("/usr/bin/x86_64-linux-gnu-gcc").as_deref(), Some("x86_64-linux-gnu"));
-        assert_eq!(t("i686-linux-gnu-gcc").as_deref(), Some("i686-linux-gnu"));
-        assert_eq!(t("aarch64-linux-gnu-gcc-14").as_deref(), Some("aarch64-linux-gnu"));
-        assert_eq!(t("x86_64-linux-gnu-gcc-14.2").as_deref(), Some("x86_64-linux-gnu"));
-        assert_eq!(t("riscv64-linux-gnu-cc").as_deref(), Some("riscv64-linux-gnu"));
-        assert_eq!(t(r"C:\bin\x86_64-w64-mingw32-gcc.exe").as_deref(), Some("x86_64-w64-mingw32"));
-        assert_eq!(t("gcc"), None);
-        assert_eq!(t("ccache-gcc"), None);
-        assert_eq!(t("x86_64-linux-gnu-gcc-ar"), None);
-        assert_eq!(t("x86_64-linux-gnu-gcc-"), None);
-        assert_eq!(t("sparc64-linux-gnu-gcc"), None);
-    }
-
-    #[test]
-    fn a_cross_gcc_name_compiles_for_its_target_and_a_written_target_still_wins() {
-        let target = |program: &str, line: &[&str]| {
-            let mut all: Vec<String> = target_from_program(program)
-                .map(|triple| format!("--target={triple}"))
-                .into_iter()
-                .collect();
-            all.extend(args(line));
-            match parse_args(&all) {
-                Ok(Action::Compile { opts, .. }) => Ok(opts.target),
-                Ok(_) => panic!("expected a compile"),
-                Err(e) => Err(e.message),
-            }
-        };
-        let aarch64: Triple = "aarch64-unknown-linux-gnu".parse().unwrap();
-        let x86_64: Triple = "x86_64-unknown-linux-gnu".parse().unwrap();
-        assert_eq!(target("aarch64-linux-gnu-gcc", &["-c", "a.c"]), Ok(aarch64));
-        assert_eq!(target("x86_64-linux-gnu-gcc", &["-c", "a.c"]), Ok(x86_64));
-        assert_eq!(
-            target("aarch64-linux-gnu-gcc", &["--target=x86_64-linux-gnu", "-c", "a.c"]),
-            Ok(x86_64)
-        );
-        // No i686 back end yet, so the name is refused with the triple it implied rather than
-        // quietly building for the host.
-        let e = target("i686-linux-gnu-gcc", &["-c", "a.c"]).unwrap_err();
-        assert!(e.contains("i686-linux-gnu"), "{e}");
+        assert_eq!(t("aarch64-linux-gnu-gcc"), None);
     }
 
     #[test]
@@ -6753,10 +6352,10 @@ mod tests {
     #[test]
     fn an_argument_for_a_separate_tool_is_refused_rather_than_dropped() {
         // Every one of these says something about the output, so the wrong answer is silence.
-        assert!(refused(&["-Wa,--execstack", "-c", "a.c"]).contains("`--execstack`"));
-        assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate preprocessor"));
+        assert!(refused(&["-Wa,--noexecstack", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate assembler"));
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
-        assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("kernel code models"));
+        assert!(refused(&["-mcmodel=kernel", "-c", "a.c"]).contains("small code model"));
         assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
         // The word size the target does not have, which is a target this compiler was not asked
         // for rather than a flag it does not know.
@@ -6767,18 +6366,27 @@ mod tests {
     /// `-gz` and the two spellings of the split, which are the two questions about the shape of
     /// the debug output rather than about how much of it there is.
     ///
-    /// Nothing compresses the debug sections yet, so every spelling that asks for compression is
-    /// refused with the issue about it, and the one that asks for none is taken. The kernel probes
-    /// `-gz=zlib` for `DEBUG_INFO_COMPRESSED`, and a compiler that took it would configure a
-    /// kernel that says its debug information is compressed when it is not.
+    /// Both answers here are about what happens when there is debug information to shape, and
+    /// there is none yet, so what is being asserted is that the flags are read and remembered
+    /// rather than that anything changed in the output. That is the whole of what taking them
+    /// claims, and it is worth a test because the day `rucc-debug` writes a section this is where
+    /// it comes to find out what the command line said.
     #[test]
     fn the_shape_of_the_debug_output_is_recorded_even_where_there_is_none_of_it() {
         let (opts, _) = compile(&["-c", "a.c"]);
         assert_eq!(opts.compress, Compress::None, "uncompressed unless somebody asks");
-        assert_eq!(compile(&["-gz=none", "-c", "a.c"]).0.compress, Compress::None);
-        for flag in ["-gz", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
-            let failed = refused(&[flag, "-c", "a.c"]);
-            assert!(failed.contains("uncompressed") && failed.contains("#2288"), "{failed}");
+
+        // Bare `-gz` is `-gz=zlib`, measured against gcc 16 rather than read out of the manual,
+        // which describes the flag without ever saying which algorithm it picks.
+        assert_eq!(compile(&["-gz", "-c", "a.c"]).0.compress, Compress::Zlib);
+        for (spelling, want) in [
+            ("none", Compress::None),
+            ("zlib", Compress::Zlib),
+            ("zlib-gnu", Compress::ZlibGnu),
+            ("zstd", Compress::Zstd),
+        ] {
+            let (opts, _) = compile(&[&format!("-gz={spelling}"), "-c", "a.c"]);
+            assert_eq!(opts.compress, want, "{spelling}");
         }
 
         // A value nothing here has heard of is refused rather than rounded to the nearest one,
@@ -7087,11 +6695,7 @@ mod tests {
         let x86 = ["--target=x86_64-unknown-linux-gnu", "-c", "a.c"];
         let said = refused(&[&x86[..], &["-mavx2"]].concat());
         assert!(said.contains("no intrinsics for avx2"), "{said}");
-        // Turning the baseline off is what a kernel asks for, and the kernel's table answers it
-        // with the issue about keeping the vector registers out.
         let said = refused(&[&x86[..], &["-mno-sse2"]].concat());
-        assert!(said.contains("tamnd/rucc#2277"), "{said}");
-        let said = refused(&[&x86[..], &["-mno-fxsr"]].concat());
         assert!(said.contains("baseline"), "{said}");
         assert!(refused(&[&x86[..], &["-msse5"]].concat()).contains("unknown option"));
         // No other target has these, whichever side of the target the flag was written on.
@@ -7140,7 +6744,7 @@ mod tests {
 
     #[test]
     fn the_version_banner_keeps_our_first_line_and_takes_meson_down_the_gnu_path() {
-        let text = printed(&["--version"]);
+        let text = banner();
         let mut lines = text.lines();
         // Every harness we have reads the first line and nothing else.
         assert_eq!(lines.next(), Some(format!("rucc {VERSION}").as_str()));
@@ -7149,110 +6753,6 @@ mod tests {
         // GCC's own banner has three lines and so does this one, and the claim is the dialect.
         assert!(lines.next().is_some_and(|l| l.contains("GCC 16")), "{text}");
         assert!(lines.next().is_some() && lines.next().is_none(), "{text}");
-    }
-
-    /// The banner under a claimed release, which is GCC's shape with this compiler named where a
-    /// distribution names its build. The kernel from 4.18 to 5.11 runs `grep gcc` on the first
-    /// line to decide it has GCC, and every kernel copies that line into `CONFIG_CC_VERSION_TEXT`.
-    #[test]
-    fn a_claimed_release_puts_gcc_and_its_version_on_the_first_line() {
-        let text = printed(&["-fgnuc-version=14.2.0", "--version"]);
-        let first = text.lines().next().unwrap_or_default();
-        assert_eq!(first, format!("gcc (rucc {VERSION}, GNU C persona 14.2.0) 14.2.0"));
-        assert!(text.contains("GCC 14 from the Free Software Foundation"), "{text}");
-        assert_eq!(text.lines().count(), 3, "{text}");
-
-        // The claim can come after the flag, since it is answered once the line has been read,
-        // and a short claim is printed in all three numbers, as GCC prints its own.
-        let text = printed(&["--version", "-fgnuc-version=4.9"]);
-        assert!(text.starts_with(&format!("gcc (rucc {VERSION}, GNU C persona 4.9.0) 4.9.0\n")));
-
-        // A command line gcc would refuse is refused rather than answered.
-        assert!(refused(&["--version", "-fgnuc-version=4.x"]).contains("not a number"));
-    }
-
-    /// Before GCC 7 `-dumpversion` was the whole version. From 7 it is the major number the way
-    /// the distributions build it, and `-dumpfullversion` is the whole one.
-    #[test]
-    fn the_version_questions_are_answered_the_way_the_claimed_release_answers_them() {
-        let ask = |claim: &str, flags: &[&str]| {
-            let claim = format!("-fgnuc-version={claim}");
-            let mut line = vec![claim.as_str()];
-            line.extend_from_slice(flags);
-            printed(&line)
-        };
-        assert_eq!(ask("4.9.4", &["-dumpversion"]), "4.9.4");
-        assert_eq!(ask("4.9.4", &["-dumpfullversion"]), "4.9.4");
-        assert_eq!(ask("6.3", &["-dumpversion"]), "6.3.0");
-        assert_eq!(ask("7.5.0", &["-dumpversion"]), "7");
-        assert_eq!(ask("14.2.0", &["-dumpversion"]), "14");
-        assert_eq!(ask("14.2.0", &["-dumpfullversion"]), "14.2.0");
-        // The first of the family wins, as it does in GCC, which is what makes the usual way of
-        // asking any GCC for its whole version work.
-        assert_eq!(ask("14.2.0", &["-dumpfullversion", "-dumpversion"]), "14.2.0");
-        assert_eq!(ask("14.2.0", &["-dumpversion", "-dumpfullversion"]), "14");
-        assert_eq!(ask("4.9.4", &["-dumpfullversion", "-dumpversion"]), "4.9.4");
-        assert_eq!(
-            ask("14.2.0", &["-dumpmachine", "-dumpversion", LINUX]),
-            "x86_64-unknown-linux-gnu"
-        );
-    }
-
-    /// The kernel's `GCC_PLUGINS` depends on `include/plugin-version.h` being under what
-    /// `-print-file-name=plugin` prints, and this compiler has no plugins to offer.
-    #[test]
-    fn there_is_never_a_plugin_directory_to_find() {
-        let dir = std::env::temp_dir().join(format!("rucc-plugin-{}", std::process::id()));
-        let headers = dir.join("plugin").join("include");
-        std::fs::create_dir_all(&headers).unwrap();
-        std::fs::write(headers.join("plugin-version.h"), "").unwrap();
-        // Even with a GCC plugin tree in a directory the search reads, since loading what is in it
-        // is not something this compiler can do.
-        let search = format!("-L{}", dir.display());
-        assert_eq!(printed(&[LINUX, &search, "-print-file-name=plugin"]), "plugin");
-        assert_eq!(printed(&["-fgnuc-version=14.2.0", "-print-file-name=plugin"]), "plugin");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The dialect a claimed release compiled when the command line had no `-std=`.
-    #[test]
-    fn a_claimed_release_brings_its_default_dialect_and_an_explicit_one_still_wins() {
-        let dialect = |flags: &[&str]| {
-            let mut line = vec![LINUX, "-c", "a.c"];
-            line.extend_from_slice(flags);
-            let (opts, _) = compile(&line);
-            (opts.std, opts.gnu_extensions)
-        };
-        assert_eq!(dialect(&[]), (Std::C23, true), "no claim, our own default");
-        assert_eq!(dialect(&["-fgnuc-version=4.9.4"]), (Std::C89, true));
-        assert_eq!(dialect(&["-fgnuc-version=5.1"]), (Std::C11, true));
-        assert_eq!(dialect(&["-fgnuc-version=7.5.0"]), (Std::C11, true));
-        assert_eq!(dialect(&["-fgnuc-version=8.1"]), (Std::C17, true));
-        assert_eq!(dialect(&["-fgnuc-version=14.2.0"]), (Std::C17, true));
-        assert_eq!(dialect(&["-fgnuc-version=15.1"]), (Std::C23, true));
-        // Whichever order they come in, what the command line said about the dialect wins.
-        assert_eq!(dialect(&["-std=gnu11", "-fgnuc-version=4.9.4"]), (Std::C11, true));
-        assert_eq!(dialect(&["-fgnuc-version=14.2.0", "-std=c99"]), (Std::C99, false));
-        assert_eq!(dialect(&["-fgnuc-version=4.9.4", "-ansi"]), (Std::C89, false));
-        // On an MSVC row the claim is `__GNUC__` and nothing more, as it is in clang.
-        let (opts, _) =
-            compile(&["--target=x86_64-pc-windows-msvc", "-fgnuc-version=4.9.4", "-c", "a.c"]);
-        assert_eq!(opts.std, Std::default());
-    }
-
-    #[test]
-    fn a_claimed_release_before_ten_makes_tentative_definitions_common() {
-        let common = |flags: &[&str]| {
-            let mut line = vec![LINUX, "-c", "a.c"];
-            line.extend_from_slice(flags);
-            Session::new(*compile(&line).0).common()
-        };
-        assert!(common(&["-fgnuc-version=9.5"]));
-        assert!(!common(&["-fgnuc-version=10.1"]));
-        assert!(!common(&["-fgnuc-version=9.5", "-fno-common"]), "the command line wins");
-        let (opts, _) =
-            compile(&["--target=x86_64-pc-windows-msvc", "-fgnuc-version=9.5", "-c", "a.c"]);
-        assert!(!Session::new(*opts).common());
     }
 
     #[test]
@@ -7463,103 +6963,8 @@ mod tests {
 
     #[test]
     fn a_preprocessor_flag_this_compiler_does_not_read_is_still_refused_whole() {
-        assert!(refused(&["-Wp,-MD", "-c", "a.c"]).contains("separate preprocessor"));
+        assert!(refused(&["-Wp,-MD", "-c", "a.c"]).contains("separate assembler"));
         assert!(refused(&["-Wp,-MD,x.d,-C", "-c", "a.c"]).contains("-Wp,-MD,x.d,-C"));
-    }
-
-    #[test]
-    fn the_assembler_version_is_its_own_claim_beside_the_gcc_one() {
-        let line = |extra: &[&str]| {
-            let mut words = vec!["-Wa,--version", "-c", "-x", "assembler", "/dev/null"];
-            words.extend_from_slice(extra);
-            words.extend_from_slice(&["-o", "/dev/null"]);
-            printed(&words)
-        };
-        let ours = format!("GNU assembler (rucc {VERSION} integrated)");
-        assert_eq!(line(&["-fgnu-as-version=2.44"]), format!("{ours} 2.44"));
-        assert_eq!(line(&[]), format!("{ours} 2.46"), "the documented default moved");
-        assert_eq!(line(&["-fgnu-as-version=2.35.1"]), format!("{ours} 2.35.1"));
-        // The two personas do not move each other.
-        assert_eq!(line(&["-fgnuc-version=4.9.4"]), format!("{ours} 2.46"));
-        let (opts, _) = compile(&["-fgnu-as-version=2.25", "-c", "a.c"]);
-        assert_eq!(opts.gnu_as.to_string(), "2.25");
-        assert_eq!(opts.gnuc, GnucVersion::default());
-        let bad = refused(&["-fgnu-as-version=2.x", "-c", "a.c"]);
-        assert!(bad.contains("-fgnu-as-version="), "{bad}");
-    }
-
-    #[test]
-    fn the_assembler_version_is_asked_the_way_as_version_sh_asks_it() {
-        // `scripts/as-version.sh` in the kernel, which puts its flags after the compiler's own and
-        // reads the preprocessor's spelling of an assembler file.
-        let said = printed(&[
-            "-fgnuc-version=14.2.0",
-            "-fgnu-as-version=2.44",
-            "-Wa,--version",
-            "-c",
-            "-x",
-            "assembler-with-cpp",
-            "/dev/null",
-            "-o",
-            "/dev/null",
-        ]);
-        assert!(said.starts_with("GNU assembler "), "{said}");
-        assert!(said.ends_with(" 2.44"), "{said}");
-        // And `-Xassembler`, which is the same word by another road, and a list in one `-Wa,`.
-        let x = printed(&["-Xassembler", "--version", "-c", "-x", "assembler", "/dev/null"]);
-        assert_eq!(x, format!("GNU assembler (rucc {VERSION} integrated) 2.46"));
-        let list = printed(&["-Wa,--noexecstack,--version", "-c", "-x", "assembler", "/dev/null"]);
-        assert_eq!(list, x);
-    }
-
-    #[test]
-    fn what_the_kernel_hands_the_assembler_is_taken_where_it_is_true() {
-        let x86 = "--target=x86_64-unknown-linux-gnu";
-        let arm = "--target=aarch64-unknown-linux-gnu";
-        for word in [
-            "-Wa,--noexecstack",
-            "-Wa,-mx86-used-note=no",
-            "-Wa,--64",
-            "-Wa,-Iinclude",
-            "-Wa,-I,include",
-        ] {
-            compile(&[x86, word, "-c", "a.c"]);
-        }
-        compile(&[x86, "-Xassembler", "--noexecstack", "-c", "a.c"]);
-        for word in ["-Wa,-march=armv8.5-a", "-Wa,-march=armv8.4-a+crc", "-Wa,-mabi=lp64"] {
-            compile(&[arm, word, "-c", "a.c"]);
-        }
-        let (opts, _) = compile(&[x86, "-Wa,--fatal-warnings", "-c", "a.c"]);
-        assert!(opts.asm_fatal_warnings, "--fatal-warnings did not reach the assembler");
-        assert!(!compile(&[x86, "-c", "a.c"]).0.asm_fatal_warnings);
-    }
-
-    #[test]
-    fn what_the_assembler_would_not_do_is_refused_by_name() {
-        // kbuild's `as-option` takes an exit status of zero as the option being supported, so
-        // each of these has to fail or the kernel switches on something the output does not have.
-        let x86 = "--target=x86_64-unknown-linux-gnu";
-        let arm = "--target=aarch64-unknown-linux-gnu";
-        let cases: [(&[&str], &str); 10] = [
-            (&[x86, "-Wa,--32"], "`--32`"),
-            (&[arm, "-Wa,--64"], "`--64`"),
-            (&[arm, "-Wa,-mx86-used-note=no"], "`-mx86-used-note=no`"),
-            (&[x86, "-Wa,-mx86-used-note=yes"], "`-mx86-used-note=yes`"),
-            (&[x86, "-Wa,-gdwarf-5"], "debug information"),
-            (&[x86, "-Wa,--gdwarf-4"], "debug information"),
-            (&[x86, "-Wa,-march=corei7"], "`-march=corei7`"),
-            (&[arm, "-Wa,-march=armv7-a"], "`-march=armv7-a`"),
-            (&[x86, "-Wa,-mrelax-relocations=no"], "`-mrelax-relocations=no`"),
-            (&[x86, "-Wa,--noexecstack,-isa=foo"], "`-Wa,--noexecstack,-isa=foo`"),
-        ];
-        for (words, needle) in cases {
-            let mut line = words.to_vec();
-            line.extend_from_slice(&["-c", "a.c"]);
-            let why = refused(&line);
-            assert!(why.contains(needle), "{words:?}: {why}");
-        }
-        let lonely = refused(&[x86, "-Xassembler"]);
-        assert!(lonely.contains("requires an argument"), "{lonely}");
     }
 
     /// A directory of sources for one test, removed when the test is done with it.
@@ -7963,227 +7368,5 @@ mod tests {
         // and which a person building mingw-w64 with this compiler has to be able to find without
         // knowing it is there.
         assert!(USAGE.lines().count() < 74, "usage text has grown past one screen");
-    }
-
-    const KERNEL_X86: &str = "--target=x86_64-unknown-linux-gnu";
-    const KERNEL_ARM64: &str = "--target=aarch64-unknown-linux-gnu";
-
-    /// The flags kbuild passes whose request is already what this compiler does, on the target
-    /// each is for. Every one of them was an unknown option before, and a `cc-option` probe that
-    /// is refused drops the flag, so a kernel built with rucc was built with a different line.
-    #[test]
-    fn a_kernel_flag_that_asks_for_what_happens_is_taken() {
-        for flag in [
-            "-fverbose-asm",
-            "-fno-var-tracking",
-            "-fno-var-tracking-assignments",
-            "-fno-partial-inlining",
-            "-fmerge-constants",
-            "-fno-allow-store-data-races",
-            "-freg-struct-return",
-            "-fzero-init-padding-bits=all",
-            "-fno-stack-check",
-            "-fno-dwarf2-cfi-asm",
-            "-femit-struct-debug-baseonly",
-            "-fdiagnostics-show-context=2",
-            "-fjump-tables",
-            "-ftrivial-auto-var-init=uninitialized",
-            "-fzero-call-used-regs=skip",
-            "-gz=none",
-            "-mskip-rax-setup",
-            "-maccumulate-outgoing-args",
-            "-mno-apx-features=egpr",
-            "-mstack-protector-guard=tls",
-            "-mindirect-branch=keep",
-            "-mfunction-return=keep",
-            "-mharden-sls=none",
-        ] {
-            compile(&[KERNEL_X86, flag, "-c", "a.c"]);
-        }
-        for flag in [
-            "-mno-outline-atomics",
-            "-ffixed-x18",
-            "-mlittle-endian",
-            "-mbranch-protection=none",
-            "-mabi=lp64",
-        ] {
-            compile(&[KERNEL_ARM64, flag, "-c", "a.c"]);
-        }
-        // Read for the target the line ends up naming, wherever `--target=` was written.
-        compile(&["-mno-outline-atomics", KERNEL_ARM64, "-c", "a.c"]);
-    }
-
-    /// The boundary is a power of two, as gcc spells it, and only on x86-64, where gcc has the
-    /// flag. 3 is the kernel's and waits on the vector registers being kept out.
-    #[test]
-    fn the_preferred_stack_boundary_is_a_power_of_two_on_x86_64() {
-        let boundary = |flag: &str| compile(&[KERNEL_X86, flag, "-c", "a.c"]).0.stack_boundary;
-        assert_eq!(compile(&[KERNEL_X86, "-c", "a.c"]).0.stack_boundary, None);
-        assert_eq!(boundary("-mpreferred-stack-boundary=4"), Some(16));
-        assert_eq!(boundary("-mpreferred-stack-boundary=5"), Some(32));
-        assert_eq!(boundary("-mpreferred-stack-boundary=12"), Some(4096));
-        for bad in ["-mpreferred-stack-boundary=13", "-mpreferred-stack-boundary=2"] {
-            assert!(refused(&[KERNEL_X86, bad, "-c", "a.c"]).contains("between 4 and 12"));
-        }
-        let three = refused(&[KERNEL_X86, "-mpreferred-stack-boundary=3", "-c", "a.c"]);
-        assert!(three.contains("-mno-sse"), "{three}");
-        let arm = refused(&[KERNEL_ARM64, "-mpreferred-stack-boundary=4", "-c", "a.c"]);
-        assert!(arm.contains("unknown option"), "{arm}");
-    }
-
-    /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
-    /// that would add it, so that the person reading the error can find where the work is.
-    #[test]
-    fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
-        for (flag, issue) in [
-            ("-mno-sse", 2277),
-            ("-mno-80387", 2277),
-            ("-mgeneral-regs-only", 2277),
-            ("-mpreferred-stack-boundary=3", 2277),
-            ("-mstack-protector-guard-reg=gs", 2279),
-            ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
-            ("-mindirect-branch=thunk-extern", 2280),
-            ("-mfunction-return=thunk-extern", 2280),
-            ("-mharden-sls=all", 2280),
-            ("-mindirect-branch-cs-prefix", 2280),
-            ("-fno-jump-tables", 2280),
-            ("-fzero-call-used-regs=used-gpr", 2281),
-            ("-ftrivial-auto-var-init=zero", 2282),
-            ("-mrecord-mcount", 2283),
-            ("-mnop-mcount", 2283),
-            ("-fconserve-stack", 2284),
-            ("-gdwarf-4", 2287),
-            ("-gz=zlib", 2288),
-        ] {
-            let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
-            assert!(failed.starts_with(flag), "the flag is named: {failed}");
-            assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
-        }
-        for (flag, issue) in [
-            ("-mbranch-protection=pac-ret+bti", 2286),
-            ("-msign-return-address=non-leaf", 2286),
-            ("-mgeneral-regs-only", 2277),
-            ("-mstack-protector-guard=sysreg", 2279),
-        ] {
-            let failed = refused(&[KERNEL_ARM64, flag, "-c", "a.c"]);
-            assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
-        }
-        // Refused with no issue, because nothing is planned for them, and still with the reason.
-        for flag in ["-fstack-check", "-fstrict-flex-arrays=3", "-fno-zero-initialized-in-bss"] {
-            let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
-            assert!(failed.starts_with(&format!("{flag}: ")) && !failed.contains('#'), "{failed}");
-        }
-        assert!(refused(&[KERNEL_ARM64, "-mstrict-align", "-c", "a.c"]).contains("unaligned"));
-        // A sanitizer rather than a typo, so it gets the refusal every sanitizer gets.
-        let failed = refused(&[KERNEL_ARM64, "-fsanitize=shadow-call-stack", "-c", "a.c"]);
-        assert!(failed.contains("no sanitizer instrumentation"), "{failed}");
-    }
-
-    /// A flag of one architecture is an unknown option on another, as it is to gcc, and not an
-    /// answer about a target that was not asked for.
-    #[test]
-    fn a_kernel_flag_of_the_other_architecture_is_unknown() {
-        for (target, flag) in [
-            (KERNEL_X86, "-mno-outline-atomics"),
-            (KERNEL_X86, "-ffixed-x18"),
-            (KERNEL_X86, "-mbranch-protection=none"),
-            (KERNEL_ARM64, "-mskip-rax-setup"),
-            (KERNEL_ARM64, "-mrecord-mcount"),
-        ] {
-            assert_eq!(refused(&[target, flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
-        }
-    }
-
-    /// `-fshort-wchar` is honored rather than dropped: it is the width and the signedness of
-    /// `wchar_t`, which the session puts into the target for everything that asks.
-    #[test]
-    fn short_wchar_is_carried_to_the_session() {
-        let (opts, _) = compile(&[KERNEL_X86, "-c", "a.c"]);
-        assert!(!opts.short_wchar);
-        let (opts, _) = compile(&[KERNEL_X86, "-fshort-wchar", "-c", "a.c"]);
-        let session = Session::new(*opts);
-        assert_eq!((session.target.wchar_width, session.target.wchar_is_signed), (16, false));
-        let (opts, _) = compile(&[KERNEL_X86, "-fshort-wchar", "-fno-short-wchar", "-c", "a.c"]);
-        assert!(!opts.short_wchar, "the last one wins");
-    }
-
-    /// `-fmin-function-alignment=` is a floor that `-falign-functions` may raise and not lower,
-    /// whichever of the two is written last. The kernel passes it with the boundary its call
-    /// padding needs.
-    #[test]
-    fn the_minimum_function_alignment_is_a_floor() {
-        let align = |flags: &[&str]| {
-            let mut line = flags.to_vec();
-            line.extend(["-c", "a.c"]);
-            compile(&line).0.align_functions
-        };
-        assert_eq!(align(&["-fmin-function-alignment=16"]), None, "the default is sixteen");
-        assert_eq!(align(&["-fmin-function-alignment=8"]), None, "and a lower floor is under it");
-        assert_eq!(align(&["-fmin-function-alignment=64"]), Some(64));
-        assert_eq!(align(&["-fmin-function-alignment=33"]), Some(64), "rounded up as gcc does");
-        assert_eq!(align(&["-fmin-function-alignment=32", "-falign-functions=8"]), Some(32));
-        assert_eq!(align(&["-falign-functions=8", "-fmin-function-alignment=32"]), Some(32));
-        assert_eq!(align(&["-fmin-function-alignment=16", "-falign-functions=64"]), Some(64));
-        assert_eq!(align(&["-fno-align-functions", "-fmin-function-alignment=16"]), Some(16));
-        let failed = refused(&["-fmin-function-alignment=big", "-c", "a.c"]);
-        assert!(failed.contains("number of bytes"), "{failed}");
-    }
-
-    /// Every `-W` flag the kernel's Makefiles pass for gcc is one gcc 16 knows, and so one this
-    /// compiler takes, and the ones they pass only for clang are refused the way gcc refuses them,
-    /// which is what makes `cc-option` and `cc-disable-warning` give gcc's answers.
-    #[test]
-    fn the_kernel_s_warning_flags_get_gcc_s_answers() {
-        for flag in [
-            "-Wall",
-            "-Wextra",
-            "-Wundef",
-            "-Wstrict-prototypes",
-            "-Wno-trigraphs",
-            "-Werror=implicit-function-declaration",
-            "-Werror=implicit-int",
-            "-Werror=return-type",
-            "-Werror=date-time",
-            "-Werror=incompatible-pointer-types",
-            "-Werror=designated-init",
-            "-Wno-format-security",
-            "-Wno-frame-address",
-            "-Wno-address-of-packed-member",
-            "-Wframe-larger-than=2048",
-            "-Wvla",
-            "-Wno-pointer-sign",
-            "-Wcast-function-type",
-            "-Wno-array-bounds",
-            "-Wno-alloc-size-larger-than",
-            "-Wimplicit-fallthrough=5",
-            "-Wenum-conversion",
-            "-Wno-dangling-pointer",
-            "-Wno-stringop-overflow",
-            "-Wno-stringop-truncation",
-            "-Wno-format-truncation",
-            "-Wno-override-init",
-            "-Wno-maybe-uninitialized",
-            "-Wmissing-declarations",
-            "-Wmissing-prototypes",
-            "-Wmissing-format-attribute",
-            "-Wmissing-include-dirs",
-            "-Wold-style-definition",
-            "-Wpacked-not-aligned",
-            "-Wlogical-op",
-            "-Wnested-externs",
-            "-Wunterminated-string-initialization",
-            "-Walloc-size-larger-than=18446744073709551615",
-            "-Wno-unaligned-access",
-            "-Wno-format-overflow-non-kprintf",
-        ] {
-            compile(&[flag, "-c", "a.c"]);
-        }
-        for flag in ["-Wthread-safety", "-Wdefault-const-init-unsafe"] {
-            assert_eq!(refused(&[flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
-        }
-        for name in ["unknown-warning-option", "option-ignored", "unused-command-line-argument"] {
-            let flag = format!("-Werror={name}");
-            assert_eq!(refused(&[&flag, "-c", "a.c"]), format!("`{flag}`: no option `-W{name}`"));
-        }
     }
 }

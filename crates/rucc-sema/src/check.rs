@@ -389,14 +389,11 @@ impl<'a> Checker<'a> {
     /// The same, where an object that exists before the program runs is being initialized, which
     /// is the one place C23 6.6p10 lets an implementation take more than the rest of 6.6 does.
     ///
-    /// Under the GNU dialects a `const` object of integer type counts as the value it holds here,
-    /// which is what gcc takes and what [`Eval::objects`] says more about.
-    ///
     /// # Errors
     ///
     /// [`NotConstant`] when the expression is not one, the same way [`Self::eval_constant`] is.
     pub fn eval_initializer(&mut self, expr: ExprId) -> Result<Const, NotConstant> {
-        let mut eval = self.eval().objects(self.cx.gnu);
+        let mut eval = self.eval();
         let value = eval.initializer(expr);
         self.absorb(eval.finish());
         value

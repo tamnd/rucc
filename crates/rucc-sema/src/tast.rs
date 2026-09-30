@@ -35,17 +35,6 @@ pub type ConstId = Idx<Const>;
 /// A string literal, in the literal table.
 pub type StrId = Idx<StringLiteral>;
 
-/// The messages `__attribute__((error("...")))` and `__attribute__((warning("...")))` put on a
-/// function, for a call to it that survives optimization. A function may carry both, and gcc then
-/// reports both at each such call.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Notices {
-    /// The message of an `error` attribute.
-    pub error: Option<StrId>,
-    /// The message of a `warning` attribute.
-    pub warning: Option<StrId>,
-}
-
 /// A label, in the label table.
 pub type LabelId = Idx<Label>;
 
@@ -173,9 +162,8 @@ pub struct Tast {
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     targets: Vec<(DeclId, Isa)>,
-    sections: Map<DeclId, StrId>,
+    sections: Vec<(DeclId, StrId)>,
     defined_at: Map<DeclId, Span>,
-    notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 
@@ -408,51 +396,29 @@ impl Tast {
         }
     }
 
-    /// Records the section `__attribute__((section(...)))` put a function or an object in.
-    ///
-    /// A list beside the tree for the reason [`Tast::record_target`] is one: most declarations
-    /// name no section, and the ones that do are a kernel's `__init` functions and its tables. The
-    /// first declaration to name one stands, which is what gcc does with a later one that names
-    /// another, and the caller is what warns about that.
-    pub fn record_section(&mut self, decl: DeclId, section: StrId) {
-        self.sections.entry(decl).or_insert(section);
-    }
-
-    /// The section a `section` attribute put this declaration in, and nothing when no declaration
-    /// of it named one.
-    #[must_use]
-    pub fn section(&self, decl: DeclId) -> Option<StrId> {
-        self.sections.get(&decl).copied()
-    }
-
-    /// Records the message an `error` or a `warning` attribute asks to have said about a call to a
-    /// function that is still there once the optimizer is done with it.
-    ///
-    /// A list beside the tree for the reason [`Tast::record_target`] is one: a handful of functions
-    /// in a unit carry one, and they are the kernel's `__compiletime_assert_N` and the fortify
-    /// checks. Unlike a target, a later declaration replaces what an earlier one said, which is
-    /// what gcc does: the message a call is reported with is the last one written above it.
-    pub fn record_notice(&mut self, decl: DeclId, error: bool, message: StrId) {
-        let notices = self.notices.entry(decl).or_default();
-        if error {
-            notices.error = Some(message);
-        } else {
-            notices.warning = Some(message);
-        }
-    }
-
-    /// What an `error` or a `warning` attribute asks to have said about a call to this function,
-    /// which is nothing for almost every function.
-    #[must_use]
-    pub fn notices(&self, decl: DeclId) -> Notices {
-        self.notices.get(&decl).copied().unwrap_or_default()
-    }
-
     /// The extensions a function was built for, when a `target` attribute said, and nothing when
     /// it is built for what the unit is.
     #[must_use]
     pub fn target(&self, decl: DeclId) -> Option<Isa> {
         self.targets.iter().find(|&&(at, _)| at == decl).map(|&(_, isa)| isa)
+    }
+
+    /// Records the section a `section` attribute put a function or an object in.
+    ///
+    /// A list beside the tree for the reason [`Self::record_target`] is one: a handful of names in
+    /// a unit carry it, and a field on every declaration would be paid for by all of them. The
+    /// first declaration to name a section stands, since gcc refuses a later one that names
+    /// another and the usual program writes it once.
+    pub fn record_section(&mut self, decl: DeclId, name: StrId) {
+        if self.section(decl).is_none() {
+            self.sections.push((decl, name));
+        }
+    }
+
+    /// The section a `section` attribute named, and nothing for a name the compiler places.
+    #[must_use]
+    pub fn section(&self, decl: DeclId) -> Option<StrId> {
+        self.sections.iter().find(|&&(at, _)| at == decl).map(|&(_, name)| name)
     }
 
     /// Records that a label names a statement, which is not known when the label is created
@@ -724,9 +690,6 @@ mod tests {
     /// the alternative, and it was not taken because the answer has to follow the name through
     /// the merge of its declarations the way `always_inline` does, which is what the bits already
     /// do. The seven bits past it are free again.
-    ///
-    /// Still seventy six when they went from sixteen bits to thirty two for `no_stack_protector`,
-    /// the seventeenth, because the two bytes the wider field took were padding already.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);

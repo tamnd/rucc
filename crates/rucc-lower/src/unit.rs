@@ -642,33 +642,6 @@ impl Unit<'_> {
         self.tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
     }
 
-    /// The section a `section` attribute put this function or object in, as the object format
-    /// spells a section name.
-    ///
-    /// ELF and COFF take the name as written. A Mach-O section is a segment and a section of up to
-    /// sixteen bytes each with a comma between them, and a program written for ELF says `.mine`,
-    /// which no Mach-O assembler takes. So a name with no comma in it is given the segment its
-    /// contents belong in, `__TEXT` for code and `__DATA` for anything else, and the leading dots
-    /// become the two underscores every Mach-O section name starts with: `.init.text` on a
-    /// function is `__TEXT,__init_text`. A name that already has a comma is the program speaking
-    /// Mach-O and is left alone.
-    fn section_of(&mut self, decl: DeclId, code: bool) -> Option<Symbol> {
-        let written = self.spelled(self.tast.section(decl)?);
-        let name = match self.target.object_format {
-            ObjectFormat::MachO if !written.contains(',') => {
-                let segment = if code { "__TEXT" } else { "__DATA" };
-                let mut section =
-                    format!("__{}", written.trim_start_matches('.').replace('.', "_"));
-                while section.len() > 16 {
-                    section.pop();
-                }
-                format!("{segment},{section}")
-            }
-            _ => written,
-        };
-        Some(self.names.intern(&name))
-    }
-
     /// One object with static storage duration.
     fn object(&mut self, decl: DeclId) {
         let tast = self.tast;
@@ -723,12 +696,12 @@ impl Unit<'_> {
         }
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
-        global.section = self.section_of(decl, false);
+        global.section = self.section_of(decl);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal
-        // one is not the linker's to merge, and one the program put in a section of its own is in
-        // that section, which is gcc's answer too.
+        // one is not the linker's to merge, and one the program put in a section has been told
+        // where to go, which gcc honours over `-fcommon`.
         if self.common
             && state == Definition::Tentative
             && global.linkage == IrLinkage::External
@@ -864,23 +837,9 @@ impl Unit<'_> {
         } else if node.flags.contains(DeclFlags::HOT) {
             func.attrs.set |= AttrSet::HOT;
         }
-        // Kept on the function as well as acted on, since the body never asks for a canary when it
-        // says this, so that a listing shows why a function the flag covers has none.
-        if node.flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
-            func.attrs.set |= AttrSet::NO_STACK_PROTECTOR;
-        }
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
-        func.section = self.section_of(decl, true);
-        // What a call that survives the optimizer is reported with, which the driver reads once
-        // the optimizer is done. A declaration is the usual carrier, since the function is one
-        // nothing should ever call.
-        let notices = tast.notices(decl);
-        func.notices = rucc_ir::Notices {
-            error: notices.error.map(|id| self.spelled(id)),
-            warning: notices.warning.map(|id| self.spelled(id)),
-        };
         // An inline definition this unit calls, which this unit puts a copy of out of line for
         // every call the inliner leaves alone. See [`Self::out_of_line`].
         let copied = body.is_some() && self.out_of_line(decl, node.inline);
@@ -895,6 +854,7 @@ impl Unit<'_> {
         // sends the calls to whatever unit holds the external definition, so it is not this
         // file's to describe. That is the condition the body is lowered under, a few lines below.
         func.visibility = self.seen(decl, body.is_some() && (node.inline.emits() || copied));
+        func.section = self.section_of(decl);
         // An inline copy made for this unit's own calls is not the definition another DLL would
         // be sent to, so it is not exported, and it is not imported either, since it is here.
         func.dll = match self.dll(decl, body.is_some() && node.inline.emits()) {
@@ -959,16 +919,6 @@ impl Unit<'_> {
             Some(SymbolRef::Func(id)) => {
                 if self.module[id].spelled.is_none() {
                     self.module[id].spelled = func.spelled;
-                }
-                // A later declaration's `error` or `warning` replaces an earlier one's, which is
-                // what gcc reports a call with. Two declarations inside two blocks are two
-                // declarations here and one function in the module.
-                let notices = &mut self.module[id].notices;
-                if func.notices.error.is_some() {
-                    notices.error = func.notices.error;
-                }
-                if func.notices.warning.is_some() {
-                    notices.warning = func.notices.warning;
                 }
             }
             Some(_) => {}
@@ -1929,6 +1879,16 @@ impl Unit<'_> {
         symbol
     }
 
+    /// The section a `section` attribute named for a declaration, and nothing for one the
+    /// compiler places. The name is written the way the program wrote it: it is the linker's to
+    /// read, and a linker script matches it by spelling.
+    fn section_of(&mut self, decl: DeclId) -> Option<Symbol> {
+        let id = self.tast.section(decl)?;
+        let spelled: String =
+            self.tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+        Some(self.names.intern(&spelled))
+    }
+
     /// The name an object or a function is known by in the object file.
     pub(crate) fn symbol_of(&mut self, decl: DeclId) -> Symbol {
         let tast = self.tast;
@@ -1980,12 +1940,8 @@ impl Unit<'_> {
     /// 6.6 does, so it asks for the reading the front end already accepted there. Asking the
     /// strict way instead would refuse here what was allowed a pass earlier, which is a wrong
     /// answer arriving late rather than an extra check.
-    ///
-    /// A `const` object is read as its value for the same reason. The front end allowed that only
-    /// under the GNU dialects and refused the program under the others, so whatever reaches here
-    /// with one in it was allowed, and the dialect does not need asking again.
     fn fold(&mut self, expr: ExprId) -> Option<Const> {
-        let mut eval = Eval::new(self.tast, self.types, self.target, self.names).objects(true);
+        let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
         let folded = eval.initializer(expr);
         let reported = eval.finish();
         self.diagnostics.extend(reported);

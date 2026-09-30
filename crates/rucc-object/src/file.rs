@@ -44,7 +44,7 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::section::{
-    Alias, Apart, Array, Binding, Data, EXCEPT_TABLE, Export, Holds, Info, Object, Output, Place,
+    Alias, Apart, Array, Binding, Data, EXCEPT_TABLE, Export, Info, Object, Output, Place,
     Property, Reference, Reloc, Sections, Text, Visibility,
 };
 use crate::{coff, elf};
@@ -873,7 +873,7 @@ fn beyond(text: &Text, data: &Data) -> Result<(), Error> {
                 object.name
             ));
         }
-        let Place::Named(name, _) = &object.place else { continue };
+        let Place::Named(name) = &object.place else { continue };
         if Array::of(name).is_some() {
             return why(format!("'{name}' is not a list the startup code here gathers"));
         }
@@ -980,13 +980,12 @@ fn put(
         Place::Thread { zero: true } => obj.section_id(StandardSection::UninitializedTls),
         Place::Merged => return (SymbolSection::Common, 0),
         // A named section is the program's word for where this goes, and a program that names one
-        // wants what it named rather than what would have been chosen. Its flags are what the
-        // variable holds, which is the answer gcc gives, except for the three names the startup
+        // wants what it named rather than what would have been chosen. It is written as ordinary
+        // data because nothing in the IR says otherwise, except for the three names the startup
         // code calls what it finds in, which have a section type of their own and are gathered by
-        // the linker whether or not they carry it. Two variables naming one section share it, in
-        // the order they were written, and the first one is what made it.
-        Place::Named(name, _) => {
-            let section = made(obj, named, name, kind_of(&object.place));
+        // the linker whether or not they carry it.
+        Place::Named(name) => {
+            let section = made(obj, named, name, SectionKind::Data);
             if let Some(flags) = Array::of(name).and_then(|array| flavour.gathered(array)) {
                 obj.section_mut(section).flags = flags;
             }
@@ -1070,7 +1069,7 @@ fn tables(
 /// `.tbss` is a thread's own copy of one. A section like this costs its size in the section header
 /// and nothing in the file, which is what keeps a program with a large zeroed array small.
 fn carries_no_bytes(place: &Place) -> bool {
-    matches!(place, Place::Zero | Place::Thread { zero: true } | Place::Named(_, Holds::Zero))
+    matches!(place, Place::Zero | Place::Thread { zero: true })
 }
 
 /// The section of this name, made the first time it is asked for and found afterwards.
@@ -1102,19 +1101,14 @@ fn made(
 /// so the flags a linker reads off the section header have to come out the same as they would
 /// have. The two kinds with no section of their own never reach here, and `Data` for them is a
 /// value that is never used rather than a claim about either.
-///
-/// A section the program named is never split, and is what this says for the same reason: what
-/// the variable holds is what the section header has to say about it.
 fn kind_of(place: &Place) -> SectionKind {
     match place {
-        Place::ReadOnly | Place::Pointer | Place::Named(_, Holds::ReadOnly) => {
-            SectionKind::ReadOnlyData
-        }
+        Place::ReadOnly | Place::Pointer => SectionKind::ReadOnlyData,
         Place::RelocReadOnly { .. } => SectionKind::ReadOnlyDataWithRel,
-        Place::Zero | Place::Named(_, Holds::Zero) => SectionKind::UninitializedData,
+        Place::Zero => SectionKind::UninitializedData,
         Place::Thread { zero: false } => SectionKind::Tls,
         Place::Thread { zero: true } => SectionKind::UninitializedTls,
-        Place::Written | Place::Merged | Place::Named(_, Holds::Written) => SectionKind::Data,
+        Place::Written | Place::Merged | Place::Named(_) => SectionKind::Data,
     }
 }
 
@@ -1964,7 +1958,7 @@ mod tests {
             (Place::Zero, ".bss"),
             (Place::Thread { zero: false }, ".tdata"),
             (Place::Thread { zero: true }, ".tbss"),
-            (Place::Named(".init_array".to_owned(), Holds::Written), ".init_array"),
+            (Place::Named(".init_array".to_owned()), ".init_array"),
         ] {
             let bytes = holding(variable("x", place.clone()));
             let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2009,7 +2003,7 @@ mod tests {
             (".preinit_array", elf::SHT_PREINIT_ARRAY),
             (".init_arrays", elf::SHT_PROGBITS),
         ] {
-            let bytes = holding(variable("x", Place::Named(name.to_owned(), Holds::Written)));
+            let bytes = holding(variable("x", Place::Named(name.to_owned())));
             let file = object::File::parse(&bytes[..]).expect("a readable object");
             let section = file.section_by_name(name).unwrap_or_else(|| panic!("{name}"));
             let SectionFlags::Elf { sh_type, sh_flags } = section.flags() else {
@@ -2017,27 +2011,6 @@ mod tests {
             };
             assert_eq!(sh_type, wanted, "{name}");
             assert!(sh_flags.contains(elf::SHF_ALLOC | elf::SHF_WRITE), "{name}");
-        }
-    }
-
-    /// A section the program named carries the flags of what is in it, which are the flags gcc
-    /// writes: read only for a constant with no address in it, no bytes in the file for zeros in
-    /// a section whose name means zeros, and writable bytes for the rest.
-    #[test]
-    fn a_named_section_carries_the_flags_of_what_is_in_it() {
-        for (name, holds, kind, flags) in [
-            (".mine", Holds::Written, elf::SHT_PROGBITS, elf::SHF_ALLOC | elf::SHF_WRITE),
-            (".roz", Holds::ReadOnly, elf::SHT_PROGBITS, elf::SHF_ALLOC),
-            (".bss..page_aligned", Holds::Zero, elf::SHT_NOBITS, elf::SHF_ALLOC | elf::SHF_WRITE),
-        ] {
-            let bytes = holding(variable("x", Place::Named(name.to_owned(), holds)));
-            let file = object::File::parse(&bytes[..]).expect("a readable object");
-            let section = file.section_by_name(name).unwrap_or_else(|| panic!("{name}"));
-            let SectionFlags::Elf { sh_type, sh_flags } = section.flags() else {
-                panic!("{name} is not an elf section");
-            };
-            assert_eq!((sh_type, sh_flags), (kind, flags), "{name}");
-            assert_eq!(section.size(), 4, "{name}");
         }
     }
 
@@ -2049,8 +2022,8 @@ mod tests {
     #[test]
     fn two_variables_in_one_named_section_share_it() {
         let objects = vec![
-            variable("x", Place::Named(".init_array".to_owned(), Holds::Written)),
-            variable("y", Place::Named(".init_array".to_owned(), Holds::Written)),
+            variable("x", Place::Named(".init_array".to_owned())),
+            variable("y", Place::Named(".init_array".to_owned())),
         ];
         let data = Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects };
         let bytes =
@@ -2105,7 +2078,7 @@ mod tests {
     fn a_variable_that_has_no_section_of_its_own_to_be_given_is_left_where_it_was() {
         let sections =
             Output { sections: Sections { functions: false, data: true }, ..Output::default() };
-        let named = Place::Named(".init_array".to_owned(), Holds::Written);
+        let named = Place::Named(".init_array".to_owned());
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes = write(
             &Text::default(),
@@ -2778,9 +2751,7 @@ mod tests {
         thread.objects.push(variable("t", Place::Thread { zero: true }));
 
         let mut gathered = Data::default();
-        gathered
-            .objects
-            .push(variable("c", Place::Named(".init_array".to_owned(), Holds::Written)));
+        gathered.objects.push(variable("c", Place::Named(".init_array".to_owned())));
 
         let mut table = calling("puts");
         table.relocs[0].kind = Reference::Got;

@@ -244,26 +244,14 @@ impl Conv<'_> {
     /// Whether an expression is a null pointer constant, 6.3.2.3p3.
     ///
     /// An integer constant expression with the value zero, or such an expression cast to `void
-    /// *`. The casts to a pointer are looked through because `(void *)0` is one, and below them
-    /// whatever has an integer type is folded, because the expression is any integer constant
-    /// expression and not only a literal: `(void *)((long)(x) * 0l)` is one exactly when `x` is
-    /// an integer constant expression, which is the whole of how the kernel's `__is_constexpr`
-    /// tells a constant from a variable. The folding is the strict one, so a `const` object is not
-    /// a constant here in any dialect, which is gcc's answer for it too.
+    /// *`. The casts and the conversions are looked through because `(void *)0` is one and so
+    /// is `(long)0`, and stopping at the first node would see a cast rather than a zero.
     #[must_use]
     pub fn is_null_pointer_constant(&self, expr: ExprId) -> bool {
         match self.tast[expr].kind {
             ExprKind::Const(value) => self.tast[value] == Const::Int(0),
-            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. }
-                if is_pointer(self.types, self.tast[expr].ty) =>
-            {
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => {
                 self.is_null_pointer_constant(inner)
-            }
-            _ if int_shape(self.types, self.tast[expr].ty, self.target).is_some() => {
-                let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
-                // A `__builtin_constant_p` the optimizer has still to answer is not one, since
-                // its no is only the answer where a constant is required.
-                eval.integer(expr) == Ok(0) && !eval.deferred()
             }
             _ => false,
         }

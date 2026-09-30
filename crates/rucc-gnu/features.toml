@@ -330,10 +330,9 @@ name = "section"
 kind = "attribute"
 gcc_version = "2.0"
 status = "implemented"
-answer = "error"
 used_by = ["linux", "systemd"]
-tests = ["rucc::an_elf_listing_puts_each_definition_in_the_section_it_named_with_gccs_flags", "rucc::an_elf_object_has_the_sections_gcc_writes_for_the_same_source", "rucc::a_darwin_listing_maps_an_elf_name_to_a_segment_and_a_section", "rucc::a_windows_listing_names_the_section_with_coff_flags", "rucc-asm::a_variable_in_a_named_section_is_there_with_the_flags_its_contents_ask_for", "rucc-object::a_named_section_carries_the_flags_of_what_is_in_it"]
-notes = "The kernel's initcall and section placement machinery is built on it. A function goes in the named section as code and an object with the writability its contents ask for, zeros are bytes there unless the name is `.bss` or under it, and several definitions share one section in the order they were written. On Mach-O a name with no comma is given a segment, so `.mine` is `__DATA,__mine`."
+tests = ["rucc::a_function_and_an_object_go_in_the_section_they_name", "rucc::a_windows_listing_names_the_section_with_its_own_flags", "rucc::a_darwin_section_names_its_segment_and_code_is_marked_as_code", "rucc::a_tentative_definition_in_a_section_is_not_offered_to_the_linker_to_merge", "rucc::an_object_on_the_stack_is_in_no_section_and_saying_otherwise_is_refused", "rucc::a_linker_set_finds_what_was_put_in_it"]
+notes = "The kernel's initcall and section placement machinery is built on it, and ignoring it silently produces a kernel that does not boot. A function and an object with static storage go in the section named, on every format, and a Mach-O name has to carry its segment as `__DATA,__name` the way clang insists. An automatic object is refused as gcc refuses it. A named section is always writable data for an object, where gcc makes it read only for a `const` one."
 
 [[feature]]
 name = "no_sanitize"
@@ -392,18 +391,18 @@ notes = "On a union, in both places gcc takes it: after the closing brace and on
 name = "noreturn"
 kind = "attribute"
 gcc_version = "2.5"
-status = "implemented"
+status = "partial"
 used_by = ["linux", "glibc", "sqlite", "systemd"]
-tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept", "tests/golden/gnu.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "The claim reaches the IR as `attrs(noreturn)` on the function, and `_Noreturn` and `[[noreturn]]` land in the same place. The code is right without anything acting on it, since a call that does come back is undefined and the block after one is simply never reached. What gcc also does with it is take that block away, which is the optimization in tamnd/rucc#712 and is not a reason to send a header down its fallback path."
+tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept", "tests/golden/gnu.c"]
+notes = "The claim reaches the IR as `attrs(noreturn)` on the function, and `_Noreturn` and `[[noreturn]]` land in the same place. Nothing acts on it yet: the block after a call to one still falls through to whatever comes next, so `if (!p) abort();` is still read as a path that can carry a null pointer. That half is tamnd/rucc#712."
 
 [[feature]]
 name = "always_inline"
 kind = "attribute"
 gcc_version = "3.1"
-status = "implemented"
+status = "partial"
 used_by = ["linux", "glibc", "ffmpeg"]
-tests = ["rucc::a_fortified_wrapper_forwards_its_arguments", "rucc-opt::a_call_to_an_always_inline_function_is_replaced_by_its_body", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
+tests = ["rucc::a_fortified_wrapper_forwards_its_arguments", "rucc-opt::a_call_to_an_always_inline_function_is_replaced_by_its_body"]
 notes = "Every direct call is inlined at every level, `-O0` included, by `rucc_opt::inline`, which settles each callee before its callers and leaves a call inside a cycle alone. A call it refuses, which is one to a function that takes a structure by value, calls `va_start`, takes a label's address or calls `setjmp`, stays a call and is reported as missed under `-fopt-info`, where gcc gives an error."
 
 [[feature]]
@@ -423,15 +422,6 @@ status = "implemented"
 used_by = ["linux", "glibc"]
 tests = ["rucc::a_fortified_wrapper_forwards_its_arguments"]
 notes = "Read and carried to the IR as an attribute of the function. The only inliner so far is the one for `always_inline`, which never inlines anything else, so nothing here inlines a `noinline` function. A name that says both is under `always_inline`, as it is under gcc."
-
-[[feature]]
-name = "noclone"
-kind = "attribute"
-gcc_version = "4.5"
-status = "implemented"
-used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Says gcc may not make a specialised copy of the function. This compiler never makes one, so the promise is kept by doing nothing."
 
 [[feature]]
 name = "flatten"
@@ -504,22 +494,13 @@ tests = ["rucc-sema::no_instrument_function_written_as_the_attribute_is_kept", "
 notes = "Takes a function back out of `-finstrument-functions`, which is what the two hooks need or they call themselves. One declaration saying it is enough, so a prototype that says it covers the definition below."
 
 [[feature]]
-name = "no_profile_instrument_function"
-kind = "attribute"
-gcc_version = "7.0"
-status = "implemented"
-used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Takes a function out of the counters `-fprofile-arcs` and `--coverage` add. This compiler refuses those flags rather than instrumenting, so no function is ever instrumented and the attribute has nothing left to take out."
-
-[[feature]]
 name = "no_stack_protector"
 kind = "attribute"
 gcc_version = "11.0"
-status = "implemented"
+status = "unimplemented"
+answer = "error"
 used_by = ["linux"]
-tests = ["rucc::a_function_that_says_no_stack_protector_gets_none_under_any_flag", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "The kernel writes it on the code that runs before the canary is set up, where a check on the way out would fail in a function that did nothing wrong. Read on any declaration of the name and wins over every `-fstack-protector` flag."
+tests = []
 
 [[feature]]
 name = "no_caller_saved_registers"
@@ -579,19 +560,9 @@ notes = "It is what keeps a symbol the linker script needs from being dropped, a
 name = "unused"
 kind = "attribute"
 gcc_version = "2.0"
-status = "implemented"
+status = "unimplemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "What it asks for is that the unused warnings keep quiet about the name, and this compiler gives none of them, so taking it and doing nothing is the whole of it. It becomes work the day `-Wunused-variable` does."
-
-[[feature]]
-name = "externally_visible"
-kind = "attribute"
-gcc_version = "4.2"
-status = "implemented"
-used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Keeps a name visible when `-fwhole-program` or link-time optimization would otherwise make it local. This compiler does neither yet, `-flto` is read and not acted on, so every name with external linkage already stays visible. This row has to be looked at again when `-flto` starts doing something."
+tests = []
 
 [[feature]]
 name = "retain"
@@ -678,28 +649,27 @@ tests = []
 name = "warning"
 kind = "attribute"
 gcc_version = "4.3"
-status = "implemented"
+status = "unimplemented"
 used_by = ["glibc", "linux"]
-tests = ["rucc::a_warning_attribute_is_a_warning_and_the_listing_is_still_written", "rucc::both_attributes_are_said_and_the_latest_message_stands"]
-notes = "A call still there once the optimizer is done is a warning quoting the message, and one it took out says nothing."
+tests = []
 
 [[feature]]
 name = "error"
 kind = "attribute"
 gcc_version = "4.3"
-status = "implemented"
+status = "unimplemented"
 used_by = ["linux", "glibc"]
-tests = ["rucc::a_build_bug_on_the_inliner_settles_true_is_an_error_quoting_the_message_at_the_call", "rucc::a_build_bug_on_the_inliner_settles_false_says_nothing", "rucc::a_call_in_code_that_was_taken_out_says_nothing", "rucc-driver::a_call_is_reported_only_in_a_function_the_program_can_reach"]
-notes = "The kernel turns a link failure into a compile-time message with it, so it fires after optimization, on a call in a function the program can still reach, and a call the optimizer took out says nothing."
+tests = []
+notes = "The kernel turns a link failure into a compile-time message with it, so it has to fire after optimization, when it is known the call survives."
 
 [[feature]]
 name = "format"
 kind = "attribute"
 gcc_version = "2.0"
-status = "partial"
+status = "unimplemented"
 used_by = ["linux", "glibc", "systemd", "curl", "ffmpeg"]
-tests = ["rucc-driver::format_takes_the_archetypes_gcc_knows_on_the_target"]
-notes = "The archetype is checked against the ones gcc knows on the target, and nothing else is: a call is not compared against its format string, which is what the attribute is for and is one of the few warnings that finds real bugs. `__has_attribute` answers no until it does."
+tests = []
+notes = "It has to actually work. It is the mechanism behind printf format checking, which is one of the few warnings that finds real bugs."
 
 [[feature]]
 name = "format_arg"
@@ -762,10 +732,9 @@ tests = []
 name = "fallthrough"
 kind = "attribute"
 gcc_version = "7.0"
-status = "implemented"
+status = "unimplemented"
 used_by = ["linux", "systemd", "ffmpeg"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "A null statement in front of a case label that tells `-Wimplicit-fallthrough` the fall is meant. This compiler does not give that warning, so taking the statement is the whole of it. `__has_attribute` answers 201904, the number the standard gives `[[fallthrough]]`, because gcc answers that for the GNU spelling as well."
+tests = []
 
 [[feature]]
 name = "assume_aligned"
@@ -809,141 +778,6 @@ status = "unimplemented"
 used_by = ["glibc"]
 tests = []
 
-[[feature]]
-name = "nonstring"
-kind = "attribute"
-gcc_version = "8.0"
-status = "implemented"
-used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Says an array of characters need not hold a terminated string, which is only ever read by the warnings about truncating copies. This compiler gives none of them."
-
-[[feature]]
-name = "uninitialized"
-kind = "attribute"
-gcc_version = "12.0"
-status = "implemented"
-used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Leaves a local out of `-ftrivial-auto-var-init`. This compiler refuses that flag rather than taking it, so no local is initialized behind the program's back and there is nothing to leave it out of."
-
-[[feature]]
-name = "copy"
-kind = "attribute"
-gcc_version = "9.0"
-status = "unimplemented"
-used_by = ["linux"]
-tests = []
-notes = "Copies the attributes of another declaration onto this one. The kernel writes it on the aliases `module_init` makes and falls back to nothing when `__has_attribute` says no, which is the answer it gets."
-
-[[feature]]
-name = "alloc_size"
-kind = "attribute"
-gcc_version = "4.3"
-status = "unimplemented"
-used_by = ["linux", "glibc"]
-tests = []
-notes = "Tells `__builtin_object_size` how big the object a call returns is. It is accepted and not read, so the size of such an object is unknown, which is the safe answer, and `__has_attribute` says no."
-
-[[feature]]
-name = "cdecl"
-kind = "attribute"
-gcc_version = "2.95"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
-
-[[feature]]
-name = "stdcall"
-kind = "attribute"
-gcc_version = "2.95"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
-
-[[feature]]
-name = "fastcall"
-kind = "attribute"
-gcc_version = "3.4"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
-
-[[feature]]
-name = "thiscall"
-kind = "attribute"
-gcc_version = "4.6"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
-
-[[feature]]
-name = "regparm"
-kind = "attribute"
-gcc_version = "2.95"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
-
-[[feature]]
-name = "vectorcall"
-kind = "attribute"
-gcc_version = "none"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Clang's and Microsoft's rather than gcc's, which does not know it. Read by the checker alongside the 32-bit conventions and dropped the way they are, and `__has_attribute` answers no, which is gcc's answer."
-
-[[feature]]
-name = "ms_struct"
-kind = "attribute"
-gcc_version = "3.4"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc-driver::ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record"]
-notes = "Lays the bit-fields of one record out the way Microsoft's compiler does, on x86 and on Windows, which is where gcc takes it. `__has_attribute` answers no because the answer depends on the target and this table has none."
-
-[[feature]]
-name = "gcc_struct"
-kind = "attribute"
-gcc_version = "3.4"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc-driver::ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record"]
-notes = "The other half of `ms_struct`, and answered no for the same reason."
-
-[[feature]]
-name = "dllimport"
-kind = "attribute"
-gcc_version = "3.1"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc-sema::dllimport_and_dllexport_written_as_attributes_are_kept", "rucc::a_call_to_a_dllimport_function_goes_through_its_import_pointer"]
-notes = "Read on every target, as gcc and clang read it, and acted on only in a COFF object. `__has_attribute` answers no because gcc answers yes only where there are DLLs and this table has no target."
-
-[[feature]]
-name = "dllexport"
-kind = "attribute"
-gcc_version = "3.1"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc-sema::dllimport_and_dllexport_written_as_attributes_are_kept"]
-notes = "The other half of `dllimport`, and answered no for the same reason."
-
-[[feature]]
-name = "selectany"
-kind = "attribute"
-gcc_version = "3.4"
-status = "partial"
-used_by = ["mingw-w64"]
-tests = ["rucc::a_selectany_definition_is_one_the_link_may_find_elsewhere_too"]
-notes = "Makes a definition one the link may find in several objects, on Windows. Answered no for the reason `dllimport` is."
-
 # The C23 standard attributes, which `__has_c_attribute` answers with the number the standard
 # gives them rather than with 1.
 
@@ -960,21 +794,19 @@ tests = []
 name = "fallthrough"
 kind = "c-attribute"
 gcc_version = "10.0"
-status = "implemented"
+status = "unimplemented"
 value = "201904"
 used_by = []
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "The same statement as the GNU spelling and taken the same way, since `-Wimplicit-fallthrough` is not a warning this compiler gives."
+tests = []
 
 [[feature]]
 name = "maybe_unused"
 kind = "c-attribute"
 gcc_version = "10.0"
-status = "implemented"
+status = "unimplemented"
 value = "202106"
 used_by = []
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c"]
-notes = "The standard's `unused`, and taken the same way, since this compiler gives none of the warnings it silences."
+tests = []
 
 [[feature]]
 name = "nodiscard"
@@ -989,11 +821,11 @@ tests = []
 name = "noreturn"
 kind = "c-attribute"
 gcc_version = "13.0"
-status = "implemented"
+status = "partial"
 value = "202202"
 used_by = []
-tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "C23's spelling of the row above, read by the same code."
+tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept"]
+notes = "C23's spelling of the row above, read by the same code and carrying the same amount of the way. What is left is the same thing, which is that nothing acts on the claim yet."
 
 [[feature]]
 name = "unsequenced"

@@ -198,10 +198,6 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         };
     }
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
-    // What the calls to a function carrying `error` or `warning` that the optimizer left get said
-    // about them, kept apart so they come after what the checker said, which is about the source
-    // as written and is the order gcc says the two in.
-    let mut surviving: Vec<Diagnostic> = Vec::new();
     // Filled in by the back end when there is one, and empty for every kind that stops before it.
     let mut fired = Fired::new();
     // The same, and the other thing the back end is asked to record about itself.
@@ -461,15 +457,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     &mut remarks,
                                 )
                             })
-                            .map(|times| {
-                                passes = times;
-                                // After the optimizer, since a call it took out is not one the
-                                // program makes. See `crate::notice`.
-                                surviving.extend(crate::notice::surviving_calls(
-                                    &lowered.module,
-                                    &sess.interner,
-                                ));
-                            })
+                            .map(|times| passes = times)
                         {
                             diagnostics.extend(complaints);
                         } else if opts.emit == EmitKind::SafetySummary {
@@ -529,7 +517,6 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             }
         }
         diagnostics.extend(checked.diagnostics);
-        diagnostics.append(&mut surviving);
     }
     // The back end's remarks after the optimizer's, which is the order the work happened in. Only
     // the `switch` lowering says anything yet, and what it says is a rewrite.
@@ -864,17 +851,9 @@ fn optimize(
 /// so a variable defined elsewhere needs the table whichever link is coming. COFF decides what
 /// leaves a DLL by an export table the linker is handed. Neither has an object writer here yet, so
 /// what this does is decline to say the ELF answer about them.
-///
-/// `-fno-pic` reaches the back end on x86-64 ELF only, which is the one row that writes anything
-/// different for it (tamnd/rucc#2276). Everywhere else the position independent executable's code
-/// is what it gets, and that is still right for a link that is not position independent: it reads
-/// some names out of a table the linker then has to build, which costs a load and is correct.
 fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
     match (target.tuple.os().object_format(), opts.pic) {
         (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
-        (Some(ObjectFormat::Elf), Pic::Absolute) if target.tuple.arch() == Arch::X86_64 => {
-            IrPic::Absolute
-        }
         _ => IrPic::Executable,
     }
 }
@@ -909,12 +888,6 @@ fn generate(
             "there is no back end for {} in this compiler yet, so there is nothing to generate",
             target.tuple
         ))]);
-    };
-    // Once for the whole unit rather than for each function, because the boundary is the command
-    // line's and every function in the unit is compiled against it.
-    let machine = match opts.stack_boundary {
-        Some(bytes) => machine.aligned_to(bytes),
-        None => machine,
     };
     // Refused rather than dropped. A command line that asks for a stack protector on a target
     // that has nowhere to keep the word one is compared against would otherwise get code with no
@@ -969,7 +942,6 @@ fn generate(
     let flags = pipeline::Flags {
         frame_pointer: opts.keeps_frame_pointer(),
         red_zone: opts.red_zone,
-        code_model: opts.code_model,
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         profile: match profile {
@@ -1168,13 +1140,12 @@ fn generate(
             // the encoder's own tables, so reading it back is the encoder run over the same values,
             // and it is one path to get right rather than two.
             //
-            // A function the program put in a section of its own comes this way as well. The
-            // object writer lays the code out as one run of bytes, and the listing is where a
-            // function's section is already said, so it is the one place the answer has to be
-            // right rather than two.
+            // A function a `section` attribute put somewhere goes this way too. The object writer
+            // puts every function in the text section or one named after it, and the reader
+            // already takes a `.section` with any name in it.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
-            let placed_code = funcs.iter().any(|func| func.section.is_some());
-            if aarch64 || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
+            let sectioned = funcs.iter().any(|func| func.section.is_some());
+            if aarch64 || sectioned || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and
                 // `.cfi_lsda`, writes the table in `.gcc_except_table`, and the reader keeps both.
@@ -1183,13 +1154,12 @@ fn generate(
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
                         .map_err(refused)?;
                 let arch = target.tuple.arch();
-                let flags = rucc_asm::Flags { fatal_warnings: opts.asm_fatal_warnings };
-                let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
-                    .map_err(|trouble| {
+                let read =
+                    rucc_asm::read_as(&listing, arch, target.object_format).map_err(|trouble| {
                         let what = if aarch64 {
                             "a unit for aarch64"
-                        } else if placed_code {
-                            "a function in a section the program named"
+                        } else if sectioned {
+                            "a function in a section of its own"
                         } else if globals.kept() {
                             "an `asm` at file scope"
                         } else {
@@ -8988,16 +8958,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("global @e : i32 = 4,"), "{text}");
 
         // A `const` object is not one of them, which is what makes `int a[n];` a variable
-        // length array in C and is the distinction the keyword was added to draw. gcc reads one
-        // as its value in an array size all the same, and so do the GNU dialects here, so the
-        // refusal is the strict dialects' answer.
+        // length array in C and is the distinction the keyword was added to draw.
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        opts.gnu_extensions = false;
         let konst = "const int n = 1;\nint a[n];\n";
         let message = "/main.c:2:5: error: variably modified 'a' at file scope [E0538]";
         assert_eq!(run(&opts, konst).messages, [message]);
-        opts.gnu_extensions = true;
 
         // Nor is a subscript of one, which gcc 16 refuses in the same words.
         let subscript = "constexpr int t[3] = { 1, 2, 3 };\nint a[t[1]];\n";
@@ -9008,62 +8974,6 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let warning = "/main.c:2:6: warning: initialization discards 'const' qualifier from \
              pointer target type [E0514]";
         assert_eq!(run(&opts, address).messages, [warning]);
-    }
-
-    /// A `const` object of integer type is read as its value in an array size and in a static
-    /// initializer under the GNU dialects, which is gcc's extension and what Linux 7.2 relies on.
-    ///
-    /// Every answer here is what gcc 16 gives. The other places a constant is required are
-    /// unchanged, since gcc refuses the object in all of them, and so are the strict dialects.
-    #[test]
-    fn a_const_object_is_read_as_its_value_where_gcc_reads_one() {
-        let text = ir(concat!(
-            "const int n = 4;\n",
-            "static const long big = 1L << 40;\n",
-            "static const int twice = n * 2;\n",
-            "int a[n];\n",
-            "int b = n * 2 + 1;\n",
-            "int c = (int)(big >> 38);\n",
-            "int d = twice + 1;\n",
-            "int f(void) { const int m = 5; char buf[m]; static int s = m; return sizeof buf + s; }\n",
-        ));
-        assert!(text.contains("global @a : bytes 16 ="), "{text}");
-        assert!(text.contains("global @b : i32 = 9,"), "{text}");
-        assert!(text.contains("global @c : i32 = 4,"), "{text}");
-        assert!(text.contains("global @d : i32 = 9,"), "{text}");
-        assert!(text.contains("alloca, size 5,"), "{text}");
-        assert!(!text.contains("stacksave"), "{text}");
-
-        let mut opts = options();
-        opts.emit = EmitKind::Ir;
-        // An automatic object counts only where its own initializer is a constant without this
-        // reading, and `volatile` takes an object out of it, so both of these stay variable.
-        let variable = concat!(
-            "const int n = 4;\n",
-            "int f(void) { const int m = n + 1; volatile const int v = 3; char a[m]; char b[v];\n",
-            "  return sizeof a + sizeof b; }\n",
-        );
-        let compiled = run(&opts, variable);
-        assert!(compiled.messages.is_empty(), "{:?}", compiled.messages);
-        assert_eq!(compiled.text().matches("alloca %").count(), 2, "{}", compiled.text());
-
-        // gcc refuses the object everywhere else a constant is required.
-        let elsewhere = "const int n = 4;\n_Static_assert(n == 4, \"\");\n";
-        let message = "/main.c:2:16: error: expression in static assertion is not constant [E0614]";
-        assert_eq!(run(&opts, elsewhere).messages, [message]);
-
-        // `-pedantic` says so about the array, in gcc's words.
-        opts.pedantic = true;
-        let pedantic = "const int n = 4;\nint a[n];\n";
-        let warning = "/main.c:2:5: warning: variably modified 'a' at file scope [E0749]";
-        assert_eq!(run(&opts, pedantic).messages, [warning]);
-
-        // And the strict dialects keep 6.6 as it is written.
-        opts.pedantic = false;
-        opts.gnu_extensions = false;
-        let initializer = "const int n = 4;\nint b = n;\n";
-        let message = "/main.c:2:5: error: initializer element is not constant [E0618]";
-        assert_eq!(run(&opts, initializer).messages, [message]);
     }
 
     /// A member whose size was refused is not a flexible array member, whatever it looks like.

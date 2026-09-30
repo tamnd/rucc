@@ -44,7 +44,7 @@ use rucc_target::{Isa, TargetInfo};
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
     heap, image, inline, ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside,
-    params, pass, purity, readonly, reload, sroa,
+    params, pass, purity, readonly, reload,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -75,7 +75,7 @@ const READS_SUMMARIES: &[&str] = &[
 /// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
-const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME];
+const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME];
 
 /// Which passes ask what a call is allowed to do.
 ///
@@ -275,7 +275,6 @@ const O1: &[&str] = &[
     "expect",
     "fold",
     "image",
-    "sroa",
     "fold",
     "simplify",
     "narrow",
@@ -353,7 +352,6 @@ const O2: &[&str] = &[
     "expect",
     "fold",
     "image",
-    "sroa",
     "fold",
     "simplify",
     "narrow",
@@ -398,7 +396,6 @@ const O3: &[&str] = &[
     "expect",
     "fold",
     "image",
-    "sroa",
     "fold",
     "simplify",
     "narrow",
@@ -468,7 +465,6 @@ const OS: &[&str] = &[
     "expect",
     "fold",
     "image",
-    "sroa",
     "fold",
     "simplify",
     "narrow",
@@ -507,7 +503,6 @@ const OZ: &[&str] = &[
     "expect",
     "fold",
     "image",
-    "sroa",
     "fold",
     "simplify",
     "narrow",
@@ -1731,7 +1726,7 @@ mod tests {
         // the count at the bottom would then be counting repeats rather than what it is asking.
         opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("7: narrow, "), "{text}");
+        assert!(text.contains("6: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }

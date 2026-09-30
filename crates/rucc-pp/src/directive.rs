@@ -31,7 +31,7 @@ use crate::include::{
     Context, Dependency, Frame, Header, Reader, directory_of, header_from_token,
     header_from_tokens, spelling,
 };
-use crate::macros::{Builtin, MacroTable, parse_define_in};
+use crate::macros::{Builtin, MacroTable, parse_define};
 use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line};
 use crate::token::Tok;
 
@@ -385,20 +385,7 @@ impl Preprocessor {
             if first.is_eof() {
                 break;
             }
-            // In assembly a `#` at the start of a line also starts a comment, and a number
-            // after it is not a line marker. So a live line whose word after the `#` is not a
-            // directive this phase knows goes out as text and is expanded like any other, which
-            // is what gcc does with it. Only the word is looked at here, and it is put back for
-            // whichever branch reads the line.
-            let directive = is_directive(first)
-                && !(cx.lex.assembly && was_live && {
-                    let word = reader.next(cx.interner);
-                    reader.put_back(word);
-                    !word.is_eof()
-                        && !word.flags.has(TokenFlags::START_OF_LINE)
-                        && !is_known(ident_of(&word), names)
-                });
-            if directive {
+            if is_directive(first) {
                 body.clear();
                 let name_tok = reader.next(cx.interner);
                 if !(is_conditional(ident_of(&name_tok), names)
@@ -584,7 +571,7 @@ impl Preprocessor {
 
         let interner = &mut *cx.interner;
         if name == Some(names.define) {
-            let (def, diagnostics) = parse_define_in(rest, interner, cx.lex.assembly);
+            let (def, diagnostics) = parse_define(rest, interner);
             self.diagnostics.extend(diagnostics);
             if let Some(def) = def {
                 if let Some(problem) = self.macros.define(def, interner) {
@@ -1803,34 +1790,6 @@ fn is_include(name: Option<Symbol>, names: &Names) -> bool {
     name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
 }
 
-/// Whether `name` is a directive this phase answers, which in assembly is what tells a
-/// directive from a comment that starts with `#`.
-fn is_known(name: Option<Symbol>, names: &Names) -> bool {
-    let Some(name) = name else {
-        return false;
-    };
-    [
-        names.define,
-        names.undef,
-        names.r#if,
-        names.ifdef,
-        names.ifndef,
-        names.elif,
-        names.elifdef,
-        names.elifndef,
-        names.r#else,
-        names.endif,
-        names.line,
-        names.error,
-        names.warning,
-        names.pragma,
-        names.include,
-        names.include_next,
-        names.embed,
-    ]
-    .contains(&name)
-}
-
 /// Whether this token opens a directive line.
 fn is_directive(tok: PpToken) -> bool {
     tok.flags.has(TokenFlags::START_OF_LINE) && tok.punct() == Some(Punct::Hash)
@@ -2162,8 +2121,6 @@ mod tests {
         pp: Preprocessor,
         /// What `-Wpedantic` is set to for every context this run builds.
         pedantic: bool,
-        /// Whether the file is read as assembly, the way a `.S` is.
-        assembly: bool,
     }
 
     impl Run {
@@ -2175,13 +2132,7 @@ mod tests {
                 search: SearchPath::new(),
                 pp: Preprocessor::new(),
                 pedantic: false,
-                assembly: false,
             }
-        }
-
-        /// The same, reading the file as assembly on its way to the assembler.
-        fn assembly() -> Run {
-            Run { assembly: true, ..Run::new() }
         }
 
         /// The same, under `-Wpedantic`.
@@ -2252,14 +2203,10 @@ mod tests {
         fn go_named(&mut self, path: &str, src: &str) -> String {
             let file = self.sources.add(path, src.as_bytes().to_vec()).expect("the map has room");
             let pedantic = self.pedantic;
-            let assembly = self.assembly;
             let out = {
                 let mut cx =
                     Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
                 cx.pedantic = pedantic;
-                if assembly {
-                    cx.lex = cx.lex.for_assembly();
-                }
                 self.pp.run(file, &mut cx)
             };
             self.spell(&out)
@@ -2602,49 +2549,6 @@ mod tests {
         let mut run = Run::new();
         run.go("#frobnicate\n");
         assert_eq!(run.messages(), vec!["invalid preprocessing directive".to_owned()]);
-    }
-
-    #[test]
-    fn in_assembly_a_line_that_is_not_a_directive_is_text_and_is_expanded() {
-        let mut run = Run::assembly();
-        let out = run.go("#define N 3\n# a comment that says N\n#frobnicate N\n");
-        assert!(run.messages().is_empty(), "{:?}", run.messages());
-        assert_eq!(out, "# a comment that says 3 #frobnicate 3");
-    }
-
-    #[test]
-    fn in_assembly_a_number_after_the_hash_is_not_a_line_marker() {
-        let mut run = Run::assembly();
-        let out = run.go("# 42 \"other.S\"\nx\n");
-        assert!(run.messages().is_empty(), "{:?}", run.messages());
-        assert_eq!(out, "# 42 \"other.S\" x");
-        assert!(run.pp.line_directives().is_empty());
-    }
-
-    #[test]
-    fn in_assembly_the_directives_are_still_directives() {
-        let mut run = Run::assembly();
-        let out = run.go("#if 0\n#frobnicate\n#else\n#define N 1\nN\n#endif\n#\n");
-        assert!(run.messages().is_empty(), "{:?}", run.messages());
-        assert_eq!(out, "1");
-    }
-
-    #[test]
-    fn in_assembly_a_hash_before_a_word_that_is_not_a_parameter_is_kept() {
-        // The AArch64 immediate. In C this is E0305, which the macros tests cover.
-        let mut run = Run::assembly();
-        let out =
-            run.go("#define ZERO(r) mov r, #0\n#define IMM(r) mov r, #imm\nZERO(x1)\nIMM(x2)\n");
-        assert!(run.messages().is_empty(), "{:?}", run.messages());
-        assert_eq!(out, "mov x1, #0 mov x2, #imm");
-    }
-
-    #[test]
-    fn in_assembly_the_name_after_a_dollar_is_expanded() {
-        let mut run = Run::assembly();
-        let out = run.go("#define FOO 3\nmovq $FOO, %rax\n");
-        assert!(run.messages().is_empty(), "{:?}", run.messages());
-        assert_eq!(out, "movq $3, %rax");
     }
 
     #[test]
@@ -3312,92 +3216,6 @@ mod tests {
         // seven the standard has. GCC answers one there, which is issue #315.
         assert_eq!(clean("#if __has_c_attribute(gnu::packed)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "");
-    }
-
-    /// Every name the kernel's `include/linux/compiler_attributes.h` asks about, from v6.12, with
-    /// what GCC 14 answers for it on x86-64.
-    ///
-    /// The header defines each of its macros empty when `__has_attribute` says no, so a no for an
-    /// attribute this compiler honours quietly changes the kernel, and a yes for one it ignores is
-    /// a promise nothing keeps. The names are the ones the header asks about and the ones it writes
-    /// unconditionally, since a header written for gcc 5.1 and up takes those as given.
-    ///
-    /// The answers were not taken from a GCC 14 run, because there was none to hand. They are what
-    /// gcc 16 answers, with the three places GCC 14 differs put back from its source: it answers
-    /// the standard's older numbers for `fallthrough` and `noreturn`, where 16 answers 202311 for
-    /// both, and it has no `counted_by`, which came in 15. `no_caller_saved_registers` is an
-    /// attribute of x86 alone, which is why the target is written down. The clang-only names at
-    /// the bottom are ones gcc answers no for and so must this.
-    const KERNEL_ATTRIBUTES: [(&str, u32); 39] = [
-        ("alias", 1),
-        ("aligned", 1),
-        ("alloc_size", 1),
-        ("always_inline", 1),
-        ("assume_aligned", 1),
-        ("cleanup", 1),
-        ("const", 1),
-        ("copy", 1),
-        ("designated_init", 1),
-        ("error", 1),
-        ("externally_visible", 1),
-        ("fallthrough", 201_904),
-        ("format", 1),
-        ("gnu_inline", 1),
-        ("malloc", 1),
-        ("mode", 1),
-        ("no_caller_saved_registers", 1),
-        ("no_profile_instrument_function", 1),
-        ("no_stack_protector", 1),
-        ("noclone", 1),
-        ("noinline", 1),
-        ("nonstring", 1),
-        ("noreturn", 202_202),
-        ("packed", 1),
-        ("pure", 1),
-        ("section", 1),
-        ("uninitialized", 1),
-        ("unused", 1),
-        ("used", 1),
-        ("warn_unused_result", 1),
-        ("warning", 1),
-        ("weak", 1),
-        ("counted_by", 0),
-        ("diagnose_as_builtin", 0),
-        ("disable_sanitizer_instrumentation", 0),
-        ("overloadable", 0),
-        ("pass_dynamic_object_size", 0),
-        ("pass_object_size", 0),
-        ("name", 0),
-    ];
-
-    /// The kernel's names are answered the way GCC 14 answers them, except where this compiler
-    /// does not do what the attribute asks, and there the answer is no and the table says so.
-    ///
-    /// A difference has to go one way only. Answering yes where gcc says no is never right, and
-    /// answering no where gcc says yes is right only for a row the table marks as not done, so a
-    /// name the kernel uses cannot be missing from the table and come out as no by accident.
-    #[test]
-    fn the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them() {
-        let asked: Vec<String> = KERNEL_ATTRIBUTES
-            .iter()
-            .map(|(name, _)| format!("__has_attribute(__{name}__)"))
-            .collect();
-        let mut run = Run::new();
-        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
-        let text = run.go(&(asked.join("\n") + "\n"));
-        let answers: Vec<u32> = text.split(' ').map(|n| n.parse().expect("a number")).collect();
-        assert_eq!(answers.len(), KERNEL_ATTRIBUTES.len(), "{text}");
-        for (&(name, gcc), &ours) in KERNEL_ATTRIBUTES.iter().zip(&answers) {
-            if ours == gcc {
-                continue;
-            }
-            assert_eq!(ours, 0, "`{name}` is answered {ours} where gcc answers {gcc}");
-            let row = rucc_gnu::lookup(Kind::Attribute, name);
-            assert!(
-                row.is_some_and(|row| !row.status.is_available()),
-                "`{name}` is answered no where gcc answers {gcc} and the table has no row saying why"
-            );
-        }
     }
 
     #[test]

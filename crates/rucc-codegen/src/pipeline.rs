@@ -30,8 +30,8 @@ use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
-    BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, MachineInsts, PhysReg,
-    RegFile, ShortInsts, TargetInfo, TimingInsts, aarch64, x86_64,
+    BitInsts, BranchInsts, CallRegs, FlagInsts, FrameInsts, MachineInsts, PhysReg, RegFile,
+    ShortInsts, TargetInfo, TimingInsts, aarch64, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -211,28 +211,13 @@ impl Machine {
     /// again from it, because which registers the function owes back is the thing that differs,
     /// and a scratch register has to be one it does not owe.
     #[must_use]
-    ///
-    /// The boundary the stack is kept on is the command line's rather than the convention's, so
-    /// a machine made with [`Machine::aligned_to`] gives one with the same boundary.
     pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
-        let conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
+        let conv = self.conv.under(convention)?;
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Some(Self::aarch64(conv))
         } else {
             Some(Self::x86_64(conv))
         }
-    }
-
-    /// The same machine with the stack pointer kept on a multiple of `bytes` at every call rather
-    /// than on the convention's boundary, which is what `-mpreferred-stack-boundary=` asks for.
-    ///
-    /// Nothing but the frame reads the boundary. A function may count on no more than it on entry
-    /// and owes no more than it at a call, and a local that asks for more is aligned by the
-    /// prologue behind a frame pointer, which is what [`crate::frame`] already does for a local
-    /// that asks for more than sixteen.
-    #[must_use]
-    pub fn aligned_to(self, bytes: u32) -> Self {
-        Self { conv: self.conv.aligned_to(bytes), ..self }
     }
 
     /// The machine a target describes, or `None` when no backend in this crate covers it.
@@ -306,10 +291,6 @@ pub struct Flags {
     pub frame_pointer: bool,
     /// Whether the red zone may be used, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
-    /// Where the code and static data are promised to be, which `-mcmodel=` says. Under the kernel
-    /// model an address of a name wanted as a value is written as a number, and one with an index
-    /// added to it is one instruction. See [`crate::fold::absolute`].
-    pub code_model: CodeModel,
     /// Whether a frame is taken a page at a time, which `-fstack-clash-protection` asks for.
     pub stack_clash: bool,
     /// Whether every address an indirect branch may arrive at opens with a landing pad, which
@@ -386,7 +367,6 @@ impl Default for Flags {
         Self {
             frame_pointer: false,
             red_zone: true,
-            code_model: CodeModel::Small,
             stack_clash: false,
             landing: false,
             profile: Profile::No,
@@ -576,14 +556,7 @@ pub fn compile_recording(
         arguments: &mut stack.arguments,
         dynamic: &mut stack.dynamic,
     };
-    fold::addresses(
-        &mut func,
-        machine.insts,
-        machine.shapes,
-        names,
-        &mut pending,
-        flags.code_model,
-    );
+    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending);
 
     // After that fold rather than before it, because what this puts inside an arithmetic
     // instruction is a load's addressing mode and a load whose address is still a `lea` in front of
@@ -595,11 +568,6 @@ pub fn compile_recording(
     // the same run written a second way.
     combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
-    // Last of the three, so that a name read or written directly is still read from the
-    // instruction pointer and only an address wanted as a value is written as a number.
-    if flags.code_model == CodeModel::Kernel {
-        fold::absolute(&mut func, machine.insts, names);
-    }
 
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by

@@ -146,10 +146,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // Before the walk, because it is a question about what the function declares rather than about
     // what it does, and the scan above is where that is already known. What the attribute then
     // costs the function is a slot in its frame and a comparison before each of its returns.
-    // The function's own attribute wins over the flag, which is the point of it.
-    if !tast[decl].flags.contains(DeclFlags::NO_STACK_PROTECTOR)
-        && protects(&body, &locals, &escaped)
-    {
+    if protects(&body, &locals, &escaped) {
         body.func.attrs.set |= AttrSet::STACK_PROTECT;
     }
     // And what the command line said about fusing a multiply and an addition, which is a fact about

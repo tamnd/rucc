@@ -34,21 +34,13 @@ pub struct Options {
     /// extension. Off means `1'000'000` is a number, a multi-character character constant and
     /// another number, which is how gcc reads it before C23 and why it does not parse.
     pub digit_separators: bool,
-    /// Whether the file is assembly on its way to the assembler, which is a `.S` or
-    /// `-x assembler-with-cpp`. GCC reads such a file as `-lang-asm` and two things change in
-    /// this phase. `$` stops being an identifier character, because `movq $SYM, %rax` writes an
-    /// immediate whose name has to be macro expanded, and the kernel's headers depend on that. And
-    /// a quote with no partner on its line is not an error but a token that runs to the end of
-    /// the line, because assembly has apostrophes in its comments and in `.ascii` text that are
-    /// not character constants, and nothing here knows where an assembler's comments are.
-    pub assembly: bool,
 }
 
 impl Options {
     /// The defaults, which are what `-std=gnu23` implies.
     #[must_use]
     pub fn new() -> Options {
-        Options { trigraphs: false, line_comments: true, digit_separators: true, assembly: false }
+        Options { trigraphs: false, line_comments: true, digit_separators: true }
     }
 
     /// What a dialect implies, which is the form the driver wants.
@@ -58,14 +50,7 @@ impl Options {
             trigraphs: false,
             line_comments: std >= Std::C99 || gnu,
             digit_separators: std >= Std::C23,
-            assembly: false,
         }
-    }
-
-    /// The same knobs for a file of assembly that is preprocessed first.
-    #[must_use]
-    pub fn for_assembly(self) -> Options {
-        Options { assembly: true, ..self }
     }
 }
 
@@ -172,12 +157,6 @@ impl<'a> Lexer<'a> {
 
         let b = self.cursor.first();
         let kind = match CLASS[b as usize] {
-            // gcc's `-lang-asm` turns `$` into a punctuator of its own, which is what lets
-            // `$__PAGE_OFFSET` expand the macro after it.
-            Class::IdentStart if b == b'$' && self.options.assembly => {
-                self.eat();
-                PpTokenKind::Other
-            }
             Class::IdentStart => self.ident_or_prefixed_literal(b, start),
             Class::Digit => self.pp_number(),
             Class::Dot if CLASS[self.cursor.nth(1) as usize] == Class::Digit => self.pp_number(),
@@ -457,17 +436,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Whether `b` carries on an identifier or a number, which every identifier byte does except
-    /// `$` in a file of assembly.
-    #[inline]
-    fn continues(&self, b: u8) -> bool {
-        is_ident_continue(b) && (b != b'$' || !self.options.assembly)
-    }
-
     fn identifier(&mut self) -> PpTokenKind {
         while !self.cursor.at_end() {
             let b = self.cursor.first();
-            if self.continues(b) {
+            if is_ident_continue(b) {
                 self.eat();
             } else if b == b'\\' && matches!(self.cursor.nth(1), b'u' | b'U') {
                 // A universal character name spells an identifier character. Whether the
@@ -493,7 +465,7 @@ impl<'a> Lexer<'a> {
             if matches!(b, b'e' | b'E' | b'p' | b'P') && matches!(n1, b'+' | b'-') {
                 self.eat();
                 self.eat();
-            } else if self.continues(b) || b == b'.' {
+            } else if is_ident_continue(b) || b == b'.' {
                 self.eat();
             } else if b == b'\'' && is_ident_continue(n1) && self.options.digit_separators {
                 // C23 digit separators. `1'000'000` is one pp-number, and the apostrophe only
@@ -516,12 +488,6 @@ impl<'a> Lexer<'a> {
         self.eat();
         loop {
             if self.cursor.at_end() || self.cursor.first() == b'\n' {
-                // In assembly the quote is most likely an apostrophe in a comment, which gcc
-                // passes through with the rest of its line as one token and says nothing about.
-                // The rest of the line is then not expanded, which is gcc's reading too.
-                if self.options.assembly {
-                    return PpTokenKind::Other;
-                }
                 // A literal does not cross a line. Reporting it here and stopping at the
                 // newline is what keeps one missing quote from swallowing the rest of the
                 // file and turning into a hundred nonsense errors.

@@ -217,23 +217,6 @@ pub const BLOCK_COPY_MOVES_FOR_SPEED: u32 = 8;
 /// Half, because a call is five bytes and eight moves are not.
 pub const BLOCK_COPY_MOVES_FOR_SIZE: u32 = 4;
 
-/// The most bytes of a local scalar replacement turns into values, per section 18.2.
-///
-/// GCC bounds the same thing with `sra-max-scalarization-size-Ospeed`, which it works out from the
-/// move ratio and the word size and which comes to a little over a hundred bytes on x86-64. A local
-/// past this is an array or a buffer rather than a record, and its pieces would not fit in the
-/// registers they are meant to end up in.
-pub const SRA_MAX_BYTES: u32 = 128;
-
-/// The most pieces one local is cut into by scalar replacement, per section 18.2.
-///
-/// Each piece is a value the function keeps in a register, and a loop that reads them all keeps all
-/// of them at once. Eight is half of the sixteen general purpose registers x86-64 has, which leaves
-/// the other half for the loop's own values. At 32 the corpus's `simd-lfind.lfind8` programs had
-/// their sixteen byte vectors cut into sixteen bytes each, and the spills that followed cost 8% more
-/// instructions than keeping the vectors in memory. At eight the same programs run 5% fewer.
-pub const SRA_MAX_PIECES: u32 = 8;
-
 /// How many instructions a loop header may hold and still be worth copying, per section 26.6.
 ///
 /// GCC's `max-loop-header-insns`, `Init(20)` at `gcc/params.opt:690`. The copy is what turns a
@@ -748,22 +731,6 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "22.5",
         gcc: "LOGICAL_OP_NON_SHORT_CIRCUIT",
-        provenance: Provenance::Chosen,
-    },
-    Constant {
-        name: "SRA_MAX_BYTES",
-        value: 128,
-        unit: "bytes",
-        document: "18.2",
-        gcc: "sra-max-scalarization-size-Ospeed",
-        provenance: Provenance::Chosen,
-    },
-    Constant {
-        name: "SRA_MAX_PIECES",
-        value: 8,
-        unit: "pieces",
-        document: "18.2",
-        gcc: "sra-max-propagations",
         provenance: Provenance::Chosen,
     },
     Constant {

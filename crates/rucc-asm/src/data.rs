@@ -42,7 +42,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
 use rucc_ir::{AliasKind, Datum, Dll, GlobalId, Linkage, Module, SymbolRef};
 use rucc_object::{
-    Alias, Apart, Binding, Data, Export, Holds, Object, Offer, Place, Reference, Reloc, Visibility,
+    Alias, Apart, Binding, Data, Export, Object, Offer, Place, Reference, Reloc, Visibility,
 };
 use rucc_target::ObjectFormat;
 
@@ -232,13 +232,7 @@ impl Globals {
                 visibility: var.visibility,
                 relocs: Vec::new(),
             };
-            if matches!(
-                var.place,
-                Place::Zero
-                    | Place::Merged
-                    | Place::Thread { zero: true }
-                    | Place::Named(_, Holds::Zero)
-            ) {
+            if matches!(var.place, Place::Zero | Place::Merged | Place::Thread { zero: true }) {
                 data.objects.push(object);
                 continue;
             }
@@ -565,21 +559,8 @@ fn place(
         let zero = !pieces.is_empty() && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
         return Place::Thread { zero };
     }
-    // Before the tentative definition, because gcc never offers one the program put in a section
-    // to the linker to merge, and before the zeros, because what a linker script walking the
-    // section finds has to be there as bytes unless the section's own name says it holds none.
-    // The flags come from the same two questions asked below of a variable in no section.
     if let Some(section) = global.section {
-        let name = names.resolve(section).to_owned();
-        let zero = pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
-        let holds = if zero && Holds::nobits(&name) {
-            Holds::Zero
-        } else if global.constant && addrs.is_empty() {
-            Holds::ReadOnly
-        } else {
-            Holds::Written
-        };
-        return Place::Named(name, holds);
+        return Place::Named(names.resolve(section).to_owned());
     }
     if global.linkage == Linkage::Common {
         return Place::Merged;
@@ -709,7 +690,7 @@ mod tests {
                 &Place::Zero,
                 &Place::Written,
                 &Place::ReadOnly,
-                &Place::Named(".init_array".to_owned(), Holds::Written),
+                &Place::Named(".init_array".to_owned()),
                 &Place::Merged,
             ]
         );
@@ -773,58 +754,6 @@ mod tests {
                 ("both", &Place::RelocReadOnly { local: false }),
             ]
         );
-    }
-
-    /// A variable in a section the program named keeps its bytes and gets the flags gcc gives it.
-    ///
-    /// Zeros are bytes in the section unless its name is one that means zeros, since a linker
-    /// script walking a table finds what is in the file and not what `.bss` would have held. A
-    /// constant is read only unless it holds an address, and anything else is writable.
-    #[test]
-    fn a_variable_in_a_named_section_is_there_with_the_flags_its_contents_ask_for() {
-        let mut names = Interner::new();
-        let mut module = module(&mut names);
-        let value = module.add_imm(Imm::int(7, Type::int(32)));
-        let seven = [Datum::Scalar { ty: Type::int(32), value }];
-        let mine = names.intern(".mine");
-
-        let zeros = defined(&mut module, &mut names, "zeros", &[Datum::Zero(4)]);
-        module[zeros].section = Some(mine);
-        let fixed = defined(&mut module, &mut names, "fixed", &seven);
-        module[fixed].constant = true;
-        module[fixed].section = Some(mine);
-        let to = module.add_reloc(IrReloc { symbol: module[zeros].name, addend: 0, size: 8 });
-        let table = defined(&mut module, &mut names, "table", &[Datum::Addr(to)]);
-        module[table].constant = true;
-        module[table].size = 8;
-        module[table].section = Some(names.intern(".initcall"));
-        let page = defined(&mut module, &mut names, "page", &[Datum::Zero(4)]);
-        module[page].section = Some(names.intern(".bss..page_aligned"));
-        let filled = defined(&mut module, &mut names, "filled", &seven);
-        module[filled].section = Some(names.intern(".bss.filled"));
-        let merged = defined(&mut module, &mut names, "merged", &[Datum::Zero(4)]);
-        module[merged].linkage = Linkage::Common;
-        module[merged].section = Some(mine);
-
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of six globals").vars;
-        let places: Vec<(&str, &Place)> =
-            vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
-        let named = |name: &str, holds| Place::Named(name.to_owned(), holds);
-        assert_eq!(
-            places,
-            [
-                ("zeros", &named(".mine", Holds::Written)),
-                ("fixed", &named(".mine", Holds::ReadOnly)),
-                ("table", &named(".initcall", Holds::Written)),
-                ("page", &named(".bss..page_aligned", Holds::Zero)),
-                ("filled", &named(".bss.filled", Holds::Written)),
-                ("merged", &named(".mine", Holds::Written)),
-            ]
-        );
-        let data = Globals { vars, ..Globals::default() }.image();
-        assert_eq!(data.objects[0].bytes, [0; 4], "zeros in a named section are bytes");
-        assert!(data.objects[3].bytes.is_empty(), "zeros in .bss..page_aligned are not");
     }
 
     #[test]

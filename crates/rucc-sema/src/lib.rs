@@ -120,9 +120,7 @@ pub use crate::expr::{
 pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};
 pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};
-pub use crate::tast::{
-    Address, Base, Const, ConstId, Counts, Label, LabelId, Notices, StrId, Tast,
-};
+pub use crate::tast::{Address, Base, Const, ConstId, Counts, Label, LabelId, StrId, Tast};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";

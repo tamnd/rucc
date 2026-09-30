@@ -93,9 +93,8 @@ struct Declared {
     twice: bool,
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
-    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`],
-    /// [`DeclFlags::NO_STACK_PROTECTOR`], [`DeclFlags::COLD`] and [`DeclFlags::HOT`] and nothing
-    /// else.
+    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::COLD`] and
+    /// [`DeclFlags::HOT`] and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.
@@ -364,11 +363,7 @@ impl Checker<'_> {
             takes_prior_linkage: takes_prior_linkage(&specs, DeclKind::Function),
             span,
         };
-        // The specifiers only, for the reason `noreturn` above reads them only. A kernel writes
-        // `__init` between the return type and the name, which is still the specifiers.
-        let section = self.sectioned(specs.attrs, duration);
         let id = self.merge(declared);
-        self.record_section(id, section);
         // The return type's name, kept for the debug information the way an object's is below.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
@@ -378,8 +373,9 @@ impl Checker<'_> {
         if let Some(isa) = self.targeted(&[specs.attrs]) {
             self.tast.record_target(id, isa);
         }
-        // The specifiers only, for the reason `noreturn` above reads them only.
-        self.record_notices(id, &[specs.attrs], DeclKind::Function);
+        if let Some(section) = self.sectioned(&[specs.attrs]) {
+            self.tast.record_section(id, section);
+        }
         if nested {
             return Some(id);
         }
@@ -744,14 +740,7 @@ impl Checker<'_> {
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
-        // Both places, for the reason `retained` above reads both. The kernel's `__initdata` and
-        // `__read_mostly` are written after the declarator and its `__init` in front of the name.
-        let section = match self.sectioned(specs.attrs, duration) {
-            Some(section) => Some(section),
-            None => self.sectioned(item.attrs, duration),
-        };
         let id = self.merge(declared);
-        self.record_section(id, section);
         // Kept for the debug information, which names the typedef where the program did.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
@@ -763,9 +752,17 @@ impl Checker<'_> {
                 self.tast.record_target(id, isa);
             }
         }
-        // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
-        // declarator of a function declared inside the block that calls it.
-        self.record_notices(id, &[specs.attrs, item.attrs], kind);
+        // Both places, for the reason `noreturn` above reads both. An object that lives on the
+        // stack is in no section at all, so naming one for it is refused the way gcc refuses it,
+        // and a `static` one inside a function is an object like any other at file scope.
+        if let Some(section) = self.sectioned(&[specs.attrs, item.attrs]) {
+            if kind != DeclKind::Function && duration == StorageDuration::Automatic {
+                let what = "section attribute cannot be specified for local variables";
+                self.report(Diagnostic::error(what, span).with_code("E0752"));
+            } else {
+                self.tast.record_section(id, section);
+            }
+        }
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
         let mut worked = true;
@@ -819,19 +816,6 @@ impl Checker<'_> {
         item: ast::InitDeclarator,
         span: Span,
     ) -> Option<DeclId> {
-        // A type is not something the linker places, so a section on one is refused the way gcc
-        // refuses it rather than dropped.
-        for attrs in [specs.attrs, item.attrs] {
-            let written = self.ast[attrs].to_vec();
-            if let Some(attr) = written.iter().find(|attr| {
-                !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
-                    && rucc_gnu::unarmour(self.text(attr.name)) == "section"
-            }) {
-                let what = format!("section attribute not allowed for '{}'", self.text(name));
-                self.report(Diagnostic::error(what, attr.span).with_code("E0750"));
-                break;
-            }
-        }
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();
             self.report(

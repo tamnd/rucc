@@ -175,15 +175,14 @@ pub struct Decl {
 /// for `constexpr` and again for `noreturn` and would have happened a third time for `naked`. A
 /// byte with six bits in it takes the node below the size it was before all three, and leaves
 /// enough room that the next several questions of this kind cost nothing at all. The ninth took
-/// it to sixteen bits, which is the story in `tast.rs` beside the size of a declaration, and
-/// the seventeenth to thirty two, which cost nothing.
+/// it to sixteen bits, which is the story in `tast.rs` beside the size of a declaration.
 ///
 /// What that trades away is where the paragraphs live. A field carries its explanation on the
 /// field, where a reader of the struct meets it; a bit carries it on a constant here, one step
 /// away. The constants below are written the way the fields were so the step is the only
 /// difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DeclFlags(u32);
+pub struct DeclFlags(u16);
 
 impl DeclFlags {
     /// Nothing written.
@@ -347,14 +346,6 @@ impl DeclFlags {
     /// definition, and a name that is only declared here is not exported by this unit. Merged the
     /// way [`Self::DLLIMPORT`] is. A name with both is exported, since the definition is here.
     pub const DLLEXPORT: Self = Self(1 << 15);
-
-    /// `__attribute__((no_stack_protector))` was written on a declaration of this name, so its
-    /// body gets no canary whatever `-fstack-protector` asked for.
-    ///
-    /// The kernel writes it on the code that runs before the canary has been set up, where a check
-    /// against it would fail on the way out of a function that did nothing wrong. Merged the way
-    /// [`Self::NO_INSTRUMENT`] is, since it is a fact about the body said wherever the name is.
-    pub const NO_STACK_PROTECTOR: Self = Self(1 << 16);
 
     /// Whether every bit of `other` is set here.
     #[must_use]

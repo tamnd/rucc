@@ -107,17 +107,3 @@ A macro defined twice warns when the two definitions differ and says nothing whe
 The same agreement runs the other way through the headers this compiler ships. A program is allowed to define `offsetof` itself, under `#ifndef offsetof`, and to reach `<stddef.h>` later through some header it includes for another reason. So `<stddef.h>` undefines the name before defining it, as GCC's does, and any header of ours that defines a name the program may own does the same.
 
 Neither of those is cosmetic. A warning costs nothing on a terminal and costs a feature inside a configure script: autosetup, which sqlite uses, compiles its feature tests with `cctest -nooutput 1` and counts any output at all as a failed test, so a spurious warning is silently the answer no. The rule that follows is that a translation unit which compiles clean under GCC compiles quiet here, and a warning our own headers or predefines cause is a bug of the same weight as a wrong answer.
-
-## 5.8 Assembly on its way to the assembler
-
-A `.S` file, and anything named `-x assembler-with-cpp`, goes through this stage before the assembler sees it, and the Linux kernel has several hundred of them. They are not C, and gcc reads them as its `-lang-asm` mode does, so this stage reads them differently from C in the five ways below and in no others.
-
-`__ASSEMBLER__` is defined to 1, because every header that a `.S` shares with C hides its declarations behind `#ifndef __ASSEMBLER__`. `__STDC_VERSION__`, `__STDC_UTF_16__` and `__STDC_UTF_32__` are left out, which is the whole of the difference gcc 16 makes between `-dM` for C and for assembly, and so are this compiler's own `__STDC_NO_ATOMICS__`, `__STDC_NO_COMPLEX__` and `__STDC_NO_THREADS__`, which qualify a version that is no longer there. Every other predefined name stays, since a `.S` asks about the machine as often as a C file does.
-
-A `$` is a token of its own rather than a letter of a name. x86 writes an immediate as `$FOO`, and the kernel's `FOO` is often a macro from `asm-offsets.h`, so the name after the `$` has to be found and expanded. The output keeps the two together as `$3`, not `$ 3`, the way gcc prints it.
-
-A line that starts with `#` and whose next word is not a directive this stage knows is text. It is a comment to the x86 assembler, and gcc passes it through with its macros expanded, so that is what happens here too. A number after the `#` is text on the same terms and is not taken as a line marker. The directives themselves, and everything in a skipped region, are handled as they are in C.
-
-A `#` in a function-like macro that is not followed by a parameter is kept as a `#` and is not an error. That is how an AArch64 immediate is written, as in `#define ZERO(r) mov r, #0`. A `#` that is followed by a parameter still turns it into a string, as gcc's does.
-
-A `'` or `"` with no partner on its line is not an error. The rest of the line is one token and goes through untouched, so a comment like `# it's done` reads as it would under gcc.

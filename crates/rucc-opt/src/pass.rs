@@ -97,7 +97,6 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::constant_p::ConstantP,
     &crate::fold::Fold,
     &crate::image::Image,
-    &crate::sroa::Sroa,
     &crate::simplify::Simplify,
     &crate::narrow::Narrow,
     &crate::dce::Dce,

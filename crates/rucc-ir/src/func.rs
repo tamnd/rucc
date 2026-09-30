@@ -41,24 +41,6 @@ use crate::inst::{
 use crate::module::{Dll, Linkage, Visibility};
 use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
 
-/// The messages an `error` and a `warning` attribute put on a function, for a call to it that
-/// survives optimization. A function may carry both, and gcc then says both at each such call.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Notices {
-    /// What a surviving call is refused with.
-    pub error: Option<String>,
-    /// What a surviving call is warned about with.
-    pub warning: Option<String>,
-}
-
-impl Notices {
-    /// Whether there is nothing to say about a call.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.error.is_none() && self.warning.is_none()
-    }
-}
-
 /// One function.
 #[derive(Debug)]
 pub struct Func {
@@ -130,13 +112,6 @@ pub struct Func {
     ///
     /// [`Span::DUMMY`] wherever [`Func::declared`] is, and for the same reason.
     pub named: Span,
-    /// What a call to it that is still there once the optimizer is done has to be reported with,
-    /// from `__attribute__((error("...")))` and `__attribute__((warning("...")))`.
-    ///
-    /// Not part of the IR's text, since it is a message for whoever compiled the source and not a
-    /// fact about what the function does. A module read back from text has none, and its calls
-    /// are reported by nothing, which is what a call to such a function in another unit gets.
-    pub notices: Notices,
 
     values: Vec<ValueData>,
     insts: Vec<InstData>,
@@ -203,7 +178,6 @@ impl Func {
             target: None,
             declared: Span::DUMMY,
             named: Span::DUMMY,
-            notices: Notices::default(),
             values: Vec::new(),
             insts: Vec::new(),
             inst_layout: Vec::new(),

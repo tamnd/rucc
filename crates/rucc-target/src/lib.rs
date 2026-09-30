@@ -235,39 +235,6 @@ impl ObjectFormat {
     }
 }
 
-/// Where the program's code and static data are promised to be, which is `-mcmodel=`.
-///
-/// The model is a promise about addresses that the code generator is allowed to believe. It says
-/// nothing about which link is coming, which is `-fPIC` and friends, and it decides only how an
-/// address is written into an instruction. x86-64 is the only machine with more than one here.
-///
-/// Design: `spec/11-asm-objects-debug.md` section 11.3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-// Deliberately not `#[non_exhaustive]`, for the reason [`Arch`] is not: a new model is a new set of
-// addressing forms and every place that picks one should stop compiling until it says which.
-pub enum CodeModel {
-    /// Everything within 2 GiB of everything else, reached from the instruction pointer. The
-    /// default on every target and every hosted program's model.
-    #[default]
-    Small,
-    /// The top 2 GiB of the address space, from `0xffffffff80000000` up, which is where every
-    /// x86-64 Linux kernel is linked. An address there is a 32 bit number sign extended, so an
-    /// instruction may carry it as an immediate (`movq $sym, %rax`) or as the displacement of an
-    /// indexed address (`sym(,%rdi,8)`), both with `R_X86_64_32S`.
-    Kernel,
-}
-
-impl CodeModel {
-    /// The spelling `-mcmodel=` takes, and the one `__code_model_*__` is named after.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            CodeModel::Small => "small",
-            CodeModel::Kernel => "kernel",
-        }
-    }
-}
-
 /// A target triple.
 ///
 /// We accept the LLVM-style `arch-vendor-os-env` form because that is what build systems
@@ -1458,12 +1425,6 @@ mod tests {
         assert_eq!(arm.call_regs.map(|regs| regs.int_args[0]), Some(aarch64::x(0)));
         assert_eq!(arm.call_regs.map(|regs| regs.red_zone), Some(0));
         assert_eq!(of("aarch64-apple-darwin").call_regs.map(|regs| regs.red_zone), Some(128));
-        // Another stack boundary is the same convention with one number changed, made once.
-        let sysv = linux.call_regs.expect("a convention");
-        let eight = sysv.aligned_to(8);
-        assert_eq!((eight.stack_align, eight.int_args), (8, sysv.int_args));
-        assert!(std::ptr::eq(eight, sysv.aligned_to(8)));
-        assert!(std::ptr::eq(sysv, sysv.aligned_to(16)));
         // Windows on AArch64 has registers of its own rather than Linux's, both runtimes alike.
         for triple in ["aarch64-pc-windows-msvc", "aarch64-pc-windows-gnu"] {
             let regs = of(triple).call_regs.expect("a convention");

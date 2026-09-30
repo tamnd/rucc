@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Arch, CodeModel, Env, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, Isa, Os, TargetInfo, Triple};
 
 /// An optimisation level.
 ///
@@ -1236,11 +1236,11 @@ impl fmt::Display for Patchable {
     }
 }
 
-/// Which link the output is written for, and whether it has to be position independent at all.
+/// Which of the two position independent questions the output is answering.
 ///
-/// The first two answers are both position independent, so between them this is not about whether
-/// there are absolute addresses in the text. It is about whether the link that reads the object is
-/// one that puts every name in the same program. An executable is such a link and a shared library is not,
+/// Everything this compiler writes is position independent, so this is not about whether there are
+/// absolute addresses in the text. It is about whether the link that reads the object is one that
+/// puts every name in the same program. An executable is such a link and a shared library is not,
 /// and the difference decides how a name is reached: from the instruction pointer where the
 /// distance is a number the linker has, and out of the global offset table where it is not.
 ///
@@ -1260,12 +1260,6 @@ pub enum Pic {
     /// exports is one something loaded earlier may define too, and where a name defined elsewhere
     /// is not copied in. Both are reached through the global offset table.
     Library,
-    /// `-fno-pic`, `-fno-pie` and their capital spellings. The output is linked where it runs and
-    /// nothing relocates it afterwards, which is a kernel and a `-no-pie` executable. Every name is
-    /// reached directly, so the object asks for no global offset table at all: a weak name nothing
-    /// defines is resolved to zero by the static linker rather than read out of a slot, which is
-    /// what a kernel's link script asserts when it checks that `.got` is empty. See tamnd/rucc#2276.
-    Absolute,
 }
 
 impl Pic {
@@ -1274,7 +1268,6 @@ impl Pic {
         match self {
             Pic::Executable => "-fPIE",
             Pic::Library => "-fPIC",
-            Pic::Absolute => "-fno-pic",
         }
     }
 }
@@ -1541,100 +1534,6 @@ impl FromStr for GnucVersion {
             return Err(format!("`{text}` has more than three components"));
         }
         Ok(GnucVersion { major, minor, patch })
-    }
-}
-
-impl GnucVersion {
-    /// The dialect that GCC release compiles when the command line has no `-std=`.
-    ///
-    /// A build that claims an old GCC is usually an old tree, and an old tree that passes no
-    /// `-std=` was written against that release's default rather than ours. Kernels up to 3.17 are
-    /// the example that matters: they rely on gnu89, and under gnu23 their own identifiers meet
-    /// keywords. GCC 5 moved the default to gnu11, GCC 8 to gnu17 and GCC 15 to gnu23. Every one of
-    /// these is a GNU dialect, so the extensions stay on. `spec/04-driver-and-cli.md` section 4.6.
-    #[must_use]
-    pub const fn default_std(self) -> Std {
-        match self.major {
-            0..=4 => Std::C89,
-            5..=7 => Std::C11,
-            8..=14 => Std::C17,
-            _ => Std::C23,
-        }
-    }
-
-    /// Whether that GCC release put a tentative definition in a common symbol when the command
-    /// line did not say, which every release before 10 did.
-    #[must_use]
-    pub const fn common_by_default(self) -> bool {
-        self.major < 10
-    }
-
-    /// What `-dumpversion` prints for that release.
-    ///
-    /// Before GCC 7 it was the whole version, and there was nothing else to ask. GCC 7 added
-    /// `-dumpfullversion` for that and, built the way the distributions build it, prints only the
-    /// major number for `-dumpversion`, which is the shape scripts written since then expect.
-    #[must_use]
-    pub fn dumpversion(self) -> String {
-        if self.major < 7 { self.to_string() } else { self.major.to_string() }
-    }
-}
-
-impl fmt::Display for GnucVersion {
-    /// All three numbers, which is what `-dumpfullversion` prints and what ends GCC's banner.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
-    }
-}
-
-/// The GNU assembler release claimed, which is the number at the end of what `-Wa,--version`
-/// prints.
-///
-/// This compiler has no separate assembler, but build systems ask for one's version all the same.
-/// The Linux kernel's `scripts/as-version.sh` runs `$(CC) -Wa,--version` and stops the build with
-/// "unknown assembler invoked" unless the first line starts with `GNU assembler` and ends with a
-/// version, which Kconfig then compares against the binutils release a feature needs. What does the
-/// assembling is `rucc-asm`, so the claim is about which gas this is meant to stand in for.
-///
-/// 2.46 by default, which is the binutils release that was current when GCC 16 came out, and GCC 16
-/// is what [`GnucVersion`] claims by default. A build that claims an older GCC with
-/// `-fgnuc-version=` will usually want an older assembler too, and `-fgnu-as-version=` says so.
-/// `spec/04-driver-and-cli.md` section 4.9 has the rest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GasVersion {
-    /// The major number, which is 2 for every binutils release a build is likely to ask about.
-    pub major: u32,
-    /// The minor number, which is what moves from one binutils release to the next.
-    pub minor: u32,
-    /// The point release, which binutils rarely has and prints only when it is not zero.
-    pub patch: u32,
-}
-
-impl Default for GasVersion {
-    fn default() -> GasVersion {
-        GasVersion { major: 2, minor: 46, patch: 0 }
-    }
-}
-
-impl FromStr for GasVersion {
-    type Err = String;
-
-    /// Reads `-fgnu-as-version=`, which is `2`, `2.44` or `2.44.1`, the same shapes
-    /// `-fgnuc-version=` takes.
-    fn from_str(text: &str) -> Result<GasVersion, String> {
-        let GnucVersion { major, minor, patch } = text.parse()?;
-        Ok(GasVersion { major, minor, patch })
-    }
-}
-
-impl fmt::Display for GasVersion {
-    /// The way gas prints its own: `2.44` for a release and `2.44.1` for a point release.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.major, self.minor)?;
-        if self.patch != 0 {
-            write!(f, ".{}", self.patch)?;
-        }
-        Ok(())
     }
 }
 
@@ -2066,17 +1965,6 @@ pub struct Options {
     /// makes the promise false, and every kernel build in the wild passes `-mno-red-zone` for
     /// exactly that reason. A convention without a red zone ignores this.
     pub red_zone: bool,
-    /// Where the code and static data are promised to be, which is `-mcmodel=`. The kernel model is
-    /// x86-64 ELF only and only beside `-fno-pic`, which the driver checks. tamnd/rucc#2275.
-    pub code_model: CodeModel,
-    /// The boundary in bytes the stack pointer is kept on at every call, from
-    /// `-mpreferred-stack-boundary=`, or `None` for the convention's own.
-    ///
-    /// The x86-64 kernel passes 3, which is eight bytes, because interrupt entry does not align the
-    /// stack and the psABI's sixteen cannot be counted on there. A function is then entitled to
-    /// no more than this on entry and owes no more than this at its calls, and a local that asks
-    /// for more is aligned by the prologue behind a frame pointer, as gcc does.
-    pub stack_boundary: Option<u32>,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2209,13 +2097,6 @@ pub struct Options {
     /// rather than about one file, and `__CHAR_UNSIGNED__` is defined when the answer is unsigned
     /// so that a header can see what was decided.
     pub char_signed: Option<bool>,
-    /// Whether `wchar_t` is a 16 bit unsigned type whatever the target says, from `-fshort-wchar`,
-    /// with `false` meaning the target's own answer.
-    ///
-    /// Like plain `char`, this is put into the target when the session is made, so that the lexer
-    /// converting `L""`, the checker typing it and the macros that spell `wchar_t` all read one
-    /// answer. It changes the ABI of anything that passes a `wchar_t`.
-    pub short_wchar: bool,
     /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
     /// integer type that holds its enumerators, from `-fshort-enums`.
     ///
@@ -2358,8 +2239,7 @@ pub struct Options {
     /// Off unless asked for. A function declared `no_instrument_function` is left alone whatever
     /// this says, which is how the two hooks avoid calling themselves.
     pub instrument_functions: bool,
-    /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`, or is not
-    /// position independent at all, from `-fno-pic` and `-fno-pie`.
+    /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`.
     pub pic: Pic,
     /// Whether a definition in this unit may be replaced at load time by one in another object,
     /// from `-fsemantic-interposition` and `-fno-semantic-interposition`.
@@ -2426,12 +2306,6 @@ pub struct Options {
     /// `-target x86_64-pc-windows-msvc`: the SDK headers take a path for `__GNUC__` that they
     /// were never tested on with the MSVC runtime. The flag is the way to ask, as it is in clang.
     pub gnuc_given: bool,
-    /// The GNU assembler release claimed, from `-fgnu-as-version=`, which is what
-    /// `-Wa,--version` prints.
-    pub gnu_as: GasVersion,
-    /// Whether `-Wa,--fatal-warnings` was given, which makes the assembler's one warning, the
-    /// `.warning` directive, an error the way it is in gas.
-    pub asm_fatal_warnings: bool,
     /// The MSVC release claimed on an MSVC row, from `-fms-compatibility-version=`.
     pub msc: MscVersion,
     /// Whether an MSVC row is built against the C runtime in a DLL, which is
@@ -2617,8 +2491,6 @@ impl Options {
             profile_data: Profile::default(),
             frame_pointer: None,
             red_zone: true,
-            code_model: CodeModel::Small,
-            stack_boundary: None,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 Arch::Aarch64 | Arch::Riscv64 => Isa::NONE,
@@ -2638,7 +2510,6 @@ impl Options {
             patchable: Patchable::default(),
             wrapping: Wrapping::NONE,
             char_signed: None,
-            short_wchar: false,
             short_enums: false,
             ms_extensions: None,
             common: None,
@@ -2669,8 +2540,6 @@ impl Options {
             data_sections: false,
             gnuc: GnucVersion::default(),
             gnuc_given: false,
-            gnu_as: GasVersion::default(),
-            asm_fatal_warnings: false,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
             hosted: true,
@@ -2759,10 +2628,9 @@ pub struct Session {
 impl Session {
     /// A session for `opts`.
     ///
-    /// The command line's answers about plain `char` and `wchar_t` are put into the target here
-    /// rather than carried beside it, because every place that asks what either is asks the
-    /// target, and two answers to one question is how a front end ends up disagreeing with its own
-    /// back end.
+    /// The command line's answer about plain `char` is put into the target here rather than
+    /// carried beside it, because every place that asks what a `char` is asks the target, and two
+    /// answers to one question is how a front end ends up disagreeing with its own back end.
     pub fn new(opts: Options) -> Self {
         let mut target = TargetInfo::new(opts.target);
         if let Some(version) = opts.os_version {
@@ -2770,10 +2638,6 @@ impl Session {
         }
         if let Some(signed) = opts.char_signed {
             target.char_is_signed = signed;
-        }
-        if opts.short_wchar {
-            target.wchar_width = 16;
-            target.wchar_is_signed = false;
         }
         Self {
             opts,
@@ -2799,16 +2663,10 @@ impl Session {
     /// Whether a tentative definition is a common symbol rather than one in `.bss`.
     ///
     /// The command line answers where it said anything and the target answers otherwise, for the
-    /// reason [`Options::common`] gives. A claim of a GCC before 10 answers yes as well, since
-    /// those releases did and a tree written for them can define the same variable in two files.
-    /// An MSVC row is left alone, because `-fgnuc-version=` there only claims `__GNUC__`, as it
-    /// does in clang.
+    /// reason [`Options::common`] gives.
     #[must_use]
     pub fn common(&self) -> bool {
-        self.opts.common.unwrap_or_else(|| {
-            self.opts.target.os == Os::Darwin
-                || (self.opts.target.env != Env::Msvc && self.opts.gnuc.common_by_default())
-        })
+        self.opts.common.unwrap_or(self.opts.target.os == Os::Darwin)
     }
 
     /// Records a diagnostic.
@@ -2884,25 +2742,6 @@ mod tests {
         assert!("".parse::<GnucVersion>().is_err());
         assert!("15.".parse::<GnucVersion>().is_err(), "a trailing dot is a typo, not a zero");
         assert!("1.2.3.4".parse::<GnucVersion>().is_err());
-    }
-
-    #[test]
-    fn a_claimed_release_answers_for_its_defaults_the_way_that_gcc_did() {
-        let v = |text: &str| text.parse::<GnucVersion>().unwrap();
-        assert_eq!(v("4.9.4").default_std(), Std::C89);
-        assert_eq!(v("5.1.0").default_std(), Std::C11);
-        assert_eq!(v("7.5.0").default_std(), Std::C11);
-        assert_eq!(v("8.1.0").default_std(), Std::C17);
-        assert_eq!(v("14.2.0").default_std(), Std::C17);
-        assert_eq!(v("15.1.0").default_std(), Std::C23);
-        assert_eq!(GnucVersion::default().default_std(), Std::default());
-        assert!(v("9.5.0").common_by_default());
-        assert!(!v("10.1.0").common_by_default());
-        assert_eq!(v("4.9").to_string(), "4.9.0");
-        assert_eq!(v("4.9.4").dumpversion(), "4.9.4");
-        assert_eq!(v("6.5.0").dumpversion(), "6.5.0");
-        assert_eq!(v("7.1.0").dumpversion(), "7");
-        assert_eq!(v("14.2.0").dumpversion(), "14");
     }
 
     #[test]
@@ -3104,14 +2943,5 @@ mod tests {
         let s = session();
         assert_eq!(s.target.pointer_width, 64);
         assert!(s.target.char_is_signed);
-    }
-
-    #[test]
-    fn short_wchar_makes_wchar_t_sixteen_bits_and_unsigned() {
-        assert_eq!((session().target.wchar_width, session().target.wchar_is_signed), (32, true));
-        let mut opts = Options::new("x86_64-unknown-linux-gnu".parse().unwrap());
-        opts.short_wchar = true;
-        let s = Session::new(opts);
-        assert_eq!((s.target.wchar_width, s.target.wchar_is_signed), (16, false));
     }
 }
