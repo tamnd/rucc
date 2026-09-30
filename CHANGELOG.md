@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.1
+
+A patch release on the way to building the Linux kernel. The x86-64 kernel flags that used to be refused are now taken with the meaning gcc gives them: `-mcmodel=kernel`, `-fno-pie`, `-mpreferred-stack-boundary`, the retpoline, return thunk and SLS flags, and `-mrecord-mcount` with `-mnop-mcount`. The assembler has gas's macro layer, label arithmetic, the system instructions and one stream per object shared with inline `asm`. `asm goto` takes instructions and outputs, `__builtin_constant_p` always removes the branch it rules out, and code after `__builtin_unreachable()` and `noreturn` calls is gone. Small constant `memcpy` and `memset` calls are written as moves on x86. A call in tail position is a jump on x86-64 and AArch64, including one through a function pointer, and a jump table under `-mcmodel=kernel` holds the addresses objtool reads. Inline asm takes the operand modifiers `%V`, `%a`, `%z`, `%n` and `%H`, and the kernel's `current_stack_pointer` register variable is accepted.
+
 ### Added
 
 - The i386 predefined macros for an i686 target: `__i386__`, `__i386`, `__i686__`, `__pentium4__`, `i386` in the GNU modes, the SSE and SSE2 macros with `__SSE2_MATH__`, and `__code_model_32__`. Every target with a 32-bit `long` and pointer now also gets `__ILP32__` and `_ILP32`, and i686 says `long long` atomics are lock free, since `cmpxchg8b` is always there. See #2247.
