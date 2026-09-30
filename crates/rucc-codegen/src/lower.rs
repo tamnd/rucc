@@ -5261,6 +5261,18 @@ impl<'a> Lowering<'a> {
                 let (symbol, offset) = self.named_address(base)?;
                 Some((symbol, offset.checked_add(self.folded(step)?)?))
             }
+            // The address as a number and back, which is the same address as long as the number
+            // holds all of it. The kernel's gdt_idt.c hands `rip_rel_ptr` a per cpu variable as
+            // `(void *)(unsigned long)&gdt_page`, to drop its address space, and then asks for it
+            // with `"i"`.
+            opcode @ (Opcode::PtrToInt | Opcode::IntToPtr) => {
+                let &[inner] = &self.source[self.source[inst].args] else { return None };
+                let number = if opcode == Opcode::PtrToInt { value } else { inner };
+                if self.source[number].ty.bits() < 64 {
+                    return None;
+                }
+                self.named_address(inner)
+            }
             _ => None,
         }
     }
