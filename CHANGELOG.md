@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `static` function marked `used` is kept at `-O1` and above even when nothing in the file calls it. The kernel's `asm-offsets.c` writes every offset from such a function, and since the last release those offsets were missing.
 - From `-O1`, a `static` function whose last call the optimizer removed is no longer emitted, so a symbol only its body names is not left undefined at link time. gcc drops these too, and the kernel relies on it for `load_vdso32` in a 64-bit-only build.
 - A `static` function kept alive only by an `alias` now has its callees kept too, so a `static inline` it calls is emitted instead of left as an undefined reference. The kernel's syscall stubs are aliases of this kind.
 - Attributes after a `struct`, `union` or `enum` tag with no body, as in `struct mem_section __ref *f(int)`, are now specifiers of the declaration, the way gcc reads them, instead of being kept on the tag where nothing read them.

@@ -169,3 +169,17 @@ fn a_static_function_whose_only_call_went_is_not_emitted() {
         assert!(asm.contains("setup:"), "{level}:\n{asm}");
     }
 }
+
+/// And a `static` function marked `used` is kept however nothing calls it, which is how the
+/// kernel's `asm-offsets.c` writes every offset the assembly reads.
+#[test]
+fn a_static_function_marked_used_stays_with_no_caller() {
+    let source = "static void __attribute__((__used__)) common(void) {\n\
+                  asm volatile(\"\\n.ascii \\\"->X %0\\\"\" : : \"i\"(5)); }\n\
+                  int main(void) { return 0; }\n";
+    for level in LEVELS {
+        let asm = emit_of(level, "asm", "static-used", source);
+        assert!(asm.contains("common:"), "{level}:\n{asm}");
+        assert!(asm.contains("->X $5"), "{level}:\n{asm}");
+    }
+}
