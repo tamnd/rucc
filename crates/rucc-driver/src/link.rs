@@ -1645,6 +1645,7 @@ fn emulation(target: Triple) -> &'static str {
         Arch::X86_64 => "elf_x86_64",
         Arch::Aarch64 => "aarch64linux",
         Arch::Riscv64 => "elf64lriscv",
+        Arch::X86 => "elf_i386",
     }
 }
 
@@ -1660,6 +1661,8 @@ fn loader(target: Triple) -> &'static str {
         (Arch::Aarch64, _) => "/lib/ld-linux-aarch64.so.1",
         (Arch::Riscv64, Env::Musl) => "/lib/ld-musl-riscv64.so.1",
         (Arch::Riscv64, _) => "/lib/ld-linux-riscv64-lp64d.so.1",
+        (Arch::X86, Env::Musl) => "/lib/ld-musl-i386.so.1",
+        (Arch::X86, _) => "/lib/ld-linux.so.2",
     }
 }
 

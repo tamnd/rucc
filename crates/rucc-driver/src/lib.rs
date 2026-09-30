@@ -2282,7 +2282,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-mabi=") => {
                 let want = &arg["-mabi=".len()..];
                 let have = match opts.target.arch {
-                    rucc_target::Arch::X86_64 => "sysv",
+                    rucc_target::Arch::X86_64 | rucc_target::Arch::X86 => "sysv",
                     rucc_target::Arch::Aarch64 => "lp64",
                     rucc_target::Arch::Riscv64 => "lp64d",
                 };
@@ -2518,7 +2518,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             };
             opts.isa = isa.over(base);
         }
-        rucc_target::Arch::Aarch64 | rucc_target::Arch::Riscv64 => {
+        rucc_target::Arch::Aarch64 | rucc_target::Arch::Riscv64 | rucc_target::Arch::X86 => {
             if let Some(flag) = isa_flag {
                 return Err(err(format!("unknown option `{flag}`")));
             }

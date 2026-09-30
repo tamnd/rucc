@@ -60,6 +60,7 @@ mod short;
 pub mod template;
 mod timing;
 mod typenames;
+pub mod x86;
 pub mod x86_64;
 
 pub use crate::abi::{
@@ -95,6 +96,8 @@ pub enum Arch {
     /// no condition codes and no complex addressing modes, so anything the middle end got
     /// away with on x86-64 shows up here.
     Riscv64,
+    /// 32-bit x86, the i386 of the psABI and the i686 of a triple, which issue #2247 brings up.
+    X86,
 }
 
 impl Arch {
@@ -102,13 +105,14 @@ impl Arch {
     pub const fn pointer_width(self) -> u32 {
         match self {
             Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 => 64,
+            Arch::X86 => 32,
         }
     }
 
     /// Whether the target is little-endian.
     pub const fn is_little_endian(self) -> bool {
         match self {
-            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 => true,
+            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::X86 => true,
         }
     }
 
@@ -118,6 +122,7 @@ impl Arch {
             Arch::X86_64 => "x86_64",
             Arch::Aarch64 => "aarch64",
             Arch::Riscv64 => "riscv64",
+            Arch::X86 => "i686",
         }
     }
 }
@@ -309,13 +314,14 @@ impl Triple {
     /// # Panics
     ///
     /// Never, for a triple this type can hold, which `every_triple_describes_a_machine` checks by
-    /// building all forty eight of them.
+    /// building all sixty four of them.
     #[must_use]
     pub fn tuple(self) -> TargetTuple {
         let arch = match self.arch {
             Arch::X86_64 => tuple::Arch::X86_64,
             Arch::Aarch64 => tuple::Arch::Aarch64,
             Arch::Riscv64 => tuple::Arch::Riscv64,
+            Arch::X86 => tuple::Arch::X86,
         };
         let os = match self.os {
             Os::Linux => tuple::Os::Linux,
@@ -350,8 +356,8 @@ impl Triple {
     ///
     /// It returns `None` for most of the target table, and that is the honest answer rather than a
     /// gap to be papered over. `rucc-abi` describes the scalar layout of all forty two rows, and
-    /// this type holds three fields with three architectures in the first, so seventeen of those
-    /// rows have a [`TargetInfo`] and the other twenty five do not. Anything that needs to lay a
+    /// this type holds three fields with four architectures in the first, so only the rows on
+    /// those four have a [`TargetInfo`] and the rest do not. Anything that needs to lay a
     /// record out for `s390x-linux-gnu` needs that gap closed rather than an approximation of it.
     ///
     /// The environment of the answer is the narrowed one, so the triple this gives back is the
@@ -366,7 +372,7 @@ impl Triple {
         // answer is the candidate whose environment came through the narrowing unchanged, and
         // anything else is only a fallback for the day a narrowing loses a spelling entirely.
         let mut fallback = None;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
             for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
                 for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
                     let candidate = Triple::new(arch, os, env);
@@ -400,6 +406,7 @@ impl Triple {
             "x86_64" => Arch::X86_64,
             "aarch64" => Arch::Aarch64,
             "riscv64" => Arch::Riscv64,
+            "x86" => Arch::X86,
             _ => return None,
         };
         // Which libc this is matters, and `std::env::consts` does not say. A compiler built on
@@ -460,6 +467,7 @@ impl FromStr for Triple {
             Some("x86_64" | "amd64") => Arch::X86_64,
             Some("aarch64" | "arm64") => Arch::Aarch64,
             Some("riscv64") => Arch::Riscv64,
+            Some("i386" | "i486" | "i586" | "i686" | "x86") => Arch::X86,
             _ => return Err(err("unknown architecture")),
         };
 
@@ -876,6 +884,7 @@ impl TargetInfo {
         let regs = match target.arch() {
             tuple::Arch::X86_64 => &x86_64::REGS,
             tuple::Arch::Aarch64 => &aarch64::REGS,
+            tuple::Arch::X86 => &x86::REGS,
             _ => &RegFile::EMPTY,
         };
         let call_regs = match (target.arch(), target.os(), target.env()) {
@@ -893,6 +902,13 @@ impl TargetInfo {
             (tuple::Arch::Aarch64, tuple::Os::Windows, _) => Some(&aarch64::WINDOWS),
             (tuple::Arch::Aarch64, os, _) if os.is_darwin() => Some(&aarch64::DARWIN),
             (tuple::Arch::Aarch64, _, _) => Some(&aarch64::AAPCS64),
+            // Not on Windows yet, because `rucc_abi::abis::for_target` declines i686 Windows: its
+            // cdecl has these registers and its stdcall and fastcall do not, and the registers here
+            // have to be the register half of an ABI that is written down. Position independent
+            // code wants [`x86::SYSV_PIC`], which is the code generator's to pick, since whether
+            // code is position independent is a flag and not the target.
+            (tuple::Arch::X86, tuple::Os::Windows, _) => None,
+            (tuple::Arch::X86, _, _) => Some(&x86::SYSV),
             _ => None,
         };
         // The same rule as the register file. A model is a measurement of a processor, and there
@@ -1212,16 +1228,16 @@ mod tests {
     #[test]
     fn every_triple_describes_a_machine() {
         // `Triple::tuple` panics on a pair that is not a machine and this is what says there is
-        // no such pair. All forty eight combinations, including the ones the parser will produce
+        // no such pair. All sixty four combinations, including the ones the parser will produce
         // from a string somebody can type and no machine has, such as a Darwin target claiming
         // glibc.
         let mut built = 0;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
             for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
                 for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
                     let triple = Triple::new(arch, os, env);
                     let tuple = triple.tuple();
-                    assert_eq!(tuple.pointer_width(), 64, "{triple}");
+                    assert_eq!(tuple.pointer_width(), arch.pointer_width(), "{triple}");
                     // The one field the narrowing has to preserve, because mingw and MSVC are the
                     // same operating system with two different `long double`s.
                     if os == Os::Windows {
@@ -1235,7 +1251,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, 48);
+        assert_eq!(built, 64);
     }
 
     #[test]
@@ -1244,7 +1260,7 @@ mod tests {
         // always the triple it started as, because the narrowing is many to one: a Darwin target
         // claiming glibc and the same one claiming nothing are one machine, and the answer is the
         // spelling that names no libc.
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
             for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
                 for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
                     let triple = Triple::new(arch, os, env);
@@ -1285,11 +1301,10 @@ mod tests {
 
     #[test]
     fn from_tuple_says_no_rather_than_saying_something_near() {
-        // Twenty five of the forty two rows have no triple, and the answer is `None` rather than
+        // Most of the forty two rows have no triple, and the answer is `None` rather than
         // a neighbour. `rucc-abi` knows the scalar layout of every one of these and this type
         // cannot hold any of them, which is the gap the record layout engine inherits.
         for tuple in [
-            "i686-linux-gnu",
             "armv7-linux-gnueabihf",
             "s390x-linux-gnu",
             "powerpc64le-linux-gnu",
@@ -1303,6 +1318,10 @@ mod tests {
             let target = tuple.parse().unwrap();
             assert_eq!(Triple::from_tuple(target), None, "{tuple}");
         }
+        // i686 has a triple now, and it is the machine and not x86-64's.
+        let i686 = Triple::from_tuple("i686-linux-gnu".parse().unwrap()).unwrap();
+        assert_eq!(i686, Triple::new(Arch::X86, Os::Linux, Env::Gnu));
+        assert_eq!(i686.to_string(), "i686-unknown-linux-gnu");
     }
 
     #[test]
@@ -1469,6 +1488,13 @@ mod tests {
             let regs = of(triple).call_regs.expect("a convention");
             assert!(std::ptr::eq(regs, &aarch64::WINDOWS), "{triple}");
         }
+        // i386 has its registers everywhere and a convention wherever `rucc-abi` has one.
+        let i386 = of("i686-unknown-linux-gnu");
+        assert_eq!(i386.regs.reg_named("ebx"), Some((x86::GPR, x86::EBX)));
+        assert!(std::ptr::eq(i386.call_regs.expect("i386 SysV"), &x86::SYSV));
+        let i686_windows = of("i686-pc-windows-gnu");
+        assert_eq!(i686_windows.regs.len(x86::GPR), 8);
+        assert!(i686_windows.call_regs.is_none(), "no ABI is described for it yet");
         let riscv = of("riscv64-unknown-linux-gnu");
         assert!(riscv.regs.is_empty());
         assert!(riscv.call_regs.is_none());
@@ -1485,7 +1511,7 @@ mod tests {
     #[test]
     fn the_registers_and_the_abi_a_target_gets_are_the_same_convention() {
         let mut checked = 0;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
             for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
                 for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
                     let triple = Triple::new(arch, os, env);

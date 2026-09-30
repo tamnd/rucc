@@ -624,6 +624,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__riscv_compressed");
             d.set("__riscv_cmodel_medlow", "1");
         }
+        // Nothing yet, for the reason at the top of this function: i386 has no backend, and its
+        // macros arrive with it (#2247).
+        Arch::X86 => {}
     }
     match triple.os {
         Os::Linux => {
@@ -874,7 +877,7 @@ fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
             d.set("_M_AMD64", "100");
         }
         Arch::Aarch64 => d.flag("_M_ARM64"),
-        Arch::Riscv64 => {}
+        Arch::Riscv64 | Arch::X86 => {}
     }
     d.set("_MSC_VER", &opts.msc.msc_ver().to_string());
     d.set("_MSC_FULL_VER", &opts.msc.msc_full_ver().to_string());

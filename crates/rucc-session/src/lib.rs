@@ -2621,7 +2621,8 @@ impl Options {
             stack_boundary: None,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
-                Arch::Aarch64 | Arch::Riscv64 => Isa::NONE,
+                // Nothing for i686 yet: x86-64's baseline promises SSE2, which an i686 does not.
+                Arch::Aarch64 | Arch::Riscv64 | Arch::X86 => Isa::NONE,
             },
             reorder_blocks: None,
             schedule_insns: None,
