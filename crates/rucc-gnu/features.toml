@@ -339,10 +339,10 @@ notes = "The kernel's initcall and section placement machinery is built on it. A
 name = "no_sanitize"
 kind = "attribute"
 gcc_version = "4.8"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["linux"]
-tests = []
+tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c"]
+notes = "Says a function is to be left out of the instrumentation the sanitizers named ask for. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
 
 [[feature]]
 name = "naked"
@@ -565,6 +565,7 @@ status = "unimplemented"
 answer = "error"
 used_by = ["linux"]
 tests = []
+notes = "Refused with E0753 rather than ignored, since dropping it is wrong code. `tests/accept/a-function-that-saves-every-register.c` checks that."
 
 [[feature]]
 name = "target"
@@ -600,6 +601,7 @@ status = "unimplemented"
 answer = "error"
 used_by = ["linux"]
 tests = []
+notes = "Refused with E0753 rather than ignored, since dropping it is wrong code. `tests/accept/an-interrupt-handler.c` checks that."
 
 [[feature]]
 name = "used"
@@ -674,6 +676,7 @@ status = "unimplemented"
 answer = "error"
 used_by = ["glibc"]
 tests = []
+notes = "Refused with E0753 rather than ignored, since dropping it is wrong code. `tests/accept/a-weak-reference.c` checks that."
 
 [[feature]]
 name = "cleanup"

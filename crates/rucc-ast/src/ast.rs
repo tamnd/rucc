@@ -150,6 +150,14 @@ impl Ast {
         &self.top_level
     }
 
+    /// Every attribute in the unit, in the order they were written.
+    ///
+    /// For a question asked of each attribute once whatever it was written on, such as whether
+    /// it is one the compiler must refuse rather than ignore.
+    pub fn attributes(&self) -> &[Attribute] {
+        &self.attrs
+    }
+
     /// Adds a declaration at file scope.
     pub fn add_top_level(&mut self, decl: DeclId) {
         self.top_level.push(decl);
