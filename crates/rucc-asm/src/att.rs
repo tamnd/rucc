@@ -428,7 +428,10 @@ impl Writer<'_> {
                             line += 1;
                         }
                     }
-                    None => self.inst(func, block, inst, &name)?,
+                    None => match func.mcount.filter(|mcount| mcount.inst == inst) {
+                        Some(mcount) => self.mcount(func, block, mcount, &name)?,
+                        None => self.inst(func, block, inst, &name)?,
+                    },
                 }
                 if let Some((at, pad)) = site {
                     let _ = writeln!(self.out, "{local}EHE{at}_{name}:");
@@ -678,6 +681,33 @@ impl Writer<'_> {
         let table = |at: u32| self.table(func_name, at as usize);
         a64::inst(&mut line, &at, func, block, inst, label, table)?;
         Ok(line)
+    }
+
+    /// The profiler's call, when `-mrecord-mcount` or `-mnop-mcount` asked for something to be done
+    /// with it, in gcc's spelling: a label on the call, or on the nop in its place, and a `.quad` of
+    /// the label in `__mcount_loc` straight after it. See [`rucc_mir::Mcount`].
+    fn mcount(
+        &mut self,
+        func: &Func,
+        block: Block,
+        mcount: rucc_mir::Mcount,
+        name: &str,
+    ) -> Result<(), Error> {
+        let label = format!("{}mcount_{name}", self.directives.local());
+        if mcount.record {
+            let _ = writeln!(self.out, "{label}:");
+        }
+        if mcount.nop {
+            let _ = writeln!(self.out, "\t.byte\t0x0f, 0x1f, 0x44, 0x00, 0x00");
+        } else {
+            self.inst(func, block, mcount.inst, name)?;
+        }
+        if mcount.record {
+            let _ = writeln!(self.out, "\t.section\t{},\"a\",@progbits", rucc_object::MCOUNT_LOC);
+            let _ = writeln!(self.out, "\t.quad\t{label}");
+            let _ = writeln!(self.out, "\t.previous");
+        }
+        Ok(())
     }
 
     /// One instruction of the machine IR, as however many instructions of the machine it is.

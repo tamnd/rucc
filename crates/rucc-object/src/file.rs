@@ -455,6 +455,37 @@ pub fn write(
         symbols.insert(label.name.clone(), id);
     }
 
+    // The profiler's calls `-mrecord-mcount` lists, one eight byte address each in one section for
+    // the whole file, which is what gcc writes: `.quad 1b` after every call, each in the same
+    // `__mcount_loc`, allocated and never written by the program. The address is against the
+    // section the call is in for the reason the patch record's is, so it survives a function being
+    // at an offset the linker picks.
+    if !text.mcount.is_empty() {
+        let name = crate::section::MCOUNT_LOC.as_bytes().to_vec();
+        let id = obj.add_section(Vec::new(), name, SectionKind::ReadOnlyData);
+        let flags = flavour.reloc(Reference::Address { bytes: 8 }, 0).ok_or_else(|| {
+            Error::Refused { why: "no relocation holds an address here".to_owned() }
+        })?;
+        for &call in &text.mcount {
+            let after = text.funcs.partition_point(|func| func.start <= call);
+            let Some(index) = after.checked_sub(1) else {
+                let why = format!("a profiler call at {call} is in front of every function");
+                return Err(Error::Refused { why });
+            };
+            let func = &text.funcs[index];
+            let (section, at) = if sections.functions {
+                let base = func.start - func.patch.map_or(0, |patch| patch.before);
+                (split[index].0, call - base)
+            } else {
+                (whole, call)
+            };
+            let offset = obj.append_section_data(id, &[0; 8], 8);
+            let symbol = obj.section_symbol(section);
+            obj.add_relocation(id, Relocation { offset, symbol, addend: at as i64, flags })
+                .map_err(|why| Error::Refused { why: why.to_string() })?;
+        }
+    }
+
     // Where each variable's image landed in the section it went into, kept because a relocation in
     // an image counts from the start of the image and one in a file counts from the start of the
     // section. A variable that is not in a section has no entry, since nothing in a merged one can

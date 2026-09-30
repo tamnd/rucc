@@ -123,7 +123,17 @@ pub struct Text {
     /// The jump tables that are read rather than run, and so go in a read only section of data
     /// rather than in these bytes. Empty on a format that keeps its tables after the function.
     pub tables: Vec<Table>,
+    /// Where each call to the profiler's hook that `-mrecord-mcount` lists is, in the order they
+    /// were written, as offsets into [`Text::bytes`]. Empty unless the flag was given.
+    ///
+    /// The writer puts one eight byte address per call in a section called `__mcount_loc`, which
+    /// is what gcc writes and what a kernel before objtool took this over reads at boot to find
+    /// every call it can turn into a nop.
+    pub mcount: Vec<usize>,
 }
+
+/// The section `-mrecord-mcount` lists the calls in. See [`Text::mcount`].
+pub const MCOUNT_LOC: &str = "__mcount_loc";
 
 impl Default for Text {
     fn default() -> Self {
@@ -135,6 +145,7 @@ impl Default for Text {
             align: FUNC_ALIGN,
             unwind: Unwind::default(),
             tables: Vec::new(),
+            mcount: Vec::new(),
         }
     }
 }

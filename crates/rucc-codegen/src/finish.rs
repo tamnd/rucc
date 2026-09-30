@@ -77,6 +77,7 @@ use rucc_target::{BranchInsts, CallRegs, Chkstk, FrameInsts, Guard, PhysReg, Pro
 
 use crate::frame::Frame;
 use crate::lower::Stack;
+use crate::pipeline::Mcount;
 
 /// What the stack protector's check needs beyond the frame, in a function that has one.
 ///
@@ -126,6 +127,8 @@ pub struct Tracing {
     pub name: &'static str,
     /// Whether the call goes in front of the prologue rather than once the frame is taken.
     pub early: bool,
+    /// Whether the call is listed and whether it is a nop. See [`crate::pipeline::Mcount`].
+    pub mcount: Mcount,
 }
 
 /// The room at the top of a function for something to be written over later, in a function that
@@ -794,7 +797,12 @@ impl Writer<'_> {
     fn hook(&mut self, trace: Tracing) -> Inst {
         let call = self.opcode(self.insts.call);
         let symbol = self.names.intern(trace.name);
-        self.func.build_loose(call).symbol(symbol).finish()
+        let inst = self.func.build_loose(call).symbol(symbol).finish();
+        let Mcount { record, nop } = trace.mcount;
+        if record || nop {
+            self.func.mcount = Some(rucc_mir::Mcount { inst, record, nop });
+        }
+        inst
     }
 
     /// Takes the frame, which is one subtraction unless the command line asked for the stack to be
