@@ -105,6 +105,12 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then exe=".exe"; fi
           "./target/$dir/rucc$exe" --print-config
           "./target/$dir/rucc$exe" --version
+      # The litmus tests on Apple silicon, which reorders more than most AArch64 parts do and so is
+      # where a missing barrier shows soonest. Here rather than in a job of its own because the
+      # compiler is already built.
+      - name: litmus tests
+        if: matrix.name == 'macos arm64'
+        run: tests/litmus/run.sh "$PWD/target/debug/rucc" cc
 
   docs:
     name: documentation
@@ -486,6 +492,32 @@ jobs:
           cargo xtask builtins --target aarch64-linux-gnu
       - name: run the programs
         run: tests/qemu/run.sh "$PWD/target/release/rucc" aarch64-linux-gnu
+
+  # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
+  # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and
+  # most of what AArch64 is allowed to reorder x86 never does. Each litmus test in tests/litmus runs
+  # a few million times and fails on an outcome the memory model forbids, built by rucc at -O0 and
+  # -O2 and by gcc with and without its outline atomics as the control.
+  litmus:
+    name: aarch64 litmus tests on hardware
+    needs: quick
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install lld
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y lld-19
+          gcc --version | head -1
+          lscpu | grep -i -m2 "model name\|vendor"
+          nproc
+      - name: build rucc and the runtime
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target aarch64-linux-gnu
+      - name: run the litmus tests
+        run: tests/litmus/run.sh "$PWD/target/release/rucc" gcc
 
   # The same programs built by rucc on Windows itself, with no flags, since x86_64-windows-gnu is
   # the default target there. lld is the one in the LLVM install the image carries, which the
@@ -888,7 +920,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, windows, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, litmus, windows, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

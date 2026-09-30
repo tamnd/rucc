@@ -22,5 +22,6 @@ rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-sema.workspace = true
 rucc-target.workspace = true
+rucc-tuple.workspace = true
 rucc-types.workspace = true
 

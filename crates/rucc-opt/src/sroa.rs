@@ -119,6 +119,7 @@ impl Pass for Sroa {
         for (rank, block) in func.blocks().enumerate() {
             layout[block.index()] = rank;
         }
+        let (pre, last) = preorder(doms, entry, func.counts().blocks);
         let allocas: Vec<Inst> = func
             .insts(entry)
             .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[func[inst].args].is_empty())
@@ -138,7 +139,8 @@ impl Pass for Sroa {
                 continue;
             }
             let mut rewrite = Rewrite::new(func, entry, &plan, target);
-            rewrite.run(func, Graph { cfg, doms, frontiers, entry, layout: &layout }, &mut readers);
+            let graph = Graph { cfg, frontiers, entry, layout: &layout, pre: &pre, last: &last };
+            rewrite.run(func, graph, &mut readers);
             stats.optimized(SCALARIZED);
         }
         stats
@@ -158,11 +160,35 @@ struct Target {
 #[derive(Clone, Copy)]
 struct Graph<'a> {
     cfg: &'a Cfg,
-    doms: &'a Dominators,
     frontiers: &'a Frontiers,
     entry: Block,
     /// Where each block is in the layout, by block.
     layout: &'a [usize],
+    /// Where each block is in the walk down the dominator tree, by block, or `usize::MAX` for a
+    /// block the walk does not reach.
+    pre: &'a [usize],
+    /// The last place in that walk that is still under each block, by block.
+    last: &'a [usize],
+}
+
+/// Numbers the blocks in the order the renaming goes down the dominator tree, with the children of
+/// a block taken last first, and says where each block's subtree ends.
+fn preorder(doms: &Dominators, entry: Block, count: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut pre = vec![usize::MAX; count];
+    let mut last = vec![0; count];
+    let mut next = 0;
+    let mut stack = vec![(entry, true)];
+    while let Some((block, entering)) = stack.pop() {
+        if entering {
+            pre[block.index()] = next;
+            next += 1;
+            stack.push((block, false));
+            stack.extend(doms.children(block).map(|child| (child, true)));
+        } else {
+            last[block.index()] = next - 1;
+        }
+    }
+    (pre, last)
 }
 
 /// Every instruction that reads each value, kept up to date as the locals go.
@@ -796,9 +822,11 @@ impl<'a> Rewrite<'a> {
             }
         }
 
-        // The renaming, down the dominator tree. What a block changes is put back on the way out
-        // of it rather than each child getting a copy of its own, and what a block ends with is
-        // kept only for a block an edge into a parameter leaves from.
+        // The renaming, down the dominator tree. Only the blocks that use the local, take a
+        // parameter for it or pass one are visited, in the order a walk over the whole tree would
+        // meet them. What a block changes is put back once the walk is out from under it rather
+        // than each child getting a copy of its own, and what a block ends with is kept only for
+        // a block an edge into a parameter leaves from.
         let mut sources: Set<Block> = Set::default();
         for &block in params.keys() {
             sources.extend(graph.cfg.predecessors(block).iter().copied());
@@ -806,15 +834,27 @@ impl<'a> Rewrite<'a> {
         let mut forward: Map<Value, Value> = Map::default();
         let mut ends: Map<Block, Vec<Option<Value>>> = Map::default();
         let mut current = Current { values: vec![None; count], undo: Vec::new() };
-        let mut stack = vec![Step::Enter(graph.entry)];
-        while let Some(step) = stack.pop() {
-            let block = match step {
-                Step::Enter(block) => block,
-                Step::Leave(mark) => {
-                    current.undo_to(mark);
-                    continue;
+        let mut order: Vec<Block> = spans
+            .keys()
+            .chain(params.keys())
+            .chain(&sources)
+            .copied()
+            .filter(|block| graph.pre[block.index()] != usize::MAX)
+            .collect();
+        order.sort_unstable_by_key(|block| graph.pre[block.index()]);
+        order.dedup();
+        // The blocks visited that the one being visited is under, each with where its changes
+        // start in the undo list.
+        let mut open: Vec<(Block, usize)> = Vec::new();
+        for block in order {
+            let at = graph.pre[block.index()];
+            while let Some(&(above, mark)) = open.last() {
+                if at <= graph.last[above.index()] {
+                    break;
                 }
-            };
+                current.undo_to(mark);
+                open.pop();
+            }
             let mark = current.undo.len();
             for &(k, param) in params.get(&block).into_iter().flatten() {
                 current.set(k, param);
@@ -828,8 +868,7 @@ impl<'a> Rewrite<'a> {
             if sources.contains(&block) {
                 ends.insert(block, current.values.clone());
             }
-            stack.push(Step::Leave(mark));
-            stack.extend(graph.doms.children(block).map(Step::Enter));
+            open.push((block, mark));
         }
 
         // Every edge into a block with parameters passes the values its source ended with, in
@@ -1028,14 +1067,6 @@ impl Current {
             self.values[k] = was;
         }
     }
-}
-
-/// One step of the renaming's walk down the dominator tree.
-enum Step {
-    /// Rename in a block.
-    Enter(Block),
-    /// Leave a block, putting back what it changed, which it did from this point in the undo list.
-    Leave(usize),
 }
 
 /// Points every reader of a value in the map at the value it now stands for, and moves the names
