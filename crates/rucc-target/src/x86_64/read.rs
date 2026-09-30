@@ -539,6 +539,21 @@ fn jumped(text: &str, locals: &Locals) -> Option<Step> {
     Some(Step::Jump { opcode, to: to.to_owned() })
 }
 
+/// That line with the labels in front of it taken off, which is the instruction on it.
+///
+/// A line kept as text is checked one at a time for an instruction the reader knows and refused,
+/// and a label on its own is never a refusal: `1: movl (%1), %0` from `_ASM_EXTABLE` reads as the
+/// instruction once the `1:` is off, while with it on the label reaches nothing in a template of
+/// one line and the whole line would be refused for that instead.
+#[must_use]
+pub fn unlabelled(line: &str) -> &str {
+    let mut text = line.trim_start();
+    while let Some((_, rest)) = labelled(text) {
+        text = rest.trim_start();
+    }
+    text
+}
+
 /// The label a line starts with and the rest of the line behind it, or nothing for a line that
 /// does not start with one.
 ///

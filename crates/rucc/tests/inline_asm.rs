@@ -989,3 +989,37 @@ fn eight_early_outputs_and_two_pinned_inputs_fit_with_optimisation() {
         assert!(ok, "{level}:\n{said}");
     }
 }
+
+#[test]
+fn a_macro_one_asm_defines_is_expanded_in_the_templates_after_it() {
+    // The shapes behind the kernel's `ANNOTATE` and `_ASM_EXTABLE_TYPE_REG`. The first is a macro
+    // defined by an `asm` at file scope and called from a template in a function further down. The
+    // second is defined, called and purged in one template, and picks the number of the register
+    // the output was given by comparing its name against each one in turn. The output is pinned so
+    // that the number is known here: `%edx` is register 2, so the entry is `3 + (2 << 8)`.
+    let source = r#"asm(".macro ANNOTATE type:req\n.Lhere_\\@:\n"
+    ".pushsection .discard.annotate_insn,\"M\",@progbits,8\n"
+    ".long .Lhere_\\@ - .\n.long \\type\n.popsection\n.endm\n");
+int f(int *p) {
+    int v;
+    asm volatile("1: movl (%1), %0\n2:\n"
+        ".pushsection __ex_table, \"a\"\n.balign 4\n.long 1b - .\n.long 2b - .\n"
+        ".macro extable_type_reg type:req reg:req\n.set .Lfound, 0\n.set .Lregnr, 0\n"
+        ".irp rs,eax,ecx,edx,ebx\n.ifc \\reg, %%\\rs\n.set .Lfound, .Lfound+1\n"
+        ".long \\type + (.Lregnr << 8)\n.endif\n.set .Lregnr, .Lregnr+1\n.endr\n"
+        ".if (.Lfound != 1)\n.error \"extable_type_reg: bad register argument\"\n.endif\n"
+        ".endm\n"
+        "extable_type_reg reg=%0, type=3\n.purgem extable_type_reg\n.popsection\n"
+        : "=d"(v) : "r"(p));
+    asm volatile("ANNOTATE 0x2269\n nop");
+    return v;
+}
+"#;
+    let (ok, bytes, said) = object("macros", source, &["-O1"]);
+    assert!(ok, "{said}");
+    let has = |what: &[u8]| bytes.windows(what.len()).any(|at| at == what);
+    assert!(has(b"__ex_table"), "the exception table never reached the object");
+    assert!(has(b".discard.annotate_insn"), "the annotation never reached the object");
+    assert!(has(&[0x03, 0x02, 0, 0]), "the entry does not name the register the output is in");
+    assert!(has(&[0x69, 0x22, 0, 0]), "the macro from file scope was not expanded");
+}
