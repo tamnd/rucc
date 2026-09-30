@@ -876,13 +876,18 @@ fn a_constant_can_be_negated_and_a_memory_operand_read_eight_bytes_on() {
                   long less(long x) { asm (\"addq $%n1, %0\" : \"+r\" (x) : \"i\" (4)); return x; }\n\
                   long high(long *p) { long r; asm (\"movq %H1, %0\" : \"=r\" (r) : \"m\" (*p)); \
                   return r; }\n\
-                  void *at(void) { void *r; asm (\"leaq %a1(%%rip), %0\" : \"=r\" (r) : \"i\" (arr)); \
-                  return r; }\n";
+                  void *at(void) { void *r; asm (\"leaq %a1, %0\" : \"=r\" (r) : \"i\" (arr)); \
+                  return r; }\n\
+                  int has(void) { asm goto (\"testb $1, %a0\\n\\tjnz %l1\" : : \"i\" (&arr[1]) : : yes); \
+                  return 0; yes: return 1; }\n";
     let (ok, text, said) = run_with("constant-modifiers", source, &["-O2"]);
     assert!(ok, "the compiler refused the fixture:\n{said}");
     assert!(body(&text, "less").contains("addq $-4, %"), "not negated:\n{text}");
     assert!(body(&text, "high").contains("movq 8(%rdi), %"), "not eight bytes on:\n{text}");
-    assert!(body(&text, "at").contains("leaq arr(%rip), %"), "not a bare name:\n{text}");
+    // A name as an address is reached from the instruction pointer, which gcc adds itself, and
+    // the kernel's `static_cpu_has` leans on that in code that runs before it is relocated.
+    assert!(body(&text, "at").contains("leaq arr(%rip), %"), "not rip-relative:\n{text}");
+    assert!(body(&text, "has").contains("testb $1, arr+8(%rip)"), "not rip-relative:\n{text}");
 }
 
 /// What the compiler makes of that source as an object, and what it said.

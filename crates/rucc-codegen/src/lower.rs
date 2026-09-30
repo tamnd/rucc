@@ -5189,6 +5189,13 @@ impl<'a> Lowering<'a> {
                         1.. => text.push_str(&format!("+{offset}")),
                         _ => text.push_str(&offset.to_string()),
                     }
+                    // A name as an address is reached from the instruction pointer on x86-64,
+                    // which is how gcc prints it whatever the code model. The kernel's
+                    // `static_cpu_has` writes `testb %[bitnum], %a[cap_byte]`, and code that runs
+                    // before the kernel is at its link address cannot use the absolute form.
+                    if modifier == Some('a') && !a64 && self.address_bits() == 64 {
+                        text.push_str("(%rip)");
+                    }
                 } else {
                     return Err(refused());
                 }
