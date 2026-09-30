@@ -1022,8 +1022,8 @@ kind = "builtin"
 gcc_version = "2.0"
 status = "implemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = ["rucc-driver::builtin_constant_p_is_folded_where_it_is_written_rather_than_called"]
-notes = "Answered in the front end, one where the argument folds there and zero otherwise. gcc folds it after optimization, so its answer can differ between -O0 and -O2, and the kernel's BUILD_BUG_ON depends on the folding that happens after inlining. Raising the answer for the arguments that only become constant later is work for the optimizer and not for this."
+tests = ["rucc-driver::builtin_constant_p_is_folded_where_it_is_written_rather_than_called", "rucc/tests/constant_p.rs"]
+notes = "A constant as written is answered in the front end. Anything else read out of objects becomes an is_constant instruction that the constant-p pass answers after inlining, one where the value has become a constant or the ranges pin it to one number and zero otherwise, and zero everywhere at -O0. The pass follows its answers to the branches they decide and takes out every arm an answer rules out before code generation, which is what the kernel's BUILD_BUG_ON, percpu size switch and FORTIFY checks depend on."
 
 [[feature]]
 name = "__builtin_expect"
