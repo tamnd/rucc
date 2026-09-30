@@ -104,86 +104,100 @@ name = "pragma_once"
 kind = "feature"
 gcc_version = "3.4"
 status = "implemented"
+value = "0"
 used_by = ["linux", "systemd", "sqlite"]
 tests = ["rucc-pp::pragma_once_skips_the_second_read_and_does_not_reach_the_output"]
+notes = "gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "include_next"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["glibc", "musl"]
 tests = ["rucc-pp::include_next_continues_after_the_directory_the_file_came_from"]
+notes = "gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "variadic_macros"
 kind = "feature"
 gcc_version = "3.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "sqlite", "systemd", "curl"]
 tests = ["rucc-pp::variadic_arguments_arrive_as_one_argument_with_the_commas_intact"]
+notes = "gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "gnu_variadic_macros"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc"]
 tests = ["rucc-pp::the_gnu_named_variadic_form_works_the_same_way", "rucc-pp::the_gnu_comma_swallowing_extension_drops_the_comma"]
-notes = "The named form `args...` and the `, ## __VA_ARGS__` comma swallowing, which the kernel's logging macros are built out of."
+notes = "The named form `args...` and the `, ## __VA_ARGS__` comma swallowing, which the kernel's logging macros are built out of. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "pragma_operator"
 kind = "feature"
 gcc_version = "3.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "ffmpeg"]
 tests = ["rucc-pp::the_pragma_operator_works_from_inside_a_macro"]
+notes = "gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "counter_macro"
 kind = "extension"
 gcc_version = "4.3"
 status = "implemented"
+value = "0"
 used_by = ["linux", "systemd"]
 tests = ["rucc-pp::the_counter_is_a_different_number_every_time"]
-notes = "`__COUNTER__`, which is how a macro makes a name nobody else will pick. The kernel's `BUILD_BUG_ON` is built out of it."
+notes = "`__COUNTER__`, which is how a macro makes a name nobody else will pick. The kernel's `BUILD_BUG_ON` is built out of it. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "base_file_macro"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["glibc"]
 tests = ["rucc-pp::the_base_file_is_the_one_named_on_the_command_line"]
-notes = "`__BASE_FILE__`, the file on the command line rather than the header the use is in."
+notes = "`__BASE_FILE__`, the file on the command line rather than the header the use is in. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "include_level_macro"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["glibc"]
 tests = ["rucc-pp::the_include_level_counts_the_headers_above_it"]
-notes = "`__INCLUDE_LEVEL__`, which glibc uses to tell a header included directly from one pulled in by another."
+notes = "`__INCLUDE_LEVEL__`, which glibc uses to tell a header included directly from one pulled in by another. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "file_name_macro"
 kind = "extension"
 gcc_version = "12.0"
 status = "implemented"
+value = "0"
 used_by = []
 tests = ["rucc-pp::the_file_name_is_the_file_without_the_directories"]
-notes = "`__FILE_NAME__`, `__FILE__` with the directories taken off. Clang had it first and GCC took it, and code uses it to keep build paths out of a binary."
+notes = "`__FILE_NAME__`, `__FILE__` with the directories taken off. Clang had it first and GCC took it, and code uses it to keep build paths out of a binary. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "embed"
 kind = "feature"
 gcc_version = "15.0"
 status = "implemented"
+value = "0"
 used_by = []
 tests = ["rucc-pp::embed_writes_the_bytes_of_the_resource"]
-notes = "C23, with `limit`, `prefix`, `suffix`, `if_empty` and `gnu::offset`. The bytes become real tokens for now. The fast path that fills an initializer without making them needs the parser."
+notes = "C23, with `limit`, `prefix`, `suffix`, `if_empty` and `gnu::offset`. The bytes become real tokens for now. The fast path that fills an initializer without making them needs the parser. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 # Statement and expression extensions, from section 13.3. None of these can work before the
 # parser lands in M2, and every one of them is in the kernel.
@@ -193,95 +207,110 @@ name = "asm_labels"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["glibc", "linux", "sqlite"]
 tests = ["rucc-sema::an_assembler_name_written_after_a_declarator_is_the_symbol_the_name_stands_for"]
-notes = "An assembler name written after a declarator, which says what symbol the name stands for. A local kept in a named register is the other reading of the syntax and is not here."
+notes = "An assembler name written after a declarator, which says what symbol the name stands for. A local kept in a named register is the other reading of the syntax and is not here. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "statement_expressions"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "systemd"]
 tests = ["rucc-sema::a_statement_expression_has_the_type_of_its_last_statement", "tests/golden/gnu.c"]
-notes = "Every min, max and container_of variant in the kernel is one."
+notes = "Every min, max and container_of variant in the kernel is one. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "typeof"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "systemd"]
 tests = ["rucc-lex::typeof_is_a_gnu_extension_that_c23_made_standard", "rucc-sema::typeof_takes_the_type_of_an_expression_it_does_not_evaluate", "tests/accept/typeof.c"]
-notes = "C23 as `typeof`. `__typeof__` is the spelling that works in every mode."
+notes = "C23 as `typeof`. `__typeof__` is the spelling that works in every mode. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "labels_as_values"
 kind = "extension"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["cpython", "lua", "linux"]
 tests = ["rucc-sema::a_computed_goto_wants_something_that_could_be_an_address", "tests/golden/gnu.c", "tests/accept/a-label-on-the-value-of-a-block.c"]
-notes = "Constrains the optimizer: a block whose address is taken cannot be deleted or merged."
+notes = "Constrains the optimizer: a block whose address is taken cannot be deleted or merged. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "case_ranges"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = ["linux", "ffmpeg"]
-tests = []
+tests = ["rucc-driver::a_case_range_is_tested_for_rather_than_put_in_the_table", "rucc-sema::a_case_range_that_runs_backwards_is_empty", "rucc-parse::a_case_range_keeps_both_ends"]
+notes = "`case low ... high:`, both ends included, and a range that runs backwards is empty. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "binary_conditional"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = ["linux", "glibc"]
-tests = []
-notes = "`x ?: y`, which evaluates `x` once."
+tests = ["rucc-driver::the_left_side_of_a_conditional_with_no_middle_is_evaluated_once"]
+notes = "`x ?: y`, which evaluates `x` once. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "zero_length_arrays"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc::an_array_of_no_elements_takes_no_room_and_its_address_is_the_end_of_the_record"]
+notes = "An array of no elements takes no room, and one at the end of a record starts where the record ends, which is the flexible array member the kernel wrote before C99 had one. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "void_pointer_arithmetic"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = ["linux", "glibc"]
-tests = []
+tests = ["rucc::arithmetic_on_a_pointer_to_void_counts_in_bytes"]
+notes = "`void` is one byte wide wherever a size is asked for, so arithmetic on a `void *` counts in bytes, in a constant initializer as well. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "designated_initializer_ranges"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = ["linux"]
-tests = []
-notes = "`[0 ... 9] = x`."
+tests = ["rucc::a_range_in_a_designator_gives_every_element_in_it_the_value"]
+notes = "`[0 ... 9] = x`, both ends included, in an array and in an array member. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "cast_to_union"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = []
-tests = []
+tests = ["rucc-sema::a_cast_to_a_union_builds_the_object_rather_than_converting_the_value", "rucc-sema::a_cast_to_a_union_is_a_constant_where_what_went_into_it_was_one"]
+notes = "`(union u)x` builds the union with `x` in the member of its type. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "extension_keyword"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
+value = "0"
 used_by = ["glibc", "linux"]
-tests = []
-notes = "`__extension__`, which suppresses pedantic diagnostics for one expression."
+tests = ["rucc-parse::the_extension_keyword_begins_a_declaration_as_well_as_an_expression"]
+notes = "`__extension__`, which suppresses pedantic diagnostics for one expression. This compiler gives none of them, so taking the keyword wherever gcc does is the whole of it. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
 
 [[feature]]
 name = "nested_functions"
@@ -437,9 +466,10 @@ notes = "Says gcc may not make a specialised copy of the function. This compiler
 name = "flatten"
 kind = "attribute"
 gcc_version = "4.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["systemd"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Asks for every call in the function to be inlined where it can be. It is only a hint and is dropped, so the calls are inlined when the inliner would have inlined them anyway, and the program is the same."
 
 [[feature]]
 name = "hot"
@@ -481,9 +511,10 @@ notes = "The stronger of the pair, reaching the IR as `attrs(readnone)`. A decla
 name = "malloc"
 kind = "attribute"
 gcc_version = "2.96"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc", "systemd"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Both forms: the plain one, which says the pointer returned aliases nothing, and `malloc(deallocator, index)`, which names the function that frees it for the analyzer. Both are dropped, which gives up an aliasing fact and a warning and changes nothing a correct program does."
 
 [[feature]]
 name = "returns_twice"
@@ -580,9 +611,10 @@ notes = "On x86-64 the strings are read the way gcc 16 reads them: a comma separ
 name = "target_clones"
 kind = "attribute"
 gcc_version = "6.0"
-status = "unimplemented"
+status = "partial"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Taken, and only the default clone is built: there is no ifunc resolver choosing a clone built for the running machine, so the function is the portable one everywhere. That is correct and slower. `__has_attribute` answers no until the clones are built, which is the answer that makes a header fall back to one plain function."
 
 [[feature]]
 name = "optimize"
@@ -709,9 +741,10 @@ notes = "An ELF file gets a `.fini_array` entry and a Windows one is registered 
 name = "deprecated"
 kind = "attribute"
 gcc_version = "3.1"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc", "openssl", "curl"]
-tests = []
+tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "rucc::a_deprecated_name_can_be_used_quietly_under_the_option_that_turns_it_off"]
+notes = "A use of a function or an object marked with it is a warning in gcc's words under `-Wdeprecated-declarations`, with the message when one was given and a note at the declaration. gcc also warns at a use of a type, a tag, an enumerator or a member marked with it, and those are not said yet."
 
 [[feature]]
 name = "warning"
@@ -744,9 +777,10 @@ notes = "The archetype is checked against the ones gcc knows on the target, and 
 name = "format_arg"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Says the function returns a format string made from its argument, and is only read by the format check that follows a call through it. That check is not done here, see the `format` row, so there is nothing for it to feed and taking it is the whole of it."
 
 [[feature]]
 name = "nonnull"
@@ -761,33 +795,37 @@ notes = "Taken with or without operands and nothing is assumed from it, which is
 name = "returns_nonnull"
 kind = "attribute"
 gcc_version = "4.9"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc", "systemd"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Lets gcc drop a null check on what the function returns. Dropping the attribute keeps the check, which is always correct."
 
 [[feature]]
 name = "warn_unused_result"
 kind = "attribute"
 gcc_version = "3.4"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = []
+tests = ["rucc::a_result_thrown_away_is_said_the_way_gcc_says_it_for_each_attribute", "rucc::the_last_value_of_a_statement_expression_is_not_thrown_away_unless_the_whole_is"]
+notes = "A call whose value an expression statement, the clauses of a `for` or the left side of a comma throws away is a warning in gcc's words under `-Wunused-result`, and a cast to `void` does not keep it quiet, which is gcc's rule. The last statement of a statement expression is its value and is not thrown away unless the statement expression is."
 
 [[feature]]
 name = "sentinel"
 kind = "attribute"
 gcc_version = "4.0"
-status = "unimplemented"
+status = "partial"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Taken, and `-Wformat` is not given for a call whose variable arguments do not end in a null pointer. The warning is the whole of the attribute, so the row is partial. `__has_attribute` answers no until the warning is given, and what glibc writes behind it compiles the same either way."
 
 [[feature]]
 name = "access"
 kind = "attribute"
 gcc_version = "10.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Says how a function reads or writes through a pointer parameter, for gcc's warnings about out of bounds and uninitialized reads. None of them is given here and nothing is assumed from it, so taking it changes nothing a correct program does."
 
 [[feature]]
 name = "counted_by"
@@ -805,15 +843,16 @@ gcc_version = "7.0"
 status = "implemented"
 used_by = ["linux", "systemd", "ffmpeg"]
 tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "A null statement in front of a case label that tells `-Wimplicit-fallthrough` the fall is meant. This compiler does not give that warning, so taking the statement is the whole of it. `__has_attribute` answers 201904, the number the standard gives `[[fallthrough]]`, because gcc answers that for the GNU spelling as well."
+notes = "A null statement in front of a case label that tells `-Wimplicit-fallthrough` the fall is meant. This compiler does not give that warning, so taking the statement is the whole of it. `__has_attribute` answers 202311, the number gcc 16 gives `[[fallthrough]]`, because gcc answers that for the GNU spelling as well."
 
 [[feature]]
 name = "assume_aligned"
 kind = "attribute"
 gcc_version = "4.9"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Says the pointer returned is aligned, which gcc may use to pick an aligned instruction. Dropping it only gives up that choice."
 
 [[feature]]
 name = "vector_size"
@@ -837,17 +876,19 @@ notes = "On a typedef or a record. An access through the type, or to a member of
 name = "designated_init"
 kind = "attribute"
 gcc_version = "5.1"
-status = "unimplemented"
+status = "partial"
 used_by = ["linux"]
-tests = []
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Taken on a record, and `-Wdesignated-init` is not given for a positional initializer of one. The warning is the whole of the attribute, so the row is partial. `__has_attribute` answers no until the warning is given, and the kernel writes it on its operation tables through `__designated_init`, which compiles the same without it."
 
 [[feature]]
 name = "nocommon"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["rucc::nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon"]
+notes = "A tentative definition written `nocommon` is an ordinary definition under `-fcommon`, where the others go in the common block."
 
 [[feature]]
 name = "nonstring"
@@ -991,17 +1032,18 @@ notes = "Makes a definition one the link may find in several objects, on Windows
 name = "deprecated"
 kind = "c-attribute"
 gcc_version = "10.0"
-status = "unimplemented"
-value = "201904"
+status = "implemented"
+value = "202311"
 used_by = []
-tests = []
+tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "rucc-gnu::a_c_attribute_answers_with_the_number_the_standard_gives_it"]
+notes = "The standard's spelling of the GNU row and read by the same code. gcc 16 answers 202311 for every C23 attribute, the date of the standard, rather than the date each one was voted in, and so does this."
 
 [[feature]]
 name = "fallthrough"
 kind = "c-attribute"
 gcc_version = "10.0"
 status = "implemented"
-value = "201904"
+value = "202311"
 used_by = []
 tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
 notes = "The same statement as the GNU spelling and taken the same way, since `-Wimplicit-fallthrough` is not a warning this compiler gives."
@@ -1011,7 +1053,7 @@ name = "maybe_unused"
 kind = "c-attribute"
 gcc_version = "10.0"
 status = "implemented"
-value = "202106"
+value = "202311"
 used_by = []
 tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c"]
 notes = "The standard's `unused`, and taken the same way, since this compiler gives none of the warnings it silences."
@@ -1020,17 +1062,18 @@ notes = "The standard's `unused`, and taken the same way, since this compiler gi
 name = "nodiscard"
 kind = "c-attribute"
 gcc_version = "10.0"
-status = "unimplemented"
-value = "202003"
+status = "implemented"
+value = "202311"
 used_by = []
-tests = []
+tests = ["rucc::a_result_thrown_away_is_said_the_way_gcc_says_it_for_each_attribute", "rucc::the_last_value_of_a_statement_expression_is_not_thrown_away_unless_the_whole_is"]
+notes = "A call whose value is thrown away is a warning in gcc's words under `-Wunused-result`, with the message quoted when one was given and a note at the declaration. A cast to `void` keeps it quiet, which is what the standard asks for."
 
 [[feature]]
 name = "noreturn"
 kind = "c-attribute"
 gcc_version = "13.0"
 status = "implemented"
-value = "202202"
+value = "202311"
 used_by = []
 tests = ["rucc-sema::noreturn_written_as_the_attribute_is_kept", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
 notes = "C23's spelling of the row above, read by the same code."
@@ -1422,9 +1465,10 @@ name = "__builtin_va_list"
 kind = "builtin"
 gcc_version = "2.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "musl", "sqlite"]
 tests = ["rucc-target::va_list_is_the_psabis_type_and_not_one_type_with_four_spellings", "rucc-sema::the_rest_of_the_family_is_handed_the_address_of_the_list_and_answers_nothing"]
-notes = "A keyword naming a target defined type rather than a builtin function. gcc declares it as a typedef that is always in scope, which is the same type reached another way. Which type it is is the psABI's answer: an array of one structure on SysV, a structure on AAPCS, and a pointer everywhere else."
+notes = "A keyword naming a target defined type rather than a builtin function. gcc declares it as a typedef that is always in scope, which is the same type reached another way. Which type it is is the psABI's answer: an array of one structure on SysV, a structure on AAPCS, and a pointer everywhere else. gcc 16 answers 0 to `__has_builtin(__builtin_va_list)` because it is a type and not a function, so this row does too."
 
 [[feature]]
 name = "__builtin_va_start"

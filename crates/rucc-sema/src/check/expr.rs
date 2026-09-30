@@ -162,6 +162,9 @@ impl Checker<'_> {
                     );
                     return self.poison(span);
                 }
+                // Said at every use, a call inside the function's own body included, which is
+                // what gcc does. In `check/advice.rs`.
+                self.heed_deprecated(decl, span);
                 let ty = self.tast[decl].ty;
                 let category = match self.tast[decl].kind {
                     DeclKind::Function => Category::Function,

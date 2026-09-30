@@ -56,6 +56,8 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0752", "attribute-warning"),
     ("E0768", "compare-distinct-pointer-types"),
     ("E0769", "prio-ctor-dtor"),
+    ("E0770", "deprecated-declarations"),
+    ("E0771", "unused-result"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
