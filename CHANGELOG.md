@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The assembler reads more of the kernel's x86 crypto code the way gas does. A name set to a register, `X0 = %xmm4` or `.set KEY, %rdi`, stands for that register in an instruction until it is set to something else, and a name set to a number is that number in an operand, so `8*t+frame_W(%rsp)` inside a `.rept` works. An address may have arithmetic in brackets in front of its registers, as in `(0*16)(%rsp)` and `(K_table-8)(%rip)`, and may be made of 32-bit registers, which puts the `0x67` prefix in front. `$~31` and other immediates that are arithmetic on numbers take the short form. `movzx` and `movsx` read both widths from the registers, `.type f STT_FUNC` with no comma is read, and `.extern` is passed over. 14 of the 48 x86-64 crypto files in a 6.12 allmodconfig now assemble, and each object has the same bytes and relocations as the one gas writes. The rest stop on AVX and AES-NI instructions the encoder has no rows for yet. See tamnd/rucc-kernel#6.
+
 ## 0.18.1
 
 A patch release on the way to building the Linux kernel. The x86-64 kernel flags that used to be refused are now taken with the meaning gcc gives them: `-mcmodel=kernel`, `-fno-pie`, `-mpreferred-stack-boundary`, the retpoline, return thunk and SLS flags, and `-mrecord-mcount` with `-mnop-mcount`. The assembler has gas's macro layer, label arithmetic, the system instructions and one stream per object shared with inline `asm`. `asm goto` takes instructions and outputs, `__builtin_constant_p` always removes the branch it rules out, and code after `__builtin_unreachable()` and `noreturn` calls is gone. Small constant `memcpy` and `memset` calls are written as moves on x86. A call in tail position is a jump on x86-64 and AArch64, including one through a function pointer, and a jump table under `-mcmodel=kernel` holds the addresses objtool reads. Inline asm takes the operand modifiers `%V`, `%a`, `%z`, `%n` and `%H`, and the kernel's `current_stack_pointer` register variable is accepted.
