@@ -326,3 +326,22 @@ fn an_attribute_after_a_label_is_the_label_s() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// i915 keeps each DMI table behind a pointer to an array of unknown size and passes `*list` to a
+/// function that takes a pointer. The array decays, so nothing reads the incomplete type, and gcc
+/// takes it. `sizeof *list` still needs the size and is still refused.
+#[test]
+fn a_pointer_to_an_array_of_unknown_size_can_be_dereferenced() {
+    let source = "struct d { int a; };\n\
+        int check(const struct d *);\n\
+        struct q { const struct d (*list)[]; };\n\
+        static const struct q qs[] = { { .list = &(const struct d[]) { { 1 }, { 0 } } } };\n\
+        int f(int i) { return check(*qs[i].list) + (*qs[i].list)[1].a; }\n";
+    let out =
+        run(&["--target=x86_64-unknown-linux-gnu", "-Werror", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let size = "struct d { int a; };\n\
+        unsigned long h(const struct d (*p)[]) { return sizeof *p; }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-c", "-o", "/dev/null"], size);
+    assert!(!out.status.success(), "the size of an array of unknown size is not known");
+}
