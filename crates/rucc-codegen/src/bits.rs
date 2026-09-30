@@ -261,29 +261,47 @@ const SOURCE: u8 = 1;
 /// starting point rather than a wrong one to be corrected later: the answer only grows, so a
 /// register still absent when the walk settles is one nothing reads at all.
 fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> Wanted {
+    // What an instruction asks of its operands is the same every round, and only how much of a
+    // conversion's result is read moves, so the target's description is asked once here rather
+    // than for every operand on every round. Per instruction, the result a conversion passes its
+    // demand through and where its reads end in `reads`. Per block, where its instructions end.
+    let mut steps: Vec<(Option<mir::Reg>, usize)> = Vec::new();
+    let mut reads: Vec<(mir::Reg, u32)> = Vec::new();
+    let mut ends: Vec<usize> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let name = opcode(func, insts, names, inst);
+            // A conversion puts the low bits of its source in its result and nothing else, so the
+            // bits of the source above however much of the result is read are bits it takes
+            // nowhere. Anything else reads its operand at the width it names it at.
+            let copies = name.is_some_and(|name| (insts.copies_low)(name));
+            let through = conversion(func, inst).filter(|_| copies).map(|(def, _)| def);
+            let operands = &func[func[inst].operands];
+            for (at, operand) in operands.iter().enumerate() {
+                if operand.role != Role::Use {
+                    continue;
+                }
+                let Ok(at) = u8::try_from(at) else { continue };
+                reads.push((operand.reg, read(name, insts, operands, at)));
+            }
+            steps.push((through, reads.len()));
+        }
+        ends.push(steps.len());
+    }
+
     let mut wanted = Wanted { virtuals: vec![0; func.vregs()], physical: HashMap::new() };
     loop {
         let mut moved = false;
-        for block in func.blocks() {
-            for inst in func.insts(block) {
-                let name = opcode(func, insts, names, inst);
-                // A conversion puts the low bits of its source in its result and nothing else, so
-                // the bits of the source above however much of the result is read are bits it
-                // takes nowhere. Anything else reads its operand at the width it names it at.
-                let copies = name.is_some_and(|name| (insts.copies_low)(name));
-                let through = conversion(func, inst)
-                    .filter(|_| copies)
-                    .map_or(EVERYTHING, |(def, _)| wanted.get(def));
-                let operands = &func[func[inst].operands];
-                for (at, operand) in operands.iter().enumerate() {
-                    if operand.role != Role::Use {
-                        continue;
-                    }
-                    let Ok(at) = u8::try_from(at) else { continue };
-                    let asked = read(name, insts, operands, at).min(through);
-                    moved |= wanted.raise(operand.reg, asked);
+        let (mut step, mut from) = (0, 0);
+        for (block, &end) in func.blocks().zip(&ends) {
+            for &(through, to) in &steps[step..end] {
+                let through = through.map_or(EVERYTHING, |def| wanted.get(def));
+                for &(reg, bits) in &reads[from..to] {
+                    moved |= wanted.raise(reg, bits.min(through));
                 }
+                from = to;
             }
+            step = end;
             for call in &func[block].succs {
                 for (arg, param) in call.args.iter().zip(&func[call.block].params) {
                     let asked = wanted.get(param.reg);
