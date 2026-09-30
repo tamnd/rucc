@@ -21,7 +21,7 @@ use rucc_codegen::pipeline::{self, Machine, Recording};
 use rucc_codegen::pressure::Pressure;
 use rucc_codegen::usage::StackUsage;
 use rucc_cost::Goal;
-use rucc_diag::{Diagnostic, Severity, SourceMap, Span};
+use rucc_diag::{Diagnostic, SourceMap, Span};
 use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, convert};
 use rucc_lower::Protector as LowerProtector;
@@ -563,15 +563,18 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // raised is not a warning there is anything to promote. A warning about something in a
         // header that came with the machine goes the same way for the same reason, unless
         // `-Wsystem-headers` asked for it.
-        if rucc_diag::dropped(diag, &sess.sources, opts.warnings, opts.system_header_warnings) {
+        // A warning turned off by name goes the same way, and one turned into an error by name,
+        // or kept a warning under `-Werror` by name, is counted and labelled by that.
+        if rucc_diag::dropped(diag, &sess.sources, opts.warnings, opts.system_header_warnings)
+            || opts.named_warnings.silenced(diag)
+        {
             continue;
         }
-        if diag.severity.is_fatal()
-            || (diag.severity == Severity::Warning && opts.warnings_are_errors)
-        {
+        let promoted = opts.named_warnings.promoted(diag, opts.warnings_are_errors);
+        if diag.severity.is_fatal() || promoted {
             errors += 1;
         }
-        messages.push(render(diag, &sess.sources, opts.warnings_are_errors));
+        messages.push(render(diag, &sess.sources, promoted));
     }
     if errors > 0 {
         // A tree built from a file that did not compile is not a tree anything should read.

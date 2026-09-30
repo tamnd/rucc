@@ -2359,6 +2359,9 @@ pub struct Options {
     /// It is worth having the flag rather than nothing at all, because somebody porting a header
     /// or reading what a new compiler thinks of one does want to hear all of it.
     pub system_header_warnings: bool,
+    /// What `-Wno-<name>`, `-Werror=<name>` and `-Wno-error=<name>` said, by the name gcc gives
+    /// the option that controls a warning.
+    pub named_warnings: rucc_diag::Named,
     /// How many diagnostics to print before giving up. Past a certain point the output is
     /// noise from a single earlier mistake, and GCC's default of no limit is not a kindness.
     pub error_limit: u32,
@@ -2720,6 +2723,7 @@ impl Options {
             warnings_are_errors: false,
             warnings: true,
             system_header_warnings: false,
+            named_warnings: rucc_diag::Named::default(),
             error_limit: 20,
             std: Std::default(),
             gnu_extensions: true,
@@ -2903,10 +2907,11 @@ impl Session {
             &self.sources,
             self.opts.warnings,
             self.opts.system_header_warnings,
-        ) {
+        ) || self.opts.named_warnings.silenced(&diag)
+        {
             return;
         }
-        if self.opts.warnings_are_errors && diag.severity == Severity::Warning {
+        if self.opts.named_warnings.promoted(&diag, self.opts.warnings_are_errors) {
             diag.severity = Severity::Error;
         }
         match diag.severity {

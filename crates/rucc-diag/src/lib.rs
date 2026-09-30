@@ -19,9 +19,11 @@
 #![doc(html_root_url = "https://docs.rs/rucc-diag/0.18.2")]
 
 mod errors;
+mod named;
 mod source;
 
 pub use crate::errors::{DEFAULT_ERROR_LIMIT, Errors};
+pub use crate::named::{Named, option_of};
 pub use crate::source::{
     FileId, Loc, PresumedLoc, SourceBytes, SourceFile, SourceMap, SourceMapFull, dropped,
 };
