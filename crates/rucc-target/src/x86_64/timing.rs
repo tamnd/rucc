@@ -270,6 +270,11 @@ fn slow(name: &str, form: Form) -> Option<Timing> {
         // conversions and is not one: nothing is rounded, nothing is checked, and it costs what a
         // move across the machine costs rather than what a conversion costs.
         "movd" | "movq" => Some(Timing { latency: 2, unit: Unit::Float }),
+        // The integer vector arithmetic, which is the integer adder and the bitwise unit copied
+        // once per lane and costs what they cost rather than what a float add does.
+        "paddd" | "paddq" | "psubd" | "psubq" | "pand" | "por" | "pxor" => {
+            Some(Timing { latency: 1, unit: Unit::Float })
+        }
         _ => None,
     }
 }

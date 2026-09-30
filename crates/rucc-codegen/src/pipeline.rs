@@ -1810,6 +1810,60 @@ mod tests {
         assert!(!text.contains("x64.movaps_mr"), "{text}");
     }
 
+    /// Two integer vectors read from memory, added lane by lane, mixed with a bitwise operation and
+    /// written back, which is the whole of what an SSE2 loop body is made of.
+    ///
+    /// Each one is a single instruction on a whole vector register, and no lane is taken out into
+    /// a general purpose register along the way, which is what would happen if the value had been
+    /// put in the wrong file.
+    #[test]
+    fn an_integer_vector_is_added_and_mixed_a_whole_register_at_a_time() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, Type::PTR]);
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 16,
+            align: 16,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let i32x4 = Type::vector(Type::int(32), 4);
+        let i64x2 = Type::vector(Type::int(64), 2);
+        let x = build.load(i32x4, args[0], info, ir::Flags::default());
+        let y = build.load(i32x4, args[1], info, ir::Flags::default());
+        let sum = build.binary(Opcode::Add, x, y, ir::Flags::default());
+        let less = build.binary(Opcode::Sub, sum, y, ir::Flags::default());
+        let mixed = build.binary(Opcode::Xor, less, x, ir::Flags::default());
+        build.store(mixed, args[0], info, ir::Flags::default());
+        let p = build.load(i64x2, args[1], info, ir::Flags::default());
+        let q = build.binary(Opcode::Add, p, p, ir::Flags::default());
+        let r = build.binary(Opcode::And, q, p, ir::Flags::default());
+        let s = build.binary(Opcode::Or, r, q, ir::Flags::default());
+        build.store(s, args[1], info, ir::Flags::default());
+        build.ret(&[]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        for inst in [
+            "x64.movdqu_rm",
+            "x64.movdqu_mr",
+            "x64.paddd_rr",
+            "x64.psubd_rr",
+            "x64.pxor_rr",
+            "x64.paddq_rr",
+            "x64.pand_rr",
+            "x64.por_rr",
+        ] {
+            assert!(text.contains(inst), "{inst} in {text}");
+        }
+        assert!(text.contains("$xmm"), "{text}");
+    }
+
     /// The same journey at the format the machine only moves, which is the whole of what it can do
     /// with one: in from memory, back out to memory, in and out of a register, and back to the
     /// caller.

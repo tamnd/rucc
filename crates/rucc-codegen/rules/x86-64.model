@@ -57,6 +57,22 @@
 (semantics (x64.mulsd_rr l r) (fp.mul l r))
 (semantics (x64.divss_rr l r) (fp.div l r))
 (semantics (x64.divsd_rr l r) (fp.div l r))
+;; The integer vector arithmetic. `paddd` adds four lanes of thirty two bits and `paddq` two of
+;; sixty four, each on its own with no carry between them, and the three bitwise ones do not
+;; care where one lane ends because no bit of their answer reads another bit.
+(semantics (x64.paddd_rr l r)
+           (concat (bvadd (extract 127 96 l) (extract 127 96 r)) (bvadd (extract 95 64 l) (extract 95 64 r))
+                   (bvadd (extract 63 32 l) (extract 63 32 r)) (bvadd (extract 31 0 l) (extract 31 0 r))))
+(semantics (x64.paddq_rr l r)
+           (concat (bvadd (extract 127 64 l) (extract 127 64 r)) (bvadd (extract 63 0 l) (extract 63 0 r))))
+(semantics (x64.psubd_rr l r)
+           (concat (bvsub (extract 127 96 l) (extract 127 96 r)) (bvsub (extract 95 64 l) (extract 95 64 r))
+                   (bvsub (extract 63 32 l) (extract 63 32 r)) (bvsub (extract 31 0 l) (extract 31 0 r))))
+(semantics (x64.psubq_rr l r)
+           (concat (bvsub (extract 127 64 l) (extract 127 64 r)) (bvsub (extract 63 0 l) (extract 63 0 r))))
+(semantics (x64.pand_rr l r) (bvand l r))
+(semantics (x64.por_rr l r) (bvor l r))
+(semantics (x64.pxor_rr l r) (bvxor l r))
 ;; The conversions. The suffix on these names is the width of the integer, since the format is
 ;; already in the mnemonic: `cvtsi2ss_64` reads a sixty four bit integer and writes a float, and
 ;; `cvttss2si_64` reads a float and writes a sixty four bit integer. The `movd` and `movq` pair
@@ -395,6 +411,28 @@
                            (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
                            (select (mem) (bvadd a 1)) (select (mem) a))))
 
+;; The integer vectors, which are the same sixteen bytes as the format above with nothing to
+;; say they are a float. A vector is the bitvector of its lanes end to end, first lane lowest, and
+;; memory holds it lowest byte first, so the lanes need no mention here at all.
+(semantics (load.i32x4 a)
+           (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                   (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                   (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                   (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                   (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                   (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                   (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (load.i64x2 a)
+           (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                   (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                   (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                   (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                   (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                   (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                   (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+
 ;; Writing memory.
 ;;
 ;; The same access the other way round, and written the other way round: a `store` puts one
@@ -464,6 +502,43 @@
                                 (bvadd a 13) (extract 111 104 (bits_from_float 128 v)))
                                 (bvadd a 14) (extract 119 112 (bits_from_float 128 v)))
                                 (bvadd a 15) (extract 127 120 (bits_from_float 128 v))))
+
+(semantics (store.i32x4 v a)
+           (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                                (bvadd a 2) (extract 23 16 v))
+                                (bvadd a 3) (extract 31 24 v))
+                                (bvadd a 4) (extract 39 32 v))
+                                (bvadd a 5) (extract 47 40 v))
+                                (bvadd a 6) (extract 55 48 v))
+                                (bvadd a 7) (extract 63 56 v))
+                                (bvadd a 8) (extract 71 64 v))
+                                (bvadd a 9) (extract 79 72 v))
+                                (bvadd a 10) (extract 87 80 v))
+                                (bvadd a 11) (extract 95 88 v))
+                                (bvadd a 12) (extract 103 96 v))
+                                (bvadd a 13) (extract 111 104 v))
+                                (bvadd a 14) (extract 119 112 v))
+                                (bvadd a 15) (extract 127 120 v)))
+(semantics (store.i64x2 v a)
+           (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                                (bvadd a 2) (extract 23 16 v))
+                                (bvadd a 3) (extract 31 24 v))
+                                (bvadd a 4) (extract 39 32 v))
+                                (bvadd a 5) (extract 47 40 v))
+                                (bvadd a 6) (extract 55 48 v))
+                                (bvadd a 7) (extract 63 56 v))
+                                (bvadd a 8) (extract 71 64 v))
+                                (bvadd a 9) (extract 79 72 v))
+                                (bvadd a 10) (extract 87 80 v))
+                                (bvadd a 11) (extract 95 88 v))
+                                (bvadd a 12) (extract 103 96 v))
+                                (bvadd a 13) (extract 111 104 v))
+                                (bvadd a 14) (extract 119 112 v))
+                                (bvadd a 15) (extract 127 120 v)))
 
 ;; The instructions that do it. Written out again rather than in terms of the IR heads above,
 ;; for the reason `x64.add_rr_32` is written out rather than in terms of `add.i32`: the two
@@ -583,6 +658,34 @@
                                 (bvadd a 13) (extract 111 104 (bits_from_float 128 v)))
                                 (bvadd a 14) (extract 119 112 (bits_from_float 128 v)))
                                 (bvadd a 15) (extract 127 120 (bits_from_float 128 v))))
+
+(semantics (x64.movdqu_rm a)
+           (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                   (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                   (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                   (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                   (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                   (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                   (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                   (select (mem) (bvadd a 1)) (select (mem) a)))
+(semantics (x64.movdqu_mr a v)
+           (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 v))
+                                (bvadd a 1) (extract 15 8 v))
+                                (bvadd a 2) (extract 23 16 v))
+                                (bvadd a 3) (extract 31 24 v))
+                                (bvadd a 4) (extract 39 32 v))
+                                (bvadd a 5) (extract 47 40 v))
+                                (bvadd a 6) (extract 55 48 v))
+                                (bvadd a 7) (extract 63 56 v))
+                                (bvadd a 8) (extract 71 64 v))
+                                (bvadd a 9) (extract 79 72 v))
+                                (bvadd a 10) (extract 87 80 v))
+                                (bvadd a 11) (extract 95 88 v))
+                                (bvadd a 12) (extract 103 96 v))
+                                (bvadd a 13) (extract 111 104 v))
+                                (bvadd a 14) (extract 119 112 v))
+                                (bvadd a 15) (extract 127 120 v)))
 
 ;; Leaving a value where the caller will look for it.
 ;;

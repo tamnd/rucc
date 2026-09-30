@@ -69,7 +69,9 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
             "load.i1",
             "load.i16",
             "load.i32",
+            "load.i32x4",
             "load.i64",
+            "load.i64x2",
             "load.i8",
             "store.f128",
             "store.f32",
@@ -77,7 +79,9 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
             "store.i1",
             "store.i16",
             "store.i32",
+            "store.i32x4",
             "store.i64",
+            "store.i64x2",
             "store.i8",
         ]
     );

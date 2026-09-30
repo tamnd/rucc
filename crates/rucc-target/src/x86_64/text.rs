@@ -1211,6 +1211,15 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mulsd_rr", &[spell("mulsd", &[Xmm(2), Xmm(0)])]),
     ("divss_rr", &[spell("divss", &[Xmm(2), Xmm(0)])]),
     ("divsd_rr", &[spell("divsd", &[Xmm(2), Xmm(0)])]),
+    ("movdqu_rm", &[spell("movdqu", &[Mem, Xmm(0)])]),
+    ("movdqu_mr", &[spell("movdqu", &[Xmm(0), Mem])]),
+    ("paddd_rr", &[spell("paddd", &[Xmm(2), Xmm(0)])]),
+    ("paddq_rr", &[spell("paddq", &[Xmm(2), Xmm(0)])]),
+    ("psubd_rr", &[spell("psubd", &[Xmm(2), Xmm(0)])]),
+    ("psubq_rr", &[spell("psubq", &[Xmm(2), Xmm(0)])]),
+    ("pand_rr", &[spell("pand", &[Xmm(2), Xmm(0)])]),
+    ("por_rr", &[spell("por", &[Xmm(2), Xmm(0)])]),
+    ("pxor_rr", &[spell("pxor", &[Xmm(2), Xmm(0)])]),
     // The conversions, which are the instructions with one argument from each file. The
     // destination is the operand at zero and the source is the one at one, the way every other
     // conversion here is written, and the assembler order puts the source first.

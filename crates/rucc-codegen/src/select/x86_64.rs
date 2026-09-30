@@ -133,7 +133,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 16, "the store rules moved and this test did not follow them");
+        assert_eq!(seen, 20, "the store rules moved and this test did not follow them");
     }
 
     /// Every comparison can be made against a constant as well as against a register.

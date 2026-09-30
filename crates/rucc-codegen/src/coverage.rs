@@ -147,8 +147,9 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
         "tamnd/rucc#1064",
     ),
     (
-        "a vector of any lane count",
-        "a rule at a width says nothing about how many lanes",
+        "a vector other than four lanes of thirty two bits or two of sixty four",
+        "a rule at a width says nothing about how many lanes, and x86-64 has rules at those two \
+         shapes only",
         "tamnd/rucc#200",
     ),
 ];
@@ -191,6 +192,20 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
         "tamnd/rucc#2247",
     ),
     ("smulh.i32", "the same, signed", "tamnd/rucc#2247"),
+    ("add.i32x4", "an integer vector, which only x86-64 has rules for so far", "tamnd/rucc#2320"),
+    ("add.i64x2", "the same", "tamnd/rucc#2320"),
+    ("and.i32x4", "the same", "tamnd/rucc#2320"),
+    ("and.i64x2", "the same", "tamnd/rucc#2320"),
+    ("load.i32x4", "the same", "tamnd/rucc#2320"),
+    ("load.i64x2", "the same", "tamnd/rucc#2320"),
+    ("or.i32x4", "the same", "tamnd/rucc#2320"),
+    ("or.i64x2", "the same", "tamnd/rucc#2320"),
+    ("store.i32x4", "the same", "tamnd/rucc#2320"),
+    ("store.i64x2", "the same", "tamnd/rucc#2320"),
+    ("sub.i32x4", "the same", "tamnd/rucc#2320"),
+    ("sub.i64x2", "the same", "tamnd/rucc#2320"),
+    ("xor.i32x4", "the same", "tamnd/rucc#2320"),
+    ("xor.i64x2", "the same", "tamnd/rucc#2320"),
 ];
 
 /// [`NAMES`] for `i386.rules`.
@@ -252,6 +267,20 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
         "tamnd/rucc#2247",
     ),
     ("umulh.i64", "the same, unsigned", "tamnd/rucc#2247"),
+    ("add.i32x4", "an integer vector, which only x86-64 has rules for so far", "tamnd/rucc#2320"),
+    ("add.i64x2", "the same", "tamnd/rucc#2320"),
+    ("and.i32x4", "the same", "tamnd/rucc#2320"),
+    ("and.i64x2", "the same", "tamnd/rucc#2320"),
+    ("load.i32x4", "the same", "tamnd/rucc#2320"),
+    ("load.i64x2", "the same", "tamnd/rucc#2320"),
+    ("or.i32x4", "the same", "tamnd/rucc#2320"),
+    ("or.i64x2", "the same", "tamnd/rucc#2320"),
+    ("store.i32x4", "the same", "tamnd/rucc#2320"),
+    ("store.i64x2", "the same", "tamnd/rucc#2320"),
+    ("sub.i32x4", "the same", "tamnd/rucc#2320"),
+    ("sub.i64x2", "the same", "tamnd/rucc#2320"),
+    ("xor.i32x4", "the same", "tamnd/rucc#2320"),
+    ("xor.i64x2", "the same", "tamnd/rucc#2320"),
 ];
 
 /// The names left for later in the rule file `table` is built from.

@@ -2355,6 +2355,17 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mulsd_rr", AluVec),
     ("divss_rr", AluVec),
     ("divsd_rr", AluVec),
+    // The integer vectors, a whole register of lanes at a time. The moves are the unaligned ones,
+    // and the arithmetic is two address the way the float arithmetic above is.
+    ("movdqu_rm", LoadVec),
+    ("movdqu_mr", StoreVec),
+    ("paddd_rr", AluVec),
+    ("paddq_rr", AluVec),
+    ("psubd_rr", AluVec),
+    ("psubq_rr", AluVec),
+    ("pand_rr", AluVec),
+    ("por_rr", AluVec),
+    ("pxor_rr", AluVec),
     // The conversions, which are the instructions that cross between the two register files and
     // the two float formats. Ten of them, which is one for each pair of things a C program is
     // allowed to convert between here: the two formats in both directions, and each format with a
@@ -2548,7 +2559,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 756);
+        assert_eq!(described, 765);
     }
 
     #[test]
