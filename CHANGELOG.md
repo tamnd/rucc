@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The address of a local or of a name is written again where it is read, the way a constant already was, rather than worked out once and kept in a register or spilled to a slot of its own. A local's address is a `lea` off the stack pointer and is written at each use; a name's is written once in each block that reads it. An address passed to a call is written next to the store or the move that passes it, so a call with many string arguments no longer holds all of them in registers the call leaves alone. The two reduced programs in #2200 took 144 and 128 bytes of frame where gcc takes 80 (#2200).
 - Working out where each value is live puts the pieces into one list and sorts them by value at the end, instead of growing a list per value (#2229).
 - Finding the conversions whose upper bits nothing reads asks the target for the width of each operand once, instead of on every round of the walk (#2231).
+- Encoding x86-64 into an object file looks each opcode up in the target's table once per unit, instead of by name for every instruction (#2234).
 
 ### Fixed
 

@@ -345,7 +345,13 @@ impl Writer<'_> {
         // How long each loop is, which the listing cannot say without the lengths of the
         // instructions in it. The object writer's encoder is asked, and a function it cannot
         // encode, which is one for another machine, has its loops left where they fall.
-        let loops = crate::bytes::loop_sizes(self.names, self.directives, func).unwrap_or_default();
+        let loops = crate::bytes::loop_sizes(
+            self.names,
+            self.directives,
+            func,
+            &mut crate::bytes::Known::default(),
+        )
+        .unwrap_or_default();
         for (index, block) in func.blocks().enumerate() {
             let size = loops.get(block.index()).copied().unwrap_or(0);
             if let Some(most) = crate::loop_room(size) {

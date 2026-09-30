@@ -36,10 +36,11 @@
 
 use std::collections::HashMap;
 
-use rucc_base::Interner;
+use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_mir::{Amode, Block, Func, Inst, Operand, Reach, defs};
-use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width};
+use rucc_target::x86_64::{self, Addr, Arg, RAX, Value, Width, Written};
 use rucc_target::{ObjectFormat, PhysReg, TargetInfo};
 use rucc_tuple::Arch;
 
@@ -135,6 +136,7 @@ pub fn assemble(
     // the section as they are found, because a record counts from the start of its function and the
     // function's own length is not known until its last instruction has been encoded.
     let mut rows = Vec::with_capacity(funcs.len());
+    let mut known = Known::default();
     for func in funcs {
         // What this function asked for, which pads the space in front of it and, once every
         // function has been through here, is what the whole section is aligned to. Both halves
@@ -181,6 +183,7 @@ pub fn assemble(
             loops: Vec::new(),
             apart: target.object_format == ObjectFormat::Elf,
             sites: Vec::new(),
+            known: &mut known,
         };
         assembler.func()?;
         let room = assembler.room;
@@ -339,7 +342,16 @@ struct Assembler<'a> {
     /// Where each call an unwind lands from began and ended, counted from the front of the
     /// function, with the pad it lands in. See [`rucc_mir::Func::landings`].
     sites: Vec<(usize, usize, Block)>,
+    /// What each opcode is written as, for the ones already met. See [`Known`].
+    known: &'a mut Known,
 }
+
+/// What each opcode met so far is written as, by the opcode's symbol.
+///
+/// The target's table is looked up by name, which is hashing the name and comparing it, and a
+/// function is thousands of instructions drawn from far fewer opcodes. So each opcode is looked up
+/// once for the whole unit and every instruction after that is one lookup by a number.
+pub(crate) type Known = Map<Symbol, Option<&'static [Written]>>;
 
 /// How long each loop in the function is, from its head to the end of the last jump back to it,
 /// indexed by the head's own number and zero for a block that is not a head.
@@ -353,6 +365,7 @@ pub(crate) fn loop_sizes(
     names: &Interner,
     directives: Directives,
     func: &Func,
+    known: &mut Known,
 ) -> Result<Vec<usize>, Error> {
     let mut sizes = vec![0; func.block_count()];
     if func.heads.is_empty() {
@@ -375,6 +388,7 @@ pub(crate) fn loop_sizes(
         loops: Vec::new(),
         apart: false,
         sites: Vec::new(),
+        known,
     };
     scratch.lay()?;
     for jump in &scratch.jumps {
@@ -392,7 +406,7 @@ pub(crate) fn loop_sizes(
 impl Assembler<'_> {
     /// The blocks, and then the jumps between them once every block has a place.
     fn func(&mut self) -> Result<(), Error> {
-        self.loops = loop_sizes(self.names, self.directives, self.func)?;
+        self.loops = loop_sizes(self.names, self.directives, self.func, self.known)?;
         self.lay()?;
         let tables = self.tables()?;
         self.patch(&tables)
@@ -613,7 +627,9 @@ impl Assembler<'_> {
                 .extend(relocs.into_iter().map(|reloc| Reloc { at: reloc.at + at, ..reloc }));
             return Ok(());
         }
-        let Some(written) = x86_64::written(opcode) else {
+        let known =
+            *self.known.entry(data.opcode.name()).or_insert_with(|| x86_64::written(opcode));
+        let Some(written) = known else {
             return Err(Error::Opcode { func: self.name.to_owned(), opcode: spelled.to_owned() });
         };
         let operands = &self.func[data.operands];
