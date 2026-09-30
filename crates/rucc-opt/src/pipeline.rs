@@ -323,6 +323,13 @@ const O1: &[&str] = &[
 /// to give the second branch's block another predecessor, and a block two edges reach is one the
 /// collapse will not touch, so a chain that was foldable stops being foldable.
 ///
+/// `sroa` runs a second time after `unroll`, with a `fold` in front of it. A loop over the lanes of
+/// a local, which is what every SSE2 shift in `emmintrin.h` is, indexes the local with the loop's
+/// counter, and an address the first run cannot put a number on keeps the local in memory. Once
+/// the loop is copied out the counter is a chain of additions to a constant, `fold` turns each
+/// address into a constant offset, and the second run takes the local. An SSE2 salsa20/8 went
+/// from 3.62s to 1.27s on that, with all 32 of its locals gone (tamnd/rucc#2320).
+///
 /// `canon` and `licm` run a second time after `split`, and that pair is the only thing here that
 /// looks at what `split` wrote. A guard goes in the preheader of the loop being split, which for an
 /// inner loop is a block inside the loops around it, and the guard asks the runtime how big each
@@ -370,6 +377,8 @@ const O2: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "fold",
+    "sroa",
     "number",
     "load-forward",
     "redundant-load",
@@ -415,6 +424,8 @@ const O3: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "fold",
+    "sroa",
     "number",
     "load-forward",
     "redundant-load",
@@ -1890,11 +1901,11 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
         let report = super::run(&mut module, &mut names, &opts);
-        // The level folds three times, twice at the top on either side of `image` and once after
-        // the loop pipeline, and what a dump request names is a pass rather than a position, so
-        // every run is written out. The side is what this is about: not one of the three is a
-        // `before`.
-        assert_eq!(report.dumps.len(), 3, "every run of the pass, one dump each");
+        // The level folds four times, twice at the top on either side of `image`, once in front
+        // of the second `sroa` and once after the loop pipeline, and what a dump request names is
+        // a pass rather than a position, so every run is written out. The side is what this is
+        // about: not one of the four is a `before`.
+        assert_eq!(report.dumps.len(), 4, "every run of the pass, one dump each");
         assert!(
             report.dumps.iter().all(|dump| dump.name.ends_with("-after-fold")),
             "{:?}",
