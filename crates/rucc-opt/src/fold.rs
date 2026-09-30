@@ -245,8 +245,16 @@ fn cast(func: &Func, value: Value) -> Option<(Imm, Type)> {
 /// `BUILD_BUG_ON`, so it has to be a number. How wide an address is is not known here, but none is
 /// narrower than thirty two bits, so a number that fits in those comes back the same through any of
 /// them. A larger one is left for the back end, where it costs nothing either.
+///
+/// A number cast from and back to the same integer type is also that number whatever it is. The
+/// lowering builds every cast to a pointer from an integer as wide as an address and every cast
+/// back into one, so a type that is the same on both sides is the width of an address and nothing
+/// was cut. `test_printf.c` asks `BUILD_BUG_ON (IS_ERR (PTR))` of `(void *) 0xffff0123456789abUL`.
 fn round_trip(func: &Func, pointer: Value, ty: Type) -> Option<Imm> {
-    let (number, _) = cast(func, pointer)?;
+    let (number, from) = cast(func, pointer)?;
+    if from == ty {
+        return Some(number);
+    }
     let small = u32::try_from(number.unsigned()).ok()?;
     Some(Imm::int(i128::from(small), ty))
 }

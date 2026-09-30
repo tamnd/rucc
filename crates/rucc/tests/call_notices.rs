@@ -110,6 +110,26 @@ int user(void) {{ struct attr at; copy(&at, sizeof(at)); return at.a; }}
     }
 }
 
+/// A number cast to a pointer and back is the number, however wide, which is what lib/test_printf.c
+/// leans on in `BUILD_BUG_ON (IS_ERR (PTR))` with a sixty four bit `PTR`.
+#[test]
+fn a_build_bug_on_a_wide_number_cast_to_a_pointer_and_back_says_nothing() {
+    let source = format!(
+        "{KERNEL}#define MAX_ERRNO 4095
+static inline __attribute__((always_inline)) _Bool IS_ERR(const void *ptr) {{
+\treturn __builtin_expect((unsigned long)(void *)((unsigned long)ptr) >= (unsigned long)-MAX_ERRNO, 0);
+}}
+#define PTR ((void *)0xffff0123456789abUL)
+void errptr(void) {{ BUILD_BUG_ON(IS_ERR(PTR)); BUILD_BUG_ON(!IS_ERR((void *)-12L)); }}
+"
+    );
+    for level in ["-O1", "-O2", "-Os"] {
+        let (ok, _, said) = compile(&format!("wide-number{level}"), &[level], &source);
+        assert!(ok, "{level}: {said}");
+        assert!(said.is_empty(), "{level}: {said}");
+    }
+}
+
 /// A call in a branch the optimizer took out is not in the program, at every level: gcc folds an
 /// `if (0)` at `-O0` as well, and so does this compiler.
 #[test]
