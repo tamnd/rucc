@@ -117,9 +117,8 @@
 //! them instead. Running it to a fixpoint is what handles a chain, since a `cap_narrow` of a
 //! `cap_of` leaves the `cap_of` unread only once the `cap_narrow` has gone.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{
     Block, BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
     Opcode, Restrict, Type, Value,
@@ -161,7 +160,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
     if !placeable(func) {
         return;
     }
-    let mut moved: HashMap<Value, Value> = HashMap::new();
+    let mut moved: Map<Value, Value> = Map::default();
     for inst in walk(func) {
         if !func[inst].opcode.makes_capability() {
             continue;
@@ -272,7 +271,7 @@ fn prune(func: &mut Func) {
         }
         for block in func.blocks().collect::<Vec<Block>>() {
             let params = func[block].params.clone();
-            let gone: HashSet<usize> = params
+            let gone: Set<usize> = params
                 .iter()
                 .enumerate()
                 .filter(|&(_, &param)| func[param].ty.is_cap() && !read.contains(&param))
@@ -282,7 +281,7 @@ fn prune(func: &mut Func) {
                 continue;
             }
             joined(func, block, &gone, &[], Type::int(64));
-            let dropped: HashSet<Value> = gone.iter().map(|&index| params[index]).collect();
+            let dropped: Set<Value> = gone.iter().map(|&index| params[index]).collect();
             func.retain_params(block, |value| !dropped.contains(&value));
             again = true;
         }
@@ -294,8 +293,8 @@ fn prune(func: &mut Func) {
 
 /// Every value something reads, where an edge reads what it hands a `cap` parameter only if that
 /// parameter is read in turn.
-fn reads(func: &Func) -> HashSet<Value> {
-    let mut read: HashSet<Value> = HashSet::new();
+fn reads(func: &Func) -> Set<Value> {
+    let mut read: Set<Value> = Set::default();
     let mut carried: Vec<(Value, Value)> = Vec::new();
     for inst in walk(func) {
         read.extend(func[func[inst].args].iter().copied());
@@ -447,7 +446,7 @@ fn parameters(func: &mut Func, word: Type) {
             if !func[param].ty.is_cap() {
                 continue;
             }
-            let arriving: HashSet<Value> =
+            let arriving: Set<Value> =
                 incoming(func, block, index).into_iter().filter(|&value| value != param).collect();
             let to = match arriving.iter().next() {
                 Some(&only) if arriving.len() == 1 => only,
@@ -461,7 +460,7 @@ fn parameters(func: &mut Func, word: Type) {
             };
             renamed(func, param, to);
         }
-        let gone: HashSet<usize> = params
+        let gone: Set<usize> = params
             .iter()
             .enumerate()
             .filter(|&(_, &param)| func[param].ty.is_cap())
@@ -471,7 +470,7 @@ fn parameters(func: &mut Func, word: Type) {
             continue;
         }
         joined(func, block, &gone, &copied, word);
-        let dropped: HashSet<Value> = gone.iter().map(|&index| params[index]).collect();
+        let dropped: Set<Value> = gone.iter().map(|&index| params[index]).collect();
         func.retain_params(block, |value| !dropped.contains(&value));
     }
 }
@@ -512,13 +511,7 @@ fn renamed(func: &mut Func, from: Value, to: Value) {
 /// the branch would overwrite the slot on the way out of the loop as well as on the way round it.
 /// A computed `goto` and an `asm goto` are the exception, because a block put on one of their edges
 /// is one the jump goes straight past, and those copy in front of the branch.
-fn joined(
-    func: &mut Func,
-    block: Block,
-    gone: &HashSet<usize>,
-    copied: &[(usize, Value)],
-    word: Type,
-) {
+fn joined(func: &mut Func, block: Block, gone: &Set<usize>, copied: &[(usize, Value)], word: Type) {
     for pred in func.blocks().collect::<Vec<Block>>() {
         let Some(term) = func.terminator(pred) else { continue };
         let targets = func.target_list(term);
@@ -598,7 +591,7 @@ fn plain() -> MemInfo {
 }
 
 /// Points every reader of a capability at the address of the slot holding it.
-fn substitute(func: &mut Func, moved: &HashMap<Value, Value>) {
+fn substitute(func: &mut Func, moved: &Map<Value, Value>) {
     let with = |value: Value| moved.get(&value).copied().unwrap_or(value);
     for inst in walk(func) {
         let args = func[inst].args;

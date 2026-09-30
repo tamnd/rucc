@@ -50,10 +50,10 @@
 //! value in a register until something reads it, which is a fact the allocator needed and the
 //! machine does not, and by here it has been acted on: the register in the operand is the answer.
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir::{Amode, Block, CfiOp, Func, Inst, Opcode, Operand, Reach, defs};
 use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
@@ -330,10 +330,10 @@ impl Writer<'_> {
         // Only on ELF, since both are spelled in ELF's terms: the routine through a slot gcc's
         // runtime fills in and the table in ELF's section for it. A Mach-O function is unwound
         // through without either. See `crate::unwind::table`.
-        let pads: HashMap<Inst, Block> = if self.directives == Directives::Elf {
+        let pads: Map<Inst, Block> = if self.directives == Directives::Elf {
             func.landings.iter().copied().collect()
         } else {
-            HashMap::new()
+            Map::default()
         };
         let local = self.directives.local();
         if unwind && !pads.is_empty() {

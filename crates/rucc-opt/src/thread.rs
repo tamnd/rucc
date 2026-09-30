@@ -148,9 +148,8 @@
 //! below it, 4 on the arm carrying one, and none at all on the block doing something that has to
 //! happen. That split is why the copy here is the copy of a block with no effects in it.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_base::Idx;
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Start, Value, ValueList};
 
@@ -248,11 +247,11 @@ impl Pass for Thread {
         // pool and there is no finding it again from the block the edge used to arrive at.
         let mut edges: Edges = incoming(func);
         let mut leaks = leaky(func);
-        let unbound = Bindings::new();
+        let unbound = Bindings::default();
         let mut threaded = false;
         // What each copy made in this run has cost the path it is on, which is what the path limit
         // of section 23.4 adds up, and how many copies there have been.
-        let mut paths: HashMap<Block, u32> = HashMap::new();
+        let mut paths: Map<Block, u32> = Map::default();
         let mut copies = 0;
         'blocks: for block in func.blocks().collect::<Vec<Block>>() {
             if block == entry || func[block].params.is_empty() {
@@ -370,7 +369,7 @@ impl Thread {
         block: Block,
         from: Block,
         into: Block,
-        paths: &HashMap<Block, u32>,
+        paths: &Map<Block, u32>,
         copies: u32,
     ) -> Result<u32, Option<&'static str>> {
         if self.budget == 0 {
@@ -451,7 +450,7 @@ fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
     let cfg = Cfg::new(func);
     let dom = Dominators::new(&cfg);
     let frontiers = Frontiers::new(&cfg, &dom);
-    let mut joins: HashSet<Block> = HashSet::new();
+    let mut joins: Set<Block> = Set::default();
     let mut work = vec![block, copy];
     while let Some(at) = work.pop() {
         for &join in frontiers.of(at) {
@@ -468,8 +467,8 @@ fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
             copy,
             value,
             copied,
-            params: HashMap::new(),
-            memo: HashMap::new(),
+            params: Map::default(),
+            memo: Map::default(),
         };
         merge(func, &cfg, &joins, &mut reaching);
     }
@@ -477,7 +476,7 @@ fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
 
 /// The values `block` defines that something outside it and outside its copy reads.
 fn read_outside(func: &Func, block: Block, copy: Block) -> Vec<Value> {
-    let mut seen = HashSet::new();
+    let mut seen = Set::default();
     let mut out = Vec::new();
     for other in func.blocks() {
         if other == block || other == copy {
@@ -507,9 +506,9 @@ struct Reaching<'a> {
     /// The value as `copy` defines it.
     copied: Value,
     /// The parameter each merge block was given for the value.
-    params: HashMap<Block, Value>,
+    params: Map<Block, Value>,
     /// What reached the start of each block already asked about.
-    memo: HashMap<Block, Value>,
+    memo: Map<Block, Value>,
 }
 
 impl Reaching<'_> {
@@ -557,7 +556,7 @@ impl Reaching<'_> {
 
 /// Puts the parameters one value needs where its two definitions meet, and points every read of it
 /// at the definition that reaches the read.
-fn merge(func: &mut Func, cfg: &Cfg, joins: &HashSet<Block>, reaching: &mut Reaching<'_>) {
+fn merge(func: &mut Func, cfg: &Cfg, joins: &Set<Block>, reaching: &mut Reaching<'_>) {
     let (block, copy, value) = (reaching.block, reaching.copy, reaching.value);
     // Where the value is still wanted at the start of a block. A read is where it starts, and it
     // goes up through predecessors until it meets one of the two definitions.
@@ -574,7 +573,7 @@ fn merge(func: &mut Func, cfg: &Cfg, joins: &HashSet<Block>, reaching: &mut Reac
             readers.push(other);
         }
     }
-    let mut live: HashSet<Block> = readers.iter().copied().collect();
+    let mut live: Set<Block> = readers.iter().copied().collect();
     let mut work = readers.clone();
     while let Some(at) = work.pop() {
         for &pred in cfg.predecessors(at) {
@@ -710,8 +709,8 @@ fn skippable(func: &Func, block: Block) -> bool {
 /// it went past: [`carried`] refuses the edge when an arm carries one, and everything else it passes
 /// on was defined further up. A copy does add reads, of the parameters its merges put further down,
 /// so the pass walks again after each one.
-fn leaky(func: &Func) -> HashSet<Block> {
-    let mut out = HashSet::new();
+fn leaky(func: &Func) -> Set<Block> {
+    let mut out = Set::default();
     for block in func.blocks().collect::<Vec<Block>>() {
         for inst in func.insts(block).collect::<Vec<Inst>>() {
             uses::operands(func, inst, |value| {
@@ -766,8 +765,7 @@ mod tests {
         Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Restrict, Signature, Type, Value,
     };
 
-    use std::collections::HashMap;
-
+    use rucc_base::hash::Map;
     use rucc_ir::{Module, verify_func};
     use rucc_target::{TargetInfo, Triple};
 
@@ -1111,7 +1109,7 @@ mod tests {
         let from = Block::from_usize(1);
         let into = Block::from_usize(5);
         let loops = an.loops(&func);
-        let mut paths = HashMap::new();
+        let mut paths = Map::default();
         assert_eq!(COPY.path(&func, loops, join, from, into, &paths, 0), Ok(2));
         paths.insert(from, 99);
         assert_eq!(

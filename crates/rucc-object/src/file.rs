@@ -30,7 +30,7 @@
 //! model and the back end writes none of them, so a module carrying one is refused before it
 //! reaches here rather than written as an ordinary variable in the wrong section.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use object::write::{
     Comdat, Object as Writer, Relocation, StandardSection, Symbol, SymbolId, SymbolSection,
@@ -39,6 +39,7 @@ use object::{
     Architecture, BinaryFormat, ComdatKind, Endianness, RelocationFlags, SectionFlags, SectionKind,
     SymbolFlags, SymbolKind, SymbolScope,
 };
+use rucc_base::hash::{Map, Set};
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
@@ -462,7 +463,7 @@ pub fn write(
     // The sections the writer has no name of its own for, remembered by name so that every variable
     // that wants one lands in the same one. The rest come back from `section_id`, which already
     // answers with the section it made the first time it was asked.
-    let mut named = HashMap::new();
+    let mut named = Map::default();
     for object in &data.objects {
         let (section, offset) = put(&mut obj, object, &mut named, sections, flavour);
         // COFF says which section a group is with the section's own symbol, which carries the
@@ -551,13 +552,13 @@ pub fn write(
     // The names a declaration wrote `weak` on, which the link is allowed to leave undefined and
     // whose references then read a zero address. The listing writes a `.weak` for each of the same
     // names, so the two paths put the same entries in whether or not anything refers to one.
-    let weak: HashSet<&str> = data.weak.iter().map(String::as_str).collect();
+    let weak: Set<&str> = data.weak.iter().map(String::as_str).collect();
     let relocs = || text.relocs.iter().chain(data.objects.iter().flat_map(|o| &o.relocs));
     // The names something here reaches through the thread pointer, which is the one thing about an
     // undefined name this file does know. A reference to a thread-local variable is a different kind
     // of reference from a reference to an ordinary one and the code that makes it is already
     // different, so the file has been told, and ELF wants the symbol to say so as well.
-    let thread: HashSet<&str> = relocs()
+    let thread: Set<&str> = relocs()
         .filter(|reloc| reloc.kind == Reference::Thread)
         .map(|reloc| reloc.symbol.as_str())
         .collect();
@@ -638,7 +639,7 @@ pub fn write(
         // own, and a name for each of them, because a row reaches one through a relocation and a
         // relocation names a symbol. The names are never offered to another file: what they point
         // at is one function's prologue, described for the runtime of this program and nothing else.
-        let mut described = HashMap::new();
+        let mut described = Map::default();
         if !text.unwind.info.is_empty() {
             let Some((name, align)) = second else {
                 let why = "an unwind table here is one section and it was given two".to_owned();
@@ -727,7 +728,7 @@ pub fn write(
     // Every section is added before any relocation is, because a relocation in one of them names
     // another as often as it names a function, and a name is resolved against the sections the
     // file already has.
-    let mut named = HashMap::new();
+    let mut named = Map::default();
     for chunk in &info.chunks {
         let id = obj.add_section(Vec::new(), chunk.name.clone().into_bytes(), SectionKind::Debug);
         obj.append_section_data(id, &chunk.bytes, 1);
@@ -942,7 +943,7 @@ pub fn defines(
 fn put(
     obj: &mut Writer<'_>,
     object: &Object,
-    named: &mut HashMap<String, object::write::SectionId>,
+    named: &mut Map<String, object::write::SectionId>,
     sections: Sections,
     flavour: Flavour,
 ) -> (SymbolSection, u64) {
@@ -1022,11 +1023,11 @@ fn tables(
     obj: &mut Writer<'_>,
     text: &Text,
     split: &[(object::write::SectionId, u64)],
-    named: &mut HashMap<String, object::write::SectionId>,
+    named: &mut Map<String, object::write::SectionId>,
     sections: Sections,
     flavour: Flavour,
-) -> Result<HashMap<String, (object::write::SectionId, u64)>, Error> {
-    let mut placed = HashMap::new();
+) -> Result<Map<String, (object::write::SectionId, u64)>, Error> {
+    let mut placed = Map::default();
     if text.tables.is_empty() {
         return Ok(placed);
     }
@@ -1080,7 +1081,7 @@ fn carries_no_bytes(place: &Place) -> bool {
 /// names of its own for, and this is the same answer for the ones it does not.
 fn made(
     obj: &mut Writer<'_>,
-    named: &mut HashMap<String, object::write::SectionId>,
+    named: &mut Map<String, object::write::SectionId>,
     name: &str,
     kind: SectionKind,
 ) -> object::write::SectionId {

@@ -103,8 +103,7 @@
 //! rather than assumed to: a value defined outside the loop that reaches the exit test has to
 //! dominate the preheader, and an assertion is cheaper than being wrong about why.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, Builder, Def, Extra, Func, Inst, InstData, IntPred, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
@@ -148,7 +147,7 @@ impl Pass for LoopDelete {
         if func.entry().is_none() {
             return stats;
         }
-        let mut done: HashSet<Block> = HashSet::new();
+        let mut done: Set<Block> = Set::default();
         let mut say = true;
         while let Some(job) = plan(func, an, &done, &mut stats, say) {
             say = false;
@@ -187,7 +186,7 @@ struct Job {
     /// The block outside the loop the one exit edge arrives at.
     exit: Block,
     /// The blocks the loop is made of, which is what says which uses are the ones outside it.
-    inside: HashSet<Block>,
+    inside: Set<Block>,
     /// What the edge out was going to carry, which the preheader carries instead.
     args: Vec<Value>,
     /// Every value the loop defines that anything outside it reads, and what it ends up holding.
@@ -234,7 +233,7 @@ enum Leaves {
 fn plan(
     func: &Func,
     an: &mut Analyses,
-    done: &HashSet<Block>,
+    done: &Set<Block>,
     stats: &mut Stats,
     say: bool,
 ) -> Option<Job> {
@@ -279,7 +278,7 @@ fn consider(
     };
 
     let blocks = loops.blocks(id).to_vec();
-    let inside: HashSet<Block> = blocks.iter().copied().collect();
+    let inside: Set<Block> = blocks.iter().copied().collect();
     for &block in &blocks {
         // The same reducibility check unrolling makes. A block of the loop reached from outside
         // the loop is a region this has no right to reason about as one piece.
@@ -349,8 +348,8 @@ fn consider(
 /// [`crate::unroll::escapes`] asks whether there is one of these and stops there, because a loop
 /// with one is a loop it will not copy. Here they are the work rather than the reason to stop, so
 /// the answer has to be which ones.
-fn read_outside(func: &Func, blocks: &[Block], inside: &HashSet<Block>) -> Vec<Value> {
-    let mut defined: HashSet<Value> = HashSet::new();
+fn read_outside(func: &Func, blocks: &[Block], inside: &Set<Block>) -> Vec<Value> {
+    let mut defined: Set<Value> = Set::default();
     for &block in blocks {
         defined.extend(func[block].params.iter().copied());
         for inst in func.insts(block) {
@@ -462,7 +461,7 @@ fn defined_in(func: &Func, value: Value) -> Block {
 /// Answers how many of those there were, which is what the report counts.
 fn apply(func: &mut Func, job: &Job) -> usize {
     let term = func.terminator(job.preheader).expect("a preheader ends in a jump to the header");
-    let mut instead: HashMap<Value, Value> = HashMap::new();
+    let mut instead: Map<Value, Value> = Map::default();
     // One clamp for the whole loop rather than one per value, since the count belongs to the loop
     // and the values differ only in what they do with it.
     let mut times: Option<Value> = None;
@@ -494,7 +493,7 @@ fn apply(func: &mut Func, job: &Job) -> usize {
 /// up until the blocks go. The preheader is outside and gets walked with the rest, which is
 /// harmless and better than a special case: what was just written into it names nothing the loop
 /// defines.
-fn swap_in(func: &mut Func, job: &Job, instead: &HashMap<Value, Value>) {
+fn swap_in(func: &mut Func, job: &Job, instead: &Map<Value, Value>) {
     if instead.is_empty() {
         return;
     }

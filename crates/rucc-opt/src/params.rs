@@ -71,9 +71,8 @@
 //! the same reason: a record that survives the file it was worked out in is what link time
 //! optimization will want and there is no link time optimization yet.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_base::Symbol;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{
     Datum, Def, Extra, Facts, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Type, Value,
 };
@@ -101,7 +100,7 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
     if closed.is_empty() {
         return 0;
     }
-    let mut where_defined: HashMap<_, FuncId> = HashMap::new();
+    let mut where_defined: Map<_, FuncId> = Map::default();
     for &id in &closed {
         where_defined.insert(module[id].name, id);
     }
@@ -148,16 +147,16 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
 fn handed(
     module: &Module,
     closed: &[FuncId],
-    sites: &HashMap<FuncId, Vec<(FuncId, Inst)>>,
-    globals: &HashMap<Symbol, u64>,
-) -> HashMap<FuncId, HashMap<u32, u64>> {
-    let mut known: HashMap<FuncId, HashMap<u32, u64>> = HashMap::new();
+    sites: &Map<FuncId, Vec<(FuncId, Inst)>>,
+    globals: &Map<Symbol, u64>,
+) -> Map<FuncId, Map<u32, u64>> {
+    let mut known: Map<FuncId, Map<u32, u64>> = Map::default();
     loop {
         let mut settled = true;
         for &id in closed {
             let Some(calls) = sites.get(&id) else { continue };
             let count = module[id].signature().params.len();
-            let mut sizes = HashMap::new();
+            let mut sizes = Map::default();
             for index in 0..count {
                 if module[id].signature().params[index].ty != Type::PTR {
                     continue;
@@ -187,8 +186,8 @@ fn least(
     module: &Module,
     calls: &[(FuncId, Inst)],
     index: usize,
-    globals: &HashMap<Symbol, u64>,
-    known: &HashMap<FuncId, HashMap<u32, u64>>,
+    globals: &Map<Symbol, u64>,
+    known: &Map<FuncId, Map<u32, u64>>,
 ) -> Option<u64> {
     let mut least = None;
     for &(caller, inst) in calls {
@@ -209,8 +208,8 @@ fn passed(
     caller: FuncId,
     func: &Func,
     value: Value,
-    globals: &HashMap<Symbol, u64>,
-    known: &HashMap<FuncId, HashMap<u32, u64>>,
+    globals: &Map<Symbol, u64>,
+    known: &Map<FuncId, Map<u32, u64>>,
 ) -> Option<u64> {
     let (base, offset) = normal(func, value);
     let whole = i128::from(object(caller, func, base, globals, known)?);
@@ -225,8 +224,8 @@ fn object(
     caller: FuncId,
     func: &Func,
     base: Value,
-    globals: &HashMap<Symbol, u64>,
-    known: &HashMap<FuncId, HashMap<u32, u64>>,
+    globals: &Map<Symbol, u64>,
+    known: &Map<FuncId, Map<u32, u64>>,
 ) -> Option<u64> {
     match func[base].def {
         // The caller's own parameter, which is what makes a chain of static helpers worth
@@ -281,15 +280,15 @@ fn object(
 fn aligns(
     module: &Module,
     closed: &[FuncId],
-    sites: &HashMap<FuncId, Vec<(FuncId, Inst)>>,
-) -> HashMap<FuncId, HashMap<u32, u32>> {
-    let mut known: HashMap<FuncId, HashMap<u32, u32>> = HashMap::new();
+    sites: &Map<FuncId, Vec<(FuncId, Inst)>>,
+) -> Map<FuncId, Map<u32, u32>> {
+    let mut known: Map<FuncId, Map<u32, u32>> = Map::default();
     loop {
         let mut stable = true;
         for &id in closed {
             let Some(calls) = sites.get(&id) else { continue };
             let count = module[id].signature().params.len();
-            let mut alignments = HashMap::new();
+            let mut alignments = Map::default();
             for index in 0..count {
                 if module[id].signature().params[index].ty != Type::PTR {
                     continue;
@@ -321,7 +320,7 @@ fn least_align(
     module: &Module,
     calls: &[(FuncId, Inst)],
     index: usize,
-    known: &HashMap<FuncId, HashMap<u32, u32>>,
+    known: &Map<FuncId, Map<u32, u32>>,
 ) -> Option<u32> {
     let mut least = None;
     for &(caller, inst) in calls {
@@ -341,12 +340,8 @@ fn least_align(
 ///
 /// The shape [`settled`] wants, which is the answers checks gave, because a fact from a caller of
 /// the caller is as good an answer about that value as a check standing in front of it.
-fn carried(
-    func: &Func,
-    caller: FuncId,
-    known: &HashMap<FuncId, HashMap<u32, u32>>,
-) -> HashMap<Value, u64> {
-    let mut carried = HashMap::new();
+fn carried(func: &Func, caller: FuncId, known: &Map<FuncId, Map<u32, u32>>) -> Map<Value, u64> {
+    let mut carried = Map::default();
     let (Some(entry), Some(alignments)) = (func.entry(), known.get(&caller)) else {
         return carried;
     };
@@ -369,7 +364,7 @@ fn carried(
 /// The larger of what is there and what was worked out, because a fact is a promise and two
 /// promises about one value are both true. Nothing else writes this fact today, so the case is
 /// this pass running twice over one module.
-fn write_aligns(module: &mut Module, table: &HashMap<FuncId, HashMap<u32, u32>>) {
+fn write_aligns(module: &mut Module, table: &Map<FuncId, Map<u32, u32>>) {
     for (&id, alignments) in table {
         let func = &mut module[id];
         let Some(entry) = func.entry() else { continue };
@@ -391,11 +386,8 @@ fn write_aligns(module: &mut Module, table: &HashMap<FuncId, HashMap<u32, u32>>)
 /// counted, since the positions would not line up and a prototype disagreeing with a definition is
 /// something a translation unit can contain. A variadic callee is left out for the same reason
 /// read the other way: a position past the named parameters is not a parameter.
-fn sites(
-    module: &Module,
-    where_defined: &HashMap<Symbol, FuncId>,
-) -> HashMap<FuncId, Vec<(FuncId, Inst)>> {
-    let mut sites: HashMap<FuncId, Vec<(FuncId, Inst)>> = HashMap::new();
+fn sites(module: &Module, where_defined: &Map<Symbol, FuncId>) -> Map<FuncId, Vec<(FuncId, Inst)>> {
+    let mut sites: Map<FuncId, Vec<(FuncId, Inst)>> = Map::default();
     for id in module.funcs() {
         let func = &module[id];
         if func.is_declaration() {
@@ -425,8 +417,8 @@ fn sites(
 /// A `global_addr` in any body, a relocation in any global's initial image, and the target of any
 /// alias. What each of them has in common is that something other than a direct call can reach the
 /// function afterwards, and a call this cannot see is an argument nobody counted.
-fn reachable(module: &Module) -> HashSet<Symbol> {
-    let mut taken = HashSet::new();
+fn reachable(module: &Module) -> Set<Symbol> {
+    let mut taken = Set::default();
     for id in module.funcs() {
         let func = &module[id];
         if func.is_declaration() {

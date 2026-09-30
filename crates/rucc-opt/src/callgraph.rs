@@ -81,9 +81,8 @@
 //! boundary that buys nothing today. [`crate::nofree`] records the same kind of deviation for the
 //! same kind of reason.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{AliasKind, Datum, Extra, Func, FuncId, Inst, Linkage, Module, Opcode, Pic};
 
 /// One name in a [`CallGraph`].
@@ -128,7 +127,7 @@ pub struct CallGraph {
     /// One per name, in the order described under "Determinism" in the module comment.
     entries: Vec<Entry>,
     /// Which node a name is. Asked, never walked.
-    by_name: HashMap<Symbol, Node>,
+    by_name: Map<Symbol, Node>,
     /// The strongly connected components, callees before callers, each sorted by node index.
     components: Vec<Vec<Node>>,
     /// Which component each node landed in, indexed by node.

@@ -191,10 +191,10 @@
 //! out.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use rucc_base::float::Float;
+use rucc_base::hash::Map;
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
 use rucc_ir::{
     Block, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
@@ -374,7 +374,7 @@ impl Pass for Simplify {
         // Rewriting each one where it is found would be a walk over every instruction for every
         // rewrite, and there is nothing to be gained by it: what a pattern asks about is the
         // instruction and its operands, and neither changes under a redirection.
-        let mut forward: HashMap<Value, Value> = HashMap::new();
+        let mut forward: Map<Value, Value> = Map::default();
         // Who reads what, so that an instruction nothing reads is left alone. A rule that fires
         // on one changes no program, because what it does is point the readers somewhere else and
         // there are none, and it would still spend fuel and still report having optimized
@@ -779,9 +779,9 @@ fn bits_of(head: &str) -> Option<u32> {
 /// `ptr_add` is an add at the address width and is named as one, and a rule that writes `add` is
 /// asking for the add.
 fn opcode_of(head: &str) -> Option<Opcode> {
-    static NAMES: OnceLock<HashMap<&'static str, Opcode>> = OnceLock::new();
+    static NAMES: OnceLock<Map<&'static str, Opcode>> = OnceLock::new();
     let names = NAMES.get_or_init(|| {
-        let mut names = HashMap::new();
+        let mut names = Map::default();
         for (opcode, name) in rucc_ir::term::heads() {
             names.entry(name).or_insert(opcode);
         }

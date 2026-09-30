@@ -36,8 +36,7 @@
 //! question 4 is actually asking for, since the question is whether the rule is worth building,
 //! and it can be answered before the frame exists.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{Extra, Inst, Module, Opcode};
 
@@ -318,7 +317,7 @@ pub fn summarize(
     // Counted here rather than anywhere later, because `crate::lower` takes the markers out once
     // this has run and a region is then a thing the object file has no trace of. That order is on
     // purpose: the count is the whole of what a declared region costs the back end.
-    let mut declared: HashMap<String, usize> = HashMap::new();
+    let mut declared: Map<String, usize> = Map::default();
 
     for id in module.funcs() {
         if module[id].is_declaration() {

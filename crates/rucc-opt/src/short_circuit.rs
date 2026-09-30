@@ -352,7 +352,7 @@ fn refused(func: &Func, shape: &Diamond) -> Option<&'static str> {
     // The question is put to `simplify-cfg` rather than answered again here, for the reason its own
     // documentation gives: two answers about when a branch is decided would be two compilers.
     let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
-    if simplify_cfg::taken(func, term, &Bindings::new()).is_some() {
+    if simplify_cfg::taken(func, term, &Bindings::default()).is_some() {
         return Some(CONDITION_IS_DECIDED);
     }
     for &arm in shape.arms.iter().flatten() {
@@ -407,9 +407,8 @@ fn fold(func: &mut Func, shape: &Diamond, plan: &Collapse) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rucc_base::Interner;
+    use rucc_base::hash::Map;
     use rucc_ir::{
         Block, BlockCall, Builder, Extra, Flags, Func, IntPred, MemInfo, MemOrder, Opcode,
         Restrict, Signature, Type, Value,
@@ -453,7 +452,7 @@ mod tests {
     /// constant, an addition, the and or the or the pass writes, and the branches. Anything else is
     /// a test that has drifted away from what it is testing, so it stops rather than guesses.
     fn ends_at(func: &Func, inputs: &[i128]) -> usize {
-        let mut values: HashMap<Value, i128> = HashMap::new();
+        let mut values: Map<Value, i128> = Map::default();
         let mut block = func.entry().expect("a function with blocks in it");
         for (&param, &input) in func[block].params.iter().zip(inputs) {
             values.insert(param, input);

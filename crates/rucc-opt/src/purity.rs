@@ -53,8 +53,7 @@
 //! because deleting a call to it would change whether the program terminates. Proving a particular
 //! loop finite is [`crate::scev`]'s and nothing here asks it yet.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{AttrSet, Extra, Flags, Func, Inst, InstData, MemOrder, Module, Opcode, Value};
 
@@ -245,9 +244,9 @@ impl Callee {
 /// [`Purity::Opaque`] to everything and is correct.
 #[derive(Debug, Clone, Default)]
 pub struct Facts {
-    declared: HashMap<Symbol, AttrSet>,
-    inferred: HashMap<Symbol, Purity>,
-    from_the_library: HashMap<Symbol, Purity>,
+    declared: Map<Symbol, AttrSet>,
+    inferred: Map<Symbol, Purity>,
+    from_the_library: Map<Symbol, Purity>,
 }
 
 impl Facts {
@@ -264,7 +263,7 @@ impl Facts {
     #[must_use]
     pub fn of_module(module: &Module, names: &Interner) -> Self {
         let mut facts = Self::default();
-        let mut defined = HashSet::new();
+        let mut defined = Set::default();
         for id in module.funcs() {
             let func = &module[id];
             facts.declared.insert(func.name, func.attrs.set);

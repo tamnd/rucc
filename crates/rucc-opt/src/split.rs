@@ -227,8 +227,7 @@
 //! the function grows by about the size of the loop, and buying speed with code is what those levels
 //! are for and what `-Os` and `-Oz` are for declining.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{
     Block, BlockCall, Builder, Def, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type,
@@ -681,7 +680,7 @@ fn planned(func: &Func, cfg: &Cfg, loops: &Loops, stats: &mut Stats) -> Vec<Plan
         sweep(func, cfg, loops, &mut scev, id, &mut plans, stats);
     }
     plans.sort_by_key(|plan| std::cmp::Reverse(loops.depth(plan.id)));
-    let mut taken: HashSet<Block> = HashSet::new();
+    let mut taken: Set<Block> = Set::default();
     plans.retain(|plan| {
         if plan.body.iter().any(|block| taken.contains(block)) {
             stats.missed(NESTED_WITH_ONE);
@@ -751,7 +750,7 @@ fn repaired(
 
 /// Whether anything after this loop reads a value its body defines.
 fn leaving(func: &Func, plan: &Plan) -> bool {
-    let inside: HashSet<Block> = plan.body.iter().copied().collect();
+    let inside: Set<Block> = plan.body.iter().copied().collect();
     escapes(func, &plan.body, &inside)
 }
 
@@ -798,8 +797,8 @@ fn elsewhere(func: &Func, plan: &Plan, named: &[(LoopId, Value)]) -> bool {
 }
 
 /// Every value the blocks of a loop define, parameters and results alike.
-fn defines(func: &Func, body: &[Block]) -> HashSet<Value> {
-    let mut defined: HashSet<Value> = HashSet::new();
+fn defines(func: &Func, body: &[Block]) -> Set<Value> {
+    let mut defined: Set<Value> = Set::default();
     for &block in body {
         defined.extend(func[block].params.iter().copied());
         for inst in func.insts(block) {
@@ -814,7 +813,7 @@ fn defines(func: &Func, body: &[Block]) -> HashSet<Value> {
 /// Where there is one, the two halves would leave it reading whichever of them happened to define
 /// it. Closed form is what makes it not one: the use names a parameter of the block the loop leaves
 /// to, and each half fills that parameter in on its own way out.
-fn escapes(func: &Func, body: &[Block], inside: &HashSet<Block>) -> bool {
+fn escapes(func: &Func, body: &[Block], inside: &Set<Block>) -> bool {
     let defined = defines(func, body);
     for block in func.blocks() {
         if inside.contains(&block) {
@@ -1203,7 +1202,7 @@ fn measured(
     }
     let mut rebuild = Vec::new();
     let mut leaves = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = Set::default();
     if !writable(func, loops, id, at, &mut rebuild, &mut leaves, &mut seen) {
         return None;
     }
@@ -1246,7 +1245,7 @@ fn writable(
     value: Value,
     order: &mut Vec<Value>,
     leaves: &mut Vec<Value>,
-    seen: &mut HashSet<Value>,
+    seen: &mut Set<Value>,
 ) -> bool {
     // A value reached twice is written once, and its place in the order is the first one, which is
     // in front of both uses. Returning true here is safe because a refusal anywhere refuses the
@@ -1344,7 +1343,7 @@ fn remade(
     made: &mut Vec<Value>,
     order: &[Value],
     at: Value,
-    swap: &HashMap<Value, Value>,
+    swap: &Map<Value, Value>,
 ) -> Value {
     let mut swap = swap.clone();
     for &value in order {
@@ -1380,7 +1379,7 @@ fn carried(func: &Func, cfg: &Cfg, loops: &Loops, id: LoopId, latch: Block, leaf
     let Some(term) = func.terminator(latch) else { return false };
     let round = copy::edge_args(func, term, header);
     let Some(&next) = round.get(index as usize) else { return false };
-    let mut seen = HashSet::new();
+    let mut seen = Set::default();
     moving(func, cfg, loops, id, leaf, next, &mut seen)
 }
 
@@ -1489,7 +1488,7 @@ fn moving(
     id: LoopId,
     param: Value,
     value: Value,
-    seen: &mut HashSet<Value>,
+    seen: &mut Set<Value>,
 ) -> bool {
     if value == param {
         return true;
@@ -1585,7 +1584,7 @@ fn apply(func: &mut Func, plan: &Plan) {
     // The slow half, which is the loop as it stands, under a substitution that renames everything it
     // defines. Nothing is seeded, so its header gets parameters of its own, which is what a copy
     // reached from a block that also reaches the original needs.
-    let mut renamed: HashMap<Value, Value> = HashMap::new();
+    let mut renamed: Map<Value, Value> = Map::default();
     let copies = copy::blocks(func, &plan.body, &mut renamed);
     let slow = copies[&plan.header];
 
@@ -1623,7 +1622,7 @@ fn apply(func: &mut Func, plan: &Plan) {
     // what the rule the removal rests on is written in. That is what makes the subtraction below
     // safe as well: a pointer that went under where it started comes out as a displacement no
     // window is ever going to hold, so the loop goes to the half that kept its checks.
-    let held: HashMap<Value, Value> =
+    let held: Map<Value, Value> =
         func[plan.header].params.iter().copied().zip(carried.iter().copied()).collect();
     // Nothing built here has to be moved afterwards, unlike in the preheader: the guard is a block
     // this pass just made and it has no terminator yet, so appending puts things in the order they
@@ -1791,7 +1790,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
     let entering = copy::edge_args(func, term, plan.header);
     // What the preheader has in place of each parameter the header carries, which is what a measured
     // address is written again out of to get the first iteration's.
-    let swap: HashMap<Value, Value> =
+    let swap: Map<Value, Value> =
         func[plan.header].params.iter().copied().zip(entering.iter().copied()).collect();
     let mut made = Vec::new();
     let mut build = Builder::new(func, plan.preheader);
@@ -1800,7 +1799,7 @@ fn limited(func: &mut Func, plan: &Plan) -> Choice {
     let mut windows: Vec<Window> = Vec::new();
     // Every measured address written once, since the same expression under the same substitution is
     // the same value and two checks off one pointer are the commonest thing here.
-    let mut begun: HashMap<Value, Value> = HashMap::new();
+    let mut begun: Map<Value, Value> = Map::default();
     // Every question asked once, for the same reason. See [`Asked`].
     let mut asked = Asked::default();
     for sweep in &plan.sweeps {

@@ -28,8 +28,9 @@
 //! subtracted at the end. What is left over after the subtractions is what the linker is asked
 //! about, and the shape of what is left is what says which relocation it is.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
+use rucc_base::hash::{Map, Set};
 use rucc_mir::CfiOp;
 use rucc_object::{
     Array, Assembled, Binding, Extent, Group, Held, Keep, Name, Part, Reference, Reloc, Shape,
@@ -120,7 +121,7 @@ pub fn read_with(
     // did not reach written long, until none is left over. A branch made long never goes back, so
     // each pass has more long ones than the last and there are only so many branches, which is how
     // gas does it and why the two come out the same size.
-    let mut long = std::collections::HashSet::new();
+    let mut long = Set::default();
     loop {
         let aarch64 = arch == Arch::Aarch64;
         let macho = format == ObjectFormat::MachO;
@@ -256,7 +257,7 @@ struct Described {
 struct Reader {
     parts: Vec<Part>,
     /// Which index each section name is at, so that a second `.text` continues the first one.
-    named: HashMap<String, usize>,
+    named: Map<String, usize>,
     /// The section being written to.
     here: usize,
     /// What `.pushsection` stacked up.
@@ -264,13 +265,13 @@ struct Reader {
     /// What `.previous` goes back to.
     before: Option<usize>,
     syms: Vec<Sym>,
-    known: HashMap<String, usize>,
+    known: Map<String, usize>,
     /// How many times each numbered local label has been written so far, which is what `1b` counts
     /// back from and what `1f` counts forward from.
-    counts: HashMap<String, usize>,
+    counts: Map<String, usize>,
     /// Which sections have a name pointing into them, so that an empty one that something is
     /// defined in survives and an empty one nothing mentions does not.
-    labelled: std::collections::HashSet<usize>,
+    labelled: Set<usize>,
     fixups: Vec<Fixup>,
     /// `.set` and `.equ`, as the symbol they name and the expression they were given.
     sets: Vec<(usize, Sum, usize)>,
@@ -279,15 +280,15 @@ struct Reader {
     /// Which entry a name that has been set means from here on. A file may set one name as many
     /// times as it likes, and each use means the value it had where the use was written, so a
     /// second setting is a second entry and this says which one is current.
-    current: HashMap<String, String>,
+    current: Map<String, String>,
     /// The numbered entries a relocation names, which are kept in the symbol table so that the
     /// relocation has something to point at. That is a numbered local label or a set name reached
     /// from another section, and is rare.
-    relocated: std::collections::HashSet<usize>,
+    relocated: Set<usize>,
     /// The names `.local` was said of, which a `.comm` after it makes room for here rather than
     /// asking the linker, the way `.lcomm` does. Every name is local until something says
     /// otherwise, so the binding alone cannot tell these apart.
-    said_local: std::collections::HashSet<usize>,
+    said_local: Set<usize>,
     /// The function whose frame rules are being read, between `.cfi_startproc` and `.cfi_endproc`.
     frame: Option<Frame>,
     /// Every function that has had its frame rules read, in the order the file wrote them.
@@ -306,7 +307,7 @@ struct Reader {
     /// one symbol where it should be two.
     files: Vec<String>,
     /// The branches an earlier pass found out of reach of two bytes, which this one writes long.
-    long: std::collections::HashSet<usize>,
+    long: Set<usize>,
     /// How many branches with a two byte form have been read so far.
     branches: usize,
     /// Every alignment in the file, in the order it was written.

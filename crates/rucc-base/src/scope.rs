@@ -12,8 +12,7 @@
 //! Nothing in here knows what C is. It is a name, a value, and the rule that an inner binding
 //! hides an outer one until its scope closes.
 
-use std::collections::HashMap;
-
+use crate::hash::Map;
 use crate::intern::Symbol;
 
 /// One binding, and the scope it was made in.
@@ -35,7 +34,7 @@ pub struct ScopeMap<V> {
     /// The bindings of each name, innermost last. An empty stack means the name is not bound,
     /// and the entry is kept rather than removed so that the allocation is reused by the next
     /// declaration of that name, which in a header is usually the same names again.
-    bindings: HashMap<Symbol, Vec<Binding<V>>>,
+    bindings: Map<Symbol, Vec<Binding<V>>>,
     /// Every name bound in an open scope, in the order it was bound.
     log: Vec<Symbol>,
     /// Where each open scope starts in `log`. The file scope is not in here, which is what
@@ -45,7 +44,7 @@ pub struct ScopeMap<V> {
 
 impl<V> Default for ScopeMap<V> {
     fn default() -> Self {
-        ScopeMap { bindings: HashMap::new(), log: Vec::new(), marks: Vec::new() }
+        ScopeMap { bindings: Map::default(), log: Vec::new(), marks: Vec::new() }
     }
 }
 

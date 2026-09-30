@@ -10,9 +10,9 @@
 //! reading, so one [`Session`] has to outlive all of them and there has to be one place that
 //! holds it.
 
-use std::collections::HashMap;
 use std::path::Path;
 
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::{Elsewhere, Slot};
@@ -1223,7 +1223,7 @@ fn placed(
     names: &Interner,
     target: &TargetInfo,
 ) -> Result<rucc_asm::Assembled, String> {
-    let at: HashMap<&str, &rucc_object::Name> =
+    let at: Map<&str, &rucc_object::Name> =
         read.names.iter().map(|name| (name.name.as_str(), name)).collect();
     let offset = |name: &str| match at.get(name).map(|name| name.at) {
         Some(rucc_object::Held::In { part, offset }) => Some((part, offset)),
@@ -1601,7 +1601,7 @@ fn nests(
     scopes: &[crate::shapes::Scope],
     extent: &rucc_object::Extent,
     rows: &[rucc_asm::Row],
-) -> (Vec<rucc_debug::Scope>, HashMap<usize, usize>) {
+) -> (Vec<rucc_debug::Scope>, Map<usize, usize>) {
     let mut needed: Vec<usize> = Vec::new();
     for &want in wants {
         let mut up = want;
@@ -1616,7 +1616,7 @@ fn nests(
     // In the order the unit wrote them, which puts a scope after the one it is inside, because that
     // is the order the writer wants and is what lets a parent be named by an entry already made.
     needed.sort_unstable();
-    let at: HashMap<usize, usize> =
+    let at: Map<usize, usize> =
         needed.iter().enumerate().map(|(which, &scope)| (scope, which)).collect();
     let ends = ends(extent, rows);
     let out = needed

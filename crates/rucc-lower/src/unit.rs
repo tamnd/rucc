@@ -26,9 +26,10 @@
 //! convention.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
@@ -305,16 +306,16 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         read,
         module,
         diagnostics: Vec::new(),
-        strings: HashMap::new(),
+        strings: Map::default(),
         anonymous: 0,
-        statics: HashMap::new(),
-        labels: HashMap::new(),
-        done: HashSet::new(),
+        statics: Map::default(),
+        labels: Map::default(),
+        done: Set::default(),
         aliases: Vec::new(),
         sets: Vec::new(),
-        aliased: HashSet::new(),
+        aliased: Set::default(),
         starts: Vec::new(),
-        renamed: HashMap::new(),
+        renamed: Map::default(),
         reachable,
     };
     unit.run();
@@ -359,12 +360,12 @@ pub(crate) struct Unit<'a> {
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// The global each string literal was emitted as, so that two mentions of one literal are
     /// one object.
-    strings: HashMap<StrId, Symbol>,
+    strings: Map<StrId, Symbol>,
     /// How many runs of bytes written under no label in an `asm` at file scope have been given a
     /// name, which is what keeps the next one from being given the same one.
     anonymous: usize,
     /// The name each object with no linkage was given.
-    statics: HashMap<DeclId, Symbol>,
+    statics: Map<DeclId, Symbol>,
     /// The name each label an image holds the address of was given.
     ///
     /// A label is a place inside a function and has no name in the object file, because a jump to
@@ -373,9 +374,9 @@ pub(crate) struct Unit<'a> {
     /// relocation names a symbol. So a label an image points at gets one, minted here because the
     /// image is lowered before the body is walked and the block the label starts does not exist
     /// yet when the name is first asked for.
-    labels: HashMap<LabelId, Symbol>,
+    labels: Map<LabelId, Symbol>,
     /// What has been emitted, because a redeclaration is the same declaration seen twice.
-    done: HashSet<DeclId>,
+    done: Set<DeclId>,
     /// The declarations that are a second name for something rather than a thing of their own,
     /// in the order the file made them.
     ///
@@ -394,7 +395,7 @@ pub(crate) struct Unit<'a> {
     /// A `static` function nothing calls is not emitted, and being what an alias points at is a
     /// reason to emit one that no reference in the file says: the string an alias names is not a
     /// use of anything as far as the walk over the tree is concerned.
-    aliased: HashSet<Symbol>,
+    aliased: Set<Symbol>,
     /// The functions the file asked to have run without anything calling them, in the order it
     /// defined them.
     ///
@@ -410,10 +411,10 @@ pub(crate) struct Unit<'a> {
     /// declaration from the implicit one the checker made for `__builtin_memcpy`, so the label
     /// on the first is never reached from the second, and a program that renames a function and
     /// then calls the builtin means the call to go to the new name.
-    renamed: HashMap<Symbol, Symbol>,
+    renamed: Map<Symbol, Symbol>,
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
-    reachable: HashSet<DeclId>,
+    reachable: Set<DeclId>,
 }
 
 // The debug is by hand and short: a translation unit is not something anybody wants printed as

@@ -44,10 +44,9 @@
 //! wide for an `int` is unchanged. Measured against gcc 16 in both `-std=c17` and `-std=c23`,
 //! which agree with each other and with this.
 
-use std::collections::HashSet;
-
 use rucc_ast::{self as ast, Member, TypeSpec};
 use rucc_base::Symbol;
+use rucc_base::hash::Set;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
     ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
@@ -160,7 +159,7 @@ impl Checker<'_> {
         // what lets the walk below call methods that take the checker mutably.
         let ast = self.ast;
         let mut fields: Vec<(FieldDecl, Span)> = Vec::with_capacity(ast[members].len());
-        let mut named = HashSet::new();
+        let mut named = Set::default();
         for member in &ast[members] {
             let field = match *member {
                 Member::Field(field) => field,

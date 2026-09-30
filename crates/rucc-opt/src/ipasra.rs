@@ -72,9 +72,8 @@
 //! changed yet is read as it stands. Whatever ran [`crate::dce`] before this is what decides how
 //! much of that there is.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Abi, CallInfo, Extra, Func, FuncId, Inst, Module, Opcode, Signature, Value};
 
 use crate::ipa::Sites;
@@ -132,7 +131,7 @@ pub fn remove(
     // through every round below, and the sweep is its only reader.
     let mut facts = Facts::of_module(module, names);
     purity::infer(module, graph, &mut facts);
-    let mut stats: HashMap<FuncId, Stats> = HashMap::new();
+    let mut stats: Map<FuncId, Stats> = Map::default();
     for _ in 0..ROUNDS {
         let changed = round(module, &closed, fuel, &mut stats);
         if changed.is_empty() {
@@ -175,7 +174,7 @@ fn round(
     module: &mut Module,
     closed: &[FuncId],
     fuel: &mut Fuel,
-    stats: &mut HashMap<FuncId, Stats>,
+    stats: &mut Map<FuncId, Stats>,
 ) -> Vec<FuncId> {
     let sites = ipa::sites(module, closed);
     let mut changed: Vec<FuncId> = Vec::new();
@@ -233,12 +232,12 @@ fn round(
 fn void_returns(
     module: &mut Module,
     closed: &[FuncId],
-    sites: &HashMap<FuncId, Sites>,
+    sites: &Map<FuncId, Sites>,
     fuel: &mut Fuel,
-    stats: &mut HashMap<FuncId, Stats>,
+    stats: &mut Map<FuncId, Stats>,
     changed: &mut Vec<FuncId>,
 ) {
-    let mut reads: HashMap<FuncId, HashSet<Value>> = HashMap::new();
+    let mut reads: Map<FuncId, Set<Value>> = Map::default();
     for &id in closed {
         let Some(calls) = sites.get(&id) else { continue };
         if calls.ragged || calls.calls.is_empty() || !returning(&module[id]) {

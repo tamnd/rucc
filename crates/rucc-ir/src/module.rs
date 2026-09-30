@@ -25,11 +25,11 @@
 //! Function attributes are not here yet. They arrive with the printer, which is where their
 //! spelling has to be settled.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
 use rucc_base::float::Format;
+use rucc_base::hash::Map;
 use rucc_base::{Idx, IdxRange, Interner, Symbol};
 use rucc_target::TargetInfo;
 use rucc_tuple::TargetTuple;
@@ -644,7 +644,7 @@ pub struct Module {
     imms: Vec<Imm>,
     relocs: Vec<Reloc>,
 
-    symbols: HashMap<Symbol, SymbolRef>,
+    symbols: Map<Symbol, SymbolRef>,
 
     /// The `asm` written at file scope that the lowering could not read into globals, which is one
     /// with an instruction in it, kept as the text it was written as. See
@@ -672,7 +672,7 @@ impl Module {
             bytes: Vec::new(),
             imms: Vec::new(),
             relocs: Vec::new(),
-            symbols: HashMap::new(),
+            symbols: Map::default(),
             file_asm: Vec::new(),
             linker_options: Vec::new(),
         }

@@ -14,9 +14,9 @@
 //! skipping looks at the directive name and nothing else, and only the seven conditional
 //! directives mean anything while it is going on.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
 use rucc_gnu::Kind;
@@ -135,7 +135,7 @@ pub struct Preprocessor {
     /// Files that do not need reading again, and why. Keyed by what the file system calls the
     /// file rather than by the name an include used, so that a header reached two ways is one
     /// entry here.
-    seen: HashMap<PathBuf, Guard>,
+    seen: Map<PathBuf, Guard>,
     /// Every file an `#include` found, in the order they were first reached.
     ///
     /// This is what the `-M` family reports. It is collected here rather than read off the
@@ -154,7 +154,7 @@ pub struct Preprocessor {
     /// are two prerequisites there and a header two other headers in the same directory reach
     /// by different relative paths is listed twice. Naming a file once is what the flag means,
     /// and a duplicate prerequisite means nothing to `make` either way.
-    dep_ids: HashSet<PathBuf>,
+    dep_ids: Set<PathBuf>,
 }
 
 impl Preprocessor {
@@ -3230,13 +3230,14 @@ mod tests {
 
     #[test]
     fn has_feature_and_has_extension_read_the_same_table() {
-        // The preprocessor features are the ones that are real today, so they are the ones
-        // that answer yes, and `__has_extension` answers yes wherever `__has_feature` does.
+        // `__has_extension` answers yes wherever `__has_feature` does, and also for a GNU
+        // extension, which `__has_feature` never names.
         assert_eq!(clean("#if __has_feature(pragma_once)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_extension(pragma_once)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_extension(include_next)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_feature(include_next)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_feature(statement_expressions)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_extension(statement_expressions)\nyes\n#endif\n"), "yes");
     }
 
     #[test]

@@ -38,8 +38,7 @@
 //! instruction standing for a later pass to find would be leaving the wrapper in the way of
 //! everything, which is the thing this exists to avoid.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_cost::heuristics::PREDICT_EXPECT;
 use rucc_ir::{Block, Def, Extra, Func, Hint, Imm, Inst, IntPred, Opcode, Type, Value};
 
@@ -114,7 +113,7 @@ impl Pass for Expect {
         // Every one of them, and not only the ones a branch was found for. The instruction has done
         // whatever it is going to do by this point, and what it would do from here is sit in front
         // of the folder.
-        let mut forward: HashMap<Value, Value> = HashMap::new();
+        let mut forward: Map<Value, Value> = Map::default();
         for &inst in &hints {
             let args = &func[func[inst].args];
             let (Some(&result), Some(&value)) = (func[inst].first_result.as_ref(), args.first())

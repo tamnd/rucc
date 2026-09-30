@@ -13,9 +13,8 @@
 //! four byte [`HideSet`] index into that table. Set equality is an integer compare, and the
 //! common case by a wide margin is the empty set, which is always index zero.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 
 /// An interned set of macro names.
 ///
@@ -53,7 +52,7 @@ pub struct HideSets {
     /// Every distinct set, sorted, indexed by [`HideSet`]. Index zero is the empty set.
     sets: Vec<Box<[Symbol]>>,
     /// Lookup from contents to index.
-    map: HashMap<Box<[Symbol]>, HideSet>,
+    map: Map<Box<[Symbol]>, HideSet>,
 }
 
 impl Default for HideSets {
@@ -66,7 +65,7 @@ impl HideSets {
     /// A table containing only the empty set.
     pub fn new() -> Self {
         let empty: Box<[Symbol]> = Box::new([]);
-        let mut map = HashMap::new();
+        let mut map = Map::default();
         map.insert(empty.clone(), HideSet::EMPTY);
         Self { sets: vec![empty], map }
     }

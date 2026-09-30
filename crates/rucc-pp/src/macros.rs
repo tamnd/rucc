@@ -7,8 +7,7 @@
 //! where the error is worth reading. By the time the expander runs, a definition is known
 //! good and it can concentrate on the substitution rules.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{PpToken, PpTokenKind, Punct, TokenFlags};
@@ -130,14 +129,14 @@ impl MacroDef {
 /// Every macro currently defined.
 #[derive(Debug, Default)]
 pub struct MacroTable {
-    by_name: HashMap<Symbol, MacroDef>,
+    by_name: Map<Symbol, MacroDef>,
     /// What `#pragma push_macro` put aside, innermost last, one stack per name.
     ///
     /// A name with nothing saved has no entry, so the common case of a file that never uses the
     /// pragma pays for one empty map. `None` in a stack is a real value and not an absence: it
     /// records that the name had no definition when it was pushed, which is what a matching pop
     /// has to restore.
-    saved: HashMap<Symbol, Vec<Option<MacroDef>>>,
+    saved: Map<Symbol, Vec<Option<MacroDef>>>,
 }
 
 impl MacroTable {

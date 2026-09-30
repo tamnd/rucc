@@ -104,8 +104,7 @@
 //! function is untouched, so every control flow answer still stands, and the liveness is about
 //! values and does not, which is why this pass drops it whether or not it changed anything.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
 use crate::alias::{Access, origin};
@@ -170,7 +169,7 @@ impl Pass for RedundantLoad {
         // What each removed load's result is read as, applied to the whole function once at the
         // end, for the reason `crate::load` gives: rewriting each one where it is found would be a
         // walk over the function per load and there is nothing to gain by it.
-        let mut forward: HashMap<Value, Value> = HashMap::new();
+        let mut forward: Map<Value, Value> = Map::default();
         let mut gone: Vec<Inst> = Vec::new();
 
         // The walk borrows the function, so it is a scope of its own and every edit happens after
@@ -185,7 +184,7 @@ impl Pass for RedundantLoad {
             let mut walk = Walk::new(body, an.outside()).knowing(an.modref());
             // One entry per address read at a version of memory, holding the block the first load
             // of it was in and the value that load is known to be equal to.
-            let mut seen: HashMap<(Value, Value, Type), (Block, Value)> = HashMap::new();
+            let mut seen: Map<(Value, Value, Type), (Block, Value)> = Map::default();
             for block in func.blocks().collect::<Vec<Block>>() {
                 for inst in func.insts(block).collect::<Vec<Inst>>() {
                     let Some((result, ty)) = reads(func, inst) else {
@@ -347,7 +346,7 @@ enum Found {
 /// forwarded and there is nothing left to record, or it is not, and then neither block dominates
 /// the other and keeping the one already there is as good as swapping it.
 fn remember(
-    seen: &mut HashMap<(Value, Value, Type), (Block, Value)>,
+    seen: &mut Map<(Value, Value, Type), (Block, Value)>,
     key: Option<(Value, Value, Type)>,
     block: Block,
     value: Value,

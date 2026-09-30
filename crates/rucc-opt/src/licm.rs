@@ -109,8 +109,7 @@
 //! the call takes its writes out of the loop along with it, which is section 27.3's store motion
 //! and a different proof.
 
-use std::collections::HashSet;
-
+use rucc_base::hash::Set;
 use rucc_cost::heuristics;
 use rucc_ir::{Block, Flags, Func, Inst, Opcode, Value};
 
@@ -189,7 +188,7 @@ impl Pass for Licm {
         }
         let dom = an.dominators(func);
         let post = an.post_dominators(func);
-        let invented: HashSet<Block> = post.fake_exits().iter().copied().collect();
+        let invented: Set<Block> = post.fake_exits().iter().copied().collect();
 
         // Innermost first, so a value hoisted out of an inner loop lands in the outer loop's body
         // and is looked at again on the outer loop's turn. That is what carries a computation all
@@ -204,7 +203,7 @@ impl Pass for Licm {
         // would read the same answer out of a fresh computation as out of this one. Recomputing
         // for it anyway is a walk of the whole function, and a function with hundreds of loops
         // side by side in it used to pay that hundreds of times. tamnd/rucc#1015.
-        let mut stale: HashSet<Block> = HashSet::new();
+        let mut stale: Set<Block> = Set::default();
         for id in order {
             if loops.blocks(id).iter().any(|block| stale.contains(block)) {
                 pressure = Pressure::of(func, cfg, &Liveness::of(func, cfg));
@@ -252,7 +251,7 @@ struct Job<'a> {
     dom: &'a Dominators,
     post: &'a PostDominators,
     loops: &'a Loops,
-    invented: &'a HashSet<Block>,
+    invented: &'a Set<Block>,
 }
 
 /// Whether anything this loop writes can be what this instruction reads.
@@ -599,8 +598,8 @@ impl Job<'_> {
         // is cannot be known at the point it is read, because what reads it has not been read
         // yet. So it goes in provisionally and [`trim`] takes it out again, which is the same
         // answer a cost free instruction already gets and for the same reason.
-        let mut passengers: HashSet<Inst> = HashSet::new();
-        let mut moved: HashSet<Value> = HashSet::new();
+        let mut passengers: Set<Inst> = Set::default();
+        let mut moved: Set<Value> = Set::default();
         // Every value moved out is one more live across the loop, which is one register less to
         // decide the next one against. Taking it off the allocatable count says that once instead
         // of at each of the comparisons below, and it is per bank because a value moved into a
@@ -724,7 +723,7 @@ impl Job<'_> {
     ///
     /// The memory operand is one of the operands, so a load of memory the loop wrote is answered
     /// here along with everything else and needs no separate walk.
-    fn unchanging(&self, func: &Func, id: LoopId, inst: Inst, moved: &HashSet<Value>) -> bool {
+    fn unchanging(&self, func: &Func, id: LoopId, inst: Inst, moved: &Set<Value>) -> bool {
         func[func[inst].args]
             .iter()
             .all(|arg| self.loops.is_invariant(func, id, *arg) || moved.contains(arg))
@@ -749,8 +748,8 @@ impl Job<'_> {
 /// The pressure miss is counted here rather than where it is decided, because an instruction that
 /// went on to carry an expensive one out of the loop was not left in the loop and reporting it as
 /// missed would say the opposite of what happened.
-fn trim(func: &Func, plan: Vec<Inst>, passengers: &HashSet<Inst>, stats: &mut Stats) -> Vec<Inst> {
-    let mut wanted: HashSet<Value> = HashSet::new();
+fn trim(func: &Func, plan: Vec<Inst>, passengers: &Set<Inst>, stats: &mut Stats) -> Vec<Inst> {
+    let mut wanted: Set<Value> = Set::default();
     let mut keep = Vec::with_capacity(plan.len());
     for inst in plan.into_iter().rev() {
         if !func[inst].results().any(|value| wanted.contains(&value)) {

@@ -66,9 +66,8 @@
 //! `sqlite3DbMallocRawNN`, 109 on `sqlite3MallocZero`, 52 on `sqlite3_malloc64`, 48 on
 //! `sqlite3DbMallocRaw` and 30 on `sqlite3Malloc`, and none at all on `malloc`.
 
-use std::collections::HashSet;
-
 use rucc_base::Interner;
+use rucc_base::hash::Set;
 use rucc_ir::{Block, Def, Extra, Flags, Func, FuncId, IntPred, Module, Opcode, Value};
 
 use crate::cfg::Cfg;
@@ -107,7 +106,7 @@ const LARGEST: i128 = 4 * 1024 * 1024 * 1024;
 pub fn annotate(module: &mut Module, names: &Interner) -> usize {
     // A module that defines one of these names itself is the allocator's own source, and what a
     // function called `malloc` does in there is whatever it was written to do.
-    let defined: HashSet<&str> = module
+    let defined: Set<&str> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
         .map(|id| names.resolve(module[id].name))
@@ -175,10 +174,10 @@ pub(crate) fn made(func: &Func, base: Value) -> Option<Fact> {
 /// nothing has been tested before the function starts, and that is what makes the answer travel
 /// forward from there rather than hold itself up. A block the entry does not reach is left out
 /// altogether, so nothing is claimed about code nothing runs.
-pub(crate) fn tested(func: &Func, cfg: &Cfg, pointer: Value) -> HashSet<Block> {
-    let Some(entry) = cfg.entry() else { return HashSet::new() };
+pub(crate) fn tested(func: &Func, cfg: &Cfg, pointer: Value) -> Set<Block> {
+    let Some(entry) = cfg.entry() else { return Set::default() };
     let order: Vec<Block> = cfg.reverse_postorder().collect();
-    let mut known: HashSet<Block> = order.iter().copied().filter(|&block| block != entry).collect();
+    let mut known: Set<Block> = order.iter().copied().filter(|&block| block != entry).collect();
     loop {
         let mut settled = true;
         for &block in &order {
