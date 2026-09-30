@@ -193,7 +193,7 @@ impl Size {
     /// not the same question. A prefix in front of an SSE opcode says which instruction it is and
     /// this says how wide the general purpose register in it is, which is why four of the sizes
     /// here answer both.
-    const fn wide(self) -> bool {
+    pub(crate) const fn wide(self) -> bool {
         matches!(self, Quad | WordQuad | SingleQuad | DoubleQuad)
     }
 }
@@ -4353,13 +4353,15 @@ mod tests {
     fn every_instruction_the_listing_writes_is_one_this_encodes() {
         // The claim `spec/11-asm-objects-debug.md` section 11.1 makes about the two paths sharing
         // a description. An instruction the text path writes and this cannot encode would be an
-        // opcode that compiles under `-S` and fails to produce an object file.
+        // opcode that compiles under `-S` and fails to produce an object file. The few that only
+        // i386 writes, `pushl` and `popl`, are asked about in the mode they belong to.
         for &(opcode, _) in INSTS {
             let insts = written(opcode).expect("every described opcode is a written opcode");
             for inst in insts {
                 let args: Vec<Kind> = inst.args.iter().map(|&arg| Kind::of(arg)).collect();
                 assert!(
-                    encoding(inst.mnemonic, &args, 0).is_some(),
+                    encoding(inst.mnemonic, &args, 0).is_some()
+                        || encoding_in(Mode::Bits32, inst.mnemonic, &args, 0).is_some(),
                     "{opcode} writes {} with {args:?} and nothing encodes it",
                     inst.mnemonic
                 );

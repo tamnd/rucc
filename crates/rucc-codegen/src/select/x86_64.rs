@@ -562,6 +562,10 @@ mod tests {
     /// call is still the rule that picked it, and the thunk is only where the branch is sent.
     const THUNKS: &[&str] = &["call_thunk", "call_thunk_cs", "jmp_thunk", "jmp_thunk_cs", "int3"];
 
+    /// The instructions only the i386 frame and selector name. They are in the shared description
+    /// because the two machines share one, and no x86-64 rule selects them.
+    const I386: &[&str] = &["lea_32", "mov_rr_32", "push_32", "pop_32", "endbr32"];
+
     /// The instructions that change an object where it lives, which a template asks for and
     /// nothing else does.
     ///
@@ -1014,6 +1018,9 @@ mod tests {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {
+                continue;
+            }
+            if I386.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

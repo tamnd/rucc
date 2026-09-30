@@ -419,7 +419,7 @@ static CONDITIONAL: [&str; 16] = [
 /// them a comparison that had a load folded into it would be a comparison the layout walks past,
 /// and the branch behind it would keep the byte and the test that reads it, which would make
 /// folding the load a saving of one instruction and a cost of two.
-static FUSED: [Fusion; 160] = [
+pub(crate) static FUSED: [Fusion; 160] = [
     Fusion { set: "cmp_set_e_8", cmp: "cmp_rr_8", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_16", cmp: "cmp_rr_16", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_32", cmp: "cmp_rr_32", if_true: "jcc_e", if_false: "jcc_ne" },
@@ -588,7 +588,7 @@ static FUSED: [Fusion; 160] = [
 /// The ten conditions at the four widths a select has. There is no conditional move narrower than
 /// sixteen bits, so the eight bit select moves thirty two bits here for the reason its own rule
 /// does.
-static MOVES: [Move; 40] = [
+pub(crate) static MOVES: [Move; 40] = [
     Move { select: "test_cmov_ne_8", when: "jcc_e", cmov: "cmov_e_32" },
     Move { select: "test_cmov_ne_8", when: "jcc_ne", cmov: "cmov_ne_32" },
     Move { select: "test_cmov_ne_8", when: "jcc_l", cmov: "cmov_l_32" },

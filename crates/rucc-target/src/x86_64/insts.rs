@@ -1966,6 +1966,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("bswap_64", Swap),
     // The address computation the addressing modes are reached through.
     ("lea_64", Lea),
+    // The same at thirty two bits, which is the one an i386 address is. It is also an instruction
+    // in sixty four bit mode, where it keeps the low half of the sum, but no rule for this machine
+    // asks for that.
+    ("lea_32", Lea),
     // Reading and writing memory, at each width the machine has a `mov` for.
     ("mov_rm_8", Load),
     ("mov_rm_16", Load),
@@ -2193,6 +2197,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mov_rr_64", Move),
     ("push_64", Push),
     ("pop_64", Pop),
+    // The same three for i386, whose registers are thirty two bits wide. `pushl` and `popl` have
+    // no encoding in sixty four bit mode, so only `crate::x86::FRAME` names them.
+    ("mov_rr_32", Move),
+    ("push_32", Push),
+    ("pop_32", Pop),
     ("ret", Ret),
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
@@ -2213,6 +2222,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // The landing pad, which says an indirect branch may arrive here. A prologue writes one under
     // `-fcf-protection=branch` and nothing else produces one.
     ("endbr64", Landing),
+    // The landing pad an i386 function starts with, which is the same hint under its other name.
+    ("endbr32", Landing),
     // A byte that does nothing, which `-fpatchable-function-entry=` reserves room with so that
     // something else can be written over it while the program runs. A prologue writes them and
     // nothing else produces one.
@@ -2510,7 +2521,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 747);
+        assert_eq!(described, 752);
     }
 
     #[test]
