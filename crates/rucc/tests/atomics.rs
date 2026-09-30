@@ -235,6 +235,65 @@ void put(_Complex double v) { z = v; }
     assert!(text.contains("__atomic_store"), "{text}");
 }
 
+/// The exchange and the compare and exchange over one that fits are the instructions too, at the
+/// width of the whole object. These used to be refused by name with E0519, because the two
+/// builtins had no way to take a structure, and `<stdatomic.h>` could not hand one over either.
+#[test]
+fn a_structure_an_instruction_reaches_is_exchanged_by_that_instruction() {
+    let text = asm(
+        "narrow-exchange",
+        "\
+#include <stdatomic.h>
+struct P { int a, b; };
+_Atomic struct P pair;
+struct P swap(struct P v) { return atomic_exchange(&pair, v); }
+_Bool cas(struct P *e, struct P d) { return atomic_compare_exchange_strong(&pair, e, d); }
+",
+    );
+    assert!(!text.contains("__atomic_"), "{text}");
+    assert!(text.contains("xchgq"), "{text}");
+    assert!(text.contains("cmpxchgq"), "{text}");
+}
+
+/// One that does not fit is the runtime's generic routine for each, with the size first and every
+/// value by address, which is the call gcc 16.2.0 makes for the same source. A failed compare and
+/// exchange writing what it found back over the expected value is the routine's own business.
+#[test]
+fn a_structure_too_wide_for_an_instruction_is_exchanged_by_a_call() {
+    let text = asm(
+        "wide-exchange",
+        "\
+#include <stdatomic.h>
+struct B { long v[4]; };
+_Atomic struct B big;
+struct B swap(struct B v) { return atomic_exchange(&big, v); }
+_Bool cas(struct B *e, struct B d) { return atomic_compare_exchange_weak(&big, e, d); }
+",
+    );
+    assert!(text.contains("call\t__atomic_exchange"), "{text}");
+    assert!(text.contains("call\t__atomic_compare_exchange"), "{text}");
+    assert!(text.contains("movl\t$32, %edi") || text.contains("movq\t$32, %rdi"), "{text}");
+}
+
+/// The rest of the header after it stopped using the `_n` builtins, over the objects every program
+/// has, which is still one instruction each and no call.
+#[test]
+fn the_shipped_header_still_reaches_one_instruction_for_a_scalar() {
+    let text = asm(
+        "header-scalar",
+        "\
+#include <stdatomic.h>
+int get(atomic_int *p) { return atomic_load(p); }
+void put(atomic_int *p, int v) { atomic_store_explicit(p, v, memory_order_release); }
+int swap(atomic_int *p, int v) { return atomic_exchange(p, v); }
+_Bool cas(_Atomic(int *) *p, int **e, int *d) { return atomic_compare_exchange_strong(p, e, d); }
+",
+    );
+    assert!(!text.contains("call"), "{text}");
+    assert!(text.contains("xchgl"), "{text}");
+    assert!(text.contains("cmpxchgq"), "{text}");
+}
+
 /// A member of one is refused, 6.5.2.3p5, and the reason is the lock: what an access to an atomic
 /// object takes the lock around is the whole object, so four bytes out of the middle of one are
 /// not under it and are not atomic. gcc refuses the same expression.

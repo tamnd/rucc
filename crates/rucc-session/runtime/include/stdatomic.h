@@ -119,31 +119,64 @@ typedef _Atomic __UINTMAX_TYPE__ atomic_uintmax_t;
 #define ATOMIC_LLONG_LOCK_FREE __GCC_ATOMIC_LLONG_LOCK_FREE
 #define ATOMIC_POINTER_LOCK_FREE __GCC_ATOMIC_POINTER_LOCK_FREE
 
-/* The `_n` builtins, which take and answer a value, rather than the ones that pass it through a
- * second pointer. gcc's header uses the second pointer because it has to work for an object of
- * any size and the wide ones come back through memory. Every atomic object here is one a
- * register holds, so the value form says the same thing without a temporary to write it into. */
-#define atomic_store_explicit(object, desired, order) \
-  __atomic_store_n(object, desired, order)
+/* These four go through the builtins that take every value by address, because an atomic object
+ * may be a structure or a union and a structure is not something the `_n` forms can take or give
+ * back. Each is a statement expression holding a temporary of the object's type with the
+ * qualifier taken off, which is what `__typeof__` over a comma expression gives, since the result
+ * of a comma is a value and a value has no qualifiers. The pointer is read into a variable of its
+ * own first so that an argument with a side effect is evaluated once, and `__extension__` is what
+ * keeps a program built with -pedantic-errors from being told off about a header it did not
+ * write. For an integer or a pointer the temporary costs nothing once the optimizer has seen it,
+ * and a size no instruction reaches becomes a call to the runtime either way. */
+#define atomic_store_explicit(object, desired, order)          \
+  __extension__({                                              \
+    __auto_type __rucc_obj = (object);                         \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);   \
+    __atomic_store(__rucc_obj, &__rucc_new, (order));          \
+  })
 #define atomic_store(object, desired) \
   atomic_store_explicit(object, desired, __ATOMIC_SEQ_CST)
 
-#define atomic_load_explicit(object, order) __atomic_load_n(object, order)
+#define atomic_load_explicit(object, order)                    \
+  __extension__({                                              \
+    __auto_type __rucc_obj = (object);                         \
+    __typeof__((void)0, *__rucc_obj) __rucc_old;               \
+    __atomic_load(__rucc_obj, &__rucc_old, (order));           \
+    __rucc_old;                                                \
+  })
 #define atomic_load(object) atomic_load_explicit(object, __ATOMIC_SEQ_CST)
 
-#define atomic_exchange_explicit(object, desired, order) \
-  __atomic_exchange_n(object, desired, order)
+#define atomic_exchange_explicit(object, desired, order)             \
+  __extension__({                                                    \
+    __auto_type __rucc_obj = (object);                               \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);         \
+    __typeof__((void)0, *__rucc_obj) __rucc_old;                     \
+    __atomic_exchange(__rucc_obj, &__rucc_new, &__rucc_old, (order)); \
+    __rucc_old;                                                      \
+  })
 #define atomic_exchange(object, desired) \
   atomic_exchange_explicit(object, desired, __ATOMIC_SEQ_CST)
 
+/* The value expected already arrives through a pointer, and a failed exchange writes what it
+ * found back through that pointer, so only the value to put there needs a temporary. */
 #define atomic_compare_exchange_strong_explicit(object, expected, desired, success, failure) \
-  __atomic_compare_exchange_n(object, expected, desired, 0, success, failure)
+  __extension__({                                                                          \
+    __auto_type __rucc_obj = (object);                                                     \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);                               \
+    __atomic_compare_exchange(__rucc_obj, (expected), &__rucc_new, 0, (success),           \
+                              (failure));                                                  \
+  })
 #define atomic_compare_exchange_strong(object, expected, desired)                 \
   atomic_compare_exchange_strong_explicit(object, expected, desired,              \
                                           __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
 
 #define atomic_compare_exchange_weak_explicit(object, expected, desired, success, failure) \
-  __atomic_compare_exchange_n(object, expected, desired, 1, success, failure)
+  __extension__({                                                                        \
+    __auto_type __rucc_obj = (object);                                                   \
+    __typeof__((void)0, *__rucc_obj) __rucc_new = (desired);                             \
+    __atomic_compare_exchange(__rucc_obj, (expected), &__rucc_new, 1, (success),         \
+                              (failure));                                                \
+  })
 #define atomic_compare_exchange_weak(object, expected, desired)                 \
   atomic_compare_exchange_weak_explicit(object, expected, desired,              \
                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
