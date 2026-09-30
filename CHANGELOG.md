@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Lowering keeps the opcode and operands of each rule head it has built, instead of looking them up by name for every machine instruction (#2236).
 - Cleaning up the allocator's copies and marking the instructions that commute ask the target about each opcode once per function instead of by name for every instruction, and the scheduler and load folding keep their answers per opcode with the shared hasher (#2238).
 - Folding addresses into their readers keeps the instructions the frame still owes an offset in a set, instead of walking the pending lists for every `lea` (#2242).
+- The register allocator finds what an instruction insists on by searching only the one register's points, instead of every constraint in the function (#2243).
 
 ### Fixed
 
