@@ -1317,7 +1317,7 @@ pub(crate) fn length(func: &Func, block: Block) -> u32 {
 /// for. Counting it made the arm of `acc = c ? acc + 1 : acc` two instructions when `acc` is an
 /// `int` and three when it is anything else, since the front end writes the `1` as an `int` and
 /// converts it, and that one extra constant was the difference between a select and a branch.
-fn work(func: &Func, head: Block, arm: Block) -> u32 {
+pub(crate) fn work(func: &Func, head: Block, arm: Block) -> u32 {
     let whole = length(func, arm);
     if whole > heuristics::PHIOPT_ARM_SCAN_INSTRUCTIONS {
         return whole;
