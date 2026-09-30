@@ -761,6 +761,14 @@ impl<'a> Checker<'a> {
             if self.tast[decl].duration != StorageDuration::Automatic {
                 return;
             }
+            // One written in a block lives only as long as the block, and gcc still takes it as
+            // the value of a static object there when everything in it is a constant, which is
+            // how `DEFINE_RATELIMIT_STATE` fills the lock of a `static` inside a function. Its
+            // address is still not a constant, and that is not this case: `&(int){ 1 }` is not
+            // a read of the literal.
+            if !w.constant && self.literal_is_constant(decl) {
+                return;
+            }
         }
         // A `constexpr` object is folded the strict way and a static one the loose way, which is
         // the difference C23 6.6p10 leaves to the implementation and the difference gcc draws:
@@ -788,6 +796,21 @@ impl<'a> Checker<'a> {
             Diagnostic::error("initializer element is not constant", span).with_code("E0618"),
         );
         w.poisoned = true;
+    }
+
+    /// Whether every element of a compound literal written in a block folds to a constant, which
+    /// is what it was not asked for where it was written.
+    ///
+    /// One level only. A second block literal inside the first is not a constant to gcc, and
+    /// the folding refuses it here too, since it is a read of an object that is automatic.
+    fn literal_is_constant(&mut self, decl: DeclId) -> bool {
+        let Some(list) = self.tast[decl].init else { return true };
+        let values = self.tast[list].iter().map(|entry| entry.value).collect::<Vec<_>>();
+        values.into_iter().all(|value| {
+            let ty = self.tast[value].ty;
+            matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Complex(_))
+                || self.eval_initializer(value).is_ok()
+        })
     }
 
     /// A string literal filling a character array, which is one entry and not one per character.
