@@ -238,6 +238,19 @@ fn cast(func: &Func, value: Value) -> Option<(Imm, Type)> {
     constant(func, *func[func[inst].args].first()?)
 }
 
+/// A pointer cast back to an integer when the pointer was cast from an integer constant, which is
+/// that constant again as long as no address is too narrow to hold it.
+///
+/// The kernel's `xa_mk_value (0)` is this once it is inlined, and `swap_table.h` checks it with a
+/// `BUILD_BUG_ON`, so it has to be a number. How wide an address is is not known here, but none is
+/// narrower than thirty two bits, so a number that fits in those comes back the same through any of
+/// them. A larger one is left for the back end, where it costs nothing either.
+fn round_trip(func: &Func, pointer: Value, ty: Type) -> Option<Imm> {
+    let (number, _) = cast(func, pointer)?;
+    let small = u32::try_from(number.unsigned()).ok()?;
+    Some(Imm::int(i128::from(small), ty))
+}
+
 /// Whether two integer constants cast to pointers are the same address, when that can be said
 /// without knowing how wide an address is.
 ///
@@ -306,6 +319,7 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             let value = floating(func, *args.first()?)?;
             to_integer(value, ty, data.opcode == Opcode::FPToSI)
         }
+        Opcode::PtrToInt => round_trip(func, *args.first()?, ty),
         Opcode::ICmp if func[*args.first()?].ty.is_ptr() => {
             let Extra::IntPred(pred) = data.extra else { return None };
             same_address(func, pred, args, ty)
