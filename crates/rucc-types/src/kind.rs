@@ -514,6 +514,13 @@ pub enum TypeKind {
         /// so `typedef int L __attribute__((aligned(2)))` really is an `int` at a multiple of
         /// two and `struct { char c; L x; }` really is six bytes.
         align: Option<NonZeroU32>,
+        /// Whether `__attribute__((may_alias))` was written on the typedef.
+        ///
+        /// An access through a type that says this may read or write an object of any type, the
+        /// way an access through a character type may. It is on this node for the reason the
+        /// alignment is: `typedef int A __attribute__((may_alias))` and `int` are the same type to
+        /// everything but the alias analysis, and that has to be able to tell them apart.
+        may_alias: bool,
     },
 }
 

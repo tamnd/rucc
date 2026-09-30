@@ -150,6 +150,11 @@ enum Name {
 /// Typedefs are resolved first and qualifiers are never looked at, so `const size_t` and
 /// `unsigned long` are one name on a target where they are one type.
 fn spelling(types: &Types, ty: TypeId) -> Option<Name> {
+    // Before the sugar is taken off, since the sugar is where it was said. A type that may alias
+    // anything is a character type as far as this tree is concerned.
+    if types.may_alias(ty) {
+        return Some(Name::Character);
+    }
     match types.kind(types.canonical(ty)) {
         TypeKind::Bool => Some(Name::Distinct("bool".to_string())),
         TypeKind::Int(kind) => Some(match integer(kind) {
@@ -356,6 +361,21 @@ mod tests {
         fix.node(short);
         // The root, `int` and `short`, and nothing else.
         assert_eq!(fix.module.metadata().count(), 3);
+    }
+
+    #[test]
+    fn a_typedef_that_may_alias_anything_is_the_root_and_its_type_is_not() {
+        let mut fix = Fixture::new();
+        let int = fix.types.int(IntKind::Int);
+        let name = fix.names.intern("aliased_int");
+        let aliased = fix.types.may_alias_typedef(name, int, None);
+        let root = fix.node(fix.types.int(IntKind::Char)).expect("the root");
+        assert_eq!(fix.node(aliased), Some(root));
+        assert_ne!(fix.node(int), Some(root), "int itself kept its own node");
+        // A typedef of one that said it cannot take it back.
+        let outer = fix.names.intern("outer");
+        let outer = fix.types.typedef(outer, aliased);
+        assert_eq!(fix.node(outer), Some(root));
     }
 
     #[test]
