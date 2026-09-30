@@ -152,3 +152,28 @@ fn a_register_named_at_file_scope_is_refused_by_name() {
     assert!(!ok, "a global register variable was compiled");
     assert!(said.contains("'gr' is a global register variable"), "{said}");
 }
+
+#[test]
+fn the_stack_pointer_named_at_file_scope_is_read_where_it_is() {
+    // The one file-scope register this target keeps, since nothing is ever given it. The kernel's
+    // `asm/asm.h` declares `current_stack_pointer` this way, and a read of it is a read of `%rsp`.
+    let source = "register unsigned long sp asm (\"rsp\");\nunsigned long f(void) { return sp; }\n";
+    let text = asm("sp-read", source);
+    assert!(text.contains("movq\t%rsp, %rax"), "the stack pointer was not read:\n{text}");
+}
+
+#[test]
+fn an_asm_output_kept_in_the_stack_pointer_is_the_stack_pointer_in_the_template() {
+    // `ASM_CALL_CONSTRAINT`, which the kernel puts on every `asm` that makes a call. The operand is
+    // the register itself, so the template names `%rsp` where it says `%0`, the operand after it
+    // is counted down to `%0`, and nothing is copied in or out.
+    let source = "register unsigned long sp asm (\"rsp\");\nvoid g(void);\n\
+                  long f(long x) { asm volatile (\"leaq 8(%0), %%rdx\\n\\tmovq %1, %%rcx\\n\\tcall g\" \
+                  : \"+r\" (sp) : \"r\" (x) : \"rdx\", \"rcx\"); return x; }\n";
+    let text = asm("sp-asm", source);
+    assert!(text.contains("leaq\t8(%rsp), %rdx"), "the operand is not the stack pointer:\n{text}");
+    assert!(text.contains("call\tg"), "{text}");
+    let copied = text.lines().any(|line| line.contains("movq\t%rsp, ") && !line.ends_with("%rbp"));
+    assert!(!copied, "the stack pointer was copied for the operand:\n{text}");
+    assert!(text.contains("movq\t%rbx, %rcx") || text.contains("movq\t%rdi, %rcx"), "{text}");
+}

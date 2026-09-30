@@ -865,9 +865,28 @@ impl TargetInfo {
     /// AArch64 that is `x18`, which rucc keeps off every target because Windows and Apple give it
     /// to the platform, and which mingw-w64's `winnt.h` declares this way so that `NtCurrentTeb`
     /// reads the thread's TEB out of it.
+    ///
+    /// The stack pointer is the other one, on both machines. Nothing hands it out and nothing
+    /// writes it behind the program's back, and the Linux kernel declares `current_stack_pointer`
+    /// as `rsp` or `sp` this way, to read it and to hand it to the `asm` statements that make a
+    /// call so that the call is made from a frame that is set up.
     #[must_use]
     pub fn keeps_register_for_the_program(&self, name: &str) -> bool {
-        self.tuple.arch() == tuple::Arch::Aarch64 && name == "x18"
+        match self.tuple.arch() {
+            tuple::Arch::Aarch64 => matches!(name, "x18" | "sp"),
+            tuple::Arch::X86_64 => name == "rsp",
+            _ => false,
+        }
+    }
+
+    /// How an `asm` template with operands on this target writes the register called `name`,
+    /// which is `%%rsp` on x86, where one `%` would start an operand, and as it is on AArch64.
+    #[must_use]
+    pub fn register_in_text(&self, name: &str) -> String {
+        match self.tuple.arch() {
+            tuple::Arch::X86_64 | tuple::Arch::X86 => format!("%%{name}"),
+            _ => name.to_owned(),
+        }
     }
 
     /// Whether an unnamed bit-field raises the record's alignment under `style`, which is the

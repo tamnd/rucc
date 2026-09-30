@@ -787,6 +787,51 @@ fn a_call_from_a_template_is_a_call_and_reads_the_input_sharing_its_output() {
     assert!(!zeroed(&body), "the output was read as nothing rather than as the input:\n{body}");
 }
 
+#[test]
+fn an_input_pinned_to_a_register_is_there_for_the_call_the_template_makes() {
+    // The kernel's way of passing an argument to a call it makes from a template, `"D" (x)` beside
+    // `call g`. Nothing in the template reads `rdi`, so without the call reading it the move of the
+    // second argument into it was a move nobody read and was left out.
+    let source =
+        "void g(void); void f(long a, long x) { asm volatile (\"call g\" : : \"D\" (x)); }\n";
+    let (ok, text, said) = run_with("pinned-call", source, &["-O2"]);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    let body = body(&text, "f");
+    let moved = body.find("movq\t%rsi, %rdi").expect("the argument never reached rdi");
+    let called = body.find("call\tg").expect("the call never reached the listing");
+    assert!(moved < called, "the argument was put in rdi after the call:\n{body}");
+}
+
+#[test]
+fn a_clobber_list_does_not_move_what_a_line_reads() {
+    // The listing names a register by where it is among the instruction's operands, and the
+    // clobbers used to go in among them, so every read behind them was one place off. This was
+    // written as `movq %rcx, %rax`, a move out of the register the list said was destroyed.
+    let source = "long f(long x) { long y; asm (\"movq %1, %0\" : \"=r\" (y) : \"r\" (x) : \"rcx\"); \
+                  return y + x; }\n";
+    let (ok, text, said) = run_with("clobber-read", source, &["-O2"]);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    let body = body(&text, "f");
+    assert!(body.contains("movq\t%rdi, %"), "the move does not read x:\n{body}");
+    assert!(!body.contains("movq\t%rcx"), "the move reads the clobbered register:\n{body}");
+}
+
+#[test]
+fn a_register_the_template_writes_and_also_clobbers_is_written_once() {
+    // `rcx` written by name and named in the clobber list as a program has to name it. The second
+    // line read it back as the clobber rather than as what the first line put there, and the
+    // template was gone above -O0.
+    let source = "long f(long x) { long y; asm volatile (\"movq %1, %%rcx\\n\\tmovq %%rcx, %0\" \
+                  : \"=r\" (y) : \"r\" (x) : \"rcx\"); return y; }\n";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with("clobbered-write", source, &[level]);
+        assert!(ok, "the compiler refused the fixture:\n{said}");
+        let body = body(&text, "f");
+        assert!(body.contains("movq\t%rdi, %rcx"), "x never reached rcx at {level}:\n{body}");
+        assert!(body.contains("movq\t%rcx, %"), "rcx was never read at {level}:\n{body}");
+    }
+}
+
 /// What the compiler makes of that source as an object, and what it said.
 fn object(what: &str, source: &str, flags: &[&str]) -> (bool, Vec<u8>, String) {
     let path = fixture(what, source);
