@@ -352,7 +352,7 @@ impl Checker<'_> {
             // The specifiers only, for the reason the two above read them only: a definition has
             // no declarator to write an attribute after, so a definition that says anything says
             // it there.
-            visibility: self.seen(specs.attrs),
+            visibility: self.seen(specs.attrs).or(pushed(specs.pushed)),
             // The specifiers only, for the reason the visibility above reads them only. A
             // definition carrying it is the usual way a program offers a default somebody else
             // may replace, and the declaration above it is the other way. Beside a star as well,
@@ -744,7 +744,10 @@ impl Checker<'_> {
             // declarator, and both spellings are common in the same header.
             effects: self.promised_effects(specs.attrs).and(self.promised_effects(item.attrs)),
             // Both places, for the reason `retained` above reads both.
-            visibility: self.seen(specs.attrs).or_else(|| self.seen(item.attrs)),
+            visibility: self
+                .seen(specs.attrs)
+                .or_else(|| self.seen(item.attrs))
+                .or(pushed(specs.pushed)),
             // Both places, for the reason `retained` above reads both. The usual place a library
             // writes it is on the specifiers of a declaration in a header, which is where a hook
             // nobody has to define is offered.
@@ -1947,6 +1950,15 @@ fn takes_prior_linkage(specs: &ast::DeclSpecs, kind: DeclKind) -> bool {
         None => kind == DeclKind::Function,
         _ => false,
     }
+}
+
+/// What `#pragma GCC visibility push` left on a declaration, as the attribute would have said it.
+fn pushed(pushed: Option<ast::PushedVisibility>) -> Option<Visibility> {
+    pushed.map(|pushed| match pushed {
+        ast::PushedVisibility::Default => Visibility::Default,
+        ast::PushedVisibility::Hidden => Visibility::Hidden,
+        ast::PushedVisibility::Protected => Visibility::Protected,
+    })
 }
 
 /// The stronger of two definition states, which is what a redeclaration leaves behind.

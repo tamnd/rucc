@@ -45,6 +45,9 @@ pub(crate) struct Packs {
     current: Option<u32>,
     /// What `push` saved, innermost last.
     stack: Vec<Option<u32>>,
+    /// What `#pragma GCC visibility push` lines are open, innermost last. It lives here because
+    /// this is what walks the lines, and `visibility.rs` reads it.
+    pub(crate) visibility: Vec<rucc_ast::PushedVisibility>,
 }
 
 /// The alignments `#pragma pack` takes, which is what both GCC and MSVC accept.
@@ -102,12 +105,19 @@ impl Parser<'_> {
         }
     }
 
-    /// One `#pragma` line, which is ignored unless it is a `pack` or a `comment`.
+    /// Applies every pragma line up to and including the ones written just ahead of the cursor.
+    pub(crate) fn read_to_cursor(&mut self) {
+        self.read_packs(self.cursor.index() + 1);
+    }
+
+    /// One `#pragma` line, which is ignored unless it is a `pack`, a `comment` or a
+    /// `GCC visibility`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
         let Some(first) = line.first() else { return };
         match first.ident().map(|name| self.cx.interner.resolve(name)) {
             Some("pack") => {}
             Some("comment") => return self.comment_line(&line[1..], span),
+            Some("GCC") => return self.visibility_line(&line[1..], span),
             _ => return,
         }
         let mut rest = &line[1..];
