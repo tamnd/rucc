@@ -853,7 +853,7 @@ gcc_version = "12.0"
 status = "implemented"
 used_by = ["linux"]
 tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Leaves a local out of `-ftrivial-auto-var-init`. This compiler refuses that flag rather than taking it, so no local is initialized behind the program's back and there is nothing to leave it out of."
+notes = "Leaves a local out of `-ftrivial-auto-var-init`, so it holds whatever was there, as in gcc."
 
 [[feature]]
 name = "copy"

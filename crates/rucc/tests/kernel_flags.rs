@@ -53,6 +53,8 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
         "-fno-jump-tables",
         "-fconserve-stack",
         "-gz=zstd",
+        "-ftrivial-auto-var-init=zero",
+        "-ftrivial-auto-var-init=pattern",
     ] {
         assert!(cc_option(X86, flag), "{flag}");
     }

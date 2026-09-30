@@ -82,6 +82,25 @@ pub enum Protector {
     Explicit,
 }
 
+/// What an automatic object with no initializer holds before the program writes it, which is
+/// `-ftrivial-auto-var-init=`.
+///
+/// The kernel builds with `zero` under `CONFIG_INIT_STACK_ALL_ZERO`, which a distribution config
+/// usually has on, and with `pattern` under `CONFIG_INIT_STACK_ALL_PATTERN`. Either one is written
+/// where the declaration is reached, so a declaration a `switch` jumps past is left alone, as gcc
+/// leaves it. A local that says `__attribute__((uninitialized))` is left alone too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoInit {
+    /// Whatever was there, which is what C says and what a command line that says nothing gets.
+    #[default]
+    Uninitialized,
+    /// Every byte zero, padding included.
+    Zero,
+    /// Every byte `0xfe`, the byte gcc repeats, except that padding is zero and so is a `bool`
+    /// that is a whole object rather than a member of one.
+    Pattern,
+}
+
 /// What overflows rather than being undefined, which is `-fwrapv` and its relatives.
 ///
 /// Every licence the walk grants the optimizer about overflow is one flag on one instruction, and
@@ -210,6 +229,8 @@ pub struct Context<'a> {
     pub builtins: bool,
     /// The names `-fno-builtin-<name>` took away one at a time, without the prefix.
     pub no_builtin: &'a [String],
+    /// What a local with no initializer starts out holding, which is `-ftrivial-auto-var-init=`.
+    pub auto_init: AutoInit,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -238,6 +259,7 @@ impl fmt::Debug for Context<'_> {
             .field("common", &self.common)
             .field("builtins", &self.builtins)
             .field("no_builtin", &self.no_builtin)
+            .field("auto_init", &self.auto_init)
             .finish_non_exhaustive()
     }
 }
@@ -308,6 +330,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         common,
         builtins,
         no_builtin,
+        auto_init,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -332,6 +355,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         common,
         builtins,
         no_builtin,
+        auto_init,
         read,
         module,
         diagnostics: Vec::new(),
@@ -389,6 +413,8 @@ pub(crate) struct Unit<'a> {
     builtins: bool,
     /// The names taken away one at a time. See [`Context::no_builtin`].
     no_builtin: &'a [String],
+    /// What a local with no initializer starts out holding. See [`Context::auto_init`].
+    pub(crate) auto_init: AutoInit,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
