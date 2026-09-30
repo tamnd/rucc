@@ -42,4 +42,4 @@ These are in code that runs, not in tests. A test that builds x86-64 instruction
 
 - `lower.rs` jumps away with `jmp_away`, and reads a global register variable with `x86_64::gpr_named`. The last needs a register name table per machine.
 
-- `lower.rs` assumes a 64-bit address in `ADDRESS_BITS`. That holds for every target in plan tier 1 and fails for i686, armv7 and x32.
+- `lower.rs` takes the address width from the convention's word, which is right for i686 and every 64-bit target and would be wrong for x32, where a register is 64 bits and an address is 32.

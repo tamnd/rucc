@@ -108,17 +108,13 @@ use crate::varargs;
 /// See [`x86_64::Step::Away`].
 const AWAY: &str = "jmp_away";
 
-/// How wide an address is on this target, which is the width a cast between a pointer and an
-/// integer has to be at for the cast to be nothing.
-const ADDRESS_BITS: u32 = 64;
-
 /// How much of a register an operand of an `asm` statement fills, which is the width of its type
 /// with two exceptions. A pointer is an address, and a truth value is the byte it is stored in: a
 /// program that writes `sete %0` into a `_Bool` is asking for exactly that byte, which is what tcc's
 /// own test of the width of one checks.
-fn held_bits(ty: Type) -> u32 {
+fn held_bits(ty: Type, address: u32) -> u32 {
     if ty.is_ptr() {
-        ADDRESS_BITS
+        address
     } else if ty.bits() == 1 {
         8
     } else {
@@ -3775,8 +3771,8 @@ impl<'a> Lowering<'a> {
         };
         let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
         let ty = self.source[result].ty;
-        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
-        if bits > ADDRESS_BITS {
+        let bits = if ty.is_ptr() { self.address_bits() } else { ty.bits() };
+        if bits > self.address_bits() {
             return Err(self.unsupported(inst));
         }
         let spelled = self.names.resolve(symbol).to_owned();
@@ -3994,7 +3990,7 @@ impl<'a> Lowering<'a> {
         // has no instruction for rather than a program that is wrong, and the front end refuses it
         // before ever getting here.
         let ty = self.source[old].ty;
-        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        let bits = if ty.is_ptr() { self.address_bits() } else { ty.bits() };
         if (!ty.is_int() && !ty.is_ptr()) || !matches!(bits, 8 | 16 | 32 | 64) {
             return Err(self.unsupported(inst));
         }
@@ -4116,7 +4112,7 @@ impl<'a> Lowering<'a> {
     /// The width an AArch64 atomic works at, which is an integer or an address of one of the four
     /// widths the exclusive loads and stores have. Anything else is refused.
     fn atomic_bits(&self, inst: Inst, ty: Type) -> Result<u32, Unsupported> {
-        let bits = if ty.is_ptr() { ADDRESS_BITS } else { ty.bits() };
+        let bits = if ty.is_ptr() { self.address_bits() } else { ty.bits() };
         if (!ty.is_int() && !ty.is_ptr()) || !matches!(bits, 8 | 16 | 32 | 64) {
             return Err(self.unsupported(inst));
         }
@@ -4331,7 +4327,7 @@ impl<'a> Lowering<'a> {
                 if !ty.is_scalar() {
                     return None;
                 }
-                x86_64::Width::of_bits(held_bits(ty))
+                x86_64::Width::of_bits(held_bits(ty, self.address_bits()))
             })
             .collect();
         // An operand in memory is an address the statement holds and an object the template names,
@@ -4914,7 +4910,7 @@ impl<'a> Lowering<'a> {
                 let placed = def_of[index].or(use_of[index].map(|at| first_use + at));
                 if let Some(at) = placed {
                     let value = operand.result.or(operand.value).ok_or_else(refused)?;
-                    let bits = held_bits(self.source[value].ty);
+                    let bits = held_bits(self.source[value].ty, self.address_bits());
                     // `w` and `x` are the two names every general purpose register has, and one
                     // with no modifier is named at the width of its type, as gcc names it. A
                     // vector register with no modifier is `v`, which is what gcc writes for one
@@ -4933,7 +4929,7 @@ impl<'a> Lowering<'a> {
                         }
                     } else {
                         match modifier {
-                            None => match held_bits(self.source[value].ty) {
+                            None => match held_bits(self.source[value].ty, self.address_bits()) {
                                 8 => 'b',
                                 16 => 'w',
                                 32 => 'k',
@@ -5841,7 +5837,7 @@ impl<'a> Lowering<'a> {
             (None, Some(value)) => self.source[value].ty,
             (None, None) => return Err(refused()),
         };
-        let bits = held_bits(ty);
+        let bits = held_bits(ty, self.address_bits());
         if !placeable || self.class_of(ty) != desc.class {
             return Err(refused());
         }
@@ -6038,7 +6034,7 @@ impl<'a> Lowering<'a> {
     fn undefined(&mut self, inst: Inst, result: Value) -> Result<(), Unsupported> {
         let ty = self.source[result].ty;
         let refused = Unsupported::Assembly { inst, refused: Written::Operand };
-        let bits = held_bits(ty);
+        let bits = held_bits(ty, self.address_bits());
         if self.class_of(ty) != self.gpr || !matches!(bits, 8 | 16 | 32 | 64) {
             return Err(refused);
         }
@@ -6050,9 +6046,16 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
+    /// How wide an address is on this target, which is the width a cast between a pointer and an
+    /// integer has to be at for the cast to be nothing. A register holds exactly one address on
+    /// every target this lowers for, so it is the convention's word.
+    fn address_bits(&self) -> u32 {
+        self.conv.word * 8
+    }
+
     /// Whether a type is the width an address is, which is what makes a cast to or from one free.
     fn is_address_width(&self, ty: Type) -> bool {
-        ty.is_ptr() || (ty.is_int() && ty.bits() == ADDRESS_BITS)
+        ty.is_ptr() || (ty.is_int() && ty.bits() == self.address_bits())
     }
 
     /// Where a block goes, which in machine IR is on the block rather than on its terminator.
@@ -6710,7 +6713,7 @@ impl<'a> Lowering<'a> {
         let mut left = Vec::with_capacity(16);
         let mut bindings = Vec::with_capacity(8);
         for plan in self.plans(inst, refused) {
-            let terms = Terms::new(self.source, inst, plan);
+            let terms = Terms::new(self.source, inst, plan, self.address_bits());
             if let Some(rule) =
                 self.selector.table.find_in(&terms, Term::Root, &mut left, &mut bindings)
             {
@@ -6736,7 +6739,7 @@ impl<'a> Lowering<'a> {
                 ways[index][count] = Shown::Expand;
                 count += 1;
             }
-            if Terms::new(self.source, inst, PLAIN).constant(arg).is_some() {
+            if Terms::new(self.source, inst, PLAIN, self.address_bits()).constant(arg).is_some() {
                 ways[index][count] = Shown::Const;
                 count += 1;
             }
@@ -7182,7 +7185,7 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         Unsupported::Inst {
             inst,
-            term: Terms::new(self.source, inst, PLAIN).name(inst),
+            term: Terms::new(self.source, inst, PLAIN, self.address_bits()).name(inst),
             opcode: data.opcode,
             ty: data.first_result.map(|result| self.source[result].ty),
         }

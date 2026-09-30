@@ -41,6 +41,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Splitting an integer wider than a register now splits at twice the target's register width instead of always splitting `__int128` into 64-bit halves. On a 32-bit target, which is where the i386 backend is heading, a `long long` becomes two 32-bit halves and its divisions and float conversions call `__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3` and the `__floatdi`/`__fixdi` family. 64-bit targets get the same output as before (#2247).
+- The rule matcher and the x86 lowering now ask the target how wide an address is, instead of taking it to be 64 bits. A pointer is named as an integer of that width in a rule, so on i386 a load of a pointer is `load.i32` and a pointer add is `add.i32`. The optimizer reads the width from the module's data layout and the lowering reads it from the calling convention. 64-bit targets get the same output as before (#2247).
 - The optimizer's maps and sets hash with the shared hasher instead of SipHash (#2291).
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
