@@ -3360,6 +3360,24 @@ static ENCODINGS: &[Encoding] = &[
     // AVX and AVX2, which have no EVEX form and are written with a VEX prefix whose one length
     // bit the registers named decide. Each size is the mandatory prefix, and the ones with a wide
     // bit say so the way a legacy row does.
+    // The bitwise operations on packed floats, which the kernel's xor_avx.h writes on `ymm`
+    // registers. They only have an EVEX form under AVX-512DQ, which nothing here asks for yet.
+    avx("vandps", &VVV, Long, Map::Escape, &[0x54], Some(1), pair(0, 2)),
+    avx("vandps", &MVV, Long, Map::Escape, &[0x54], Some(1), pair(0, 2)),
+    avx("vandpd", &VVV, Word, Map::Escape, &[0x54], Some(1), pair(0, 2)),
+    avx("vandpd", &MVV, Word, Map::Escape, &[0x54], Some(1), pair(0, 2)),
+    avx("vandnps", &VVV, Long, Map::Escape, &[0x55], Some(1), pair(0, 2)),
+    avx("vandnps", &MVV, Long, Map::Escape, &[0x55], Some(1), pair(0, 2)),
+    avx("vandnpd", &VVV, Word, Map::Escape, &[0x55], Some(1), pair(0, 2)),
+    avx("vandnpd", &MVV, Word, Map::Escape, &[0x55], Some(1), pair(0, 2)),
+    avx("vorps", &VVV, Long, Map::Escape, &[0x56], Some(1), pair(0, 2)),
+    avx("vorps", &MVV, Long, Map::Escape, &[0x56], Some(1), pair(0, 2)),
+    avx("vorpd", &VVV, Word, Map::Escape, &[0x56], Some(1), pair(0, 2)),
+    avx("vorpd", &MVV, Word, Map::Escape, &[0x56], Some(1), pair(0, 2)),
+    avx("vxorps", &VVV, Long, Map::Escape, &[0x57], Some(1), pair(0, 2)),
+    avx("vxorps", &MVV, Long, Map::Escape, &[0x57], Some(1), pair(0, 2)),
+    avx("vxorpd", &VVV, Word, Map::Escape, &[0x57], Some(1), pair(0, 2)),
+    avx("vxorpd", &MVV, Word, Map::Escape, &[0x57], Some(1), pair(0, 2)),
     avx("vpxor", &VVV, Word, Map::Escape, &[0xEF], Some(1), pair(0, 2)),
     avx("vpxor", &MVV, Word, Map::Escape, &[0xEF], Some(1), pair(0, 2)),
     avx("vpor", &VVV, Word, Map::Escape, &[0xEB], Some(1), pair(0, 2)),
@@ -6106,6 +6124,22 @@ mod tests {
         assert_eq!(hex("kmovq", &[quad(R13), Value::Mask(7)]), "c4 c1 fb 92 fd");
         assert_eq!(hex("kmovq", &[Value::Mask(1), quad(RAX)]), "c4 e1 fb 93 c1");
         assert_eq!(hex("kmovq", &[Value::Mask(3), quad(R9)]), "c4 61 fb 93 cb");
+    }
+
+    /// crypto/xor.c xors a block into a `ymm` register with `vxorps`, and the other three
+    /// bitwise operations on packed floats come with it.
+    #[test]
+    fn the_bitwise_operations_on_packed_floats_are_the_bytes_gas_writes() {
+        assert_eq!(hex("vxorps", &[at(RAX, 0), y(0), y(0)]), "c5 fc 57 00");
+        assert_eq!(hex("vxorps", &[y(1), y(2), y(3)]), "c5 ec 57 d9");
+        assert_eq!(hex("vxorps", &[y(9), y(13), y(0)]), "c4 c1 14 57 c1");
+        assert_eq!(hex("vxorpd", &[at(RCX, 32), x(4), x(5)]), "c5 d9 57 69 20");
+        assert_eq!(hex("vandps", &[y(1), y(2), y(3)]), "c5 ec 54 d9");
+        assert_eq!(hex("vandnpd", &[x(11), x(2), x(3)]), "c4 c1 69 55 db");
+        assert_eq!(hex("vorps", &[at(R8, 0), y(12), y(2)]), "c4 c1 1c 56 10");
+        assert_eq!(hex("vorpd", &[y(1), y(2), y(3)]), "c5 ed 56 d9");
+        assert_eq!(hex("vandpd", &[x(1), x(2), x(3)]), "c5 e9 54 d9");
+        assert_eq!(hex("vandnps", &[y(1), y(2), y(3)]), "c5 ec 55 d9");
     }
 
     /// lib/raid6/recov_avx512.c moves whole `zmm` registers with the floating point moves, which
