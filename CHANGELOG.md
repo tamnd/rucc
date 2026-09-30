@@ -13,6 +13,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__attribute__((error("...")))` and `warning("...")` are honoured, where before they were accepted and dropped. A call to such a function that is still there after inlining and dead code removal is an error or a warning quoting the message and pointing at the call, and a call the optimizer took out says nothing, so the kernel's `BUILD_BUG_ON` reports the failing assertion instead of leaving a link error naming `__compiletime_assert_N`. A `static inline` function every call to which was inlined is no longer emitted from `-O1` up, which is what gcc does and what keeps the call in its body from counting (#2264).
+
+### Added
+
 - `__attribute__((section("name")))` puts a function or an object in the section it names, where before the attribute was accepted and dropped. A function goes there as code, `"ax"`, and an object as `"a"` when it is a constant holding no address and `"aw"` otherwise, which are gcc's flags. Zeros are written as bytes in the named section rather than sent to `.bss`, except in a section whose name means zeros such as `.bss..page_aligned`, relocations are kept, and several definitions naming one section share it in the order they were written. On Mach-O a name written for ELF becomes `__DATA,__name` or `__TEXT,__name`. The attribute on an automatic object or a typedef is refused, and a later declaration naming a different section is warned about and ignored, as gcc does (#909).
 
 ### Added

@@ -40,6 +40,7 @@ pub mod library;
 pub mod link;
 mod map;
 pub mod msvc;
+mod notice;
 pub mod phase;
 pub mod preprocess;
 pub mod schedule;
