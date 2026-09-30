@@ -517,9 +517,21 @@ pub(crate) enum Want {
 /// It used to be a flat list walked from one end for every candidate register of every interval,
 /// which is quadratic in the size of a function and is most of the compile on a large one. See
 /// tamnd/rucc#1003 for the profile that found it.
+///
+/// The search is over the points alone and only among the one register's entries. A search over
+/// the whole list compares three fields of an entry several times its size at every step, and on a
+/// large function that is most of what asking costs, since every candidate register of every
+/// interval asks.
 pub(crate) struct Blocks {
     /// The constraints, sorted by class, then by register, then by point.
     all: Vec<Blocked>,
+    /// The point of each constraint, in the same order, which is what the search reads.
+    points: Vec<Point>,
+    /// Where each register's constraints start and end in the list, by class times `stride` plus
+    /// the register's number.
+    spans: Vec<(usize, usize)>,
+    /// One more than the highest register number anything insists on.
+    stride: usize,
     /// How many bytes of its register each virtual register's value takes, by number, which is
     /// what [`Blocked::reaches`] asks.
     widths: Vec<Option<u8>>,
@@ -572,12 +584,14 @@ impl Blocks {
         at: PhysReg,
         range: Range,
     ) -> impl Iterator<Item = &Blocked> + '_ {
-        let first = self
-            .all
-            .partition_point(|one| (one.class, one.at, one.point) < (class, at, range.start));
-        self.all[first..]
-            .iter()
-            .take_while(move |one| one.class == class && one.at == at && one.point <= range.end)
+        let (low, high) = if usize::from(at.number()) < self.stride {
+            let key = usize::from(class.number()) * self.stride + usize::from(at.number());
+            self.spans.get(key).copied().unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        let first = low + self.points[low..high].partition_point(|&point| point < range.start);
+        self.all[first..high].iter().take_while(move |one| one.point <= range.end)
     }
 }
 
@@ -785,7 +799,19 @@ pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
     let widths = (0..func.vregs())
         .map(|number| func.width(Reg::virtual_reg(u32::try_from(number).ok()?)))
         .collect();
-    Blocks { all: blocked, widths }
+    let points = blocked.iter().map(|one| one.point).collect();
+    let stride = blocked.iter().map(|one| usize::from(one.at.number()) + 1).max().unwrap_or(0);
+    let classes = blocked.last().map_or(0, |one| usize::from(one.class.number()) + 1);
+    let mut spans = vec![(0, 0); classes * stride];
+    for (index, one) in blocked.iter().enumerate() {
+        let key = usize::from(one.class.number()) * stride + usize::from(one.at.number());
+        let span = &mut spans[key];
+        if span.1 == 0 {
+            span.0 = index;
+        }
+        span.1 = index + 1;
+    }
+    Blocks { all: blocked, points, spans, stride, widths }
 }
 
 /// The register an operand has to be in, which is the one a constraint asks for or the one the
