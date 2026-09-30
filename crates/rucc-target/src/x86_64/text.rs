@@ -1771,8 +1771,10 @@ mod tests {
             // And the jump has no second place it could go. A call may be to a name the linker
             // resolves, which is the ordinary one, but where a computed `goto` goes is in the
             // register and a name written for one would be a jump somewhere the program never said.
+            // The thunk jumps are the exception: the register is still where they go, and the name
+            // written is the thunk for that register, which goes there for them.
             assert!(
-                form != Form::JmpReg || through,
+                form != Form::JmpReg || through || name.starts_with("jmp_thunk"),
                 "{name} goes through a register and names something else"
             );
             assert_eq!(
