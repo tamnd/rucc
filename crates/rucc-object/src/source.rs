@@ -27,8 +27,11 @@
 //! there is one place that knows how an object file is laid out and one that knows what each format
 //! calls the things in it.
 
-use object::write::{Object as Writer, Relocation, Symbol, SymbolSection};
-use object::{Architecture, Endianness, RelocationFlags, SectionKind, SymbolFlags, elf, pe};
+use object::write::{Object as Writer, Relocation, SectionId, Symbol, SymbolSection};
+use object::{
+    Architecture, Endianness, RelocationFlags, SectionFlags, SectionKind, SymbolFlags, SymbolKind,
+    SymbolScope, elf, pe,
+};
 use rucc_base::hash::{Map, Set};
 use rucc_target::aarch64::Fixup;
 use rucc_target::{ObjectFormat, TargetInfo};
@@ -54,13 +57,15 @@ pub struct Part {
     /// Every place in it that names something, counted from the start of the section.
     pub relocs: Vec<Reloc>,
     /// The COMDAT it is, on COFF, where `.section name,"flags",discard,symbol` makes a section one
-    /// the linker keeps a single copy of out of every object that has one about the same symbol.
-    /// [`None`] for every other section and on every other format.
+    /// the linker keeps a single copy of out of every object that has one about the same symbol,
+    /// and the section group it is in on ELF, where `.section name,"axG",@progbits,symbol,comdat`
+    /// says the same. [`None`] for every other section and on Mach-O.
     pub group: Option<Group>,
 }
 
-/// A COFF section the linker keeps one copy of, which is what the third and fourth operands of
-/// `.section` say on that format.
+/// A section the linker keeps one copy of, which is what the third and fourth operands of
+/// `.section` say on COFF and the `G` flag and the operands after the type say on ELF. Every
+/// section of one ELF object that names the same symbol is in the one group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     /// The name the group is about, which the file defines in the section.
@@ -85,6 +90,9 @@ pub enum Keep {
     Largest,
     /// `newest`: the newest one, which no toolchain writes and link.exe does not implement.
     Newest,
+    /// A group that is not a COMDAT, on ELF, which is `G` without `comdat` after the symbol. The
+    /// linker keeps or drops its sections together and keeps every copy of them.
+    Together,
 }
 
 impl Keep {
@@ -110,6 +118,9 @@ impl Keep {
             Keep::SameContents => object::ComdatKind::ExactMatch,
             Keep::Largest => object::ComdatKind::Largest,
             Keep::Newest => object::ComdatKind::Newest,
+            // The writer underneath writes every ELF group as a COMDAT, and the word that says so
+            // is cleared afterwards. See [`together`].
+            Keep::Together => object::ComdatKind::Any,
         }
     }
 }
@@ -143,6 +154,13 @@ pub struct Shape {
     /// `S`: the entries are strings ended by a zero rather than all of one length, which is where
     /// gcc puts every string literal. Only means anything beside `merge`.
     pub strings: bool,
+    /// `@note`: the bytes are notes for a loader or a tool to find by type, such as the build ID
+    /// and the entry point notes a boot loader reads out of the kernel. Only means anything beside
+    /// `bits`, and only on ELF, whose section type says it.
+    pub note: bool,
+    /// `R`: the linker keeps the section when it drops the ones nothing refers to, which is what
+    /// `__attribute__((retain))` asks for on ELF.
+    pub retain: bool,
     /// The type and attributes of a Mach-O section, in the one word the format keeps them in,
     /// which is what [`Shape::mach`] works out. Zero on the other two formats, where the fields
     /// above are the whole answer, and zero is also an ordinary Mach-O section with nothing said.
@@ -351,6 +369,9 @@ impl Shape {
         if self.thread {
             flags |= elf::SHF_TLS.0;
         }
+        if self.retain {
+            flags |= elf::SHF_GNU_RETAIN.0;
+        }
         if self.merge != 0 {
             flags |= elf::SHF_MERGE.0;
             if self.strings {
@@ -364,6 +385,7 @@ impl Shape {
     pub(crate) fn sh_type(self) -> elf::SectionType {
         match self.array {
             _ if !self.bits => elf::SHT_NOBITS,
+            _ if self.note => elf::SHT_NOTE,
             Some(Array::Init) => elf::SHT_INIT_ARRAY,
             Some(Array::Fini) => elf::SHT_FINI_ARRAY,
             Some(Array::Preinit) => elf::SHT_PREINIT_ARRAY,
@@ -539,7 +561,14 @@ pub fn assembled_described(
         // them and the source said them exactly. A section the program wrote `"ax"` on is executable
         // whether or not its name is one this compiler would have made executable. Only where the
         // format has the fields: see [`Flavour::stated`].
-        if let Some(flags) = flavour.stated(part.shape) {
+        if let Some(mut flags) = flavour.stated(part.shape) {
+            // A member of a group says so in its own flags on ELF, which the writer underneath
+            // leaves to whoever states them.
+            if let SectionFlags::Elf { sh_flags, .. } = &mut flags {
+                if part.group.is_some() {
+                    sh_flags.0 |= elf::SHF_GROUP.0;
+                }
+            }
             obj.section_mut(id).flags = flags;
         }
         let align = part.align.max(1);
@@ -551,7 +580,7 @@ pub fn assembled_described(
         // A COMDAT's section symbol comes before the symbol the group is about, which is the
         // order the COFF writer wants the two in, so it is asked for here and not left to the
         // first relocation that happens to need it.
-        if part.group.is_some() {
+        if part.group.is_some() && flavour == Flavour::Coff {
             obj.section_symbol(id);
         }
         made.push(id);
@@ -568,6 +597,13 @@ pub fn assembled_described(
         .flat_map(|part| &part.relocs)
         .filter(|reloc| onto(reloc).is_none())
         .map(|reloc| reloc.symbol.as_str())
+        .chain(
+            input
+                .parts
+                .iter()
+                .filter_map(|part| part.group.as_ref())
+                .map(|group| group.symbol.as_str()),
+        )
         .collect();
 
     // Then every name. A relocation names one, and the writer wants the symbol before the
@@ -618,20 +654,49 @@ pub fn assembled_described(
         symbols.insert(name.name.clone(), id);
     }
 
+    // One group for every symbol on ELF, holding each section that named it, and one for every
+    // section on COFF, where a COMDAT is a section and the symbol it is about.
+    let mut groups: Vec<(&Group, Vec<SectionId>)> = Vec::new();
+    let mut grouped: Map<&str, usize> = Map::default();
     for (part, id) in input.parts.iter().zip(&made) {
         let Some(group) = &part.group else { continue };
-        let Some(&symbol) = symbols.get(&group.symbol) else {
-            let why = format!(
-                "section '{}' is a COMDAT about '{}', which the file does not define",
-                part.name, group.symbol
-            );
-            return Err(Error::Refused { why });
+        match grouped.get(group.symbol.as_str()) {
+            Some(&at) if flavour == Flavour::Elf => groups[at].1.push(*id),
+            _ => {
+                grouped.insert(group.symbol.as_str(), groups.len());
+                groups.push((group, vec![*id]));
+            }
+        }
+    }
+    let mut together = Vec::new();
+    for (group, sections) in groups {
+        let symbol = match symbols.get(&group.symbol) {
+            Some(&symbol) => symbol,
+            // ELF only wants the name of a group, and a group about a name the file does not
+            // define gets a local one of its own. llvm-mc puts it in the group's own section,
+            // which the writer underneath has no handle on, and the first member is as good a
+            // place, since nothing reads where it is.
+            None if flavour == Flavour::Elf => obj.add_symbol(Symbol {
+                name: group.symbol.clone().into_bytes(),
+                value: 0,
+                size: 0,
+                kind: SymbolKind::Label,
+                scope: SymbolScope::Compilation,
+                weak: false,
+                section: SymbolSection::Section(sections[0]),
+                flags: SymbolFlags::None,
+            }),
+            None => {
+                let why = format!(
+                    "section '{}' is a COMDAT about '{}', which the file does not define",
+                    obj.section(sections[0]).name().unwrap_or_default(),
+                    group.symbol
+                );
+                return Err(Error::Refused { why });
+            }
         };
-        obj.add_comdat(object::write::Comdat {
-            kind: group.keep.kind(),
-            symbol,
-            sections: vec![*id],
-        });
+        together.push(group.keep == Keep::Together);
+        obj.add_comdat(object::write::Comdat { kind: group.keep.kind(), symbol, sections });
     }
 
     for (part, id) in input.parts.iter().zip(&made) {
@@ -725,6 +790,7 @@ pub fn assembled_described(
         for part in input.parts.iter().filter(|part| part.shape.merge != 0) {
             entry_size(&mut bytes, &part.name, part.shape.merge);
         }
+        together_groups(&mut bytes, &together);
     }
     Ok(bytes)
 }
@@ -748,6 +814,29 @@ fn entry_size(bytes: &mut [u8], name: &str, size: u64) {
         if bytes[at..].starts_with(name.as_bytes()) && bytes.get(at + name.len()) == Some(&0) {
             bytes[header + 0x38..header + 0x40].copy_from_slice(&size.to_le_bytes());
         }
+    }
+}
+
+/// Clear the word that makes a group a COMDAT in each group of an ELF file that is not one, which
+/// the writer underneath writes into every group it makes. `together` holds a flag for each group
+/// in the order they were added, which is the order the writer puts their headers in.
+fn together_groups(bytes: &mut [u8], together: &[bool]) {
+    if !together.contains(&true) {
+        return;
+    }
+    let word = |bytes: &[u8], at: usize, width: usize| {
+        bytes[at..at + width].iter().rev().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte))
+    };
+    let table = word(bytes, 0x28, 8) as usize;
+    let each = word(bytes, 0x3a, 2) as usize;
+    let count = word(bytes, 0x3c, 2) as usize;
+    let headers = (0..count).map(|nth| table + nth * each);
+    let groups: Vec<usize> = headers
+        .filter(|&header| word(bytes, header + 4, 4) == u64::from(elf::SHT_GROUP.0))
+        .map(|header| word(bytes, header + 0x18, 8) as usize)
+        .collect();
+    for (at, _) in groups.into_iter().zip(together).filter(|(_, together)| **together) {
+        bytes[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
     }
 }
 
@@ -1083,7 +1172,7 @@ mod tests {
                     panic!("a symbol")
                 };
                 let symbol = file.symbol_by_index(index).expect("the symbol");
-                let name = if symbol.kind() == object::SymbolKind::Section {
+                let name = if symbol.kind() == SymbolKind::Section {
                     ".text"
                 } else {
                     symbol.name().expect("a name")
