@@ -2736,7 +2736,7 @@ mod tests {
             "int f(int *r, int a) { return ckd_add(r, a, 1) + ckd_sub(r, a, 1) + ckd_mul(r, a, 2); }\n",
             "long v = __STDC_VERSION_STDCKDINT_H__;\n",
         ));
-        assert!(text.contains("decl #0 f"), "{text}");
+        assert!(text.contains("202311"), "{text}");
     }
 
     /// Including everything twice has to change nothing, because that is what happens in any
