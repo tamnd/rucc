@@ -31,7 +31,7 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `aarch64-ios-macabi` | 4 | 4 | no | Mac Catalyst, which zig added in 0.16 and which costs a platform value |
 | `x86_64-windows-gnu` | 2 | 1 | yes | mingw-w64 and UCRT, the default env for Windows, with rung 1 run under Wine |
 | `x86_64-windows-msvc` | 3 | 2 | yes | rucc --fetch brings the CRT and SDK from Microsoft, and cl.exe is the ABI reference |
-| `aarch64-windows-gnu` | 4 | 2 | yes |  |
+| `aarch64-windows-gnu` | 2 | 2 | yes | UCRT on Windows 11 on Arm, with rung 1 run natively on windows-11-arm |
 | `aarch64-windows-msvc` | 4 | 3 | yes |  |
 | `arm64ec-windows-msvc` | 4 | 4 | no | a separate symbol namespace, thunks and hybrid images, declined in document 06.8 |
 | `i686-windows-gnu` | 4 | 3 | no | stdcall, fastcall and thiscall decoration, the only place C has mangling |
