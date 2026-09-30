@@ -80,8 +80,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum Action {
     /// Print usage and exit successfully.
     Help,
-    /// Print the version and exit successfully.
-    Version,
     /// Print one line and exit successfully, which is what the `-dump` and `-print` family do.
     ///
     /// A build system asks these before it compiles anything, and what it does with the answer
@@ -663,6 +661,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut output = None;
     let mut link = LinkOptions::default();
     let mut query: Option<Query> = None;
+    // `--version`, answered after the loop because the banner names the GCC release claimed and
+    // `-fgnuc-version=` may come after it.
+    let mut version = false;
+    // Whether `-std=` or `-ansi` said what the dialect is. When neither did, a claimed GCC release
+    // decides it after the loop, the way that release's own default did.
+    let mut std_given = false;
     // What `--fetch` named, and whether `--offline` forbade it. Both are weighed after the loop
     // because either can be written after the other.
     let mut fetch: Option<String> = None;
@@ -717,7 +721,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         i += 1;
         match arg {
             "-h" | "--help" => return Ok(Action::Help),
-            "--version" => return Ok(Action::Version),
+            "--version" => version = true,
             // The sysroot fetch, which is weighed after the loop rather than acted on here, because
             // `--offline` written after it has to be able to forbid it. Both spellings, since a
             // flag that takes a tuple gets written both ways and neither is a guess at what the
@@ -887,11 +891,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // The questions a build system asks before it compiles anything. Answered after the
             // loop, because each one is about the target or the library search and the command
             // line has not finished saying what those are.
+            // Of the three `-dump` questions GCC answers the first and stops, so `-dumpfullversion
+            // -dumpversion`, which is how a script asks for the whole version from a GCC old
+            // enough not to know the first flag, gets the whole version from a new one too.
+            "-dumpversion" | "-dumpfullversion" | "-dumpmachine"
+                if matches!(query, Some(Query::Machine | Query::Version | Query::FullVersion)) => {}
             "-dumpmachine" => query = Some(Query::Machine),
             // Both answer with the GCC release in `__GNUC__` rather than our own version, because
             // what asks is a build script deciding which GCC it is talking to, and `0.11` reads as
-            // a GCC too old to have anything. GCC 7 and later print only the major number for the
-            // first one, and that is the shape the scripts were written against.
+            // a GCC too old to have anything. The first one is the whole version before GCC 7 and
+            // only the major number from 7 on, see `GnucVersion::dumpversion`.
             "-dumpversion" => query = Some(Query::Version),
             "-dumpfullversion" => query = Some(Query::FullVersion),
             "-print-multiarch" => query = Some(Query::Multiarch),
@@ -926,6 +935,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-ansi" => {
                 opts.std = Std::C89;
                 opts.gnu_extensions = false;
+                std_given = true;
             }
             // `-Wpedantic` is the same flag under the name the `-W` family gives it, which is
             // the spelling a build system that groups its warning flags tends to write.
@@ -1101,6 +1111,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     .ok_or_else(|| err(format!("unknown dialect `{name}`, see --help")))?;
                 opts.std = std;
                 opts.gnu_extensions = gnu;
+                std_given = true;
             }
             // Section 4.5. The claim decides which half of glibc's `sys/cdefs.h` we are
             // handed, so a differential run that does not set it is comparing two compilers
@@ -2464,8 +2475,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if threads {
         inputs.push(Input::library("pthread"));
     }
+    // The dialect a claimed GCC release compiled when nothing said which, per
+    // `spec/04-driver-and-cli.md` section 4.6. Only when the claim was written, so the default
+    // claim leaves the default dialect alone, and not on an MSVC row, where the claim is
+    // `__GNUC__` and nothing else, as it is in clang.
+    if !std_given && opts.gnuc_given && opts.target.env != rucc_target::Env::Msvc {
+        opts.std = opts.gnuc.default_std();
+        opts.gnu_extensions = true;
+    }
     if let Some(query) = query {
         return Ok(Action::Print(answer(&query, &opts, &link)?));
+    }
+    if version {
+        return Ok(Action::Print(banner(&opts)));
     }
     // `-M` and `-MM` produce the rule and nothing else, so the run stops after phase 4 whatever
     // else the command line asked for. Read here rather than where the flag was, because a `-c`
@@ -2793,10 +2815,8 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
     };
     Ok(match query {
         Query::Machine => opts.target.to_string(),
-        Query::Version => opts.gnuc.major.to_string(),
-        Query::FullVersion => {
-            format!("{}.{}.{}", opts.gnuc.major, opts.gnuc.minor, opts.gnuc.patch)
-        }
+        Query::Version => opts.gnuc.dumpversion(),
+        Query::FullVersion => opts.gnuc.to_string(),
         Query::Multiarch => link::multiarch(opts.target),
         // The three lines GCC prints, in its order and with its punctuation, because what reads
         // them is a script written against that shape. There is no installation directory to
@@ -2850,6 +2870,11 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
             Some(manifest) => manifest.digest(),
             None => String::new(),
         },
+        // GCC answers `plugin` with the directory its plugin headers are under, and the kernel
+        // turns `GCC_PLUGINS` on when `include/plugin-version.h` is there. This compiler loads no
+        // GCC plugin, so the answer is the bare word, which is what GCC prints for a file it does
+        // not have, and nothing a search directory holds is allowed to change that.
+        Query::FileName(name) if name == "plugin" => name.clone(),
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
@@ -3808,16 +3833,28 @@ pub fn run_as(program: &str, args: &[String]) -> i32 {
 
 /// What `--version` prints.
 ///
-/// The first line is ours and is the one every harness we have reads. The second is for build
-/// systems that decide what kind of compiler they have by reading this text. Meson takes the GNU
-/// path only when it finds "Free Software Foundation" here, and otherwise stops with "Unknown
-/// compiler" before it has asked a single question, which is how the whole of a meson build is
-/// lost to one sentence. Past that point meson reads the version from `__GNUC__` and asks the
-/// preprocessor everything else, so the line decides the path and nothing more. It says what is
-/// true, that rucc speaks the dialect of GCC 16, and it does not claim to be GCC.
-fn banner() -> String {
+/// Without a claimed GCC release the first line is ours and is the one every harness we have
+/// reads. With `-fgnuc-version=` it has the shape of GCC's, `gcc (<build>) <version>`, with this
+/// compiler named in the brackets where a distribution names its build. That is for the builds
+/// that tell GCC from other compilers by this line: the Linux kernel from 4.18 to 5.11 sets
+/// `CC_IS_GCC` from `grep gcc` on it, and every kernel copies it into `CONFIG_CC_VERSION_TEXT`. A
+/// build that asks for the claim gets it in the banner too, and a build that did not ask still
+/// sees `rucc`. The second line is for build systems that decide what kind of compiler they have
+/// by reading this text. Meson takes the GNU path only when it finds "Free Software Foundation"
+/// here, and otherwise stops with "Unknown compiler" before it has asked a single question. Past
+/// that point meson reads the version from `__GNUC__` and asks the preprocessor everything else,
+/// so the line decides the path and nothing more. It says what is true, that rucc speaks the
+/// dialect of that GCC release. `spec/04-driver-and-cli.md` section 4.5 has the rest.
+fn banner(opts: &Options) -> String {
+    let gnuc = opts.gnuc;
+    let first = if opts.gnuc_given {
+        format!("gcc (rucc {VERSION}, GNU C persona {gnuc}) {gnuc}")
+    } else {
+        format!("rucc {VERSION}")
+    };
     format!(
-        "rucc {VERSION}\nA C compiler for the GNU C dialect of GCC 16 from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.\n"
+        "{first}\nA C compiler for the GNU C dialect of GCC {} from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.",
+        gnuc.major
     )
 }
 
@@ -3934,10 +3971,6 @@ pub fn run(args: &[String]) -> i32 {
     match parse_args(args) {
         Ok(Action::Help) => {
             print!("{USAGE}");
-            0
-        }
-        Ok(Action::Version) => {
-            print!("{}", banner());
             0
         }
         Ok(Action::Print(line)) => {
@@ -4118,7 +4151,9 @@ mod tests {
     #[test]
     fn help_and_version_win_over_everything_else() {
         assert_eq!(parse_args(&args(&["-c", "--help", "x.c"])).unwrap(), Action::Help);
-        assert_eq!(parse_args(&args(&["--version"])).unwrap(), Action::Version);
+        let banner = printed(&["--version"]);
+        assert!(banner.starts_with("rucc "), "{banner}");
+        assert_eq!(printed(&["-c", "--version", "x.c"]), banner);
     }
 
     fn compile(s: &[&str]) -> (Box<Options>, Box<Plan>) {
@@ -6882,7 +6917,7 @@ mod tests {
 
     #[test]
     fn the_version_banner_keeps_our_first_line_and_takes_meson_down_the_gnu_path() {
-        let text = banner();
+        let text = printed(&["--version"]);
         let mut lines = text.lines();
         // Every harness we have reads the first line and nothing else.
         assert_eq!(lines.next(), Some(format!("rucc {VERSION}").as_str()));
@@ -6891,6 +6926,110 @@ mod tests {
         // GCC's own banner has three lines and so does this one, and the claim is the dialect.
         assert!(lines.next().is_some_and(|l| l.contains("GCC 16")), "{text}");
         assert!(lines.next().is_some() && lines.next().is_none(), "{text}");
+    }
+
+    /// The banner under a claimed release, which is GCC's shape with this compiler named where a
+    /// distribution names its build. The kernel from 4.18 to 5.11 runs `grep gcc` on the first
+    /// line to decide it has GCC, and every kernel copies that line into `CONFIG_CC_VERSION_TEXT`.
+    #[test]
+    fn a_claimed_release_puts_gcc_and_its_version_on_the_first_line() {
+        let text = printed(&["-fgnuc-version=14.2.0", "--version"]);
+        let first = text.lines().next().unwrap_or_default();
+        assert_eq!(first, format!("gcc (rucc {VERSION}, GNU C persona 14.2.0) 14.2.0"));
+        assert!(text.contains("GCC 14 from the Free Software Foundation"), "{text}");
+        assert_eq!(text.lines().count(), 3, "{text}");
+
+        // The claim can come after the flag, since it is answered once the line has been read,
+        // and a short claim is printed in all three numbers, as GCC prints its own.
+        let text = printed(&["--version", "-fgnuc-version=4.9"]);
+        assert!(text.starts_with(&format!("gcc (rucc {VERSION}, GNU C persona 4.9.0) 4.9.0\n")));
+
+        // A command line gcc would refuse is refused rather than answered.
+        assert!(refused(&["--version", "-fgnuc-version=4.x"]).contains("not a number"));
+    }
+
+    /// Before GCC 7 `-dumpversion` was the whole version. From 7 it is the major number the way
+    /// the distributions build it, and `-dumpfullversion` is the whole one.
+    #[test]
+    fn the_version_questions_are_answered_the_way_the_claimed_release_answers_them() {
+        let ask = |claim: &str, flags: &[&str]| {
+            let claim = format!("-fgnuc-version={claim}");
+            let mut line = vec![claim.as_str()];
+            line.extend_from_slice(flags);
+            printed(&line)
+        };
+        assert_eq!(ask("4.9.4", &["-dumpversion"]), "4.9.4");
+        assert_eq!(ask("4.9.4", &["-dumpfullversion"]), "4.9.4");
+        assert_eq!(ask("6.3", &["-dumpversion"]), "6.3.0");
+        assert_eq!(ask("7.5.0", &["-dumpversion"]), "7");
+        assert_eq!(ask("14.2.0", &["-dumpversion"]), "14");
+        assert_eq!(ask("14.2.0", &["-dumpfullversion"]), "14.2.0");
+        // The first of the family wins, as it does in GCC, which is what makes the usual way of
+        // asking any GCC for its whole version work.
+        assert_eq!(ask("14.2.0", &["-dumpfullversion", "-dumpversion"]), "14.2.0");
+        assert_eq!(ask("14.2.0", &["-dumpversion", "-dumpfullversion"]), "14");
+        assert_eq!(ask("4.9.4", &["-dumpfullversion", "-dumpversion"]), "4.9.4");
+        assert_eq!(
+            ask("14.2.0", &["-dumpmachine", "-dumpversion", LINUX]),
+            "x86_64-unknown-linux-gnu"
+        );
+    }
+
+    /// The kernel's `GCC_PLUGINS` depends on `include/plugin-version.h` being under what
+    /// `-print-file-name=plugin` prints, and this compiler has no plugins to offer.
+    #[test]
+    fn there_is_never_a_plugin_directory_to_find() {
+        let dir = std::env::temp_dir().join(format!("rucc-plugin-{}", std::process::id()));
+        let headers = dir.join("plugin").join("include");
+        std::fs::create_dir_all(&headers).unwrap();
+        std::fs::write(headers.join("plugin-version.h"), "").unwrap();
+        // Even with a GCC plugin tree in a directory the search reads, since loading what is in it
+        // is not something this compiler can do.
+        let search = format!("-L{}", dir.display());
+        assert_eq!(printed(&[LINUX, &search, "-print-file-name=plugin"]), "plugin");
+        assert_eq!(printed(&["-fgnuc-version=14.2.0", "-print-file-name=plugin"]), "plugin");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The dialect a claimed release compiled when the command line had no `-std=`.
+    #[test]
+    fn a_claimed_release_brings_its_default_dialect_and_an_explicit_one_still_wins() {
+        let dialect = |flags: &[&str]| {
+            let mut line = vec![LINUX, "-c", "a.c"];
+            line.extend_from_slice(flags);
+            let (opts, _) = compile(&line);
+            (opts.std, opts.gnu_extensions)
+        };
+        assert_eq!(dialect(&[]), (Std::C23, true), "no claim, our own default");
+        assert_eq!(dialect(&["-fgnuc-version=4.9.4"]), (Std::C89, true));
+        assert_eq!(dialect(&["-fgnuc-version=5.1"]), (Std::C11, true));
+        assert_eq!(dialect(&["-fgnuc-version=7.5.0"]), (Std::C11, true));
+        assert_eq!(dialect(&["-fgnuc-version=8.1"]), (Std::C17, true));
+        assert_eq!(dialect(&["-fgnuc-version=14.2.0"]), (Std::C17, true));
+        assert_eq!(dialect(&["-fgnuc-version=15.1"]), (Std::C23, true));
+        // Whichever order they come in, what the command line said about the dialect wins.
+        assert_eq!(dialect(&["-std=gnu11", "-fgnuc-version=4.9.4"]), (Std::C11, true));
+        assert_eq!(dialect(&["-fgnuc-version=14.2.0", "-std=c99"]), (Std::C99, false));
+        assert_eq!(dialect(&["-fgnuc-version=4.9.4", "-ansi"]), (Std::C89, false));
+        // On an MSVC row the claim is `__GNUC__` and nothing more, as it is in clang.
+        let (opts, _) =
+            compile(&["--target=x86_64-pc-windows-msvc", "-fgnuc-version=4.9.4", "-c", "a.c"]);
+        assert_eq!(opts.std, Std::default());
+    }
+
+    #[test]
+    fn a_claimed_release_before_ten_makes_tentative_definitions_common() {
+        let common = |flags: &[&str]| {
+            let mut line = vec![LINUX, "-c", "a.c"];
+            line.extend_from_slice(flags);
+            Session::new(*compile(&line).0).common()
+        };
+        assert!(common(&["-fgnuc-version=9.5"]));
+        assert!(!common(&["-fgnuc-version=10.1"]));
+        assert!(!common(&["-fgnuc-version=9.5", "-fno-common"]), "the command line wins");
+        let (opts, _) =
+            compile(&["--target=x86_64-pc-windows-msvc", "-fgnuc-version=9.5", "-c", "a.c"]);
+        assert!(!Session::new(*opts).common());
     }
 
     #[test]
