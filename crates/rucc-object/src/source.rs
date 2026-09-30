@@ -29,6 +29,7 @@
 
 use object::write::{Object as Writer, Relocation, Symbol, SymbolSection};
 use object::{Architecture, Endianness, RelocationFlags, SectionKind, SymbolFlags, elf, pe};
+use rucc_base::hash::{Map, Set};
 use rucc_target::aarch64::Fixup;
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
@@ -558,10 +559,10 @@ pub fn assembled_described(
 
     // Which relocations point at the section a name is in rather than at the name, and which names
     // are then asked for by nothing and left out, before either is written down.
-    let defined: std::collections::HashMap<&str, &Name> =
+    let defined: Map<&str, &Name> =
         input.names.iter().map(|name| (name.name.as_str(), name)).collect();
     let onto = |reloc: &Reloc| moved(flavour, input, &defined, reloc);
-    let wanted: std::collections::HashSet<&str> = input
+    let wanted: Set<&str> = input
         .parts
         .iter()
         .flat_map(|part| &part.relocs)
@@ -675,7 +676,7 @@ pub fn assembled_described(
 
     // The debug information, every section before any relocation because a relocation in one of
     // them names another as often as it names a function.
-    let mut named = std::collections::HashMap::new();
+    let mut named = Map::default();
     for chunk in &info.chunks {
         let id = obj.add_section(Vec::new(), chunk.name.clone().into_bytes(), SectionKind::Debug);
         obj.append_section_data(id, &chunk.bytes, 1);
@@ -763,7 +764,7 @@ fn entry_size(bytes: &mut [u8], name: &str, size: u64) {
 fn moved(
     flavour: Flavour,
     input: &Assembled,
-    defined: &std::collections::HashMap<&str, &Name>,
+    defined: &Map<&str, &Name>,
     reloc: &Reloc,
 ) -> Option<(usize, u64)> {
     use crate::section::Reference;
