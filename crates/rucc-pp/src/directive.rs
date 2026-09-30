@@ -3320,9 +3320,9 @@ mod tests {
         // a path that then fails to compile, and a no for one it honours sends it down a worse
         // path than it had to take.
         assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_attribute(flatten)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_attribute(alloc_size)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_attribute(no_such_attribute)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if !__has_attribute(flatten)\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if !__has_attribute(alloc_size)\nno\n#endif\n"), "no");
     }
 
     #[test]
@@ -3333,25 +3333,22 @@ mod tests {
         // the scope is dropped and what is left is asked of the C attribute rows, which are the
         // seven the standard has. GCC answers one there, which is issue #315.
         assert_eq!(clean("#if __has_c_attribute(gnu::packed)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "yes");
     }
 
     /// Every name the kernel's `include/linux/compiler_attributes.h` asks about, from v6.12, with
-    /// what GCC 14 answers for it on x86-64.
+    /// what gcc 16 answers for it on x86-64.
     ///
     /// The header defines each of its macros empty when `__has_attribute` says no, so a no for an
     /// attribute this compiler honours quietly changes the kernel, and a yes for one it ignores is
     /// a promise nothing keeps. The names are the ones the header asks about and the ones it writes
     /// unconditionally, since a header written for gcc 5.1 and up takes those as given.
     ///
-    /// The answers were not taken from a GCC 14 run, because there was none to hand. They are what
-    /// gcc 16 answers, with the three places GCC 14 differs put back from its source: it answers
-    /// the standard's older numbers for `fallthrough` and `noreturn`, where 16 answers 202311 for
-    /// both, and it has no `counted_by`, which came in 15. That one row is answered the way 15
-    /// answers it, because this compiler calls itself 16 and the kernel's own test for the
-    /// attribute is the version number. `no_caller_saved_registers` is an
-    /// attribute of x86 alone, which is why the target is written down. The clang-only names at
-    /// the bottom are ones gcc answers no for and so must this.
+    /// The answers are what gcc 16 gives. GCC 14 answered the standard's older numbers for
+    /// `fallthrough` and `noreturn`, 201904 and 202202, where 16 answers 202311 for every C23
+    /// attribute, and this compiler calls itself 16. `no_caller_saved_registers` is an attribute
+    /// of x86 alone, which is why the target is written down. The clang-only names at the bottom
+    /// are ones gcc answers no for and so must this.
     const KERNEL_ATTRIBUTES: [(&str, u32); 39] = [
         ("alias", 1),
         ("aligned", 1),
@@ -3364,7 +3361,7 @@ mod tests {
         ("designated_init", 1),
         ("error", 1),
         ("externally_visible", 1),
-        ("fallthrough", 201_904),
+        ("fallthrough", 202_311),
         ("format", 1),
         ("gnu_inline", 1),
         ("malloc", 1),
@@ -3375,7 +3372,7 @@ mod tests {
         ("noclone", 1),
         ("noinline", 1),
         ("nonstring", 1),
-        ("noreturn", 202_202),
+        ("noreturn", 202_311),
         ("packed", 1),
         ("pure", 1),
         ("section", 1),
@@ -3394,7 +3391,7 @@ mod tests {
         ("name", 0),
     ];
 
-    /// The kernel's names are answered the way GCC 14 answers them, except where this compiler
+    /// The kernel's names are answered the way gcc 16 answers them, except where this compiler
     /// does not do what the attribute asks, and there the answer is no and the table says so.
     ///
     /// A difference has to go one way only. Answering yes where gcc says no is never right, and
@@ -3437,14 +3434,18 @@ mod tests {
 
     #[test]
     fn has_feature_and_has_extension_read_the_same_table() {
-        // `__has_extension` answers yes wherever `__has_feature` does, and also for a GNU
-        // extension, which `__has_feature` never names.
-        assert_eq!(clean("#if __has_feature(pragma_once)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_extension(pragma_once)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_extension(include_next)\nyes\n#endif\n"), "yes");
+        // `__has_extension` answers yes wherever `__has_feature` does, and `__has_feature` never
+        // names an extension.
+        assert_eq!(clean("#if __has_feature(__has_include)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_extension(__has_include)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_feature(include_next)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if __has_feature(statement_expressions)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if __has_extension(statement_expressions)\nyes\n#endif\n"), "yes");
+        // The clang names for things this compiler does and gcc 16 does too are answered no,
+        // because gcc 16 answers no for them: a header that asks has only ever been built by gcc
+        // down the path the no takes. The row still says the thing is implemented.
+        for name in ["pragma_once", "include_next", "statement_expressions", "case_ranges"] {
+            assert_eq!(clean(&format!("#if __has_feature({name})\nyes\n#endif\n")), "", "{name}");
+            assert_eq!(clean(&format!("#if __has_extension({name})\nyes\n#endif\n")), "", "{name}");
+        }
     }
 
     #[test]
@@ -3483,10 +3484,10 @@ mod tests {
         // GCC and clang both make these builtin macros rather than something only the
         // conditional parser knows, so a program may write one in a declaration. Real headers
         // do: an attribute macro is often written as the answer rather than as a `#if`.
-        assert_eq!(clean("f __has_feature(pragma_once)\n"), "f 1");
+        assert_eq!(clean("f __has_feature(__has_include)\n"), "f 1");
         assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 1");
         assert_eq!(clean("a __has_attribute(packed)\n"), "a 1");
-        assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 0");
+        assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 202311");
         assert_eq!(clean("m __building_module(foo)\n"), "m 0");
     }
 
@@ -3494,7 +3495,7 @@ mod tests {
     fn a_macro_that_expands_to_a_has_operator_is_answered_where_it_is_used() {
         // The awkward half of the same feature. The answer is deferred to wherever the macro
         // lands, so the sweep has to run after expansion and not only before it.
-        assert_eq!(clean("#define HAVE __has_feature(pragma_once)\nx HAVE\n"), "x 1");
+        assert_eq!(clean("#define HAVE __has_feature(__has_include)\nx HAVE\n"), "x 1");
         assert_eq!(clean("#define HAVE(x) __has_attribute(x)\ny HAVE(packed)\n"), "y 1");
     }
 

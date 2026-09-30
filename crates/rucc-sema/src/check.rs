@@ -67,6 +67,7 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast};
 
+mod advice;
 mod annotate;
 mod attr;
 mod builtin;
@@ -300,6 +301,9 @@ pub struct Checker<'a> {
     /// The attribute lists `__builtin_has_attribute` and `__builtin_counted_by_ref` read, which
     /// is in `check/annotate.rs` with both of them.
     pub(in crate::check) annotations: annotate::Annotations,
+    /// What the declarations of each name asked to have said at a use of it, which is in
+    /// `check/advice.rs` with the warnings themselves.
+    pub(in crate::check) advice: advice::Advice,
     /// How many operands that are never evaluated the expression being checked is inside, which
     /// is the operand of `sizeof`, `__alignof__` and `typeof`.
     ///
@@ -335,6 +339,7 @@ impl<'a> Checker<'a> {
             calling: None,
             defining: None,
             annotations: annotate::Annotations::default(),
+            advice: advice::Advice::default(),
             unevaluated: 0,
             answered_late: rucc_base::hash::Set::default(),
         };

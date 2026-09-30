@@ -397,6 +397,13 @@ impl DeclFlags {
     /// choices that end in `-arg`. Only ever set with [`Self::ZERO_USED`] or [`Self::ZERO_ALL`].
     pub const ZERO_ARG: Self = Self(1 << 24);
 
+    /// `__attribute__((nocommon))` was written, so a tentative definition of the object is a
+    /// zeroed definition in `.bss` even under `-fcommon`, which is what the attribute is for: a
+    /// program built with `-fcommon` for the sake of old code that still wants one object of its
+    /// own to be defined once, and to be refused by the linker when another file defines it too.
+    /// Only ever read off an object with static storage.
+    pub const NO_COMMON: Self = Self(1 << 25);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

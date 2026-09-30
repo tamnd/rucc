@@ -96,7 +96,9 @@ fn render(rows: &[Feature]) -> String {
         "The table is what `__has_attribute`, `__has_builtin`, `__has_feature`, \
          `__has_extension` and `__has_c_attribute` answer, so the counts below are the \
          compiler's own claims about itself. Only `implemented` answers yes, and every \
-         implemented row names the tests that prove it. The design is \
+         implemented row names the tests that prove it. The exception is a row gcc 16 \
+         answers 0 for, such as the clang names for GNU extensions: it answers 0 like gcc \
+         and is still counted by what the compiler does. The design is \
          `spec/13-gnu-compat.md` section 13.2.\n\n",
     );
 

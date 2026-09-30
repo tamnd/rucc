@@ -112,6 +112,9 @@ pub(in crate::check) struct Body {
     landings: Map<LabelId, Landing>,
     /// Every `goto` met so far, kept until the whole function has been walked.
     jumps: Vec<Jump>,
+    /// Every value a statement threw away, kept until the whole function has been walked for the
+    /// reason given in `check/advice.rs`.
+    pub(in crate::check) discarded: Vec<ExprId>,
 }
 
 /// One declaration of a variably modified type, which is one a jump may not enter the scope of.
@@ -238,7 +241,9 @@ impl Checker<'_> {
             ast::Stmt::Empty => Stmt::Empty,
             ast::Stmt::Expr(value) => {
                 let value = self.expr(value);
-                Stmt::Expr(self.value(value))
+                let value = self.value(value);
+                self.discard(value);
+                Stmt::Expr(value)
             }
             ast::Stmt::Decl(decl) => {
                 let decls = self.check_decl(decl);
@@ -296,6 +301,10 @@ impl Checker<'_> {
     /// wanted instead.
     pub(in crate::check) fn stmt_expr(&mut self, id: ast::StmtId, span: Span) -> ExprId {
         let stmt = self.stmt(id);
+        // The last statement's value is this one's, so it is thrown away only if this is.
+        if let Some(last) = self.last_value(stmt) {
+            self.undiscard(last);
+        }
         let ty = match self.tast[stmt] {
             Stmt::Block(body) => match self.tast[body].last() {
                 Some(&last) => self.value_type(last),
@@ -359,6 +368,7 @@ impl Checker<'_> {
             inside: None,
             landings: Map::default(),
             jumps: Vec::new(),
+            discarded: Vec::new(),
         };
         self.body.replace(body)
     }
@@ -428,9 +438,10 @@ impl Checker<'_> {
 
     /// Closes a body, reporting the labels that were used and never defined.
     pub(in crate::check) fn close_body(&mut self, previous: Option<Body>) {
-        let Some(body) = mem::replace(&mut self.body, previous) else {
+        let Some(mut body) = mem::replace(&mut self.body, previous) else {
             return;
         };
+        self.heed_discarded(mem::take(&mut body.discarded));
         // Sorted, because a map has no order and a compiler whose diagnostics come out in a
         // different order on two runs of the same input is one nobody can write a test against.
         let mut undefined: Vec<Labelled> =
@@ -603,6 +614,7 @@ impl Checker<'_> {
                 let span = self.ast.expr_span(value);
                 let value = self.expr(value);
                 let value = self.value(value);
+                self.discard(value);
                 Some(self.tast.stmt(Stmt::Expr(value), span))
             }
             ForInit::Decl(decl) => {
@@ -616,7 +628,9 @@ impl Checker<'_> {
         let cond = cond.map(|cond| self.controlling(cond));
         let step = step.map(|step| {
             let step = self.expr(step);
-            self.value(step)
+            let step = self.value(step);
+            self.discard(step);
+            step
         });
         let body = self.loop_body(body);
         self.close_scope(outer);

@@ -189,8 +189,14 @@ fn check(rows: &[Row]) {
             }
         }
         if !row.value.is_empty() {
-            if row.kind != "c-attribute" {
-                panic!("features.toml:{line}: `{name}` has a value, which only a c-attribute has");
+            // Any other row may only say `0`, which is how it says that gcc 16 does not know the
+            // name and so answers no for it, whatever this compiler does with the thing itself.
+            if row.kind != "c-attribute" && row.value != "0" {
+                panic!(
+                    "features.toml:{line}: `{name}` has value `{}`, and only a c-attribute has a \
+                     value other than 0",
+                    row.value
+                );
             }
             if row.value.parse::<u32>().is_err() {
                 panic!(

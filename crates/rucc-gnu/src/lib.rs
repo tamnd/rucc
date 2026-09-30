@@ -128,7 +128,15 @@ pub struct Feature {
     /// What to do when it is met and is not implemented.
     pub answer: Answer,
     /// What `__has_c_attribute` answers with, which the standard fixes per attribute. One for
-    /// every other kind, where the operators answer one or nothing.
+    /// every other kind, where the operators answer one or nothing, except on a row that says
+    /// zero.
+    ///
+    /// Zero is how a row says that gcc 16 does not know the name. `__has_extension(case_ranges)`
+    /// is the example: this compiler has case ranges and gcc has them too, and gcc still answers
+    /// no, because the names `__has_extension` knows are clang's and this is not one of them. A
+    /// program that asks is asking a question written for clang or for this table, and the answer
+    /// it gets from gcc is the one it has to be able to live with, so the row keeps its status,
+    /// which says what the compiler does, and answers what gcc answers.
     pub value: u32,
     /// Projects known to need it, from the corpus in `spec/15-testing.md`.
     pub used_by: &'static [&'static str],
@@ -158,7 +166,7 @@ pub fn lookup(kind: Kind, name: &str) -> Option<&'static Feature> {
 /// What `__has_attribute(name)` answers.
 ///
 /// A name the standard also has is answered with the standard's number, as GCC answers it, so
-/// `__has_attribute(fallthrough)` is 201904 rather than one. GCC does that whether or not the name
+/// `__has_attribute(fallthrough)` is 202311 rather than one. GCC does that whether or not the name
 /// is also a GNU attribute, so `maybe_unused`, which is only a standard one, is answered too.
 pub fn has_attribute(name: &str) -> u32 {
     match answer(Kind::CAttribute, name) {
@@ -266,12 +274,30 @@ mod tests {
             let answered = answer(feature.kind, feature.name);
             assert_eq!(
                 answered != 0,
-                feature.status == Status::Implemented,
+                feature.status == Status::Implemented && feature.value != 0,
                 "{} answered {answered} at status {:?}",
                 feature.name,
                 feature.status
             );
         }
+    }
+
+    /// A row that answers no while saying it is implemented is one gcc 16 answers no for, and it
+    /// is never an attribute, since gcc knows every attribute the table has a row for.
+    #[test]
+    fn a_row_answers_no_on_purpose_only_where_gcc_does() {
+        for feature in FEATURES {
+            if feature.value == 0 {
+                assert!(
+                    matches!(feature.kind, Kind::Extension | Kind::Feature | Kind::Builtin),
+                    "{} is an attribute gcc knows",
+                    feature.name
+                );
+            }
+        }
+        let ranges = lookup(Kind::Extension, "case_ranges").expect("in the table");
+        assert_eq!(ranges.status, Status::Implemented);
+        assert_eq!(has_extension("case_ranges"), 0, "gcc 16 does not know the name");
     }
 
     #[test]
@@ -327,7 +353,10 @@ mod tests {
     #[test]
     fn a_c_attribute_answers_with_the_number_the_standard_gives_it() {
         let deprecated = lookup(Kind::CAttribute, "deprecated").expect("C23 has it");
-        assert_eq!(deprecated.value, 201904);
+        assert_eq!(deprecated.value, 202311);
+        // The number C23 gave every one of them in the end, which is what gcc 16 answers.
+        assert_eq!(has_c_attribute("nodiscard"), 202311);
+        assert_eq!(has_attribute("fallthrough"), 202311);
         // And it is a different row from the GNU attribute of the same name.
         let gnu = lookup(Kind::Attribute, "deprecated").expect("GCC has it too");
         assert_eq!(gnu.value, 1);
