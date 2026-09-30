@@ -38,8 +38,8 @@
 //! threshold is refused by name rather than written wrong.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
+use rucc_base::hash::Map;
 use rucc_base::{Idx, Interner};
 use rucc_ir::{
     CallInfo, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
@@ -758,7 +758,7 @@ fn counted(func: &mut Func, inst: Inst) {
 pub fn overflows(func: &mut Func) {
     let found: Vec<Inst> =
         func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
-    let mut forward = HashMap::new();
+    let mut forward = Map::default();
     for inst in found {
         let checked = match func[inst].opcode {
             Opcode::UAddOverflow => Checked::Add(false),
@@ -803,7 +803,7 @@ enum Checked {
 /// For an unsigned multiply the product fits exactly when the high half is zero, and for a signed
 /// one it fits exactly when the high half is the sign extension of the low half, which is the low
 /// half shifted right arithmetically by every bit but one.
-fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut HashMap<Value, Value>) {
+fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut Map<Value, Value>) {
     let ty = produced(func, inst);
     let [a, b] = func[func[inst].args] else { return };
     if !checkable(ty) {
@@ -947,7 +947,7 @@ fn compared(func: &mut Func, inst: Inst, pred: IntPred, lhs: Value, rhs: Value) 
 /// them are everything an instruction can read. Nothing chases here, the way the same walk in
 /// `rucc_opt::simplify` does, because every value this map answers with is one written above and so
 /// is never itself a key.
-fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
+fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     let with = |value: Value| forward.get(&value).copied().unwrap_or(value);
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<Inst>>() {

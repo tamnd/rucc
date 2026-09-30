@@ -15,8 +15,9 @@
 //! disagree, or one no path reaches, has no answer, and the back end reads that as nothing to
 //! choose by rather than as a choice.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Func, Inst, Value};
 
 /// The value each declaration that has more than one of them holds at the top of each block, where
@@ -26,7 +27,7 @@ use rucc_ir::{Block, Def, Func, Inst, Value};
 /// be holding the wrong one of them, and the list would otherwise be every local times every block.
 #[must_use]
 pub fn on_entry(func: &Func) -> Vec<(u32, Block, Value)> {
-    let mut assigned: HashMap<u32, Vec<(Block, Option<Inst>, Value)>> = HashMap::new();
+    let mut assigned: Map<u32, Vec<(Block, Option<Inst>, Value)>> = Map::default();
     for value in func.values() {
         let place = match func[value].def {
             Def::Result { inst, .. } => func.block_of(inst).map(|block| (block, Some(inst))),

@@ -114,9 +114,8 @@
 //! after combining and if-conversion and before compare elimination and addressing-mode folding,
 //! and that is where `crate::pipeline` calls it.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir as mir;
 use rucc_target::{BitInsts, Constraint, MachineInsts, Role};
 
@@ -150,7 +149,7 @@ pub fn dead(
     names: &Interner,
 ) -> usize {
     let wanted = demand(func, insts, names);
-    let mut sent: HashMap<mir::Reg, mir::Reg> = HashMap::new();
+    let mut sent: Map<mir::Reg, mir::Reg> = Map::default();
     let mut gone: Vec<mir::Inst> = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -212,14 +211,14 @@ pub fn dead(
 #[derive(Debug, Default)]
 struct Readers {
     /// The instructions that read it, each named once however many of its operands do.
-    insts: HashMap<mir::Reg, Vec<mir::Inst>>,
+    insts: Map<mir::Reg, Vec<mir::Inst>>,
     /// The edges that carry it, as the block each leaves and its position in that block's list.
-    edges: HashMap<mir::Reg, Vec<(mir::Block, usize)>>,
+    edges: Map<mir::Reg, Vec<(mir::Block, usize)>>,
 }
 
 impl Readers {
     /// Every read of every register in the map, which is the registers the conversions wrote.
-    fn of(func: &mir::Func, sent: &HashMap<mir::Reg, mir::Reg>) -> Self {
+    fn of(func: &mir::Func, sent: &Map<mir::Reg, mir::Reg>) -> Self {
         let mut found = Self::default();
         for block in func.blocks() {
             for inst in func.insts(block) {
@@ -289,7 +288,7 @@ fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> Wanted {
         ends.push(steps.len());
     }
 
-    let mut wanted = Wanted { virtuals: vec![0; func.vregs()], physical: HashMap::new() };
+    let mut wanted = Wanted { virtuals: vec![0; func.vregs()], physical: Map::default() };
     loop {
         let mut moved = false;
         let (mut step, mut from) = (0, 0);
@@ -323,7 +322,7 @@ fn demand(func: &mir::Func, insts: &BitInsts, names: &Interner) -> Wanted {
 #[derive(Debug)]
 struct Wanted {
     virtuals: Vec<u32>,
-    physical: HashMap<mir::Reg, u32>,
+    physical: Map<mir::Reg, u32>,
 }
 
 impl Wanted {
@@ -424,7 +423,7 @@ fn conversion(func: &mir::Func, inst: mir::Inst) -> Option<(mir::Reg, mir::Reg)>
 /// inner one. The walk ends because machine IR is in SSA form here and every step goes to a
 /// register written earlier in the function, and the bound is there so that a map built any other
 /// way stops as well.
-fn chased(sent: &HashMap<mir::Reg, mir::Reg>) -> HashMap<mir::Reg, mir::Reg> {
+fn chased(sent: &Map<mir::Reg, mir::Reg>) -> Map<mir::Reg, mir::Reg> {
     sent.iter()
         .map(|(&from, &first)| {
             let mut into = first;

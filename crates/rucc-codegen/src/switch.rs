@@ -983,9 +983,8 @@ pub fn blocks_for(clusters: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rucc_base::Interner;
+    use rucc_base::hash::Map;
     use rucc_ir::{
         Block, BlockCall, Builder, Extra, Func, Hint, Imm, InstData, IntPred, Module, Opcode,
         Signature, SwitchInfo, Type, Value,
@@ -1078,7 +1077,7 @@ mod tests {
     /// while doing it.
     fn arrives(func: &Func, operand: Value, x: i128, ty: Type) -> Block {
         let mut at = func.entry().expect("an entry block");
-        let mut held: HashMap<Value, i128> = HashMap::new();
+        let mut held: Map<Value, i128> = Map::default();
         held.insert(operand, Imm::int(x, ty).signed(ty));
         loop {
             let mut moved = None;
@@ -1422,7 +1421,7 @@ mod tests {
     /// A depth first walk over the blocks the lowering wrote, which is a directed acyclic graph
     /// because every branch it writes goes forward, so no path is walked twice and nothing loops.
     fn deepest(func: &Func) -> usize {
-        fn walk(func: &Func, at: Block, seen: &mut HashMap<Block, usize>) -> usize {
+        fn walk(func: &Func, at: Block, seen: &mut Map<Block, usize>) -> usize {
             if let Some(&known) = seen.get(&at) {
                 return known;
             }
@@ -1439,7 +1438,7 @@ mod tests {
             seen.insert(at, here + below);
             here + below
         }
-        walk(func, func.entry().expect("an entry block"), &mut HashMap::new())
+        walk(func, func.entry().expect("an entry block"), &mut Map::default())
     }
 
     #[test]

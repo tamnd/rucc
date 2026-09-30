@@ -162,9 +162,8 @@
 //! last rewrite is about the ones that were not computing anything rather than about address
 //! computation in general.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_cost::Goal;
 use rucc_mir::{self as mir, Role};
 use rucc_target::{FlagInsts, MachineInsts, Reads, ShortInsts};
@@ -196,7 +195,7 @@ pub fn shorter(
     let names = &*names;
     let mut counts = changes::Reads::of(func);
     let mut took = 0;
-    let mut seen = HashMap::new();
+    let mut seen = Map::default();
     // Whether the rewrite that spends the condition state may be asked for at all. The narrower
     // instruction neither reads the state nor writes it, so it is not asked this and a function
     // this turns down still gets that one.
@@ -340,7 +339,7 @@ fn carried(
     short: &ShortInsts,
     flags: &FlagInsts,
     names: &Interner,
-    seen: &mut HashMap<mir::Opcode, Known>,
+    seen: &mut Map<mir::Opcode, Known>,
 ) -> bool {
     func.blocks().any(|block| {
         for inst in func.insts(block) {
@@ -395,7 +394,7 @@ struct Known {
 
 impl Known {
     fn of(
-        seen: &mut HashMap<mir::Opcode, Self>,
+        seen: &mut Map<mir::Opcode, Self>,
         func: &mir::Func,
         short: &ShortInsts,
         flags: &FlagInsts,

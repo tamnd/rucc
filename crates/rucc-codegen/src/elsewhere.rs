@@ -38,9 +38,8 @@
 //! reached through a pointer the file writes itself, so that the link may send it to a DLL without
 //! this file having known.
 
-use std::collections::HashSet;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Set;
 use rucc_ir::{AttrSet, Dll, Extra, Linkage, Module, Opcode, Pic, Visibility};
 use rucc_target::ObjectFormat;
 
@@ -74,13 +73,13 @@ use rucc_target::ObjectFormat;
 /// either as though it were the other is a wrong answer rather than a slower one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Elsewhere {
-    names: HashSet<Symbol>,
-    threads: HashSet<Symbol>,
-    twice: HashSet<Symbol>,
+    names: Set<Symbol>,
+    threads: Set<Symbol>,
+    twice: Set<Symbol>,
     described: bool,
     indexed: bool,
-    imported: HashSet<Symbol>,
-    referred: HashSet<Symbol>,
+    imported: Set<Symbol>,
+    referred: Set<Symbol>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -163,9 +162,9 @@ impl Elsewhere {
     /// through a pointer for it. A function never gets one from this file, since the import
     /// library's stub under the plain name is already an address in this image, and neither
     /// compiler writes one for a function either.
-    fn pointers(module: &Module, format: ObjectFormat) -> (HashSet<Symbol>, HashSet<Symbol>) {
+    fn pointers(module: &Module, format: ObjectFormat) -> (Set<Symbol>, Set<Symbol>) {
         if format != ObjectFormat::Coff {
-            return (HashSet::new(), HashSet::new());
+            return (Set::default(), Set::default());
         }
         let funcs = module
             .funcs()
@@ -294,11 +293,11 @@ impl Elsewhere {
     }
 
     /// The variables among `names` whose address some function here takes.
-    fn read(module: &Module, names: &HashSet<Symbol>) -> Vec<Symbol> {
+    fn read(module: &Module, names: &Set<Symbol>) -> Vec<Symbol> {
         if names.is_empty() {
             return Vec::new();
         }
-        let mut read = HashSet::new();
+        let mut read = Set::default();
         for id in module.funcs() {
             let func = &module[id];
             for block in func.blocks() {

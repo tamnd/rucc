@@ -99,9 +99,10 @@
 //! lay out around rather than something it has to leave room for.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, Fusion, Role};
 
@@ -123,7 +124,7 @@ pub fn blocks(
     func: &mut mir::Func,
     insts: &BranchInsts,
     names: &mut Interner,
-    fusable: &HashSet<mir::Inst>,
+    fusable: &Set<mir::Inst>,
     reorder: bool,
 ) {
     let table = table(insts, names);
@@ -557,7 +558,7 @@ fn along(
 ///
 /// One entry per name the target's table holds, interned once for the function rather than once
 /// per block, since a block that ends in a branch is most of the blocks there are.
-fn table(insts: &BranchInsts, names: &mut Interner) -> HashMap<mir::Opcode, &'static Fusion> {
+fn table(insts: &BranchInsts, names: &mut Interner) -> Map<mir::Opcode, &'static Fusion> {
     insts
         .fused
         .iter()
@@ -580,11 +581,11 @@ fn table(insts: &BranchInsts, names: &mut Interner) -> HashMap<mir::Opcode, &'st
 /// comparison and the branch, and a comparison that is no longer the instruction in front of the
 /// branch is not one the flags survive to, so [`blocks`] checks that again on what it finds.
 #[must_use]
-pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> HashSet<mir::Inst> {
+pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> Set<mir::Inst> {
     let table = table(insts, names);
     let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
     let reads = crate::changes::Reads::of(func);
-    let mut found = HashSet::new();
+    let mut found = Set::default();
     for block in func.blocks() {
         let insts: Vec<mir::Inst> = func.insts(block).collect();
         let [.., compare, last] = insts[..] else { continue };
@@ -612,8 +613,8 @@ struct Writer<'a> {
     func: &'a mut mir::Func,
     insts: &'a BranchInsts,
     names: &'a mut Interner,
-    table: HashMap<mir::Opcode, &'static Fusion>,
-    fusable: &'a HashSet<mir::Inst>,
+    table: Map<mir::Opcode, &'static Fusion>,
+    fusable: &'a Set<mir::Inst>,
 }
 
 impl Writer<'_> {

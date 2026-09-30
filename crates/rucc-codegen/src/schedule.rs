@@ -170,9 +170,9 @@
 //! a different one, which is what spec 10.5 says the right failure mode is. What has to be right is
 //! the graph, and what makes the graph right is that every edge the machine needs is in it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_mir::{Block, Func, Inst, Reg, Role};
 use rucc_target::{FlagInsts, MachineInsts, PhysReg, RegClass, Timing, TimingInsts, Unit};
@@ -233,7 +233,7 @@ pub fn insts(
     flags: &FlagInsts,
     names: &Interner,
     accurate: bool,
-    pinned: &HashSet<Inst>,
+    pinned: &Set<Inst>,
 ) -> Scheduled {
     let blocks: Vec<Block> = func.blocks().collect();
     let mut done = Scheduled::default();
@@ -382,8 +382,8 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Vec<Node> {
     // The last instruction to write each register, and every instruction to read one since. The
     // condition state is the same two questions with nowhere to keep the register's number, since
     // it is not an operand on a machine that has one.
-    let mut wrote: HashMap<Place, usize> = HashMap::new();
-    let mut read: HashMap<Place, Vec<usize>> = HashMap::new();
+    let mut wrote: Map<Place, usize> = Map::default();
+    let mut read: Map<Place, Vec<usize>> = Map::default();
     let mut wrote_flags: Option<usize> = None;
     let mut read_flags: Vec<usize> = Vec::new();
     let mut touched: Option<usize> = None;
@@ -499,7 +499,7 @@ fn heights(nodes: &mut [Node]) {
 /// difference is what criterion two compares, and what it is really asking is whether an
 /// instruction is doing work or making something that will have to be kept until later.
 fn growth(func: &Func, run: &[Inst], nodes: &mut [Node]) {
-    let mut seen: HashSet<Place> = HashSet::new();
+    let mut seen: Set<Place> = Set::default();
     for (at, &inst) in run.iter().enumerate().rev() {
         for operand in &func[func[inst].operands] {
             if operand.role == Role::Use && seen.insert((operand.reg, operand.class)) {
@@ -540,7 +540,7 @@ fn list(nodes: &[Node], timing: &TimingInsts, accurate: bool) -> Vec<usize> {
     let mut ready: BTreeSet<usize> = (0..nodes.len()).filter(|&at| preds[at] == 0).collect();
     let mut out: Vec<usize> = Vec::with_capacity(nodes.len());
     let mut cycle = 0;
-    let mut used: HashMap<Unit, u32> = HashMap::new();
+    let mut used: Map<Unit, u32> = Map::default();
     let mut issued = 0;
     let mut last: Option<usize> = None;
 
@@ -592,7 +592,7 @@ fn list(nodes: &[Node], timing: &TimingInsts, accurate: bool) -> Vec<usize> {
 }
 
 /// Whether the machine has room this cycle for an instruction on that unit.
-fn fits(unit: Unit, used: &HashMap<Unit, u32>, issued: u32, timing: &TimingInsts) -> bool {
+fn fits(unit: Unit, used: &Map<Unit, u32>, issued: u32, timing: &TimingInsts) -> bool {
     issued < timing.width.max(1) && used.get(&unit).copied().unwrap_or(0) < timing.slots(unit)
 }
 
@@ -689,7 +689,7 @@ mod tests {
 
     /// The pass, with nothing pinned beyond the block's own last instruction.
     fn schedule(func: &mut Func, names: &Interner) -> Scheduled {
-        insts(func, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, names, false, &HashSet::new())
+        insts(func, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, names, false, &Set::default())
     }
 
     /// A chain of three where only one order computes the right answer.
@@ -891,7 +891,7 @@ mod tests {
             &FLAGS,
             &names,
             false,
-            &HashSet::from([second]),
+            &[second].into_iter().collect::<Set<_>>(),
         );
         assert_eq!(
             shape(&held, &names, block),
@@ -1039,7 +1039,7 @@ mod tests {
 
         let mut names = Interner::new();
         let (mut loose, block) = build(&mut names);
-        insts(&mut loose, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, &names, false, &HashSet::new());
+        insts(&mut loose, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, &names, false, &Set::default());
         assert_eq!(
             shape(&loose, &names, block),
             ["addsd_rr", "addsd_rr", "addsd_rr", "mov_rr_64", "ret"],
@@ -1047,7 +1047,7 @@ mod tests {
         );
 
         let (mut tight, block) = build(&mut names);
-        insts(&mut tight, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, &names, true, &HashSet::new());
+        insts(&mut tight, (RSP, GPR), &TIMING, &MACHINE, &FLAGS, &names, true, &Set::default());
         assert_eq!(
             shape(&tight, &names, block),
             ["addsd_rr", "addsd_rr", "mov_rr_64", "addsd_rr", "ret"],
