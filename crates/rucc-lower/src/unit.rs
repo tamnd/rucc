@@ -187,6 +187,14 @@ pub struct Context<'a> {
     /// built yet. So what it does here is turn down the one shape the missing pad would change the
     /// meaning of, a call made while a handler is owed, rather than build it without the pad.
     pub exceptions: bool,
+    /// Whether an instruction that can trap may unwind as well as a call, which is
+    /// `-fnon-call-exceptions`.
+    ///
+    /// A load or a store through a pointer and a division can raise a signal, and a handler that
+    /// throws or calls `pthread_exit` from there unwinds out of that instruction. gcc covers such
+    /// an instruction with the same landing pad a call in the scope gets, so the `cleanup`
+    /// handlers owed there run, and this asks the walk to do the same.
+    pub non_call_exceptions: bool,
     /// Whether a tentative definition with external linkage is a common symbol, which is
     /// `-fcommon` and the default on Darwin, rather than a zeroed object in `.bss`.
     pub common: bool,
@@ -214,6 +222,7 @@ impl fmt::Debug for Context<'_> {
             .field("align", &self.align)
             .field("instrument", &self.instrument)
             .field("exceptions", &self.exceptions)
+            .field("non_call_exceptions", &self.non_call_exceptions)
             .field("common", &self.common)
             .finish_non_exhaustive()
     }
@@ -281,6 +290,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         align,
         instrument,
         exceptions,
+        non_call_exceptions,
         common,
         read,
     } = cx;
@@ -302,6 +312,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         align,
         instrument,
         exceptions,
+        non_call_exceptions,
         common,
         read,
         module,
@@ -352,6 +363,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) instrument: bool,
     /// Whether an exception may unwind through the unit. See [`Context::exceptions`].
     pub(crate) exceptions: bool,
+    /// Whether a trapping instruction may unwind. See [`Context::non_call_exceptions`].
+    pub(crate) non_call_exceptions: bool,
     /// Whether a tentative definition is a common symbol. See [`Context::common`].
     common: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].

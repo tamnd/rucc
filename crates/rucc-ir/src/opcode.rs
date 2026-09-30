@@ -719,6 +719,11 @@ pub enum Opcode {
     /// instruction for it or for the branch, and the call is given the pad in the table the
     /// unwinder reads instead. So it has to stay where it is, straight after its call, and one
     /// with no call in front of it, which is a call something folded away, answers false.
+    ///
+    /// Under `-fnon-call-exceptions` what is in front of it can also be a load, a store or a
+    /// division, which is an instruction a signal handler may unwind out of. The code generator
+    /// covers that instruction the same way, and one that was folded away or moved leaves this
+    /// answering false the same way.
     Unwound,
     /// The exception an unwind arrived at a landing pad with, which is the first thing in the
     /// block a `br_if` on [`Opcode::Unwound`] sends it to.

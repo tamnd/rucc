@@ -641,7 +641,8 @@ impl Func {
     }
 
     /// Whether this call has an unwind edge, which is an `unwound` straight after it. See
-    /// [`Opcode::Unwound`].
+    /// [`Opcode::Unwound`]. A load, a store or a division can have one too, under
+    /// `-fnon-call-exceptions`, and the question is the same for them.
     #[must_use]
     pub fn unwinds_to_pad(&self, call: Inst) -> bool {
         self.next_inst(call).is_some_and(|next| self[next].opcode == Opcode::Unwound)

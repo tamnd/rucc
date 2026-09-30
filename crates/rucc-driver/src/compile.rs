@@ -419,6 +419,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             align: opts.align_functions,
                             instrument: opts.instrument_functions,
                             exceptions: opts.exceptions,
+                            non_call_exceptions: opts.exceptions && opts.non_call_exceptions,
                             common,
                             read: &mut read,
                         },
@@ -5839,6 +5840,41 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // the pad for c makes after b's handler. The pad for b only runs a's, so it has none.
         assert_eq!(text.matches("= unwound").count(), 5, "{text}");
         assert_eq!(text.matches("= landing").count(), 2, "{text}");
+    }
+
+    /// Under `-fnon-call-exceptions` a load through a pointer and a division by a value can unwind
+    /// as well as a call, so in a handler's scope each gets the landing pad a call there would.
+    /// One in the handler's own initializer does not, since the object is not owed its handler
+    /// until it has its value, and a slot of the frame and a division by a constant never fault.
+    #[test]
+    fn a_trapping_instruction_gets_a_landing_pad_under_non_call_exceptions() {
+        let source = concat!(
+            "void done(int *p);\n",
+            "int load(int *q) { int x __attribute__((cleanup(done))) = 1; return *q + x; }\n",
+            "int divide(int a, int b) { int x __attribute__((cleanup(done))) = a / b; return x % b; }\n",
+            "int safe(int a) { int x __attribute__((cleanup(done))) = a; int y[2] = {a, a}; return y[1] / 3 + x; }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.exceptions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        assert!(!result.text().contains("landing"), "{}", result.text());
+
+        opts.non_call_exceptions = true;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        assert_eq!(text.matches("= unwound").count(), 2, "{text}");
+        assert_eq!(text.matches("= landing").count(), 2, "{text}");
+
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        let text = result.text();
+        assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_load"), "{text}");
+        assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_divide"), "{text}");
+        assert_eq!(text.matches(".cfi_lsda").count(), 2, "{text}");
     }
 
     /// Under `-fexceptions` a `cleanup` handler is owed a call on an unwind as well. On x86-64 ELF

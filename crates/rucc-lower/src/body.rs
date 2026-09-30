@@ -31,9 +31,9 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Symbol, dfp};
 use rucc_diag::Span;
 use rucc_ir::{
-    AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Extra, Flags, FloatPred, Func, Inst,
-    InstData, IntPred, MemInfo, MemOrder, Opcode, PrefetchHint, Restrict, RmwOp, Signature, Type,
-    VaInfo, Value,
+    AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Def, Extra, Flags, FloatPred, Func,
+    Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, PrefetchHint, Restrict, RmwOp, Signature,
+    Type, VaInfo, Value,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind, Eval,
@@ -95,6 +95,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         pinned: Set::default(),
         landings: Map::default(),
         pads: Map::default(),
+        covered: None,
         jumps: Vec::new(),
         grows: false,
         cleans: false,
@@ -664,6 +665,9 @@ struct Body<'a, 'u> {
     /// same pad rather than a copy of it, which is what gcc does. Keyed by the slots rather than
     /// the declarations, so an object the walk gave a second slot gets a pad of its own.
     pads: Map<Vec<(Value, DeclId)>, Block>,
+    /// The last instruction [`Body::cover`] looked at, so that each one is asked about once and an
+    /// edge it builds does not ask about the instruction it was built for all over again.
+    covered: Option<Inst>,
     /// The jumps whose stack is not settled yet, which is all of them until the walk knows where
     /// every label is.
     jumps: Vec<Jump>,
@@ -931,8 +935,14 @@ impl<'u> Body<'_, 'u> {
         build.binary(Opcode::Sub, zero, value, flags)
     }
 
-    /// The block being appended to.
-    fn block(&self) -> Block {
+    /// The block being appended to, once the instruction built last has the unwind edge
+    /// [`Body::cover`] gives one that can trap.
+    ///
+    /// Here because every way of building something goes through here first, so the question is
+    /// asked before anything is put after the instruction and before anyone takes the block as the
+    /// one a branch leaves from.
+    fn block(&mut self) -> Block {
+        self.cover();
         self.at.expect("nothing is built while the cursor is in unreachable code")
     }
 
@@ -1158,6 +1168,7 @@ impl<'u> Body<'_, 'u> {
     /// The handlers first and the stack afterwards, because a handler is called with the address
     /// of an object in this scope and giving the stack back is what takes that object away.
     fn close(&mut self, span: Span) {
+        self.cover();
         let mark = self.marks.pop().expect("a scope is closed by whoever opened it");
         let owed = self.cleanups.pop().expect("a scope is closed by whoever opened it");
         let outer = self.owed_now();
@@ -1173,6 +1184,9 @@ impl<'u> Body<'_, 'u> {
     /// arrived at twice, which a backward `goto` over the declaration does, and it is owed one
     /// call and not two.
     fn owes_cleanup(&mut self, object: DeclId, handler: DeclId) {
+        // Before the handler is owed, so that a fault in the object's own initializer does not run
+        // the handler on an object that never got its value, which is what gcc does too.
+        self.cover();
         let Some(owed) = self.cleanups.last_mut() else { return };
         if owed.iter().any(|entry| entry.object == object) {
             return;
@@ -8073,6 +8087,107 @@ impl<'u> Body<'_, 'u> {
         }
         let owed = self.owed_now();
         self.unwind_to(owed, span);
+    }
+
+    /// The unwind edge a call gets, given to the instruction built last when it can trap and a
+    /// scope owes a handler, which is `-fnon-call-exceptions`.
+    ///
+    /// Under that flag a signal handler that throws or calls `pthread_exit` unwinds out of the
+    /// instruction that faulted, and gcc covers such an instruction in the call site table the
+    /// way it covers a call, so the handlers owed there run. Only the last instruction of the
+    /// block is asked about, and it is asked before the walk builds anything after it or changes
+    /// what is owed, so the edge goes straight after it without moving anything. An instruction
+    /// built in the middle of a group some builder made in one go is not asked about, which loses
+    /// the handlers for a fault there and nothing else.
+    fn cover(&mut self) {
+        if !self.unit.non_call_exceptions {
+            return;
+        }
+        let Some(block) = self.at else { return };
+        let Some(last) = self.func.insts_backwards(block).next() else { return };
+        if self.covered == Some(last) {
+            return;
+        }
+        self.covered = Some(last);
+        if !self.traps(last) || !self.owes_anything() || !self.has_landing_pads() {
+            return;
+        }
+        let span = self.func.span(last);
+        let owed = self.owed_now();
+        self.unwind_to(owed, span);
+    }
+
+    /// Whether an instruction can fault, which is gcc's `may_trap_p` cut down to what the walk
+    /// builds: a load or a store through an address that is not a place in the frame or a named
+    /// object at a fixed distance, and an integer division by anything that is not a constant
+    /// other than zero. Floating point arithmetic is left out, although gcc counts it under the
+    /// default `-ftrapping-math`, because nothing on these targets unmasks the exceptions that
+    /// would make it fault.
+    fn traps(&self, inst: Inst) -> bool {
+        let data = &self.func[inst];
+        let args = &self.func[data.args];
+        match data.opcode {
+            Opcode::Load => !self.fixed_place(args[0]),
+            Opcode::Store => !self.fixed_place(args[1]),
+            Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem => {
+                !self.nonzero_constant(args[1])
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an address is a stack slot or a named object, or a distance into one that is
+    /// worked out from constants.
+    fn fixed_place(&self, mut addr: Value) -> bool {
+        loop {
+            let Def::Result { inst, .. } = self.func[addr].def else { return false };
+            let data = &self.func[inst];
+            match data.opcode {
+                Opcode::Alloca | Opcode::GlobalAddr => return true,
+                Opcode::PtrAdd => {
+                    let args = &self.func[data.args];
+                    if !self.fixed_offset(args[1]) {
+                        return false;
+                    }
+                    addr = args[0];
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Whether an offset is worked out from constants alone, which is what the walk builds for an
+    /// element of an array at an index that is a constant before anything folds it.
+    fn fixed_offset(&self, value: Value) -> bool {
+        let Def::Result { inst, .. } = self.func[value].def else { return false };
+        let data = &self.func[inst];
+        match data.opcode {
+            Opcode::IConst => true,
+            Opcode::SExt | Opcode::ZExt | Opcode::Trunc => {
+                self.fixed_offset(self.func[data.args][0])
+            }
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Shl => {
+                let args = &self.func[data.args];
+                self.fixed_offset(args[0]) && self.fixed_offset(args[1])
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value is an integer constant other than zero.
+    fn nonzero_constant(&self, value: Value) -> bool {
+        self.bits_of(value).is_some_and(|bits| bits != 0)
+    }
+
+    /// The bits of an integer constant, for a value that is one.
+    fn bits_of(&self, value: Value) -> Option<u128> {
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        match self.func[inst] {
+            InstData { opcode: Opcode::IConst, extra: Extra::Imm(imm), .. } => {
+                Some(self.func[imm].unsigned())
+            }
+            _ => None,
+        }
     }
 
     /// Every handler the open scopes owe, innermost first, which is the order an unwind runs them.

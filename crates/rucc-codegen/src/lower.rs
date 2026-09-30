@@ -1608,7 +1608,27 @@ impl<'a> Lowering<'a> {
                 _ => {}
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
+            let before = self.at.and_then(|at| self.out.insts(at).last());
             self.emit(inst, &matched)?;
+            // A load, a store or a division with an unwind edge, which `-fnon-call-exceptions`
+            // gives one that can fault. What the table covers is the one instruction of what the
+            // rule wrote that does the access or the divide: the first for a load, where anything
+            // after it is widening what it read, and the last for the others, where anything in
+            // front is getting the operands ready. A signal frame is unwound from the address of
+            // the instruction that faulted rather than from the one after it, so covering that
+            // instruction's own bytes is enough.
+            if self.source.unwinds_to_pad(inst) {
+                let at = self.at.expect("a block is being filled");
+                let first = match before {
+                    Some(before) => self.out.next_inst(before),
+                    None => self.out.insts(at).next(),
+                };
+                let last = self.out.insts(at).last();
+                let access = if self.source[inst].opcode == Opcode::Load { first } else { last };
+                if let Some(access) = access {
+                    self.unwinding.insert(inst, access);
+                }
+            }
             // After it is built rather than when it matched, so that what is recorded is the rules
             // this function was lowered by and not the rules something was tried with.
             self.fired.mark(matched.rule);
