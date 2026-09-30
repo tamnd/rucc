@@ -1025,6 +1025,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // nothing. gcc refuses that command line, and there is nothing it could have meant.
             "-fgnu89-inline" => opts.gnu89_inline = true,
             "-fno-gnu89-inline" => opts.gnu89_inline = false,
+            // Which trailing arrays are flexible. The bare spelling is the strictest level, as it
+            // is in gcc, and the kernel passes `=3`.
+            "-fstrict-flex-arrays" => opts.strict_flex_arrays = 3,
+            "-fno-strict-flex-arrays" => opts.strict_flex_arrays = 0,
+            _ if arg.starts_with("-fstrict-flex-arrays=") => {
+                let text = &arg["-fstrict-flex-arrays=".len()..];
+                let level: u8 = text
+                    .parse()
+                    .map_err(|_| err(format!("{arg}: the level has to be a number from 0 to 3")))?;
+                if level > 3 {
+                    return Err(err(format!("{arg}: the level has to be a number from 0 to 3")));
+                }
+                opts.strict_flex_arrays = level;
+            }
             // Both directions of each, because a build system that wants one of these usually
             // writes it beside the flag that turns it back off for one directory.
             "-fno-omit-frame-pointer" => opts.frame_pointer = Some(true),
@@ -8387,7 +8401,6 @@ mod tests {
         // Refused with no issue, because nothing is planned for them, and still with the reason.
         for flag in [
             "-fstack-check",
-            "-fstrict-flex-arrays=3",
             "-fno-zero-initialized-in-bss",
             "-mindirect-branch=thunk",
             "-mfunction-return=thunk-inline",

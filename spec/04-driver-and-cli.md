@@ -339,6 +339,7 @@ Honored, by doing what gcc does:
 | `-fconserve-stack`, `-fno-conserve-stack` | Inlining may grow a caller's frame to 40 percent more than its own locals or to 100 bytes, whichever is more, where the default is 1000 percent or 256 bytes. Those are the values gcc gives `large-stack-frame-growth` and `large-stack-frame` under the flag. See section 33.7 of the optimizer spec. |
 | `-fshort-wchar`, `-fno-short-wchar` | `wchar_t` is a 16 bit unsigned type, in `L""`, in `__WCHAR_TYPE__` and its neighbours and in the checker, because the session puts it into the target the way it puts `-funsigned-char` there. The negative form is the target's own `wchar_t`. |
 | `-fmin-function-alignment=N` | A floor under every function, rounded up to a power of two the way gcc rounds `-falign-functions=`. `-falign-functions` may raise it and cannot lower it, in whichever order the two are written. |
+| `-fstrict-flex-arrays`, `-fstrict-flex-arrays=N`, `-fno-strict-flex-arrays` | Which arrays at the end of a structure count as flexible when `__builtin_object_size` is asked about one through a pointer, which section 13.5 describes. Zero, the default, takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`, and three takes only `[]`. The bare flag is three and the negative form is zero, as in gcc, and a level outside zero to three is refused. |
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
 | `-mpreferred-stack-boundary=N` (x86-64) | The stack pointer is kept on a multiple of 2 to the N at every call and counted on to be no more than that on entry, for N from 4 to 12, and from 3 once `-mno-sse` is on the line as well, which is gcc's range. A frame is rounded to that and not to sixteen, and a local that asks for more is aligned by the prologue behind a frame pointer with `and`, which is gcc's sequence and the one objtool reads. A local aggregate of sixteen bytes or more, which is otherwise raised to sixteen, is raised no further than the boundary. |
 | `-mno-sse`, `-mno-sse2`, `-mno-mmx` (x86-64), `-mgeneral-regs-only` | The vector registers are kept out of every function. The extension macros such as `__SSE2__` and `__SSE2_MATH__` go, the register save area of a variadic function holds the general purpose registers only, and a function with a `float`, a `double` or a vector in it is refused with the type named, as gcc refuses it. On x86-64 they are off once SSE2 is. On AArch64 `-mgeneral-regs-only` does the same to the FP and SIMD registers, and `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros go. On x86-64 it also turns the x87 stack off. |
@@ -368,7 +369,6 @@ Taken because what they ask for is what happens:
 | `-fzero-init-padding-bits=all`, `-fzero-init-padding-bits=unions`, `-fzero-init-padding-bits=standard` | An automatic object whose initializer does not cover every byte, padding and the rest of a union included, is zeroed whole before its members are stored. |
 | `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |
-| `-fstrict-flex-arrays=0`, `-fno-strict-flex-arrays` | Every trailing array is treated as flexible, which is how `__builtin_object_size` treats one here. |
 | `-ftrivial-auto-var-init=uninitialized` | The default. |
 | `-fzero-call-used-regs=skip` | The default. |
 | `-mindirect-branch-register`, `-mno-indirect-branch-register` (x86-64) | Every indirect call and jump already goes through a register and never through memory. |
@@ -395,7 +395,6 @@ Refused, with no issue, because nothing is planned for them:
 |---|---|
 | `-fno-zero-initialized-in-bss` | A variable whose initializer is all zeroes, `= {}` say, can still be put in `.bss`, which is the one thing the flag forbids. A variable with a zero written out, `= 0`, goes in `.data` already. |
 | `-fstack-check`, `-fstack-check=*` | gcc's old probing is not written. `-fstack-clash-protection` is the probing this compiler does. |
-| `-fstrict-flex-arrays*` | `__builtin_object_size` gives no size for a trailing array reached through a pointer at any level, so the bounds a build turns this on for would not be checked. |
 | `-fplugin=*`, `-fplugin-arg-*` | A gcc plugin is built against gcc's own internals. |
 | `-mharden-sls=*` (AArch64) | Nothing is put after a return to stop speculation past it. |
 | `-mregparm=*` (x86-64) | It is for 32 bit x86, which is not a target here. |
