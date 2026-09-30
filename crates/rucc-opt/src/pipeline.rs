@@ -683,6 +683,9 @@ pub struct Options {
     /// Whether `-fconserve-stack` asked for gcc's tighter limits on how far inlining may grow a
     /// frame. See [`inline::Growth`].
     pub conserve_stack: bool,
+    /// Whether bodies spliced into one caller may share the slots they bring with them, which is
+    /// `-fstack-reuse=` and on above `-O0`. See [`inline`].
+    pub stack_reuse: bool,
 }
 
 impl Default for Options {
@@ -702,6 +705,7 @@ impl Default for Options {
             no_builtin: Vec::new(),
             isa: Isa::NONE,
             conserve_stack: false,
+            stack_reuse: false,
         }
     }
 }
@@ -886,7 +890,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     let started = Instant::now();
     let growth =
         if opts.conserve_stack { inline::Growth::CONSERVE } else { inline::Growth::DEFAULT };
-    let inlined = inline::run(module, names, limit, once, opts.isa, growth);
+    let inlined = inline::run(module, names, limit, once, opts.isa, growth, opts.stack_reuse);
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {
         if opts.verify {

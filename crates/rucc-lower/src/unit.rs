@@ -231,6 +231,16 @@ pub struct Context<'a> {
     pub no_builtin: &'a [String],
     /// What a local with no initializer starts out holding, which is `-ftrivial-auto-var-init=`.
     pub auto_init: AutoInit,
+    /// Whether two locals whose addresses are taken may be given one slot when the blocks that
+    /// declare them never overlap, which is `-fstack-reuse=` and on above `-O0`.
+    ///
+    /// The code generator shares the bytes of two locals it can follow the addresses of, and not
+    /// of any other. An array handed to a call is one it cannot follow, and a function with four
+    /// of them in four blocks one after another kept all four where gcc keeps one. The blocks are
+    /// what says they are never wanted at once, and only the walk still has the blocks, so this
+    /// is decided here, as one `alloca` for all of them, which is a thing every pass after it
+    /// already reads correctly. The rules are on `Body::declare`.
+    pub share: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -260,6 +270,7 @@ impl fmt::Debug for Context<'_> {
             .field("builtins", &self.builtins)
             .field("no_builtin", &self.no_builtin)
             .field("auto_init", &self.auto_init)
+            .field("share", &self.share)
             .finish_non_exhaustive()
     }
 }
@@ -331,6 +342,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         builtins,
         no_builtin,
         auto_init,
+        share,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -356,6 +368,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         builtins,
         no_builtin,
         auto_init,
+        share,
         read,
         module,
         diagnostics: Vec::new(),
@@ -415,6 +428,8 @@ pub(crate) struct Unit<'a> {
     no_builtin: &'a [String],
     /// What a local with no initializer starts out holding. See [`Context::auto_init`].
     pub(crate) auto_init: AutoInit,
+    /// Whether locals in blocks that never overlap may share a slot. See [`Context::share`].
+    pub(crate) share: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,

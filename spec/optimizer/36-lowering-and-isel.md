@@ -279,6 +279,8 @@ allocator's own liveness.** GCC cannot do this because its stack layout is fixed
 
 **The two kinds are gated differently, and only one of them is gated at all.** The reason a frame ever lays two things apart that could share is the debugger: a local is a variable somebody can ask the value of, and one that is out of scope reading as whatever took its place is what `-O0` exists not to do, so locals share above `-O0` and where `-fstack-reuse` says they may. A spill slot has no name, nothing can ask for it, and the only thing that ever reads it is an instruction the allocator wrote, so a spill slot shares at every level including `-O0`. That is not a refinement: an interpreter whose dispatch table reaches seventy labels spills the same loop values once per label, and a slot each is a frame of tens of kilobytes at a level where GCC's is three.
 
+**A local the slot allocator cannot follow is shared before it, by scope.** The allocator's liveness only covers a local whose address stays where it can see it, and an array handed to a call is not one. Those are the buffers the kernel's frames are made of, so they are shared in two earlier places, both of which still have what the allocator lacks. The lowering has the blocks, and gives locals of the same size in blocks where neither is inside the other one `alloca`, for a local whose address is taken or one too large for SROA to take apart. The inliner has the calls, and lets a body spliced into a caller take over a slot of the same size that an earlier body spliced into the same caller brought, since the calls a function was written with never overlap. One `alloca` for two locals is something every pass after reads correctly without being told, which a pair of slots marked as overlapping would not be. Only the same size is shared because `__builtin_object_size` reads the size of the `alloca`. Both follow `-fstack-reuse` and neither happens in a build that checks accesses.
+
 ## 36.8 What rucc builds, and what changes from spec 10
 
 Spec 10 is the design and it stands. What this document adds is four things.
@@ -335,10 +337,7 @@ maintained honestly rather than grown whenever it fails. Spec 10.2 requires a re
 entry; the discipline is that adding an entry needs the reason, and "no rule yet" is a
 tracked-issue reason and not an excuse.
 
-**A frame slot is shared between two locals whose live ranges the analysis thought were disjoint and
-were not.** The `-fstack-reuse` bug class. It is a wrong-code bug that manifests as one variable
-corrupting another, and the historical instances in GCC involve address-taken locals whose addresses
-outlive their scopes. The defence is conservatism: a local whose address escapes gets its own slot.
+**A frame slot is shared between two locals whose live ranges the analysis thought were disjoint and were not.** The `-fstack-reuse` bug class. It is a wrong-code bug that manifests as one variable corrupting another, and the historical instances in GCC involve address-taken locals whose addresses outlive their scopes. The defence is conservatism: a local whose address escapes shares only with a local of a scope apart from its own or of a body spliced in at another call, never by liveness, and a pointer kept past the end of its scope reads what took its place, which it does in GCC too.
 
 **The parallel copy on an edge is sequenced wrongly when it contains a cycle.** Spec 10.4 already
 names this as "a small algorithm that is wrong in a startling number of compilers". It needs a

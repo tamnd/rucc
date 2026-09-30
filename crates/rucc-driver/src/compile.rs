@@ -433,6 +433,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Some(0) => rucc_lower::AutoInit::Zero,
                                 Some(_) => rucc_lower::AutoInit::Pattern,
                             },
+                            share: shares_slots(opts),
                             read: &mut read,
                         },
                     );
@@ -768,6 +769,17 @@ struct Instrumented {
     crossings: rucc_safety::Sites,
 }
 
+/// Whether locals whose lifetimes never overlap may be given one slot before the code generator,
+/// by the walk for blocks apart from each other and by the inliner for bodies spliced into the
+/// same caller.
+///
+/// The same answer the code generator gets for its own sharing, less a build that checks accesses,
+/// which reasons about each local as an object of its own and should not find two at one address.
+fn shares_slots(opts: &Options) -> bool {
+    opts.stack_reuse.unwrap_or_else(|| opts.opt_level.runs_optimizer())
+        && !opts.safety.instruments()
+}
+
 /// Runs the optimizer over the module, and collects whatever the dumps asked for.
 ///
 /// The level chooses a pipeline, the `-f` flags edit it, and at `-O0` there is nothing in it, so
@@ -811,6 +823,7 @@ fn optimize(
     // callee with one against.
     settings.isa = opts.isa;
     settings.conserve_stack = opts.conserve_stack;
+    settings.stack_reuse = shares_slots(opts);
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.global_fuel = opts.pass_fuel_global;
     settings.verify |= opts.verify_each;
