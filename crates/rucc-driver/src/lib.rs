@@ -248,8 +248,7 @@ options:
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
-  -std=<dialect>         c89 through c2y, and the gnu spellings
-  -trigraphs             replace trigraphs in any dialect, which c89 to c17 do anyway
+  -std=<dialect>, -trigraphs   c89 through c2y and the gnu spellings, trigraphs in any of them
   -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z, fast
