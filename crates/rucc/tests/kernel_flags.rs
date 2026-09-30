@@ -297,3 +297,14 @@ fn an_address_compared_in_a_build_bug_on_is_decided() {
     let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], weak);
     assert!(!out.status.success(), "a weak declaration may be null");
 }
+
+/// `swap_table.h` checks `(unsigned long)xa_mk_value(0)` in a `BUILD_BUG_ON`, which is an integer
+/// cast to a pointer inside an inline function and cast back outside it. gcc gives the number back.
+#[test]
+fn a_small_number_cast_to_a_pointer_and_back_is_that_number() {
+    let source = "extern void bad(void) __attribute__((error(\"BUILD_BUG_ON failed\")));\n\
+        static inline void *xa_mk_value(unsigned long v) { return (void *)((v << 1) | 1); }\n\
+        void t(void) { if ((unsigned long)xa_mk_value(0) != 0b1UL) bad(); }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}

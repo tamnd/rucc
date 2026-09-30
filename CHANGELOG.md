@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A pointer made from an integer constant that fits in thirty two bits and cast back to an integer folds to that constant, so the kernel's `BUILD_BUG_ON` on `xa_mk_value (0)` in `mm/swap_table.h` builds.
 - `-fgcse` and `-fno-gcse` are taken and ignored like the other flags that name a gcc pass, so the kernel's `kernel/bpf/core.c` builds.
 - The assembler writes `vandps`, `vandnps`, `vorps` and `vxorps` and their `pd` forms, which crypto/xor.c uses through xor_avx.h.
 - The assembler writes `pushw` and `popw`, `sgdtl`, `sidtl`, `lgdtl` and `lidtl` under `.code32`, and the VEX forms of `vpextrb`, `vpextrw`, `vpextrd`, `vpinsrb`, `vpinsrw` and `vpinsrd`, which the kernel's `efi-mixed.S`, `relocate_kernel_64.S` and `crc32-pclmul.S` use.
