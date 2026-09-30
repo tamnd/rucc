@@ -1226,6 +1226,11 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // left standing. Nothing below the optimizer lowers the instruction, so the answer is written
     // here, and it is the one the pass would have given.
     constant_p::answer(module, true);
+    // Last, once every pass that takes a call away has run. See [`inline::drop_unreferenced`].
+    // Not at `-O0`, where nothing took a call away and gcc keeps what the source calls.
+    if opts.level != OptLevel::O0 {
+        inline::drop_unreferenced(module);
+    }
     report
 }
 

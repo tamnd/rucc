@@ -1540,6 +1540,39 @@ fn targets(
     func.push_block_calls(&calls)
 }
 
+/// Turns every `static` function that nothing in the module refers to any more into a
+/// declaration, until there is none left.
+///
+/// The front end decides which of them to emit from the calls it can see, and a call the passes
+/// then found could never run is one it still saw. The kernel writes
+/// `if (IS_ENABLED(CONFIG_X86_64)) { ... return ...; } return load_vdso32();`, and gcc emits no
+/// `load_vdso32` there, which matters because its body names `vdso32_image`, and nothing in a
+/// sixty four bit only kernel defines that. So the question is asked again once the passes are
+/// done, and asked again after each answer, since a function taken away may have been the last
+/// caller of another. A function that calls itself is still a caller, so one of those stays.
+pub fn drop_unreferenced(module: &mut Module) {
+    loop {
+        let (calls, elsewhere) = references(module);
+        let gone: Vec<FuncId> = module
+            .funcs()
+            .filter(|&id| {
+                let func = &module[id];
+                !func.is_declaration()
+                    && func.linkage == Linkage::Internal
+                    && !func.attrs.set.contains(AttrSet::USED)
+                    && !calls.contains_key(&func.name)
+                    && !elsewhere.contains(&func.name)
+            })
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for id in gone {
+            module[id] = declaration(&module[id]);
+        }
+    }
+}
+
 /// Turns every function that still holds a `va_arg_pack` or a `va_arg_pack_len`, and every one
 /// marked `inline_only`, into a declaration of the same name.
 fn withdraw(module: &mut Module) {

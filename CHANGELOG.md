@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- From `-O1`, a `static` function whose last call the optimizer removed is no longer emitted, so a symbol only its body names is not left undefined at link time. gcc drops these too, and the kernel relies on it for `load_vdso32` in a 64-bit-only build.
 - A `static` function kept alive only by an `alias` now has its callees kept too, so a `static inline` it calls is emitted instead of left as an undefined reference. The kernel's syscall stubs are aliases of this kind.
 - Attributes after a `struct`, `union` or `enum` tag with no body, as in `struct mem_section __ref *f(int)`, are now specifiers of the declaration, the way gcc reads them, instead of being kept on the tag where nothing read them.
 - A `section` or `used` attribute beside the star of a function that returns a pointer, as in `void * __init f(void)`, now places the function too, on a definition as well as a declaration.

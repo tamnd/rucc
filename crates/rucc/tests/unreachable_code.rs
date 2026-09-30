@@ -149,3 +149,23 @@ fn a_conditional_whose_condition_folds_does_not_name_the_other_arm() {
         assert!(asm.contains("kept"), "the arm that runs went at {level}:\n{asm}");
     }
 }
+
+/// A `static` function whose one call the optimizer took away is not emitted, so what its body
+/// names is not named either. The kernel's `load_vdso32` is this, after an `if` on
+/// `IS_ENABLED(CONFIG_X86_64)` that returns, and its body names a `vdso32_image` that a sixty
+/// four bit only kernel does not define. From `-O1`, where something takes the call away.
+#[test]
+fn a_static_function_whose_only_call_went_is_not_emitted() {
+    let source = "extern int vdso32_image;\nint map(int *p, int x);\n\
+                  static int load32(void) { return map(&vdso32_image, 0); }\n\
+                  static int helper(void) { return load32(); }\n\
+                  int setup(int n) {\n  if (sizeof(long) == 8) { return map(0, n); }\n\
+                  return helper();\n}\n";
+    for level in &LEVELS[1..] {
+        let asm = emit_of(level, "asm", "static-gone", source);
+        assert!(!asm.contains("vdso32_image"), "the dead body reached {level}:\n{asm}");
+        assert!(!asm.contains("load32"), "{level}:\n{asm}");
+        assert!(!asm.contains("helper"), "the caller of the caller stayed at {level}:\n{asm}");
+        assert!(asm.contains("setup:"), "{level}:\n{asm}");
+    }
+}
