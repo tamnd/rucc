@@ -2727,6 +2727,18 @@ mod tests {
         assert!(text.contains("const 8 : unsigned long"), "{text}");
     }
 
+    /// `<stdckdint.h>` is the overflow builtins with the arguments in the standard's order, so a
+    /// checked add that wraps says so and still stores the wrapped value.
+    #[test]
+    fn the_checked_arithmetic_header_is_shipped() {
+        let text = shipped(concat!(
+            "#include <stdckdint.h>\n",
+            "int f(int *r, int a) { return ckd_add(r, a, 1) + ckd_sub(r, a, 1) + ckd_mul(r, a, 2); }\n",
+            "long v = __STDC_VERSION_STDCKDINT_H__;\n",
+        ));
+        assert!(text.contains("decl #0 f"), "{text}");
+    }
+
     /// Including everything twice has to change nothing, because that is what happens in any
     /// program large enough to matter and a guard that is wrong shows up nowhere else.
     ///
