@@ -172,6 +172,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_mir::{Block, Func, Inst, Reg, Role};
 use rucc_target::{FlagInsts, MachineInsts, PhysReg, RegClass, Timing, TimingInsts, Unit};
@@ -237,7 +238,7 @@ pub fn insts(
     let blocks: Vec<Block> = func.blocks().collect();
     let mut done = Scheduled::default();
     let stack = (Reg::physical(stack.0), stack.1);
-    let mut known = Known { timing, machine, flags, names, stack, seen: HashMap::new() };
+    let mut known = Known { timing, machine, flags, names, stack, seen: Map::default() };
     for block in blocks {
         let was: Vec<Inst> = func.insts(block).collect();
         if was.len() < 3 {
@@ -297,7 +298,7 @@ struct Known<'a> {
     flags: &'a FlagInsts,
     names: &'a Interner,
     stack: Place,
-    seen: HashMap<Symbol, Facts>,
+    seen: Map<Symbol, Facts>,
 }
 
 impl Known<'_> {
