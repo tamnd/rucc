@@ -1111,7 +1111,10 @@ impl Checker<'_> {
             );
             return self.poison(span);
         };
-        if !self.target_of_indirection(target, span) {
+        // `*p` on a structure nobody has defined yet is an lvalue like any other, and only reading
+        // it needs the definition. The kernel's `PERCPU_PTR(&runqueues)` takes `typeof(*p)` of
+        // one without a definition in sight, and gcc accepts it, so the refusal waits for `value`.
+        if !self.incomplete_record(target) && !self.target_of_indirection(target, span) {
             return self.poison(span);
         }
         // Dereferencing a function pointer gives the function back, which is why `(*f)()` and
@@ -2371,8 +2374,28 @@ impl Checker<'_> {
     }
 
     /// The value of an expression, which is what every operand but a few is.
+    ///
+    /// An lvalue of a structure or union with no definition yet cannot be read, since nothing
+    /// knows how big it is. Unary `*` lets one through for `&` and `typeof` to use, and this is
+    /// where the refusal it put off is made.
     pub(in crate::check) fn value(&mut self, expr: ExprId) -> ExprId {
+        let ty = self.tast[expr].ty;
+        if self.tast[expr].category == Category::Lvalue && self.incomplete_record(ty) {
+            let span = self.tast.expr_span(expr);
+            let ty = self.spell(ty);
+            self.report(
+                Diagnostic::error(format!("invalid use of undefined type '{ty}'"), span)
+                    .with_code("E0503"),
+            );
+            return self.poison(span);
+        }
         self.conv().value(expr)
+    }
+
+    /// Whether a type is a structure or union that has been declared and not defined.
+    fn incomplete_record(&self, ty: TypeId) -> bool {
+        matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Record(_))
+            && !is_complete(&self.types, ty)
     }
 
     /// What a message calls the thing that cannot be written to.
