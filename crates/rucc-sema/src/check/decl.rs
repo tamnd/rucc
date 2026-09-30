@@ -112,6 +112,9 @@ struct Declared {
     /// because the attribute is refused on a name with internal linkage and the sentence has to
     /// point at it.
     weak: Option<Span>,
+    /// Whether this declaration is a `weakref` of the symbol its assembler name holds, which is
+    /// [`DeclFlags::WEAKREF`].
+    weakref: bool,
     /// The function a `cleanup` attribute on this declaration asks to have called on the way out
     /// of the block the object is in.
     cleanup: Option<DeclId>,
@@ -298,6 +301,11 @@ impl Checker<'_> {
         // Checked and not kept, since nothing reads a format string yet. The specifiers only, for
         // the reason `retained` below reads them only.
         self.format_archetypes(specs.attrs);
+        // A definition is the thing itself, so a `weakref` on one is a name that is both a
+        // reference to something else and a body of its own. gcc refuses that as it refuses an
+        // alias on one, and the reader says so in gcc's words, which is all it does here: told
+        // the name has a value, it answers with nothing.
+        self.weak_reference([specs.attrs, AttrList::EMPTY], None, linkage, true, name, span);
         let declared = Declared {
             name,
             ty,
@@ -314,6 +322,8 @@ impl Checker<'_> {
             // declaration above the definition is where one goes and the merge keeps it.
             asm_label: None,
             register: None,
+            // Refused above when it was written.
+            weakref: false,
             // A definition is the thing itself, so an `alias` on one is a name that is both a
             // second spelling of something else and a body of its own. gcc refuses that, and
             // the specifiers are not where one is written anyway.
@@ -694,6 +704,27 @@ impl Checker<'_> {
         let starred = self.starred(item.declarator);
         // One string with two readings, so one call answers both and the string is looked at once.
         let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
+        // Read from both places for the reason `retained` below is.
+        let alias = self.aliased(specs.attrs).or_else(|| self.aliased(item.attrs));
+        // A weakref is a declaration whose assembler name is the target and whose references to it
+        // are weak, and the alias that may have named the target is spent on that rather than
+        // making this a second name for something the file defines. See
+        // [`Checker::weak_reference`].
+        let weakref = self.weak_reference(
+            [specs.attrs, item.attrs],
+            alias,
+            linkage,
+            item.init.is_some(),
+            name,
+            span,
+        );
+        let (asm_label, alias) = match weakref {
+            Some(target) => (Some(target), None),
+            None => (asm_label, alias),
+        };
+        // And it is a declaration, not the tentative definition `static int v;` would be without
+        // it, since there is no object of its own here to lay out.
+        let state = if weakref.is_some() { Definition::Declared } else { state };
         let mut declared = Declared {
             name,
             ty,
@@ -707,13 +738,16 @@ impl Checker<'_> {
             // Written on the specifiers it is shared with the declarators beside this one, and
             // written after the declarator it is this declaration's alone. Either place asks for
             // the same thing, so either place is read.
-            retained: self.retains(specs.attrs)
-                || self.retains(item.attrs)
-                || starred.iter().any(|&attrs| self.retains(attrs)),
+            // A weakref is a reference and has nothing to keep, even when the `alias` that named
+            // its target is one of the attributes that would otherwise keep it.
+            retained: weakref.is_none()
+                && (self.retains(specs.attrs)
+                    || self.retains(item.attrs)
+                    || starred.iter().any(|&attrs| self.retains(attrs))),
             asm_label,
             register,
-            // Read from both places for the same reason `retained` above is.
-            alias: self.aliased(specs.attrs).or_else(|| self.aliased(item.attrs)),
+            alias,
+            weakref: weakref.is_some(),
             // A declaration with no body under it, which C's reading of `inline` listens to and
             // GNU's does not.
             written: self.written_inline(&specs, kind, linkage, false),
@@ -1370,9 +1404,15 @@ impl Checker<'_> {
             self.conflicting_types(declared.name, declared.ty, Some(previous), declared.span);
             return previous;
         }
-        if node.state == Definition::Defined
-            && declared.state == Definition::Defined
-            && !self.replaces_a_gnu_inline_body(&node, &declared)
+        // A weakref counts as the name's definition, since it has already said what the name is,
+        // so a body or a value for it later is a second one, which is what gcc calls it.
+        let referred = (node.flags.contains(DeclFlags::WEAKREF)
+            && declared.state != Definition::Declared)
+            || (declared.weakref && node.state != Definition::Declared);
+        if referred
+            || node.state == Definition::Defined
+                && declared.state == Definition::Defined
+                && !self.replaces_a_gnu_inline_body(&node, &declared)
         {
             let spelled = self.text(declared.name).to_owned();
             let (note, at) = self.previous_note(previous);
@@ -1432,6 +1472,11 @@ impl Checker<'_> {
         // takes the same reading and warns only when a reference was already compiled.
         if declared.weak.is_some() {
             flags |= DeclFlags::WEAK;
+        }
+        // The same rule again, so that a `static` prototype above the weakref and a second
+        // weakref below it are all the one reference.
+        if declared.weakref {
+            flags |= DeclFlags::WEAKREF;
         }
         let merged = Decl {
             ty,
@@ -1727,6 +1772,7 @@ impl Checker<'_> {
                 .with(DeclFlags::NAKED, declared.naked)
                 .with(DeclFlags::RETURNS_TWICE, declared.twice)
                 .with(DeclFlags::WEAK, declared.weak.is_some())
+                .with(DeclFlags::WEAKREF, declared.weakref)
                 | declared.inlining
                 | declared.dll,
             asm_label: declared.asm_label,

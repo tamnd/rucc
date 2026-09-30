@@ -1,8 +1,8 @@
-/* reject: all */
-/* message: 'weakref' attribute is not supported */
+/* accept: all */
 /* `weakref` makes a static name another spelling of a symbol that may be missing at link time.
-   Dropped, the name is a static function with no definition, and a call to it is a call to
-   nothing, so it is refused rather than dropped. */
+   Every reference through it is weak, so the test below reads as false when nothing defines
+   `real_maybe`, and the older spelling with the target given to `alias` is the same thing. */
 
 static int maybe(void) __attribute__((weakref("real_maybe")));
-int ask(void) { return maybe ? maybe() : 0; }
+static int other(void) __attribute__((weakref, alias("real_other")));
+int ask(void) { return (maybe ? maybe() : 0) + (other ? other() : 0); }

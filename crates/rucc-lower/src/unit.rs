@@ -346,7 +346,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
-    let reachable = reach::reachable(reach::Decide::new(tast, types, target, names));
+    let (reachable, named) = reach::reachable(reach::Decide::new(tast, types, target, names));
     let mut unit = Unit {
         tast,
         types,
@@ -383,6 +383,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         starts: Vec::new(),
         renamed: Map::default(),
         reachable,
+        named,
     };
     unit.run();
     Lowered { module: unit.module, diagnostics: unit.diagnostics }
@@ -491,6 +492,9 @@ pub(crate) struct Unit<'a> {
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
     reachable: Set<DeclId>,
+    /// What an expression in something reached names, which is what a use of a name is. Only a
+    /// weakref asks, since whether its target stays weak is whether anything uses it by name.
+    named: Set<DeclId>,
 }
 
 // The debug is by hand and short: a translation unit is not something anybody wants printed as
@@ -546,6 +550,7 @@ impl Unit<'_> {
                 DeclKind::Type => {}
             }
         }
+        self.weak_references();
         for index in 0..self.aliases.len() {
             self.alias(self.aliases[index]);
         }
@@ -1444,11 +1449,69 @@ impl Unit<'_> {
     /// how a library ships a default. On a reference to something this file does not define it
     /// says the link may leave the name undefined and hand the reference a zero address, which is
     /// how a library offers a hook and why zstd's thirty files link at all.
+    ///
+    /// A weakref is the other way a reference is weak, and its linkage is internal only as far as
+    /// C is concerned: the symbol it is under is its target, which is some other object's. So it
+    /// is a weak reference here whatever its linkage says, and [`Unit::weak_references`] settles
+    /// afterwards whether the rest of the file lets it stay one.
     fn told(&self, decl: DeclId, linkage: Linkage) -> IrLinkage {
+        if self.tast[decl].flags.contains(DeclFlags::WEAKREF) {
+            return IrLinkage::Weak;
+        }
         match linkage {
             Linkage::External if self.tast[decl].flags.contains(DeclFlags::WEAK) => IrLinkage::Weak,
             Linkage::External => IrLinkage::External,
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
+        }
+    }
+
+    /// Whether each symbol a `weakref` refers to stays a weak reference, once the whole file has
+    /// been placed in the module.
+    ///
+    /// What gcc writes for one is `.weakref local, target`, and what the assembler makes of that
+    /// is a weak undefined `target` only when nothing else in the object refers to it. A
+    /// reference to the target by its own name is an ordinary one, and one ordinary reference
+    /// makes the symbol ordinary for the whole object, since the object has one symbol table
+    /// entry for it and not one per spelling. A definition of it in the file is the address every
+    /// spelling reaches, and is left as it was defined. This gives the module the same answer
+    /// directly, since the weakref was already placed under the target's name: a declaration
+    /// under a weakref's target is weak when every reference the file reaches is through a
+    /// weakref and external as soon as one is not.
+    ///
+    /// What counts as referred to is what [`reach`] found an expression naming in something it
+    /// reached, rather than everything it reached, since a declaration of an external function
+    /// and every object with static storage are reached whether or not anything uses them, and
+    /// a declaration nothing uses is not a reference.
+    fn weak_references(&mut self) {
+        let tast = self.tast;
+        let mut reached: Vec<DeclId> = self.named.iter().copied().collect();
+        reached.retain(|&decl| {
+            let node = &tast[decl];
+            node.kind != DeclKind::Type
+                && (node.linkage != Linkage::None || node.flags.contains(DeclFlags::WEAKREF))
+        });
+        let mut weak: Set<Symbol> = Set::default();
+        let mut strong: Set<Symbol> = Set::default();
+        for decl in reached {
+            let symbol = self.symbol_of(decl);
+            if tast[decl].flags.contains(DeclFlags::WEAKREF) {
+                weak.insert(symbol);
+            } else {
+                strong.insert(symbol);
+            }
+        }
+        for symbol in weak {
+            let linkage =
+                if strong.contains(&symbol) { IrLinkage::External } else { IrLinkage::Weak };
+            match self.module.lookup(symbol) {
+                Some(SymbolRef::Func(id)) if self.module[id].is_declaration() => {
+                    self.module[id].linkage = linkage;
+                }
+                Some(SymbolRef::Global(id)) if self.module[id].init.is_none() => {
+                    self.module[id].linkage = linkage;
+                }
+                _ => {}
+            }
         }
     }
 

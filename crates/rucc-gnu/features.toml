@@ -704,11 +704,10 @@ notes = "The target has to be defined in the same file, which is GCC's rule as w
 name = "weakref"
 kind = "attribute"
 gcc_version = "4.2"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
-notes = "Refused with E0753 rather than ignored, since dropping it is wrong code. `tests/accept/a-weak-reference.c` checks that."
+tests = ["rucc::a_weakref_to_a_missing_symbol_is_a_weak_reference_to_it", "rucc::a_weakref_named_through_alias_is_the_same_reference", "rucc::a_weakref_beside_an_ordinary_use_is_an_ordinary_reference", "rucc::a_declaration_nothing_uses_leaves_the_weakref_weak", "rucc::a_weakref_to_something_the_file_defines_reaches_the_definition", "rucc::a_weakref_is_refused_where_gcc_refuses_it", "rucc::a_weakref_with_no_target_is_warned_about_and_left_ordinary", "rucc::a_weakref_is_refused_where_the_object_format_has_no_way_to_write_it"]
+notes = "Both spellings, `weakref` with the target as its argument and `weakref` with the target given to `alias`. The target is a weak undefined symbol unless the file also refers to it by its own name, which makes it an ordinary one, or defines it, which makes it that definition, as the assembler does with gcc's `.weakref`. The name has to be `static` and is refused otherwise in gcc's words. ELF only: on COFF and Mach-O it is refused with E0753 rather than dropped. One difference from gcc: an object weakref nothing uses still leaves a weak undefined symbol behind, the way an unused `weak` declaration does."
 
 [[feature]]
 name = "cleanup"
