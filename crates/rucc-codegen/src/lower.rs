@@ -1205,6 +1205,10 @@ struct Lowering<'a> {
     /// The machine call each IR call with an unwind edge became, which [`Self::edges`] pairs with
     /// the pad the edge went to. See [`rucc_ir::Opcode::Unwound`].
     unwinding: Map<Inst, mir::Inst>,
+    /// What each IR instruction with no effects was built as, when all of it went into one block.
+    /// Something that reads the value can spell it without a register, as a kept `asm` template
+    /// spells a name, and then what was built for it is read by nothing. See [`Self::unread`].
+    effectless: Vec<Vec<mir::Inst>>,
     /// The machine opcode each head a rule builds is and the operands it has, by where the head's
     /// name is in the rule table. See [`Self::head`].
     heads: Map<(usize, usize), (mir::Opcode, &'static [OperandDesc])>,
@@ -1343,6 +1347,7 @@ impl<'a> Lowering<'a> {
             marks: Map::default(),
             frame_slots: Map::default(),
             unwinding: Map::default(),
+            effectless: Vec::new(),
             heads: Map::default(),
         }
     }
@@ -1372,6 +1377,7 @@ impl<'a> Lowering<'a> {
         for block in self.order() {
             self.block(block)?;
         }
+        self.unread();
         // And the name each block an image holds the address of was given, which nothing in the
         // walk above would ask for: the `lea` a label address is inside the function needs no
         // symbol, and the one thing that does is a relocation in another section.
@@ -1381,6 +1387,85 @@ impl<'a> Lowering<'a> {
         self.out.labels = labels;
         self.naming();
         Ok(Lowered { func: self.out, stack: self.stack, fired: self.fired, blocks: self.blocks })
+    }
+
+    /// Takes out what was built for an IR instruction with no effects when nothing reads it.
+    ///
+    /// The IR reads the value, which is why it was built, but the reader did not need it in a
+    /// register. A kept `asm` template spells an `"m"` or an `"i"` operand that is a name as the
+    /// name itself, so `call *%[op]` against `pv_ops.op` becomes `call *pv_ops+8(%rip)`, and the
+    /// `movq $pv_ops, %rax; addq $8, %rax` in front of it was a register nothing read. Over and
+    /// over, because taking out the `addq` is what leaves the `movq` unread.
+    ///
+    /// Only when there is no debug information, since a declaration's location names registers
+    /// and machine instructions this does not look at.
+    fn unread(&mut self) {
+        if self.debug {
+            return;
+        }
+        loop {
+            let mut reads: Map<mir::Reg, usize> = Map::default();
+            for block in self.out.blocks().collect::<Vec<mir::Block>>() {
+                for inst in self.out.insts(block) {
+                    for operand in &self.out[self.out[inst].operands] {
+                        if operand.role == Role::Use {
+                            *reads.entry(operand.reg).or_default() += 1;
+                        }
+                    }
+                }
+                for call in &self.out[block].succs {
+                    for &reg in &call.args {
+                        *reads.entry(reg).or_default() += 1;
+                    }
+                }
+            }
+            // What something after this finds by instruction stays, rather than be looked for
+            // there once it is gone: the place a declaration starts, and what the frame writes a
+            // number into once it knows it.
+            let stack = &self.stack;
+            let marked: Set<mir::Inst> = (self.marks.values().flatten().filter_map(|&(_, at)| at))
+                .chain(stack.addresses.iter().map(|&(inst, _)| inst))
+                .chain(stack.arguments.iter().map(|&(inst, _)| inst))
+                .chain(stack.dynamic.iter().chain(&stack.grown).copied())
+                .collect();
+            let mut gone = false;
+            for built in &mut self.effectless {
+                if built.is_empty() || built.iter().any(|inst| marked.contains(inst)) {
+                    continue;
+                }
+                // What the group reads of itself, the `addq` reading what the `movq` wrote, does
+                // not keep it.
+                let mut own: Map<mir::Reg, usize> = Map::default();
+                for &inst in built.iter() {
+                    for operand in &self.out[self.out[inst].operands] {
+                        if operand.role == Role::Use {
+                            *own.entry(operand.reg).or_default() += 1;
+                        }
+                    }
+                }
+                let dead = built.iter().all(|&inst| {
+                    self.out[self.out[inst].operands].iter().filter(|it| it.role != Role::Use).all(
+                        |it| {
+                            it.reg.is_virtual()
+                                && reads.get(&it.reg).copied().unwrap_or(0)
+                                    == own.get(&it.reg).copied().unwrap_or(0)
+                        },
+                    )
+                });
+                let writes = built.iter().any(|&inst| {
+                    self.out[self.out[inst].operands].iter().any(|it| it.role != Role::Use)
+                });
+                if dead && writes {
+                    for inst in built.drain(..) {
+                        self.out.remove_inst(inst);
+                    }
+                    gone = true;
+                }
+            }
+            if !gone {
+                break;
+            }
+        }
     }
 
     /// Which register each declaration the front end kept in a value ended up in, as far as this
@@ -1814,8 +1899,25 @@ impl<'a> Lowering<'a> {
                 _ => {}
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
+            let started = self.at;
             let before = self.at.and_then(|at| self.out.insts(at).last());
             self.emit(inst, &matched)?;
+            let opcode = self.source[inst].opcode;
+            if !opcode.has_effects() && opcode != Opcode::Load && self.at == started {
+                if let Some(at) = self.at {
+                    let first = match before {
+                        Some(before) => self.out.next_inst(before),
+                        None => self.out.insts(at).next(),
+                    };
+                    let built: Vec<mir::Inst> = self
+                        .out
+                        .insts(at)
+                        .skip_while(|&one| Some(one) != first)
+                        .take_while(|_| first.is_some())
+                        .collect();
+                    self.effectless.push(built);
+                }
+            }
             // A load, a store or a division with an unwind edge, which `-fnon-call-exceptions`
             // gives one that can fault. What the table covers is the one instruction of what the
             // rule wrote that does the access or the divide: the first for a load, where anything
