@@ -390,6 +390,36 @@ fn vector_letter(constraint: &str) -> bool {
 /// The x86-64 vector register one entry of a clobber list names, spelled `xmm0` or `ymm0` with or
 /// without the sigil, or nothing for any other entry. Only the sixteen there are without AVX-512,
 /// so `zmm0` and `xmm16` are still refused as names this has no register for.
+/// The registers a template kept as text spells, written `%%rax` in an extended one, each with
+/// the file it is in. Anything after the sigils that is not a general purpose or a vector register,
+/// `%%cr3` or `%%gs`, is not one the allocator hands out and is left out.
+fn spelled_registers(template: &str, gpr: RegClass, sse: RegClass) -> Vec<(PhysReg, RegClass)> {
+    let mut found = Vec::new();
+    for (_, after) in template.match_indices("%%").map(|(at, _)| template.split_at(at + 2)) {
+        let end = after.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(after.len());
+        let name = &after[..end];
+        let reg = match x86_64::gpr_named(name) {
+            Some((reg, _)) => (reg, gpr),
+            None => match vector_named(name) {
+                Some(reg) => (reg, sse),
+                None => continue,
+            },
+        };
+        if !found.contains(&reg) {
+            found.push(reg);
+        }
+    }
+    found
+}
+
+/// Whether a template calls out to a function, which is a `call` anywhere in it as a word of its
+/// own, whatever suffix it has.
+fn calls_out(template: &str) -> bool {
+    template
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| matches!(word, "call" | "callq" | "calll" | "callw"))
+}
+
 fn vector_named(entry: &str) -> Option<PhysReg> {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix('%').unwrap_or(entry);
@@ -4489,19 +4519,38 @@ impl<'a> Lowering<'a> {
         let labels = self.source[self.source[asm].targets].len().saturating_sub(1);
         let basic = list.is_empty() && clobbers.trim().is_empty() && labels == 0;
 
-        // Every register a call may leave anything in, as well as the ones the list names. The
-        // text can write any register it likes without saying so, and tcc's tests do: gcc gets
-        // away with that at `-O0` because nothing lives in a register between two statements
-        // there, and taking these away from the allocator across the template is what gives the
-        // same answer here. Nothing is written to them by this, so a register one template leaves
-        // a value in is still holding it when the next template reads it.
+        // The ones the list names, and on x86 the ones the text spells as well. The text can write
+        // any register it likes without saying so, and tcc's tests do: gcc gets away with that at
+        // `-O0` because nothing lives in a register between two statements there. A register the
+        // text spells is one it may write, so it is taken away from the allocator across the
+        // template the way a clobber is.
+        //
+        // Every register a call may leave anything in goes as well where the text may do more than
+        // that says: on AArch64, in basic assembly, whose registers are not marked off from
+        // anything else in it, and in a template with a call in it, since the function it calls
+        // writes those without the text spelling any of them. Everywhere else the list and the
+        // text are the whole of what the template writes, which is what gcc takes them to be, and
+        // a value held across it stays in its register. The kernel's `rmb()` and `wrmsr()` are
+        // templates like that, and treating each as a call cost a save and a restore around it.
+        // Nothing is written to any of them by this, so a register one template leaves a value in
+        // is still holding it when the next template reads it.
         let a64 = self.on_aarch64();
-        let mut clobbered: Vec<(PhysReg, RegClass)> =
-            self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect();
-        let named = if a64 {
+        let mut named = if a64 {
             Self::clobbered_a64(inst, &clobbers)?
         } else {
             Self::clobbered_x86(inst, &clobbers, self.gpr, self.conv.sse_class)?
+        };
+        if !a64 {
+            for reg in spelled_registers(template, self.gpr, self.conv.sse_class) {
+                if !named.contains(&reg) {
+                    named.push(reg);
+                }
+            }
+        }
+        let mut clobbered: Vec<(PhysReg, RegClass)> = if a64 || basic || calls_out(template) {
+            self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect()
+        } else {
+            Vec::new()
         };
         for &(reg, class) in &named {
             if !clobbered.iter().any(|&(had, of)| had == reg && of == class) {
@@ -9016,6 +9065,47 @@ mod tests {
         assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n    $rsi = x64.pause\n}\n");
     }
 
+    /// A template this cannot read, kept as its text, takes away what its list names and what its
+    /// text spells and nothing else. `rmb()` in the kernel is `lfence` with a `memory` clobber, and
+    /// it writes no register at all.
+    #[test]
+    fn a_kept_template_writes_what_it_names_and_what_it_spells() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        clobbering(&mut source, block, &mut names, "lfence", "", "memory", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+        let text = lower(&mut names, &source);
+        assert!(!text.contains('$'), "no register is written: {text}");
+
+        let (mut names, mut source, block, _) = blank(&[]);
+        clobbering(
+            &mut source,
+            block,
+            &mut names,
+            "xorl %%ecx, %%ecx; lfence",
+            "",
+            "rdx",
+            &[],
+            &[],
+        );
+        Builder::new(&mut source, block).ret(&[]);
+        let text = lower(&mut names, &source);
+        assert!(text.contains("$rcx") && text.contains("$rdx"), "{text}");
+        assert!(!text.contains("$rsi") && !text.contains("$r11"), "{text}");
+    }
+
+    /// A template with a call in it, or one with no colons at all, takes away every register a call
+    /// may write, since what it writes is more than the list and the text say.
+    #[test]
+    fn a_kept_template_that_calls_out_writes_what_a_call_writes() {
+        for (template, clobbers) in [("call foo", "memory"), ("lfence", "")] {
+            let (mut names, mut source, block, _) = blank(&[]);
+            clobbering(&mut source, block, &mut names, template, "", clobbers, &[], &[]);
+            Builder::new(&mut source, block).ret(&[]);
+            let text = lower(&mut names, &source);
+            assert!(text.contains("$rsi") && text.contains("$r11"), "{template}: {text}");
+        }
+    }
+
     /// A clobber naming something this has no register for. Refused rather than dropped, since the
     /// list is the program saying which registers it may not leave anything in, and an entry
     /// nobody read is a register something may still be left in.
@@ -9141,8 +9231,8 @@ mod tests {
 
     /// A template kept as text with an operand in a register reads the operand, and its text holds
     /// a hole naming that operand of the instruction, which the writer fills with the register the
-    /// allocator chose. The input is the instruction's only use, behind every register a call may
-    /// write.
+    /// allocator chose. The input is the instruction's only use, and nothing else is written, since
+    /// the text spells no register and the list names none.
     #[test]
     fn a_template_kept_as_text_reads_an_operand_in_a_register_through_a_hole() {
         let i32 = Type::int(32);
@@ -9152,10 +9242,10 @@ mod tests {
 
         let printed = lower(&mut names, &source);
         let line = printed.lines().find(|line| line.contains("x64.template")).unwrap_or_default();
-        // Twenty five registers are written ahead of it, so the operand read is the twenty sixth,
-        // spelled at the width of an `int`.
-        assert!(line.contains("x64.template %0, @hcf \u{1}r25k\u{2}"), "{printed}");
-        assert!(line.contains("early $rax"), "{printed}");
+        // Nothing is written ahead of it, so the operand read is the first, spelled at the width
+        // of an `int`.
+        assert!(line.contains("x64.template %0, @hcf \u{1}r0k\u{2}"), "{printed}");
+        assert!(!line.contains("early $"), "{printed}");
     }
 
     /// A template kept as text with more outputs than the convention keeps registers across a call
@@ -9165,7 +9255,8 @@ mod tests {
     /// scratch and no operand is given one, but an output it spills is carried in one of them, which
     /// it cannot be while the template claims it. The shape is `sodium_sub` in libsodium, whose
     /// `sbbq` into memory the reader has no form for, and before this the allocator ran out of
-    /// registers on it.
+    /// registers on it. Only basic assembly and a template with a call in it claim them now, and
+    /// basic assembly has no outputs, so the shape is written with a call in it.
     #[test]
     fn a_template_kept_as_text_with_more_outputs_than_are_kept_gets_registers_back() {
         let i64 = Type::int(64);
@@ -9175,7 +9266,7 @@ mod tests {
             &mut source,
             block,
             &mut names,
-            "hcf %0, %1, %2, %3, %4, %5",
+            "hcf %0, %1, %2, %3, %4, %5; call f",
             "=&r,=&r,=&r,=&r,=&r,=&r",
             &[],
             &outputs,
