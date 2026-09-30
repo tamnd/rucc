@@ -1124,7 +1124,8 @@ impl Checker<'_> {
         // one without a definition in sight, and gcc accepts it, so the refusal waits for `value`.
         // An array of unknown length is the same, and less of a question: it decays to a pointer
         // to its first element, whose type is complete, so `(*layers)[0]` is fine. Landlock hands
-        // its rules around as `const struct landlock_layer (*)[]`.
+        // its rules around as `const struct landlock_layer (*)[]`, and i915 its DMI tables. This is
+        // only for `*`, since `p[0][1]` steps over a whole array and needs its size.
         let unsized_array = is_array(&self.types, target);
         if !self.incomplete_record(target)
             && !unsized_array
@@ -2349,11 +2350,7 @@ impl Checker<'_> {
             );
             return true;
         }
-        // An array whose size is not known yet is fine too, because it is not read: it decays to
-        // a pointer to its first element. i915 keeps its DMI tables as `const struct
-        // dmi_system_id (*)[]` and hands `*list` to a function that takes a pointer.
-        if is_function(&self.types, ty) || is_complete(&self.types, ty) || is_array(&self.types, ty)
-        {
+        if is_function(&self.types, ty) || is_complete(&self.types, ty) {
             return true;
         }
         let ty = self.spell(ty);
