@@ -76,6 +76,37 @@ narrow() { # project root stem function
     fi
 }
 
-narrow brotli "$RUCC_BROTLI_SOURCE" c-dec-decode ReadCommandInternal
-narrow lua "$RUCC_LUA_SOURCE" ltable luaH_resize
-cat "$RUCC_LUA_SOURCE/ltable.c" | sed -n '/^void luaH_resize/,/^}/p'
+
+crash() { # project label files...
+    local p=$1 label=$2
+    shift 2
+    local lib=$top/target/libraries/$p
+    rm -rf /tmp/look && mkdir -p /tmp/look
+    gcc -no-pie "$@" "$lib/safe-rt.a" -lpthread -lm -ldl -o /tmp/look/x || return
+    for n in 1 2 3; do
+        (cd /tmp/look && RUCC_SAFETY_ON_ERROR=continue timeout 300 ./x) >/tmp/look/out 2>&1
+        echo "$p $label run $n: status $? $(grep -c 'all answers correct' /tmp/look/out)"
+    done
+    head -c 1500 /tmp/look/out; echo
+    (cd /tmp/look && RUCC_SAFETY_ON_ERROR=continue timeout 300 gdb -q -batch -ex run -ex bt -ex 'x/12i $pc-30' -ex 'info registers' ./x 2>&1 | tail -60)
+}
+
+everything() { # project root dir env...
+    local p=$1 root=$2 dir=$3
+    shift 3
+    mkdir -p "$dir"
+    for s in $(stems_of "$p"); do
+        compile "$p" "$root" "$s" "$dir/$s.s" "$@" 2>/dev/null
+    done
+}
+
+sudo apt-get install -y -qq gdb >/dev/null 2>&1
+lib=$top/target/libraries
+crash brotli default $(for s in $(stems_of brotli); do echo "$lib/brotli/$s-O2.s"; done)
+everything brotli "$RUCC_BROTLI_SOURCE" /tmp/bns RUCC_NO_SHARE='*'
+crash brotli no-share /tmp/bns/*.s
+everything brotli "$RUCC_BROTLI_SOURCE" /tmp/bkl RUCC_KEEP_LOCALS='*'
+crash brotli keep-locals /tmp/bkl/*.s
+crash lua default $(for s in $(stems_of lua); do echo "$lib/lua/$s-O2.s"; done)
+everything lua "$RUCC_LUA_SOURCE" /tmp/lns RUCC_NO_SHARE='*'
+crash lua no-share /tmp/lns/*.s
