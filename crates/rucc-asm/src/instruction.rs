@@ -2197,6 +2197,56 @@ mod tests {
         assert!(refused("vmovdqu %zmm1, (%rdi)").contains("VEX prefix"));
     }
 
+    /// The AVX-512, GFNI and mask instructions the rest of the crypto code writes, and the two
+    /// instructions that name a register where others name a number, each against the bytes
+    /// llvm-mc writes for the same line. An instruction that has a VEX form is written that way
+    /// whenever nothing needs EVEX, which is what gas does.
+    #[test]
+    fn the_avx512_instructions_the_crypto_code_writes_are_read() {
+        let lines: &[(&str, &[u8])] = &[
+            ("vpxord %zmm1, %zmm2, %zmm3", &[0x62, 0xf1, 0x6d, 0x48, 0xef, 0xd9]),
+            ("vpxord %xmm17, %xmm2, %xmm3", &[0x62, 0xb1, 0x6d, 0x08, 0xef, 0xd9]),
+            ("vpaddd %zmm24, %zmm25, %zmm26", &[0x62, 0x01, 0x35, 0x40, 0xfe, 0xd0]),
+            ("vpaddd %ymm1, %ymm2, %ymm3", &[0xc5, 0xed, 0xfe, 0xd9]),
+            ("vpaddq %zmm1, %zmm2, %zmm3", &[0x62, 0xf1, 0xed, 0x48, 0xd4, 0xd9]),
+            ("vpsubq 64(%rax), %zmm2, %zmm3", &[0x62, 0xf1, 0xed, 0x48, 0xfb, 0x58, 0x01]),
+            ("vpshufb %zmm1, %zmm2, %zmm3", &[0x62, 0xf2, 0x6d, 0x48, 0x00, 0xd9]),
+            ("vpunpckhqdq %zmm1, %zmm2, %zmm3", &[0x62, 0xf1, 0xed, 0x48, 0x6d, 0xd9]),
+            ("vpbroadcastq (%rdi), %zmm3", &[0x62, 0xf2, 0xfd, 0x48, 0x59, 0x1f]),
+            ("vpbroadcastd %xmm1, %zmm3", &[0x62, 0xf2, 0x7d, 0x48, 0x58, 0xd9]),
+            ("vpsllq %xmm1, %zmm2, %zmm3", &[0x62, 0xf1, 0xed, 0x48, 0xf3, 0xd9]),
+            ("vpslld $7, %zmm2, %zmm3", &[0x62, 0xf1, 0x65, 0x48, 0x72, 0xf2, 0x07]),
+            ("vprold $12, %xmm2, %xmm3", &[0x62, 0xf1, 0x65, 0x08, 0x72, 0xca, 0x0c]),
+            ("vprord $7, %ymm17, %ymm3", &[0x62, 0xb1, 0x65, 0x28, 0x72, 0xc1, 0x07]),
+            ("vpternlogd $0x96, %zmm1, %zmm2, %zmm3", &[0x62, 0xf3, 0x6d, 0x48, 0x25, 0xd9, 0x96]),
+            ("vpermi2d %xmm1, %xmm2, %xmm3", &[0x62, 0xf2, 0x6d, 0x08, 0x76, 0xd9]),
+            ("vinserti32x4 $1, %xmm1, %zmm2, %zmm3", &[0x62, 0xf3, 0x6d, 0x48, 0x38, 0xd9, 0x01]),
+            ("vinserti64x4 $1, %ymm1, %zmm2, %zmm3", &[0x62, 0xf3, 0xed, 0x48, 0x3a, 0xd9, 0x01]),
+            ("vbroadcasti64x2 16(%rax), %zmm3", &[0x62, 0xf2, 0xfd, 0x48, 0x5a, 0x58, 0x01]),
+            ("vpcmpuq $1, %zmm24, %zmm2, %k1", &[0x62, 0x93, 0xed, 0x48, 0x1e, 0xc8, 0x01]),
+            ("vgf2p8affineqb $0, %xmm1, %xmm2, %xmm3", &[0xc4, 0xe3, 0xe9, 0xce, 0xd9, 0x00]),
+            (
+                "vgf2p8affineinvqb $0x33, %zmm1, %zmm2, %zmm3",
+                &[0x62, 0xf3, 0xed, 0x48, 0xcf, 0xd9, 0x33],
+            ),
+            ("kmovd %eax, %k1", &[0xc5, 0xfb, 0x92, 0xc8]),
+            ("kmovd %k1, %eax", &[0xc5, 0xfb, 0x93, 0xc1]),
+            ("kaddb %k1, %k2, %k3", &[0xc5, 0xed, 0x4a, 0xd9]),
+            ("vpblendvb %xmm4, %xmm3, %xmm2, %xmm1", &[0xc4, 0xe3, 0x69, 0x4c, 0xcb, 0x40]),
+            ("vpblendvb %ymm12, (%rax), %ymm2, %ymm1", &[0xc4, 0xe3, 0x6d, 0x4c, 0x08, 0xc0]),
+            ("vaesenc %zmm1, %zmm2, %zmm3", &[0x62, 0xf2, 0x6d, 0x48, 0xdc, 0xd9]),
+            ("vpalignr $8, %zmm1, %zmm2, %zmm3", &[0x62, 0xf3, 0x6d, 0x48, 0x0f, 0xd9, 0x08]),
+            ("bzhi %eax, %ebx, %ecx", &[0xc4, 0xe2, 0x78, 0xf5, 0xcb]),
+            ("bzhi %r8, (%rdi), %r9", &[0xc4, 0x62, 0xb8, 0xf5, 0x0f]),
+        ];
+        for (line, expected) in lines {
+            assert_eq!(bytes(line), *expected, "{line}");
+        }
+        // These two have no EVEX form at all.
+        assert!(refused("vpblendvb %zmm4, %zmm3, %zmm2, %zmm1").contains("VEX prefix"));
+        assert!(refused("vpxor %xmm16, %xmm1, %xmm2").contains("VEX prefix"));
+    }
+
     #[test]
     fn a_mask_that_is_not_one_is_refused() {
         assert!(refused("vmovdqu8 (%rbx), %zmm16{%k0}").contains("mask"));
