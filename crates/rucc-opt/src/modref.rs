@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 
 use rucc_base::Symbol;
-use rucc_ir::{AttrSet, Block, Def, Func, Inst, Module, Opcode, Value};
+use rucc_ir::{AttrSet, Block, Def, Extra, Flags, Func, Inst, MemOrder, Module, Opcode, Value};
 
 use crate::alias::{Escapes, Origin, keeps_address, origin};
 use crate::callgraph::{CallGraph, Node};
@@ -523,6 +523,17 @@ fn add_access(func: &Func, entry: Block, escapes: &Escapes, summary: &mut Summar
     if data.opcode.touches_only_planes() {
         return;
     }
+    // A `volatile` access is one the program asked for by name, and an atomic one is part of an
+    // order other threads can see, so neither is only a read or only a write of memory. Summarized
+    // as one, a callee that reads a `volatile` looks like it only reads, and `licm` moves the call
+    // out of the loop and makes it once (#2241). This is the line [`crate::purity`] draws, and a
+    // callee that crosses it did everything.
+    if data.flags.contains(Flags::VOLATILE)
+        || matches!(data.extra, Extra::Mem(mem) if func[mem].order != MemOrder::NotAtomic)
+    {
+        summary.touch_everything();
+        return;
+    }
     let args = &func[data.args];
     let mut through = |at: usize, effect: Effect| match behind(func, entry, escapes, args[at]) {
         Behind::Param(at) => {
@@ -743,6 +754,38 @@ mod tests {
         assert!(f.writes_nothing());
         assert!(f.only_through_arguments());
         assert!(!f.param(0).escapes, "dereferencing an address is not keeping it");
+    }
+
+    /// A `volatile` read is not only a read, so the summary says the function did everything and
+    /// no caller moves or merges a call to it (#2241).
+    #[test]
+    fn a_volatile_load_is_everything() {
+        fn body(names: &mut Interner, build: &mut Builder<'_>, _: &[Value]) {
+            let global = somewhere(build, names);
+            let value = build.load(Type::int(32), global, access(), Flags::VOLATILE);
+            build.ret(&[value]);
+        }
+        let mut worked = Worked::out(&[("f", 1, AttrSet::NONE, Some(body))]);
+        let f = worked.about("f");
+        assert_eq!(f.outside(), Effect::Writes);
+        assert!(!f.writes_nothing());
+        assert_eq!(f.param(0), Touch::everything());
+    }
+
+    /// An acquire load is part of an order another thread can see, which is the spin wait that has
+    /// to see a flag change, so it is everything as well.
+    #[test]
+    fn an_atomic_load_is_everything() {
+        fn body(names: &mut Interner, build: &mut Builder<'_>, _: &[Value]) {
+            let global = somewhere(build, names);
+            let order = MemInfo { order: MemOrder::Acquire, ..access() };
+            let value = build.atomic_load(Type::int(32), global, order, Flags::NONE);
+            build.ret(&[value]);
+        }
+        let mut worked = Worked::out(&[("f", 0, AttrSet::NONE, Some(body))]);
+        let f = worked.about("f");
+        assert_eq!(f.outside(), Effect::Writes);
+        assert!(!f.writes_nothing());
     }
 
     #[test]
