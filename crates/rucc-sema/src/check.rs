@@ -67,6 +67,7 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast};
 
+mod annotate;
 mod attr;
 mod builtin;
 mod decl;
@@ -292,6 +293,9 @@ pub struct Checker<'a> {
     /// What a call in the body may inline depends on the extensions the function is built for,
     /// which a `target` attribute on it decides, and that is kept against the declaration.
     pub(in crate::check) defining: Option<DeclId>,
+    /// The attribute lists `__builtin_has_attribute` and `__builtin_counted_by_ref` read, which
+    /// is in `check/annotate.rs` with both of them.
+    pub(in crate::check) annotations: annotate::Annotations,
 }
 
 impl<'a> Checker<'a> {
@@ -312,6 +316,7 @@ impl<'a> Checker<'a> {
             refused_sizes: 0,
             calling: None,
             defining: None,
+            annotations: annotate::Annotations::default(),
         };
         checker.declare_type_names();
         checker

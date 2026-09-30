@@ -442,6 +442,7 @@ impl Parser<'_> {
             Keyword::BuiltinChooseExpr => self.builtin_choose_expr(),
             Keyword::BuiltinTypesCompatibleP => self.builtin_types_compatible(),
             Keyword::BuiltinClassifyType => self.builtin_classify_type(),
+            Keyword::BuiltinHasAttribute => self.builtin_has_attribute(),
             Keyword::BuiltinVaArg => self.builtin_va_arg(),
             Keyword::BuiltinVaStart => self.builtin_va_start(),
             Keyword::BuiltinVaEnd => self.builtin_va_end(),
@@ -595,6 +596,37 @@ impl Parser<'_> {
         };
         self.expect_punct(Punct::RParen);
         let span = self.span_from(start);
+        self.add_expr(node, span)
+    }
+
+    /// `__builtin_has_attribute(type, attribute)` or `__builtin_has_attribute(expr, attribute)`.
+    ///
+    /// The first operand is told apart the way `__builtin_classify_type` tells its one apart. The
+    /// second is one attribute written the way it would be inside `__attribute__((...))`, with
+    /// its arguments if it has any, so `aligned(16)` asks a different question from `aligned`.
+    fn builtin_has_attribute(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return self.poison_expr(start);
+        }
+        let ty = if self.starts_type_name(self.cursor.current()) {
+            Ok(self.type_name())
+        } else {
+            Err(self.assign_expr())
+        };
+        if !self.expect_punct(Punct::Comma) {
+            return self.poison_expr(start);
+        }
+        let Some(attr) = self.attribute_operand() else {
+            return self.poison_expr(start);
+        };
+        self.expect_punct(Punct::RParen);
+        let span = self.span_from(start);
+        let node = match ty {
+            Ok(ty) => Expr::HasAttributeType { ty, attr },
+            Err(operand) => Expr::HasAttributeExpr { operand, attr },
+        };
         self.add_expr(node, span)
     }
 

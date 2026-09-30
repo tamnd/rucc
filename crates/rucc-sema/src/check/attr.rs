@@ -74,7 +74,7 @@ pub(in crate::check) struct Packing {
 /// than taken from [`rucc_target::TargetInfo`] because the target table has no field for it and
 /// inventing one to hold a number that is the same everywhere would be describing a difference
 /// that does not exist.
-const BIGGEST_ALIGNMENT: u32 = 16;
+pub(in crate::check) const BIGGEST_ALIGNMENT: u32 = 16;
 
 /// The attributes that keep a definition nothing in the file refers to.
 ///

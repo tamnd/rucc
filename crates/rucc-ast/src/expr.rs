@@ -10,7 +10,7 @@
 
 use rucc_base::Symbol;
 
-use crate::ast::{CharId, DesignatorList, ExprList, FloatId, GenericList, IntId, StrId};
+use crate::ast::{AttrList, CharId, DesignatorList, ExprList, FloatId, GenericList, IntId, StrId};
 use crate::decl::TypeNameId;
 use crate::init::InitId;
 use crate::stmt::StmtId;
@@ -176,6 +176,24 @@ pub enum Expr {
     ClassifyExpr(ExprId),
     /// `__builtin_classify_type(ty)`, where the operand is a type name.
     ClassifyType(TypeNameId),
+    /// `__builtin_has_attribute(operand, attribute)`, where the operand is an expression.
+    ///
+    /// The operand is never evaluated. The attribute is held as a list of one so that it is read
+    /// the way every other attribute is, and the type name form is a variant of its own for the
+    /// reason `sizeof` has two.
+    HasAttributeExpr {
+        /// What is asked about.
+        operand: ExprId,
+        /// The attribute asked for.
+        attr: AttrList,
+    },
+    /// `__builtin_has_attribute(ty, attribute)`, where the operand is a type name.
+    HasAttributeType {
+        /// What is asked about.
+        ty: TypeNameId,
+        /// The attribute asked for.
+        attr: AttrList,
+    },
     /// `__builtin_types_compatible_p(a, b)`.
     TypesCompatible {
         /// The first type.

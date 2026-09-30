@@ -455,6 +455,13 @@ impl Parser<'_> {
         self.expect_punct(Punct::RParen);
     }
 
+    /// One attribute standing on its own as an operand, as a list of one, which is the second
+    /// operand of `__builtin_has_attribute`.
+    pub(crate) fn attribute_operand(&mut self) -> Option<AttrList> {
+        let attr = self.one_attribute(AttrSyntax::Gnu)?;
+        Some(self.ast.add_attr_list(&[attr]))
+    }
+
     /// One attribute, with its namespace and arguments.
     fn one_attribute(&mut self, syntax: AttrSyntax) -> Option<Attribute> {
         let start = self.cursor.span();

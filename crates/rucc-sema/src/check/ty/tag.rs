@@ -186,9 +186,11 @@ impl Checker<'_> {
             if let (Some(member), Some((name, of))) = (decl.name, spelled) {
                 self.types.record_member_spelling(Spelled { record: id, member, name, of });
             }
+            self.annotate_member(id, field);
             fields.push((decl, at));
         }
         self.check_flexible(kind, &mut fields);
+        self.annotate_record(id, attrs, &fields);
 
         let decls: Vec<FieldDecl> = fields.iter().map(|(decl, _)| *decl).collect();
         let options = RecordOptions {

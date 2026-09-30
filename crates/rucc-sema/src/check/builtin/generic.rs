@@ -284,6 +284,11 @@ impl Checker<'_> {
         if let Some(answer) = self.apply_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // The one that has to see the array before it decays. In `check/annotate.rs`, beside the
+        // `counted_by` it reads.
+        if let Some(answer) = self.counted_by_ref_call(name, args, span) {
+            return Some(answer);
+        }
         let spelled = self.text(name);
         let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
         if generic.name == CONSTANT_P {
@@ -735,6 +740,7 @@ mod tests {
         // never reaches a name lookup at all and neither table has anything to say about it.
         let syntax = [
             "__builtin_types_compatible_p",
+            "__builtin_has_attribute",
             "__builtin_choose_expr",
             "__builtin_offsetof",
             "__builtin_va_list",
@@ -752,6 +758,7 @@ mod tests {
                 || crate::check::builtin::sign::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
                 || crate::check::builtin::apply::is_family(feature.name)
+                || crate::check::annotate::is_family(feature.name)
                 || syntax.contains(&feature.name);
             assert!(known, "{} has neither a signature nor a rule", feature.name);
         }

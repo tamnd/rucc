@@ -381,6 +381,7 @@ impl Checker<'_> {
         }
         // The specifiers only, for the reason `noreturn` above reads them only.
         self.record_notices(id, &[specs.attrs], DeclKind::Function);
+        self.annotate_decl(id, &[specs.attrs]);
         if nested {
             return Some(id);
         }
@@ -772,6 +773,7 @@ impl Checker<'_> {
         // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
         // declarator of a function declared inside the block that calls it.
         self.record_notices(id, &[specs.attrs, item.attrs], kind);
+        self.annotate_decl(id, &[specs.attrs, item.attrs]);
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
         let mut worked = true;
