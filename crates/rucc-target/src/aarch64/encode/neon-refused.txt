@@ -375,3 +375,5 @@ scvtf s1, s2, #33
 ucvtf s1, s2, #33
 fcvtzs s1, s2, #33
 fcvtzu s1, s2, #33
+movi v1.16b, -129
+movi v1.16b, 0xffffff83

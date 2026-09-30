@@ -794,6 +794,19 @@ impl At<'_> {
                 }
                 _ => return Err(self.unwritten()),
             },
+            "adc" => self.carry(0x1a00_0000, values)?,
+            "adcs" => self.carry(0x3a00_0000, values)?,
+            "sbc" => self.carry(0x5a00_0000, values)?,
+            "sbcs" => self.carry(0x7a00_0000, values)?,
+            // Taking away from zero with the borrow, which is `sbc` with the zero register first.
+            "ngc" | "ngcs" => match values {
+                [d, m] => {
+                    let base = if self.mnemonic == "ngc" { 0x5a00_0000 } else { 0x7a00_0000 };
+                    let (width, _) = self.zr(d)?;
+                    self.carry(base, &[*d, Value::Gpr(width, 31), *m])?
+                }
+                _ => return Err(self.unwritten()),
+            },
             "sdiv" => self.two_source(0b00_0011, values)?,
             "udiv" => self.two_source(0b00_0010, values)?,
             "lslv" => self.two_source(0b00_1000, values)?,
@@ -1347,6 +1360,17 @@ impl At<'_> {
     }
 
     /// The instructions with two register sources and no other operand.
+    /// The adds and subtracts that take the carry flag in, which gcc writes for the upper half of
+    /// a sixteen byte integer: `sf op S 11010000 Rm 000000 Rn Rd`, where the base has `op` and `S`.
+    fn carry(self, base: u32, values: &[Value]) -> Result<u32, Error> {
+        let [d, n, mm] = values else {
+            return Err(self.unwritten());
+        };
+        let ((wd, rd), (wn, rn), (wm, rmm)) = (self.zr(d)?, self.zr(n)?, self.zr(mm)?);
+        let width = self.same(self.same(wd, wn)?, wm)?;
+        Ok(width.sf() << 31 | base | rmm << 16 | rn << 5 | rd)
+    }
+
     fn two_source(self, opcode: u32, values: &[Value]) -> Result<u32, Error> {
         let [d, n, mm] = values else {
             return Err(self.unwritten());
@@ -1977,6 +2001,16 @@ mod tests {
         }
         assert!(count > 400, "golden.txt has only {count} lines");
         assert!(wrong.is_empty(), "{} of {count} lines differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    /// The carry instructions take three registers of one width, none of them the stack pointer,
+    /// which is what GNU as holds them to as well.
+    #[test]
+    fn the_carry_instructions_refuse_mixed_widths_and_the_stack_pointer() {
+        for text in ["adc x1, w2, x3", "adc sp, x2, x3", "sbcs w1, w2, sp", "ngc x1"] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
     }
 
     /// The words for the CRC32 extension, from the encoding in the Arm ARM, C6.2 under `CRC32B`

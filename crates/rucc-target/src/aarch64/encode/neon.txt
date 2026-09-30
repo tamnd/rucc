@@ -1967,3 +1967,8 @@
 7f20fc41	fcvtzu s1, s2, #32
 7f40fc41	fcvtzu d1, d2, #64
 7f7dfc41	fcvtzu d1, d2, #3
+4f04e461	movi v1.16b, 0xffffffffffffff83
+0f07e7e1	movi v1.8b, -1
+4f04e401	movi v1.16b, -128
+4f0707e1	movi v1.4s, -1
+4f048461	movi v1.8h, 0xffffffffffffff83

@@ -622,7 +622,9 @@ impl At<'_> {
         if !matches!(m, "movi" | "mvni" | "orr" | "bic") {
             return Ok(None);
         }
-        let byte = |imm: i64| u32::try_from(imm).ok().filter(|&imm| imm < 256);
+        // A byte with its top bit set may come as a negative number, which is how gcc writes one:
+        // `movi v0.16b, 0xffffffffffffff83` is the byte 0x83. GNU as takes that in every lane size.
+        let byte = |imm: i64| (-128..256).contains(&imm).then_some(imm as u32 & 0xff);
         let word = match q {
             // A doubleword pattern, where each bit of the eight says whether a byte is all ones.
             None | Some(Arrangement::D2) if m == "movi" && shift == 0 => {
