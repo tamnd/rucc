@@ -864,6 +864,11 @@ impl Unit<'_> {
         } else if node.flags.contains(DeclFlags::HOT) {
             func.attrs.set |= AttrSet::HOT;
         }
+        // Kept on the function as well as acted on, since the body never asks for a canary when it
+        // says this, so that a listing shows why a function the flag covers has none.
+        if node.flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
+            func.attrs.set |= AttrSet::NO_STACK_PROTECTOR;
+        }
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);

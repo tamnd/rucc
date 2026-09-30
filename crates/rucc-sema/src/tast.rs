@@ -724,6 +724,9 @@ mod tests {
     /// the alternative, and it was not taken because the answer has to follow the name through
     /// the merge of its declarations the way `always_inline` does, which is what the bits already
     /// do. The seven bits past it are free again.
+    ///
+    /// Still seventy six when they went from sixteen bits to thirty two for `no_stack_protector`,
+    /// the seventeenth, because the two bytes the wider field took were padding already.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);

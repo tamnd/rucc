@@ -93,8 +93,9 @@ struct Declared {
     twice: bool,
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
-    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::COLD`] and
-    /// [`DeclFlags::HOT`] and nothing else.
+    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`],
+    /// [`DeclFlags::NO_STACK_PROTECTOR`], [`DeclFlags::COLD`] and [`DeclFlags::HOT`] and nothing
+    /// else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.

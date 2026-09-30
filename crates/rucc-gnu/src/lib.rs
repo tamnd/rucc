@@ -156,8 +156,15 @@ pub fn lookup(kind: Kind, name: &str) -> Option<&'static Feature> {
 }
 
 /// What `__has_attribute(name)` answers.
+///
+/// A name the standard also has is answered with the standard's number, as GCC answers it, so
+/// `__has_attribute(fallthrough)` is 201904 rather than one. GCC does that whether or not the name
+/// is also a GNU attribute, so `maybe_unused`, which is only a standard one, is answered too.
 pub fn has_attribute(name: &str) -> u32 {
-    answer(Kind::Attribute, name)
+    match answer(Kind::CAttribute, name) {
+        0 => answer(Kind::Attribute, name),
+        standard => standard,
+    }
 }
 
 /// What `__has_c_attribute(name)` answers, which is the number the standard gives the

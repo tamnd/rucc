@@ -3218,6 +3218,92 @@ mod tests {
         assert_eq!(clean("#if __has_c_attribute(deprecated)\nyes\n#endif\n"), "");
     }
 
+    /// Every name the kernel's `include/linux/compiler_attributes.h` asks about, from v6.12, with
+    /// what GCC 14 answers for it on x86-64.
+    ///
+    /// The header defines each of its macros empty when `__has_attribute` says no, so a no for an
+    /// attribute this compiler honours quietly changes the kernel, and a yes for one it ignores is
+    /// a promise nothing keeps. The names are the ones the header asks about and the ones it writes
+    /// unconditionally, since a header written for gcc 5.1 and up takes those as given.
+    ///
+    /// The answers were not taken from a GCC 14 run, because there was none to hand. They are what
+    /// gcc 16 answers, with the three places GCC 14 differs put back from its source: it answers
+    /// the standard's older numbers for `fallthrough` and `noreturn`, where 16 answers 202311 for
+    /// both, and it has no `counted_by`, which came in 15. `no_caller_saved_registers` is an
+    /// attribute of x86 alone, which is why the target is written down. The clang-only names at
+    /// the bottom are ones gcc answers no for and so must this.
+    const KERNEL_ATTRIBUTES: [(&str, u32); 39] = [
+        ("alias", 1),
+        ("aligned", 1),
+        ("alloc_size", 1),
+        ("always_inline", 1),
+        ("assume_aligned", 1),
+        ("cleanup", 1),
+        ("const", 1),
+        ("copy", 1),
+        ("designated_init", 1),
+        ("error", 1),
+        ("externally_visible", 1),
+        ("fallthrough", 201_904),
+        ("format", 1),
+        ("gnu_inline", 1),
+        ("malloc", 1),
+        ("mode", 1),
+        ("no_caller_saved_registers", 1),
+        ("no_profile_instrument_function", 1),
+        ("no_stack_protector", 1),
+        ("noclone", 1),
+        ("noinline", 1),
+        ("nonstring", 1),
+        ("noreturn", 202_202),
+        ("packed", 1),
+        ("pure", 1),
+        ("section", 1),
+        ("uninitialized", 1),
+        ("unused", 1),
+        ("used", 1),
+        ("warn_unused_result", 1),
+        ("warning", 1),
+        ("weak", 1),
+        ("counted_by", 0),
+        ("diagnose_as_builtin", 0),
+        ("disable_sanitizer_instrumentation", 0),
+        ("overloadable", 0),
+        ("pass_dynamic_object_size", 0),
+        ("pass_object_size", 0),
+        ("name", 0),
+    ];
+
+    /// The kernel's names are answered the way GCC 14 answers them, except where this compiler
+    /// does not do what the attribute asks, and there the answer is no and the table says so.
+    ///
+    /// A difference has to go one way only. Answering yes where gcc says no is never right, and
+    /// answering no where gcc says yes is right only for a row the table marks as not done, so a
+    /// name the kernel uses cannot be missing from the table and come out as no by accident.
+    #[test]
+    fn the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them() {
+        let asked: Vec<String> = KERNEL_ATTRIBUTES
+            .iter()
+            .map(|(name, _)| format!("__has_attribute(__{name}__)"))
+            .collect();
+        let mut run = Run::new();
+        run.predefine("x86_64-unknown-linux-gnu", &Predef::new());
+        let text = run.go(&(asked.join("\n") + "\n"));
+        let answers: Vec<u32> = text.split(' ').map(|n| n.parse().expect("a number")).collect();
+        assert_eq!(answers.len(), KERNEL_ATTRIBUTES.len(), "{text}");
+        for (&(name, gcc), &ours) in KERNEL_ATTRIBUTES.iter().zip(&answers) {
+            if ours == gcc {
+                continue;
+            }
+            assert_eq!(ours, 0, "`{name}` is answered {ours} where gcc answers {gcc}");
+            let row = rucc_gnu::lookup(Kind::Attribute, name);
+            assert!(
+                row.is_some_and(|row| !row.status.is_available()),
+                "`{name}` is answered no where gcc answers {gcc} and the table has no row saying why"
+            );
+        }
+    }
+
     #[test]
     fn has_builtin_answers_no_until_the_builtin_is_real() {
         assert_eq!(clean("#if __has_builtin(__builtin_expect)\nyes\n#endif\n"), "yes");
