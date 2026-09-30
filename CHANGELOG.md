@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Working out where each value is live puts the pieces into one list and sorts them by value at the end, instead of growing a list per value (#2229).
 - Finding the conversions whose upper bits nothing reads asks the target for the width of each operand once, instead of on every round of the walk (#2231).
 - Encoding x86-64 into an object file looks each opcode up in the target's table once per unit, instead of by name for every instruction (#2234).
+- Lowering keeps the opcode and operands of each rule head it has built, instead of looking them up by name for every machine instruction (#2236).
 
 ### Fixed
 
