@@ -54,7 +54,80 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Address { .. } | Reference::Image | Reference::Section | Reference::Field(_) => {
             return None;
         }
+        // The i386 ways of reaching the global offset table, counted from a register holding it.
+        // This machine counts from the instruction pointer instead and has kinds of its own above.
+        Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
+            return None;
+        }
     })
+}
+
+/// The same for i386.
+///
+/// A call is `R_386_PLT32`, which lets the linker send it through a stub, and a distance from the
+/// four bytes to something else is `R_386_PC32`. gas writes the second for a plain `call foo` and
+/// the first only for `call foo@PLT`, and a linker treats the two the same way for a function it
+/// finds in the program, so the kind the assembler chose says which is meant.
+///
+/// Position independent code has no instruction pointer to count from on this machine, so it
+/// counts from a register it has loaded with the address of the global offset table. The table is
+/// found with `R_386_GOTPC`, something this file defines is reached as an offset from the table with
+/// `R_386_GOTOFF`, and something another object may define is read out of a slot, with
+/// `R_386_GOT32X` where the linker may turn the load back into the address it would have been and
+/// `R_386_GOT32` where it may not.
+///
+/// An address is written in four bytes, or in two or one where the source asked for that. An
+/// address an x86-64 instruction would have sign extended is the same four bytes here, since there
+/// is nothing wider to extend it into.
+///
+/// Nothing for thread-local storage yet. It is reached through `%gs` on this machine with
+/// relocations of its own, and which of them a reference is depends on the model the back end
+/// picks, so [`Reference::Thread`], which is the x86-64 table slot, is refused rather than written
+/// as whichever of them looks closest. Nothing either for anything eight bytes wide, or for the
+/// kinds that belong to another machine or another format.
+pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
+    Some(match reference {
+        Reference::Call => elf::R_386_PLT32,
+        Reference::Data | Reference::Away => elf::R_386_PC32,
+        Reference::GotOffset => elf::R_386_GOTOFF,
+        Reference::GotFront => elf::R_386_GOTPC,
+        Reference::Slot => elf::R_386_GOT32X,
+        Reference::SlotKept => elf::R_386_GOT32,
+        Reference::Address { bytes: 4 } | Reference::Signed => elf::R_386_32,
+        Reference::Address { bytes: 2 } => elf::R_386_16,
+        Reference::Address { bytes: 1 } => elf::R_386_8,
+        Reference::Got
+        | Reference::GotBare
+        | Reference::GotKept
+        | Reference::Thread
+        | Reference::AwayWide
+        | Reference::Address { .. }
+        | Reference::Image
+        | Reference::Section
+        | Reference::Field(_) => return None,
+    })
+}
+
+/// How many bytes of the section an i386 relocation writes over, which is where its addend goes.
+///
+/// A file for this machine keeps no addend in the relocation itself. What is added to the symbol is
+/// whatever the bytes held before the linker got there, so the writer has to put it there, and it
+/// needs to know how many bytes are the relocation's to do that. The writer underneath knows for
+/// some of the types and not for `R_386_GOT32X`, so the answer is given here for every type
+/// [`r_type_i386`] gives.
+pub(crate) fn width_i386(r_type: elf::RelocationType) -> Option<usize> {
+    match r_type {
+        elf::R_386_8 => Some(1),
+        elf::R_386_16 => Some(2),
+        elf::R_386_32
+        | elf::R_386_PC32
+        | elf::R_386_PLT32
+        | elf::R_386_GOTOFF
+        | elf::R_386_GOTPC
+        | elf::R_386_GOT32
+        | elf::R_386_GOT32X => Some(4),
+        _ => None,
+    }
 }
 
 /// The same for AArch64.
@@ -169,35 +242,95 @@ pub(crate) fn link(bytes: &mut [u8], ordered: &[String]) {
     if ordered.is_empty() {
         return;
     }
-    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
-    let short = |bytes: &[u8], at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
-    let long = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-    // Where the section headers are, how far apart they are and how many of them there are. A
-    // file with more than there is room to say puts the count in the first header instead, which
-    // this never writes: it would take sixty five thousand sections, and a section here is a
-    // function.
-    let headers = word(bytes, 0x28) as usize;
-    let step = short(bytes, 0x3a) as usize;
-    let count = short(bytes, 0x3c) as usize;
-    let strings = word(bytes, headers + short(bytes, 0x3e) as usize * step + 24) as usize;
-    let name = |bytes: &[u8], header: usize| {
-        let at = strings + long(bytes, header) as usize;
-        let end = bytes[at..].iter().position(|byte| *byte == 0).map_or(at, |len| at + len);
-        String::from_utf8_lossy(&bytes[at..end]).into_owned()
-    };
-    let names: Vec<String> = (0..count).map(|i| name(bytes, headers + i * step)).collect();
+    let headers = Headers::read(bytes);
     let mut wanted = ordered.iter();
-    for (i, section) in names.iter().enumerate() {
-        if section != PATCHABLE {
+    for header in &headers.list {
+        if header.name != PATCHABLE {
             continue;
         }
         let Some(target) = wanted.next() else { break };
-        let Some(at) = names.iter().position(|name| name == target) else { continue };
+        let Some(at) = headers.list.iter().position(|other| other.name == *target) else {
+            continue;
+        };
         let at = u32::try_from(at).expect("a file with this many sections in it");
-        let sh_link = headers + i * step + 40;
+        let sh_link = header.at + headers.link();
         bytes[sh_link..sh_link + 4].copy_from_slice(&at.to_le_bytes());
     }
     debug_assert!(wanted.next().is_none(), "a record whose header nothing found");
+}
+
+/// The section headers of a finished little endian file, read back so that a field the writer
+/// underneath has no way to set can be written into the bytes afterwards.
+///
+/// Both classes, because the fields are in different places in each: a 32 bit file has four byte
+/// addresses and sizes where a 64 bit one has eight, so every field after the first two moves. The
+/// class is the fifth byte of the file, and the rest is where that says it is.
+pub(crate) struct Headers {
+    /// Whether the file is a 64 bit one.
+    wide: bool,
+    /// Every header, in the order they are in the file.
+    pub(crate) list: Vec<Header>,
+}
+
+/// One section header, as much of it as anything here reads.
+pub(crate) struct Header {
+    /// Where the header starts in the file.
+    pub(crate) at: usize,
+    /// What the section is called.
+    pub(crate) name: String,
+    /// `sh_type`.
+    pub(crate) sh_type: u32,
+    /// `sh_offset`, which is where the section's contents start in the file.
+    pub(crate) offset: usize,
+}
+
+impl Headers {
+    /// Every section header of `bytes`.
+    ///
+    /// A file with more sections than there is room to say puts the count in the first header
+    /// instead, which this never writes: it would take sixty five thousand sections, and a section
+    /// here is a function.
+    pub(crate) fn read(bytes: &[u8]) -> Headers {
+        let wide = bytes[4] == elf::ELFCLASS64.0;
+        let word = |at: usize, width: usize| {
+            bytes[at..at + width].iter().rev().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte))
+                as usize
+        };
+        // Where the headers are, how far apart, how many, and which one names the rest.
+        let (table, each, count, names) = if wide {
+            (word(0x28, 8), 0x3a, 0x3c, 0x3e)
+        } else {
+            (word(0x20, 4), 0x2e, 0x30, 0x32)
+        };
+        let (each, count, names) = (word(each, 2), word(count, 2), word(names, 2));
+        let offset = |header: usize| if wide { word(header + 24, 8) } else { word(header + 16, 4) };
+        let strings = offset(table + names * each);
+        let list = (0..count)
+            .map(|nth| {
+                let at = table + nth * each;
+                let from = strings + word(at, 4);
+                let end =
+                    bytes[from..].iter().position(|byte| *byte == 0).map_or(from, |len| from + len);
+                Header {
+                    at,
+                    name: String::from_utf8_lossy(&bytes[from..end]).into_owned(),
+                    sh_type: word(at + 4, 4) as u32,
+                    offset: offset(at),
+                }
+            })
+            .collect();
+        Headers { wide, list }
+    }
+
+    /// Where `sh_link` is in a header.
+    pub(crate) fn link(&self) -> usize {
+        if self.wide { 40 } else { 24 }
+    }
+
+    /// Where `sh_entsize` is in a header, and how wide it is.
+    pub(crate) fn entry_size(&self) -> (usize, usize) {
+        if self.wide { (56, 8) } else { (36, 4) }
+    }
 }
 
 /// The note that says what the file was built to have checked.
@@ -206,24 +339,27 @@ pub(crate) fn link(bytes: &mut [u8], ordered: &[String]) {
 /// whose description is a list of properties. Each property is a key, a length and that many bytes,
 /// and the one written here is the feature word.
 ///
-/// Everything is padded to eight rather than to four, which is what a note in a sixty four bit
-/// object is aligned to and what makes the reader's walk over the list a walk over aligned words.
-/// The two lengths in the header count the padding after what they measure, which is why the
-/// description is sixteen bytes for a property of twelve.
-pub(crate) fn record(property: Property) -> Vec<u8> {
+/// Everything is padded to the width of an address, which is eight in a 64 bit object and four in
+/// a 32 bit one, and is what makes the reader's walk over the list a walk over aligned words. The
+/// two lengths in the header count the padding after what they measure, which is why the
+/// description is sixteen bytes for a property of twelve in a 64 bit file and twelve in a 32 bit
+/// one, where there is nothing to pad.
+pub(crate) fn record(property: Property, align: u32) -> Vec<u8> {
     // How long the name is, how long the description is, and which kind of note this is. Then the
-    // name, and then the description, which is the one property and the four bytes that pad it.
-    let head = [4, 16, elf::NT_GNU_PROPERTY_TYPE_0.0];
-    let desc = [Property::X86_FEATURES, 4, property.features, 0];
-    let mut out = Vec::with_capacity(32);
+    // name, and then the description, which is the one property and whatever pads it.
+    let size = 12u32.next_multiple_of(align);
+    let head = [4, size, elf::NT_GNU_PROPERTY_TYPE_0.0];
+    let desc = [Property::X86_FEATURES, 4, property.features];
+    let mut out = Vec::with_capacity(12 + 4 + size as usize);
     for word in head {
         out.extend_from_slice(&word.to_le_bytes());
     }
-    // Twelve bytes in and already a multiple of eight, so the description begins straight after the
-    // name with no padding between them.
+    // Sixteen bytes in once the name is there, which is a multiple of either width, so the
+    // description begins straight after the name with no padding between them.
     out.extend_from_slice(b"GNU\0");
     for word in desc {
         out.extend_from_slice(&word.to_le_bytes());
     }
+    out.resize(16 + size as usize, 0);
     out
 }

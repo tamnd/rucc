@@ -784,6 +784,14 @@ impl Assembler<'_> {
                     | Reference::Field(_) => {
                         unreachable!("an instruction wanting an address")
                     }
+                    // The ways i386 reaches the global offset table, which this encoder does not
+                    // write yet.
+                    Reference::GotOffset
+                    | Reference::GotFront
+                    | Reference::Slot
+                    | Reference::SlotKept => {
+                        unreachable!("an x86-64 instruction reaching the table the i386 way")
+                    }
                 };
                 let at = at.expect("an instruction naming a symbol leaves room for the distance");
                 let addend = match kind {

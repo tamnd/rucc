@@ -863,6 +863,30 @@ pub enum Reference {
     /// variable is as far into the copy as it is into the section. `IMAGE_REL_AMD64_SECREL`, and
     /// nothing on ELF or Mach-O, which reach thread-local storage through a table slot instead.
     Section,
+    /// How far the thing is from the front of the global offset table, in four bytes.
+    ///
+    /// What position independent code on i386 reaches its own data with. That machine has no
+    /// addressing from the instruction pointer, so a function finds the table once, keeps its
+    /// address in a register, and reaches everything this file defines as that register plus a
+    /// constant: `leal .LC0@GOTOFF(%ebx), %eax`. `R_386_GOTOFF` on ELF.
+    GotOffset,
+    /// How far the front of the global offset table is from the four bytes themselves, which is how
+    /// i386 code finds the table in the first place.
+    ///
+    /// `addl $_GLOBAL_OFFSET_TABLE_, %ebx` straight after a call that left its own return address
+    /// in `%ebx`. The addend makes up the difference between where the four bytes are and where the
+    /// instruction starts, which is the address the call left behind. `R_386_GOTPC` on ELF.
+    GotFront,
+    /// Where a slot of the global offset table is, as a distance from the front of the table, read
+    /// by an instruction the linker may rewrite into one that does not go through the slot at all.
+    ///
+    /// The i386 counterpart of [`Reference::Got`], counted from the register holding the table
+    /// rather than from the instruction pointer: `movl foo@GOT(%ebx), %eax` and
+    /// `call *foo@GOT(%ebx)`. `R_386_GOT32X` on ELF.
+    Slot,
+    /// The same slot read or written by an instruction the linker has to leave as it is, because it
+    /// is not one of the few it knows how to rewrite. `R_386_GOT32` on ELF.
+    SlotKept,
     /// Some bits of an AArch64 instruction, which the fixup says which and how to fill in.
     ///
     /// Its own kind rather than one of the above, because on this machine a reference is not four

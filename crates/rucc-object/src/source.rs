@@ -29,8 +29,8 @@
 
 use object::write::{Object as Writer, Relocation, SectionId, Symbol, SymbolSection};
 use object::{
-    Architecture, Endianness, RelocationFlags, SectionFlags, SectionKind, SymbolFlags, SymbolKind,
-    SymbolScope, elf, pe,
+    Architecture, Endianness, SectionFlags, SectionKind, SymbolFlags, SymbolKind, SymbolScope, elf,
+    pe,
 };
 use rucc_base::hash::{Map, Set};
 use rucc_target::aarch64::Fixup;
@@ -528,25 +528,21 @@ pub fn assembled_described(
     target: &TargetInfo,
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
-    // Both machines on ELF and COFF, and AArch64 on Mach-O, which is a function of its own since
-    // what it answers differently is most of what is below.
-    let (flavour, machine) = match (Flavour::of(target), target.tuple.arch()) {
-        (Some(flavour), Arch::X86_64) => (flavour, Architecture::X86_64),
-        (Some(flavour), Arch::Aarch64) => (flavour, Architecture::Aarch64),
-        (None, Arch::Aarch64) if target.object_format == ObjectFormat::MachO => {
+    // x86-64 and AArch64 on ELF and COFF, i386 on ELF, and AArch64 on Mach-O, which is a function
+    // of its own since what it answers differently is most of what is below.
+    let (flavour, machine) = match Flavour::of(target) {
+        Some(flavour) => match flavour.machine(target.tuple.arch()) {
+            Some(machine) => (flavour, machine),
+            None => return Err(Error::Format { triple: target.tuple.to_string() }),
+        },
+        None if target.tuple.arch() == Arch::Aarch64
+            && target.object_format == ObjectFormat::MachO =>
+        {
             return crate::macho::write(input, target, info);
         }
-        _ => return Err(Error::Format { triple: target.tuple.to_string() }),
+        None => return Err(Error::Format { triple: target.tuple.to_string() }),
     };
-    let flags_of = |kind, after| match (machine, flavour) {
-        (Architecture::Aarch64, Flavour::Coff) => {
-            crate::coff::arm64(kind).map(|typ| RelocationFlags::Coff { typ })
-        }
-        (Architecture::Aarch64, _) => {
-            crate::elf::r_type_aarch64(kind).map(|r_type| RelocationFlags::Elf { r_type })
-        }
-        _ => flavour.reloc(kind, after),
-    };
+    let flags_of = |kind, after| flavour.reloc(machine, kind, after);
     // Whether the addend of a field of an instruction goes into the field rather than into the
     // relocation, which is what a format without addends does. See [`crate::coff::carry`].
     let carried = machine == Architecture::Aarch64 && flavour == Flavour::Coff;
@@ -734,8 +730,8 @@ pub fn assembled_described(
                 }
                 _ => addend,
             };
-            obj.add_relocation(*id, Relocation { offset: reloc.at as u64, symbol, addend, flags })
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
+            crate::file::relocate(&mut obj, *id, record)?;
         }
     }
 
@@ -772,8 +768,7 @@ pub fn assembled_described(
             let flags = flags_of(kind, reloc.after)
                 .ok_or_else(|| Error::Refused { why: format!("no relocation is {kind:?}") })?;
             let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
-            obj.add_relocation(section, record)
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            crate::file::relocate(&mut obj, section, record)?;
         }
     }
 
@@ -797,23 +792,14 @@ pub fn assembled_described(
 
 /// Write how long an entry of a mergeable section is into its header, which the linker needs and
 /// the writer underneath has no field for. It writes one only for a section of strings it made
-/// itself. The file is a 64 bit little endian ELF one, since that is the only kind this writes, and
-/// the section is found by its name, which is unique because the assembler gave every name one
-/// section.
+/// itself. The section is found by its name, which is unique because the assembler gave every name
+/// one section.
 fn entry_size(bytes: &mut [u8], name: &str, size: u64) {
-    let word = |bytes: &[u8], at: usize, width: usize| {
-        bytes[at..at + width].iter().rev().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte))
-    };
-    let table = word(bytes, 0x28, 8) as usize;
-    let each = word(bytes, 0x3a, 2) as usize;
-    let count = word(bytes, 0x3c, 2) as usize;
-    let names = table + each * word(bytes, 0x3e, 2) as usize;
-    let names = word(bytes, names + 0x18, 8) as usize;
-    for header in (0..count).map(|nth| table + nth * each) {
-        let at = names + word(bytes, header, 4) as usize;
-        if bytes[at..].starts_with(name.as_bytes()) && bytes.get(at + name.len()) == Some(&0) {
-            bytes[header + 0x38..header + 0x40].copy_from_slice(&size.to_le_bytes());
-        }
+    let headers = crate::elf::Headers::read(bytes);
+    let (field, width) = headers.entry_size();
+    for header in headers.list.iter().filter(|header| header.name == name) {
+        let at = header.at + field;
+        bytes[at..at + width].copy_from_slice(&size.to_le_bytes()[..width]);
     }
 }
 
@@ -824,19 +810,10 @@ fn together_groups(bytes: &mut [u8], together: &[bool]) {
     if !together.contains(&true) {
         return;
     }
-    let word = |bytes: &[u8], at: usize, width: usize| {
-        bytes[at..at + width].iter().rev().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte))
-    };
-    let table = word(bytes, 0x28, 8) as usize;
-    let each = word(bytes, 0x3a, 2) as usize;
-    let count = word(bytes, 0x3c, 2) as usize;
-    let headers = (0..count).map(|nth| table + nth * each);
-    let groups: Vec<usize> = headers
-        .filter(|&header| word(bytes, header + 4, 4) == u64::from(elf::SHT_GROUP.0))
-        .map(|header| word(bytes, header + 0x18, 8) as usize)
-        .collect();
-    for (at, _) in groups.into_iter().zip(together).filter(|(_, together)| **together) {
-        bytes[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+    let headers = crate::elf::Headers::read(bytes);
+    let groups = headers.list.iter().filter(|header| header.sh_type == elf::SHT_GROUP.0);
+    for (header, _) in groups.zip(together).filter(|(_, together)| **together) {
+        bytes[header.offset..header.offset + 4].copy_from_slice(&0u32.to_le_bytes());
     }
 }
 
@@ -868,6 +845,9 @@ fn moved(
         | Reference::Got
         | Reference::GotBare
         | Reference::GotKept
+        | Reference::Slot
+        | Reference::SlotKept
+        | Reference::GotFront
         | Reference::Thread => false,
         // The same for a field of an instruction that goes through a stub or a table slot, or that
         // says where a thread-local variable is, which a linker checks against the name's type.
@@ -916,7 +896,7 @@ pub fn assembled_defines(input: &Assembled) -> Vec<String> {
 mod tests {
     use super::*;
 
-    use object::read::elf::{FileHeader as _, Sym as _};
+    use object::read::elf::{FileHeader as _, SectionHeader as _, Sym as _};
     use object::read::{Object as _, ObjectComdat as _, ObjectSection as _, ObjectSymbol as _};
     use object::{RelocationFlags, SectionFlags};
     use rucc_target::{Arch as TargetArch, Env, Os, Triple};
@@ -1619,5 +1599,235 @@ mod tests {
             reloc.flags(),
             RelocationFlags::Coff { typ: pe::RelocationType(pe::IMAGE_REL_AMD64_REL32.0 + 4) }
         );
+    }
+
+    /// A linux i386 target, which is written as a 32 bit ELF file with REL relocations.
+    fn i386() -> TargetInfo {
+        TargetInfo::new(Triple::new(TargetArch::X86, Os::Linux, Env::Gnu))
+    }
+
+    /// Every relocation of one section of an i386 file, as the offset it is at, its type, the
+    /// symbol it names, and the addend the bytes it covers hold.
+    ///
+    /// The reader reports an addend of nothing for a REL file and says the real one is implicit,
+    /// so what is added is read out of the section, which is where the linker reads it too.
+    fn implicit(file: &object::File<'_>, section: &str) -> Vec<(u64, u32, String, i64)> {
+        let section = file.section_by_name(section).expect("the section");
+        let data = section.data().expect("the bytes");
+        section
+            .relocations()
+            .map(|(at, reloc)| {
+                assert!(reloc.has_implicit_addend(), "a REL file keeps the addend in the bytes");
+                assert_eq!(reloc.addend(), 0);
+                let RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("ELF") };
+                let width = crate::elf::width_i386(r_type).expect("a width");
+                let at_ = at as usize;
+                let mut word = [0u8; 8];
+                word[..width].copy_from_slice(&data[at_..at_ + width]);
+                // Sign extended from however many bytes it is, since a distance is negative as
+                // often as not.
+                let shift = 64 - 8 * width as u32;
+                let addend = (i64::from_le_bytes(word) << shift) >> shift;
+                let object::RelocationTarget::Symbol(index) = reloc.target() else {
+                    panic!("a relocation against a symbol")
+                };
+                let symbol = file.symbol_by_index(index).expect("the symbol");
+                let name = match symbol.kind() {
+                    SymbolKind::Section => {
+                        let section = symbol.section_index().expect("a section symbol's section");
+                        file.section_by_index(section)
+                            .expect("it")
+                            .name()
+                            .expect("a name")
+                            .to_owned()
+                    }
+                    _ => symbol.name().expect("a name").to_owned(),
+                };
+                (at, r_type.0, name, addend)
+            })
+            .collect()
+    }
+
+    /// The relocations gas writes for the same instructions and data, with the addends where gas
+    /// puts them.
+    ///
+    /// The code is what `gcc -m32 -fPIC` makes of a function that calls through the PLT, finds the
+    /// global offset table, reaches a string of its own and a variable of someone else's, plus a
+    /// plain call and an absolute address, which is what code that is not position independent
+    /// writes. The data is an address at each width and a distance.
+    #[test]
+    fn an_i386_object_is_32_bit_elf_with_the_addends_in_the_bytes() {
+        let reloc = |at, symbol: &str, kind, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind,
+            addend,
+            after: 0,
+        };
+        let code = vec![
+            0xe8, 0, 0, 0, 0, // call foo@PLT
+            0xe8, 0, 0, 0, 0, // call bar
+            0x81, 0xc3, 0, 0, 0, 0, // addl $_GLOBAL_OFFSET_TABLE_, %ebx
+            0x8d, 0x83, 0, 0, 0, 0, // leal .LC0@GOTOFF(%ebx), %eax
+            0x8b, 0x83, 0, 0, 0, 0, // movl foo@GOT(%ebx), %eax
+            0x89, 0x83, 0, 0, 0, 0, // movl %eax, foo@GOT(%ebx)
+            0xa1, 0, 0, 0, 0, // movl counter+8, %eax
+        ];
+        let mut text = part(".text", code);
+        text.relocs = vec![
+            reloc(1, "foo", Reference::Call, -4),
+            reloc(6, "bar", Reference::Data, -4),
+            reloc(12, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 2),
+            reloc(18, ".LC0", Reference::GotOffset, 0),
+            reloc(24, "foo", Reference::Slot, 0),
+            reloc(30, "foo", Reference::SlotKept, 0),
+            reloc(35, "counter", Reference::Signed, 8),
+        ];
+        let rodata = part(".rodata", b"abc\0hi\0\0".to_vec());
+        let mut data = part(".data", vec![0; 11]);
+        data.relocs = vec![
+            reloc(0, "foo", Reference::Address { bytes: 4 }, 16),
+            reloc(4, "bar", Reference::Away, 0),
+            reloc(8, "foo", Reference::Address { bytes: 2 }, 0),
+            reloc(10, "foo", Reference::Address { bytes: 1 }, 0),
+        ];
+        let undefined = |name: &str| Name {
+            at: Held::Undefined,
+            ..at(name, 0, Sort::Untyped, Binding::Global)
+        };
+        let names = vec![
+            at("f", 0, Sort::Func, Binding::Global),
+            Name {
+                at: Held::In { part: 1, offset: 4 },
+                ..at(".LC0", 0, Sort::Untyped, Binding::Local)
+            },
+            undefined("foo"),
+            undefined("bar"),
+            undefined("counter"),
+            undefined("_GLOBAL_OFFSET_TABLE_"),
+        ];
+        let input = Assembled { parts: vec![text, rodata, data], names, subsections: false };
+        let bytes = assembled(&input, &i386()).expect("an object");
+
+        let header = elf::FileHeader32::<Endianness>::parse(&bytes[..]).expect("a 32 bit header");
+        let endian = header.endian().expect("an endianness");
+        assert_eq!(bytes[4], elf::ELFCLASS32.0);
+        assert_eq!(header.e_machine(endian), elf::EM_386);
+        assert_eq!(header.e_type(endian), elf::ET_REL);
+
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(!file.is_64());
+        assert_eq!(file.architecture(), Architecture::I386);
+        for name in [".rel.text", ".rel.data"] {
+            let section = file.section_by_name(name).expect("a REL section");
+            let SectionFlags::Elf { sh_type, .. } = section.flags() else { panic!("ELF") };
+            assert_eq!(sh_type, elf::SHT_REL, "{name}");
+        }
+        assert!(file.section_by_name(".rela.text").is_none(), "i386 has no addend field");
+
+        let text = implicit(&file, ".text");
+        let want = [
+            (1, elf::R_386_PLT32, "foo", -4),
+            (6, elf::R_386_PC32, "bar", -4),
+            (12, elf::R_386_GOTPC, "_GLOBAL_OFFSET_TABLE_", 2),
+            // A label only this file sees is its section and how far into it, as gas writes it.
+            (18, elf::R_386_GOTOFF, ".rodata", 4),
+            (24, elf::R_386_GOT32X, "foo", 0),
+            (30, elf::R_386_GOT32, "foo", 0),
+            (35, elf::R_386_32, "counter", 8),
+        ];
+        let want: Vec<_> = want
+            .into_iter()
+            .map(|(at, r_type, name, addend)| (at, r_type.0, name.to_owned(), addend))
+            .collect();
+        assert_eq!(text, want);
+
+        let data = implicit(&file, ".data");
+        let want = [
+            (0, elf::R_386_32, "foo", 16),
+            (4, elf::R_386_PC32, "bar", 0),
+            (8, elf::R_386_16, "foo", 0),
+            (10, elf::R_386_8, "foo", 0),
+        ];
+        let want: Vec<_> = want
+            .into_iter()
+            .map(|(at, r_type, name, addend)| (at, r_type.0, name.to_owned(), addend))
+            .collect();
+        assert_eq!(data, want);
+    }
+
+    /// What i386 has no relocation for is refused rather than written as the nearest thing.
+    ///
+    /// An address in eight bytes and a distance in eight are wider than anything this machine
+    /// relocates, a load from the instruction pointer is something it cannot do, and a thread-local
+    /// variable is reached with relocations that depend on a model the back end has not picked yet.
+    #[test]
+    fn a_reference_i386_has_no_relocation_for_is_refused() {
+        for kind in [
+            Reference::Address { bytes: 8 },
+            Reference::AwayWide,
+            Reference::Got,
+            Reference::GotBare,
+            Reference::GotKept,
+            Reference::Thread,
+            Reference::Image,
+            Reference::Section,
+        ] {
+            let mut text = part(".text", vec![0; 8]);
+            text.relocs =
+                vec![Reloc { at: 0, symbol: "foo".to_owned(), kind, addend: 0, after: 0 }];
+            let names =
+                vec![Name { at: Held::Undefined, ..at("foo", 0, Sort::Untyped, Binding::Global) }];
+            let input = Assembled { parts: vec![text], names, subsections: false };
+            let Err(Error::Refused { .. }) = assembled(&input, &i386()) else {
+                panic!("{kind:?} was written for i386");
+            };
+        }
+    }
+
+    /// An addend that does not fit in the bytes that have to hold it is refused, since a REL file
+    /// has nowhere else to put the rest of it.
+    #[test]
+    fn an_i386_addend_too_wide_for_its_bytes_is_refused() {
+        let mut data = part(".data", vec![0; 2]);
+        let kind = Reference::Address { bytes: 1 };
+        data.relocs = vec![Reloc { at: 0, symbol: "foo".to_owned(), kind, addend: 300, after: 0 }];
+        let names =
+            vec![Name { at: Held::Undefined, ..at("foo", 0, Sort::Untyped, Binding::Global) }];
+        let input = Assembled { parts: vec![data], names, subsections: false };
+        let Err(Error::Refused { why }) = assembled(&input, &i386()) else {
+            panic!("an addend of 300 went into one byte");
+        };
+        assert!(why.contains("300"), "{why}");
+    }
+
+    /// The header fields written into the finished bytes land where a 32 bit file keeps them,
+    /// which is not where a 64 bit one does.
+    #[test]
+    fn a_32_bit_file_gets_its_entry_size_and_groups_in_the_right_place() {
+        let mut strings = part(".rodata.str1.1", b"hi\0".to_vec());
+        strings.shape.merge = 1;
+        strings.shape.strings = true;
+        let mut kept = part(".text.f", vec![0xc3]);
+        kept.group = Some(Group { symbol: "f".to_owned(), keep: Keep::Together });
+        let names = vec![Name {
+            at: Held::In { part: 1, offset: 0 },
+            ..at("f", 0, Sort::Func, Binding::Global)
+        }];
+        let input = Assembled { parts: vec![strings, kept], names, subsections: false };
+        let bytes = assembled(&input, &i386()).expect("an object");
+        let header = elf::FileHeader32::<Endianness>::parse(&bytes[..]).expect("a 32 bit header");
+        let endian = header.endian().expect("an endianness");
+        let sections = header.sections(endian, &bytes[..]).expect("the sections");
+        let find = |name: &str| {
+            sections
+                .iter()
+                .find(|section| sections.section_name(endian, section) == Ok(name.as_bytes()))
+                .expect("the section")
+        };
+        assert_eq!(find(".rodata.str1.1").sh_entsize(endian), 1);
+        let group = find(".group");
+        let at = group.sh_offset(endian) as usize;
+        assert_eq!(&bytes[at..at + 4], &[0; 4], "a group that is not a COMDAT says so");
     }
 }
