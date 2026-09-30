@@ -250,3 +250,23 @@ fn a_function_returning_a_pointer_may_have_its_section_beside_the_star() {
         assert!(text.contains(&placed), "{name} in .init.text:\n{text}");
     }
 }
+
+#[test]
+fn an_attribute_after_a_tag_with_no_body_is_the_declarations() {
+    // `static enum memblock_flags __init_memblock choose_memblock_flags(void)` and
+    // `struct mem_section __ref *sparse_index_alloc(int nid)`. With no brace after the tag the
+    // attribute is a specifier of the declaration, and gcc places each of these by it.
+    let source = "enum e { A };\nstruct s { int x; };\n\
+                  enum e __attribute__((__section__(\".init.text\"))) f(void) { return A; }\n\
+                  struct s __attribute__((__section__(\".ref.text\"))) *g(int n) { return 0; }\n\
+                  struct s __attribute__((__section__(\".mine\"))) v;\n";
+    let text = listing("after-tag", LINUX, source);
+    for (section, name) in
+        [(".init.text,\"ax\"", "f"), (".ref.text,\"ax\"", "g"), (".mine,\"aw\"", "v")]
+    {
+        let placed = format!("\t.section\t{section},@progbits\n");
+        let at = text.find(&placed).unwrap_or_else(|| panic!("{section} in\n{text}"));
+        let label = text.find(&format!("\n{name}:\n")).expect("the label is written");
+        assert!(at < label, "{name} after {section}:\n{text}");
+    }
+}
