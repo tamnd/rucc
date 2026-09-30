@@ -284,6 +284,7 @@ static EXCHANGED: [Arg; 1] = [Reg(1, Byte)];
 // instruction is named once, and the register the two of them print is the one the description
 // pinned rather than the one an allocator happened to choose.
 static SWAP_BYTES: [Arg; 2] = [Low(0), High(1)];
+static EXCHANGE_32: [Arg; 2] = [Reg(1, Long), Reg(0, Long)];
 
 static RMW_8: [Arg; 2] = [Reg(0, Byte), Mem];
 static RMW_16: [Arg; 2] = [Reg(0, Word), Mem];
@@ -585,6 +586,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("imul_wide_16", &[spell("imulw", &MULTIPLIER_16)]),
     ("imul_wide_32", &[spell("imull", &MULTIPLIER_32)]),
     ("imul_wide_64", &[spell("imulq", &MULTIPLIER_64)]),
+    ("mul_high_32", &[spell("mull", &MULTIPLIER_32)]),
+    ("imul_high_32", &[spell("imull", &MULTIPLIER_32)]),
     ("mul_high_64", &[spell("mulq", &MULTIPLIER_64)]),
     ("imul_high_64", &[spell("imulq", &MULTIPLIER_64)]),
     // Division and remainder, signed and unsigned. The four widening instructions have no operands
@@ -1072,6 +1075,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("push_32", &[spell("pushl", &[Reg(0, Long)])]),
     ("pop_32", &[spell("popl", &[Reg(0, Long)])]),
     ("ret", &[spell("ret", &[])]),
+    ("ret_pop", &[spell("ret", &[Imm])]),
     ("mfence", &[spell("mfence", &[])]),
     // The four hints. One operand each and it is the address, the way `fldcw` above has one and it
     // is the address, and no width in the mnemonic because a hint is about a line rather than about
@@ -1185,6 +1189,7 @@ static TEXT: &[(&str, &[Written])] = &[
     // only way this machine has of saying one, since `bswap` is thirty two bits and up. Nothing
     // selects it: it is here because a template can write it and `llt/utils.h` does.
     ("xchg_high_16", &[spell("xchgb", &SWAP_BYTES)]),
+    ("xchg_rr_32", &[spell("xchgl", &EXCHANGE_32)]),
     ("xadd_8", &[spell("lock", &[]), spell("xaddb", &RMW_8)]),
     ("xadd_16", &[spell("lock", &[]), spell("xaddw", &RMW_16)]),
     ("xadd_32", &[spell("lock", &[]), spell("xaddl", &RMW_32)]),

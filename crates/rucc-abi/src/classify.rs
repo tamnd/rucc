@@ -103,7 +103,10 @@ impl Call {
                 if let (Kind::Integer, Some(format)) = (scalar.kind, vector) {
                     return Pass::Pieces(vec![Slot::Float { offset: 0, format }]);
                 }
-                if self.abi.return_pointer == ReturnPointer::FirstArgument {
+                if matches!(
+                    self.abi.return_pointer,
+                    ReturnPointer::FirstArgument | ReturnPointer::FirstArgumentPopped
+                ) {
                     self.integer = self.integer.saturating_sub(1);
                 }
                 return Pass::Reference;
@@ -306,7 +309,12 @@ impl Call {
                 // As an argument the address is one more argument. As a return value it is
                 // whichever register this ABI reserves for the purpose, and on AAPCS64 that is
                 // not an argument register at all.
-                if !returning || self.abi.return_pointer == ReturnPointer::FirstArgument {
+                if !returning
+                    || matches!(
+                        self.abi.return_pointer,
+                        ReturnPointer::FirstArgument | ReturnPointer::FirstArgumentPopped
+                    )
+                {
                     self.integer = self.integer.saturating_sub(1);
                 }
                 return Some(Pass::Reference);

@@ -94,6 +94,12 @@
 //! difference: the slot holds the address of the copy rather than the copy. Which arguments those
 //! are is a question about the size and nothing else, so the classification the front end put on a
 //! `va_object` is not read here at all.
+//!
+//! i386 has the same kind of list for a simpler reason: cdecl passes every argument in memory,
+//! so the run of them is there already and the list is a `char *` into it. There nothing travels
+//! by reference and nothing is held to one slot: a `double` or a `long long` is two words in a
+//! row and a structure is its size rounded up to a word, so the step is the width of what was
+//! read, rounded up to the four bytes a word is.
 
 pub mod aapcs;
 
@@ -236,9 +242,11 @@ pub fn lists(func: &mut Func, conv: &CallRegs) {
             (Opcode::VaObject, VaList::CharPointer | VaList::VoidPointer) => {
                 held(func, inst, word);
             }
-            (Opcode::VaCopy, VaList::SysV) => copy(func, inst, SIZE),
-            (Opcode::VaCopy, VaList::Aapcs) => copy(func, inst, aapcs::SIZE),
-            (Opcode::VaCopy, VaList::CharPointer | VaList::VoidPointer) => copy(func, inst, word),
+            (Opcode::VaCopy, VaList::SysV) => copy(func, inst, SIZE, 8),
+            (Opcode::VaCopy, VaList::Aapcs) => copy(func, inst, aapcs::SIZE, 8),
+            (Opcode::VaCopy, VaList::CharPointer | VaList::VoidPointer) => {
+                copy(func, inst, word, word);
+            }
             // Nothing at all, which is what the psABI says it is. The instruction was still worth
             // emitting, because it says the list stops being read here, and here is where that
             // stops being worth saying.
@@ -770,8 +778,17 @@ fn part(align: u32, offset: u64) -> u32 {
 /// eight bytes is passed as a pointer to a copy the caller made, whatever the argument is made of.
 /// A three byte structure is one and so is a sixteen byte float, and no classification is asked
 /// about either, which is why the slots the front end put on a `va_object` go unread on this side.
-fn by_reference(size: u64) -> bool {
+fn by_reference(size: u64, word: u64) -> bool {
+    if cdecl(word) {
+        return false;
+    }
     !matches!(size, 1 | 2 | 4 | 8)
+}
+
+/// Whether the list is i386's, which is the one plain pointer list on a machine with four byte
+/// words.
+fn cdecl(word: u64) -> bool {
+    word == 4
 }
 
 /// The slot the walk is at, with the list stepped on past it, written in front of an instruction.
@@ -779,9 +796,14 @@ fn by_reference(size: u64) -> bool {
 /// One word whatever is in the slot, because this convention gives every argument exactly one and
 /// pays for the ones that do not fit by passing their address instead. So there is nothing to round
 /// up, nothing to ask and nothing to branch on.
-fn slot(func: &mut Func, inst: Inst, list: Value, word: u64) -> Value {
+///
+/// On i386 the step is `bytes` rounded up to a word instead, for the reason the module doc's last
+/// section gives, and the slot is never an address.
+fn slot(func: &mut Func, inst: Inst, list: Value, word: u64, bytes: u64) -> Value {
     let here = read(func, inst, list, Type::PTR, word);
-    let step = field(func, inst, here, i64::try_from(word).unwrap_or(0));
+    let step = if cdecl(word) { bytes.next_multiple_of(word) } else { word };
+    let bits = u32::try_from(word * 8).unwrap_or(64);
+    let step = field_at(func, inst, here, i64::try_from(step).unwrap_or(0), bits);
     let mem = func.add_mem(info(word, u32::try_from(word).unwrap_or(1)));
     let args = func.push_values(&[step, list]);
     let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) };
@@ -837,12 +859,15 @@ fn value(func: &mut Func, inst: Inst, word: u64) {
     let ty = func[result].ty;
     let Some(bytes) = travels(ty, word) else { return };
 
-    let here = slot(func, inst, list, word);
-    let from = if by_reference(bytes) { read(func, inst, here, Type::PTR, word) } else { here };
+    let here = slot(func, inst, list, word, bytes);
+    let from =
+        if by_reference(bytes, word) { read(func, inst, here, Type::PTR, word) } else { here };
     // The next power of two up from the width, which is the width itself for everything the slot
     // holds and is sixteen for the ten bytes of an x87 value, since the copy the caller made is an
     // object of the type and the type is sixteen bytes here.
+    // On i386 no slot is aligned past a word, so neither is the load.
     let align = u32::try_from(bytes.next_power_of_two()).unwrap_or(1);
+    let align = if cdecl(word) { align.min(4) } else { align };
     let mem = func.add_mem(info(bytes, align));
     let args = func.push_values(&[from]);
     let data = &mut func[inst];
@@ -870,13 +895,14 @@ fn held(func: &mut Func, inst: Inst, word: u64) {
         return;
     }
 
-    let here = slot(func, inst, list, word);
-    let from = if by_reference(size) { read(func, inst, here, Type::PTR, word) } else { here };
+    let here = slot(func, inst, list, word, size);
+    let from =
+        if by_reference(size, word) { read(func, inst, here, Type::PTR, word) } else { here };
     // Through an integer and back, which is what the branching walk's answer is too and is free
     // either way: the two are the same bits on this machine and nothing is written for the pair.
     let args = func.push_values(&[from]);
     let data = InstData { args, ..InstData::new(Opcode::PtrToInt) };
-    let address = ahead(func, inst, data, Type::int(64));
+    let address = ahead(func, inst, data, Type::int(u32::try_from(word * 8).unwrap_or(64)));
     let args = func.push_values(&[address]);
     let data = &mut func[inst];
     data.opcode = Opcode::IntToPtr;
@@ -894,21 +920,23 @@ fn held(func: &mut Func, inst: Inst, word: u64) {
 /// offsets share one, and one for the list that is a pointer.
 ///
 /// Every read is built before any write, so that a list copied onto itself, which is legal and
-/// useless, moves what it held rather than what it has just been given.
-fn copy(func: &mut Func, inst: Inst, bytes: u64) {
+/// useless, moves what it held rather than what it has just been given. The words are `unit`
+/// bytes each, which is eight everywhere but i386, where the list is one pointer of four.
+fn copy(func: &mut Func, inst: Inst, bytes: u64, unit: u64) {
     let [into, from] = func[func[inst].args] else { return };
     let mut moved = Vec::new();
-    for word in 0..bytes / 8 {
-        let step = i64::try_from(word * 8).unwrap_or(0);
-        let there = field(func, inst, from, step);
-        let mem = func.add_mem(info(8, 8));
+    let align = u32::try_from(unit).unwrap_or(8);
+    for word in 0..bytes / unit {
+        let step = i64::try_from(word * unit).unwrap_or(0);
+        let there = field_at(func, inst, from, step, align * 8);
+        let mem = func.add_mem(info(unit, align));
         let args = func.push_values(&[there]);
         let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Load) };
-        moved.push((ahead(func, inst, data, Type::int(64)), step));
+        moved.push((ahead(func, inst, data, Type::int(align * 8)), step));
     }
     for (read, step) in moved {
-        let here = field(func, inst, into, step);
-        let mem = func.add_mem(info(8, 8));
+        let here = field_at(func, inst, into, step, align * 8);
+        let mem = func.add_mem(info(unit, align));
         let args = func.push_values(&[read, here]);
         let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) };
         let span = func.span(inst);
@@ -922,14 +950,14 @@ fn copy(func: &mut Func, inst: Inst, bytes: u64) {
 /// for no distance at all.
 ///
 /// A field of a list for the walk that has four of them, and the slot behind this one for the walk
-/// whose list is a pointer.
-fn field(func: &mut Func, inst: Inst, list: Value, at: i64) -> Value {
+/// whose list is a pointer. The distance is an integer `bits` wide, which is as wide as an address.
+fn field_at(func: &mut Func, inst: Inst, list: Value, at: i64, bits: u32) -> Value {
     if at == 0 {
         return list;
     }
-    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(at), Type::int(64))));
+    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(at), Type::int(bits))));
     let step =
-        ahead(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, Type::int(64));
+        ahead(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, Type::int(bits));
     let args = func.push_values(&[list, step]);
     ahead(func, inst, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
 }

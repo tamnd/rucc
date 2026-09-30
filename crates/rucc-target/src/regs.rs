@@ -641,6 +641,17 @@ impl PartialEq for Conventions {
 impl Eq for Conventions {}
 
 impl CallRegs {
+    /// The bytes a function that returns through a hidden address takes off the stack as it
+    /// returns. That is the address's slot where the ABI says the callee pops it, which is i386
+    /// System V, and nothing where the caller does, which is every other ABI including i386
+    /// Windows.
+    pub fn return_pointer_popped(&self) -> u32 {
+        match self.abi.return_pointer {
+            rucc_abi::ReturnPointer::FirstArgumentPopped => self.word,
+            _ => 0,
+        }
+    }
+
     /// The registers a function of that convention uses on this platform, and [`None`] for a
     /// convention the platform does not have.
     ///
@@ -839,7 +850,10 @@ impl<'a> Places<'a> {
     /// and the `short` after it starts at the second. That covers only the arguments a signature
     /// names. One it does not is a word or more wherever it goes, and the caller asks for that
     /// with [`Places::on_stack`] rather than here.
-    fn scalar(&mut self, bytes: u32) -> Where {
+    ///
+    /// It is also where an integer two registers wide goes when the pair did not fit, which is an
+    /// `__int128` at sixteen bytes on a sixty four bit machine and a `long long` at a word on i386.
+    pub fn scalar(&mut self, bytes: u32) -> Where {
         if self.regs.abi.stack_args == StackArgs::Packed {
             let bytes = bytes.max(1);
             let at = self.stack.next_multiple_of(bytes);
@@ -847,8 +861,12 @@ impl<'a> Places<'a> {
             return Where::Stack(at);
         }
         // The alignment is the width, which [`Places::on_stack`] raises to a word for anything
-        // narrower, so this is the natural alignment of the value and not a rule of its own.
-        self.on_stack(bytes, bytes)
+        // narrower, so this is the natural alignment of the value and not a rule of its own. The
+        // one exception is a scalar of two words, which is a `double` or a `long long` on i386,
+        // and the i386 psABI puts those at the next word and not the next eight bytes. A scalar of
+        // sixteen bytes keeps its own alignment everywhere, since a `movaps` reads it back.
+        let align = if bytes <= 8 { bytes.min(self.regs.word) } else { bytes };
+        self.on_stack(bytes, align)
     }
 
     /// Where the next value is, when it travels in memory whatever is left.

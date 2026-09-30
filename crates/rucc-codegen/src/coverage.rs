@@ -184,6 +184,13 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
     ("ret.f16", "the same, returned in `h0`", "tamnd/rucc#2105"),
     ("bitcast.f16.i16", "the same, as the bits a constant or a negation is", "tamnd/rucc#2105"),
     ("bitcast.i16.f16", "the same, the other way", "tamnd/rucc#2105"),
+    (
+        "umulh.i32",
+        "the high half of a thirty two bit product, which only a division by a constant on a \
+         machine of thirty two bits writes: this one divides a word by multiplying at sixty four",
+        "tamnd/rucc#2247",
+    ),
+    ("smulh.i32", "the same, signed", "tamnd/rucc#2247"),
 ];
 
 /// [`NAMES`] for `i386.rules`.
@@ -191,8 +198,9 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
 /// Every name here is at sixty four bits, which is twice what an i386 register holds. Most of them
 /// never reach the selector on this machine, since [`crate::wide`] splits the value into two
 /// thirty two bit halves first, and they are written down so the report says that rather than
-/// calling them missing rules. The last four have no split yet, and the two high halves are the
-/// only names their opcodes have, so on i386 nothing lowers those two opcodes at all.
+/// calling them missing rules. The last four have no split yet. The two high halves are never
+/// asked for at this width here, since [`crate::divide`] divides a word by multiplying words on a
+/// machine of thirty two bits.
 pub static X86_NAMES: &[(&str, &str, &str)] = &[
     (
         "add.i64",

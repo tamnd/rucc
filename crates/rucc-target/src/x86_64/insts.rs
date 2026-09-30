@@ -46,12 +46,12 @@ use Form::{
     Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
     ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
     CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Jcc, Jmp, JmpAway, JmpReg,
-    Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop, Pop,
-    PopX87, Prefetch, Push, PushX87, Ret, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Search, Set,
-    ShiftCl, ShiftRi, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
-    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
-    TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange, Jcc, Jmp, JmpAway,
+    JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop,
+    Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
+    Search, Set, ShiftCl, ShiftRi, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep,
+    StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves,
+    Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -291,6 +291,12 @@ pub enum Form {
     /// is a move in front when the source is elsewhere and a move behind when the answer is wanted
     /// elsewhere. Either move is free when the allocator takes the hint, and it usually does.
     SwapHalves,
+    /// Two registers trading what they hold, which nothing selects: i386 writes one on either side
+    /// of an instruction that names the low byte of `esi` or `edi`, neither of which has one, so
+    /// that the instruction can name the byte of a register that does. Each end is written and read,
+    /// and each is tied to itself, since what an exchange leaves in a register is what was in the
+    /// other one and the allocator has already run by the time one is written.
+    Exchange,
     /// A multiply that keeps the whole of its answer, in the two registers it takes to hold it.
     ///
     /// The product of two numbers of a width is twice that width, and every other multiply on this
@@ -533,6 +539,10 @@ pub enum Form {
     /// [`Form::RetVal`] gives: the frame has to be given back first and the frame is worked out
     /// long after selection has finished.
     Ret,
+    /// Leaving and taking that many bytes of arguments off the stack on the way, which is i386
+    /// System V giving back the address a result went through. The count is the immediate, and it is a
+    /// form of its own because it is the one return that carries one.
+    RetPop,
     /// A barrier, which reads nothing, writes nothing and is only its effect on the order other
     /// instructions become visible in.
     ///
@@ -910,6 +920,12 @@ static TWO_ADDRESS_RI: [OperandDesc; 2] =
 // because the instruction names the high byte of it and only the first four registers have one.
 // See [`Form::SwapHalves`] for why it is `rax` rather than whichever of the four the allocator
 // would rather have, and why the two ends are said separately instead of being tied.
+static EXCHANGE: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Reuse(2)),
+    OperandDesc::write(GPR).with(Constraint::Reuse(3)),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
 static SWAP_HALVES: [OperandDesc; 2] = [
     OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
@@ -1206,6 +1222,7 @@ impl Form {
             AluRr | AluCarry => &TWO_ADDRESS_RR,
             AluRi | AluCarryI | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             SwapHalves => &SWAP_HALVES,
+            Exchange => &EXCHANGE,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi | CmpSetRm => &ONE_TO_ONE,
@@ -1244,7 +1261,9 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | Barrier | Landing | Nop | Spin | Trap | Align | Literal | Template => &LEAVE,
+            Ret | RetPop | Barrier | Landing | Nop | Spin | Trap | Align | Literal | Template => {
+                &LEAVE
+            }
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             Rmw => &READ_MODIFY_WRITE,
@@ -1282,6 +1301,7 @@ impl Form {
                 | CmpMi
                 | TestRi
                 | StoreImm
+                | RetPop
         )
     }
 
@@ -1357,6 +1377,7 @@ impl Form {
                 | Push
                 | Pop
                 | Ret
+                | RetPop
                 | Call
                 | StrMove
                 | StrMoveRep
@@ -1668,8 +1689,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("imul_wide_16", MulWide),
     ("imul_wide_32", MulWide),
     ("imul_wide_64", MulWide),
-    // The same two at sixty four bits read for the high half alone, which a division by a
-    // constant multiplies for.
+    // The same two read for the high half alone, which a division by a constant multiplies for.
+    // Sixty four bits on x86-64 and thirty two on i386, the width of a register on each.
+    ("mul_high_32", MulHigh),
+    ("imul_high_32", MulHigh),
     ("mul_high_64", MulHigh),
     ("imul_high_64", MulHigh),
     // Division and remainder, signed and unsigned.
@@ -2203,6 +2226,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("push_32", Push),
     ("pop_32", Pop),
     ("ret", Ret),
+    // A return that takes that many bytes of arguments with it, which only i386 writes: its
+    // callee takes the address a result goes back through off the stack.
+    ("ret_pop", RetPop),
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
     ("mfence", Barrier),
@@ -2305,6 +2331,7 @@ pub static INSTS: &[(&str, Form)] = &[
     // The same instruction with both of its arguments in one register, which exchanges the two
     // bytes of a word and is where the machine's only nameable high byte is.
     ("xchg_high_16", SwapHalves),
+    ("xchg_rr_32", Exchange),
     ("xadd_8", Rmw),
     ("xadd_16", Rmw),
     ("xadd_32", Rmw),
@@ -2521,7 +2548,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 752);
+        assert_eq!(described, 756);
     }
 
     #[test]
@@ -2579,6 +2606,7 @@ mod tests {
                             | JmpReg
                             | Push
                             | Ret
+                            | RetPop
                             | StoreVec
                             | Barrier
                             | PushX87
@@ -2764,6 +2792,7 @@ mod tests {
                             | Jmp
                             | JmpAway
                             | Ret
+                            | RetPop
                             | Barrier
                             | AluMi
                             | UnaryM

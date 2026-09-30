@@ -350,7 +350,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::Anything, Travel::InMemory),
     ],
-    return_pointer: ReturnPointer::FirstArgument,
+    return_pointer: ReturnPointer::FirstArgumentPopped,
     // Everything is in the argument area already, so there is nothing a variadic argument could
     // do differently. This is the only ABI on the list where that is true for a reason rather
     // than by coincidence.

@@ -124,6 +124,8 @@
 (semantics (x64.imul_rr_16 l r) (bvmul l r))
 (semantics (x64.imul_rr_32 l r) (bvmul l r))
 (semantics (x64.imul_rr_64 l r) (bvmul l r))
+(semantics (x64.mul_high_32 l r) (extract 63 32 (bvmul (zero_extend 32 64 l) (zero_extend 32 64 r))))
+(semantics (x64.imul_high_32 l r) (extract 63 32 (bvmul (sign_extend 32 64 l) (sign_extend 32 64 r))))
 (semantics (x64.mul_high_64 l r) (extract 127 64 (bvmul (zero_extend 64 128 l) (zero_extend 64 128 r))))
 (semantics (x64.imul_high_64 l r) (extract 127 64 (bvmul (sign_extend 64 128 l) (sign_extend 64 128 r))))
 (semantics (x64.add_ri_8 l r) (bvadd l r))

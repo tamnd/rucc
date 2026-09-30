@@ -206,6 +206,14 @@ pub struct Layout<'a> {
     /// end of it calls when it fails. The caller sets `leaf` accordingly rather than this working
     /// it out, so that there is one place a frame learns whether it owes an aligned stack pointer.
     pub protect: bool,
+    /// The registers a protected function's canary goes through on its way in and out, which the
+    /// prologue has to put back like any other when the convention preserves one.
+    ///
+    /// Nothing on x86-64 or AArch64, whose protector uses the scratch registers no call preserves.
+    /// i386 has none of those to spare, so its canary goes through `esi` on the way in and the
+    /// check reads the guard into `ecx`, and `esi` is one a call preserves. See
+    /// [`crate::pipeline`].
+    pub guarded: &'a [PhysReg],
     /// Whether the function is written without a prologue or an epilogue, which
     /// `__attribute__((naked))` asks for.
     ///
@@ -238,6 +246,9 @@ pub struct Layout<'a> {
     /// the canonical frame address and none of the distances to the caller's arguments, which are
     /// counted from the bottom of it. See [`Frame::home`].
     pub home: u32,
+    /// How many bytes of its arguments the function takes off the stack as it returns. See
+    /// [`Frame::popped`].
+    pub popped: u32,
 }
 
 impl<'a> Layout<'a> {
@@ -256,10 +267,12 @@ impl<'a> Layout<'a> {
             grows: false,
             red_zone: true,
             protect: false,
+            guarded: &[],
             naked: false,
             pairs: false,
             share: None,
             home: 0,
+            popped: 0,
         }
     }
 }
@@ -284,6 +297,7 @@ pub struct Frame {
     pairs: bool,
     usage: u32,
     home: u32,
+    popped: u32,
 }
 
 impl Frame {
@@ -535,6 +549,7 @@ impl Frame {
             pairs: layout.pairs,
             usage,
             home: layout.home,
+            popped: layout.popped,
         }
     }
 
@@ -701,6 +716,14 @@ impl Frame {
         self.home
     }
 
+    /// How many bytes of its arguments the function takes off the stack as it returns, which the
+    /// epilogue says with a `ret` that carries the count. Four on i386 for a function a result
+    /// goes back from through an address the caller passed, and nothing anywhere else.
+    #[must_use]
+    pub fn popped(&self) -> u32 {
+        self.popped
+    }
+
     /// Whether the prologue points the frame pointer at the frame after taking it rather than
     /// before, which is [`rucc_target::CallRegs::late_frame_pointer`]. See `Late` in the module
     /// documentation.
@@ -782,6 +805,11 @@ fn saved(
         }
     }
 
+    if layout.protect {
+        for &at in layout.guarded {
+            note(layout.conv.int_class, at);
+        }
+    }
     let conv = layout.conv;
     let wanted = |class: RegClass, at: PhysReg| used.contains(&(class, at));
     // In the convention's order rather than the order the function happened to reach for them, so

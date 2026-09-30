@@ -1110,6 +1110,14 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     } else {
         (wide, wide_unsigned, wide_suffix)
     };
+    // The types as wide as a pointer, which are the wide ones above everywhere but a thirty two
+    // bit target, where they are `int`. That is what gcc says for i386 on Linux and on Windows,
+    // and it is what `rucc_sema` gives `sizeof` and a pointer difference, which have to agree.
+    let (pointer, pointer_unsigned, pointer_max, pointer_umax) = if target.pointer_width == 32 {
+        ("int", "unsigned int", "0x7fffffff".to_string(), "0xffffffffU".to_string())
+    } else {
+        (wide, wide_unsigned, wide_max.clone(), wide_umax.clone())
+    };
     let int64_max = format!("0x7fffffffffffffff{int64_suffix}");
     let int64_umax = format!("0xffffffffffffffffU{int64_suffix}");
 
@@ -1120,10 +1128,10 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__LONG_LONG_MAX__", "0x7fffffffffffffffLL");
     d.set("__INTMAX_MAX__", &wide_max);
     d.set("__UINTMAX_MAX__", &wide_umax);
-    d.set("__SIZE_MAX__", &wide_umax);
-    d.set("__PTRDIFF_MAX__", &wide_max);
-    d.set("__INTPTR_MAX__", &wide_max);
-    d.set("__UINTPTR_MAX__", &wide_umax);
+    d.set("__SIZE_MAX__", &pointer_umax);
+    d.set("__PTRDIFF_MAX__", &pointer_max);
+    d.set("__INTPTR_MAX__", &pointer_max);
+    d.set("__UINTPTR_MAX__", &pointer_umax);
     d.set("__SIG_ATOMIC_MAX__", "0x7fffffff");
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
     // The widest `_BitInt` this compiler builds, which is narrower than gcc 16's sixty five
@@ -1142,12 +1150,12 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__WINT_TYPE__", wint.spelling);
     d.set("__WINT_MAX__", wint.max);
     d.set("__WINT_MIN__", wint.min);
-    d.set("__SIZE_TYPE__", wide_unsigned);
-    d.set("__PTRDIFF_TYPE__", wide);
+    d.set("__SIZE_TYPE__", pointer_unsigned);
+    d.set("__PTRDIFF_TYPE__", pointer);
     d.set("__INTMAX_TYPE__", wide);
     d.set("__UINTMAX_TYPE__", wide_unsigned);
-    d.set("__INTPTR_TYPE__", wide);
-    d.set("__UINTPTR_TYPE__", wide_unsigned);
+    d.set("__INTPTR_TYPE__", pointer);
+    d.set("__UINTPTR_TYPE__", pointer_unsigned);
     d.set("__SIG_ATOMIC_TYPE__", "int");
     d.set("__CHAR16_TYPE__", "short unsigned int");
     d.set("__CHAR32_TYPE__", "unsigned int");
@@ -2100,6 +2108,13 @@ mod tests {
             "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2",
             "#define __ATOMIC_HLE_ACQUIRE 65536",
             "#define __SIZEOF_POINTER__ 4",
+            "#define __SIZE_TYPE__ unsigned int",
+            "#define __PTRDIFF_TYPE__ int",
+            "#define __INTPTR_TYPE__ int",
+            "#define __UINTPTR_TYPE__ unsigned int",
+            "#define __SIZE_MAX__ 0xffffffffU",
+            "#define __PTRDIFF_MAX__ 0x7fffffff",
+            "#define __INTMAX_TYPE__ long long int",
         ] {
             assert!(has(&i686, line), "{line}");
         }

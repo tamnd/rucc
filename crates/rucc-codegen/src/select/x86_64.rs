@@ -564,7 +564,12 @@ mod tests {
 
     /// The instructions only the i386 frame and selector name. They are in the shared description
     /// because the two machines share one, and no x86-64 rule selects them.
-    const I386: &[&str] = &["lea_32", "mov_rr_32", "push_32", "pop_32", "endbr32"];
+    ///
+    /// The last two are the return of a function that takes the address its result went through
+    /// off the stack, and the exchange `crate::bytes` puts around an instruction that named the low
+    /// byte of `esi` or `edi`. Neither is an answer to a term on either machine.
+    const I386: &[&str] =
+        &["lea_32", "mov_rr_32", "push_32", "pop_32", "endbr32", "ret_pop", "xchg_rr_32"];
 
     /// The instructions that change an object where it lives, which a template asks for and
     /// nothing else does.

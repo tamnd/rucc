@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `--target=i686-linux-gnu` compiles small C programs that link with i686-linux-gnu-gcc and run. Calls follow cdecl, with 4-byte stack slots, `long long` and `double` 8 bytes at 4-byte alignment, and the stack 16-byte aligned at each call. A struct returned in memory has its address passed first and popped by the callee with `ret $4`. Values come back in `eax`, `edx:eax` or `st0`, and a `va_list` is a `char *`. `size_t`, `ptrdiff_t` and `intptr_t` are `unsigned int` and `int`. Division by a constant has a 32-bit form, the stack protector keeps its canary out of `edx`, and an instruction that names the low byte of `esi` or `edi` borrows a register that has one. (#2247)
 - A new pass, `rangetest`, reads comparisons of one value against constants joined by `and` and `or` as the set of values that passes and writes it back as the fewest tests (#2375). `x == 1 || x == 2 || x == 3` is one subtract and one comparison, `c >= '0' && c <= '9'` is one comparison, and a scattered set inside one word, like the whitespace characters, is a window comparison and one bit.
 
 ### Fixed

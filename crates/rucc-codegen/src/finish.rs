@@ -1336,8 +1336,19 @@ impl Writer<'_> {
             out.push(inst);
             self.row(inst, CfiOp::DefCfaOffset(offset(self.conv.return_address)));
         }
-        let ret = self.opcode(self.insts.ret);
-        let inst = self.func.build_loose(ret).finish();
+        // A function that takes some of its arguments with it says how many bytes on the `ret`,
+        // which is i386 System V giving back the address its result went through. The count comes
+        // from the ABI, so a target whose caller pops that address gets a plain `ret`.
+        let inst = match (frame.popped(), self.insts.ret_pop) {
+            (popped @ 1.., Some(name)) => {
+                let ret = self.opcode(name);
+                self.func.build_loose(ret).imm(i64::from(popped)).finish()
+            }
+            _ => {
+                let ret = self.opcode(self.insts.ret);
+                self.func.build_loose(ret).finish()
+            }
+        };
         out.push(inst);
         // These take effect at the address just past the return, which is where the next block
         // begins, and the next block is body again. Popping the body's rules and pushing them

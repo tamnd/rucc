@@ -26,6 +26,15 @@
 //! and a compare is the right code. A power of two and an exact division need no product and are
 //! done at every width.
 //!
+//! # On a machine of thirty two bits
+//!
+//! i386 has no sixty four bit multiply to widen into, and a product that wide there is a call to
+//! the runtime. So a register is thirty two bits and a division at thirty two is written the way
+//! gcc writes it, with a high multiply at that width, the same as the sixty four bit one above at
+//! half the width. A division narrower than a register is left as a `div` there, since C only
+//! writes one after the `narrow` pass has shortened it, and one wider than a register is the
+//! runtime's already.
+//!
 //! # What the dividend is known to hold
 //!
 //! C divides at `int` at least, so an `unsigned short` divided by ten is an `int` division of a
@@ -57,15 +66,16 @@ use rucc_ir::{Def, Extra, Flags, Func, Imm, Inst, Opcode, Type, Value};
 
 use crate::expand::{ahead, ahead_const, becomes};
 
-/// Rewrites every division and remainder by a constant that [`program`] has an answer for.
-pub fn divisions(func: &mut Func, goal: Goal) {
+/// Rewrites every division and remainder by a constant that [`program_at`] has an answer for, on a
+/// machine whose registers are `register` bits wide.
+pub fn divisions(func: &mut Func, goal: Goal, register: u32) {
     if matches!(goal, Goal::Size) {
         return;
     }
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         let Some(division) = division(func, inst) else { continue };
-        let Some(program) = program(division) else { continue };
+        let Some(program) = program_at(division, register) else { continue };
         write(func, inst, &program);
     }
 }
@@ -113,6 +123,8 @@ pub enum Step {
 pub struct Program {
     /// The width of the dividend and of the answer.
     pub width: u32,
+    /// The width of a register, which is the widest a product can be.
+    pub register: u32,
     /// The steps, the last of which is the answer.
     pub steps: Vec<Step>,
 }
@@ -121,8 +133,8 @@ pub struct Program {
 const DIVIDEND: usize = 0;
 
 impl Program {
-    fn new(width: u32) -> Self {
-        Self { width, steps: Vec::new() }
+    fn new(width: u32, register: u32) -> Self {
+        Self { width, register, steps: Vec::new() }
     }
 
     fn push(&mut self, step: Step) -> usize {
@@ -176,14 +188,24 @@ impl Program {
     }
 }
 
-/// The rewrite for one division, or `None` where the `div` is left.
+/// The rewrite for one division on a sixty four bit machine, or `None` where the `div` is left.
 #[must_use]
 pub fn program(division: Division) -> Option<Program> {
+    program_at(division, 64)
+}
+
+/// The rewrite for one division on a machine whose registers are `register` bits wide, which is
+/// sixty four or thirty two, or `None` where the `div` is left.
+#[must_use]
+pub fn program_at(division: Division, register: u32) -> Option<Program> {
     let Division { signed, remainder, exact, width, range, divisor } = division;
     if !matches!(width, 8 | 16 | 32 | 64) || matches!(divisor, 0 | 1) || (signed && divisor == -1) {
         return None;
     }
-    let mut program = Program::new(width);
+    if !matches!(register, 32 | 64) || width > register {
+        return None;
+    }
+    let mut program = Program::new(width, register);
     if exact && !remainder {
         exactly(&mut program, signed, divisor);
         return Some(program);
@@ -258,7 +280,7 @@ fn unsigned(program: &mut Program, divisor: u128, bits: u32) -> Option<usize> {
         let shift = i128::from(divisor.trailing_zeros());
         return Some(program.by(Opcode::LShr, DIVIDEND, shift, width));
     }
-    if bits > 32 {
+    if bits > 32 || program.register == 32 {
         return unsigned_high(program, divisor, bits);
     }
     let (magic, shift) = multiplier(divisor, bits, bits);
@@ -276,8 +298,8 @@ fn unsigned(program: &mut Program, divisor: u128, bits: u32) -> Option<usize> {
     Some(program.narrowed(shifted))
 }
 
-/// The quotient of a dividend of sixty four bits that is never negative, from the high half of its
-/// product with the magic number.
+/// The quotient of a dividend of a register's width that is never negative, from the high half of
+/// its product with the magic number.
 ///
 /// `expand_divmod` at `gcc/expmed.cc` for an unsigned division at the width of a register. A magic
 /// number of sixty five bits does not fit in the multiply. For an even divisor the power of two
@@ -286,28 +308,29 @@ fn unsigned(program: &mut Program, divisor: u128, bits: u32) -> Option<usize> {
 /// its top bit and the dividend is added back to the high half, halving the difference first so
 /// that the sum cannot carry out of the register.
 fn unsigned_high(program: &mut Program, divisor: u128, bits: u32) -> Option<usize> {
-    if program.width != 64 || bits != 64 || divisor > 1u128 << 63 {
+    let n = program.register;
+    if program.width != n || bits > n || divisor > 1u128 << (n - 1) {
         return None;
     }
-    let (magic, shift) = multiplier(divisor, 64, 64);
-    if magic < 1u128 << 64 {
-        let high = program.by(Opcode::UMulHigh, DIVIDEND, signed_at(magic, 64), 64);
+    let (magic, shift) = multiplier(divisor, n, bits);
+    if magic < 1u128 << n {
+        let high = program.by(Opcode::UMulHigh, DIVIDEND, signed_at(magic, n), n);
         return Some(program.shifted(Opcode::LShr, high, shift));
     }
     let power = divisor.trailing_zeros();
-    if power > 0 {
-        let (magic, shift) = multiplier(divisor >> power, 64, 64 - power);
-        if magic < 1u128 << 64 {
-            let value = program.by(Opcode::LShr, DIVIDEND, i128::from(power), 64);
-            let high = program.by(Opcode::UMulHigh, value, signed_at(magic, 64), 64);
+    if power > 0 && power < bits {
+        let (magic, shift) = multiplier(divisor >> power, n, bits - power);
+        if magic < 1u128 << n {
+            let value = program.by(Opcode::LShr, DIVIDEND, i128::from(power), n);
+            let high = program.by(Opcode::UMulHigh, value, signed_at(magic, n), n);
             return Some(program.shifted(Opcode::LShr, high, shift));
         }
     }
-    let low_bits = signed_at(magic - (1u128 << 64), 64);
-    let high = program.by(Opcode::UMulHigh, DIVIDEND, low_bits, 64);
-    let difference = program.op(Opcode::Sub, DIVIDEND, high, 64);
-    let half = program.by(Opcode::LShr, difference, 1, 64);
-    let sum = program.op(Opcode::Add, half, high, 64);
+    let low_bits = signed_at(magic - (1u128 << n), n);
+    let high = program.by(Opcode::UMulHigh, DIVIDEND, low_bits, n);
+    let difference = program.op(Opcode::Sub, DIVIDEND, high, n);
+    let half = program.by(Opcode::LShr, difference, 1, n);
+    let sum = program.op(Opcode::Add, half, high, n);
     Some(program.shifted(Opcode::LShr, sum, shift.checked_sub(1)?))
 }
 
@@ -324,7 +347,7 @@ fn rounded(program: &mut Program, divisor: i128, bits: u32) -> Option<usize> {
     if size > 1u128 << (bits - 1) {
         return None;
     }
-    let low = if bits > 32 {
+    let low = if bits > 32 || program.register == 32 {
         signed_high(program, size, bits)?
     } else {
         let (magic, shift) = multiplier(size, bits, bits - 1);
@@ -341,18 +364,20 @@ fn rounded(program: &mut Program, divisor: i128, bits: u32) -> Option<usize> {
     })
 }
 
-/// The quotient of a signed dividend of sixty four bits by the size of the divisor, rounded towards
-/// minus infinity, from the high half of its product with the magic number.
+/// The quotient of a signed dividend of a register's width by the size of the divisor, rounded
+/// towards minus infinity, from the high half of its product with the magic number.
 ///
 /// A number with its top bit set is negative to a signed multiply, which takes the dividend off
 /// the high half, so the dividend is added back. That is gcc's `ml - 2^N` and the add after it.
 fn signed_high(program: &mut Program, size: u128, bits: u32) -> Option<usize> {
-    if program.width != 64 || bits != 64 {
+    let n = program.register;
+    if program.width != n || bits > n {
         return None;
     }
-    let (magic, shift) = multiplier(size, 64, 63);
-    let high = program.by(Opcode::SMulHigh, DIVIDEND, signed_at(magic, 64), 64);
-    let high = if magic < 1u128 << 63 { high } else { program.op(Opcode::Add, high, DIVIDEND, 64) };
+    let (magic, shift) = multiplier(size, n, bits - 1);
+    let high = program.by(Opcode::SMulHigh, DIVIDEND, signed_at(magic, n), n);
+    let high =
+        if magic < 1u128 << (n - 1) { high } else { program.op(Opcode::Add, high, DIVIDEND, n) };
     Some(program.shifted(Opcode::AShr, high, shift))
 }
 
@@ -524,7 +549,9 @@ mod tests {
     use rucc_cost::Goal;
     use rucc_ir::{Builder, Flags, Func, Opcode, Signature, Type, Value};
 
-    use super::{Division, Program, Range, Step, divisions, mask, multiplier, program, signed_at};
+    use super::{
+        Division, Program, Range, Step, divisions, mask, multiplier, program, program_at, signed_at,
+    };
 
     /// What a program gives for one dividend, worked the way the machine works it, with the width
     /// of every operand checked on the way.
@@ -535,6 +562,7 @@ mod tests {
             let value = match step {
                 Step::Const(value, bits) => (value as u128 & mask(bits), bits),
                 Step::Op(opcode, [lhs, rhs], bits) => {
+                    assert!(bits <= program.register, "{opcode:?} at {bits} bits");
                     let (a, from) = values[lhs];
                     let (b, other) = values[rhs];
                     let answer = match opcode {
@@ -552,12 +580,12 @@ mod tests {
                                 Opcode::Mul => a.wrapping_mul(b),
                                 Opcode::And => a & b,
                                 Opcode::UMulHigh => {
-                                    assert_eq!(bits, 64, "a high multiply at {bits} bits");
-                                    (a * b) >> 64
+                                    assert_eq!(bits, program.register, "a high multiply at {bits}");
+                                    (a * b) >> bits
                                 }
                                 Opcode::SMulHigh => {
-                                    assert_eq!(bits, 64, "a high multiply at {bits} bits");
-                                    ((signed_at(a, 64) * signed_at(b, 64)) >> 64) as u128
+                                    assert_eq!(bits, program.register, "a high multiply at {bits}");
+                                    ((signed_at(a, bits) * signed_at(b, bits)) >> bits) as u128
                                 }
                                 Opcode::LShr | Opcode::AShr => {
                                     assert!(b < u128::from(bits), "a shift by {b} at {bits} bits");
@@ -839,6 +867,65 @@ mod tests {
         }
     }
 
+    /// Thirty two bits on a machine of thirty two, which is i386, with no product wider than a
+    /// register. The same divisors and dividends as above, and every one of them that is not a
+    /// power of two or the top bit set on an unsigned divisor is rewritten.
+    #[test]
+    fn thirty_two_bit_divisions_on_a_thirty_two_bit_machine_are_right() {
+        let mut values = Vec::new();
+        let mut state = 0x6a09_e667_f3bc_c908;
+        let mut divisors: Vec<i128> = (-2_000..=2_000).collect();
+        for power in 1..=31 {
+            let at = 1i128 << power;
+            divisors.extend([at - 1, at, at + 1, -at + 1, -at, -at - 1]);
+        }
+        for _ in 0..2_000 {
+            divisors.push(i128::from(random(&mut state) as i32));
+        }
+        for (signed, remainder) in both() {
+            for range in [
+                if signed { Range::Signed(32) } else { Range::Unsigned(32) },
+                Range::Unsigned(16),
+                Range::Signed(16),
+            ] {
+                if !signed && matches!(range, Range::Signed(_)) {
+                    continue;
+                }
+                let (low, high) = ends(range);
+                for &divisor in &divisors {
+                    if !signed && divisor < 0 {
+                        continue;
+                    }
+                    let division = division(signed, remainder, 32, range, divisor);
+                    let Some(program) = program_at(division, 32) else {
+                        assert!(
+                            left(&division) || divisor.unsigned_abs() > 1 << 31,
+                            "{division:?}"
+                        );
+                        continue;
+                    };
+                    let size = divisor.abs().max(1);
+                    let mut dividends = vec![low, low + 1, -1, 0, 1, 2, high - 1, high];
+                    for end in [low, high] {
+                        let near = end / size * size;
+                        dividends.extend([near - 1, near, near + 1, near - size, near + size]);
+                    }
+                    for _ in 0..64 {
+                        dividends.push(i128::from(random(&mut state) as i32));
+                    }
+                    dividends.retain(|x| (low..=high).contains(x));
+                    for x in dividends {
+                        let x = x as u128 & mask(32);
+                        let got = run(&program, x, &mut values);
+                        assert_eq!(got, truth(&division, x), "{division:?} of {x:#x}");
+                    }
+                }
+            }
+        }
+        let wide = division(false, false, 64, Range::Unsigned(64), 10);
+        assert_eq!(program_at(wide, 32), None, "a division wider than a register is left");
+    }
+
     /// Sixty four bits, the same way as thirty two: the ends, the multiples nearest them and a
     /// random sample, for every small divisor, every power of two and the divisors either side of
     /// one, and a random sample of the rest. The negative ones are the largest divisors to an
@@ -966,7 +1053,7 @@ mod tests {
     fn an_unsigned_division_by_seven_is_a_multiply_an_add_and_two_shifts() {
         let i32 = Type::int(32);
         let mut func = one(i32, i32, divided(Opcode::UDiv, 7, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         let want = [
             Opcode::ZExt,
             Opcode::Mul,
@@ -983,7 +1070,7 @@ mod tests {
     fn a_signed_remainder_is_the_quotient_multiplied_back() {
         let i32 = Type::int(32);
         let mut func = one(i32, i32, divided(Opcode::SRem, 7, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         let want = [
             Opcode::SExt,
             Opcode::Mul,
@@ -1007,7 +1094,7 @@ mod tests {
             let wide = build.unary(Opcode::ZExt, x, i32);
             divided(Opcode::SDiv, 10, Flags::NONE)(build, wide)
         });
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         let want =
             [Opcode::ZExt, Opcode::ZExt, Opcode::Mul, Opcode::LShr, Opcode::Trunc, Opcode::Return];
         assert_eq!(opcodes(&func), want);
@@ -1018,7 +1105,7 @@ mod tests {
     fn an_exact_division_is_a_shift_and_a_multiply() {
         let i64 = Type::int(64);
         let mut func = one(i64, i64, divided(Opcode::SDiv, 12, Flags::EXACT));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         assert_eq!(opcodes(&func), [Opcode::AShr, Opcode::Mul, Opcode::Return]);
     }
 
@@ -1027,7 +1114,7 @@ mod tests {
     fn a_sixty_four_bit_unsigned_division_is_a_high_multiply_and_a_shift() {
         let i64 = Type::int(64);
         let mut func = one(i64, i64, divided(Opcode::UDiv, 10, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         assert_eq!(opcodes(&func), [Opcode::UMulHigh, Opcode::LShr, Opcode::Return]);
     }
 
@@ -1036,7 +1123,7 @@ mod tests {
     fn a_sixty_four_bit_unsigned_division_by_seven_adds_the_dividend_back() {
         let i64 = Type::int(64);
         let mut func = one(i64, i64, divided(Opcode::UDiv, 7, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         let want = [
             Opcode::UMulHigh,
             Opcode::Sub,
@@ -1054,7 +1141,7 @@ mod tests {
     fn a_sixty_four_bit_unsigned_division_by_an_even_number_shifts_first() {
         let i64 = Type::int(64);
         let mut func = one(i64, i64, divided(Opcode::UDiv, 14, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         let want = [Opcode::LShr, Opcode::UMulHigh, Opcode::LShr, Opcode::Return];
         assert_eq!(opcodes(&func), want);
     }
@@ -1064,7 +1151,7 @@ mod tests {
     fn a_sixty_four_bit_signed_division_is_a_high_multiply_and_the_sign_taken_off() {
         let i64 = Type::int(64);
         let mut func = one(i64, i64, divided(Opcode::SDiv, 10, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         let want = [Opcode::SMulHigh, Opcode::AShr, Opcode::AShr, Opcode::Sub, Opcode::Return];
         assert_eq!(opcodes(&func), want);
     }
@@ -1073,18 +1160,18 @@ mod tests {
     fn size_a_variable_divisor_and_a_huge_divisor_keep_the_div() {
         let i32 = Type::int(32);
         let mut func = one(i32, i32, divided(Opcode::UDiv, 7, Flags::NONE));
-        divisions(&mut func, Goal::Size);
+        divisions(&mut func, Goal::Size, 64);
         assert_eq!(opcodes(&func), [Opcode::UDiv, Opcode::Return]);
 
         let mut func = one(i32, i32, |build, x| build.binary(Opcode::SDiv, x, x, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         assert_eq!(opcodes(&func), [Opcode::SDiv, Opcode::Return]);
 
         // Two to the sixty third and one, where the quotient of an `unsigned long` is zero or one.
         let i64 = Type::int(64);
         let huge = i128::from(i64::MIN) + 1;
         let mut func = one(i64, i64, divided(Opcode::UDiv, huge, Flags::NONE));
-        divisions(&mut func, Goal::Speed);
+        divisions(&mut func, Goal::Speed, 64);
         assert_eq!(opcodes(&func), [Opcode::UDiv, Opcode::Return]);
     }
 }

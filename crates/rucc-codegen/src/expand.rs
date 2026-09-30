@@ -193,14 +193,30 @@ fn indivisible(ty: Type, info: MemInfo, word: u32) -> bool {
 /// unsigned sixty four bit integer are the two that are not a widening or a narrowing away from a
 /// signed one, because there is no signed width that holds those values, and each gets a rewrite
 /// of its own below.
-pub fn floats(func: &mut Func) {
+///
+/// On a machine whose words are four bytes a `double` is wider than any integer register, so the
+/// integer that spells one is two words and the exchange goes through a slot in the frame. See
+/// [`spilled_constant`] and [`spilled_negate`].
+pub fn floats(func: &mut Func, word: u32) {
+    // The conversions first, because what one of them writes has float constants in it and those
+    // are the next walk's to spell.
+    let register = word * 8;
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
+            Opcode::SIToFP | Opcode::UIToFP => widen_then_convert(func, inst, register),
+            Opcode::FPToSI | Opcode::FPToUI => convert_then_narrow(func, inst, register),
+            _ => {}
+        }
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    let narrow = |func: &Func, inst: Inst| produced(func, inst).bits() > register;
+    for inst in found {
+        match func[inst].opcode {
+            Opcode::FConst if narrow(func, inst) => spilled_constant(func, inst, word),
+            Opcode::FNeg if narrow(func, inst) => spilled_negate(func, inst, word),
             Opcode::FConst => constant(func, inst),
             Opcode::FNeg => negate(func, inst),
-            Opcode::SIToFP | Opcode::UIToFP => widen_then_convert(func, inst),
-            Opcode::FPToSI | Opcode::FPToUI => convert_then_narrow(func, inst),
             _ => {}
         }
     }
@@ -228,6 +244,94 @@ fn constant(func: &mut Func, inst: Inst) {
     // top bit is set stays the negative integer that spells it rather than becoming a wider one.
     let spelled = ahead_const(func, inst, Imm::int(bits as i128, int), int);
     becomes(func, inst, Opcode::Bitcast, &[spelled]);
+}
+
+/// A float constant wider than a word, as its words written into a slot and the float read back.
+///
+/// The words go in low first, the way the machine stores the float, and each is an integer
+/// constant of a word. Not above sixty four bits, for the reason [`constant`] gives.
+fn spilled_constant(func: &mut Func, inst: Inst, word: u32) {
+    let ty = produced(func, inst);
+    let Extra::Imm(imm) = func[inst].extra else { return };
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
+        return;
+    }
+    let bits = func[imm].bits();
+    let slot = frame_slot(func, inst, ty);
+    let int = Type::int(word * 8);
+    let mask = (1u128 << (word * 8)) - 1;
+    for at in 0..ty.bits() / (word * 8) {
+        let piece = (bits >> (at * word * 8)) & mask;
+        let piece = i128::try_from(piece).unwrap_or(0);
+        let value = ahead_const(func, inst, Imm::int(piece, int), int);
+        let into = step_at(func, inst, slot, at * word, word);
+        write(func, inst, value, into, local(u64::from(word), word));
+    }
+    read_in_place(func, inst, slot, ty);
+}
+
+/// A negation of a float wider than a word, as the word holding its sign flipped where it lies.
+///
+/// The value goes into a slot, the top word of it comes out, has the sign bit flipped, goes back,
+/// and the float is read again. It is the same exclusive or [`negate`] writes, done on the one word
+/// of the float the sign is in.
+fn spilled_negate(func: &mut Func, inst: Inst, word: u32) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !ty.is_float() || !ty.is_scalar() || ty.bits() > 64 {
+        return;
+    }
+    let size = u64::from(ty.bits() / 8);
+    let slot = frame_slot(func, inst, ty);
+    write(func, inst, arg, slot, local(size, word));
+    let int = Type::int(word * 8);
+    let top = step_at(func, inst, slot, ty.bits() / 8 - word, word);
+    let high = read(func, inst, top, local(u64::from(word), word), int);
+    let mask = ahead_const(func, inst, Imm::int(1i128 << (word * 8 - 1), int), int);
+    let flipped = ahead(func, inst, Opcode::Xor, &[high, mask], int);
+    write(func, inst, flipped, top, local(u64::from(word), word));
+    read_in_place(func, inst, slot, ty);
+}
+
+/// A slot in the frame the size of that float, aligned to its size.
+fn frame_slot(func: &mut Func, inst: Inst, ty: Type) -> Value {
+    let size = ty.bits() / 8;
+    let extra = Extra::Mem(func.add_mem(local(u64::from(size), size)));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+}
+
+/// The address that far into a slot, with the distance at the width of an address.
+fn step_at(func: &mut Func, inst: Inst, slot: Value, at: u32, word: u32) -> Value {
+    if at == 0 {
+        return slot;
+    }
+    let int = Type::int(word * 8);
+    let step = ahead_const(func, inst, Imm::int(i128::from(at), int), int);
+    ahead(func, inst, Opcode::PtrAdd, &[slot, step], Type::PTR)
+}
+
+/// The instruction turned into the load of its own type from the slot.
+fn read_in_place(func: &mut Func, inst: Inst, slot: Value, ty: Type) {
+    let size = ty.bits() / 8;
+    let extra = Extra::Mem(func.add_mem(local(u64::from(size), size)));
+    let args = func.push_values(&[slot]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Load;
+    data.args = args;
+    data.extra = extra;
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Load));
+}
+
+/// An access to a slot of this compiler's own, which nothing else can see.
+fn local(size: u64, align: u32) -> MemInfo {
+    MemInfo {
+        size,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: rucc_ir::Restrict::NONE,
+    }
 }
 
 /// A negation, as an exclusive or with the sign bit.
@@ -264,14 +368,17 @@ fn negate(func: &mut Func, inst: Inst) {
 /// after it the value is the same number in a signed integer the machine converts from, so the
 /// conversion is the same value and the same rounding. That is the whole of why the machine needs
 /// no unsigned conversion and none at a width narrower than an `int`.
-fn widen_then_convert(func: &mut Func, inst: Inst) {
+///
+/// On a machine of thirty two bits there is no wider signed integer for an unsigned `int` to go
+/// into, so it takes the path an unsigned sixty four bit integer takes on a machine of sixty four.
+fn widen_then_convert(func: &mut Func, inst: Inst, register: u32) {
     let signed = func[inst].opcode == Opcode::SIToFP;
     let Some(&arg) = func[func[inst].args].first() else { return };
     let from = func[arg].ty;
     if !from.is_int() || !from.is_scalar() {
         return;
     }
-    let Some(width) = holder(from.bits(), signed) else {
+    let Some(width) = holder(from.bits(), signed).filter(|&width| width <= register) else {
         from_unsigned_word(func, inst, arg, from);
         return;
     };
@@ -289,14 +396,17 @@ fn widen_then_convert(func: &mut Func, inst: Inst) {
 /// for fits in the signed one that holds every value of it, so converting there and keeping the
 /// low bits is that value however it is read, and a float that does not fit is undefined in C and
 /// unspecified in the model at either width.
-fn convert_then_narrow(func: &mut Func, inst: Inst) {
+///
+/// And on a machine of thirty two bits an unsigned `int` is the unsigned word, the way it is for
+/// the conversion the other way.
+fn convert_then_narrow(func: &mut Func, inst: Inst, register: u32) {
     let signed = func[inst].opcode == Opcode::FPToSI;
     let ty = produced(func, inst);
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !ty.is_int() || !ty.is_scalar() {
         return;
     }
-    let Some(width) = holder(ty.bits(), signed) else {
+    let Some(width) = holder(ty.bits(), signed).filter(|&width| width <= register) else {
         to_unsigned_word(func, inst, arg, ty);
         return;
     };
@@ -333,7 +443,7 @@ fn from_unsigned_word(func: &mut Func, inst: Inst, arg: Value, from: Type) {
     if !ty.is_float() || !ty.is_scalar() {
         return;
     }
-    if ty.bits() > 64 {
+    if exact(ty, from) {
         from_unsigned_word_wide(func, inst, arg, from);
         return;
     }
@@ -378,7 +488,7 @@ fn to_unsigned_word(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
     if !from.is_float() || !from.is_scalar() {
         return;
     }
-    if from.bits() > 64 {
+    if exact(from, ty) {
         to_unsigned_word_wide(func, inst, arg, ty);
         return;
     }
@@ -432,8 +542,8 @@ fn from_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, from: Type) 
     let over = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Slt), &[arg, zero]);
 
     let signed = ahead(func, inst, Opcode::SIToFP, &[arg], ty);
-    let range = ahead_float(func, inst, two_to_the(64), ty);
-    let flag = flag_as_float(func, inst, over, ty);
+    let range = ahead_float(func, inst, power_of_two(from.bits(), ty), ty);
+    let flag = flag_as_float(func, inst, over, from, ty);
     let addend = ahead(func, inst, Opcode::FMul, &[range, flag], ty);
     becomes(func, inst, Opcode::FAdd, &[signed, addend]);
 }
@@ -451,10 +561,10 @@ fn from_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, from: Type) 
 /// not a number puts it.
 fn to_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
     let from = func[arg].ty;
-    let half = ahead_float(func, inst, two_to_the(63), from);
+    let half = ahead_float(func, inst, power_of_two(ty.bits() - 1, from), from);
     let over = ahead_cmp(func, inst, Opcode::FCmp, Extra::FloatPred(FloatPred::Oge), &[arg, half]);
 
-    let flag = flag_as_float(func, inst, over, from);
+    let flag = flag_as_float(func, inst, over, ty, from);
     let taken = ahead(func, inst, Opcode::FMul, &[half, flag], from);
     let under = ahead(func, inst, Opcode::FSub, &[arg, taken], from);
     let low = ahead(func, inst, Opcode::FPToSI, &[under], ty);
@@ -468,12 +578,26 @@ fn to_unsigned_word_wide(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
 
 /// A condition as a float that is a one or a positive zero, which is what stands in for a mask.
 ///
-/// The widening is to sixty four bits rather than to whatever the float came from, since the value
-/// is a one or a zero and the conversion wants an integer the machine converts from. Neither of the
-/// two numbers is anywhere near needing rounding.
-fn flag_as_float(func: &mut Func, inst: Inst, cond: Value, ty: Type) -> Value {
-    let wide = ahead(func, inst, Opcode::ZExt, &[cond], Type::int(64));
+/// The widening is to the integer on the other side of the conversion rather than to whatever the
+/// float came from, since the value is a one or a zero and the conversion wants an integer the
+/// machine converts from. Neither of the two numbers is anywhere near needing rounding.
+fn flag_as_float(func: &mut Func, inst: Inst, cond: Value, int: Type, ty: Type) -> Value {
+    let wide = ahead(func, inst, Opcode::ZExt, &[cond], int);
     ahead(func, inst, Opcode::SIToFP, &[wide], ty)
+}
+
+/// Whether every value of the integer is one the float holds exactly, which is what lets the
+/// conversions between them go without the halving and the bit tricks: an eighty bit float and a
+/// sixty four bit integer, and a `double` and a thirty two bit integer on a machine with no wider
+/// signed one.
+fn exact(float: Type, int: Type) -> bool {
+    float.bits() > 64 || float.bits() == 64 && int.bits() <= 32
+}
+
+/// The bits of the float of that type that is two to this power, for the two formats [`exact`]
+/// lets through.
+fn power_of_two(power: u32, ty: Type) -> u128 {
+    if ty.bits() > 64 { two_to_the(power) } else { u128::from(1023 + power) << 52 }
 }
 
 /// The bits of the eighty bit float that is two to this power.
@@ -1539,6 +1663,38 @@ fn write(func: &mut Func, inst: Inst, value: Value, into: Value, info: MemInfo) 
     func.insert_before(made, inst);
 }
 
+/// Puts every constant distance a pointer is stepped by at the width of an address.
+///
+/// The lowerings above step through a block, a list or a slot by a constant, and they write that
+/// constant at sixty four bits, which is an address on every machine but i386. There an address is
+/// thirty two bits and so is every rule for stepping one, so each such distance is written again at
+/// that width in front of the step. A distance that is not a constant is left alone, since nothing
+/// here writes one and a program's own is already the width of its pointers.
+pub fn offsets(func: &mut Func, word: u32) {
+    let bits = word * 8;
+    if bits != 32 {
+        return;
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        if func[inst].opcode != Opcode::PtrAdd {
+            continue;
+        }
+        let [pointer, by] = func[func[inst].args] else { continue };
+        if func[by].ty.bits() <= bits {
+            continue;
+        }
+        let Some(at) = number(func, by) else { continue };
+        let narrow = Type::int(bits);
+        // The low thirty two bits, read as signed, which is the same step modulo an address.
+        let at = i128::try_from(at & 0xffff_ffff).unwrap_or(0);
+        let at = if at >= 1 << 31 { at - (1 << 32) } else { at };
+        let by = ahead_const(func, inst, Imm::int(at, narrow), narrow);
+        let args = func.push_values(&[pointer, by]);
+        func[inst].args = args;
+    }
+}
+
 /// The width the machine converts at that holds every value of an integer of this one.
 ///
 /// The machine converts between a float and a signed integer at thirty two bits and at sixty four
@@ -1707,7 +1863,7 @@ mod tests {
             let k = build.fconst(f64(), 0x3ff8_0000_0000_0000);
             build.ret(&[k]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("fconst"), "the float constant is gone: {text}");
@@ -1723,7 +1879,7 @@ mod tests {
             let k = build.fconst(f32(), 0x4020_0000);
             build.ret(&[k]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
         assert!(printed(&func, &mut names).contains("iconst.i32"), "an i32, not an i64");
     }
 
@@ -1735,7 +1891,7 @@ mod tests {
             let n = build.unary(Opcode::FNeg, args[0], f64());
             build.ret(&[n]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("fneg"), "the negation is gone: {text}");
@@ -1752,7 +1908,7 @@ mod tests {
             let d = build.unary(Opcode::UIToFP, args[0], f64());
             build.ret(&[d]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
@@ -1767,7 +1923,7 @@ mod tests {
             let n = build.unary(Opcode::FPToUI, args[0], Type::int(32));
             build.ret(&[n]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
@@ -1783,7 +1939,7 @@ mod tests {
             let n = build.unary(Opcode::FPToSI, args[0], Type::int(8));
             build.ret(&[n]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
 
         let text = printed(&func, &mut names);
         assert!(text.contains("fptosi.i32"), "converted at a width there is one at: {text}");
@@ -1797,7 +1953,7 @@ mod tests {
             let d = build.unary(Opcode::SIToFP, args[0], f64());
             build.ret(&[d]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
 
         let text = printed(&func, &mut names);
         assert!(text.contains("sext.i32"), "widened with the sign and not with zeroes: {text}");
@@ -1831,7 +1987,7 @@ mod tests {
                 let d = build.unary(Opcode::UIToFP, args[0], float);
                 build.ret(&[d]);
             });
-            floats(&mut func);
+            floats(&mut func, 8);
             let text = printed(&func, &mut names);
             assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
             assert!(text.contains("sitofp"), "the signed one is what is left: {text}");
@@ -1847,7 +2003,7 @@ mod tests {
                 let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
                 build.ret(&[n]);
             });
-            floats(&mut func);
+            floats(&mut func, 8);
             let text = printed(&func, &mut names);
             assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
             assert!(text.contains("fptosi"), "the signed one is what is left: {text}");
@@ -1867,14 +2023,14 @@ mod tests {
             let d = build.unary(Opcode::UIToFP, args[0], f64());
             build.ret(&[d]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
         assert_eq!(func.blocks().count(), 1, "the conversion did not split the block");
 
         let (_, mut func) = one(&[f64()], &[Type::int(64)], |build, args| {
             let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
             build.ret(&[n]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
         assert_eq!(func.blocks().count(), 1, "nor did the other one");
     }
 
@@ -1923,7 +2079,7 @@ mod tests {
             let d = build.unary(Opcode::UIToFP, args[0], f80());
             build.ret(&[d]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
         let text = printed(&func, &mut names);
         assert!(!text.contains("uitofp"), "the unsigned conversion is gone: {text}");
         assert!(text.contains("sitofp.f80"), "the signed one is what is left: {text}");
@@ -1938,7 +2094,7 @@ mod tests {
             let n = build.unary(Opcode::FPToUI, args[0], Type::int(64));
             build.ret(&[n]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
         let text = printed(&func, &mut names);
         assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
         assert!(text.contains("fptosi.i64"), "the signed one is what is left: {text}");
@@ -1999,7 +2155,7 @@ mod tests {
             let s = build.binary(Opcode::FAdd, n, k, Flags::NONE);
             build.ret(&[s]);
         });
-        floats(&mut func);
+        floats(&mut func, 8);
         let module = Module::new(names.intern("f.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
@@ -2012,7 +2168,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        floats(&mut func);
+        floats(&mut func, 8);
         assert_eq!(printed(&func, &mut names), before);
     }
     fn access(size: u64, align: u32) -> MemInfo {

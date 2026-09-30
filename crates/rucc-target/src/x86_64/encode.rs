@@ -1968,6 +1968,9 @@ static ENCODINGS: &[Encoding] = &[
     bytes("pushfq", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
     bytes("popfq", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
     bytes("ret", &NO_ARGS, Long, &[0xC3], NO_MODRM, NO_IMM),
+    // The same with a count of bytes to take off the stack after the return address, which is how
+    // an i386 function gives back the address its result went through.
+    takes("ret", &I, Fits::Word, Long, &[0xC2], NO_MODRM, ImmSize::Iw),
     // The frame taken down in one byte, which is `movq %rbp, %rsp` and `popq %rbp` together and
     // is sixty four bits without a prefix for the reason a pop is.
     bytes("leave", &NO_ARGS, Long, &[0xC9], NO_MODRM, NO_IMM),
