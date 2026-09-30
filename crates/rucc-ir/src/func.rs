@@ -875,6 +875,16 @@ impl Func {
         Idx::from_usize(self.mem.len() - 1)
     }
 
+    /// Raises the alignment a piece of memory has to at least `align`.
+    ///
+    /// For the lowering, which gives two locals one slot when their blocks never overlap and meets
+    /// the second one after the slot is made. Only ever raised, because an access built for the
+    /// alignment the memory had is still right at a larger one.
+    pub fn align_mem(&mut self, mem: Idx<MemInfo>, align: u32) {
+        let info = &mut self.mem[mem.index()];
+        info.align = info.align.max(align);
+    }
+
     /// Records what the ABI asks of the arguments a call's signature does not name.
     pub fn push_abis(&mut self, abis: &[Abi]) -> AbiList {
         let start = Idx::from_usize(self.abis.len());
@@ -1000,22 +1010,23 @@ impl Func {
     /// and [`MemInfo`] is appended to and never reordered, so the number an access carries today is
     /// the number it carries at the end.
     ///
-    /// One declaration per piece of memory, and the first ask wins. Nothing asks twice.
+    /// A piece of memory can be more than one declaration. The lowering gives two locals in scopes
+    /// that never overlap one slot when their addresses are taken, and each of them is still a
+    /// name a debugger may ask about. They are kept in the order they were asked for, and asking
+    /// twice for the same one records it once.
     pub fn declare_mem(&mut self, mem: Idx<MemInfo>, decl: u32) {
-        let found = self.mem_decls.binary_search_by_key(&mem.raw(), |&(at, _)| at.raw());
-        if let Err(at) = found {
-            self.mem_decls.insert(at, (mem, decl));
+        let end = self.mem_decls.partition_point(|&(at, _)| at.raw() <= mem.raw());
+        let start = self.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
+        if !self.mem_decls[start..end].iter().any(|&(_, known)| known == decl) {
+            self.mem_decls.insert(end, (mem, decl));
         }
     }
 
-    /// The declaration a piece of memory was made for, or `None` for memory no declaration in the
-    /// source asked for, which is every temporary and every spill.
-    #[must_use]
-    pub fn mem_decl(&self, mem: Idx<MemInfo>) -> Option<u32> {
-        match self.mem_decls.binary_search_by_key(&mem.raw(), |&(at, _)| at.raw()) {
-            Ok(at) => Some(self.mem_decls[at].1),
-            Err(_) => None,
-        }
+    /// The declarations a piece of memory was made for, which is none for memory no declaration in
+    /// the source asked for, which is every temporary and every spill.
+    pub fn mem_decls(&self, mem: Idx<MemInfo>) -> impl Iterator<Item = u32> + '_ {
+        let start = self.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
+        self.mem_decls[start..].iter().take_while(move |&&(at, _)| at == mem).map(|&(_, decl)| decl)
     }
 
     /// Says which declaration in the source a value is a value of, which is the other half of
@@ -2201,13 +2212,16 @@ mod tests {
         // is kept sorted so that reading it back is a search rather than a scan.
         func.declare_mem(third, 7);
         func.declare_mem(first, 2);
-        // The second ask about the same memory keeps the first answer.
+        // A second declaration for the same memory, which is two locals sharing a slot, and the
+        // same one again, which changes nothing.
         func.declare_mem(first, 9);
+        func.declare_mem(first, 2);
 
-        assert_eq!(func.mem_decl(first), Some(2));
-        assert_eq!(func.mem_decl(third), Some(7));
+        let of = |mem| func.mem_decls(mem).collect::<Vec<u32>>();
+        assert_eq!(of(first), [2, 9]);
+        assert_eq!(of(third), [7]);
         // Memory no declaration asked for, which is what every temporary is.
-        assert_eq!(func.mem_decl(second), None);
+        assert_eq!(of(second), []);
     }
 
     /// A value says which declarations it is the value of, and a rename carries them over.

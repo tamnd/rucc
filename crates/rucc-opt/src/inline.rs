@@ -274,6 +274,7 @@ pub fn run(
     once: bool,
     isa: Isa,
     growth: Growth,
+    share: bool,
 ) -> Vec<(FuncId, Stats)> {
     let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
     let wanted: Map<Symbol, (FuncId, Kind)> = module
@@ -306,7 +307,7 @@ pub fn run(
         let convention = Convention::of(module);
         let mut state = Map::default();
         let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
-        let how = How { wanted: &wanted, convention, limit, isa, names, growth };
+        let how = How { wanted: &wanted, convention, limit, isa, names, growth, share };
         for id in module.funcs().collect::<Vec<FuncId>>() {
             settle(module, id, &how, &mut state, &mut done);
         }
@@ -434,6 +435,8 @@ struct How<'a> {
     names: &'a Interner,
     /// How far a caller's frame may grow.
     growth: Growth,
+    /// Whether bodies spliced into the same caller may share their slots. See [`Pool`].
+    share: bool,
 }
 
 /// How far inlining may grow a caller's frame, gcc's `large-stack-frame-growth` and
@@ -518,6 +521,7 @@ fn settle(
     };
     let mut stats = Stats::new();
     let mut spliced = false;
+    let mut pool = Pool { on: how.share, ..Pool::default() };
     for (_, call, callee, kind) in calls {
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
@@ -561,12 +565,12 @@ fn settle(
             continue;
         }
         if kind != Kind::Always
-            && !fits(own, frame(&module[id]), frame(&module[callee]), how.growth)
+            && !fits(own, frame(&module[id]), pool.growth(&module[callee]), how.growth)
         {
             stats.missed(why(InlineFailure::Frame));
             continue;
         }
-        match splice(module, id, call, callee, how.convention, kind) {
+        match splice(module, id, call, callee, how.convention, kind, &mut pool) {
             Ok(()) => {
                 spliced = true;
                 stats.optimized(match kind {
@@ -605,6 +609,84 @@ fn calls_twice(module: &Module, func: &Func, names: &Interner) -> bool {
     })
 }
 
+/// The slots the bodies spliced into one caller brought with them, which the bodies spliced in
+/// after them may take over.
+///
+/// A body's locals last as long as the call it stands for, and the calls a function was written
+/// with are made one after another, never one inside another, so the locals of two of them are
+/// never wanted at once. gcc gives them the same bytes, which is how a function that calls four
+/// `always_inline` helpers with a buffer each has one buffer in its frame and not four, and the
+/// kernel is sized on that. What is pooled is only what a splice brought. The caller's own locals
+/// may be wanted across every call it makes, and a body inside a body already spliced came in with
+/// that body and was pooled or not there, in the callee.
+///
+/// Only slots of the same size are shared, for the reason the lowering gives for its own sharing:
+/// the size of an `alloca` is the size every later pass reads as the object's, and
+/// `__builtin_object_size` would answer for the smaller with the larger. One slot is taken at most
+/// once by each splice, since two locals of one body may well be wanted at once.
+#[derive(Debug, Default)]
+struct Pool {
+    /// Whether anything is shared at all, which is `-fstack-reuse=` and off at `-O0`.
+    on: bool,
+    /// Which splice this is, counting from one.
+    site: u32,
+    /// The slots so far, each with its size and the last splice that took it.
+    slots: Vec<(Inst, u64, u32)>,
+}
+
+impl Pool {
+    /// A slot for the callee's `alloca` whose memory is `extra` to take over, when there is one.
+    fn take(&mut self, func: &mut Func, callee: &Func, extra: Extra) -> Option<Value> {
+        let Extra::Mem(mem) = extra else { return None };
+        if !self.on {
+            return None;
+        }
+        let wanted = callee[mem];
+        let site = self.site;
+        let (inst, _, taken) = self
+            .slots
+            .iter_mut()
+            .find(|&&mut (_, size, taken)| size == wanted.size && taken != site)?;
+        *taken = site;
+        let Extra::Mem(held) = func[*inst].extra else { return None };
+        func.align_mem(held, wanted.align);
+        func[*inst].first_result
+    }
+
+    /// How many bytes splicing `callee` in would add to the caller's frame, which is its [`frame`]
+    /// less the slots it would take over.
+    fn growth(&self, callee: &Func) -> u64 {
+        let mut free: Vec<u64> = if self.on {
+            self.slots.iter().map(|&(_, size, _)| size).collect()
+        } else {
+            Vec::new()
+        };
+        let mut grows = 0;
+        for inst in callee.blocks().flat_map(|block| callee.insts(block)) {
+            if callee[inst].opcode != Opcode::Alloca || !callee[inst].args.is_empty() {
+                continue;
+            }
+            let Extra::Mem(mem) = callee[inst].extra else { continue };
+            let size = callee[mem].size;
+            match free.iter().position(|&held| held == size) {
+                Some(at) => {
+                    free.swap_remove(at);
+                }
+                None => grows += size,
+            }
+        }
+        grows
+    }
+
+    /// Puts the `alloca` just copied in as `inst` on the list, for a later splice to take.
+    fn add(&mut self, func: &Func, inst: Inst, callee: &Func, extra: Extra) {
+        let Extra::Mem(mem) = extra else { return };
+        if self.on && func[inst].first_result.is_some() {
+            self.slots.push((inst, callee[mem].size, self.site));
+        }
+    }
+}
+
 /// How many instructions a body has, which is what the limit on a callee declared `inline` counts.
 fn size(func: &Func) -> usize {
     func.blocks().map(|block| func.insts(block).count()).sum()
@@ -614,9 +696,9 @@ fn size(func: &Func) -> usize {
 ///
 /// The lowering already gave every local that never has its address taken a register, so what is
 /// left is the arrays, the structures and the scalars something points at. That is gcc's
-/// `estimated_stack_size` less its packing: gcc lets locals of two scopes that never overlap share
-/// bytes, and the slot allocator here only lets two share when neither has its address go anywhere
-/// it cannot follow, which is not true of most arrays, so the sum is the honest estimate.
+/// `estimated_stack_size`. The locals of blocks that never overlap are already one slot by the
+/// time this counts them, since the lowering shares them, and so are the slots of bodies spliced
+/// in earlier, see [`Pool`], so the sum is close to what the frame will be.
 fn frame(func: &Func) -> u64 {
     func.blocks()
         .flat_map(|block| func.insts(block))
@@ -635,9 +717,10 @@ fn frame(func: &Func) -> u64 {
 /// This is gcc's `caller_growth_limits` test for the stack. The frame may grow to
 /// `large-stack-frame-growth` percent more than the caller's own locals, and a frame no larger than
 /// `large-stack-frame` bytes is always fine. Those are 1000 and 256 by default and 40 and 100 under
-/// `-fconserve-stack`. gcc also lets a call through when a sibling already
-/// made the frame that large, on the grounds that the two bodies will share bytes. That is left
-/// out, since here they do not (see [`frame`]), which is tamnd/rucc#1989.
+/// `-fconserve-stack`. gcc also lets a call through when a sibling already made the frame that
+/// large, on the grounds that the two bodies will share bytes. Here a body whose slots all fit in
+/// ones a sibling brought adds nothing to [`frame`], since it takes those over, but one that does
+/// not is still measured on its own, which is less than gcc lets through.
 ///
 /// Without this a small function with a large buffer, called once from a function with none,
 /// moves the buffer into the caller, and a caller of many such helpers ends up with all their
@@ -657,6 +740,7 @@ fn splice(
     callee: FuncId,
     convention: Convention,
     kind: Kind,
+    pool: &mut Pool,
 ) -> Result<(), InlineFailure> {
     // Out of the module for the length of the splice, so that the callee can be read while the
     // caller is written. The two are different functions, since a call to itself is refused
@@ -664,7 +748,7 @@ fn splice(
     let stand_in = Func::new(module[caller].name, Signature::new());
     let mut func = std::mem::replace(&mut module[caller], stand_in);
     let result = check(&func, call, &module[callee], convention, kind)
-        .map(|plan| copy(&mut func, call, &module[callee], &plan));
+        .map(|plan| copy(&mut func, call, &module[callee], &plan, pool));
     module[caller] = func;
     result
 }
@@ -1017,7 +1101,7 @@ fn forwardable(
 }
 
 /// Splices the callee in where the call is, which [`check`] has said it can be.
-fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
+fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan, pool: &mut Pool) {
     let block = func.block_of(call).expect("a call being inlined is in a block");
     let entry = func.entry().expect("a function with a call in it has a body");
     // Where an unwind out of the call went, and where a return from it went, when a `cleanup`
@@ -1100,6 +1184,7 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
         if span.is_dummy() || body.is_dummy() || !prologue { span } else { at }
     };
     let mut made = Vec::new();
+    pool.site += 1;
     for from in callee.blocks() {
         for inst in callee.insts(from) {
             let data = &callee[inst];
@@ -1114,6 +1199,12 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
             let shell = InstData { flags: data.flags, ..InstData::new(opcode) };
             let fixed = opcode == Opcode::Alloca && data.args.is_empty();
+            let taken = if fixed { pool.take(func, callee, data.extra) } else { None };
+            if let Some(slot) = taken {
+                let old = data.first_result.expect("an alloca has an address");
+                values.insert(old, slot);
+                continue;
+            }
             let first = func.insts(entry).next().expect("an entry block ends in something");
             let span = if fixed {
                 // A slot joins the caller's frame, so it says what the caller's own slots say.
@@ -1127,6 +1218,7 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
             }
             if fixed {
                 func.insert_before(new, first);
+                pool.add(func, new, callee, data.extra);
             } else {
                 func.append_inst(blocks[&from], new);
             }
@@ -1509,12 +1601,74 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
         let said = format!(
             "{:?}",
-            run(&mut module, &names, limit, once, Isa::baseline(), Growth::DEFAULT)
+            run(&mut module, &names, limit, once, Isa::baseline(), Growth::DEFAULT, false)
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
         (rucc_ir::print(&module, &names), said)
+    }
+
+    /// Two bodies spliced into one caller, each with a buffer of 640 bytes, leave one buffer in the
+    /// caller when slots may be shared and two when they may not. A buffer of another size keeps
+    /// one of its own, and the caller's own buffer is never taken over.
+    #[test]
+    fn bodies_spliced_into_one_caller_share_their_slots() {
+        let body = r#"
+func @use(ptr), linkage(external);
+
+func @part(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = alloca, size 640, align 4
+    store %0 -> %1, align 4
+    call @use(%1) : (ptr)
+    %2 = load.i32 %1, align 4
+    return %2
+}
+
+func @small(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = alloca, size 64, align 16
+    store %0 -> %1, align 4
+    call @use(%1) : (ptr)
+    %2 = load.i32 %1, align 4
+    return %2
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 640, align 4
+    call @use(%1) : (ptr)
+    %2 = call @part(%0) : (i32) -> i32
+    %3 = call @part(%2) : (i32) -> i32
+    %4 = call @small(%3) : (i32) -> i32
+    return %4
+}
+"#;
+        let slots = |share: bool| {
+            let mut names = Interner::new();
+            let text = format!("{HEAD}{body}");
+            let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+            run(&mut module, &names, None, false, Isa::baseline(), Growth::DEFAULT, share);
+            if let Err(errors) = rucc_ir::verify(&module, &names) {
+                panic!("the inliner left invalid IR, {errors:?}");
+            }
+            let g = module.funcs().find(|&id| names.resolve(module[id].name) == "g").expect("g");
+            let func = &module[g];
+            let mut sizes: Vec<u64> = func
+                .blocks()
+                .flat_map(|block| func.insts(block))
+                .filter(|&inst| func[inst].opcode == Opcode::Alloca)
+                .filter_map(|inst| match func[inst].extra {
+                    Extra::Mem(mem) => Some(func[mem].size),
+                    _ => None,
+                })
+                .collect();
+            sizes.sort_unstable();
+            sizes
+        };
+        assert_eq!(slots(true), [64, 640, 640]);
+        assert_eq!(slots(false), [64, 640, 640, 640]);
     }
 
     /// A callee built for SSE4.2 stays a call from a caller that is not, whether it asked to be
@@ -1718,7 +1872,7 @@ block0(%0: i32):
                 respan(func, &[brace, brace, statement, statement, statement]);
             }
         }
-        run(&mut module, &names, None, true, Isa::baseline(), Growth::DEFAULT);
+        run(&mut module, &names, None, true, Isa::baseline(), Growth::DEFAULT, false);
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
         let mut seen = Vec::new();
@@ -2003,7 +2157,7 @@ block0(%0: i32):
             let mut names = Interner::new();
             let text = format!("{HEAD}{fixture}");
             let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-            run(&mut module, &names, Some(70), true, Isa::baseline(), Growth::CONSERVE);
+            run(&mut module, &names, Some(70), true, Isa::baseline(), Growth::CONSERVE, false);
             rucc_ir::print(&module, &names)
         };
         assert!(conserved(&framed(256, 0, "")).contains("call @scale"));

@@ -2161,7 +2161,7 @@ impl<'a> Lowering<'a> {
         // go anywhere.
         let index = self.stack.locals.len();
         self.stack.locals.push(Local { size, align: info.align.max(1) });
-        if let Some(decl) = self.source.mem_decl(mem) {
+        for decl in self.source.mem_decls(mem) {
             self.stack.declared.push((index, decl));
         }
         self.frame_slots.insert(result, index);

@@ -104,6 +104,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         aligned: Map::default(),
         restrict: Scopes::default(),
         brace: brace(tast, root, span),
+        nests: Nests::default(),
     };
     body.ssa.seal(body.func, entry);
 
@@ -116,9 +117,13 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         taken: Vec::new(),
         grows: false,
         saves: false,
+        blocks: vec![0],
+        block: 0,
+        within: Map::default(),
     };
     scan.stmt(root);
-    let Scan { escaped, locals, statics, taken, grows, saves, .. } = scan;
+    let Scan { escaped, locals, statics, taken, grows, saves, blocks, within, .. } = scan;
+    body.nests = Nests { parents: blocks, within, pool: Vec::new() };
     // A label whose address is taken and which is never defined was reported by the checking,
     // and there is no block for one, so it is not somewhere a jump can arrive.
     body.taken = taken.iter().filter_map(|&label| tast[label].stmt).collect();
@@ -721,6 +726,8 @@ struct Body<'a, 'u> {
     /// lines away from itself. gcc covers all of it with the opening brace, the same line it
     /// covers the prologue with, and so does this.
     brace: Span,
+    /// The blocks of the function, and the slots locals in blocks that never overlap share.
+    nests: Nests,
 }
 
 /// One open scope, and the stack pointer as it was before anything in it grew the stack.
@@ -999,6 +1006,12 @@ impl<'u> Body<'_, 'u> {
     /// whatever the last store wrote, whichever way control got there. So every automatic object
     /// in a function that saves a place gets one, which is what gcc does for the same reason and
     /// is documented as the cost of the pair rather than as an optimization it happens to lose.
+    ///
+    /// A local whose address is taken may be given the slot of another one declared in a block
+    /// apart from its own, when the build shares stack at all. [`Nests`] has the rules. Not in a
+    /// function that saves a place, whose locals are all kept in memory so that the jump back finds
+    /// them as they were, and not for a `volatile` object, whose accesses are the program's to
+    /// order.
     fn declare(&mut self, decl: DeclId, escaped: bool) {
         let tast = self.tast();
         let ty = tast[decl].ty;
@@ -1048,7 +1061,24 @@ impl<'u> Body<'_, 'u> {
         let align =
             tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
         let align = repr::local_align(self.types(), self.target(), ty, align);
+        let shares = (escaped || size > SCALARIZED)
+            && self.unit.share
+            && !self.saves
+            && !self.is_volatile(ty);
+        let block = self.nests.within.get(&decl).copied().unwrap_or(0);
+        let pooled = if shares { self.nests.room(block, size) } else { None };
+        if let Some(pooled) = pooled {
+            let (slot, mem) = (pooled.slot, pooled.mem);
+            pooled.blocks.push(block);
+            self.func.align_mem(mem, align);
+            self.func.declare_mem(mem, decl.raw());
+            self.vars.insert(decl, Local::Slot(slot));
+            return;
+        }
         let (slot, mem) = self.alloca(size, align, span);
+        if shares && block != 0 {
+            self.nests.pool.push(Pooled { slot, mem, size, blocks: vec![block] });
+        }
         // Which declaration these bytes are, so that a build asked for debugging information can
         // say a name and a type about the place the frame ends up putting them. Written here and
         // not in `alloca` because the other things that ask for a slot are scratch a call needs
@@ -9081,6 +9111,90 @@ fn holds_a_label(tast: &Tast, id: StmtId, cases: bool) -> bool {
     }
 }
 
+/// The blocks of a function as a tree, and the slots that locals in blocks which never overlap
+/// share.
+///
+/// What is shared is a local whose address is taken and a large one, see [`SCALARIZED`]. The
+/// code generator shares the slots it can follow the addresses of by when they are live, which
+/// is better than any block can say, but a local whose address goes to a call is one it cannot
+/// follow, and without this each one of them gets bytes of its own for the whole function. gcc gives two of them the same bytes when the blocks that
+/// declare them are apart, which is what `-fstack-reuse=all` is, and the kernel's frames are
+/// sized on that: four buffers in four blocks one after the other are one buffer in gcc's frame.
+///
+/// Two locals may share when neither block is inside the other. C says an object of automatic
+/// storage lasts until its block is left, 6.2.4p6, so by the time the second block is entered the
+/// first object is gone, and entering the first block again begins a new object whose value is
+/// indeterminate. A pointer kept past the end of the block reads whatever took its place, which is
+/// what it reads in gcc's build too.
+///
+/// Only locals of the same size share, because the size of the `alloca` is the size every pass
+/// after this one reads as the size of the object, and `__builtin_object_size` in the smaller of
+/// two would otherwise answer with the larger. The alignment is the larger of the two, which is
+/// always good for both.
+#[derive(Debug, Default)]
+struct Nests {
+    /// The block each block is inside, by number. Number 0 is the function itself, where the
+    /// parameters are, and it is inside itself. Every other block has a smaller number than any
+    /// block inside it.
+    parents: Vec<u32>,
+    /// The block each named local is declared in. What is not here is in block 0, which is a
+    /// parameter and a compound literal: the parameters last as long as the function, and a
+    /// compound literal is the unnamed object `-fstack-reuse=named_vars` leaves alone.
+    within: Map<DeclId, u32>,
+    /// The slots made so far that later locals may share.
+    pool: Vec<Pooled>,
+}
+
+/// The largest local scalar replacement may turn into values, which is `SRA_MAX_BYTES` in
+/// `rucc-cost`.
+///
+/// A local whose address is not taken shares a slot here only when it is larger than this. One
+/// that is not may be taken apart into values by that pass, which wants every access to it to be
+/// its own, and one slot for two of them would be accesses of two shapes to the same bytes. Past
+/// this nothing takes it apart, and an array of that size is the buffer that is handed to a call,
+/// which the code generator cannot follow and does not share.
+const SCALARIZED: u64 = 128;
+
+/// One slot that locals in blocks apart from each other share.
+#[derive(Debug)]
+struct Pooled {
+    slot: Value,
+    mem: Idx<MemInfo>,
+    size: u64,
+    /// The blocks of the locals in it so far.
+    blocks: Vec<u32>,
+}
+
+impl Nests {
+    /// Whether `inner` is `outer` or a block inside it.
+    fn encloses(&self, outer: u32, mut inner: u32) -> bool {
+        loop {
+            if inner == outer {
+                return true;
+            }
+            if inner == 0 {
+                return false;
+            }
+            inner = self.parents[inner as usize];
+        }
+    }
+
+    /// A slot of `size` bytes that a local in `block` may join, when there is one.
+    fn room(&mut self, block: u32, size: u64) -> Option<&mut Pooled> {
+        if block == 0 {
+            return None;
+        }
+        let at = self.pool.iter().position(|pooled| {
+            pooled.size == size
+                && pooled
+                    .blocks
+                    .iter()
+                    .all(|&other| !self.encloses(other, block) && !self.encloses(block, other))
+        })?;
+        Some(&mut self.pool[at])
+    }
+}
+
 /// The pass that decides what the function needs before any of it is walked.
 ///
 /// Two questions, and both have to be answered for the whole body at once. Which locals need a
@@ -9104,9 +9218,24 @@ struct Scan<'a> {
     /// Whether anything in the body is a `__builtin_setjmp`, which decides where every local in
     /// the function lives. See [`Body::declare`].
     saves: bool,
+    /// The block each block is inside, by number. See [`Nests::parents`].
+    blocks: Vec<u32>,
+    /// The block the scan is in.
+    block: u32,
+    /// The block each named local is declared in. See [`Nests::within`].
+    within: Map<DeclId, u32>,
 }
 
 impl Scan<'_> {
+    /// Walks what `walk` walks as a block of its own inside the one the scan is in.
+    fn nested(&mut self, walk: impl FnOnce(&mut Self)) {
+        let outer = self.block;
+        self.block = u32::try_from(self.blocks.len()).expect("fewer blocks than that");
+        self.blocks.push(outer);
+        walk(self);
+        self.block = outer;
+    }
+
     /// One statement and everything under it.
     fn stmt(&mut self, id: StmtId) {
         match self.tast[id] {
@@ -9114,15 +9243,16 @@ impl Scan<'_> {
             Stmt::Expr(expr) => self.expr(expr),
             Stmt::IndirectGoto(expr) => self.expr(expr),
             Stmt::Asm(asm) => self.asm(asm),
-            Stmt::Block(list) => {
-                for index in 0..self.tast[list].len() {
-                    let stmt = self.tast[list][index];
-                    self.stmt(stmt);
+            Stmt::Block(list) => self.nested(|scan| {
+                for index in 0..scan.tast[list].len() {
+                    let stmt = scan.tast[list][index];
+                    scan.stmt(stmt);
                 }
-            }
+            }),
             Stmt::Decls(list) => {
                 for index in 0..self.tast[list].len() {
                     let decl = self.tast[list][index];
+                    self.within.insert(decl, self.block);
                     self.decl(decl);
                 }
             }
@@ -9137,18 +9267,20 @@ impl Scan<'_> {
                 self.expr(cond);
                 self.stmt(body);
             }
-            Stmt::For { init, cond, step, body } => {
+            // A `for` is a block of its own, since what its first clause declares lasts until the
+            // loop is done and no longer, 6.8.5p5.
+            Stmt::For { init, cond, step, body } => self.nested(|scan| {
                 if let Some(init) = init {
-                    self.stmt(init);
+                    scan.stmt(init);
                 }
                 if let Some(cond) = cond {
-                    self.expr(cond);
+                    scan.expr(cond);
                 }
                 if let Some(step) = step {
-                    self.expr(step);
+                    scan.expr(step);
                 }
-                self.stmt(body);
-            }
+                scan.stmt(body);
+            }),
             Stmt::Switch { cond, body, .. } => {
                 self.expr(cond);
                 self.stmt(body);
@@ -9268,7 +9400,19 @@ impl Scan<'_> {
             }
             ExprKind::Cast(operand) | ExprKind::Convert { operand, .. } => self.expr(operand),
             ExprKind::CompoundLiteral(decl) => self.decl(decl),
-            ExprKind::StmtExpr(body) => self.stmt(body),
+            // The braces of a statement expression are not a block of their own here. What the
+            // last statement in them says is the value of the whole, which may be read from where
+            // one of the locals is after the braces have closed, and a local of the next one
+            // beside it in the same expression could otherwise be given the same bytes.
+            ExprKind::StmtExpr(body) => match self.tast[body] {
+                Stmt::Block(list) => {
+                    for index in 0..self.tast[list].len() {
+                        let stmt = self.tast[list][index];
+                        self.stmt(stmt);
+                    }
+                }
+                _ => self.stmt(body),
+            },
             ExprKind::VaArg { list } | ExprKind::VaStart { list } | ExprKind::VaEnd { list } => {
                 self.escape(list);
                 self.expr(list);
