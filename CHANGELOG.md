@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The address of a local or of a name is written again where it is read, the way a constant already was, rather than worked out once and kept in a register or spilled to a slot of its own. A local's address is a `lea` off the stack pointer and is written at each use; a name's is written once in each block that reads it. An address passed to a call is written next to the store or the move that passes it, so a call with many string arguments no longer holds all of them in registers the call leaves alone. The two reduced programs in #2200 took 144 and 128 bytes of frame where gcc takes 80 (#2200).
+
+### Fixed
+
+- Under `-fsafety=detect`, a call hands its callee a pointer's capability only where that capability is worked out before the call. The optimizer can move a parameter's capability down into the blocks that check through it, and a call made before those blocks used to copy the capability's slot into the frame before anything had written it, so the callee read whatever an earlier call had left there. brotli and lua at `-O2` failed their bounds checks or crashed in `__rucc_cap_load` once the frame layout changed. Such a call now says it has no capability for that pointer, and the callee recovers one as it does for a pointer nothing checked.
+
 ## 0.17.0
 
 The W3 release, for UCRT, winpthreads and the real corpus on Windows. x86_64-windows-gnu is tier 2: SQLite's tests pass under Wine with nothing failing in rucc's build that passes in MinGW GCC's, a program imports only `KERNEL32.dll` and the `api-ms-win-crt-*` sets, six real projects pass under Wine and five natively, and the ABI differential against MinGW GCC is clean. The windows-gnu sysroots are built with import libraries from `rucc --dlltool`, byte for byte what llvm-dlltool writes. This release also carries most of the AArch64 Windows work for W5: the calling convention, unwind tables, `__chkstk`, x18 and thread-local storage.
@@ -14,14 +22,9 @@ The W3 release, for UCRT, winpthreads and the real corpus on Windows. x86_64-win
 - Thread-local variables on AArch64 Windows, found from the TEB in x18 through `_tls_index` and the thread's array of `.tls` copies with the `:secrel_hi12:` and `:secrel_lo12:` relocations, the same instructions clang writes. (#2071)
 - A file-scope `register T *x asm("x18")` on AArch64 is read as the register, which is how mingw-w64's `winnt.h` declares the TEB for `NtCurrentTeb`, and `tests/exec/windows/x18.sh` checks that nothing rung 0 compiles for Windows on ARM64 writes x18 or w18. Any other global register variable is still refused. (#2071)
 
-### Changed
-
-- The address of a local or of a name is written again where it is read, the way a constant already was, rather than worked out once and kept in a register or spilled to a slot of its own. A local's address is a `lea` off the stack pointer and is written at each use; a name's is written once in each block that reads it. An address passed to a call is written next to the store or the move that passes it, so a call with many string arguments no longer holds all of them in registers the call leaves alone. The two reduced programs in #2200 took 144 and 128 bytes of frame where gcc takes 80 (#2200).
-
 ### Fixed
 
 - `__attribute__((gcc_struct))` on AArch64 Windows lets an unnamed bit-field raise the record's alignment, as AAPCS64 and llvm-mingw's clang do. (#2071)
-- Under `-fsafety=detect`, a call hands its callee a pointer's capability only where that capability is worked out before the call. The optimizer can move a parameter's capability down into the blocks that check through it, and a call made before those blocks used to copy the capability's slot into the frame before anything had written it, so the callee read whatever an earlier call had left there. brotli and lua at `-O2` failed their bounds checks or crashed in `__rucc_cap_load` once the frame layout changed. Such a call now says it has no capability for that pointer, and the callee recovers one as it does for a pointer nothing checked.
 - A function on AArch64 Windows whose frame is bigger than a page saves x29 and x30 before it calls `__chkstk`, so one that calls nothing else no longer returns into its own prologue and loops forever. (#2071)
 - An `__int128` argument on AArch64 Linux and Windows starts at an even x register, as AAPCS64 rule C.9 says, so one after an `int` is in x2 and x3 rather than x1 and x2. On every AArch64 target, one that does not fit in the x registers left now spends them, so the argument after it goes in memory the way clang puts it. (#2222)
 - An import library indexes a name two exports define once, at the first of them, as `llvm-dlltool` does. `lib32/msvcr80d.def.in` exports `:` twice, and the library `rucc --dlltool` wrote for it had the name in its indexes twice and was 36 bytes longer than `llvm-dlltool`'s, so the i686 sysroot would not have been the one rucc pins (#2069).
