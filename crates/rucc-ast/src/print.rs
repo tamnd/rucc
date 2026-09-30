@@ -51,7 +51,7 @@ use crate::ast::{
     AsmOperandList, Ast, AttrList, DesignatorList, EnumeratorList, ExprList, GenericList,
     MemberList, ParamList, StrId, StrList, SymbolList,
 };
-use crate::attr::{AttrArg, AttrSyntax};
+use crate::attr::{AttrArg, AttrSyntax, Attribute};
 use crate::decl::{
     ArraySize, Decl, DeclId, DeclaratorId, Derived, Field, Member, Param, ParamKind, TypeNameId,
 };
@@ -971,25 +971,7 @@ impl<'a> Printer<'a> {
                 AttrSyntax::Gnu => self.token("__attribute__(("),
                 AttrSyntax::Declspec => self.token("__declspec("),
             }
-            if let Some(namespace) = attr.namespace {
-                self.name(namespace);
-                self.token("::");
-            }
-            self.name(attr.name);
-            if !attr.args.is_empty() {
-                self.token("(");
-                for (index, arg) in ast[attr.args].iter().enumerate() {
-                    if index > 0 {
-                        self.token(",");
-                        self.space();
-                    }
-                    match *arg {
-                        AttrArg::Ident(name) => self.name(name),
-                        AttrArg::Expr(expr) => self.expr_at(expr, ASSIGN),
-                    }
-                }
-                self.token(")");
-            }
+            self.attribute(attr);
             match attr.syntax {
                 AttrSyntax::Standard => self.token("]]"),
                 AttrSyntax::Gnu => self.token("))"),
@@ -998,6 +980,40 @@ impl<'a> Printer<'a> {
             // Whatever comes next reads as part of the attribute without this. Nothing needs it
             // to lex, and `token` takes it back where what follows is punctuation.
             self.space();
+        }
+    }
+
+    /// The attributes of a list with nothing around them, which is how
+    /// `__builtin_has_attribute` is handed its one.
+    fn attribute_inside(&mut self, list: AttrList) {
+        let ast = self.ast;
+        for attr in &ast[list] {
+            self.space();
+            self.attribute(attr);
+        }
+    }
+
+    /// One attribute, its name and its arguments.
+    fn attribute(&mut self, attr: &Attribute) {
+        let ast = self.ast;
+        if let Some(namespace) = attr.namespace {
+            self.name(namespace);
+            self.token("::");
+        }
+        self.name(attr.name);
+        if !attr.args.is_empty() {
+            self.token("(");
+            for (index, arg) in ast[attr.args].iter().enumerate() {
+                if index > 0 {
+                    self.token(",");
+                    self.space();
+                }
+                match *arg {
+                    AttrArg::Ident(name) => self.name(name),
+                    AttrArg::Expr(expr) => self.expr_at(expr, ASSIGN),
+                }
+            }
+            self.token(")");
         }
     }
 
@@ -1280,6 +1296,22 @@ impl<'a> Printer<'a> {
                 self.token("__builtin_classify_type");
                 self.token("(");
                 self.type_name(ty);
+                self.token(")");
+            }
+            Expr::HasAttributeExpr { operand, attr } => {
+                self.token("__builtin_has_attribute");
+                self.token("(");
+                self.expr_at(operand, ASSIGN);
+                self.token(",");
+                self.attribute_inside(attr);
+                self.token(")");
+            }
+            Expr::HasAttributeType { ty, attr } => {
+                self.token("__builtin_has_attribute");
+                self.token("(");
+                self.type_name(ty);
+                self.token(",");
+                self.attribute_inside(attr);
                 self.token(")");
             }
             Expr::TypesCompatible { a, b } => {

@@ -3325,7 +3325,9 @@ mod tests {
     /// The answers were not taken from a GCC 14 run, because there was none to hand. They are what
     /// gcc 16 answers, with the three places GCC 14 differs put back from its source: it answers
     /// the standard's older numbers for `fallthrough` and `noreturn`, where 16 answers 202311 for
-    /// both, and it has no `counted_by`, which came in 15. `no_caller_saved_registers` is an
+    /// both, and it has no `counted_by`, which came in 15. That one row is answered the way 15
+    /// answers it, because this compiler calls itself 16 and the kernel's own test for the
+    /// attribute is the version number. `no_caller_saved_registers` is an
     /// attribute of x86 alone, which is why the target is written down. The clang-only names at
     /// the bottom are ones gcc answers no for and so must this.
     const KERNEL_ATTRIBUTES: [(&str, u32); 39] = [
@@ -3361,7 +3363,7 @@ mod tests {
         ("warn_unused_result", 1),
         ("warning", 1),
         ("weak", 1),
-        ("counted_by", 0),
+        ("counted_by", 1),
         ("diagnose_as_builtin", 0),
         ("disable_sanitizer_instrumentation", 0),
         ("overloadable", 0),

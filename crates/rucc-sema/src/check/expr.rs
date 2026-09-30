@@ -129,6 +129,10 @@ impl Checker<'_> {
             ast::Expr::ClassifyExpr(operand) => self.classify_expr(operand, span),
             ast::Expr::ClassifyType(ty) => self.classify_type(ty, span),
             ast::Expr::TypesCompatible { a, b } => self.types_compatible(a, b, span),
+            ast::Expr::HasAttributeExpr { operand, attr } => {
+                self.has_attribute_expr(operand, attr, span)
+            }
+            ast::Expr::HasAttributeType { ty, attr } => self.has_attribute_type(ty, attr, span),
             ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
             ast::Expr::VaStart { list, last } => self.va_start(list, last, span),
             ast::Expr::VaEnd { list } => self.va_end(list, span),
@@ -931,7 +935,7 @@ impl Checker<'_> {
     }
 
     /// One step of a member access, whose base has already been checked to be a record.
-    fn member_node(&mut self, base: ExprId, index: u32, span: Span) -> ExprId {
+    pub(in crate::check) fn member_node(&mut self, base: ExprId, index: u32, span: Span) -> ExprId {
         let base_ty = self.tast[base].ty;
         let TypeKind::Record(record) = self.types.kind(self.types.canonical(base_ty)) else {
             unreachable!("the base of a member access is a record");
@@ -1119,7 +1123,7 @@ impl Checker<'_> {
     }
 
     /// `&operand`.
-    fn address_of(&mut self, operand: ExprId, span: Span) -> ExprId {
+    pub(in crate::check) fn address_of(&mut self, operand: ExprId, span: Span) -> ExprId {
         if self.is_poisoned(operand) {
             return self.poison(span);
         }

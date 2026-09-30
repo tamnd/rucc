@@ -780,10 +780,11 @@ tests = []
 [[feature]]
 name = "counted_by"
 kind = "attribute"
-gcc_version = "14.0"
-status = "unimplemented"
+gcc_version = "15.0"
+status = "implemented"
 used_by = ["linux"]
-tests = []
+tests = ["rucc/tests/annotations.rs"]
+notes = "Checked with gcc 15's rules and messages: on a flexible array member only, naming an integer member of the same structure. `__builtin_counted_by_ref` reads it. `__builtin_dynamic_object_size` does not yet, so a fortified copy into the array is checked against what the layout says rather than against the count, which is the answer an unannotated array gets."
 
 [[feature]]
 name = "fallthrough"
@@ -1100,6 +1101,24 @@ status = "implemented"
 used_by = ["linux"]
 tests = ["rucc-sema::types_compatible_p_is_a_constant_that_ignores_the_top_level_qualifiers"]
 notes = "An operator that names two types rather than a call, so the parser reads it and the answer is a constant. The row said unimplemented until the status column started deciding whether a call to a name is refused."
+
+[[feature]]
+name = "__builtin_has_attribute"
+kind = "builtin"
+gcc_version = "9.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc/tests/annotations.rs"]
+notes = "Syntax rather than a call, since its operands are a type or an expression and an attribute. Answered from what the declaration, member, record or typedef was written with, the way gcc 15 answers it. The kernel's `__is_cstr` asks it about `nonstring` of every buffer handed to a string copy."
+
+[[feature]]
+name = "__builtin_counted_by_ref"
+kind = "builtin"
+gcc_version = "15.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc/tests/annotations.rs"]
+notes = "A pointer to the member a flexible array member's `counted_by` names, or a null `void *` when it names none. The kernel's `__flex_counter` is this."
 
 [[feature]]
 name = "__builtin_choose_expr"
