@@ -66,9 +66,17 @@ pub fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
             }
         }
     }
-    // And the names, which go where the readers went. A declaration that was spelled by the value
-    // pointed away from is spelled by the one left, and a build asked for debugging information
-    // would otherwise have a name on a value nothing computes. Sorted first so that a map walked in
+    rename(func, forward);
+}
+
+/// Moves the names of the values in the map to the values they point at.
+///
+/// The second half of [`substitute`], for a pass that points the readers at the new values itself
+/// because it knows who they are and walking the whole function to find them would cost more.
+pub fn rename(func: &mut Func, forward: &Map<Value, Value>) {
+    // The names go where the readers went. A declaration that was spelled by the value pointed
+    // away from is spelled by the one left, and a build asked for debugging information would
+    // otherwise have a name on a value nothing computes. Sorted first so that a map walked in
     // whatever order it hashes in still leaves the same function behind.
     let mut moving: Vec<Value> = forward.keys().copied().collect();
     moving.sort_unstable();
