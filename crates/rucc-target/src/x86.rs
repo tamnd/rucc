@@ -295,7 +295,9 @@ mod tests {
                 .position(|&reg| convention.preserves_int(reg))
                 .expect("some register in the order is preserved");
             assert!(
-                convention.int_order[first_saved..].iter().all(|&reg| convention.preserves_int(reg)),
+                convention.int_order[first_saved..]
+                    .iter()
+                    .all(|&reg| convention.preserves_int(reg)),
                 "the preserved registers are not one run at the end"
             );
         }
