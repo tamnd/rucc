@@ -183,3 +183,31 @@ fn a_static_function_marked_used_stays_with_no_caller() {
         assert!(asm.contains("->X $5"), "{level}:\n{asm}");
     }
 }
+
+/// A flag that is only a constant once the caller has been folded still reaches the callee, when
+/// the callee is too large to inline. This is the kernel's `fpu__restore_sig`, whose flag goes
+/// false through `ia32_frame &= 0`, and a call left in the arm it guards is a function a kernel
+/// without 32 bit support does not have.
+#[test]
+fn a_flag_the_caller_folds_to_a_constant_settles_the_callee_too() {
+    let source = "void convert_to_fxsr(char *);\n\
+                  int use_fxsr(void);\n\
+                  int copy(void *);\n\
+                  static _Bool restore(void *buf, void *buf_fx, _Bool ia32_fxstate) {\n\
+                  char env[400];\n\
+                  if (!ia32_fxstate) return copy(buf_fx);\n\
+                  if (copy(buf)) return 0;\n\
+                  convert_to_fxsr(env);\n\
+                  return 1; }\n\
+                  _Bool fpu_restore_sig(void *buf, int ia32_frame) {\n\
+                  void *buf_fx = buf;\n\
+                  _Bool ia32_fxstate = 0;\n\
+                  ia32_frame &= (0 || 0);\n\
+                  if (ia32_frame && use_fxsr()) { buf_fx = (char *)buf + 8; ia32_fxstate = 1; }\n\
+                  return restore(buf, buf_fx, ia32_fxstate); }\n";
+    for level in ["-O2", "-O3", "-Os", "-Oz"] {
+        let asm = emit_of(level, "asm", "late-ipcp", source);
+        assert!(!asm.contains("convert_to_fxsr"), "{level}:\n{asm}");
+        assert!(asm.contains("copy"), "{level}:\n{asm}");
+    }
+}

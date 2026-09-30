@@ -1226,6 +1226,52 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // left standing. Nothing below the optimizer lowers the instruction, so the answer is written
     // here, and it is the one the pass would have given.
     constant_p::answer(module, true);
+    // The propagation again, now that every body has been through the passes. The first sweep
+    // ran before any of them, so it read each argument as the front end wrote it, where gcc's
+    // runs after its early passes have folded them. The kernel's `fpu__restore_sig` passes
+    // `__fpu_restore_sig` a flag that only becomes `false` once `ia32_frame &= 0` is folded, and
+    // what that flag guards calls `convert_to_fxsr`, which a kernel without 32 bit support does
+    // not have. So a callee that gets a constant this time round has its branches settled and
+    // its dead blocks taken away, and nothing else is run again.
+    if wants_ipcp {
+        let graph = CallGraph::of(module, opts.interposition);
+        let mut fuel = match (allowance.get(ipcp::NAME).copied(), budget) {
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
+        };
+        let started = Instant::now();
+        let changed = ipcp::propagate(module, &graph, &mut fuel);
+        for (id, stats) in changed {
+            for pass in ["sccp", "simplify-cfg", "dce"].into_iter().filter_map(pass::find) {
+                let mut an = Analyses::new(machine);
+                let tidied = pass.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+                report.remarks.push(Remark {
+                    pass: pass.name(),
+                    func: module[id].name,
+                    stats: tidied,
+                });
+            }
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the late {} sweep left invalid IR in {func}, {error}",
+                            ipcp::NAME
+                        ));
+                    }
+                }
+            }
+            report.remarks.push(Remark { pass: ipcp::NAME, func: module[id].name, stats });
+        }
+        report.took(ipcp::NAME, started.elapsed());
+        match report.spent.iter_mut().find(|(it, _)| *it == ipcp::NAME) {
+            Some((_, total)) => *total += fuel.spent(),
+            None => report.spent.push((ipcp::NAME, fuel.spent())),
+        }
+    }
     // Last, once every pass that takes a call away has run. See [`inline::drop_unreferenced`].
     // Not at `-O0`, where nothing took a call away and gcc keeps what the source calls.
     if opts.level != OptLevel::O0 {
