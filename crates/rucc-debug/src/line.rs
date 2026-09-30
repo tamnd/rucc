@@ -105,6 +105,24 @@ pub struct Unit {
     /// it leaves the object out of the map, or crashes, so on a Mac those three strings go where
     /// clang puts them and the line program's own strings stay where they are.
     pub mach_o: bool,
+    /// Which version of DWARF to write.
+    pub version: Version,
+}
+
+/// A version of DWARF this writes.
+///
+/// Five unless the build asked for four. A kernel built with `CONFIG_DEBUG_INFO_DWARF4` passes
+/// `-gdwarf-4` because the tools it will be read with are older than DWARF 5, and what changes is
+/// the layout rather than what is said: ranges and location lists go in `.debug_ranges` and
+/// `.debug_loc`, the line table names its files inline, and the unit's own strings go in
+/// `.debug_str`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Version {
+    /// DWARF 4.
+    Four,
+    /// DWARF 5.
+    #[default]
+    Five,
 }
 
 /// One function: where each of its instructions came from, and what it is.
@@ -225,8 +243,12 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     if unit.funcs.iter().all(|func| func.rows.is_empty()) {
         return Ok(Info::default());
     }
+    let version = match unit.version {
+        Version::Four => 4,
+        Version::Five => 5,
+    };
     let encoding =
-        gimli::Encoding { format: gimli::Format::Dwarf32, version: 5, address_size: unit.pointer };
+        gimli::Encoding { format: gimli::Format::Dwarf32, version, address_size: unit.pointer };
     let mut dwarf = gimli::write::DwarfUnit::new(encoding);
     let dir = text(&unit.dir, encoding, &mut dwarf.line_strings);
     let name = text(&unit.name, encoding, &mut dwarf.line_strings);
@@ -297,7 +319,9 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         (gimli::DW_AT_name, &unit.name),
         (gimli::DW_AT_comp_dir, &unit.dir),
     ] {
-        let val = if unit.mach_o {
+        // DWARF 4 has no `.debug_line_str` for the attributes to point into, so under it the three
+        // strings go in `.debug_str`, which is also where gcc puts them.
+        let val = if unit.mach_o || unit.version == Version::Four {
             let bytes: Vec<u8> = val.bytes().filter(|&byte| byte != 0).collect();
             gimli::write::AttributeValue::StringRef(dwarf.strings.add(bytes))
         } else {
@@ -311,12 +335,24 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     if let Some((attr, val)) = said.next() {
         root.set(attr, val);
     }
-    root.set(gimli::DW_AT_language, gimli::write::AttributeValue::Language(gimli::DW_LANG_C11));
+    // `DW_LANG_C11` is a DWARF 5 code, and gcc says C99 for any later C under DWARF 4.
+    let lang = match unit.version {
+        Version::Four => gimli::DW_LANG_C99,
+        Version::Five => gimli::DW_LANG_C11,
+    };
+    root.set(gimli::DW_AT_language, gimli::write::AttributeValue::Language(lang));
     for (attr, val) in said {
         root.set(attr, val);
     }
     root.set(gimli::DW_AT_stmt_list, gimli::write::AttributeValue::LineProgramRef);
     root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
+    // A DWARF 4 range or location list is measured from the unit's base address, which is its low
+    // PC. Every address in the lists here is a relocation to where a function went, so the base is
+    // zero, and writing it says so to a reader that would otherwise have no base at all.
+    if unit.version == Version::Four {
+        let zero = gimli::write::Address::Constant(0);
+        root.set(gimli::DW_AT_low_pc, gimli::write::AttributeValue::Address(zero));
+    }
     tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs, &unit.globals, unit.frames)?;
     let mut sections = gimli::write::Sections::new(Section::default());
     dwarf.write(&mut sections).map_err(refused)?;
@@ -418,6 +454,7 @@ mod tests {
             pointer: 8,
             frames: true,
             mach_o: false,
+            version: Version::Five,
         }
     }
 
@@ -473,6 +510,43 @@ mod tests {
         let unit = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
         assert!(unit.relocs.iter().all(|reloc| reloc.symbol != ".debug_line_str"));
         assert!(unit.relocs.iter().any(|reloc| reloc.symbol == ".debug_str"));
+    }
+
+    /// DWARF 4 is the same unit laid out the older way: the ranges in `.debug_ranges`, the unit's
+    /// strings in `.debug_str`, and no `.debug_line_str` at all, because the line table of that
+    /// version writes its names inline.
+    #[test]
+    fn a_dwarf_4_unit_uses_the_sections_dwarf_4_has() {
+        let info = write(&Unit { version: Version::Four, ..one() }).expect("sections");
+        let mut names: Vec<&str> = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges", ".debug_str"]
+        );
+        // The version is the two bytes after the 32 bit length, in both headers.
+        for name in [".debug_info", ".debug_line"] {
+            let chunk = info.chunks.iter().find(|chunk| chunk.name == name).expect(name);
+            assert_eq!(chunk.bytes[4..6], [4, 0], "{name}");
+        }
+        let unit = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        assert!(unit.relocs.iter().any(|reloc| reloc.symbol == ".debug_ranges"));
+        assert!(unit.relocs.iter().all(|reloc| reloc.symbol != ".debug_line_str"));
+    }
+
+    /// DWARF 4 has no code for C11, so the unit says C99 there the way gcc does.
+    #[test]
+    fn a_dwarf_4_unit_says_it_is_c99() {
+        let four = write(&Unit { version: Version::Four, ..one() }).expect("sections");
+        let five = write(&one()).expect("sections");
+        let unit = |info: &Info| {
+            info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit").clone()
+        };
+        let c99 = u8::try_from(gimli::DW_LANG_C99.0).expect("one byte");
+        let c11 = u8::try_from(gimli::DW_LANG_C11.0).expect("one byte");
+        assert!(unit(&four).bytes.contains(&c99));
+        assert!(!unit(&four).bytes.contains(&c11));
+        assert!(unit(&five).bytes.contains(&c11));
     }
 
     /// A file with nothing to say writes no sections rather than empty ones.

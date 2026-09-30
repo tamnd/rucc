@@ -2027,6 +2027,9 @@ pub struct Options {
     pub emit: EmitKind,
     /// Whether to emit debug information.
     pub debug_info: bool,
+    /// The version of DWARF that debug information is written in, which is 5 unless `-gdwarf-4`
+    /// asked for 4. Only 4 and 5 are ever here.
+    pub dwarf_version: u8,
     /// The directory the compiler ran in, which is what `DW_AT_comp_dir` says.
     ///
     /// A debugger joins it onto every file name in the line table that is relative, and the names
@@ -2648,6 +2651,7 @@ impl Options {
             races: Races::default(),
             emit: EmitKind::default(),
             debug_info: false,
+            dwarf_version: 5,
             working_dir: None,
             compress: Compress::None,
             lto: Lto::default(),

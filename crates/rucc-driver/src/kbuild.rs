@@ -182,11 +182,6 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     refused("-fplugin-arg-*", "there are no gcc plugins here to hand an argument to", None),
     // Debug information.
-    refused(
-        "-gdwarf-4",
-        "this compiler writes DWARF 5 and no other version, see spec/11-debug-info.md",
-        Some(2287),
-    ),
     refused("-gz", "the debug sections are written uncompressed", Some(2288)),
     refused("-gz=zlib", "the debug sections are written uncompressed", Some(2288)),
     refused("-gz=zlib-gnu", "the debug sections are written uncompressed", Some(2288)),

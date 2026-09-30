@@ -716,6 +716,7 @@ mod tests {
             pointer: 8,
             frames: true,
             mach_o: false,
+            version: crate::Version::Five,
         }
     }
 
@@ -903,6 +904,46 @@ mod tests {
         assert!(holds(&info, ".debug_loclists", &reg), "the first stretch is not in a register");
         let mem = [start, 0, 0, 0, 0, 0, 0, 0, 0, 8, 2, gimli::DW_OP_fbreg.0, 0x70];
         assert!(holds(&info, ".debug_loclists", &mem), "the second stretch is not in the frame");
+    }
+
+    /// Under DWARF 4 the same list goes in `.debug_loc`, as a pair of addresses per stretch rather
+    /// than a start and a length, and both ends ask the linker where the function went.
+    #[test]
+    fn a_dwarf_4_local_that_moves_is_listed_in_the_older_section() {
+        let mut unit = one();
+        unit.version = crate::Version::Four;
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Over(vec![
+                Span { from: 0, len: 8, held: Held::Reg(3) },
+                Span { from: 8, len: 8, held: Held::Frame(-16) },
+            ]),
+            scope: None,
+        }];
+        let info = write(&unit).expect("sections");
+        assert!(holds(&info, ".debug_abbrev", &listed()), "the location is not a list");
+        assert!(info.chunks.iter().all(|chunk| chunk.name != ".debug_loclists"));
+        let list = info.chunks.iter().find(|chunk| chunk.name == ".debug_loc").expect("a list");
+        let mut asked: Vec<i64> = list
+            .relocs
+            .iter()
+            .filter(|reloc| reloc.symbol == "f")
+            .map(|reloc| reloc.addend)
+            .collect();
+        asked.sort_unstable();
+        assert_eq!(
+            asked,
+            [0, 8, 8, 16],
+            "the stretches do not begin and end where they were said to"
+        );
+        // The expression after each pair is a two byte length and then the operations.
+        assert!(holds(&info, ".debug_loc", &[1, 0, gimli::DW_OP_reg3.0]), "no register stretch");
+        assert!(
+            holds(&info, ".debug_loc", &[2, 0, gimli::DW_OP_fbreg.0, 0x70]),
+            "no frame stretch"
+        );
     }
 
     /// Every stretch asks the linker where its function went, the same way a line sequence does.

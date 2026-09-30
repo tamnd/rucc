@@ -253,9 +253,9 @@ Two things are deliberately not copied. gcc warns under `-Wmissing-profile` when
 
 ## 4.8 Debug info
 
-`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default), `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz=none`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission. `-gdwarf-4` and the compressing spellings of `-gz` are refused, as section 4.12 lists.
+`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default), `-gdwarf-4`, `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz=none`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission. The compressing spellings of `-gz` are refused, as section 4.12 lists.
 
-The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` is refused rather than taken while document 11 writes DWARF 5 and nothing else, because a debugger handed version 5 when it was told version 4 is a worse outcome than a build that stopped.
+The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` and `-gdwarf-5` turn debug information on as well as choosing the version, as they do in gcc, and the last one on the line wins. Any other version is refused, because a debugger handed version 5 when it was told version 3 is a worse outcome than a build that stopped.
 
 `-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. Nothing compresses a section yet, so `-gz=none` is taken, since it asks for what is written anyway, and the bare spelling and the three compressing values are refused with tamnd/rucc#2288 named. Taking them would be a promise about the object that the object does not keep, and the kernel's `DEBUG_INFO_COMPRESSED` probe would then configure a build around sections that are not compressed. A value outside the list is refused as not a way to compress, with the list given. Document 11 writes a line table now, so what this waits on is the compressor rather than something to compress. gcc also passes `--compress-debug-sections=` on to the linker, so that debug sections arriving from objects it did not compile are compressed too. This driver will do the same when it compresses a section of its own.
 
@@ -389,7 +389,6 @@ Refused, with the issue that would honor them:
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
 | `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
-| `-gdwarf-4` | DWARF 5 is the only version written. | #2287 |
 | `-gz`, `-gz=zlib`, `-gz=zlib-gnu`, `-gz=zstd` | The debug sections are written uncompressed. The kernel probes `-gz=zlib` for `DEBUG_INFO_COMPRESSED`. | #2288 |
 
 Refused, with no issue, because nothing is planned for them:

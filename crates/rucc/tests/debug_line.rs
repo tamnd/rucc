@@ -115,3 +115,40 @@ fn a_build_with_no_unwind_table_keeps_its_frame_rules_where_a_debugger_looks() {
     assert!(holds(&loud, ".eh_frame"), "the unwind table went missing");
     assert!(!holds(&loud, ".debug_frame"), "the frame rules were written twice");
 }
+
+/// `-gdwarf-4` writes the sections DWARF 4 has in place of the DWARF 5 ones, which is what a
+/// kernel built with `CONFIG_DEBUG_INFO_DWARF4` asks for, and naming a version turns debug
+/// information on the same way `-g` does. See tamnd/rucc#2287.
+#[test]
+fn asking_for_dwarf_4_writes_the_sections_dwarf_4_has() {
+    let dir = fixture("four");
+    let four = build(&dir, &["-gdwarf-4"], "four.o");
+    let back = build(&dir, &["-gdwarf-4", "-gdwarf-5"], "back.o");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    for name in [".debug_line", ".debug_abbrev", ".debug_info", ".debug_ranges", ".debug_str"] {
+        assert!(holds(&four, name), "a build with -gdwarf-4 has no {name}");
+    }
+    for name in [".debug_line_str", ".debug_rnglists", ".debug_loclists"] {
+        assert!(!holds(&four, name), "a DWARF 4 build has {name}, which is a DWARF 5 section");
+    }
+    // The last version named is the one written, as with gcc.
+    for name in SECTIONS {
+        assert!(holds(&back, name), "a build that asked for 5 last has no {name}");
+    }
+}
+
+/// A version this compiler does not write is refused rather than quietly written as another one.
+#[test]
+fn a_dwarf_version_this_does_not_write_is_refused() {
+    let dir = fixture("three");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args([TARGET, "-c", "-gdwarf-3", "-o"])
+        .arg(dir.join("three.o"))
+        .arg(dir.join("one.c"))
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DWARF 4 and 5"));
+}

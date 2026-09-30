@@ -860,12 +860,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-g1" | "-g2" | "-g3" | "-ggdb" | "-ggdb1" | "-ggdb2" | "-ggdb3" => {
                 opts.debug_info = true;
             }
-            // The version of DWARF to write. We write DWARF 5 and nothing else, so a build that
-            // asks for another version is told rather than handed a file it cannot read.
-            "-gdwarf" | "-gdwarf-5" => opts.debug_info = true,
+            // The version of DWARF to write. We write 5 by default and 4 when asked, which is what a
+            // kernel with `CONFIG_DEBUG_INFO_DWARF4` asks for. Like gcc, naming a version also turns
+            // debug information on. Any other version is refused rather than handed over as a file
+            // the build's tools cannot read.
+            "-gdwarf" | "-gdwarf-5" => {
+                opts.debug_info = true;
+                opts.dwarf_version = 5;
+            }
+            "-gdwarf-4" => {
+                opts.debug_info = true;
+                opts.dwarf_version = 4;
+            }
             _ if arg.starts_with("-gdwarf-") => {
                 return Err(err(format!(
-                    "{arg}: this compiler writes DWARF 5 and no other version, see \
+                    "{arg}: this compiler writes DWARF 4 and 5 and no other version, see \
                      spec/11-debug-info.md"
                 )));
             }
@@ -6932,7 +6941,7 @@ mod tests {
         assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate preprocessor"));
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
         assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("kernel code models"));
-        assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
+        assert!(refused(&["-gdwarf-3", "-c", "a.c"]).contains("DWARF 4 and 5"));
         // The word size the target does not have, which is a target this compiler was not asked
         // for rather than a flag it does not know.
         let no32 = refused(&["--target=x86_64-unknown-linux-gnu", "-m32", "-c", "a.c"]);
@@ -8355,7 +8364,6 @@ mod tests {
         for (flag, issue) in [
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
-            ("-gdwarf-4", 2287),
             ("-gz=zlib", 2288),
         ] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
