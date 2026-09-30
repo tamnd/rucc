@@ -155,6 +155,7 @@ pub mod profile;
 pub mod prune;
 pub mod purity;
 pub mod range;
+pub mod rangetest;
 pub mod readonly;
 pub mod reload;
 pub mod rules;
