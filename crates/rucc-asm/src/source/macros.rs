@@ -772,6 +772,15 @@ impl Reader {
             return Err(self.bad("an expression that says nothing"));
         }
         if let Some((left, op, right)) = operator(text) {
+            // Two registers, which gas lets a conditional compare by name. The kernel's
+            // `UNWIND_HINT_REGS` says `.if \base == %rsp` to ask which one it was handed.
+            if let (Some(a), Some(b)) = (register(left), register(right)) {
+                return match op {
+                    "==" => Ok(if a == b { -1 } else { 0 }),
+                    "!=" | "<>" => Ok(if a == b { 0 } else { -1 }),
+                    _ => Err(self.bad(&format!("'{op}' between two registers"))),
+                };
+            }
             let left = self.value_now(left)?;
             // gas works out both sides, and so does this, so a name with no value is a mistake on
             // either side of a `&&` whatever the other side says.
@@ -985,6 +994,14 @@ fn operator(text: &str) -> Option<(&str, &'static str, &str)> {
         }
     }
     None
+}
+
+/// The register a side of a comparison names, in lower case, when it is one.
+fn register(text: &str) -> Option<String> {
+    let name = text.trim().strip_prefix('%')?;
+    let fine = name.starts_with(|ch: char| ch.is_ascii_alphabetic())
+        && name.chars().all(|ch| ch.is_ascii_alphanumeric());
+    fine.then(|| name.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -1242,6 +1259,16 @@ PFX_REX b b
         same(
             ".if (1 < 2) == -1\n.byte 1\n.endif\n.if !(1 == 2) && 2 >= 2\n.byte 2\n.endif",
             ".byte 1, 2",
+        );
+    }
+
+    #[test]
+    fn a_conditional_can_ask_which_register_a_macro_was_handed() {
+        // The shape of the kernel's `UNWIND_HINT_REGS`, which is used with the default and with
+        // another register.
+        same(
+            ".macro hint base=%rsp\n.if \\base == %rsp\n.byte 1\n.elseif \\base != %RDI\n.byte 2\n.else\n.byte 3\n.endif\n.endm\nhint\nhint base=%rbp\nhint %rdi",
+            ".byte 1, 2, 3",
         );
     }
 
