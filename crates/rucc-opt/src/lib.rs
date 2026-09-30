@@ -160,6 +160,7 @@ pub mod purity;
 pub mod range;
 pub mod rangetest;
 pub mod readonly;
+pub mod reassoc;
 pub mod reload;
 pub mod rules;
 pub mod sccp;
