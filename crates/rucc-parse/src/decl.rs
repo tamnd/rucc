@@ -107,14 +107,18 @@ impl Parser<'_> {
         }
 
         let mut items = Vec::new();
+        let mut before_name = AttrList::EMPTY;
         loop {
-            let item = self.init_declarator(specs, declarator, at);
+            let item = self.init_declarator(specs, declarator, before_name, at);
             items.push(item);
             if !self.cursor.eat_punct(Punct::Comma) {
                 break;
             }
             at = self.cursor.span();
             let before = self.cursor.index();
+            // GNU attributes in front of a declarator other than the first belong to that
+            // declarator alone, as in the kernel's `u64 __maybe_unused a, __maybe_unused b;`.
+            before_name = self.declarator_attributes();
             declarator = self.declarator();
             if self.cursor.index() == before {
                 break;
@@ -134,10 +138,12 @@ impl Parser<'_> {
         &mut self,
         specs: DeclSpecsId,
         declarator: DeclaratorId,
+        before_name: AttrList,
         at: Span,
     ) -> InitDeclarator {
         let asm_label = if self.cursor.at_keyword(Keyword::Asm) { self.asm_label() } else { None };
-        let attrs = self.attributes();
+        let after = self.attributes();
+        let attrs = self.join_attrs(before_name, after);
         self.declare_name(specs, declarator);
         let init = if self.cursor.eat_punct(Punct::Eq) {
             // A declaration that deduces its type takes an expression and not a braced list,
