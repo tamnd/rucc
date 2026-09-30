@@ -58,6 +58,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0769", "prio-ctor-dtor"),
     ("E0770", "deprecated-declarations"),
     ("E0771", "unused-result"),
+    ("E0784", "attributes"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),

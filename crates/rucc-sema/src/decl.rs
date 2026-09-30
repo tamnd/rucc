@@ -404,6 +404,21 @@ impl DeclFlags {
     /// Only ever read off an object with static storage.
     pub const NO_COMMON: Self = Self(1 << 25);
 
+    /// `__attribute__((weakref("target")))` was written, so this `static` name is a second
+    /// spelling of `target` and not a function or an object of its own.
+    ///
+    /// The target is kept as the declaration's [`Decl::asm_label`], since that is exactly what it
+    /// is: the symbol every use of the name is a use of. What the bit adds is how that symbol is
+    /// referred to. A reference through a weakref is weak, so the link may leave the target
+    /// undefined and the address the name has is then zero, which is how a library asks whether
+    /// an optional one is there without making every program that links it define it. The
+    /// linkage the name has for C is still internal, because that is what gcc requires it be
+    /// declared with and what a later `extern` of the same name has to agree with.
+    ///
+    /// Merged the way [`Self::RETAINED`] is, so a `static` prototype above and the weakref below
+    /// are one name.
+    pub const WEAKREF: Self = Self(1 << 26);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

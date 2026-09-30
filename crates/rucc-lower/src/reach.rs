@@ -45,8 +45,8 @@ use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Interner;
 use rucc_base::hash::Set;
 use rucc_sema::{
-    Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Eval, ExprId, ExprKind, InitList,
-    Linkage, Stmt, StmtId, StrId, Tast,
+    Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind,
+    InitList, Linkage, Stmt, StmtId, StrId, Tast,
 };
 use rucc_target::TargetInfo;
 use rucc_types::Types;
@@ -57,10 +57,16 @@ use rucc_types::Types;
 /// object with static storage is emitted whether or not anything reads it, but a local `static`
 /// with an initializer that names a function is how a reference reaches this from a place that is
 /// neither a body nor a file-scope image, so the two kinds travel the same worklist.
+///
+/// The second set is the declarations something reached names, which is the first set without
+/// the roots and the targets an attribute string reaches: a declaration of an external function
+/// is a root whether or not anything calls it, and what a weakref needs to know is whether
+/// anything does. See [`crate::unit`]'s `weak_references`.
 #[must_use]
-pub(crate) fn reachable(decide: Decide<'_>) -> Set<DeclId> {
+pub(crate) fn reachable(decide: Decide<'_>) -> (Set<DeclId>, Set<DeclId>) {
     let tast = decide.tast;
-    let mut walk = Reach { tast, decide, seen: Set::default(), work: Vec::new() };
+    let mut walk =
+        Reach { tast, decide, seen: Set::default(), named: Set::default(), work: Vec::new() };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
         if is_root(&tast[decl]) {
@@ -75,10 +81,16 @@ pub(crate) fn reachable(decide: Decide<'_>) -> Set<DeclId> {
     for decl in aliased(tast, decide.names) {
         walk.mark(decl);
     }
+    // The same for a `weakref` whose target the file defines, which is a reference by a string
+    // as well. A `static` function with no other caller is otherwise dropped, and the weakref is
+    // left pointing at a symbol nothing defines.
+    for decl in weakly_referred(tast, decide.names) {
+        walk.mark(decl);
+    }
     while let Some(decl) = walk.work.pop() {
         walk.decl(decl);
     }
-    walk.seen
+    (walk.seen, walk.named)
 }
 
 /// The declarations an `alias` attribute in the file names, found by the symbol each is emitted
@@ -97,6 +109,44 @@ fn aliased(tast: &Tast, names: &Interner) -> Vec<DeclId> {
         .copied()
         .filter(|&decl| {
             let node = &tast[decl];
+            let symbol = match (node.asm_label, node.name) {
+                (Some(label), _) => spelled(label),
+                (None, Some(name)) => names.resolve(name).to_owned(),
+                (None, None) => return false,
+            };
+            wanted.contains(&symbol)
+        })
+        .collect()
+}
+
+/// The definitions a `weakref` in the file names, found the way [`aliased`] finds its targets.
+///
+/// A weakref keeps its target as its assembler name, so it is found by that. Only definitions
+/// are in the answer: a declaration of the target has nothing to emit, and one reached from here
+/// rather than from a use would read as an ordinary reference to it, which is the question
+/// [`crate::unit`] asks the reached declarations to decide whether the reference stays weak.
+fn weakly_referred(tast: &Tast, names: &Interner) -> Vec<DeclId> {
+    let spelled = |id: StrId| -> String {
+        tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
+    };
+    let wanted: Set<String> = tast
+        .top_level()
+        .iter()
+        .filter(|&&decl| tast[decl].flags.contains(DeclFlags::WEAKREF))
+        .filter_map(|&decl| tast[decl].asm_label)
+        .map(spelled)
+        .collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    tast.top_level()
+        .iter()
+        .copied()
+        .filter(|&decl| {
+            let node = &tast[decl];
+            if node.flags.contains(DeclFlags::WEAKREF) || node.state == Definition::Declared {
+                return false;
+            }
             let symbol = match (node.asm_label, node.name) {
                 (Some(label), _) => spelled(label),
                 (None, Some(name)) => names.resolve(name).to_owned(),
@@ -130,6 +180,8 @@ struct Reach<'a> {
     tast: &'a Tast,
     decide: Decide<'a>,
     seen: Set<DeclId>,
+    /// What an expression in something reached names, which is what a use is.
+    named: Set<DeclId>,
     work: Vec<DeclId>,
 }
 
@@ -278,7 +330,10 @@ impl Reach<'_> {
             }
             // The one node that is a reference. Whether it is a call, an address or a read is
             // not asked, because a definition has to exist for all three.
-            ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => self.mark(decl),
+            ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => {
+                self.named.insert(decl);
+                self.mark(decl);
+            }
             ExprKind::StmtExpr(body) => self.stmt(body),
             // The right side of a chain its left side already ended is not lowered either.
             ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {

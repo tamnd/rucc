@@ -39,11 +39,12 @@
 //! have no layout at all.
 
 use rucc_ast::{AlignSpec, AttrArg, AttrList, AttrSyntax, Attribute};
+use rucc_base::Symbol;
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
 use rucc_gnu::{Answer, Kind, Status};
 use rucc_lex::Encoding;
-use rucc_target::{BitFieldStyle, Convention, Isa, Target, TargetInfo};
+use rucc_target::{BitFieldStyle, Convention, Isa, ObjectFormat, Target, TargetInfo};
 use rucc_types::{
     FloatKind, FunctionId, FunctionType, IntKind, TypeId, TypeKind, float_format, int_width,
     integer_info, is_arithmetic, is_complex, is_real_floating, layout,
@@ -51,7 +52,7 @@ use rucc_types::{
 
 use crate::check::Checker;
 use crate::decl::{
-    DeclFlags, DeclId, DeclKind, Effects, Priority, Startup, StorageDuration, Visibility,
+    DeclFlags, DeclId, DeclKind, Effects, Linkage, Priority, Startup, StorageDuration, Visibility,
 };
 use crate::eval;
 use crate::expr::ExprKind;
@@ -644,6 +645,99 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// The symbol a `weakref` attribute makes this declaration a weak reference to, once gcc's
+    /// rules about where one may be written have been checked.
+    ///
+    /// Two spellings name the target. `weakref("target")` names it as the attribute's own
+    /// argument, and `weakref` with `alias("target")` after it names it through the alias, which
+    /// is the older form and the one glibc's `weak_extern` machinery writes. gcc refuses the
+    /// alias in front of the weakref, since it has already made the name an alias by the time it
+    /// reads the weakref, and a bare `weakref` with no alias anywhere is a warning and nothing
+    /// else: the declaration is then an ordinary one, and a reference to it is a strong one.
+    ///
+    /// The name has to be `static`, which is gcc's rule and is what keeps the local spelling from
+    /// being a symbol of its own that another object could see. It cannot be given a value either,
+    /// since a name that is a reference to something else has no storage for one to go in. And a
+    /// weakref inside a block is ignored with a warning, which is what gcc does with it there.
+    ///
+    /// Only an ELF object has a way to write the reference: `.weakref` and a weak undefined
+    /// symbol are both ELF's, and a COFF or Mach-O target has no reading of it that this compiler
+    /// could emit. There it is refused with the sentence a table row gets when ignoring it would
+    /// change what the program does, which it would.
+    ///
+    /// `lists` are the specifiers' attributes and then the declarator's, in the order they were
+    /// written, which is the order the rule about `alias` is a rule about.
+    pub(in crate::check) fn weak_reference(
+        &mut self,
+        lists: [AttrList; 2],
+        alias: Option<StrId>,
+        linkage: Linkage,
+        initialized: bool,
+        name: Symbol,
+        span: Span,
+    ) -> Option<StrId> {
+        let mut after_alias = false;
+        let mut found = None;
+        'lists: for list in lists {
+            let written = self.ast[list].to_vec();
+            for attr in written {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                    continue;
+                }
+                match self.gnu_name(&attr) {
+                    "alias" => after_alias = true,
+                    "weakref" => {
+                        found = Some(attr);
+                        break 'lists;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let attr = found?;
+        let at = attr.span;
+        let spelled = self.text(name).to_owned();
+        if self.cx.target.object_format != ObjectFormat::Elf {
+            let what = "'weakref' attribute is not supported";
+            let note =
+                "only an ELF object has a way to refer to a symbol weakly under another name";
+            self.report(Diagnostic::error(what, at).with_code("E0753").note(note, at));
+            return None;
+        }
+        if !self.scopes.at_file_scope() {
+            let what = "'weakref' attribute ignored";
+            self.report(Diagnostic::warning(what, at).with_code("E0784"));
+            return None;
+        }
+        if after_alias {
+            let what = "'weakref' attribute must appear before 'alias' attribute";
+            self.report(Diagnostic::error(what, span).with_code("E0782"));
+            return None;
+        }
+        // An argument that is not a string has been reported by the reader `alias` shares, and
+        // the declaration is then an ordinary one, which is what is left once gcc has said so.
+        let own = match self.ast[attr.args].first() {
+            None => None,
+            Some(_) => Some(self.alias_argument(attr)?),
+        };
+        if (own.is_some() && alias.is_some()) || initialized {
+            let what = format!("'{spelled}' defined both normally and as 'alias' attribute");
+            self.report(Diagnostic::error(what, span).with_code("E0783"));
+            return None;
+        }
+        let Some(target) = own.or(alias) else {
+            let what = "'weakref' attribute should be accompanied with an 'alias' attribute";
+            self.report(Diagnostic::warning(what, at).with_code("E0784"));
+            return None;
+        };
+        if linkage != Linkage::Internal {
+            let what = format!("'weakref' symbol '{spelled}' must have static linkage");
+            self.report(Diagnostic::error(what, span).with_code("E0781"));
+            return None;
+        }
+        Some(target)
     }
 
     /// The string one `alias` was written with, and nothing when it was not written with one.
