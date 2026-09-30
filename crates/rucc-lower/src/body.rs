@@ -2426,6 +2426,29 @@ impl<'u> Body<'_, 'u> {
             }
             spelled.push(index);
         }
+        // A flag output, `"=@ccz"`, is an output in a register with the instruction that reads the
+        // flag into it written after the template, which is how gcc builds one too. Done here so
+        // that everything after this sees an ordinary output. See [`TargetInfo::flag_output`].
+        let mut slot = 0;
+        for index in 0..tast[node.outputs].len() {
+            if spelled.contains(&index) {
+                continue;
+            }
+            let operand = tast[node.outputs][index];
+            if let Some(cond) = written[slot].strip_prefix("=@cc") {
+                let at = tast.expr_span(operand.value);
+                let ty = tast[operand.value].ty;
+                let bits = repr::size_of(self.types(), self.target(), ty).saturating_mul(8);
+                let bits = u32::try_from(bits).unwrap_or(u32::MAX);
+                let Some((constraint, text)) = self.target().flag_output(cond, slot, bits) else {
+                    self.unsupported("an `asm` flag output with a condition this target lacks", at);
+                    return;
+                };
+                template.push_str(&text);
+                written[slot] = constraint.to_owned();
+            }
+            slot += 1;
+        }
         let constraints = written.join(",");
         let mut clobbers = Vec::with_capacity(tast[node.clobbers].len());
         for index in 0..tast[node.clobbers].len() {

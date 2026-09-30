@@ -916,6 +916,57 @@ impl TargetInfo {
         }
     }
 
+    /// What a flag output, `"=@cc<cond>"`, turns into on this target: the constraint of an output in
+    /// a register and the instructions that leave the condition in it, which go after the rest of
+    /// the template. The output is operand `index` and its type is `bits` wide.
+    ///
+    /// gcc does the same thing. The template leaves the answer in the flags, and gcc writes the
+    /// `set<cond>` or `cset` that reads it after the template, into a register it picked for the
+    /// output. The kernel's `CC_SET` and `CC_OUT` are the way it gets at this on both machines, and
+    /// `test_bit` and every atomic that answers whether it reached zero are written with them.
+    ///
+    /// Nothing for a condition the target has no name for, and for a target with no flag outputs.
+    #[must_use]
+    pub fn flag_output(
+        &self,
+        cond: &str,
+        index: usize,
+        bits: u32,
+    ) -> Option<(&'static str, String)> {
+        match self.tuple.arch() {
+            tuple::Arch::X86_64 | tuple::Arch::X86 => {
+                const CONDITIONS: &[&str] = &[
+                    "a", "ae", "b", "be", "c", "e", "g", "ge", "l", "le", "na", "nae", "nb", "nbe",
+                    "nc", "ne", "ng", "nge", "nl", "nle", "no", "np", "ns", "nz", "o", "p", "pe",
+                    "po", "s", "z",
+                ];
+                if !CONDITIONS.contains(&cond) {
+                    return None;
+                }
+                // `set<cond>` writes one byte, and the rest of a wider output is cleared the way gcc
+                // clears it, with a move that writes the low 32 bits and so the whole register.
+                let mut text = format!("\n\tset{cond} %b{index}");
+                if bits > 8 {
+                    text.push_str(&format!("\n\tmovzbl %b{index}, %k{index}"));
+                }
+                Some(("=q", text))
+            }
+            tuple::Arch::Aarch64 => {
+                const CONDITIONS: &[&str] = &[
+                    "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge",
+                    "lt", "gt", "le",
+                ];
+                if !CONDITIONS.contains(&cond) {
+                    return None;
+                }
+                // `cset` into the 32 bit register clears the top half as well, so one width does
+                // for every type.
+                Some(("=r", format!("\n\tcset %w{index}, {cond}")))
+            }
+            _ => None,
+        }
+    }
+
     /// How an `asm` template with operands on this target writes the register called `name`,
     /// which is `%%rsp` on x86, where one `%` would start an operand, and as it is on AArch64.
     #[must_use]

@@ -1214,3 +1214,28 @@ yes:
     assert!(text.contains(".quad entry+16 + 2 - ."), "{text}");
     assert!(text.contains(".quad before-8"), "{text}");
 }
+
+/// A flag output is the condition read into a register after the template, the way the kernel's
+/// `CC_SET` asks for it: `setc` into a byte for a `_Bool`, and a wider output cleared above it.
+#[test]
+fn a_flag_output_is_the_condition_read_after_the_template() {
+    let source = "\
+int bit(const unsigned long *p, long n) {
+    _Bool c;
+    asm(\"btq %2, %1\" : \"=@ccc\" (c) : \"m\" (*p), \"r\" (n));
+    return c;
+}
+int zero(int *v) {
+    int z;
+    asm volatile(\"decl %0\" : \"+m\" (*v), \"=@ccz\" (z));
+    return z;
+}
+";
+    let text = asm("flag-output", source);
+    assert!(text.contains("setb") || text.contains("setc"), "{text}");
+    assert!(text.contains("sete") || text.contains("setz"), "{text}");
+    assert!(text.contains("movzbl"), "{text}");
+    let (ok, _, said) =
+        run("flag-output-bad", "int f(void) { int z; asm(\"\" : \"=@ccq\" (z)); return z; }");
+    assert!(!ok && said.contains("flag output"), "{said}");
+}
