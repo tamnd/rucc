@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `__builtin_extract_return_addr` and `__builtin_frob_return_addr` are their argument, the way gcc has them on x86-64 and AArch64. The kernel's `vsprintf.c` calls the first.
 - A function declared with a parameter of an enumeration nobody has finished is taken, the way gcc takes it, as long as nothing calls it. The kernel's `irq.h` declares one, which stopped five units in an x86-64 tinyconfig build.
 - An `asm` operand that is a constant can be named with `%b`, `%w`, `%k` or `%q` again, which prints the constant the way gcc does. The kernel's `outb` with a known port was refused before.
 - The driver takes `-C` and `-CC`. Comments still come out of `-E` as spaces, which is enough for the kernel's vDSO linker script, the one place a build was seen asking for them.

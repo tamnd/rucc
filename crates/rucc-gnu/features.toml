@@ -1305,6 +1305,26 @@ tests = ["rucc-driver::the_return_address_is_one_word_above_the_frame_the_walk_e
 notes = "The address control goes back to from a frame, which is the one above it read one word further along. Everything the row beside this one says applies here too, including the forced frame pointer: gcc reads the return address of the frame a function is in off the stack pointer when it kept no frame pointer, and this keeps one and reads 8(%rbp) instead, which costs a push and a pop in a function that asked."
 
 [[feature]]
+name = "__builtin_extract_return_addr"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "void *(void *)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_return_address_builtins_that_adjust_one_hand_it_back"]
+notes = "Turns what __builtin_return_address answered into the address the program can compare with a function's. That is the same address on x86-64 and AArch64, so the call is its argument, which check/builtin/frame.rs returns in place of the call. The kernel's vsprintf.c uses it when printing a return address as a symbol."
+
+[[feature]]
+name = "__builtin_frob_return_addr"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "void *(void *)"
+used_by = ["glibc"]
+tests = ["rucc-driver::the_return_address_builtins_that_adjust_one_hand_it_back"]
+notes = "The other direction of __builtin_extract_return_addr, and the same answer for the same reason: the argument, unchanged."
+
+[[feature]]
 name = "__builtin_frame_address"
 kind = "builtin"
 gcc_version = "2.0"

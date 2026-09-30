@@ -44,6 +44,11 @@ use crate::expr::{Category, Expr, ExprId, ExprKind, FrameAsk};
 const NAMES: [(&str, FrameAsk); 2] =
     [("__builtin_frame_address", FrameAsk::Frame), ("__builtin_return_address", FrameAsk::Return)];
 
+/// The two that turn a return address into one a program can compare, and back. Both are the
+/// address they were handed on every target this compiles for, since neither x86-64 nor AArch64
+/// keeps anything in a return address but the address. gcc answers the same on both.
+const UNCHANGED: [&str; 2] = ["__builtin_extract_return_addr", "__builtin_frob_return_addr"];
+
 /// The code the argument of either builtin reports under.
 const CODE: &str = "E0705";
 
@@ -84,6 +89,24 @@ impl Checker<'_> {
         };
         let node = ExprKind::FrameAddress { ask, depth };
         Some(self.tast.expr(Expr::new(node, ret, Category::Rvalue), span))
+    }
+
+    /// The value of a call to one of [`UNCHANGED`], which is its argument, already made a
+    /// `void *` by the prototype the call was checked against.
+    ///
+    /// The kernel's `vsprintf.c` passes what `__builtin_return_address` answered through the first
+    /// of them before printing it as a symbol.
+    pub(in crate::check) fn return_address_value(
+        &mut self,
+        function: Option<Symbol>,
+        args: &[ExprId],
+    ) -> Option<ExprId> {
+        let name = function?;
+        let spelled = self.text(name);
+        if !spelled.starts_with("__builtin_") || !UNCHANGED.contains(&spelled) {
+            return None;
+        }
+        args.first().copied()
     }
 
     /// How far up the argument says to walk, as a number the walk can be written from.
@@ -133,6 +156,13 @@ mod tests {
             assert_eq!(feature.status, Status::Implemented, "{name}");
             assert_eq!(feature.signature, "void *(unsigned int)", "{name}");
             assert!(feature.library.is_empty(), "{name} is not a call to anything");
+        }
+        for name in UNCHANGED {
+            let Some(feature) = rucc_gnu::lookup(Kind::Builtin, name) else {
+                panic!("{name} is answered here and is not in features.toml");
+            };
+            assert_eq!(feature.status, Status::Implemented, "{name}");
+            assert_eq!(feature.signature, "void *(void *)", "{name}");
         }
     }
 }
