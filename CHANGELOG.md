@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler reads `% rip` with a space after the percent sign, which is what the kernel's `_ASM_RIP()` comes to once preprocessed, and a conditional can compare two registers, as `UNWIND_HINT_REGS` does with `.if \base == %rsp`.
 - `-E` keeps a line joined by a backslash on one line, as gcc does. In a `.S` file this matters beyond looks: the kernel writes `ALTERNATIVE_2` over three lines joined this way, and the assembler read each piece as its own statement and stopped at a data directive with nothing after it.
 
 ## 0.18.3

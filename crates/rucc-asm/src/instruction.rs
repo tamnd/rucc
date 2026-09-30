@@ -1064,6 +1064,12 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
     if text.is_empty() {
         return Err("an operand with nothing in it".to_owned());
     }
+    if text.contains("% ") && !text.starts_with('$') {
+        let joined = joined(text);
+        if joined != text {
+            return operand(&joined, mode);
+        }
+    }
     // A jump or a call through a register or through memory, which is the same operand as any
     // other and a different instruction from a jump to a name. The star is how AT&T says which.
     if let Some(rest) = text.strip_prefix('*') {
@@ -1139,6 +1145,28 @@ fn depths(mnemonic: &str) -> &'static [u8] {
 ///
 /// gas reads the name in either case, and a program can lean on that without meaning to:
 /// lib/raid6's `avx512.c` writes `%%Zmm14` in one of its templates.
+/// The operand with a space after a `%` taken out where what follows is a register.
+///
+/// The kernel writes `x (__ASM_REGPFX rip)` for an address from the instruction pointer, and the
+/// preprocessor keeps the space, so the line says `x (% rip)`. gas skips one space there, and the
+/// register is checked so that a `%` meaning the remainder is left alone.
+fn joined(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("% ") {
+        out.push_str(&rest[..=at]);
+        let after = &rest[at + 2..];
+        let end = after.find(|ch: char| !ch.is_ascii_alphanumeric()).unwrap_or(after.len());
+        let name = after[..end].to_ascii_lowercase();
+        if end == 0 || (register(&name).is_err() && name != "rip" && name != "eip") {
+            out.push(' ');
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 fn register(written: &str) -> Result<Operand, String> {
     let lower = written.to_ascii_lowercase();
     let name = lower.as_str();
@@ -1529,6 +1557,14 @@ mod tests {
         assert_eq!(bytes("fprem"), [0xd9, 0xf8]);
         assert_eq!(bytes("fnstsw %ax"), [0xdf, 0xe0]);
         assert!(refused("fnstsw %bx").contains("ax"));
+    }
+
+    #[test]
+    fn a_space_after_the_percent_sign_of_a_register_is_skipped() {
+        // What the kernel's `_ASM_RIP(x86_pred_cmd)` comes to once it is preprocessed.
+        assert_eq!(bytes("movl 16 (% rip), %eax"), bytes("movl 16(%rip), %eax"));
+        assert_eq!(bytes("movq % rax, % rbx"), bytes("movq %rax, %rbx"));
+        assert_eq!(bytes("movl $(9 % 4), %eax"), bytes("movl $1, %eax"));
     }
 
     #[test]
