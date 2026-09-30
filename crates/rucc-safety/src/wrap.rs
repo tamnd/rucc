@@ -166,8 +166,7 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
             continue;
         }
         let func = &mut module[id];
-        let insts: Vec<Inst> =
-            func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         for inst in insts {
             // The address of one of these, written where a pointer was wanted. The name is right
             // there, so this is the same redirection the call gets and it is the one that reaches a

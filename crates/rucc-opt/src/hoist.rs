@@ -468,7 +468,7 @@ impl Sweep<'_, '_> {
             .blocks(id)
             .iter()
             .filter(|&&block| loops.innermost(block) == Some(id))
-            .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|&block| func.insts(block))
             .filter(|&inst| {
                 matches!(
                     func[inst].opcode,
@@ -1408,7 +1408,7 @@ mod tests {
     /// Every bounds check left in a function, with the block it is in.
     fn checks(func: &Func) -> Vec<(Block, Inst)> {
         func.blocks()
-            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
             .filter(|&(_, inst)| func[inst].opcode == Opcode::CheckBounds)
             .collect()
     }
@@ -2202,7 +2202,7 @@ mod tests {
     /// Every check of one kind left in a function, with the block it is in.
     fn kinds(func: &Func, kind: Opcode) -> Vec<(Block, Inst)> {
         func.blocks()
-            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
             .filter(|&(_, inst)| func[inst].opcode == kind)
             .collect()
     }
@@ -2516,7 +2516,7 @@ mod tests {
             assert_eq!(hoisted(&mut func).count(Kind::Optimized, done), 1, "{kind:?}");
             let left: Vec<Inst> = func
                 .blocks()
-                .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                .flat_map(|block| func.insts(block))
                 .filter(|&inst| func[inst].opcode == kind)
                 .collect();
             assert_eq!(left.len(), 1, "{kind:?}");
@@ -2612,7 +2612,7 @@ mod tests {
 
         let checking = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
             .expect("the nest checks the address it works out");
         func[checking].opcode = kind;
@@ -2725,7 +2725,7 @@ mod tests {
             assert_eq!(stats.count(Kind::Optimized, HOISTED_INIT), 1);
             let out: Vec<Inst> = func
                 .blocks()
-                .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                .flat_map(|block| func.insts(block))
                 .filter(|&inst| matches!(func[inst].opcode, Opcode::CheckType | Opcode::CheckInit))
                 .collect();
             assert_eq!(out.len(), 2);

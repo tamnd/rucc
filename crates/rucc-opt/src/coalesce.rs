@@ -425,7 +425,7 @@ mod tests {
 
     /// Every instruction in the function, in the order they run.
     fn every(func: &Func) -> Vec<Inst> {
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect()
+        func.blocks().flat_map(|block| func.insts(block)).collect()
     }
 
     fn run(func: &mut Func) -> Stats {

@@ -497,11 +497,7 @@ fn nothing(func: &mut Func, inst: Inst) -> Value {
 
 /// Every instruction in the function, in an order that does not borrow it.
 fn all(func: &Func) -> Vec<Inst> {
-    func.blocks()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
-        .collect()
+    func.blocks().flat_map(|block| func.insts(block)).collect()
 }
 
 #[cfg(test)]
@@ -537,7 +533,7 @@ mod tests {
     /// The one call in that function.
     fn only(func: &Func) -> Inst {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect))
             .expect("the function calls something")
     }
@@ -567,7 +563,7 @@ mod tests {
         let func = through_a_pointer(&mut names);
         let ret = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::Return)
             .expect("the function returns");
         assert_eq!(wanted(&func, ret, &Map::default()), None);

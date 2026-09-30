@@ -126,7 +126,7 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
         };
         let marks: Vec<Inst> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| !func[inst].flags.contains(Flags::HANDED))
             .filter(|&inst| inside(func, inst, &object))
             .collect();

@@ -504,7 +504,7 @@ mod tests {
     /// Which block each address in the function names, in the order the instructions are in.
     fn addressed(func: &mir::Func) -> Vec<usize> {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter_map(|inst| func[inst].mem)
             .filter_map(|mem| func[mem].block)
             .map(mir::Block::index)

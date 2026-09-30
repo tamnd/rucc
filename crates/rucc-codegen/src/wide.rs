@@ -134,8 +134,7 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
     if !func.values().any(|value| is_wide(func[value].ty)) {
         return false;
     }
-    let insts: Vec<Inst> =
-        walk(func).into_iter().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let insts: Vec<Inst> = walk(func).into_iter().flat_map(|block| func.insts(block)).collect();
     let order: Map<Inst, usize> = insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
     if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, conv, &order, at, inst)) {
         return false;

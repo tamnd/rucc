@@ -145,8 +145,7 @@ fn calls(
     numbers: &Map<Meta, u32>,
     table: &mut Vec<Descriptor>,
 ) {
-    let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     let pairs = pairs(func, &insts);
     let fused: Set<Inst> = pairs.values().copied().collect();
     let kept = kept(func, &insts);
@@ -1880,7 +1879,7 @@ mod tests {
         let func = &module[id];
         let left: Vec<Opcode> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .map(|inst| func[inst].opcode)
             .collect();
         assert!(!left.contains(&Opcode::CapOf), "{left:?}");
@@ -1979,7 +1978,7 @@ mod tests {
         calls(&mut func, &mut names, word, &numbers, &mut Vec::new());
         let call = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::Call && func[func[inst].args].len() == 5)
             .expect("the derivation check is the one call taking five");
         let handed = func[func[call].args][3];
@@ -2002,7 +2001,7 @@ mod tests {
         assert_eq!(func[made].opcode, Opcode::IntToPtr);
         assert!(
             func.blocks()
-                .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                .flat_map(|block| func.insts(block))
                 .all(|inst| func[inst].opcode != Opcode::CapOf),
             "nothing reads the capability, so its producer is gone"
         );
@@ -2248,7 +2247,7 @@ mod tests {
         calls(&mut func, &mut names, Type::int(32), &numbers, &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .map(|inst| func[inst].opcode)
             .collect();
         assert!(opcodes.contains(&Opcode::Trunc), "{opcodes:?}");
@@ -2316,7 +2315,7 @@ mod tests {
         calls(&mut func, &mut names, Type::int(32), &numbers, &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .map(|inst| func[inst].opcode)
             .collect();
         assert!(opcodes.contains(&Opcode::Trunc), "the limit goes in narrowed: {opcodes:?}");

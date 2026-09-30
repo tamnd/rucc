@@ -846,7 +846,7 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     /// The instruction with that opcode, counting from the top of the function.
     fn nth(func: &Func, opcode: Opcode, want: usize) -> Inst {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == opcode)
             .nth(want)
             .expect("that many of them")
@@ -1020,7 +1020,7 @@ block2:
     /// The last load in the function, which is the one every walk here starts from.
     fn last_load(func: &Func) -> Inst {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::Load)
             .last()
             .expect("a load")

@@ -94,8 +94,7 @@ use crate::capability;
 /// machine has no register for would otherwise be a shape nothing later understands, since every
 /// pass after this one is written about `load` and `store` by name.
 pub fn orderings(func: &mut Func, word: u32, total_store_order: bool) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         let plain = match func[inst].opcode {
             Opcode::AtomicLoad => Opcode::Load,
@@ -193,8 +192,7 @@ fn indivisible(ty: Type, info: MemInfo, word: u32) -> bool {
 /// signed one, because there is no signed width that holds those values, and each gets a rewrite
 /// of its own below.
 pub fn floats(func: &mut Func) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
             Opcode::FConst => constant(func, inst),
@@ -531,8 +529,7 @@ fn half_the_range(width: u32) -> i128 {
 /// IR and should stay one for as long as anything is reading the IR, so that the day the rule
 /// exists nothing above the backend has to change.
 pub fn bytes(func: &mut Func) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         if func[inst].opcode == Opcode::Bswap {
             swap(func, inst);
@@ -633,8 +630,7 @@ fn every(width: u32, step: u32, run: u32) -> i128 {
 /// up what the first one wrote, and it means there is one place that knows how to count bits rather
 /// than three.
 pub fn counts(func: &mut Func) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
             Opcode::Ctlz => searched(func, inst, true),
@@ -642,8 +638,7 @@ pub fn counts(func: &mut Func) {
             _ => {}
         }
     }
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         if func[inst].opcode == Opcode::Ctpop {
             counted(func, inst);
@@ -756,8 +751,7 @@ fn counted(func: &mut Func, inst: Inst) {
 /// function read have to be pointed at what replaced them. That is what `substitute` below does,
 /// once, after every instruction has been rewritten.
 pub fn overflows(func: &mut Func) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     let mut forward = Map::default();
     for inst in found {
         let checked = match func[inst].opcode {
@@ -1008,8 +1002,7 @@ fn checkable(ty: Type) -> bool {
 /// itself is left where a call can be made from, so nothing about a frame like that is different
 /// from any other frame that grows.
 pub fn rounds(func: &mut Func, to: u32) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         if func[inst].opcode != Opcode::Alloca {
             continue;
@@ -1106,8 +1099,7 @@ pub const UNROLL: usize = 32;
 /// `word` is how many bytes the widest move on this machine carries. Nothing here reads a target
 /// otherwise, and a copy is the same run of loads and stores everywhere.
 pub fn bulk(func: &mut Func, names: &mut Interner, word: u32) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
             Opcode::Memcpy => copy(func, names, inst, word),

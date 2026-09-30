@@ -197,7 +197,7 @@ mod tests {
     /// Every write to that plane still in the function, as where it starts and how wide it is.
     fn left(func: &Func, kind: Opcode) -> Vec<(i128, i128)> {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == kind)
             .map(|inst| {
                 let [pointer, length] = func[func[inst].args] else { panic!("two operands") };

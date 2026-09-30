@@ -242,11 +242,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
 
 /// Every instruction in the function, in an order that does not borrow it.
 fn walk(func: &Func) -> Vec<Inst> {
-    func.blocks()
-        .collect::<Vec<Block>>()
-        .into_iter()
-        .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
-        .collect()
+    func.blocks().flat_map(|block| func.insts(block)).collect()
 }
 
 /// Takes out every capability nothing reads, until there are none of those left.

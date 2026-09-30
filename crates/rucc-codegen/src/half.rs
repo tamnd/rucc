@@ -100,8 +100,7 @@ fn routine(opcode: Opcode, mode: &str) -> &'static str {
 /// The instructions are collected before any of them is touched, because a rewrite puts
 /// instructions in front of the one it replaces and the walk would otherwise see its own work.
 pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription) {
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
             Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {

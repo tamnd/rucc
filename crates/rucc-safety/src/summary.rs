@@ -324,8 +324,7 @@ pub fn summarize(
             continue;
         }
         let func = &module[id];
-        let insts: Vec<Inst> =
-            func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         for inst in insts {
             match func[inst].opcode {
                 Opcode::CheckBounds => summary.bounds.remaining += 1,

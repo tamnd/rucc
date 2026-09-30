@@ -267,9 +267,7 @@ mod tests {
     }
 
     fn opcodes(func: &Func) -> Vec<Opcode> {
-        func.blocks()
-            .flat_map(|block| func.insts(block).map(|inst| func[inst].opcode).collect::<Vec<_>>())
-            .collect()
+        func.blocks().flat_map(|block| func.insts(block).map(|inst| func[inst].opcode)).collect()
     }
 
     /// A jump to a function of the other convention would leave the caller's caller with what

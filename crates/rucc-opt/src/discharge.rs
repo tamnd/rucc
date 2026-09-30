@@ -2829,7 +2829,7 @@ mod tests {
     /// How many init checks are left in a function.
     fn inits(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::CheckInit)
             .count()
     }
@@ -2872,7 +2872,7 @@ mod tests {
     /// How many type checks are left in a function.
     fn types(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::CheckType)
             .count()
     }
@@ -2913,8 +2913,7 @@ mod tests {
     /// Puts that flag on every check in the function, the way an annotator before the pipeline
     /// would have.
     fn flagged(func: &mut Func, flag: Flags) {
-        let insts: Vec<Inst> =
-            func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         for inst in insts {
             let check = matches!(
                 func[inst].opcode,
@@ -2929,7 +2928,7 @@ mod tests {
     /// How many checks are left in a function.
     fn checks(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::CheckBounds)
             .count()
     }
@@ -2937,7 +2936,7 @@ mod tests {
     /// How many lifetime checks are left in a function.
     fn lives(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::CheckLive)
             .count()
     }
@@ -4821,7 +4820,7 @@ mod tests {
     /// How many derivation checks are left in a function.
     fn derivs(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::CheckDeriv)
             .count()
     }

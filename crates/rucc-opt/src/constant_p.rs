@@ -259,7 +259,7 @@ fn asked(func: &Func) -> Vec<Inst> {
     func.blocks()
         .collect::<Vec<Block>>()
         .into_iter()
-        .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+        .flat_map(|block| func.insts(block))
         .filter(|&inst| func[inst].opcode == Opcode::IsConstant)
         .collect()
 }

@@ -337,8 +337,7 @@ pub fn insert(
     // access: two checks through the same pointer read the same one. [`mod@origin`] is where that
     // is argued and where the placement that makes it sound is.
     let mut origins = origin::Origins::new();
-    let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in insts {
         match func[inst].opcode {
             Opcode::Load | Opcode::Store => match pointer_of(func, inst) {

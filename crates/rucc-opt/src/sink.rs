@@ -266,7 +266,7 @@ fn sweep(
             .blocks(id)
             .iter()
             .filter(|&&block| loops.innermost(block) == Some(id))
-            .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|&block| func.insts(block))
             .filter(|&inst| func[inst].opcode == kind)
             .collect()
     };
