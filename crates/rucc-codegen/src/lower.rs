@@ -5226,15 +5226,27 @@ impl<'a> Lowering<'a> {
             Some(index) => {
                 let value = list[index].value.ok_or_else(refused)?;
                 local = self.local_of(value);
-                let base = match local {
-                    Some(_) => mir::Reg::physical(self.conv.stack_pointer),
-                    None => self.reg_of(value)?,
-                };
                 // An operand in a named address space is spelled with its segment, as gcc spells
                 // `"m" (x)` for an `x` in `__seg_gs`, and the kernel's percpu templates rely on
                 // it from 6.9, when they stopped writing `%%gs:` themselves.
                 let segment = self.segment(inst);
-                Some(mir::Mem { segment, ..mir::Mem::at(mir::Operand::read(base, self.gpr)) })
+                // A name this file can reach from the instruction pointer is spelled that way, as
+                // gcc spells it, rather than through a register its address was put in. The
+                // kernel's paravirt calls are `call *%[paravirt_opptr]` against `"m" (pv_ops.op)`,
+                // and the patching that turns them into direct calls only reads `call *x(%rip)`.
+                match self.near_name(value).filter(|_| local.is_none() && segment.is_none()) {
+                    Some((symbol, disp)) => Some(mir::Mem { disp, ..mir::Mem::of(symbol) }),
+                    None => {
+                        let base = match local {
+                            Some(_) => mir::Reg::physical(self.conv.stack_pointer),
+                            None => self.reg_of(value)?,
+                        };
+                        Some(mir::Mem {
+                            segment,
+                            ..mir::Mem::at(mir::Operand::read(base, self.gpr))
+                        })
+                    }
+                }
             }
             None => None,
         };
@@ -5254,6 +5266,20 @@ impl<'a> Lowering<'a> {
             self.stack.addresses.push((made, local));
         }
         Ok(())
+    }
+
+    /// The name a value is the address of and how far past it, when an instruction can reach it
+    /// from the instruction pointer: not thread local, not read through a slot of the global offset
+    /// table, and on a target that reaches a name that way at all. See [`Self::address_of`].
+    fn near_name(&self, value: Value) -> Option<(Symbol, i32)> {
+        let (symbol, offset) = self.named_address(value)?;
+        let far = self.elsewhere.thread(symbol)
+            || self.elsewhere.slot(symbol).is_some()
+            || self.elsewhere.holds(symbol);
+        if far || !matches!(self.selector.symbols.near, Reach::Mode(_)) {
+            return None;
+        }
+        i32::try_from(offset).ok().map(|disp| (symbol, disp))
     }
 
     /// The object in this function's frame a value is the address of, for one an `alloca` of a

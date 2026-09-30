@@ -896,6 +896,25 @@ fn a_search_tied_to_its_starting_value_keeps_it_for_zero() {
     }
 }
 
+/// A global in memory is named from the instruction pointer, the way gcc names it, when the file
+/// can reach it that way. The kernel's paravirt calls are `call *%[paravirt_opptr]` against
+/// `"m" (pv_ops.op)`, and what patches them into direct calls reads only `ff 15`, which is
+/// `call *x(%rip)`. Under `-fPIC` the name is read through the GOT and stays in a register.
+#[test]
+fn a_global_in_memory_is_named_from_the_instruction_pointer() {
+    let source = "struct ops { void (*a)(void); unsigned long (*b)(void); } pv;\n\
+                  unsigned long f(void) { unsigned long r; \
+                  asm volatile (\"call *%[p]\" : \"=a\" (r) : [p] \"m\" (pv.b) : \"memory\"); return r; }\n";
+    for flags in [&["-O2", "-fno-PIE"][..], &["-O2", "-mcmodel=kernel", "-fno-PIE"]] {
+        let (ok, text, said) = run_with("near-memory", source, flags);
+        assert!(ok, "the compiler refused the fixture:\n{said}");
+        assert!(body(&text, "f").contains("call *pv+8(%rip)"), "{flags:?}:\n{text}");
+    }
+    let (ok, text, said) = run_with("far-memory", source, &["-O2", "-fPIC"]);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(body(&text, "f").contains("call *(%r"), "{text}");
+}
+
 #[test]
 fn a_constant_can_be_negated_and_a_memory_operand_read_eight_bytes_on() {
     let source = "long arr[2];\n\
