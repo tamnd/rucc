@@ -521,8 +521,18 @@ pub fn rule_width(pattern: &Term) -> u32 {
 
 /// The kind of thing a head names, if it names one. `add.i32` names a bitvector, `fadd.f32` names
 /// a float, and `x64.lea` names neither.
+///
+/// A vector of integers, `add.i32x4`, names the bitvector as wide as all of its lanes end to end,
+/// with the first lane at the low end, which is where it sits in a register and in memory. What
+/// makes an entry about one lane by lane is the entry spelling out the lanes, since a bitvector
+/// that wide has no lanes of its own.
 fn declared(head: &str) -> Option<Sort> {
     let (_, suffix) = head.rsplit_once('.')?;
+    if let Some((lane, lanes)) = suffix.strip_prefix('i').and_then(|rest| rest.split_once('x')) {
+        let lane = lane.parse::<u32>().ok()?;
+        let lanes = lanes.parse::<u32>().ok()?;
+        return Some(Sort::Bits(lane.checked_mul(lanes)?));
+    }
     let number = |kind: char| suffix.strip_prefix(kind).and_then(|bits| bits.parse::<u32>().ok());
     if let Some(bits) = number('i') {
         return Some(Sort::Bits(bits));

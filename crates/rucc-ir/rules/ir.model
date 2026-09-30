@@ -42,6 +42,10 @@
 ;; and rounded back by a call.
 (semantics (value.f16 v) v)
 
+;; And the integer vectors, in the same register, as the bitvector of their lanes end to end.
+(semantics (value.i32x4 v) v)
+(semantics (value.i64x2 v) v)
+
 ;; Integer arithmetic. Two's complement in every case, which is what a bitvector is.
 (semantics (add.i8 l r) (bvadd l r))
 (semantics (add.i16 l r) (bvadd l r))
@@ -67,6 +71,28 @@
 (semantics (mul.i16 l r) (bvmul l r))
 (semantics (mul.i32 l r) (bvmul l r))
 (semantics (mul.i64 l r) (bvmul l r))
+
+;; Integer vectors, the two SSE2 computes in. A vector is the bitvector of all its lanes end to
+;; end with the first lane at the low end, so an add is an add of each lane on its own with no
+;; carry from one into the next, and it has to be written that way, since the add of the whole
+;; bitvector would carry. The bitwise ones need no lanes: no bit of their answer looks at any
+;; other bit, so the whole bitvector at once is the same thing as each lane.
+(semantics (add.i32x4 l r)
+           (concat (bvadd (extract 127 96 l) (extract 127 96 r)) (bvadd (extract 95 64 l) (extract 95 64 r))
+                   (bvadd (extract 63 32 l) (extract 63 32 r)) (bvadd (extract 31 0 l) (extract 31 0 r))))
+(semantics (add.i64x2 l r)
+           (concat (bvadd (extract 127 64 l) (extract 127 64 r)) (bvadd (extract 63 0 l) (extract 63 0 r))))
+(semantics (sub.i32x4 l r)
+           (concat (bvsub (extract 127 96 l) (extract 127 96 r)) (bvsub (extract 95 64 l) (extract 95 64 r))
+                   (bvsub (extract 63 32 l) (extract 63 32 r)) (bvsub (extract 31 0 l) (extract 31 0 r))))
+(semantics (sub.i64x2 l r)
+           (concat (bvsub (extract 127 64 l) (extract 127 64 r)) (bvsub (extract 63 0 l) (extract 63 0 r))))
+(semantics (and.i32x4 l r) (bvand l r))
+(semantics (and.i64x2 l r) (bvand l r))
+(semantics (or.i32x4 l r) (bvor l r))
+(semantics (or.i64x2 l r) (bvor l r))
+(semantics (xor.i32x4 l r) (bvxor l r))
+(semantics (xor.i64x2 l r) (bvxor l r))
 
 ;; Float arithmetic. Not two's complement and not a bitvector: these are the operations the
 ;; floating point standard defines, and `fp.add` is the solver's own name for the one the

@@ -434,6 +434,8 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
         Type::float(Float::F80),
         Type::float(Float::F128),
         Type::vector(Type::int(32), 4),
+        Type::vector(Type::int(64), 2),
+        Type::vector(Type::int(16), 8),
     ];
 
     let mut found = Vec::new();
@@ -527,6 +529,25 @@ pub fn float_slot(ty: Type) -> Option<usize> {
     }
 }
 
+/// Which of the two whole register integer vectors a type is, or nothing for any other type.
+///
+/// Four lanes of thirty two bits and two of sixty four, the two shapes SSE2 adds, subtracts and
+/// does bitwise work on in one instruction each, and the two `emmintrin.h` is written in. A lane
+/// count is a table of its own rather than more entries in [`slot`]'s, because an add of four
+/// lanes and an add of one are different instructions and a rule at a width says nothing about
+/// how many lanes it acts on. Any other vector is none of them and finds no name, which is a
+/// report rather than a lowering to an instruction that acts on the wrong number of lanes.
+pub fn vector_slot(ty: Type) -> Option<usize> {
+    if !ty.is_vector() || !ty.lane().is_int() {
+        return None;
+    }
+    match (ty.lane().bits(), ty.lanes()) {
+        (32, 4) => Some(0),
+        (64, 2) => Some(1),
+        _ => None,
+    }
+}
+
 /// Whether a type is the float the machine moves but does not compute in at the narrow end.
 ///
 /// Sixteen bits, which is `_Float16`. It is not one of [`float_slot`]'s two for the same reason
@@ -573,14 +594,14 @@ pub fn is_quad(ty: Type) -> bool {
 }
 
 /// Whether a value of that type lives in a vector register, which is the two formats the machine
-/// computes in plus the one it only moves.
+/// computes in, the one it only moves, and the integer vectors [`vector_slot`] names.
 ///
 /// The question a register file is picked by, asked here so that the three places that pick one are
 /// reading the same answer. A value put in the wrong file is a value every instruction that then
 /// touches it is the wrong instruction for.
 #[must_use]
 pub fn in_vector_file(ty: Type) -> bool {
-    float_slot(ty).is_some() || is_quad(ty) || is_half(ty)
+    float_slot(ty).is_some() || is_quad(ty) || is_half(ty) || vector_slot(ty).is_some()
 }
 
 /// Whether a type is the one bit a truth value comes in.
@@ -618,6 +639,9 @@ fn value_head(ty: Type, address: u32) -> Option<&'static str> {
     if let Some(at) = float_slot(ty) {
         return Some(["value.f32", "value.f64"][at]);
     }
+    if let Some(at) = vector_slot(ty) {
+        return Some(["value.i32x4", "value.i64x2"][at]);
+    }
     Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty, address)?])
 }
 
@@ -647,6 +671,9 @@ fn load_head(ty: Type, address: u32) -> Option<&'static str> {
     if let Some(at) = float_slot(ty) {
         return Some(["load.f32", "load.f64"][at]);
     }
+    if let Some(at) = vector_slot(ty) {
+        return Some(["load.i32x4", "load.i64x2"][at]);
+    }
     if is_bit(ty) {
         return Some("load.i1");
     }
@@ -661,6 +688,9 @@ fn store_head(ty: Type, address: u32) -> Option<&'static str> {
     }
     if let Some(at) = float_slot(ty) {
         return Some(["store.f32", "store.f64"][at]);
+    }
+    if let Some(at) = vector_slot(ty) {
+        return Some(["store.i32x4", "store.i64x2"][at]);
     }
     if is_bit(ty) {
         return Some("store.i1");
@@ -903,6 +933,19 @@ fn binary_head(opcode: Opcode, ty: Type, address: u32) -> Option<&'static str> {
             Opcode::FSub => &["fsub.f32", "fsub.f64"],
             Opcode::FMul => &["fmul.f32", "fmul.f64"],
             Opcode::FDiv => &["fdiv.f32", "fdiv.f64"],
+            _ => return None,
+        };
+        return Some(names[at]);
+    }
+    if let Some(at) = vector_slot(ty) {
+        // Lane by lane, and the three bitwise ones are the same instruction at either lane count
+        // since no bit of the answer looks at a bit in another lane.
+        let names: &[&'static str; 2] = match opcode {
+            Opcode::Add => &["add.i32x4", "add.i64x2"],
+            Opcode::Sub => &["sub.i32x4", "sub.i64x2"],
+            Opcode::And => &["and.i32x4", "and.i64x2"],
+            Opcode::Or => &["or.i32x4", "or.i64x2"],
+            Opcode::Xor => &["xor.i32x4", "xor.i64x2"],
             _ => return None,
         };
         return Some(names[at]);
@@ -1311,14 +1354,25 @@ mod tests {
     }
 
     /// A lane count is not a width, so a rule written at a width does not get to answer for a
-    /// vector of that width. Nothing produces one yet and the day something does it should be
-    /// reported rather than lowered to an instruction that acts on one lane of it.
+    /// vector of that width. The two vectors SSE2 computes in have names of their own, and one
+    /// it has no rule for is reported rather than lowered to an instruction that acts on one lane
+    /// of it.
     #[test]
     fn a_vector_is_not_the_width_of_its_lane() {
         let i32x4 = Type::vector(Type::int(32), 4);
         assert_eq!(slot(i32x4, 64), None);
-        assert_eq!(value_head(i32x4, 64), None);
-        assert_eq!(binary_head(Opcode::Add, i32x4, 64), None);
+        assert_eq!(value_head(i32x4, 64), Some("value.i32x4"));
+        assert_eq!(binary_head(Opcode::Add, i32x4, 64), Some("add.i32x4"));
+        assert_eq!(binary_head(Opcode::Mul, i32x4, 64), None);
+        assert!(in_vector_file(i32x4));
+
+        let i64x2 = Type::vector(Type::int(64), 2);
+        assert_eq!(binary_head(Opcode::Xor, i64x2, 64), Some("xor.i64x2"));
+
+        let i16x8 = Type::vector(Type::int(16), 8);
+        assert_eq!(value_head(i16x8, 64), None);
+        assert_eq!(binary_head(Opcode::Add, i16x8, 64), None);
+        assert!(!in_vector_file(i16x8));
     }
 
     /// The sweep says the same thing about an instruction that looking the instruction up does,
