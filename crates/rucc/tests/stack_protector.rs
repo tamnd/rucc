@@ -237,3 +237,31 @@ fn a_target_whose_protector_is_a_different_mechanism_refuses_the_flag() {
     // the command line wrote.
     assert!(stderr.contains("x86_64-windows-msvc"), "{stderr}");
 }
+
+/// A protected function whose only call is in tail position keeps it as a call.
+///
+/// The check has to run after the callee returns, since the callee may be what writes past the
+/// canary, so the call cannot become a jump. The frame is not a leaf's, because a protected one
+/// never is, and leaving the call alone is right. This used to trip an assertion in the back end
+/// that expected every tail call in a leaf to have become a jump, and the kernel's
+/// `kmalloc_array_noprof` was the function that found it.
+#[test]
+fn a_tail_call_in_a_protected_function_stays_a_call_before_the_check() {
+    let source = "\
+void *alloc(unsigned long size);
+void *alloc_array(unsigned long n, unsigned long size) {
+    unsigned long bytes;
+    if (__builtin_mul_overflow(n, size, &bytes))
+        return 0;
+    return alloc(bytes);
+}
+";
+    let text = asm("tail", &["-O2", "-fstack-protector-strong"], source);
+    let at = |what: &str| {
+        text.lines()
+            .position(|line| line.contains(what))
+            .unwrap_or_else(|| panic!("{what}: {text}"))
+    };
+    assert!(at("call\talloc") < at("__stack_chk_fail"), "{text}");
+    assert!(!text.contains("jmp\talloc"), "{text}");
+}

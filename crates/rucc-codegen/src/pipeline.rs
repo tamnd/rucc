@@ -970,9 +970,13 @@ pub fn compile_recording(
     // A frame with no call left in it but these was laid out as a leaf, so each of them has to go:
     // one left a call would be made with the stack pointer wherever the leaf left it and with the
     // return address of a function that never saved its own.
+    //
+    // A frame laid out as anything but a leaf is fine with a call left in it, and a protected one
+    // is one of those: its check comes between the call and the `ret`, so the call has to stay
+    // where it is, and the frame already leaves the stack pointer where a call needs it.
     let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, machine.branch, names);
     assert!(
-        stack.kept || jumped == stack.tails.len(),
+        stack.kept || !layout.leaf || jumped == stack.tails.len(),
         "a leaf whose tail calls did not all become jumps"
     );
 
