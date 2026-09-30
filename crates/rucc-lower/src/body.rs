@@ -1736,7 +1736,51 @@ impl<'u> Body<'_, 'u> {
 
     /// The flags an access to that type carries.
     fn flags(&self, ty: TypeId) -> Flags {
-        if self.is_volatile(ty) { Flags::VOLATILE } else { Flags::NONE }
+        let volatile = if self.is_volatile(ty) { Flags::VOLATILE } else { Flags::NONE };
+        volatile.union(self.space(ty))
+    }
+
+    /// The segment an access to an object of that type is counted from, as the flag that says
+    /// so, which is none for an object in the generic address space.
+    fn space(&self, ty: TypeId) -> Flags {
+        let quals = self.types().object_quals(ty);
+        if quals.has(Qualifiers::SEG_GS) {
+            Flags::SEG_GS
+        } else if quals.has(Qualifiers::SEG_FS) {
+            Flags::SEG_FS
+        } else {
+            Flags::NONE
+        }
+    }
+
+    /// A whole object copied a piece at a time, for an object in a named address space on
+    /// either end.
+    ///
+    /// A `memcpy` has one address space and it is the flat one, so an object in `%gs` is moved
+    /// with loads and stores that each say which segment they are counted from. The pieces are
+    /// the widest the alignment allows, which for anything the kernel keeps per CPU is words.
+    fn copy_spaces(
+        &mut self,
+        (to, into): (Value, Flags),
+        (from, out): (Value, Flags),
+        ty: TypeId,
+        span: Span,
+    ) {
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align = repr::align_of(self.types(), self.target(), ty);
+        let mut at = 0;
+        while at < size {
+            let known = if at == 0 { align } else { align.min(1 << at.trailing_zeros().min(16)) };
+            let fits = (size - at).min(u64::from(known));
+            let width = [8, 4, 2, 1].into_iter().find(|&width| width <= fits).unwrap_or(1);
+            let info = self.piece_info(align, at);
+            let piece = Type::int(u32::try_from(width * 8).expect("a word at most"));
+            let source = self.offset(from, at, span);
+            let target = self.offset(to, at, span);
+            let value = self.build(span).load(piece, source, info, out);
+            self.build(span).store(value, target, info, into);
+            at += width;
+        }
     }
 
     /// Whether the type has `volatile` on it.
@@ -2365,6 +2409,10 @@ impl<'u> Body<'_, 'u> {
         let mut args = Vec::new();
         let mut results = Vec::new();
         let mut writes = Vec::new();
+        // The address space the operands in memory are in, which the statement carries as the
+        // flag a load in it would, so that the operand is spelled `%gs:(%rax)`. One for the
+        // whole statement, since x86 gives an `asm` one operand in memory.
+        let mut space = Flags::NONE;
         for index in 0..tast[node.outputs].len() {
             let operand = tast[node.outputs][index];
             let at = tast.expr_span(operand.value);
@@ -2374,6 +2422,7 @@ impl<'u> Body<'_, 'u> {
             let slot = index - spelled.iter().filter(|&&gone| gone < index).count();
             let place = self.place(operand.value);
             if operand.memory {
+                space = space.union(self.space(place.ty));
                 let addr = self.address_of(place, at);
                 args.push(addr);
                 continue;
@@ -2403,6 +2452,7 @@ impl<'u> Body<'_, 'u> {
             let ty = tast[operand.value].ty;
             if operand.memory {
                 let place = self.place(operand.value);
+                space = space.union(self.space(place.ty));
                 let addr = self.address_of(place, at);
                 args.push(addr);
             } else if let Some(ty) = self.record_in_a_register(ty) {
@@ -2437,6 +2487,10 @@ impl<'u> Body<'_, 'u> {
         let targets = self.func.push_block_calls(&calls);
         let info = AsmInfo { template, constraints, clobbers, targets };
         let flags = if node.quals.has(AsmQuals::VOLATILE) { Flags::VOLATILE } else { Flags::NONE };
+        if space.contains(Flags::SEG_FS.union(Flags::SEG_GS)) {
+            self.unsupported("an `asm` with operands in memory in two address spaces", span);
+        }
+        let flags = flags.union(space);
         let inst = self.build(span).inline_asm(info, &args, &results, flags);
 
         let produced: Vec<Value> = self.func[inst].results().collect();
@@ -7759,6 +7813,16 @@ impl<'u> Body<'_, 'u> {
     /// That is what the standard asks for: an atomic object is read whole or not at all, and there
     /// is no way to name a piece of one.
     fn read_whole(&mut self, place: Place, ty: TypeId, span: Span) -> Place {
+        let space = self.space(place.ty);
+        if !space.is_empty() && matches!(place.at, Where::Addr(_)) {
+            let size = repr::size_of(self.types(), self.target(), place.ty);
+            let align = repr::align_of(self.types(), self.target(), place.ty);
+            let object = place.ty;
+            let addr = self.address_of(place, span);
+            let slot = self.scratch(size, align, span);
+            self.copy_spaces((slot, Flags::NONE), (addr, space), object, span);
+            return Place::new(Where::Addr(slot), ty);
+        }
         if !self.is_atomic(place.ty) {
             return place;
         }
@@ -8082,7 +8146,12 @@ impl<'u> Body<'_, 'u> {
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
         let source = self.place(rhs);
         let source = self.address_of(source, span);
+        let space = self.space(place.ty);
         let destination = self.address_of(place, span);
+        if !space.is_empty() {
+            self.copy_spaces((destination, space), (source, Flags::NONE), ty, span);
+            return None;
+        }
         if self.is_atomic(place.ty) {
             self.ordered_write(destination, source, place.ty, MemOrder::SeqCst, span);
             return None;

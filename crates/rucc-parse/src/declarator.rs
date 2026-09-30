@@ -285,6 +285,8 @@ impl Parser<'_> {
                 Keyword::Restrict => Quals::RESTRICT,
                 Keyword::Atomic => Quals::ATOMIC,
                 Keyword::MsQualifier => Quals::NONE,
+                Keyword::SegFs => Quals::SEG_FS,
+                Keyword::SegGs => Quals::SEG_GS,
                 _ => return quals,
             };
             self.cursor.bump();

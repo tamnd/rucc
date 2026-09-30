@@ -943,7 +943,7 @@ fn both(func: &Func, insts: [Inst; 2]) -> Option<Stored> {
     // section 22.6 says never and because the reason is not the flag matching: both how many
     // accesses there are and what order they come in are observable, and a value that arrives
     // through a select is a different program from one that arrives through a branch.
-    if data[0].flags != data[1].flags || data[0].flags.contains(Flags::VOLATILE) {
+    if data[0].flags != data[1].flags || data[0].flags.intersects(Flags::KEEP) {
         return None;
     }
     let (Extra::Mem(one), Extra::Mem(two)) = (data[0].extra, data[1].extra) else { return None };
@@ -987,7 +987,7 @@ fn alone(
     frame: &mut Option<Frame>,
 ) -> Option<Stored> {
     let data = func[inst];
-    if data.flags.contains(Flags::VOLATILE) {
+    if data.flags.intersects(Flags::KEEP) {
         return None;
     }
     let Extra::Mem(mem) = data.extra else { return None };
@@ -1050,7 +1050,7 @@ fn readable(func: &Func, head: Block, inst: Inst) -> bool {
 /// Whether this access is neither `volatile` nor atomic.
 fn plain(func: &Func, data: InstData) -> bool {
     let Extra::Mem(mem) = data.extra else { return false };
-    !data.flags.contains(Flags::VOLATILE) && func[mem].order == MemOrder::NotAtomic
+    !data.flags.intersects(Flags::KEEP) && func[mem].order == MemOrder::NotAtomic
 }
 
 /// How deep [`same`] follows two chains of operations before it gives up on them.

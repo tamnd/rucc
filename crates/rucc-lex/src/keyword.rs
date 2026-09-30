@@ -38,10 +38,10 @@
 //! compiles there. clang makes both of them keywords and rejects it. We follow gcc, so they
 //! belong with the other predefined types rather than here.
 //!
-//! gcc also reserves `_Sat`, `_Fract`, `_Accum`, `__seg_fs` and `__seg_gs` in the GNU
-//! dialects. They are left out until the fixed point types and the named address spaces are
-//! implemented, because a keyword the parser can only refuse is worse for a program than an
-//! identifier it can at least read.
+//! gcc also reserves `_Sat`, `_Fract` and `_Accum` in the GNU dialects. They are left out until
+//! the fixed point types are implemented, because a keyword the parser can only refuse is worse
+//! for a program than an identifier it can at least read. The named address spaces `__seg_fs`
+//! and `__seg_gs` are here, on x86 only, which is where gcc has them.
 
 use rucc_base::{Interner, Symbol};
 use rucc_session::Std;
@@ -229,6 +229,10 @@ pub enum Keyword {
     /// something about a pointer on a target this compiler does not build for, or nothing at all
     /// on x86-64 and AArch64, so they are one keyword the parser reads and drops.
     MsQualifier,
+    /// `__seg_fs`, the x86 named address space based at `%fs`.
+    SegFs,
+    /// `__seg_gs`, the one based at `%gs`.
+    SegGs,
     /// `__try`, the start of a structured exception handling block, which is refused.
     Try,
     /// `__except`.
@@ -344,8 +348,18 @@ impl Keywords {
         self.with(WINDOWS | MSVC)
     }
 
+    /// The same table with the x86 named address spaces, `__seg_fs` and `__seg_gs`, for a
+    /// compile for x86 in a GNU dialect.
+    ///
+    /// Measured: gcc 13 has both on x86 in every `-std=gnu*` and in no `-std=c*`, and on AArch64
+    /// in none, where `int __seg_gs x;` is a syntax error.
+    #[must_use]
+    pub fn x86(self, gnu: bool) -> Keywords {
+        if gnu { self.with(X86) } else { self }
+    }
+
     /// Turns on every entry with one of `bits` in its mask, whatever the dialect says.
-    fn with(mut self, bits: u8) -> Keywords {
+    fn with(mut self, bits: u16) -> Keywords {
         for (slot, entry) in self.active.iter_mut().zip(KEYWORDS) {
             if entry.dialects & bits != 0 {
                 *slot = Some(entry.keyword);
@@ -385,17 +399,20 @@ impl Keywords {
 }
 
 /// One bit per dialect, plus one for the GNU extensions.
-const C89: u8 = 1 << 0;
-const C99: u8 = 1 << 1;
-const C11: u8 = 1 << 2;
-const C17: u8 = 1 << 3;
-const C23: u8 = 1 << 4;
-const GNU: u8 = 1 << 5;
+const C89: u16 = 1 << 0;
+const C99: u16 = 1 << 1;
+const C11: u16 = 1 << 2;
+const C17: u16 = 1 << 3;
+const C23: u16 = 1 << 4;
+const GNU: u16 = 1 << 5;
 /// Not a dialect but a target. See [`Keywords::windows`].
-const WINDOWS: u8 = 1 << 6;
+const WINDOWS: u16 = 1 << 6;
 /// Not a dialect either, and a narrower target: Windows with Microsoft's C runtime and headers.
 /// See [`Keywords::msvc`].
-const MSVC: u8 = 1 << 7;
+const MSVC: u16 = 1 << 7;
+/// A target again: x86, where gcc has the named address spaces. They are keywords in the GNU
+/// dialects only, so [`Keywords::x86`] asks for this bit and the GNU one together.
+const X86: u16 = 1 << 8;
 
 /// The attribute names the parser writes for a Microsoft keyword, which [`Keywords::msvc`] interns.
 ///
@@ -414,22 +431,22 @@ pub const MSVC_ATTRIBUTE_NAMES: &[&str] = &[
 ];
 
 /// A spelling that is a keyword in every dialect, GNU or not.
-const ALWAYS: u8 = C89 | C99 | C11 | C17 | C23 | GNU;
+const ALWAYS: u16 = C89 | C99 | C11 | C17 | C23 | GNU;
 /// From C99 onwards, and not in `-std=gnu89`. This is `restrict`, and it is the one place the
 /// GNU dialects are not a superset: gcc and clang both keep `restrict` out of `gnu89` and
 /// offer `__restrict` there instead.
-const SINCE_C99: u8 = C99 | C11 | C17 | C23;
+const SINCE_C99: u16 = C99 | C11 | C17 | C23;
 /// From C99 onwards, and in every GNU dialect including `gnu89`. This is `inline`.
-const SINCE_C99_OR_GNU: u8 = SINCE_C99 | GNU;
+const SINCE_C99_OR_GNU: u16 = SINCE_C99 | GNU;
 /// C23 only. The lowercase spellings of the C11 keywords are here, and so is the rest of what
 /// C23 added, and `-std=gnu17` does not have any of them.
-const SINCE_C23: u8 = C23;
+const SINCE_C23: u16 = C23;
 /// C23, and every GNU dialect. This is `typeof`, which gcc has had for decades and which C23
 /// standardised, so `-std=c17` is the only place it is a variable name.
-const SINCE_C23_OR_GNU: u8 = C23 | GNU;
+const SINCE_C23_OR_GNU: u16 = C23 | GNU;
 /// The GNU dialects only. This is `asm`, which is a keyword in `gnu23` and an identifier in
 /// `c23`, where `__asm__` has to be written instead.
-const GNU_ONLY: u8 = GNU;
+const GNU_ONLY: u16 = GNU;
 
 /// A spelling, what it means, and where it is a keyword.
 struct Entry {
@@ -438,11 +455,11 @@ struct Entry {
     /// What the grammar makes of it.
     keyword: Keyword,
     /// The dialects it is a keyword in, as a mask of the bits above.
-    dialects: u8,
+    dialects: u16,
 }
 
 /// Shorthand, so that the table below reads as a table rather than a page of struct literals.
-const fn e(spelling: &'static str, keyword: Keyword, dialects: u8) -> Entry {
+const fn e(spelling: &'static str, keyword: Keyword, dialects: u16) -> Entry {
     Entry { spelling, keyword, dialects }
 }
 
@@ -592,6 +609,8 @@ static KEYWORDS: &[Entry] = &[
     e("__real__", Keyword::Real, ALWAYS),
     e("__restrict", Keyword::Restrict, ALWAYS),
     e("__restrict__", Keyword::Restrict, ALWAYS),
+    e("__seg_fs", Keyword::SegFs, X86),
+    e("__seg_gs", Keyword::SegGs, X86),
     e("__signed", Keyword::Signed, ALWAYS),
     e("__signed__", Keyword::Signed, ALWAYS),
     // gcc's own diagnostics keep `__thread` and `_Thread_local` apart, but in C they are
@@ -627,7 +646,7 @@ static KEYWORDS: &[Entry] = &[
 ];
 
 /// The bits a dialect matches, which is its own and the GNU one when the extensions are on.
-const fn mask(std: Std, gnu: bool) -> u8 {
+const fn mask(std: Std, gnu: bool) -> u16 {
     let dialect = match std {
         Std::C89 => C89,
         Std::C99 => C99,
@@ -709,6 +728,17 @@ mod tests {
         assert_eq!(lookup(Std::C23, false, "asm"), None);
         assert_eq!(lookup(Std::C23, true, "asm"), Some(Keyword::Asm));
         assert_eq!(lookup(Std::C89, false, "__asm__"), Some(Keyword::Asm));
+    }
+
+    #[test]
+    fn the_address_spaces_are_there_on_x86_in_a_gnu_dialect_and_nowhere_else() {
+        for (gnu, want) in [(true, Some(Keyword::SegGs)), (false, None)] {
+            let mut interner = Interner::new();
+            let keywords = Keywords::new(&mut interner, Std::C11, gnu).x86(gnu);
+            let symbol = interner.intern("__seg_gs");
+            assert_eq!(keywords.get(symbol), want);
+        }
+        assert_eq!(lookup(Std::C17, true, "__seg_fs"), None, "not without asking for x86");
     }
 
     #[test]

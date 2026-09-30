@@ -500,7 +500,7 @@ fn what_that_call_does(
 /// other threads can see, at every strength, which is the same line [`crate::dce`] draws and for
 /// the same reason.
 fn plain(func: &Func, data: InstData) -> bool {
-    if data.flags.contains(Flags::VOLATILE) {
+    if data.flags.intersects(Flags::KEEP) {
         return false;
     }
     match data.extra {

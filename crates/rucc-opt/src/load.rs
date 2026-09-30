@@ -277,7 +277,7 @@ fn act(func: &Func, inst: Inst) -> Act {
     if !data.opcode.touches_memory() {
         return Act::Ignore;
     }
-    if data.flags.contains(Flags::VOLATILE) {
+    if data.flags.intersects(Flags::KEEP) {
         return Act::Forget;
     }
     let args = &func[data.args];

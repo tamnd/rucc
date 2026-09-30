@@ -808,12 +808,19 @@ fn candidate(
     // there is, and the only thing that can go wrong is the width of the field the displacement
     // goes in. [`offer`] is what checks that nothing else in the reader names the base.
     let disp = i64::from(address.disp) + i64::from(reading.disp);
+    // The segment is the reader's, since a `lea` works out an offset and never reads through one.
+    // Two different ones would be two address spaces, which no single address is.
+    let segment = match (reading.segment, address.segment) {
+        (Some(one), Some(other)) if one != other => return None,
+        (one, other) => one.or(other),
+    };
     let mut amode = mir::Amode {
         disp: i32::try_from(disp).ok()?,
         base: None,
         index: None,
         scale: scaled.map_or(1, |(_, scale)| scale),
         reach,
+        segment,
         ..address
     };
 

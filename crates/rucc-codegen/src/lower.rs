@@ -2472,7 +2472,8 @@ impl<'a> Lowering<'a> {
     /// other end is the address the program wrote. That end is the access, so it is the one that
     /// carries what the program said about it, and the trip through the slot is this compiler's
     /// own business the way a spill is. See [`Self::carried`].
-    fn x87_touching(&mut self, name: &str, inst: Inst, at: mir::Mem) {
+    fn x87_touching(&mut self, name: &str, inst: Inst, mut at: mir::Mem) {
+        at.segment = self.segment(inst).or(at.segment);
         let block = self.at.expect("a block is being filled");
         let opcode = self.named(name);
         let (span, flags) = (self.source.span(inst), self.carried(inst));
@@ -4107,6 +4108,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let opcode = self.named(&name);
         let (span, flags) = (self.source.span(inst), self.carried(inst));
+        let segment = self.segment(inst);
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in descs.iter().zip([got, flag, want, put]) {
             let operand = mir::Operand {
@@ -4117,7 +4119,8 @@ impl<'a> Lowering<'a> {
             };
             build = build.operand(operand);
         }
-        build.mem(mir::Mem::at(mir::Operand::read(base, self.gpr))).finish();
+        let at = mir::Mem::at(mir::Operand::read(base, self.gpr));
+        build.mem(mir::Mem { segment, ..at }).finish();
         Ok(())
     }
 
@@ -4196,7 +4199,7 @@ impl<'a> Lowering<'a> {
         let got = self.new_reg(old);
         let descs = self.selector.operands(&name).ok_or_else(|| self.unsupported(inst))?;
         let opcode = self.named(&name);
-        let flags = self.carried(inst);
+        let (flags, segment) = (self.carried(inst), self.segment(inst));
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in descs.iter().zip([got, put]) {
             build = build.operand(mir::Operand {
@@ -4206,7 +4209,8 @@ impl<'a> Lowering<'a> {
                 constraint: desc.constraint,
             });
         }
-        build.mem(mir::Mem::at(mir::Operand::read(base, self.gpr))).finish();
+        let at = mir::Mem::at(mir::Operand::read(base, self.gpr));
+        build.mem(mir::Mem { segment, ..at }).finish();
         Ok(())
     }
 
@@ -5118,7 +5122,11 @@ impl<'a> Lowering<'a> {
                     Some(_) => mir::Reg::physical(self.conv.stack_pointer),
                     None => self.reg_of(value)?,
                 };
-                Some(mir::Mem::at(mir::Operand::read(base, self.gpr)))
+                // An operand in a named address space is spelled with its segment, as gcc spells
+                // `"m" (x)` for an `x` in `__seg_gs`, and the kernel's percpu templates rely on
+                // it from 6.9, when they stopped writing `%%gs:` themselves.
+                let segment = self.segment(inst);
+                Some(mir::Mem { segment, ..mir::Mem::at(mir::Operand::read(base, self.gpr)) })
             }
             None => None,
         };
@@ -6097,9 +6105,15 @@ impl<'a> Lowering<'a> {
         list: &[AsmOperand<'_>],
     ) -> Result<mir::Mem, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        // An operand in memory in a named address space is reached through its segment, which
+        // the statement carries for all of its memory operands at once.
+        let mut segment = at.segment;
         let base = match at.base {
             None => None,
             Some(x86_64::Piece::Operand { index, .. }) => {
+                if list.get(index).is_some_and(|operand| operand.memory) {
+                    segment = segment.or(self.segment(inst));
+                }
                 // The register an address is counted from is read and never written, whatever the
                 // instruction does to what it finds there.
                 let reg = places.get(index).and_then(|place| place.read).ok_or_else(refused)?;
@@ -6138,7 +6152,7 @@ impl<'a> Lowering<'a> {
                 i32::try_from(number).map_err(|_| refused())?
             }
         };
-        Ok(mir::Mem { base, scale: 1, disp, segment: at.segment, ..mir::Mem::default() })
+        Ok(mir::Mem { base, scale: 1, disp, segment, ..mir::Mem::default() })
     }
 
     /// The number in that value, for one an `iconst` defined, read at the width of its own type.
@@ -6915,6 +6929,11 @@ impl<'a> Lowering<'a> {
         if self.source[inst].opcode == Opcode::IConst || refused.contains(&value) {
             return false;
         }
+        // An access in a named address space is left as the instruction it is, since the segment
+        // goes on the instruction that makes the access and a folded one is not that instruction.
+        if self.segment(inst).is_some() {
+            return false;
+        }
         self.source.block_of(inst).is_some()
             && self.source.block_of(inst) == self.source.block_of(into)
     }
@@ -6961,6 +6980,24 @@ impl<'a> Lowering<'a> {
             mir::Flags::VOLATILE
         } else {
             mir::Flags::NONE
+        }
+    }
+
+    /// The segment an access is counted from, when the program went through a pointer into a
+    /// named address space.
+    ///
+    /// On the address rather than in [`Self::carried`], because it is part of where the access
+    /// lands and every pass below compares addresses with it in. Only the instruction that
+    /// makes the access gets it: [`Self::foldable`] keeps an access like this out of any other
+    /// instruction, so the one that reaches memory is always the one the IR had.
+    fn segment(&self, inst: Inst) -> Option<mir::Segment> {
+        let flags = self.source[inst].flags;
+        if flags.contains(Flags::SEG_GS) {
+            Some(mir::Segment::Gs)
+        } else if flags.contains(Flags::SEG_FS) {
+            Some(mir::Segment::Fs)
+        } else {
+            None
         }
     }
 
@@ -7035,6 +7072,7 @@ impl<'a> Lowering<'a> {
 
         let block = self.at.expect("a block is being filled");
         let (span, flags) = (self.source.span(inst), self.carried(inst));
+        let segment = if outermost { self.segment(inst) } else { None };
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in descs.iter().zip(regs) {
             let operand = mir::Operand {
@@ -7045,7 +7083,8 @@ impl<'a> Lowering<'a> {
             };
             build = build.operand(operand);
         }
-        if let Some(mem) = read.mem {
+        if let Some(mut mem) = read.mem {
+            mem.segment = segment.or(mem.segment);
             build = build.mem(mem);
         }
         if let Some(imm) = read.imm {

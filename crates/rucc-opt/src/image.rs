@@ -307,7 +307,7 @@ impl Piece {
 /// type of the load rather than by what the image turned out to hold.
 fn answer(func: &Func, inst: Inst, images: &Images) -> Option<(Opcode, Imm)> {
     let data = &func[inst];
-    if data.opcode != Opcode::Load || data.results != 1 || data.flags.contains(Flags::VOLATILE) {
+    if data.opcode != Opcode::Load || data.results != 1 || data.flags.intersects(Flags::KEEP) {
         return None;
     }
     let Extra::Mem(info) = data.extra else { return None };

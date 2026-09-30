@@ -34,6 +34,8 @@
 //! assert_eq!(spell(&types, &interner, pointer), "int (*)[3]");
 //! ```
 
+use std::borrow::Cow;
+
 use rucc_base::{Interner, Symbol};
 
 use crate::kind::{ArrayLen, FunctionId, Qualifiers, Type, TypeKind};
@@ -144,7 +146,7 @@ impl Speller<'_> {
 
         let mut out = String::new();
         if let Some(quals) = quals_text(ty.quals) {
-            out.push_str(quals);
+            out.push_str(&quals);
             out.push(' ');
         }
         out.push_str(&base);
@@ -162,7 +164,7 @@ impl Speller<'_> {
     fn pointer(&self, ty: Type, pointee: TypeId, inner: Declarator) -> String {
         let mut declarator = String::from("*");
         if let Some(quals) = quals_text(ty.quals) {
-            declarator.push_str(quals);
+            declarator.push_str(&quals);
             if !inner.text.is_empty() {
                 declarator.push(' ');
             }
@@ -194,7 +196,7 @@ impl Speller<'_> {
     fn array(&self, ty: Type, elem: TypeId, len: ArrayLen, inner: Declarator) -> String {
         let mut suffix = String::from("[");
         if let Some(quals) = quals_text(ty.quals) {
-            suffix.push_str(quals);
+            suffix.push_str(&quals);
             if !matches!(len, ArrayLen::Unknown) {
                 suffix.push(' ');
             }
@@ -257,8 +259,26 @@ impl Speller<'_> {
     }
 }
 
-/// The qualifier keywords in the order C writes them, or nothing at all.
-fn quals_text(quals: Qualifiers) -> Option<&'static str> {
+/// The qualifier keywords in the order gcc writes them, or nothing at all.
+///
+/// An address space goes after the other three, as in gcc's `const __seg_gs int`, and it is the
+/// rare case, so the string is only built for it.
+fn quals_text(quals: Qualifiers) -> Option<Cow<'static, str>> {
+    let space = if quals.has(Qualifiers::SEG_GS) {
+        "__seg_gs"
+    } else if quals.has(Qualifiers::SEG_FS) {
+        "__seg_fs"
+    } else {
+        return plain_quals_text(quals).map(Cow::Borrowed);
+    };
+    Some(match plain_quals_text(quals) {
+        Some(rest) => Cow::Owned(format!("{rest} {space}")),
+        None => Cow::Borrowed(space),
+    })
+}
+
+/// [`quals_text`] for `const`, `volatile` and `restrict`.
+fn plain_quals_text(quals: Qualifiers) -> Option<&'static str> {
     // Sixteen combinations of three flags, written out rather than assembled, because the
     // answer is a constant string in every case and this is on the path of every diagnostic.
     match (

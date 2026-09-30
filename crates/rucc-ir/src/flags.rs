@@ -32,9 +32,11 @@ use crate::Opcode;
 /// The flags on one instruction.
 ///
 /// A bitset rather than a struct of `bool`s, because it rides along in the instruction table
-/// and two bytes there is two bytes per instruction in every function in the program.
+/// and every byte there is a byte per instruction in every function in the program. It was two
+/// bytes until the address spaces needed a seventeenth bit, and four fit in the padding the
+/// instruction already had.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub struct Flags(u16);
+pub struct Flags(u32);
 
 impl Flags {
     /// No flags, which is what `-O0` and `-fwrapv` and a plain unsigned addition all produce.
@@ -152,6 +154,22 @@ impl Flags {
     /// A fact rather than a licence, in the way [`Flags::STATIC`] is.
     pub const ALIGNED: Self = Self(1 << 15);
 
+    /// The access is counted from the `%fs` segment base, because what it goes through is a
+    /// pointer into the `__seg_fs` address space.
+    ///
+    /// The address the instruction is handed is an offset into that segment and not a place in
+    /// the flat address space, so two accesses are only ever the same memory when they agree on
+    /// this and on [`Flags::SEG_GS`], and an access with either one is never the same memory as a
+    /// frame slot. Nothing in the optimizer reasons about segments, so every pass that would
+    /// move, merge or drop an access leaves one with either flag alone, which is what it does for
+    /// [`Flags::VOLATILE`] as well. See [`Flags::KEEP`].
+    pub const SEG_FS: Self = Self(1 << 16);
+    /// The same for `%gs` and `__seg_gs`, which is the one the Linux percpu accessors use.
+    pub const SEG_GS: Self = Self(1 << 17);
+
+    /// Every flag that tells the optimizer to leave an access exactly where it is.
+    pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
+
     /// Every fast-math flag, which is what `-ffast-math` sets on an expression.
     pub const FAST: Self = Self(
         Self::NNAN.0
@@ -164,7 +182,7 @@ impl Flags {
 
     /// The underlying bits, for the printer and for hashing an instruction.
     #[must_use]
-    pub const fn bits(self) -> u16 {
+    pub const fn bits(self) -> u32 {
         self.0
     }
 
@@ -178,6 +196,12 @@ impl Flags {
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// Whether any flag in `other` is set here.
+    #[must_use]
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
     }
 
     /// Both sets.
@@ -219,17 +243,17 @@ impl Flags {
             | Opcode::FNeg
             | Opcode::Fma
             | Opcode::FCmp => Self::FAST,
-            Opcode::Load | Opcode::Store | Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => {
-                Self::VOLATILE
-            }
+            Opcode::Load | Opcode::Store => Self::KEEP,
+            Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => Self::VOLATILE,
             // On the ordered accesses as well. `volatile _Atomic int x;` is a type C allows and
             // the two words say different things: the ordering is what other threads see and the
             // qualifier is what the compiler may leave out, so an object can want both and an
             // access to one carries both.
             Opcode::AtomicLoad | Opcode::AtomicStore | Opcode::Cmpxchg | Opcode::AtomicRmw => {
-                Self::VOLATILE
+                Self::KEEP
             }
-            Opcode::InlineAsm => Self::VOLATILE,
+            // The address space on an `asm` is the one its operands in memory are in.
+            Opcode::InlineAsm => Self::KEEP,
             // On all three spellings of a call, including the indirect one. Nothing works out
             // `nofree` for a call through an address today, and the flag is legal there because
             // what it says is about the functions the call reaches rather than about how the call
@@ -316,6 +340,8 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::HANDED, "handed"),
     (Flags::HEAP, "heap"),
     (Flags::ALIGNED, "aligned"),
+    (Flags::SEG_FS, "seg_fs"),
+    (Flags::SEG_GS, "seg_gs"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -684,8 +710,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_flag_set_is_two_bytes() {
-        assert_eq!(size_of::<Flags>(), 2);
+    fn a_flag_set_is_four_bytes() {
+        assert_eq!(size_of::<Flags>(), 4);
     }
 
     #[test]
@@ -700,7 +726,7 @@ mod tests {
 
     #[test]
     fn no_two_flags_share_a_bit() {
-        let mut seen = 0u16;
+        let mut seen = 0u32;
         for &(flag, name) in NAMED {
             assert_eq!(flag.bits().count_ones(), 1, "{name} is not one bit");
             assert_eq!(seen & flag.bits(), 0, "{name} shares a bit");

@@ -661,6 +661,9 @@ impl Checker<'_> {
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
         let named = item.asm_label.is_some();
         let (linkage, duration) = self.placement(&specs, kind, name, named, span);
+        if duration == StorageDuration::Automatic {
+            self.check_space(ty, Some(name), span, "auto variable");
+        }
         let state = self.definition_state(&specs, kind, item.init.is_some());
         self.check_initializer_placement(&specs, item.init.is_some(), name, span);
         self.check_specifiers(&specs, kind, name, span);

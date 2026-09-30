@@ -671,6 +671,12 @@ impl<'a> Printer<'a> {
         if quals.has(Quals::ATOMIC) {
             self.token("_Atomic");
         }
+        if quals.has(Quals::SEG_FS) {
+            self.token("__seg_fs");
+        }
+        if quals.has(Quals::SEG_GS) {
+            self.token("__seg_gs");
+        }
     }
 
     /// What type a declaration named.

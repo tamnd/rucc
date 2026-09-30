@@ -527,7 +527,7 @@ fn add_access(func: &Func, entry: Block, escapes: &Escapes, summary: &mut Summar
     // as one, a callee that reads a `volatile` looks like it only reads, and `licm` moves the call
     // out of the loop and makes it once (#2241). This is the line [`crate::purity`] draws, and a
     // callee that crosses it did everything.
-    if data.flags.contains(Flags::VOLATILE)
+    if data.flags.intersects(Flags::KEEP)
         || matches!(data.extra, Extra::Mem(mem) if func[mem].order != MemOrder::NotAtomic)
     {
         summary.touch_everything();
