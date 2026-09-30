@@ -2342,7 +2342,11 @@ impl Checker<'_> {
             );
             return true;
         }
-        if is_function(&self.types, ty) || is_complete(&self.types, ty) {
+        // An array whose size is not known yet is fine too, because it is not read: it decays to
+        // a pointer to its first element. i915 keeps its DMI tables as `const struct
+        // dmi_system_id (*)[]` and hands `*list` to a function that takes a pointer.
+        if is_function(&self.types, ty) || is_complete(&self.types, ty) || is_array(&self.types, ty)
+        {
             return true;
         }
         let ty = self.spell(ty);
