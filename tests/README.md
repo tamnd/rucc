@@ -14,6 +14,8 @@ tests/
   abi-signatures/  one generated program whose two halves are compiled separately      M6.5
   link-lines/  the recorded cross linker command line, one file per target             M7
   exec/        programs with a known exit status or output, run on every target        M3
+  litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on
+               AArch64 hardware                                                        PG4
   corpus/      checkouts and build recipes for the target ladder projects              M5
   fuzz/        cargo-fuzz targets against the driver, the parser and the IR            M3
 ```
@@ -106,3 +108,13 @@ The comments that are not directives are prose, and every case has some. A progr
 Run it with `cargo xtask safety`. The programs are x86-64 Linux ones because that is the only back end, so on an x86-64 Linux machine they run directly and anywhere else they run in a container, which is one `docker run` for the whole suite. This is not part of `cargo xtask ci`: a developer on an arm mac should not need a container running to check their work, and CI runs it as its own job on a machine where it costs nothing.
 
 The cases declare `malloc` and `free` themselves rather than including a header, because rucc has no built-in system include directories and a case that included one would be testing whichever headers the machine happened to have.
+
+## litmus
+
+Programs that run the barriers and atomics PostgreSQL is built on a few million times each, on several threads at once, and fail when an outcome the memory model forbids ever shows up. `tests/litmus/run.sh <rucc> [cc]` builds every one by rucc at `-O0` and `-O2` and by the system compiler as a control, and on AArch64 Linux by gcc once more with `-mno-outline-atomics`, which inlines the same exclusive loops rucc writes.
+
+`pg_atomics.h` is the part of PostgreSQL 18's `atomics.h`, `generic-gcc.h` and `s_lock.h` that gcc on AArch64 ends up using, under PostgreSQL's license. `litmus.h` is the harness. `sb.c`, `mp.c` and `lb.c` are store buffering, message passing and load buffering, with each barrier and ordered access in turn. `lock.c` is the spinlock and the flag guarding plain data, `counters.c` is compare and exchange and fetch and add counters at every width, and `postgres.c` is an LWLock's state word and a latch's lost wakeup.
+
+Each shape also runs once with no barrier at all, where the forbidden outcome is allowed, and how often it happened is printed. A machine or a harness that never shows it there cannot show a missing barrier either. `LITMUS_ITERATIONS` and `LITMUS_SECONDS` bound each test, two million iterations or one second by default.
+
+An emulator is no use for these, since the emulated machine is only as weak as its host, so CI runs them on an `ubuntu-24.04-arm` runner and on the macOS arm64 one.
