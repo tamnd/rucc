@@ -167,3 +167,32 @@ fn a_packed_enumeration_is_as_small_as_its_values_allow() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// `DEFINE_RATELIMIT_STATE` fills the lock of a `static` inside a function with a compound
+/// literal, and gcc takes that as a constant when everything in the literal is one. Its address
+/// is still not a constant, and a literal that reads a parameter is still refused.
+#[test]
+fn a_literal_in_a_block_is_a_constant_value_for_a_static_object() {
+    let target = "--target=x86_64-unknown-linux-gnu";
+    let source = "typedef struct { int v; void *owner; const char *name; } lock_t;\n\
+        struct rs { lock_t lock; int interval; };\n\
+        int f(void) {\n\
+            static struct rs l = { .lock = (lock_t) { .owner = ((void *)-1L), .name = \"l\" } };\n\
+            return l.interval;\n\
+        }\n";
+    let out = run(&[target, "-Werror", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    for refused in [
+        "int *g(void) { static int *p = &(int){ 1 }; return p; }\n",
+        "struct s { int v; };\n\
+         struct t { struct s s; };\n\
+         int h(int x) { static struct t t = { (struct s){ x } }; return t.s.v; }\n",
+    ] {
+        let out = run(&[target, "-c", "-o", "/dev/null"], refused);
+        assert!(!out.status.success(), "{refused}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("initializer element is not constant")
+        );
+    }
+}
