@@ -317,12 +317,13 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
     // The instruction here is one nothing in the compiler writes and nothing in the encoder has a
     // row for, which is a set that shrinks every time a hand written file needs another one. It was
     // `bswap` until tamnd/rucc#1329 gave that one bytes and a population count until
-    // tamnd/rucc#2003 did the same, and it is a round of AES now.
+    // tamnd/rucc#2003 did the same, and a round of AES until the kernel's crypto code needed one.
+    // It is a VNNI dot product now, which nothing the kernel builds writes.
     let dir = dir("unwritten");
-    write(&dir, "hot.s", "\t.text\n\t.globl go\ngo:\n\taesenc %xmm1, %xmm0\n\tret\n");
+    write(&dir, "hot.s", "\t.text\n\t.globl go\ngo:\n\tvpdpbusd %zmm1, %zmm2, %zmm3\n\tret\n");
     let (ok, said) = run(&dir, &["-c", "hot.s"]);
     assert!(!ok, "an instruction with no bytes behind it was accepted:\n{said}");
-    assert!(said.contains("aesenc"), "the message does not name the instruction:\n{said}");
+    assert!(said.contains("vpdpbusd"), "the message does not name the instruction:\n{said}");
     assert!(said.contains("hot.s:4"), "the message does not carry the line:\n{said}");
     assert!(!dir.join("hot.o").exists(), "a half-written object was left behind");
 }

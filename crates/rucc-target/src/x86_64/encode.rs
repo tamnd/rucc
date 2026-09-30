@@ -370,8 +370,7 @@ pub enum Map {
     /// What `0F 38` means, which is where the bit manipulation instructions are.
     Escape38,
     /// What `0F 3A` means, which is where the ones carrying an immediate that selects something
-    /// are. Nothing here is in it yet and it is written down because the field has three values
-    /// and a reader should not have to wonder what the third is.
+    /// are.
     Escape3A,
 }
 
@@ -409,12 +408,12 @@ pub struct Vex {
     /// no operand at all is fifteen, which is what a row with nothing to put here says by leaving
     /// this [`None`].
     pub vvvv: Option<u8>,
-    /// Whether the instruction works on the wide half of a vector register, which is the `L` bit.
+    /// Whether the instruction works on the wide half of a vector register, which is the `L` bit,
+    /// whatever registers it names.
     ///
-    /// False for everything here, because an instruction over general purpose registers has no
-    /// wide half and the manual writes `LZ` for exactly that. It is a field rather than a constant
-    /// because the bit is in the prefix either way and a row that wanted it should be able to say
-    /// so rather than the encoder having to grow a second path.
+    /// Only `vzeroall` sets it. An instruction over general purpose registers has no wide half and
+    /// the manual writes `LZ` for exactly that, and a vector row is set by the registers it names,
+    /// a `ymm` anywhere making it the wide instruction.
     pub long: bool,
 }
 
@@ -681,6 +680,35 @@ const fn vexed(
     }
 }
 
+/// One row for an AVX or AVX2 instruction, which is VEX encoded and has no EVEX form.
+///
+/// The length is not on the row, because the same row is an `xmm` and a `ymm` instruction and
+/// which is the one bit of the prefix the registers named decide. An instruction whose first
+/// argument is an immediate carries it as one byte, as for [`evex`].
+const fn avx(
+    mnemonic: &'static str,
+    args: &'static [Kind],
+    size: Size,
+    map: Map,
+    opcode: &'static [u8],
+    vvvv: Option<u8>,
+    fields: Fields,
+) -> Encoding {
+    let imm = matches!(args.first(), Some(Kind::Imm));
+    Encoding {
+        mnemonic,
+        args,
+        fits: if imm { Fits::Byte } else { Fits::Any },
+        size,
+        opcode,
+        fields,
+        imm: if imm { ImmSize::Ib } else { NO_IMM },
+        wait: false,
+        vex: Some(Vex { map, vvvv, long: false }),
+        evex: None,
+    }
+}
+
 /// One row for an EVEX encoded instruction.
 ///
 /// The size is only the mandatory prefix, since the wide bit is on the [`Evex`]. An instruction
@@ -738,6 +766,7 @@ static IR: [Kind; 2] = [Kind::Imm, Kind::Reg];
 static IRR: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Reg];
 static IMR: [Kind; 3] = [Kind::Imm, Kind::Mem, Kind::Reg];
 static RRR: [Kind; 3] = [Kind::Reg, Kind::Reg, Kind::Reg];
+static MRR: [Kind; 3] = [Kind::Mem, Kind::Reg, Kind::Reg];
 static MR: [Kind; 2] = [Kind::Mem, Kind::Reg];
 static IM: [Kind; 2] = [Kind::Imm, Kind::Mem];
 static RM: [Kind; 2] = [Kind::Reg, Kind::Mem];
@@ -767,6 +796,7 @@ static VVV: [Kind; 3] = [Kind::Vec, Kind::Vec, Kind::Vec];
 static MVV: [Kind; 3] = [Kind::Mem, Kind::Vec, Kind::Vec];
 static IVVV: [Kind; 4] = [Kind::Imm, Kind::Vec, Kind::Vec, Kind::Vec];
 static IMVV: [Kind; 4] = [Kind::Imm, Kind::Mem, Kind::Vec, Kind::Vec];
+static IRVV: [Kind; 4] = [Kind::Imm, Kind::Reg, Kind::Vec, Kind::Vec];
 /// A general purpose register and a mask register, in the two directions `kmovq` goes.
 static RK: [Kind; 2] = [Kind::Reg, Kind::Mask];
 static KR: [Kind; 2] = [Kind::Mask, Kind::Reg];
@@ -2680,6 +2710,21 @@ static ENCODINGS: &[Encoding] = &[
     bytes("pshufb", &MV, Word, &[0x0F, 0x38, 0x00], pair(0, 1), NO_IMM),
     bytes("palignr", &IVV, Word, &[0x0F, 0x3A, 0x0F], pair(1, 2), ImmSize::Ib),
     bytes("palignr", &IMV, Word, &[0x0F, 0x3A, 0x0F], pair(1, 2), ImmSize::Ib),
+    // AES-NI and carry-less multiplication, which the kernel's crypto code is written in.
+    bytes("aesenc", &VV, Word, &[0x0F, 0x38, 0xDC], pair(0, 1), NO_IMM),
+    bytes("aesenc", &MV, Word, &[0x0F, 0x38, 0xDC], pair(0, 1), NO_IMM),
+    bytes("aesenclast", &VV, Word, &[0x0F, 0x38, 0xDD], pair(0, 1), NO_IMM),
+    bytes("aesenclast", &MV, Word, &[0x0F, 0x38, 0xDD], pair(0, 1), NO_IMM),
+    bytes("aesdec", &VV, Word, &[0x0F, 0x38, 0xDE], pair(0, 1), NO_IMM),
+    bytes("aesdec", &MV, Word, &[0x0F, 0x38, 0xDE], pair(0, 1), NO_IMM),
+    bytes("aesdeclast", &VV, Word, &[0x0F, 0x38, 0xDF], pair(0, 1), NO_IMM),
+    bytes("aesdeclast", &MV, Word, &[0x0F, 0x38, 0xDF], pair(0, 1), NO_IMM),
+    bytes("aesimc", &VV, Word, &[0x0F, 0x38, 0xDB], pair(0, 1), NO_IMM),
+    bytes("aesimc", &MV, Word, &[0x0F, 0x38, 0xDB], pair(0, 1), NO_IMM),
+    bytes("aeskeygenassist", &IVV, Word, &[0x0F, 0x3A, 0xDF], pair(1, 2), ImmSize::Ib),
+    bytes("aeskeygenassist", &IMV, Word, &[0x0F, 0x3A, 0xDF], pair(1, 2), ImmSize::Ib),
+    bytes("pclmulqdq", &IVV, Word, &[0x0F, 0x3A, 0x44], pair(1, 2), ImmSize::Ib),
+    bytes("pclmulqdq", &IMV, Word, &[0x0F, 0x3A, 0x44], pair(1, 2), ImmSize::Ib),
     // SSE4.1 lanes in and out. The general register or the address is always the one in the low
     // bits of the addressing byte, so for an extract that is the destination.
     bytes("pinsrb", &IRV, Word, &[0x0F, 0x3A, 0x20], pair(1, 2), ImmSize::Ib),
@@ -3128,6 +3173,132 @@ static ENCODINGS: &[Encoding] = &[
     // The mask registers are VEX encoded, since moving one needs nothing EVEX adds.
     vexed("kmovq", &RK, DoubleQuad, &[0x92], pair(0, 1)),
     vexed("kmovq", &KR, DoubleQuad, &[0x93], pair(0, 1)),
+    // AVX and AVX2, which have no EVEX form and are written with a VEX prefix whose one length
+    // bit the registers named decide. Each size is the mandatory prefix, and the ones with a wide
+    // bit say so the way a legacy row does.
+    avx("vpxor", &VVV, Word, Map::Escape, &[0xEF], Some(1), pair(0, 2)),
+    avx("vpxor", &MVV, Word, Map::Escape, &[0xEF], Some(1), pair(0, 2)),
+    avx("vpor", &VVV, Word, Map::Escape, &[0xEB], Some(1), pair(0, 2)),
+    avx("vpor", &MVV, Word, Map::Escape, &[0xEB], Some(1), pair(0, 2)),
+    avx("vpand", &VVV, Word, Map::Escape, &[0xDB], Some(1), pair(0, 2)),
+    avx("vpand", &MVV, Word, Map::Escape, &[0xDB], Some(1), pair(0, 2)),
+    avx("vpandn", &VVV, Word, Map::Escape, &[0xDF], Some(1), pair(0, 2)),
+    avx("vpandn", &MVV, Word, Map::Escape, &[0xDF], Some(1), pair(0, 2)),
+    avx("vpaddb", &VVV, Word, Map::Escape, &[0xFC], Some(1), pair(0, 2)),
+    avx("vpaddb", &MVV, Word, Map::Escape, &[0xFC], Some(1), pair(0, 2)),
+    avx("vpaddd", &VVV, Word, Map::Escape, &[0xFE], Some(1), pair(0, 2)),
+    avx("vpaddd", &MVV, Word, Map::Escape, &[0xFE], Some(1), pair(0, 2)),
+    avx("vpsubd", &VVV, Word, Map::Escape, &[0xFA], Some(1), pair(0, 2)),
+    avx("vpsubd", &MVV, Word, Map::Escape, &[0xFA], Some(1), pair(0, 2)),
+    avx("vpsubq", &VVV, Word, Map::Escape, &[0xFB], Some(1), pair(0, 2)),
+    avx("vpsubq", &MVV, Word, Map::Escape, &[0xFB], Some(1), pair(0, 2)),
+    avx("vpmuludq", &VVV, Word, Map::Escape, &[0xF4], Some(1), pair(0, 2)),
+    avx("vpmuludq", &MVV, Word, Map::Escape, &[0xF4], Some(1), pair(0, 2)),
+    avx("vpcmpeqd", &VVV, Word, Map::Escape, &[0x76], Some(1), pair(0, 2)),
+    avx("vpcmpeqd", &MVV, Word, Map::Escape, &[0x76], Some(1), pair(0, 2)),
+    avx("vpcmpgtb", &VVV, Word, Map::Escape, &[0x64], Some(1), pair(0, 2)),
+    avx("vpcmpgtb", &MVV, Word, Map::Escape, &[0x64], Some(1), pair(0, 2)),
+    avx("vpunpckhdq", &VVV, Word, Map::Escape, &[0x6A], Some(1), pair(0, 2)),
+    avx("vpunpckhdq", &MVV, Word, Map::Escape, &[0x6A], Some(1), pair(0, 2)),
+    avx("vpunpckldq", &VVV, Word, Map::Escape, &[0x62], Some(1), pair(0, 2)),
+    avx("vpunpckldq", &MVV, Word, Map::Escape, &[0x62], Some(1), pair(0, 2)),
+    avx("vpunpckhqdq", &VVV, Word, Map::Escape, &[0x6D], Some(1), pair(0, 2)),
+    avx("vpunpckhqdq", &MVV, Word, Map::Escape, &[0x6D], Some(1), pair(0, 2)),
+    avx("vpunpcklqdq", &VVV, Word, Map::Escape, &[0x6C], Some(1), pair(0, 2)),
+    avx("vpunpcklqdq", &MVV, Word, Map::Escape, &[0x6C], Some(1), pair(0, 2)),
+    avx("vpslld", &VVV, Word, Map::Escape, &[0xF2], Some(1), pair(0, 2)),
+    avx("vpslld", &MVV, Word, Map::Escape, &[0xF2], Some(1), pair(0, 2)),
+    avx("vpsrld", &VVV, Word, Map::Escape, &[0xD2], Some(1), pair(0, 2)),
+    avx("vpsrld", &MVV, Word, Map::Escape, &[0xD2], Some(1), pair(0, 2)),
+    avx("vpsrad", &VVV, Word, Map::Escape, &[0xE2], Some(1), pair(0, 2)),
+    avx("vpsrad", &MVV, Word, Map::Escape, &[0xE2], Some(1), pair(0, 2)),
+    avx("vpsllq", &VVV, Word, Map::Escape, &[0xF3], Some(1), pair(0, 2)),
+    avx("vpsllq", &MVV, Word, Map::Escape, &[0xF3], Some(1), pair(0, 2)),
+    avx("vpsrlq", &VVV, Word, Map::Escape, &[0xD3], Some(1), pair(0, 2)),
+    avx("vpsrlq", &MVV, Word, Map::Escape, &[0xD3], Some(1), pair(0, 2)),
+    avx("vpshufb", &VVV, Word, Map::Escape38, &[0x00], Some(1), pair(0, 2)),
+    avx("vpshufb", &MVV, Word, Map::Escape38, &[0x00], Some(1), pair(0, 2)),
+    avx("vpcmpeqq", &VVV, Word, Map::Escape38, &[0x29], Some(1), pair(0, 2)),
+    avx("vpcmpeqq", &MVV, Word, Map::Escape38, &[0x29], Some(1), pair(0, 2)),
+    avx("vaesenc", &VVV, Word, Map::Escape38, &[0xDC], Some(1), pair(0, 2)),
+    avx("vaesenc", &MVV, Word, Map::Escape38, &[0xDC], Some(1), pair(0, 2)),
+    avx("vaesenclast", &VVV, Word, Map::Escape38, &[0xDD], Some(1), pair(0, 2)),
+    avx("vaesenclast", &MVV, Word, Map::Escape38, &[0xDD], Some(1), pair(0, 2)),
+    avx("vaesdec", &VVV, Word, Map::Escape38, &[0xDE], Some(1), pair(0, 2)),
+    avx("vaesdec", &MVV, Word, Map::Escape38, &[0xDE], Some(1), pair(0, 2)),
+    avx("vaesdeclast", &VVV, Word, Map::Escape38, &[0xDF], Some(1), pair(0, 2)),
+    avx("vaesdeclast", &MVV, Word, Map::Escape38, &[0xDF], Some(1), pair(0, 2)),
+    avx("vpabsb", &VV, Word, Map::Escape38, &[0x1C], None, pair(0, 1)),
+    avx("vpabsb", &MV, Word, Map::Escape38, &[0x1C], None, pair(0, 1)),
+    avx("vptest", &VV, Word, Map::Escape38, &[0x17], None, pair(0, 1)),
+    avx("vptest", &MV, Word, Map::Escape38, &[0x17], None, pair(0, 1)),
+    avx("vpbroadcastd", &VV, Word, Map::Escape38, &[0x58], None, pair(0, 1)),
+    avx("vpbroadcastd", &MV, Word, Map::Escape38, &[0x58], None, pair(0, 1)),
+    avx("vpbroadcastq", &VV, Word, Map::Escape38, &[0x59], None, pair(0, 1)),
+    avx("vpbroadcastq", &MV, Word, Map::Escape38, &[0x59], None, pair(0, 1)),
+    avx("vbroadcastss", &VV, Word, Map::Escape38, &[0x18], None, pair(0, 1)),
+    avx("vbroadcastss", &MV, Word, Map::Escape38, &[0x18], None, pair(0, 1)),
+    avx("vaesimc", &VV, Word, Map::Escape38, &[0xDB], None, pair(0, 1)),
+    avx("vaesimc", &MV, Word, Map::Escape38, &[0xDB], None, pair(0, 1)),
+    avx("vbroadcasti128", &MV, Word, Map::Escape38, &[0x5A], None, pair(0, 1)),
+    avx("vpbroadcastb", &VV, Word, Map::Escape38, &[0x78], None, pair(0, 1)),
+    avx("vpbroadcastb", &MV, Word, Map::Escape38, &[0x78], None, pair(0, 1)),
+    // The low eight bytes of a vector, which reads one way and stores another.
+    avx("vmovq", &VV, Single, Map::Escape, &[0x7E], None, pair(0, 1)),
+    avx("vmovq", &MV, Single, Map::Escape, &[0x7E], None, pair(0, 1)),
+    avx("vmovq", &VM, Word, Map::Escape, &[0xD6], None, pair(1, 0)),
+    avx("vmovdqu", &VV, Single, Map::Escape, &[0x6F], None, pair(0, 1)),
+    avx("vmovdqu", &MV, Single, Map::Escape, &[0x6F], None, pair(0, 1)),
+    avx("vmovdqu", &VM, Single, Map::Escape, &[0x7F], None, pair(1, 0)),
+    avx("vmovdqa", &VV, Word, Map::Escape, &[0x6F], None, pair(0, 1)),
+    avx("vmovdqa", &MV, Word, Map::Escape, &[0x6F], None, pair(0, 1)),
+    avx("vmovdqa", &VM, Word, Map::Escape, &[0x7F], None, pair(1, 0)),
+    avx("vmovups", &VV, Long, Map::Escape, &[0x10], None, pair(0, 1)),
+    avx("vmovups", &MV, Long, Map::Escape, &[0x10], None, pair(0, 1)),
+    avx("vmovups", &VM, Long, Map::Escape, &[0x11], None, pair(1, 0)),
+    avx("vmovd", &RV, Word, Map::Escape, &[0x6E], None, pair(0, 1)),
+    avx("vmovd", &MV, Word, Map::Escape, &[0x6E], None, pair(0, 1)),
+    avx("vmovd", &VR, Word, Map::Escape, &[0x7E], None, pair(1, 0)),
+    avx("vmovd", &VM, Word, Map::Escape, &[0x7E], None, pair(1, 0)),
+    avx("vpalignr", &IVVV, Word, Map::Escape3A, &[0x0F], Some(2), pair(1, 3)),
+    avx("vpalignr", &IMVV, Word, Map::Escape3A, &[0x0F], Some(2), pair(1, 3)),
+    avx("vpblendd", &IVVV, Word, Map::Escape3A, &[0x02], Some(2), pair(1, 3)),
+    avx("vpblendd", &IMVV, Word, Map::Escape3A, &[0x02], Some(2), pair(1, 3)),
+    avx("vinserti128", &IVVV, Word, Map::Escape3A, &[0x38], Some(2), pair(1, 3)),
+    avx("vinserti128", &IMVV, Word, Map::Escape3A, &[0x38], Some(2), pair(1, 3)),
+    avx("vinsertf128", &IVVV, Word, Map::Escape3A, &[0x18], Some(2), pair(1, 3)),
+    avx("vinsertf128", &IMVV, Word, Map::Escape3A, &[0x18], Some(2), pair(1, 3)),
+    avx("vperm2i128", &IVVV, Word, Map::Escape3A, &[0x46], Some(2), pair(1, 3)),
+    avx("vperm2i128", &IMVV, Word, Map::Escape3A, &[0x46], Some(2), pair(1, 3)),
+    avx("vperm2f128", &IVVV, Word, Map::Escape3A, &[0x06], Some(2), pair(1, 3)),
+    avx("vperm2f128", &IMVV, Word, Map::Escape3A, &[0x06], Some(2), pair(1, 3)),
+    avx("vpslld", &IVV, Word, Map::Escape, &[0x72], Some(2), ext(1, 6)),
+    avx("vpsrld", &IVV, Word, Map::Escape, &[0x72], Some(2), ext(1, 2)),
+    avx("vpsrad", &IVV, Word, Map::Escape, &[0x72], Some(2), ext(1, 4)),
+    avx("vpsllq", &IVV, Word, Map::Escape, &[0x73], Some(2), ext(1, 6)),
+    avx("vpsrlq", &IVV, Word, Map::Escape, &[0x73], Some(2), ext(1, 2)),
+    avx("vpslldq", &IVV, Word, Map::Escape, &[0x73], Some(2), ext(1, 7)),
+    avx("vpsrldq", &IVV, Word, Map::Escape, &[0x73], Some(2), ext(1, 3)),
+    avx("vextracti128", &IVV, Word, Map::Escape3A, &[0x39], None, pair(2, 1)),
+    avx("vextracti128", &IVM, Word, Map::Escape3A, &[0x39], None, pair(2, 1)),
+    avx("vpextrq", &IVR, WordQuad, Map::Escape3A, &[0x16], None, pair(2, 1)),
+    avx("vpextrq", &IVM, WordQuad, Map::Escape3A, &[0x16], None, pair(2, 1)),
+    avx("vpinsrq", &IRVV, WordQuad, Map::Escape3A, &[0x22], Some(2), pair(1, 3)),
+    avx("vpinsrq", &IMVV, WordQuad, Map::Escape3A, &[0x22], Some(2), pair(1, 3)),
+    avx("vzeroupper", &NO_ARGS, Long, Map::Escape, &[0x77], None, NO_MODRM),
+    Encoding {
+        vex: Some(Vex { map: Map::Escape, vvvv: None, long: true }),
+        ..avx("vzeroall", &NO_ARGS, Long, Map::Escape, &[0x77], None, NO_MODRM)
+    },
+    // BMI2's rotate that leaves the flags alone, and BMI's and-not, both VEX encoded.
+    avx("rorxl", &IRR, Double, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("rorxl", &IMR, Double, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("rorxq", &IRR, DoubleQuad, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("rorxq", &IMR, DoubleQuad, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("andnl", &RRR, Long, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
+    avx("andnl", &MRR, Long, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
+    avx("andnq", &RRR, Quad, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
+    avx("andnq", &MRR, Quad, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
 ];
 
 /// The rows only thirty two bit mode has, which are looked at in front of the shared table there
@@ -3416,6 +3587,12 @@ pub enum Error {
         /// The mnemonic that was asked for.
         mnemonic: String,
     },
+    /// A `zmm` register, or a vector register numbered sixteen or above, on an instruction this
+    /// encoder only has a VEX form of. Only an EVEX prefix has the bits to name either.
+    Vex {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -3445,6 +3622,11 @@ impl fmt::Display for Error {
             Error::Relative { mnemonic } => write!(
                 f,
                 "{mnemonic} has an address counted from the instruction, which 32 bit mode lacks"
+            ),
+            Error::Vex { mnemonic } => write!(
+                f,
+                "{mnemonic} is only written here with a VEX prefix, which cannot name a zmm \
+                 register or one numbered 16 or above"
             ),
         }
     }
@@ -3554,6 +3736,7 @@ pub fn encode_masked_in(
             Error::Unwritten { mnemonic: mnemonic.to_owned(), args }
         });
     };
+    let row = flipped(mode, row, values).unwrap_or(row);
     if mask != Opmask::default() && row.evex.is_none() {
         return Err(Error::Mask { mnemonic: mnemonic.to_owned() });
     }
@@ -3574,8 +3757,31 @@ pub fn encode_masked_in(
     };
     if let Some(evex) = row.evex {
         writer.choose(evex, mask);
+    } else if row.vex.is_some() {
+        writer.measure()?;
     }
     writer.write(out, imm, mask)
+}
+
+/// The store form of a VEX move between two vector registers, when gas would write that one.
+///
+/// A move between two registers can be written with either opcode, the load with the source
+/// beside the addressing byte or the store with it in the addressing byte. gas takes the store
+/// when the source is numbered eight or above and the destination is not, since then the high
+/// register is the one beside the addressing byte, and the two byte prefix has a bit for that one
+/// and not for the other. The bytes have to match what gas writes.
+fn flipped(mode: Mode, row: &Encoding, values: &[Value]) -> Option<&'static Encoding> {
+    let number = |value: &Value| match *value {
+        Value::Xmm(reg) => Some(reg.number()),
+        Value::Vector(number, _) => Some(number),
+        _ => None,
+    };
+    let [from, to] = values else { return None };
+    let high = number(from)? >= 8 && number(to)? < 8;
+    if !high || row.evex.is_some() || row.vex.is_none_or(|vex| vex.map != Map::Escape) {
+        return None;
+    }
+    rows_in(mode, row.mnemonic, &VM).find(|store| store.vex.is_some())
 }
 
 /// One instruction being written out.
@@ -3604,6 +3810,22 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
+    /// The length a VEX row works at, which is the widest vector register it names.
+    ///
+    /// The prefix has one bit for it, so an `xmm` and a `ymm` are all it can say, and it has no
+    /// fifth bit for a register number either. Either of those needs EVEX, which this row is not.
+    fn measure(&mut self) -> Result<(), Error> {
+        for value in self.values {
+            if let Value::Vector(number, length) = *value {
+                if number >= 16 || length == Length::Zmm {
+                    return Err(Error::Vex { mnemonic: self.row.mnemonic.to_owned() });
+                }
+                self.length = self.length.max(length);
+            }
+        }
+        Ok(())
+    }
+
     /// Whether a row that is EVEX encoded is written that way or in its VEX form.
     ///
     /// The VEX form is what gas writes whenever the row has one and nothing needs EVEX, which is a
@@ -3660,7 +3882,9 @@ impl Writer<'_> {
             Some(evex) if self.evex.is_none() => evex.vex.map(|wide| {
                 (Vex { map: evex.map, vvvv: evex.vvvv, long: self.length == Length::Ymm }, wide)
             }),
-            _ => self.row.vex.map(|vex| (vex, self.row.size.wide())),
+            _ => self.row.vex.map(|vex| {
+                (Vex { long: vex.long || self.length == Length::Ymm, ..vex }, self.row.size.wide())
+            }),
         };
         if let Some(evex) = self.evex {
             if let Some(prefix) = self.segment() {
@@ -3856,9 +4080,11 @@ impl Writer<'_> {
                 Ok(number & 7)
             }
             // The same on a row that is EVEX encoded, with a fifth bit that only the EVEX prefix
-            // has room for. A row that is not has nowhere to say a length either.
+            // has room for, and on a VEX row, which says the length in its own bit and has been
+            // through `measure`. A legacy row has nowhere to say a length at all.
             Some(&Value::Vector(number, _))
-                if self.row.evex.is_some() && (number < 16 || self.evex.is_some()) =>
+                if (self.row.evex.is_some() && (number < 16 || self.evex.is_some()))
+                    || (self.row.vex.is_some() && number < 16) =>
             {
                 if self.mode == Mode::Bits32 && number >= 8 {
                     return Err(self.unnamed(number));
