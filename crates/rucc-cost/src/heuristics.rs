@@ -194,14 +194,16 @@ pub const PHIOPT_UNPREDICTABLE_MARGIN_PERCENT: u32 = 3;
 /// How much work the right operand of a `&&` or a `||` may be and still be folded into one branch,
 /// per section 22.5.
 ///
-/// Three, and it counts instructions in the IR rather than on the machine, which is why it is one
-/// more than [`PHIOPT_ARM_INSTRUCTIONS`] rather than the same number. The shape this is for is a
-/// comparison against a constant, and that is two instructions here and one on the machine, because
-/// the constant becomes the comparison's immediate and stops being anything at all. Three leaves
-/// room for one operation under the comparison. A right operand of four or more is a computation
-/// rather than a test, and speculating a computation to save one branch is a trade in the wrong
-/// direction.
-pub const SHORT_CIRCUIT_INSTRUCTIONS: u32 = 3;
+/// Two, the same as [`PHIOPT_ARM_INSTRUCTIONS`], because the work is counted the same way: an
+/// integer constant is not counted, since it becomes the immediate of the instruction that reads
+/// it. The shape this is for is a comparison against a constant, which is one instruction, and two
+/// leaves room for one operation under the comparison. A right operand of three or more is a
+/// computation rather than a test, and speculating a computation to save one branch is a trade in
+/// the wrong direction.
+///
+/// It was three when constants were counted, which let `v + w < 9` through and not `(v & 1) == 0`,
+/// only because the second has two constants and the first has one (#735).
+pub const SHORT_CIRCUIT_INSTRUCTIONS: u32 = 2;
 
 /// How many scalar moves a block copy may expand to when optimizing for speed, per section 40.7.
 ///
@@ -725,7 +727,7 @@ pub const ALL: &[Constant] = &[
     },
     Constant {
         name: "SHORT_CIRCUIT_INSTRUCTIONS",
-        value: 3,
+        value: 2,
         unit: "instructions",
         document: "22.5",
         gcc: "LOGICAL_OP_NON_SHORT_CIRCUIT",

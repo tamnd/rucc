@@ -306,10 +306,10 @@ pub const TARGETS: &[TargetEntry] = &[
     },
     TargetEntry {
         tuple: "aarch64-windows-gnu",
-        tier: Tier::Recognized,
+        tier: Tier::SupportedWithEvidence,
         planned: Tier::SupportedWithEvidence,
         host: Host::Yes,
-        note: "",
+        note: "UCRT on Windows 11 on Arm, with rung 1 run natively on windows-11-arm",
     },
     TargetEntry {
         tuple: "aarch64-windows-msvc",

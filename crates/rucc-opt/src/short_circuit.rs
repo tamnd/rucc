@@ -78,11 +78,18 @@
 //! # The cost rule
 //!
 //! Work that moves up is work the other path now does for nothing, so there is a budget for it, and
-//! it is [`heuristics::SHORT_CIRCUIT_INSTRUCTIONS`]. A right operand that is one comparison against
-//! a constant is two instructions here and one on the machine, since the constant becomes the
-//! comparison's immediate and stops being anything at all, and that is the shape this is for. A
-//! right operand of ten instructions is a computation rather than a test, and speculating a
-//! computation to save one branch is a trade in the wrong direction.
+//! it is [`heuristics::SHORT_CIRCUIT_INSTRUCTIONS`]. The work is counted the way `phiopt` counts an
+//! arm, so an integer constant costs nothing, since it becomes the immediate of the instruction
+//! that reads it, and neither does a value the head already works out. A right operand that is one
+//! comparison against a constant is one instruction, and that is the shape this is for. The budget
+//! leaves room for one operation under the comparison, which is `(v & 1) == 0`. A right operand of
+//! ten instructions is a computation rather than a test, and speculating a computation to save one
+//! branch is a trade in the wrong direction.
+//!
+//! It used to count every instruction, constants included, against a budget of three. That let a
+//! comparison against a constant through with one operation under it only when the operation took
+//! no constant of its own, so `(v & 1) == 0` was four and kept its branch while `v + w < 9` was
+//! three and did not (#735). The two are the same amount of work on the machine.
 //!
 //! When there is no work in the arm at all, which is both operands worked out above the branch,
 //! nothing is speculated and the budget has nothing to price. Then the fold is one instruction
@@ -228,14 +235,23 @@ impl Pass for ShortCircuit {
                     stats.missed(reason);
                     continue 'heads;
                 }
-                let work: u32 = shape.arms.iter().flatten().map(|&arm| length(func, arm)).sum();
+                let whole: u32 = shape.arms.iter().flatten().map(|&arm| length(func, arm)).sum();
                 let composite =
                     crate::simplify::composite(func, plan.joined, shape.cond, plan.right);
                 // The arm has to hold the comparison and nothing else. Anything more is work being
                 // moved up, and the fold below takes the two comparisons away without saying a word
                 // about what fed them, so a collapse with an addition in the arm is the trade again
                 // and is priced as one.
-                let free = work <= 1 && composite.is_some();
+                let free = whole <= 1 && composite.is_some();
+                // What is priced is the work `phiopt` would price, so an integer constant and a
+                // value the head already has are not counted, and the two passes give one answer
+                // about how much an arm does.
+                let work: u32 = shape
+                    .arms
+                    .iter()
+                    .flatten()
+                    .map(|&arm| crate::phiopt::work(func, head, arm))
+                    .sum();
                 if !free {
                     if !self.speculates {
                         stats.missed(NOT_FREE);
@@ -849,6 +865,85 @@ mod tests {
         let stats = collapse(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 0);
         assert_eq!(stats.count(Kind::Missed, super::RIGHT_MAY_TRAP), 1);
+    }
+
+    /// `v < 250 && (v & 1) == 0`, the `predictable-left` shape from #735, with a hint of `parts`
+    /// of [`rucc_ir::Hint::SCALE`] on the edge into the arm when there is one.
+    fn masked(parts: Option<u32>) -> Func {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[int]));
+        let head = func.create_block();
+        let v = func.append_param(head, int);
+        let arm = func.create_block();
+        let join = func.create_block();
+        let bit = func.append_param(join, Type::I1);
+        let ends = [func.create_block(), func.create_block()];
+
+        let mut build = Builder::new(&mut func, head);
+        let bound = build.iconst(int, 250);
+        let test = build.icmp(IntPred::Slt, v, bound);
+        let already = build.iconst(Type::I1, 0);
+        build.br_if(test, arm, &[], join, &[already]);
+        let mut build = Builder::new(&mut func, arm);
+        let one = build.iconst(int, 1);
+        let low = build.binary(Opcode::And, v, one, Flags::NONE);
+        let zero = build.iconst(int, 0);
+        let even = build.icmp(IntPred::Eq, low, zero);
+        build.jump(join, &[even]);
+        let mut build = Builder::new(&mut func, join);
+        build.br_if(bit, ends[0], &[], ends[1], &[]);
+        for block in ends {
+            Builder::new(&mut func, block).ret(&[]);
+        }
+
+        if let Some(parts) = parts {
+            let term = func.terminator(head).expect("a branch");
+            let hint = rucc_ir::Hint::parts(parts);
+            for (at, hint) in func.target_list(term).iter().zip([hint, hint.complement()]) {
+                let call = func[at];
+                func.set_block_call(at, BlockCall { hint, ..call });
+            }
+        }
+        func
+    }
+
+    /// An and under the comparison is one operation, and the two constants are immediates, so the
+    /// right operand is inside the budget. It used to count four against three and keep its branch
+    /// on cost, before the odds were asked about at all (#735).
+    #[test]
+    fn a_masked_comparison_on_the_right_is_inside_the_budget() {
+        let mut func = masked(None);
+        let stats = collapse(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::TOO_MUCH_WORK), 0);
+        assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1);
+        assert_eq!(blocks(&func), vec![0, 3, 4]);
+    }
+
+    /// With the cost under the budget, the odds are what decides. A left operand hinted true 99 in
+    /// 100 either way round keeps its branch, because the machine will call it and the right
+    /// operand would be worked out for nothing on the rare path (#735).
+    #[test]
+    fn an_and_and_hinted_past_the_margin_keeps_its_branch() {
+        for parts in [9_900, 100] {
+            let mut func = masked(Some(parts));
+            let stats = collapse(&mut func);
+            assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 0, "{parts}");
+            assert_eq!(stats.count(Kind::Missed, super::BRANCH_IS_PREDICTED), 1, "{parts}");
+            assert_eq!(blocks(&func), vec![0, 1, 2, 3, 4], "{parts}");
+        }
+    }
+
+    /// A plain `__builtin_expect` claims 90, which is inside the margin `phiopt` measured in #1902,
+    /// and a hint at even says nothing. Both collapse.
+    #[test]
+    fn an_and_and_hinted_inside_the_margin_collapses() {
+        for parts in [9_000, 1_000, 5_000] {
+            let mut func = masked(Some(parts));
+            let stats = collapse(&mut func);
+            assert_eq!(stats.count(Kind::Optimized, super::COLLAPSED), 1, "{parts}");
+            assert_eq!(stats.count(Kind::Missed, super::BRANCH_IS_PREDICTED), 0, "{parts}");
+        }
     }
 
     #[test]

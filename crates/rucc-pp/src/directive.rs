@@ -3230,13 +3230,14 @@ mod tests {
 
     #[test]
     fn has_feature_and_has_extension_read_the_same_table() {
-        // The preprocessor features are the ones that are real today, so they are the ones
-        // that answer yes, and `__has_extension` answers yes wherever `__has_feature` does.
+        // `__has_extension` answers yes wherever `__has_feature` does, and also for a GNU
+        // extension, which `__has_feature` never names.
         assert_eq!(clean("#if __has_feature(pragma_once)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_extension(pragma_once)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_extension(include_next)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_feature(include_next)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_feature(statement_expressions)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_extension(statement_expressions)\nyes\n#endif\n"), "yes");
     }
 
     #[test]

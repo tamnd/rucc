@@ -83,9 +83,8 @@
 //! question: it needs no earlier instruction at all, so answering it here would mean answering it
 //! only where an earlier instruction happened to be.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir::{self as mir, Role};
 use rucc_target::{Compare, FlagInsts, MachineInsts, Reads, RegClass, Zeroing};
 
@@ -111,7 +110,7 @@ pub fn redundant(
     // Every name the rewrite could want, before the walk rather than inside it. The walk holds a
     // name it read out of the interner while it edits the function, and interning a new one there
     // would be the same interner borrowed twice.
-    let opcodes: HashMap<&str, mir::Opcode> = insts
+    let opcodes: Map<&str, mir::Opcode> = insts
         .compares
         .iter()
         .filter_map(|entry| entry.kept)
@@ -120,7 +119,7 @@ pub fn redundant(
     let names = &*names;
     let mut counts = changes::Reads::of(func);
     let mut gone = 0;
-    let mut seen = HashMap::new();
+    let mut seen = Map::default();
     for block in func.blocks().collect::<Vec<_>>() {
         let sequence: Vec<mir::Inst> = func.insts(block).collect();
         let mut left: Option<Left> = None;
@@ -366,7 +365,7 @@ fn picked(func: &mir::Func, inst: mir::Inst, role: Role) -> Vec<(u8, Place)> {
 /// that is asked rather than believed.
 fn took(
     func: &mut mir::Func,
-    opcodes: &HashMap<&str, mir::Opcode>,
+    opcodes: &Map<&str, mir::Opcode>,
     counts: &mut changes::Reads,
     machine: &MachineInsts,
     names: &Interner,

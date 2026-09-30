@@ -87,9 +87,8 @@
 //! where the call is built, by asking the ABI the same question a call in the program is asked, so
 //! everything above it goes on describing the call in halves and nothing above it names a target.
 
-use std::collections::{HashMap, HashSet};
-
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{
     Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred,
     MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
@@ -137,8 +136,7 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
     }
     let insts: Vec<Inst> =
         walk(func).into_iter().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
-    let order: HashMap<Inst, usize> =
-        insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
+    let order: Map<Inst, usize> = insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
     if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, conv, &order, at, inst)) {
         return false;
     }
@@ -147,8 +145,8 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
         return false;
     }
 
-    let mut halves: Halves = HashMap::new();
-    let mut forward: HashMap<Value, Value> = HashMap::new();
+    let mut halves: Halves = Map::default();
+    let mut forward: Map<Value, Value> = Map::default();
     let entry = func.entry();
     for block in func.blocks().collect::<Vec<_>>() {
         if Some(block) == entry {
@@ -185,7 +183,7 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
 /// refuse the function the way they always did.
 fn walk(func: &Func) -> Vec<Block> {
     let Some(entry) = func.entry() else { return func.blocks().collect() };
-    let mut seen: HashSet<Block> = HashSet::new();
+    let mut seen: Set<Block> = Set::default();
     let mut order: Vec<Block> = Vec::new();
     // A postorder without recursion: the second time a block comes off the stack every block below
     // it has been finished, so that is where it belongs in the postorder.
@@ -210,7 +208,7 @@ fn walk(func: &Func) -> Vec<Block> {
 }
 
 /// The two halves each wide value became, low first.
-type Halves = HashMap<Value, (Value, Value)>;
+type Halves = Map<Value, (Value, Value)>;
 
 /// The opcodes this pass knows how to split.
 ///
@@ -265,7 +263,7 @@ fn understood(opcode: Opcode) -> bool {
 fn can_split(
     func: &Func,
     conv: &CallRegs,
-    order: &HashMap<Inst, usize>,
+    order: &Map<Inst, usize>,
     at: usize,
     inst: Inst,
 ) -> bool {
@@ -539,7 +537,7 @@ fn planned(signature: &Signature, slots: &[Slot]) -> Signature {
 /// parameter's position is its identity to the branches that feed it and appending is the only way
 /// to add one. The narrow ones are made again as themselves and pointed at the copy, which costs
 /// nothing once the substitution below has run.
-fn params(func: &mut Func, block: Block, halves: &mut Halves, forward: &mut HashMap<Value, Value>) {
+fn params(func: &mut Func, block: Block, halves: &mut Halves, forward: &mut Map<Value, Value>) {
     let old: Vec<Value> = func[block].params.clone();
     if !old.iter().any(|&value| is_wide(func[value].ty)) {
         return;
@@ -563,13 +561,13 @@ fn arrive(
     block: Block,
     slots: &[Slot],
     halves: &mut Halves,
-    forward: &mut HashMap<Value, Value>,
+    forward: &mut Map<Value, Value>,
 ) {
     let old: Vec<Value> = func[block].params.clone();
     if !old.iter().any(|&value| is_wide(func[value].ty)) {
         return;
     }
-    let mut lows = HashMap::new();
+    let mut lows = Map::default();
     for &slot in slots {
         match slot {
             Slot::Whole(index) => {
@@ -597,7 +595,7 @@ fn rewrite(
     names: &mut Interner,
     conv: &CallRegs,
     halves: &mut Halves,
-    forward: &mut HashMap<Value, Value>,
+    forward: &mut Map<Value, Value>,
     inst: Inst,
 ) {
     // The runtime's routines are ordinary functions of the platform, whatever convention the
@@ -798,7 +796,7 @@ fn to_float(
     names: &mut Interner,
     abi: &'static AbiDescription,
     halves: &Halves,
-    forward: &mut HashMap<Value, Value>,
+    forward: &mut Map<Value, Value>,
     inst: Inst,
     signed: bool,
 ) {
@@ -1181,7 +1179,7 @@ fn bitwise(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
 /// equal and `a.lo >= b.lo` unsigned. Asking `a.hi >= b.hi` instead makes every value with a high
 /// half of its own greater than or equal to every other, which is the shape of this that a
 /// differential run against GCC caught.
-fn compare(func: &mut Func, halves: &Halves, forward: &mut HashMap<Value, Value>, inst: Inst) {
+fn compare(func: &mut Func, halves: &Halves, forward: &mut Map<Value, Value>, inst: Inst) {
     let Extra::IntPred(pred) = func[inst].extra else { return };
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
@@ -1252,7 +1250,7 @@ fn choose(func: &mut Func, halves: &mut Halves, inst: Inst) {
 /// Down to sixty four there is nothing left to do and the low half is the answer, so the truncation
 /// goes and its readers read the half. Down to anything narrower the machine's own truncation still
 /// happens, out of the half rather than out of the value that is no longer there.
-fn truncate(func: &mut Func, halves: &Halves, forward: &mut HashMap<Value, Value>, inst: Inst) {
+fn truncate(func: &mut Func, halves: &Halves, forward: &mut Map<Value, Value>, inst: Inst) {
     let Some(&arg) = func[func[inst].args].first() else { return };
     let Some(&(low, _)) = halves.get(&arg) else { return };
     let Some(result) = func[inst].first_result else { return };
@@ -1292,7 +1290,7 @@ fn call(
     func: &mut Func,
     conv: &CallRegs,
     halves: &mut Halves,
-    forward: &mut HashMap<Value, Value>,
+    forward: &mut Map<Value, Value>,
     inst: Inst,
 ) {
     let data = func[inst];
@@ -1442,7 +1440,7 @@ fn replace(func: &mut Func, halves: &mut Halves, inst: Inst, low: Value, high: V
 /// The arguments of each instruction and the arguments of the blocks it branches to, which between
 /// them are everywhere a value can be read. Nothing chases, because every value this map answers
 /// with is one made here and so is never itself a key.
-fn substitute(func: &mut Func, forward: &HashMap<Value, Value>) {
+fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     if forward.is_empty() {
         return;
     }

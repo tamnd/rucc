@@ -4,15 +4,24 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.0
+
+The W5 release, for AArch64 Windows. aarch64-windows-gnu is tier 2: rung 0 passes 42 of 42 under Wine on an arm64 runner and natively on `windows-11-arm`, rung 1 is SQLite's veryquick suite built by rucc and by llvm-mingw's clang and run natively there every night with nothing failing only in rucc's build, and the `rucc.exe` doing it is the one built for `aarch64-pc-windows-msvc`. Calls to `dllimport` functions and reads of imported data now work on AArch64 Windows, and the AArch64 assembler takes the Advanced SIMD instructions gcc writes.
+
 ### Added
 
+- CI runs rung 0 for aarch64-windows-gnu under Wine 10 in a Debian 13 container on an arm64 runner and natively on `windows-11-arm` with llvm-mingw's clang as the reference, with the x18 check in both. `tests/exec/windows/run.sh` skips a program marked `x86_64 only:` when the compiler targets AArch64, compares with `NAME.aarch64.out` there when there is one, and gives clang the `gcc flags:` and `gcc skip:` it gives gcc. (#2071)
+- Calls to a `dllimport` function, and reads of `dllimport` data and of variables only declared, on AArch64 Windows. The pointer in `__imp_` or `.refptr.` is read with `adrp` and `ldr` from `:lo12:`, the same instructions clang writes, where before the compiler stopped with "no rule lowers a `call`" at the first function a Windows header declares. (#2071)
+- `aarch64-windows-gnu` is tier 2. Rung 0 runs in CI under Wine and natively on `windows-11-arm`, and rung 1, SQLite's veryquick suite, runs nightly on `windows-11-arm` with llvm-mingw's clang as the reference and nothing failing only in rucc's build. The `rucc.exe` that runs there is the one built for `aarch64-pc-windows-msvc` (#2071).
 - The nightly run builds SQLite's veryquick suite for `aarch64-windows-gnu` natively on `windows-11-arm` with rucc and with llvm-mingw's clang, over a Tcl clang builds, and fails when a test fails only in rucc's build. `tests/sqlite/windows.sh` takes `ARCH=aarch64` and `REF_CC`, and runs without Wine under a Windows shell. (#2071)
 - The AArch64 assembler reads and encodes the Advanced SIMD instructions, so the listings gcc writes at `-O2` and `-O3`, where it vectorizes loops, now assemble. That covers every lane layout from `8b` to `2d`, single lanes like `v0.s[1]`, register lists like `{v0.16b - v3.16b}`, and the arithmetic, compare, shift, widening, narrowing, permute, reduction, by-element, immediate move and structure load and store families. Each word was checked against GNU as on nearly two thousand lines, and every line GNU as refuses from the same list is refused too.
 - The AArch64 assembler encodes `adc`, `adcs`, `sbc`, `sbcs`, `ngc` and `ngcs`, which gcc writes for sixteen byte integer arithmetic.
 - The target description knows i386: `i686` triples parse, and the i386 register file and its System V convention are written down, with the eight general purpose registers, `xmm0` to `xmm7`, the x87 stack, the psABI's DWARF numbers, which registers a call preserves, returns in `eax`, `edx:eax` and `st0`, and `ebx` kept out of the allocator's hands under position independent code. Nothing generates i386 code from it yet (#2247).
+- `docs/FEATURES.md`, generated from `crates/rucc-gnu/features.toml` by `cargo xtask features`, counts the GNU compatibility matrix by kind and status and lists every row that does not answer yes, with what the compiler does when it meets one. `cargo xtask ci` fails when the file and the table disagree. Today it is 326 of 373 rows, 87%.
 
 ### Changed
 
+- `statement_expressions`, `typeof`, `labels_as_values`, `mode`, `constructor` and `destructor` are marked implemented in the GNU matrix, with the tests that prove them, so `__has_extension` and `__has_attribute` now answer yes for them. They had been working for a while and the table still said otherwise. `destructor` is refused on Darwin, which has nowhere to put one.
 - The address of a local or of a name is written again where it is read, the way a constant already was, rather than worked out once and kept in a register or spilled to a slot of its own. A local's address is a `lea` off the stack pointer and is written at each use; a name's is written once in each block that reads it. An address passed to a call is written next to the store or the move that passes it, so a call with many string arguments no longer holds all of them in registers the call leaves alone. The two reduced programs in #2200 took 144 and 128 bytes of frame where gcc takes 80 (#2200).
 - Working out where each value is live puts the pieces into one list and sorts them by value at the end, instead of growing a list per value (#2229).
 - Finding the conversions whose upper bits nothing reads asks the target for the width of each operand once, instead of on every round of the walk (#2231).
@@ -21,6 +30,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Cleaning up the allocator's copies and marking the instructions that commute ask the target about each opcode once per function instead of by name for every instruction, and the scheduler and load folding keep their answers per opcode with the shared hasher (#2238).
 - Folding addresses into their readers keeps the instructions the frame still owes an offset in a set, instead of walking the pending lists for every `lea` (#2242).
 - The register allocator finds what an instruction insists on by searching only the one register's points, instead of every constraint in the function (#2243).
+- Folding addresses into their readers moves the frame's pending entries in one walk at the end, instead of searching the list of locals for each fold (#2248).
+- The backend's maps and sets hash with the shared hasher instead of SipHash (#2251).
 
 ### Fixed
 
@@ -33,10 +44,8 @@ The W3 release, for UCRT, winpthreads and the real corpus on Windows. x86_64-win
 ### Added
 
 - `x86_64-windows-gnu` is tier 2. `tests/sqlite/windows.sh` is rung 1 for it: SQLite 3.53.4's testfixture built by rucc and by MinGW GCC from Linux, `test/veryquick.test` run from both under Wine, and a failure when a test fails only in rucc's build. The nightly workflow runs it, and with the ABI differential against MinGW GCC that is what tier 2 asks for. `docs/DIVERGENCE.md` lists what Wine and the msvcrt reference change about the suite (#2226).
-- CI runs rung 0 for aarch64-windows-gnu under Wine 10 in a Debian 13 container on an arm64 runner and natively on `windows-11-arm` with llvm-mingw's clang as the reference, with the x18 check in both. `tests/exec/windows/run.sh` skips a program marked `x86_64 only:` when the compiler targets AArch64, compares with `NAME.aarch64.out` there when there is one, and gives clang the `gcc flags:` and `gcc skip:` it gives gcc. (#2071)
 - Thread-local variables on AArch64 Windows, found from the TEB in x18 through `_tls_index` and the thread's array of `.tls` copies with the `:secrel_hi12:` and `:secrel_lo12:` relocations, the same instructions clang writes. (#2071)
 - A file-scope `register T *x asm("x18")` on AArch64 is read as the register, which is how mingw-w64's `winnt.h` declares the TEB for `NtCurrentTeb`, and `tests/exec/windows/x18.sh` checks that nothing rung 0 compiles for Windows on ARM64 writes x18 or w18. Any other global register variable is still refused. (#2071)
-- Calls to a `dllimport` function, and reads of `dllimport` data and of variables only declared, on AArch64 Windows. The pointer in `__imp_` or `.refptr.` is read with `adrp` and `ldr` from `:lo12:`, the same instructions clang writes, where before the compiler stopped with "no rule lowers a `call`" at the first function a Windows header declares. (#2071)
 
 ### Fixed
 
@@ -284,6 +293,8 @@ Windows work from W2, a fix that lets `rucc.exe` find its fetched sysroot on a W
 - The pass that picks shorter x86-64 instructions asks the target's tables about each opcode once per function instead of once per instruction. It used to walk five or six of those tables comparing names for every instruction, and nearly every answer was no. On jtckdint's `test.c` at `-O2` the build runs 75.18G instructions instead of 78.57G (#2078).
 - The backtracking register allocator puts a loaded value where the answer of the add that reads it went, and swaps the add's sources, when the other source is wanted after the add and so can never be where the answer goes. A jump through a table is that shape: the table's address is read again on the next pass round the loop. `switch-dispatch.names.unpredictable` at `-O2` loses the copy it had in its loop, and the three cases #2064 names now run as many instructions as with `-Zregalloc=single`. Over the corpus at `-O2`, 26 cases get smaller and none larger.
 - The inline pass deletes the blocks it leaves unreachable when it inlines a function that never returns, such as one that is only an empty `for (;;)`. The code after the call used to stay in the function until a later pass removed it, so `-Zverify-each` stopped the build with "this block is not reachable and has not been deleted" after inlining. The generated code is the same as before. (#2058)
+- A call to a function that reads a `volatile` or does an atomic load is no longer moved out of its loop at `-O2` and above. The mod/ref summary took those loads for plain reads, so the callee looked like it only read memory and `licm` made the call once. The summary now counts them as touching everything, the way `purity` already did, and a driver test checks the call stays in the loop at every level. (#2241)
+- The `&&` and `||` collapse prices the right operand the way `phiopt` prices an arm, so an integer constant costs nothing and the budget is two instructions rather than three. `(v & 1) == 0` on the right used to count four and keep its branch on cost, while `v + w < 9`, which is the same amount of work on the machine, counted three and collapsed. Now both collapse, and a left operand hinted past the margin with `__builtin_expect_with_probability` keeps its branch on the odds. (#735)
 
 ## 0.12.2
 

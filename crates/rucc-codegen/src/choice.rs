@@ -40,9 +40,8 @@
 //! state is two answers, one for whether the operands were ordered at all, and a move can read only
 //! one of them.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir::{self as mir, Role};
 use rucc_target::{BranchInsts, FlagInsts, Fusion, MachineInsts};
 
@@ -62,13 +61,13 @@ pub fn fusable(
     func: &mir::Func,
     insts: &BranchInsts,
     names: &mut Interner,
-) -> HashMap<mir::Inst, usize> {
+) -> Map<mir::Inst, usize> {
     let compares = compares(insts, names);
     let selects = selects(insts, names);
     let reads = changes::Reads::of(func);
-    let mut found = HashMap::new();
+    let mut found = Map::default();
     for block in func.blocks() {
-        let mut waiting: HashMap<mir::Reg, (mir::Inst, usize)> = HashMap::new();
+        let mut waiting: Map<mir::Reg, (mir::Inst, usize)> = Map::default();
         for inst in func.insts(block) {
             let data = &func[inst];
             let operands = &func[data.operands];
@@ -104,7 +103,7 @@ pub fn moves(
     flags: &FlagInsts,
     machine: &MachineInsts,
     names: &mut Interner,
-    fusable: &HashMap<mir::Inst, usize>,
+    fusable: &Map<mir::Inst, usize>,
 ) -> usize {
     if fusable.is_empty() {
         return 0;
@@ -112,9 +111,9 @@ pub fn moves(
     // Every name the rewrite could want, before the walk rather than inside it, for the reason the
     // compare pass gives: the walk reads names out of the interner while it edits the function.
     let compares = compares(insts, names);
-    let kept: HashMap<&str, mir::Opcode> =
+    let kept: Map<&str, mir::Opcode> =
         insts.fused.iter().map(|fusion| (fusion.cmp, opcode(insts, names, fusion.cmp))).collect();
-    let chosen: HashMap<(mir::Opcode, &str), mir::Opcode> = insts
+    let chosen: Map<(mir::Opcode, &str), mir::Opcode> = insts
         .moves
         .iter()
         .map(|entry| {
@@ -161,7 +160,7 @@ fn reached(
     func: &mir::Func,
     flags: &FlagInsts,
     names: &Interner,
-    chosen: &HashMap<(mir::Opcode, &str), mir::Opcode>,
+    chosen: &Map<(mir::Opcode, &str), mir::Opcode>,
     fusion: &Fusion,
     byte: mir::Operand,
     after: &[mir::Inst],
@@ -213,7 +212,7 @@ fn flags_only(func: &mir::Func, compare: mir::Inst, cmp: mir::Opcode) -> Plan {
 }
 
 /// The comparisons that keep a byte, by opcode, each with its entry in the branch table.
-fn compares(insts: &BranchInsts, names: &mut Interner) -> HashMap<mir::Opcode, &'static Fusion> {
+fn compares(insts: &BranchInsts, names: &mut Interner) -> Map<mir::Opcode, &'static Fusion> {
     insts.fused.iter().map(|fusion| (opcode(insts, names, fusion.set), fusion)).collect()
 }
 
@@ -422,7 +421,8 @@ mod tests {
             .uses(t, GPR)
             .uses(byte, GPR)
             .finish();
-        let found = HashMap::from([(func.insts(block).next().expect("the comparison"), 1)]);
+        let found: Map<_, _> =
+            [(func.insts(block).next().expect("the comparison"), 1)].into_iter().collect();
 
         assert_eq!(moves(&mut func, &BRANCH, &FLAGS, &MACHINE, &mut names, &found), 0);
         assert_eq!(shape(&func, &names, block), ["cmp_set_l_32", "mov_rr_64", "test_cmov_ne_32"]);
