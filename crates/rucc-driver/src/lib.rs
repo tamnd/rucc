@@ -924,6 +924,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.warnings_are_errors = true;
             }
             "-P" => opts.line_markers = false,
+            // Keep comments in the output of `-E`. Taken and not acted on: every comment still
+            // becomes a space. What asks for it in practice is the kernel's vDSO linker script,
+            // and ld reads the script the same with its comments gone.
+            "-C" | "-CC" => {}
             // The dependency family, which section 4.4 calls required because every build system
             // that generates its own makefiles asks for it. The two that end in `D` write a file
             // beside the object and let the compilation happen, and the two that do not write to
@@ -6279,6 +6283,14 @@ mod tests {
         let (opts, _) = compile(&["-E", "-P", "-ffreestanding", "a.c"]);
         assert!(!opts.line_markers);
         assert!(!opts.hosted);
+        assert_eq!(opts.emit, EmitKind::Preprocessed);
+    }
+
+    #[test]
+    fn dash_c_is_taken_when_preprocessing() {
+        let (opts, _) = compile(&["-E", "-P", "-C", "a.lds.S"]);
+        assert_eq!(opts.emit, EmitKind::Preprocessed);
+        let (opts, _) = compile(&["-E", "-CC", "a.c"]);
         assert_eq!(opts.emit, EmitKind::Preprocessed);
     }
 
