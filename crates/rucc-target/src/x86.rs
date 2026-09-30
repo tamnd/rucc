@@ -166,6 +166,7 @@ pub static SYSV: CallRegs = CallRegs {
     return_address: 4,
     word: 4,
     total_store_order: true,
+    unaligned: true,
     push: 4,
     link: None,
     // The address of a result returned through memory is the first word of the argument area,
