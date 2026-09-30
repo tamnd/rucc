@@ -345,3 +345,26 @@ fn a_pointer_to_an_array_of_unknown_size_can_be_dereferenced() {
     let out = run(&["--target=x86_64-unknown-linux-gnu", "-c", "-o", "/dev/null"], size);
     assert!(!out.status.success(), "the size of an array of unknown size is not known");
 }
+
+/// i915's `hwm_field_read_and_scale` is a `static` function, not declared `inline`, that hands its
+/// mask parameter to `REG_FIELD_GET`, and each of its two callers passes a `REG_GENMASK`. The
+/// `BUILD_BUG_ON` inside only goes away once the call is inlined and the mask is a constant, which
+/// is what gcc's inliner does for a call that answers a `__builtin_constant_p` in the callee.
+#[test]
+fn a_constant_passed_to_a_parameter_the_callee_asks_about_is_inlined() {
+    let source = "extern void bad(void) __attribute__((error(\"FIELD_GET: mask is not constant\")));\n\
+        #define GENMASK(h, l) (((~0U) << (l)) & (~0U >> (31 - (h))))\n\
+        #define FIELD_GET(m, v) ({ if (!__builtin_constant_p(m)) bad(); \\\n\
+            if ((m) == 0) bad(); if ((m) & ((m) + (1U << __builtin_ctz(m)))) bad(); \\\n\
+            ((v) & (m)) >> __builtin_ctz(m); })\n\
+        unsigned rd(int);\n\
+        static unsigned long scale(int r, unsigned msk, int shift, unsigned sf) {\n\
+            unsigned v = rd(r);\n\
+            v = FIELD_GET(msk, v);\n\
+            return ((unsigned long)v * sf) >> shift;\n\
+        }\n\
+        unsigned long a(int s) { return scale(1, GENMASK(15, 8), s, 3); }\n\
+        unsigned long b(int s) { return scale(2, GENMASK(14, 0), s, 3); }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
