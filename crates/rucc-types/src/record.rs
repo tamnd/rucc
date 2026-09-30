@@ -696,6 +696,13 @@ impl Builder {
     /// the opposite reading is at least as plausible from the documents, and the same measure
     /// says `char y:6` after an `int x:12` sits at bit 12 under any packing and at bit 16
     /// without it.
+    ///
+    /// An `aligned` written on the field itself is the exception packing does not take out. The
+    /// field starts on a boundary of the alignment [`Self::member_align`] settled on, so
+    /// `struct __attribute__((packed)) { char x:3; __attribute__((aligned(4))) int a:4; }` puts
+    /// `a` at bit 32 and is eight bytes, and under `#pragma pack(1)` the same request still
+    /// moves the field to the next whole byte, since the pragma caps the alignment at one byte
+    /// and leaves the request standing. tcc's `95_bitfields` measures both against gcc.
     fn itanium(
         &mut self,
         decl: &FieldDecl,
@@ -703,6 +710,9 @@ impl Builder {
         capacity: u32,
         width: u32,
     ) -> Result<u128, RecordError> {
+        if self.kind == RecordKind::Struct && decl.align.is_some() {
+            self.at = self.step_to(align)?;
+        }
         let offset = match self.kind {
             RecordKind::Union => 0,
             // Packed, or after a member of no fixed size, where gcc does not ask whether the

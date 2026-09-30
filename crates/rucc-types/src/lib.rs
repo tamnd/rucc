@@ -1321,6 +1321,56 @@ mod tests {
     }
 
     #[test]
+    fn an_alignment_asked_for_on_a_bit_field_moves_it_even_when_packed() {
+        let mut interner = Interner::new();
+        let types = Types::new();
+        let char_ = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long_long = types.int(IntKind::LongLong);
+
+        // Not packed: the field goes to the next sixteen byte boundary and takes the record
+        // with it, where without the request it would have shared the first byte.
+        let aligned = FieldDecl { align: Some(16), ..bits(&mut interner, "a", char_, 4) };
+        let fields = [bits(&mut interner, "x", char_, 3), aligned];
+        let laid_out = lay_out(&types, RecordKind::Struct, &fields);
+        assert_eq!(laid_out.layout, Layout::new(32, 16));
+        assert_eq!(offsets(&laid_out), [0, 128]);
+
+        // Packed, the request still wins over the next free bit.
+        let packed = RecordOptions { packed: true, ..RecordOptions::default() };
+        let aligned = FieldDecl { align: Some(4), ..bits(&mut interner, "a", int, 4) };
+        let fields = [bits(&mut interner, "x", char_, 3), aligned];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with an aligned bit-field");
+        assert_eq!(laid_out.layout, Layout::new(8, 4));
+        assert_eq!(offsets(&laid_out), [0, 32]);
+
+        // `aligned(1)` asks for nothing an `int` did not have, and packed it still means the
+        // next whole byte rather than the next bit.
+        let aligned = FieldDecl { align: Some(1), ..bits(&mut interner, "a", int, 4) };
+        let fields = [bits(&mut interner, "x", char_, 3), aligned];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &linux())
+            .expect("a packed struct with a byte aligned bit-field");
+        assert_eq!(laid_out.layout, Layout::new(2, 1));
+        assert_eq!(offsets(&laid_out), [0, 8]);
+
+        // Under `#pragma pack(1)` an `aligned(16)` is capped to a byte and still moves the field
+        // to one, which is the layout tcc's `95_bitfields` prints under gcc.
+        let pack = RecordOptions { pack: Some(1), ..RecordOptions::default() };
+        let fields = [
+            bits(&mut interner, "x", int, 12),
+            bits(&mut interner, "y", char_, 6),
+            bits(&mut interner, "z", long_long, 63),
+            FieldDecl { align: Some(16), ..bits(&mut interner, "a", char_, 4) },
+            bits(&mut interner, "b", long_long, 2),
+        ];
+        let laid_out = layout_record(&types, RecordKind::Struct, &fields, &pack, &linux())
+            .expect("a struct under pragma pack with an aligned bit-field");
+        assert_eq!(laid_out.layout, Layout::new(12, 1));
+        assert_eq!(offsets(&laid_out), [0, 12, 18, 88, 92]);
+    }
+
+    #[test]
     fn a_flexible_array_member_costs_nothing_but_its_alignment() {
         // What makes `malloc(sizeof(struct S) + n)` the idiom it is.
         let mut types = Types::new();
