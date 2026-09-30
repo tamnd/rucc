@@ -11,7 +11,8 @@
 //! than a constant.
 
 use rucc_abi::abis::{
-    AAPCS64, DARWIN_ARM64, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64, WINDOWS_ARM64,
+    AAPCS64, DARWIN_ARM64, I386_MINGW, I386_MSVC, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64,
+    WINDOWS_ARM64,
 };
 use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
 
@@ -766,4 +767,55 @@ fn i386_ignores_an_aggregate_of_no_size() {
     let empty = record(&[]);
     assert_eq!(i386().argument(&Arg::Aggregate(empty)), Pass::Ignore);
     assert_eq!(i386().returns(&Arg::Aggregate(empty)), Pass::Ignore);
+}
+
+#[test]
+fn i686_windows_returns_a_small_structure_in_eax_and_edx() {
+    // What clang writes for i686-w64-windows-gnu and i686-pc-windows-msvc at -O2: one, two, four
+    // and eight bytes come back in registers, and three and twelve through the hidden pointer.
+    for abi in [&I386_MINGW, &I386_MSVC] {
+        let byte = pieces(&[int(1)]);
+        assert_eq!(
+            abi.call().returns(&Arg::Aggregate(record(&byte))),
+            Pass::Pieces(vec![gpr(0, 1)])
+        );
+        let three = pieces(&[int(1), int(1), int(1)]);
+        assert_eq!(abi.call().returns(&Arg::Aggregate(record(&three))), Pass::Reference);
+        let two = pieces(&[int(4), int(4)]);
+        assert_eq!(
+            abi.call().returns(&Arg::Aggregate(record(&two))),
+            Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+        );
+        let floats = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+        assert_eq!(
+            abi.call().returns(&Arg::Aggregate(record(&floats))),
+            Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+        );
+        let twelve = pieces(&[int(4), int(4), int(4)]);
+        assert_eq!(abi.call().returns(&Arg::Aggregate(record(&twelve))), Pass::Reference);
+        // Arguments are the argument area whatever their size, as on Linux.
+        assert_eq!(abi.call().argument(&Arg::Aggregate(record(&byte))), Pass::Memory);
+    }
+}
+
+#[test]
+fn mingw_returns_a_lone_float_in_st0_and_msvc_in_eax() {
+    let one_double = pieces(&[float(Format::Double, 8)]);
+    let one_float = pieces(&[float(Format::Single, 4)]);
+    assert_eq!(
+        I386_MINGW.call().returns(&Arg::Aggregate(record(&one_double))),
+        Pass::Pieces(vec![fpr(0, Format::Double)])
+    );
+    assert_eq!(
+        I386_MINGW.call().returns(&Arg::Aggregate(record(&one_float))),
+        Pass::Pieces(vec![fpr(0, Format::Single)])
+    );
+    assert_eq!(
+        I386_MSVC.call().returns(&Arg::Aggregate(record(&one_double))),
+        Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+    );
+    assert_eq!(
+        I386_MSVC.call().returns(&Arg::Aggregate(record(&one_float))),
+        Pass::Pieces(vec![gpr(0, 4)])
+    );
 }

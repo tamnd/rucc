@@ -284,6 +284,7 @@ impl Call {
             Test::Homogeneous { limit } => homogeneous(shape, limit),
             Test::FloatPair => float_pair(shape, integer_width, float_width),
             Test::X87Stack => x87_stack(shape),
+            Test::LoneFloat => lone_float(shape),
             Test::Eightbytes { limit } => eightbytes(shape, limit),
         }
     }
@@ -443,6 +444,18 @@ fn x87_stack(shape: &Shape<'_>) -> Option<Vec<Slot>> {
             .map(|piece| Slot::Float { offset: piece.offset, format: Format::X87Extended })
             .collect()
     })
+}
+
+/// The one floating point slot of an aggregate that is a single `float` or `double`, and [`None`]
+/// for anything else, an x87 `long double` included.
+fn lone_float(shape: &Shape<'_>) -> Option<Vec<Slot>> {
+    let [piece] = shape.pieces else { return None };
+    match piece.scalar.kind {
+        Kind::Float(format @ (Format::Single | Format::Double)) => {
+            Some(vec![Slot::Float { offset: piece.offset, format }])
+        }
+        _ => None,
+    }
 }
 
 /// The class of one eightbyte, section 3.2.3 of the SysV psABI.

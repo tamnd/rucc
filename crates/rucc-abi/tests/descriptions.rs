@@ -20,7 +20,8 @@
 //! yet, and a demonstration that only ever ran on the easy ones would be worth less.
 
 use rucc_abi::abis::{
-    AAPCS64, DESCRIBED, SYSV_AMD64, WIN64, WINDOWS_ARM64, for_convention, for_target,
+    AAPCS64, DESCRIBED, I386_MINGW, I386_MSVC, I386_SYSV, SYSV_AMD64, WIN64, WINDOWS_ARM64,
+    for_convention, for_target,
 };
 use rucc_abi::{
     AbiDescription, Arg, Banks, Convention, Format, Narrow, Pass, ReturnPointer, Rule, Scalar,
@@ -209,6 +210,21 @@ fn windows_on_aarch64_is_its_own_description_and_not_aapcs64() {
         assert_eq!(abi.arguments, AAPCS64.arguments);
         assert_eq!(abi.returns, AAPCS64.returns);
     }
+}
+
+#[test]
+fn i686_windows_is_its_own_description_and_the_two_toolchains_differ_by_one_rule() {
+    let of = |triple: &str| for_target(triple.parse().expect("a row in the target table"));
+    let mingw = of("i686-pc-windows-gnu").expect("a described ABI");
+    let msvc = of("i686-pc-windows-msvc").expect("a described ABI");
+    assert!(std::ptr::eq(mingw, &I386_MINGW));
+    assert!(std::ptr::eq(msvc, &I386_MSVC));
+    // Arguments are i386 SysV's on both, and only the way back differs.
+    assert_eq!(mingw.arguments, I386_SYSV.arguments);
+    assert_eq!(msvc.arguments, I386_SYSV.arguments);
+    assert_ne!(mingw.returns, I386_SYSV.returns);
+    assert_eq!(&mingw.returns[..1], &msvc.returns[..1]);
+    assert_eq!(&mingw.returns[2..], &msvc.returns[1..]);
 }
 
 #[test]

@@ -336,6 +336,13 @@ pub enum Test {
     /// double` in st(0) and st(1). A record holding two of them is the same thirty two bytes and
     /// comes back in memory, which is the only thing [`crate::Shape::complex`] is for.
     X87Stack,
+    /// One `float` or one `double` and nothing else, however deeply it is wrapped.
+    ///
+    /// mingw's i386 return rule, which gcc and clang both follow: `struct { double d; }` comes
+    /// back in st(0) the way a bare `double` does, where MSVC's rule for the same structure is
+    /// edx:eax. A second member of any kind, even another `float`, turns it back into an
+    /// ordinary eight byte structure.
+    LoneFloat,
     /// The SysV eightbyte classification succeeds, and no eightbyte came out x87.
     ///
     /// The intricate one. The aggregate is cut into eight byte chunks, each chunk gets a class
