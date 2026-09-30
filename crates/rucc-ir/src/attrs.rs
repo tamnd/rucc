@@ -167,6 +167,17 @@ impl AttrSet {
     /// name, not the library's, because the unit was built with `-ffreestanding` or `-fno-builtin`.
     /// The backend leaves such a call a call.
     pub const NO_BUILTIN: Self = Self(1 << 21);
+    /// Returns zero nothing whatever `-fzero-call-used-regs=` asked for.
+    /// `__attribute__((zero_call_used_regs("skip")))`.
+    pub const ZERO_SKIP: Self = Self(1 << 22);
+    /// Returns zero the call-clobbered registers the body used, from `zero_call_used_regs` with
+    /// `used-gpr` or `used-gpr-arg`.
+    pub const ZERO_USED: Self = Self(1 << 23);
+    /// Returns zero every call-clobbered register, from `zero_call_used_regs` with `all-gpr` or
+    /// `all-gpr-arg`.
+    pub const ZERO_ALL: Self = Self(1 << 24);
+    /// Only the registers arguments are passed in are zeroed, from the choices ending in `-arg`.
+    pub const ZERO_ARG: Self = Self(1 << 25);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -276,6 +287,10 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::INDIRECT_KEEP, "indirect_keep"),
     (AttrSet::NO_INSTRUMENT, "no_instrument"),
     (AttrSet::NO_BUILTIN, "no_builtin"),
+    (AttrSet::ZERO_SKIP, "zero_skip"),
+    (AttrSet::ZERO_USED, "zero_used"),
+    (AttrSet::ZERO_ALL, "zero_all"),
+    (AttrSet::ZERO_ARG, "zero_arg"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

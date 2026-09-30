@@ -58,6 +58,8 @@ const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary 
                      at an offset from sp_el0 is part of that work";
 const THUNKS: &str = "a branch goes through a thunk the program links in, which is thunk-extern, \
                       and no thunk body is written into the unit";
+const VECTOR: &str = "only the general registers are cleared on return, and this choice clears \
+                      the vector registers as well";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
                                  landing pad";
 
@@ -146,13 +148,12 @@ pub(crate) const TABLE: &[Row] = &[
          this compiler does",
         None,
     ),
-    // The default of a family whose other members are refused below.
-    same("-fzero-call-used-regs=skip", "no registers are cleared on return, the default"),
-    refused(
-        "-fzero-call-used-regs=*",
-        "registers a function used are left as they are when it returns",
-        Some(2281),
-    ),
+    // The choices that clear the vector registers as well. The general ones are read by the
+    // driver.
+    refused("-fzero-call-used-regs=used", VECTOR, Some(2335)),
+    refused("-fzero-call-used-regs=used-arg", VECTOR, Some(2335)),
+    refused("-fzero-call-used-regs=all", VECTOR, Some(2335)),
+    refused("-fzero-call-used-regs=all-arg", VECTOR, Some(2335)),
     refused(
         "-fplugin=*",
         "a gcc plugin is a shared object built against gcc's own internals, which this compiler \
@@ -308,9 +309,9 @@ mod tests {
     #[test]
     fn the_default_spelling_is_found_before_its_family() {
         let answer = |arg| row(arg, Arch::X86_64).map(|row| row.answer);
-        assert!(matches!(answer("-fzero-call-used-regs=skip"), Some(Answer::Same(_))));
         assert!(matches!(answer("-fzero-call-used-regs=all"), Some(Answer::Refused(..))));
         assert!(row("-ftrivial-auto-var-init=zero", Arch::X86_64).is_none());
+        assert!(row("-fzero-call-used-regs=used-gpr", Arch::X86_64).is_none());
     }
 
     #[test]

@@ -549,6 +549,15 @@ tests = ["rucc::a_function_that_says_stack_protect_gets_one_whenever_protection_
 notes = "A canary under any `-fstack-protector` flag whatever the function's locals are, and the only functions `-fstack-protector-explicit` protects. Nothing under `-fno-stack-protector`. Of this and `no_stack_protector` on one function the one written first stands, as in gcc 13."
 
 [[feature]]
+name = "zero_call_used_regs"
+kind = "attribute"
+gcc_version = "11.0"
+status = "partial"
+used_by = ["linux"]
+tests = ["rucc::a_function_that_names_a_choice_gets_that_choice"]
+notes = "x86-64 and AArch64. Replaces `-fzero-call-used-regs=` for one function. skip, used-gpr, used-gpr-arg, all-gpr and all-gpr-arg are done, and the four choices that clear the vector registers as well are refused until tamnd/rucc#2335."
+
+[[feature]]
 name = "no_caller_saved_registers"
 kind = "attribute"
 gcc_version = "7.0"

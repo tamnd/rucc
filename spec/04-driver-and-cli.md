@@ -346,6 +346,7 @@ Honored, by doing what gcc does:
 | `-mstack-protector-guard=tls`, `-mstack-protector-guard=global`, `-mstack-protector-guard-reg=`, `-mstack-protector-guard-offset=`, `-mstack-protector-guard-symbol=` (x86-64) | Where the canary is read from. `tls` is a thread's block through `-mstack-protector-guard-reg=`, `fs` or `gs`, at `-mstack-protector-guard-offset=` or at the symbol `-mstack-protector-guard-symbol=` names when there is one, which is `%gs:__ref_stack_chk_guard(%rip)` for the kernel from 6.13 on and `%gs:40` before it. The register is `gs` under `-mcmodel=kernel` and `fs` otherwise, as in gcc. `global` is the variable `__stack_chk_guard` and the other three are not read. Under `-fPIC` a symbol's address is read out of the global offset table first, as gcc does. The default is `%fs:40`, and `%gs:40` under `-mcmodel=kernel`. |
 | `-mno-80387`, `-msoft-float` (x86-64) | The x87 stack is kept out of every function, and a function with a `long double` in it is refused. `-m80387` and `-mhard-float` turn it back on. |
 | `-mno-fp-ret-in-387` (x86-64) | Taken with `-mno-80387`, where nothing is returned on the x87 stack, and refused without it, since there it would change where a `long double` comes back. |
+| `-fzero-call-used-regs=skip`, `used-gpr`, `used-gpr-arg`, `all-gpr`, `all-gpr-arg` (x86-64, AArch64) | Before every `ret` the registers a call may clobber are cleared, except the ones the return value is in: those the function used for the `used` choices and all of them for the `all` choices, and only the argument registers for the `-arg` ones. The order and the registers are gcc 13's, except that `x18` is never cleared on AArch64 since it is reserved. A function's `zero_call_used_regs` attribute takes the place of the flag for that function. A tail call clears nothing, as in gcc. |
 | `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
 | `-mindirect-branch=thunk-extern`, `-mindirect-branch=keep` (x86-64) | An indirect call or jump goes to the thunk for the register the address is in, `call __x86_indirect_thunk_rax` rather than `call *%rax`, and the kernel links the thunks in. `keep` is the default. The branch is always through a register, so nothing is loaded out of memory first. |
 | `-mindirect-branch-cs-prefix`, `-mno-indirect-branch-cs-prefix` (x86-64) | A `cs` segment override on its own line before a call or jump to the thunk for `%r8` to `%r15`, which is what gcc writes and gives the kernel room to patch the call into an inline `lfence; jmp *%r11`. Nothing without `-mindirect-branch=thunk-extern`. |
@@ -370,7 +371,6 @@ Taken because what they ask for is what happens:
 | `-fzero-init-padding-bits=all`, `-fzero-init-padding-bits=unions`, `-fzero-init-padding-bits=standard` | An automatic object whose initializer does not cover every byte, padding and the rest of a union included, is zeroed whole before its members are stored. |
 | `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |
-| `-fzero-call-used-regs=skip` | The default. |
 | `-mindirect-branch-register`, `-mno-indirect-branch-register` (x86-64) | Every indirect call and jump already goes through a register and never through memory. |
 | `-mharden-sls=none` (AArch64) | Nothing is put after a return or an indirect branch, the default. |
 | `-mskip-rax-setup`, `-mno-skip-rax-setup` (x86-64) | `%al` is set before every variadic call, which is always correct whether or not gcc would have skipped it. |
@@ -385,7 +385,7 @@ Refused, with the issue that would honor them:
 | Flag | Why | Issue |
 |---|---|---|
 | `-mstack-protector-guard*` (AArch64) | There is no stack protector on AArch64 yet, and the kernel's canary at an offset from `sp_el0` is part of that work. | #2279 |
-| `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
+| `-fzero-call-used-regs=used`, `-fzero-call-used-regs=used-arg`, `-fzero-call-used-regs=all`, `-fzero-call-used-regs=all-arg` | Only the general registers are cleared on return, and these clear the vector registers as well. | #2335 |
 | `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
 
 Refused, with no issue, because nothing is planned for them:

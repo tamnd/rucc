@@ -381,6 +381,22 @@ impl DeclFlags {
     /// because it is only ever read off an automatic object.
     pub const UNINITIALIZED: Self = Self(1 << 23);
 
+    /// `__attribute__((zero_call_used_regs("skip")))` was written, so the body's returns zero
+    /// nothing whatever `-fzero-call-used-regs=` asked for.
+    pub const ZERO_SKIP: Self = Self(1 << 20);
+
+    /// `zero_call_used_regs` asked for the registers the body used to be zeroed before it returns,
+    /// from `used-gpr` or `used-gpr-arg`.
+    pub const ZERO_USED: Self = Self(1 << 21);
+
+    /// `zero_call_used_regs` asked for every register a call may clobber to be zeroed before the
+    /// body returns, from `all-gpr` or `all-gpr-arg`.
+    pub const ZERO_ALL: Self = Self(1 << 22);
+
+    /// `zero_call_used_regs` asked for only the registers arguments are passed in, from the two
+    /// choices that end in `-arg`. Only ever set with [`Self::ZERO_USED`] or [`Self::ZERO_ALL`].
+    pub const ZERO_ARG: Self = Self(1 << 24);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

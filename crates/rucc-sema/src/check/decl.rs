@@ -95,8 +95,8 @@ struct Declared {
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`],
     /// [`DeclFlags::NO_STACK_PROTECTOR`], [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`],
-    /// [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`] and
-    /// [`DeclFlags::UNINITIALIZED`] and nothing else.
+    /// [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
+    /// [`DeclFlags::UNINITIALIZED`] and the four `ZERO_` bits and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.

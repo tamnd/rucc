@@ -980,6 +980,7 @@ fn generate(
         code_model: opts.code_model,
         vector: opts.vector,
         x87: opts.x87,
+        zero: opts.zero_regs.map(|(all, arg)| rucc_codegen::zero::Zeroing { all, arg }),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         speculation: opts.speculation,

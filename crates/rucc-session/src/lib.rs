@@ -2092,6 +2092,10 @@ pub struct Options {
     /// `-mstack-protector-guard` flags. `None` is the target's own place, which is `%fs:40` on
     /// x86-64 Linux. A kernel moves it to its per CPU block behind `%gs`.
     pub guard: Option<rucc_target::Guard>,
+    /// Which registers every `ret` clears first, from `-fzero-call-used-regs=`. `None` is `skip`,
+    /// and otherwise the first is whether it is every register a call may clobber rather than the
+    /// ones the function used and the second is whether it is only the argument registers.
+    pub zero_regs: Option<(bool, bool)>,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2675,6 +2679,7 @@ impl Options {
             vector: true,
             x87: true,
             guard: None,
+            zero_regs: None,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 // Nothing for i686 yet: x86-64's baseline promises SSE2, which an i686 does not.
