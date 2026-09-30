@@ -91,8 +91,7 @@
 //! The store stays. Removing a store that a later store covers is dead store elimination, which is
 //! document 17 and a different pass.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Flags, Func, Inst, Opcode, Type, Value};
 
 use crate::alias::{Access, Alias};
@@ -144,7 +143,7 @@ impl Pass for LoadForward {
         // end. Rewriting each one where it is found would be a walk over the function per load,
         // and there is nothing to gain by it: what this pass looks at is the address, and a
         // redirection of a result does not change one.
-        let mut forward: HashMap<Value, Value> = HashMap::new();
+        let mut forward: Map<Value, Value> = Map::default();
         let mut gone: Vec<Inst> = Vec::new();
 
         // The oracle borrows the function, so the walk that reads it is a scope of its own and
@@ -153,7 +152,7 @@ impl Pass for LoadForward {
         {
             let mut alias = Alias::new(func, an.outside()).knowing(an.modref());
             for block in func.blocks().collect::<Vec<Block>>() {
-                let mut known: HashMap<Value, Held> = HashMap::new();
+                let mut known: Map<Value, Held> = Map::default();
                 for inst in func.insts(block).collect::<Vec<Inst>>() {
                     match act(func, inst) {
                         Act::Ignore => {}

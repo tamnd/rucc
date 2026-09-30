@@ -10,9 +10,7 @@
 //! When there is an analysis manager it will hold a real use list with the instruction on the
 //! other end of each use, and this will be the thing that list replaces.
 
-use std::collections::HashMap;
-use std::hash::BuildHasher;
-
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Func, Inst, Value};
 
 /// How many times each value is used, indexed by [`Value::index`].
@@ -57,7 +55,7 @@ pub fn operands(func: &Func, inst: Inst, mut each: impl FnMut(Value)) {
 /// One walk over the function for the whole map rather than one walk per pair. A pass that
 /// rewrote a hundred values would otherwise walk the function a hundred times, and the map is
 /// what makes the cost of the walk independent of how much the pass did.
-pub fn substitute<S: BuildHasher>(func: &mut Func, forward: &HashMap<Value, Value, S>) {
+pub fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     let with = |value: Value| chase(forward, value);
     for block in func.blocks().collect::<Vec<Block>>() {
         for inst in func.insts(block).collect::<Vec<Inst>>() {
@@ -89,7 +87,7 @@ pub fn substitute<S: BuildHasher>(func: &mut Func, forward: &HashMap<Value, Valu
 /// was already defined before it. Both callers do: a rule points a result at one of its own
 /// operands, and a merge points a block's parameter at an argument passed by the block above it.
 #[must_use]
-pub fn chase<S: BuildHasher>(forward: &HashMap<Value, Value, S>, value: Value) -> Value {
+pub fn chase(forward: &Map<Value, Value>, value: Value) -> Value {
     let mut value = value;
     while let Some(&next) = forward.get(&value) {
         value = next;
@@ -99,9 +97,8 @@ pub fn chase<S: BuildHasher>(forward: &HashMap<Value, Value, S>, value: Value) -
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rucc_base::Interner;
+    use rucc_base::hash::Map;
     use rucc_ir::{Builder, Func, Signature, Type, Value};
 
     use super::substitute;
@@ -129,7 +126,7 @@ mod tests {
         func.declare_value(held[1], 8);
 
         // A chain, which is what a pass leaves behind when one of its rewrites feeds another.
-        let forward = HashMap::from([(held[0], held[1]), (held[1], held[2])]);
+        let forward: Map<_, _> = [(held[0], held[1]), (held[1], held[2])].into_iter().collect();
         substitute(&mut func, &forward);
 
         let entry = func.blocks().next().expect("a block");

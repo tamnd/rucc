@@ -136,9 +136,9 @@
 //! address, because the answer is not in the table and `crate::alias::origin` would say it was.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
 
 use rucc_base::Symbol;
+use rucc_base::hash::Set;
 use rucc_ir::{
     Block, BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
     Opcode, Restrict, Type, Value,
@@ -301,9 +301,9 @@ fn convert(
 /// Empty when it may not, which is on a target with no four byte distance or for a caller with
 /// nowhere to put a table. Only the names this function takes the address of are asked about,
 /// since no other name can be an answer.
-fn near(func: &Func, an: &Analyses, data: Option<&ReadOnly<'_>>) -> HashSet<Symbol> {
+fn near(func: &Func, an: &Analyses, data: Option<&ReadOnly<'_>>) -> Set<Symbol> {
     if !data.is_some_and(ReadOnly::measures) {
-        return HashSet::new();
+        return Set::default();
     }
     let images = an.images();
     func.blocks()
@@ -408,7 +408,7 @@ fn plan(
     inst: Inst,
     index_bits: Option<u32>,
     small: bool,
-    near: &HashSet<Symbol>,
+    near: &Set<Symbol>,
 ) -> Result<Plan, &'static str> {
     let Extra::Switch(info) = func[inst].extra else { return Err(ARMS_DIFFER) };
     let info = func[info];
@@ -595,7 +595,7 @@ fn walk(func: &Func, call: BlockCall, default: BlockCall) -> Option<(BlockCall, 
 ///
 /// A block something else reaches stays, and then so does every block below it, since the block
 /// that stays still jumps there. So this is a fixed point rather than one look at each block.
-fn settle(cfg: &Cfg, switch: Block, mut through: HashSet<Block>) -> HashSet<Block> {
+fn settle(cfg: &Cfg, switch: Block, mut through: Set<Block>) -> Set<Block> {
     loop {
         let outside = |from: &Block| *from != switch && !through.contains(from);
         let stays: Vec<Block> = through
@@ -876,7 +876,7 @@ fn far(builder: &mut Builder<'_>, plan: &Plan, name: Symbol, low: i128, index_bi
 ///
 /// The bytes are held to what four bytes can say, since they are added to the distance in the
 /// cell and a cell is four bytes.
-fn place(func: &Func, value: Value, near: &HashSet<Symbol>) -> Option<(Symbol, i128)> {
+fn place(func: &Func, value: Value, near: &Set<Symbol>) -> Option<(Symbol, i128)> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     let data = func[inst];
     match (data.opcode, data.extra) {
@@ -983,7 +983,7 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
 
     // The arms are unreachable now. Two labels sharing one arm is a shape that survives the checks
     // above only when the answer does not depend on the label, so the same block can be here twice.
-    let mut gone = HashSet::new();
+    let mut gone = Set::default();
     for &arm in &plan.arms {
         if gone.insert(arm) {
             func.remove_block(arm);
@@ -993,10 +993,9 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
-
     use std::sync::Arc;
 
+    use rucc_base::hash::{Map, Set};
     use rucc_base::{Interner, Symbol};
     use rucc_cost::Goal;
     use rucc_ir::{
@@ -1029,7 +1028,7 @@ mod tests {
     /// The same for a goal, which is what decides how wide a cell is.
     fn tabled_for(func: &mut Func, goal: Goal) -> (Stats, Vec<Table>) {
         let mut names = Interner::new();
-        let taken = HashSet::new();
+        let taken = Set::default();
         let mut data = ReadOnly::new(&mut names, &taken, 64, 0);
         let mut an = crate::Analyses::new(crate::Machine::with(None, goal));
         let stats = SwitchConv.run_emitting(func, &mut an, &mut Fuel::unlimited(), &mut data);
@@ -1176,7 +1175,7 @@ mod tests {
     /// needs, and a load stops the test if it is not on a cell or not inside the table.
     fn looked_up(func: &Func, block: Block, label: i128, tables: &[Table]) -> i128 {
         let head = func.entry().expect("a function with blocks in it");
-        let mut values: HashMap<Value, i128> = HashMap::new();
+        let mut values: Map<Value, i128> = Map::default();
         values.insert(func[head].params[0], label);
         for inst in func.insts(block) {
             let data = func[inst];
@@ -1841,7 +1840,7 @@ mod tests {
     /// Runs the pass the way the pipeline does on x86-64 ELF when `measures` is true, and on a
     /// target with no four byte distance when it is not.
     fn placed(pointing: &mut Pointing, measures: bool) -> (Stats, Vec<Table>) {
-        let taken = HashSet::new();
+        let taken = Set::default();
         let mut data = ReadOnly::new(&mut pointing.names, &taken, 64, 0).measuring(measures);
         let images = Arc::new(Images::of(&pointing.module, Pic::Executable));
         let mut an = crate::Analyses::new(crate::Machine::with(None, Goal::Speed)).reading(images);

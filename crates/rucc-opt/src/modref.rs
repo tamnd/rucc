@@ -38,9 +38,8 @@
 //! tamnd/rucc#1557 rather than done here: a parameter is a whole object, so a callee that writes
 //! one field of a structure is a callee that wrote the structure.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{AttrSet, Block, Def, Extra, Flags, Func, Inst, MemOrder, Module, Opcode, Value};
 
 use crate::alias::{Escapes, Origin, keeps_address, origin};
@@ -266,7 +265,7 @@ impl Summary {
 /// `None` to everything and leaves every caller with the conservative answer.
 #[derive(Clone, Debug, Default)]
 pub struct Summaries {
-    known: HashMap<Symbol, Summary>,
+    known: Map<Symbol, Summary>,
 }
 
 impl Summaries {
@@ -414,7 +413,7 @@ fn what_the_body_does(
     // analysis below reads it. A call that keeps nothing it is handed is a call that did not let
     // this function's own locals out, which is section 34.6's upgrade, and the answers are still
     // moving while this asks, which is why it is these rather than a finished [`Summaries`].
-    let mut callees: HashMap<Inst, Summary> = HashMap::new();
+    let mut callees: Map<Inst, Summary> = Map::default();
     let mut steps = 0;
     for block in func.blocks() {
         for inst in func.insts(block) {

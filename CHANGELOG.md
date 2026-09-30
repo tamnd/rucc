@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The optimizer's maps and sets hash with the shared hasher instead of SipHash (#2291).
+
 ## 0.18.0
 
 The W5 release, for AArch64 Windows. aarch64-windows-gnu is tier 2: rung 0 passes 42 of 42 under Wine on an arm64 runner and natively on `windows-11-arm`, rung 1 is SQLite's veryquick suite built by rucc and by llvm-mingw's clang and run natively there every night with nothing failing only in rucc's build, and the `rucc.exe` doing it is the one built for `aarch64-pc-windows-msvc`. Calls to `dllimport` functions and reads of imported data now work on AArch64 Windows, and the AArch64 assembler takes the Advanced SIMD instructions gcc writes.

@@ -30,11 +30,11 @@
 //! What is left of the six is the part below: verify what changed, not everything, and say which
 //! function it was.
 
-use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
 use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
@@ -613,7 +613,7 @@ pub struct Options {
     /// that the last mention of a pass is the one that decides.
     pub toggles: Vec<(String, bool)>,
     /// What `-fpass-fuel=<pass>=<n>` limited, by pass name.
-    pub fuel: HashMap<String, u32>,
+    pub fuel: Map<String, u32>,
     /// What `-fpass-fuel-global=<n>` limited the whole pipeline to, across every pass.
     ///
     /// This is the outer search of the two in section 4.5 of
@@ -668,7 +668,7 @@ impl Default for Options {
         Self {
             level: OptLevel::default(),
             toggles: Vec::new(),
-            fuel: HashMap::new(),
+            fuel: Map::default(),
             global_fuel: None,
             gates: Gates::default(),
             dumps: Dumps::default(),
@@ -828,7 +828,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // thrown away between every pass and would never answer a second question. Section 4.2 of
     // `spec/optimizer/04-pass-manager.md` is the plan for turning the loop inside out, and the
     // day that happens this map becomes a local in the inner loop.
-    let mut cached: HashMap<FuncId, Analyses> = HashMap::new();
+    let mut cached: Map<FuncId, Analyses> = Map::default();
     // The machine, once for the module, because every function in it is compiled for the same
     // target at the same goal. It goes into each function's cache rather than into a parameter of
     // its own, per `crate::machine`.
@@ -1063,7 +1063,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     };
     // Every name the module had before any pass ran, which is what a table a pass asks for has to
     // stay clear of, and the number the next table's name is made from. See `crate::readonly`.
-    let taken: HashSet<Symbol> = module
+    let taken: Set<Symbol> = module
         .funcs()
         .map(|id| module[id].name)
         .chain(module.globals().map(|id| module[id].name))

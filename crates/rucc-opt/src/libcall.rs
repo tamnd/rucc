@@ -111,8 +111,7 @@
 //! and off for one name at a time under `-fno-builtin-<name>`. A freestanding program left with a
 //! call to a `puts` it never wrote is a link failure, and that is the whole reason the flag exists.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
     AbiList, AttrSet, Block, CallInfo, Datum, Def, Extra, Float, Func, FuncId, Global, Imm, Inst,
@@ -303,7 +302,7 @@ enum Plan {
 
 impl Plan {
     /// Names what each value was renamed to wherever this plan names the old one.
-    fn rename(&mut self, renamed: &HashMap<Value, Value>) {
+    fn rename(&mut self, renamed: &Map<Value, Value>) {
         if renamed.is_empty() {
             return;
         }
@@ -421,20 +420,20 @@ enum Argument {
 struct Shapes {
     /// The symbol a call to that name has to carry and the signature it has to have, and `None`
     /// where no call may name it.
-    held: HashMap<&'static str, Option<(Symbol, Signature)>>,
+    held: Map<&'static str, Option<(Symbol, Signature)>>,
     /// The same for each name in [`UNCHECKED`], where the signature is the one the module declared
     /// and `None` where it declared nothing, since the call a checking call becomes brings its own.
-    named: HashMap<&'static str, Option<(Symbol, Option<Signature>)>>,
+    named: Map<&'static str, Option<(Symbol, Option<Signature>)>>,
 }
 
 impl Shapes {
     /// Reads the module's answer for each of the names a fold may leave behind.
     fn of(module: &Module, names: &mut Interner) -> Self {
-        let mut held: HashMap<&'static str, Option<(Symbol, Signature)>> = REPLACEMENTS
+        let mut held: Map<&'static str, Option<(Symbol, Signature)>> = REPLACEMENTS
             .iter()
             .map(|&name| (name, Some((names.intern(name), canonical(module, name)))))
             .collect();
-        let mut named: HashMap<&'static str, Option<(Symbol, Option<Signature>)>> =
+        let mut named: Map<&'static str, Option<(Symbol, Option<Signature>)>> =
             UNCHECKED.iter().map(|&name| (name, Some((names.intern(name), None)))).collect();
         for id in module.funcs() {
             // The name the source gave it, so that a module which renamed `puts` is left with a
@@ -558,13 +557,13 @@ pub fn fold(
     // What each symbol was called in the source, for the declarations where the two differ. A call
     // names a symbol, and a symbol an assembler name replaced says nothing about which library
     // function it is, so this is what the two names are put back together through.
-    let standard: HashMap<Symbol, Symbol> =
+    let standard: Map<Symbol, Symbol> =
         module.funcs().filter_map(|id| Some((module[id].name, module[id].spelled?))).collect();
     // A body the program wrote for one of these names does not stop a call to that name being
     // folded, which is gcc 16's rule as well: only `-fno-builtin` says a standard name is not the
     // standard function. What it does stop is folding inside that body, since a `puts` of the
     // program's own with a `printf` of a newline in it would otherwise be a call to itself.
-    let library: HashSet<Symbol> = module
+    let library: rucc_base::hash::Set<Symbol> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
         .map(|id| module[id].name)
@@ -575,7 +574,7 @@ pub fn fold(
         .collect();
     // One table for the module rather than one per function, so that two calls folded to the same
     // string share one object instead of each getting one of its own.
-    let mut texts: HashMap<Vec<u8>, Symbol> = HashMap::new();
+    let mut texts: Map<Vec<u8>, Symbol> = Map::default();
     let mut done = Vec::new();
     for id in module.funcs().collect::<Vec<FuncId>>() {
         // A function with none of these names in it is most of them, and the answer for one is a
@@ -617,7 +616,7 @@ pub fn fold(
             // A plan read the body as it was, so a value it names may be the answer of a call an
             // earlier plan in this round took away, which is `mempcpy (mempcpy (p, a, 4), b, 4)`.
             // Every plan is renamed through what the ones before it replaced.
-            let mut renamed: HashMap<Value, Value> = HashMap::new();
+            let mut renamed: Map<Value, Value> = Map::default();
             for (inst, mut plan) in plans {
                 plan.rename(&renamed);
                 let made = apply(module, id, names, &mut texts, inst, plan);
@@ -637,7 +636,7 @@ pub fn fold(
 }
 
 /// Whether this function calls any of the names a fold reads.
-fn mentions(func: &Func, names: &Interner, standard: &HashMap<Symbol, Symbol>) -> bool {
+fn mentions(func: &Func, names: &Interner, standard: &Map<Symbol, Symbol>) -> bool {
     func.blocks().flat_map(|block| func.insts(block)).any(|inst| {
         let data = &func[inst];
         let Extra::Call(at) = data.extra else { return false };
@@ -662,7 +661,7 @@ struct Site<'a> {
     /// How many times each value is read, which is what says a result is ignored.
     counts: &'a [u32],
     /// What each renamed symbol was called in the source.
-    standard: &'a HashMap<Symbol, Symbol>,
+    standard: &'a Map<Symbol, Symbol>,
     /// The spellings, for reading a callee's name.
     names: &'a Interner,
     /// The names `-fno-builtin-<name>` took away.
@@ -941,9 +940,9 @@ impl Site<'_> {
 
     /// The bytes of the local array at `base` the walk in front of this call found written, by
     /// their place in the array.
-    fn before(&self, call: Inst, base: Value) -> Option<HashMap<i128, u8>> {
+    fn before(&self, call: Inst, base: Value) -> Option<Map<i128, u8>> {
         let size = self.extent(base)?;
-        let mut bytes: HashMap<i128, u8> = HashMap::new();
+        let mut bytes: Map<i128, u8> = Map::default();
         let mut block = self.func.block_of(call)?;
         let mut from = Some(call);
         'walk: for _ in 0..CHAIN {
@@ -1018,13 +1017,7 @@ impl Site<'_> {
     /// module holds and a `strcpy` of a string it holds are read. Anything else that writes memory
     /// ends the walk, apart from one of those into another local, since two locals are two
     /// objects.
-    fn wrote(
-        &self,
-        inst: Inst,
-        base: Value,
-        size: u64,
-        bytes: &mut HashMap<i128, u8>,
-    ) -> Option<()> {
+    fn wrote(&self, inst: Inst, base: Value, size: u64, bytes: &mut Map<i128, u8>) -> Option<()> {
         let data = &self.func[inst];
         if !data.opcode.writes_memory() {
             return Some(());
@@ -2104,14 +2097,14 @@ fn apply(
     module: &mut Module,
     id: FuncId,
     names: &mut Interner,
-    texts: &mut HashMap<Vec<u8>, Symbol>,
+    texts: &mut Map<Vec<u8>, Symbol>,
     inst: Inst,
     plan: Plan,
-) -> HashMap<Value, Value> {
+) -> Map<Value, Value> {
     let (callee, signature, args, answer) = match plan {
         Plan::Drop => {
             module[id].remove_inst(inst);
-            return HashMap::new();
+            return Map::default();
         }
         Plan::Answer(answer) => {
             let width = size(module);
@@ -2120,7 +2113,7 @@ fn apply(
         Plan::Swap { callee, signature, args, answer } => (callee, signature, args, answer),
         Plan::Narrow { callee, signature, arg } => {
             let func = &mut module[id];
-            let Some(old) = func[inst].results().next() else { return HashMap::new() };
+            let Some(old) = func[inst].results().next() else { return Map::default() };
             let ty = func[old].ty;
             let span = func.span(inst);
             let varargs = func.push_abis(&[]);
@@ -2131,17 +2124,17 @@ fn apply(
             let wide = func.create_inst(data, &[ty], span);
             func.insert_before(wide, inst);
             let value = func[wide].results().next().expect("a conversion is one value");
-            let forward = HashMap::from([(old, value)]);
+            let forward: Map<_, _> = [(old, value)].into_iter().collect();
             uses::substitute(func, &forward);
             func.remove_inst(inst);
             return forward;
         }
         Plan::Unchecked { callee, drop } => {
             let func = &mut module[id];
-            let Extra::Call(at) = func[inst].extra else { return HashMap::new() };
+            let Extra::Call(at) = func[inst].extra else { return Map::default() };
             let info = func[at];
             let Some(signature) = without(&func[info.signature], drop) else {
-                return HashMap::new();
+                return Map::default();
             };
             let values: Vec<Value> = func[func[inst].args]
                 .iter()
@@ -2224,11 +2217,11 @@ fn call(
 
 /// Hands whoever read the old call's answer the new one's, takes the old call away, and says what
 /// was renamed.
-fn forward(func: &mut Func, old: Inst, new: Inst) -> HashMap<Value, Value> {
+fn forward(func: &mut Func, old: Inst, new: Inst) -> Map<Value, Value> {
     // Only where the two are the same kind of thing. The printf family is folded only where nothing
     // read it, so the map is empty there and this costs a walk over a function that is about to be
     // walked anyway.
-    let forward: HashMap<Value, Value> = func[old]
+    let forward: Map<Value, Value> = func[old]
         .results()
         .zip(func[new].results().collect::<Vec<Value>>())
         .filter(|&(from, to)| func[from].ty == func[to].ty)
@@ -2256,7 +2249,7 @@ fn without(signature: &Signature, drop: &[usize]) -> Option<Signature> {
 
 /// Writes the answer a search worked out in place of the call that would have worked it out, and
 /// says what was renamed.
-fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) -> HashMap<Value, Value> {
+fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) -> Map<Value, Value> {
     let span = func.span(inst);
     let value = match answer {
         // The haystack itself, which is what a search for the empty string finds and what a search
@@ -2341,8 +2334,7 @@ fn answered(func: &mut Func, inst: Inst, answer: Answer, width: Type) -> HashMap
             func[made].results().next().expect("a difference is one value")
         }
     };
-    let forward: HashMap<Value, Value> =
-        func[inst].results().map(|result| (result, value)).collect();
+    let forward: Map<Value, Value> = func[inst].results().map(|result| (result, value)).collect();
     uses::substitute(func, &forward);
     func.remove_inst(inst);
     forward
@@ -2424,7 +2416,7 @@ fn constant(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
 fn object(
     module: &mut Module,
     names: &mut Interner,
-    texts: &mut HashMap<Vec<u8>, Symbol>,
+    texts: &mut Map<Vec<u8>, Symbol>,
     bytes: &[u8],
 ) -> Symbol {
     if let Some(&symbol) = texts.get(bytes) {

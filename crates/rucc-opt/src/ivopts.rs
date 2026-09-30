@@ -118,9 +118,9 @@
 //! an addressing mode and costs an add anywhere else.
 
 use std::cell::OnceCell;
-use std::collections::HashSet;
 
 use rucc_base::Symbol;
+use rucc_base::hash::Set;
 use rucc_cost::{AddrMode, Cost, CostTable, Cycles, RegClass, Width, heuristics};
 use rucc_ir::{
     Block, BlockCall, Def, Extra, Flags, Func, Inst, InstData, IntPred, Opcode, Type, Value,
@@ -763,8 +763,8 @@ fn read_elsewhere(func: &Func, loops: &Loops, readers: &Readers, id: LoopId, aim
     let moving = |value: &Value| {
         crate::fold::constant(func, *value).is_none() && !loops.is_invariant(func, id, *value)
     };
-    let mut cycle: HashSet<Value> = HashSet::new();
-    let mut steps: HashSet<Inst> = HashSet::new();
+    let mut cycle: Set<Value> = Set::default();
+    let mut steps: Set<Inst> = Set::default();
     let mut work: Vec<Value> = func[func[aim.at].args].iter().copied().filter(moving).collect();
     while let Some(value) = work.pop() {
         if !cycle.insert(value) {
@@ -1927,9 +1927,8 @@ fn home(func: &Func, value: Value) -> Option<Block> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rucc_base::Interner;
+    use rucc_base::hash::Map;
     use rucc_ir::{
         Block, Builder, Extra, Flags, Func, InstData, IntPred, MemInfo, MemOrder, Module, Opcode,
         Restrict, Signature, Type, Value, verify_func,
@@ -2163,7 +2162,7 @@ mod tests {
     /// number has to come from somewhere, and a parameter past the end of what is given keeps the
     /// zero the other loops here rely on.
     fn stores_given(func: &Func, given: &[i128]) -> Vec<i128> {
-        let mut values: HashMap<Value, i128> = HashMap::new();
+        let mut values: Map<Value, i128> = Map::default();
         let mut block = func.entry().expect("a function with blocks in it");
         for (nth, &param) in func[block].params.iter().enumerate() {
             values.insert(param, given.get(nth).copied().unwrap_or(0));

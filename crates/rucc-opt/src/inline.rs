@@ -83,8 +83,7 @@
 //! jumps to such an address, or whose labels a static table holds, is refused, since the copy
 //! would still be reaching into the original.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
     INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_FRAME_GROWTH,
@@ -271,8 +270,8 @@ pub fn run(
     once: bool,
     isa: Isa,
 ) -> Vec<(FuncId, Stats)> {
-    let once = if limit.is_some() && once { called_once(module) } else { HashSet::new() };
-    let wanted: HashMap<Symbol, (FuncId, Kind)> = module
+    let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
+    let wanted: Map<Symbol, (FuncId, Kind)> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
         .filter_map(|id| {
@@ -300,7 +299,7 @@ pub fn run(
     let mut done = Vec::new();
     if !wanted.is_empty() {
         let convention = Convention::of(module);
-        let mut state = HashMap::new();
+        let mut state = Map::default();
         let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
         let how = How { wanted: &wanted, convention, limit, isa, names };
         for id in module.funcs().collect::<Vec<FuncId>>() {
@@ -372,7 +371,7 @@ fn settle_operands(func: &mut Func) {
 /// Any other way is a second call, a tail call, an instruction that takes the address, an image
 /// that holds it, or an alias that names it. Whether a name is a `static` function that may be
 /// inlined is for the caller to ask.
-fn called_once(module: &Module) -> HashSet<Symbol> {
+fn called_once(module: &Module) -> Set<Symbol> {
     let (calls, elsewhere) = references(module);
     calls
         .into_iter()
@@ -382,9 +381,9 @@ fn called_once(module: &Module) -> HashSet<Symbol> {
 }
 
 /// How many direct calls the module makes to each name, and the names it reaches any other way.
-fn references(module: &Module) -> (HashMap<Symbol, usize>, HashSet<Symbol>) {
-    let mut calls: HashMap<Symbol, usize> = HashMap::new();
-    let mut elsewhere = HashSet::new();
+fn references(module: &Module) -> (Map<Symbol, usize>, Set<Symbol>) {
+    let mut calls: Map<Symbol, usize> = Map::default();
+    let mut elsewhere = Set::default();
     for id in module.funcs() {
         let func = &module[id];
         for inst in func.blocks().flat_map(|block| func.insts(block)) {
@@ -420,7 +419,7 @@ fn references(module: &Module) -> (HashMap<Symbol, usize>, HashSet<Symbol>) {
 /// What stays the same for every function [`settle`] visits.
 struct How<'a> {
     /// The functions whose calls are inlined, by name, and why.
-    wanted: &'a HashMap<Symbol, (FuncId, Kind)>,
+    wanted: &'a Map<Symbol, (FuncId, Kind)>,
     /// The calling convention the pack is forwarded under.
     convention: Convention,
     /// How many instructions a callee declared `inline` may have.
@@ -445,7 +444,7 @@ fn settle(
     module: &mut Module,
     id: FuncId,
     how: &How<'_>,
-    state: &mut HashMap<FuncId, State>,
+    state: &mut Map<FuncId, State>,
     done: &mut Vec<(FuncId, Stats)>,
 ) {
     if state.contains_key(&id) || module[id].is_declaration() {
@@ -477,7 +476,7 @@ fn settle(
     // The calls to a function called once that are too many loops deep, found before anything is
     // spliced in, since a splice splits the block the call was in. Counted as gcc counts, so a
     // block in one loop is one deep, which is one more than `Loops::depth` says.
-    let deep: HashSet<Inst> = if calls.iter().any(|&(.., kind)| kind == Kind::Once) {
+    let deep: Set<Inst> = if calls.iter().any(|&(.., kind)| kind == Kind::Once) {
         let func = &module[id];
         let cfg = Cfg::new(func);
         let loops = Loops::new(&cfg, &Dominators::new(&cfg));
@@ -490,7 +489,7 @@ fn settle(
             .map(|&(_, inst, ..)| inst)
             .collect()
     } else {
-        HashSet::new()
+        Set::default()
     };
     let mut stats = Stats::new();
     let mut spliced = false;
@@ -653,7 +652,7 @@ struct Plan {
     groups: Option<Vec<u32>>,
     /// For each call in the callee that passes the pack on, the groups that have to go to memory
     /// because the registers they went in are taken there, which is only ever under SysV.
-    spills: HashMap<Inst, Vec<usize>>,
+    spills: Map<Inst, Vec<usize>>,
 }
 
 /// Whether one call can be inlined, and what the splice needs to know if it can.
@@ -700,7 +699,7 @@ fn check(
     let extras = args[fixed..].to_vec();
     let abis = expand(&func[func[info].varargs], extras.len());
     let groups = func.arg_groups(call).and_then(|groups| past(groups, fixed));
-    let mut plan = Plan { fixed, extras, abis, groups, spills: HashMap::new() };
+    let mut plan = Plan { fixed, extras, abis, groups, spills: Map::default() };
     let outer: Vec<(Type, Abi)> = args[..fixed]
         .iter()
         .enumerate()
@@ -710,7 +709,7 @@ fn check(
     if callee.named_blocks().next().is_some() {
         return Err(InlineFailure::ComputedGoto);
     }
-    let mut packs = HashSet::new();
+    let mut packs = Set::default();
     let mut counted = false;
     for block in callee.blocks() {
         for inst in callee.insts(block) {
@@ -999,7 +998,7 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
 
     // The part after the call, which takes the call's results as parameters.
     let after = func.create_block();
-    let mut forward = HashMap::new();
+    let mut forward = Map::default();
     for result in func[call].results().collect::<Vec<Value>>() {
         let ty = func[result].ty;
         forward.insert(result, func.append_param(after, ty));
@@ -1043,8 +1042,8 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan) {
             passed[at] = by_value(func, entry, call, passed[at], size, align);
         }
     }
-    let mut blocks = HashMap::new();
-    let mut values = HashMap::new();
+    let mut blocks = Map::default();
+    let mut values = Map::default();
     for from in callee.blocks() {
         let to = func.create_block();
         if from == start {
@@ -1406,8 +1405,8 @@ fn targets(
     func: &mut Func,
     callee: &Func,
     list: BlockCallList,
-    blocks: &HashMap<Block, Block>,
-    values: &HashMap<Value, Value>,
+    blocks: &Map<Block, Block>,
+    values: &Map<Value, Value>,
 ) -> BlockCallList {
     let calls: Vec<BlockCall> = callee[list]
         .iter()
@@ -1602,7 +1601,7 @@ block0:
     fn respan(func: &mut Func, spans: &[Span]) {
         let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         assert_eq!(insts.len(), spans.len(), "one span for each instruction");
-        let mut forward = HashMap::new();
+        let mut forward = Map::default();
         for (inst, &span) in insts.into_iter().zip(spans) {
             let data = func[inst];
             let types: Vec<Type> = data.results().map(|value| func[value].ty).collect();

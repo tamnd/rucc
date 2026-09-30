@@ -73,8 +73,7 @@
 //! The cost is paid now so that the passes that use it are simple, and until they land the
 //! measurement to make is that the cost really is nothing, which is what the corpus says.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Type, Value};
 
 use crate::cfg::Cfg;
@@ -441,7 +440,7 @@ fn caught(
 ) -> Vec<Block> {
     let Some(from) = defining(func, value) else { return Vec::new() };
     let mut at = Vec::new();
-    let mut seen: HashSet<Block> = HashSet::new();
+    let mut seen: Set<Block> = Set::default();
     let mut queue: Vec<Block> = Vec::new();
     for exit in loops.exits(id) {
         if seen.insert(exit.to) {
@@ -475,7 +474,7 @@ fn covered(dom: &Dominators, at: &[Block], block: Block) -> bool {
 }
 
 /// The name the value goes by at the end of this block, which is the nearest parameter above it.
-fn reaching(dom: &Dominators, param: &HashMap<Block, Value>, value: Value, block: Block) -> Value {
+fn reaching(dom: &Dominators, param: &Map<Block, Value>, value: Value, block: Block) -> Value {
     let mut here = Some(block);
     while let Some(now) = here {
         if let Some(&had) = param.get(&now) {
@@ -494,7 +493,7 @@ fn reaching(dom: &Dominators, param: &HashMap<Block, Value>, value: Value, block
 /// which is why both the placement and the rewrite go by dominance.
 pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak) {
     let ty = func[job.value].ty;
-    let param: HashMap<Block, Value> =
+    let param: Map<Block, Value> =
         job.at.iter().map(|&block| (block, func.append_param(block, ty))).collect();
     // Each edge in hands over whatever the value is called at the end of the block it leaves, which
     // is the value itself on the way out of the loop and a parameter written above on the joins.
@@ -559,7 +558,7 @@ fn wanted(
 ) -> Vec<(Block, Vec<Block>)> {
     let cfg = an.cfg(func);
     let loops = an.loops(func);
-    let mut claimed: HashSet<Block> = HashSet::new();
+    let mut claimed: Set<Block> = Set::default();
     let mut jobs: Vec<(Block, Vec<Block>)> = Vec::new();
     for id in loops.all() {
         let Some((to, from)) = ask(loops, cfg, id) else { continue };
@@ -616,7 +615,7 @@ fn apply(
 /// and so costs it every pass that asks for one. It is the same trade document 07.1 makes for a loop
 /// with several headers: the shape is refused rather than guessed at, and a computed `goto` inside a
 /// loop is rare enough that the passes it turns off are not worth the risk of a wrong one.
-fn computed(func: &Func) -> HashSet<Block> {
+fn computed(func: &Func) -> Set<Block> {
     func.blocks()
         .filter(|&block| {
             func.terminator(block).is_some_and(|last| func[last].opcode == Opcode::IndirectBr)

@@ -622,7 +622,7 @@ fn refused(
     // It matters in this case, because the condition on `if (1)` is not a constant, it is a
     // comparison of two constants, which `fold` deliberately leaves standing.
     let term = func.terminator(shape.head).expect("the head of a diamond ends in its branch");
-    if simplify_cfg::taken(func, term, &Bindings::new()).is_some() {
+    if simplify_cfg::taken(func, term, &Bindings::default()).is_some() {
         return Some(CONDITION_IS_DECIDED);
     }
     let moving: &[Inst] = store.map_or(&[], |one| &one.insts);

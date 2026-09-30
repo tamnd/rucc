@@ -81,9 +81,9 @@
 //! and never will be.
 
 use std::cell::OnceCell;
-use std::collections::HashSet;
 
 use rucc_base::Symbol;
+use rucc_base::hash::Set;
 use rucc_ir::{
     AttrSet, Attrs, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Opcode, Restrict, Type,
     Value,
@@ -364,7 +364,7 @@ impl Access {
 /// to add an opcode introduces a miscompilation without touching this file.
 #[derive(Clone, Debug, Default)]
 pub struct Escapes {
-    escaped: HashSet<Inst>,
+    escaped: Set<Inst>,
 }
 
 impl Escapes {
@@ -398,7 +398,7 @@ impl Escapes {
     /// it asks and which therefore cannot hand over a finished [`Summaries`].
     #[must_use]
     pub fn with(func: &Func, kept: impl Fn(Inst, usize) -> bool) -> Self {
-        let mut escaped = HashSet::new();
+        let mut escaped = Set::default();
         for block in func.blocks() {
             for inst in func.insts(block) {
                 let data = func[inst];

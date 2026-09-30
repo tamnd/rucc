@@ -74,10 +74,10 @@
 //! bytes spanning two of them are not a scalar either one holds, and neither does a `volatile`
 //! access or an atomic one, whose whole point is that the access happens.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{
     Block, Datum, Def, Extra, Flags, Func, Imm, Inst, MemOrder, Module, Opcode, Pic, Type, Value,
 };
@@ -154,7 +154,7 @@ impl Pass for Image {
 #[derive(Debug, Default, Clone)]
 pub struct Images {
     /// By the name the global is reached by, and `None` for a name that arrived twice.
-    objects: HashMap<Symbol, Option<Object>>,
+    objects: Map<Symbol, Option<Object>>,
     /// Which end of a number the target puts first, which only the literal bytes need.
     little_endian: bool,
 }
@@ -163,7 +163,7 @@ impl Images {
     /// The images of every read only global this module can vouch for.
     #[must_use]
     pub fn of(module: &Module, pic: Pic) -> Self {
-        let mut objects: HashMap<Symbol, Option<Object>> = HashMap::new();
+        let mut objects: Map<Symbol, Option<Object>> = Map::default();
         for id in module.globals() {
             let global = &module[id];
             if !global.constant || !vouched(global, pic) {

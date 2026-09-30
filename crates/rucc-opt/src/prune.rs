@@ -123,8 +123,7 @@
 //! verifier holds every pass to it. So the walk that takes them out is called from here, and it is
 //! [`crate::simplify_cfg`]'s walk rather than a second one written next door.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_ir::{Block, BlockCall, Def, Extra, Func, Imm, Inst, IntPred, Opcode, SwitchInfo, Value};
 
 use crate::fold::constant;
@@ -422,7 +421,7 @@ fn shrink(func: &mut Func, term: Inst, keep: &Keep) -> usize {
 /// A place is a block and what is passed to it, because two edges into one block passing
 /// different values are two places and only one of them can be the default.
 fn busiest(func: &Func, arms: &[(Imm, BlockCall)]) -> BlockCall {
-    let mut counts: HashMap<(Block, &[Value]), usize> = HashMap::new();
+    let mut counts: Map<(Block, &[Value]), usize> = Map::default();
     for &(_, call) in arms {
         *counts.entry((call.block, &func[call.args])).or_default() += 1;
     }

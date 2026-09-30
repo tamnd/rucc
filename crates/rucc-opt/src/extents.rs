@@ -68,9 +68,8 @@
 //! the one written here. `-fno-semantic-interposition` puts the belief back as a promise, and
 //! `-fvisibility=hidden` gets there without needing one.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_ir::{Def, Extra, Flags, Func, FuncId, Global, Inst, Linkage, Module, Opcode, Pic, Value};
 
 use crate::discharge::{Fact, about, alive, covers, derives};
@@ -116,7 +115,7 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
 ///
 /// The three kinds are asked in the shape `crate::discharge` asks them in, since the point of the
 /// flag is that the pass finds the answer already there rather than a second opinion about it.
-fn inside(func: &Func, inst: Inst, sizes: &HashMap<Symbol, u64>) -> bool {
+fn inside(func: &Func, inst: Inst, sizes: &Map<Symbol, u64>) -> bool {
     match func[inst].opcode {
         Opcode::CheckBounds => {
             // The hoisted form of section 7.4 covers as many bytes as its loop runs times, which is
@@ -144,7 +143,7 @@ fn inside(func: &Func, inst: Inst, sizes: &HashMap<Symbol, u64>) -> bool {
 }
 
 /// The object a global is, when the address a check is about was computed from one.
-fn object(func: &Func, base: Value, sizes: &HashMap<Symbol, u64>) -> Option<Fact> {
+fn object(func: &Func, base: Value, sizes: &Map<Symbol, u64>) -> Option<Fact> {
     let Def::Result { inst, .. } = func[base].def else { return None };
     if func[inst].opcode != Opcode::GlobalAddr {
         return None;
@@ -159,8 +158,8 @@ fn object(func: &Func, base: Value, sizes: &HashMap<Symbol, u64>) -> Option<Fact
 /// Kept apart from [`extents`] rather than folded into one map, because the two are asked at
 /// different times by different things: `crate::params` wants the sizes and nothing else, and this
 /// is only built when there is a check to answer.
-fn aligns(module: &Module, pic: Pic) -> HashMap<Symbol, u32> {
-    let mut aligns: HashMap<Symbol, u32> = HashMap::new();
+fn aligns(module: &Module, pic: Pic) -> Map<Symbol, u32> {
+    let mut aligns: Map<Symbol, u32> = Map::default();
     for id in module.globals() {
         let global = &module[id];
         if !vouched(global, pic) {
@@ -192,7 +191,7 @@ fn settled(align: u32, offset: i128) -> u32 {
 /// The global says what it is aligned to and the offset says what is left of that, and the access
 /// says what it assumes. An access that assumes nothing is not marked, because there is nothing
 /// there to answer and a flag saying so would be noise on every check over a `char`.
-fn starts(func: &Func, inst: Inst, aligns: &HashMap<Symbol, u32>) -> bool {
+fn starts(func: &Func, inst: Inst, aligns: &Map<Symbol, u32>) -> bool {
     if func[inst].opcode != Opcode::CheckBounds || func[func[inst].args].len() > 2 {
         return false;
     }
@@ -215,8 +214,8 @@ fn starts(func: &Func, inst: Inst, aligns: &HashMap<Symbol, u32>) -> bool {
 /// A name that somehow arrives twice keeps the smaller of the two sizes. That cannot happen in a
 /// module the frontend built, and writing it this way means the failure if it ever does is a check
 /// that stays rather than one that goes.
-pub(crate) fn extents(module: &Module, pic: Pic) -> HashMap<Symbol, u64> {
-    let mut sizes: HashMap<Symbol, u64> = HashMap::new();
+pub(crate) fn extents(module: &Module, pic: Pic) -> Map<Symbol, u64> {
+    let mut sizes: Map<Symbol, u64> = Map::default();
     for id in module.globals() {
         let global = &module[id];
         if !vouched(global, pic) {

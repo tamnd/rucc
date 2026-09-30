@@ -74,8 +74,9 @@
 //! came back knowing nothing down by the opcode that lost it, which is how the table in
 //! [`super::ops`] grows by evidence rather than by guesswork.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, Def, Extra, Func, Inst, IntPred, Opcode, Value};
 
 use super::ops::{self, Truth, Undo};
@@ -234,7 +235,7 @@ struct Relation {
 #[derive(Clone, Debug, Default)]
 struct Entry {
     at_def: Option<Range>,
-    refined: HashMap<Block, Range>,
+    refined: Map<Block, Range>,
 }
 
 /// The range analysis of one function.
@@ -248,14 +249,14 @@ pub struct Ranges<'a> {
     cfg: &'a Cfg,
     dom: &'a Dominators,
     options: Options,
-    cache: HashMap<Value, Entry>,
-    relations: HashMap<Block, Vec<Relation>>,
+    cache: Map<Value, Entry>,
+    relations: Map<Block, Vec<Relation>>,
     counts: Counts,
     /// The values whose definition range is being computed right now.
     ///
     /// Re-entering one is a cycle, which in SSA means a loop-carried value, and the answer there
     /// is the range of the type.
-    active: HashSet<Value>,
+    active: Set<Value>,
     /// How many times that has happened, so that an answer which leaned on a cycle is not cached
     /// and the next query gets the same answer rather than a worse one.
     cycles: u64,
@@ -285,10 +286,10 @@ impl<'a> Ranges<'a> {
             cfg,
             dom,
             options,
-            cache: HashMap::new(),
-            relations: HashMap::new(),
+            cache: Map::default(),
+            relations: Map::default(),
             counts: Counts::default(),
-            active: HashSet::new(),
+            active: Set::default(),
             cycles: 0,
             spent: 0,
             loops: None,

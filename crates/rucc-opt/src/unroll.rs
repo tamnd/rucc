@@ -90,8 +90,7 @@
 //! rather than built: it is a second threshold and a second pass name for a case the corpus has not
 //! asked for yet.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{Block, BlockCall, Builder, Def, Func, Opcode, Value};
 
@@ -140,7 +139,7 @@ impl Pass for Unroll {
         if func.entry().is_none() {
             return stats;
         }
-        let mut done: HashSet<Block> = HashSet::new();
+        let mut done: Set<Block> = Set::default();
         let mut say = true;
         'rounds: loop {
             let jobs = plan(func, an, &done, &mut stats, say);
@@ -201,7 +200,7 @@ struct Job {
 fn plan(
     func: &Func,
     an: &mut Analyses,
-    done: &HashSet<Block>,
+    done: &Set<Block>,
     stats: &mut Stats,
     say: bool,
 ) -> Vec<Job> {
@@ -223,7 +222,7 @@ fn plan(
         }
     }
     found.sort_by_key(|job| std::cmp::Reverse(job.depth));
-    let mut taken: HashSet<Block> = HashSet::new();
+    let mut taken: Set<Block> = Set::default();
     found.retain(|job| {
         let free = job.blocks.iter().all(|block| !taken.contains(block));
         if free {
@@ -238,9 +237,9 @@ fn plan(
 #[derive(Debug)]
 struct Round {
     /// The blocks whose address is taken, which a copy cannot stand in for.
-    addressed: HashSet<Block>,
+    addressed: Set<Block>,
     /// The blocks that read each block's values, from [`readers`].
-    readers: HashMap<Block, HashSet<Block>>,
+    readers: Map<Block, Set<Block>>,
 }
 
 /// Whether this loop can be unrolled away, and why not when it cannot.
@@ -304,7 +303,7 @@ fn consider(
     }
 
     let blocks = loops.blocks(id).to_vec();
-    let inside: HashSet<Block> = blocks.iter().copied().collect();
+    let inside: Set<Block> = blocks.iter().copied().collect();
     for &block in &blocks {
         if round.addressed.contains(&block) {
             return Err(ADDRESSED);
@@ -351,17 +350,17 @@ fn consider(
 /// would leave it reading the first iteration's value instead of the last, so this is refused
 /// rather than repaired.
 pub(crate) fn escapes(
-    readers: &HashMap<Block, HashSet<Block>>,
+    readers: &Map<Block, Set<Block>>,
     blocks: &[Block],
-    inside: &HashSet<Block>,
+    inside: &Set<Block>,
 ) -> bool {
     blocks.iter().filter_map(|block| readers.get(block)).flatten().any(|at| !inside.contains(at))
 }
 
 /// For each block, the other blocks that read a value it defines, as an operand or as an argument
 /// to a block, which is what [`escapes`] asks about a loop's blocks.
-fn readers(func: &Func) -> HashMap<Block, HashSet<Block>> {
-    let mut readers: HashMap<Block, HashSet<Block>> = HashMap::new();
+fn readers(func: &Func) -> Map<Block, Set<Block>> {
+    let mut readers: Map<Block, Set<Block>> = Map::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
             let args = func[func[inst].args].iter();
@@ -390,7 +389,7 @@ fn size_after(
     blocks: &[Block],
     times: u32,
 ) -> Option<u32> {
-    let mut settled: HashSet<Value> = HashSet::new();
+    let mut settled: Set<Value> = Set::default();
     let mut survives = 0u32;
     for &block in blocks {
         for inst in func.insts(block) {
@@ -460,9 +459,9 @@ fn apply(func: &mut Func, job: &Job) {
 
     // One entry per copy, the first being the original blocks standing for themselves under a
     // substitution that renames nothing.
-    let mut copies: Vec<HashMap<Block, Block>> =
+    let mut copies: Vec<Map<Block, Block>> =
         vec![job.blocks.iter().map(|&block| (block, block)).collect()];
-    let mut subs: Vec<HashMap<Value, Value>> = vec![HashMap::new()];
+    let mut subs: Vec<Map<Value, Value>> = vec![Map::default()];
 
     for round in 1..job.times as usize {
         // The header's parameters stand for whatever the one edge in hands them, so each copy is
@@ -471,7 +470,7 @@ fn apply(func: &mut Func, job: &Job) {
         // original arguments read through the previous copy's substitution, never the previous
         // copy's read through it again, which would be one round's worth of renaming applied on top
         // of another's.
-        let mut map: HashMap<Value, Value> = HashMap::new();
+        let mut map: Map<Value, Value> = Map::default();
         for (&param, arg) in params.iter().zip(&back) {
             map.insert(param, subs[round - 1].get(arg).copied().unwrap_or(*arg));
         }
