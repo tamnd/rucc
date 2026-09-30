@@ -233,3 +233,20 @@ fn a_section_written_beside_the_star_is_the_declarations() {
         assert!(text.contains("keep_f:\n"), "`used` keeps it at {level}:\n{text}");
     }
 }
+
+#[test]
+fn a_function_returning_a_pointer_may_have_its_section_beside_the_star() {
+    // `void * __init memblock_alloc_try_nid(...)`, on a definition and on a declaration that a
+    // definition without the attribute follows.
+    let source = "int g;\n\
+                  void * __attribute__((__section__(\".init.text\"))) f(void) { return &g; }\n\
+                  void * __attribute__((__section__(\".init.text\"))) h(void);\n\
+                  void *h(void) { return 0; }\n";
+    let text = listing("starred-function", LINUX, source);
+    for name in ["f", "h"] {
+        let placed = format!(
+            "\t.section\t.init.text,\"ax\",@progbits\n\t.p2align\t4, 0x90\n\t.globl\t{name}\n"
+        );
+        assert!(text.contains(&placed), "{name} in .init.text:\n{text}");
+    }
+}
