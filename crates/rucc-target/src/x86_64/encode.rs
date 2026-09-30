@@ -2211,6 +2211,11 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movq", &R_CONTROL, Long, &[0x0F, 0x22], pair(0, 1), NO_IMM),
     bytes("movq", &DEBUG_R, Long, &[0x0F, 0x21], pair(1, 0), NO_IMM),
     bytes("movq", &R_DEBUG, Long, &[0x0F, 0x23], pair(0, 1), NO_IMM),
+    // The same in thirty two bit mode, where the register is thirty two bits and so is the letter.
+    bytes("movl", &CONTROL_R, Long, &[0x0F, 0x20], pair(1, 0), NO_IMM),
+    bytes("movl", &R_CONTROL, Long, &[0x0F, 0x22], pair(0, 1), NO_IMM),
+    bytes("movl", &DEBUG_R, Long, &[0x0F, 0x21], pair(1, 0), NO_IMM),
+    bytes("movl", &R_DEBUG, Long, &[0x0F, 0x23], pair(0, 1), NO_IMM),
     // A segment register moved to and from a general purpose one or memory. Reading one into a
     // register writes as much of the register as the letter says, so that direction has a prefix
     // per width. Loading one reads a word whatever the letter is, and gas writes no prefix for a
