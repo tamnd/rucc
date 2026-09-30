@@ -72,6 +72,8 @@ An address constant is an object and a distance into it rather than a value, bec
 
 A null pointer constant is any integer constant expression with the value zero, or one cast to `void *`, and the evaluator is what decides it rather than the shape of the tree. `(void *)((long)(x) * 0l)` is one exactly when `x` is an integer constant expression, which is the whole of how the kernel's `__is_constexpr` tells a constant from a variable: the conditional it builds has type `int *` for a constant and `void *` for anything else. The question is asked with the strict folding, so a `const` object is not a constant there in any dialect, and gcc gives the same answer.
 
+GCC reads a `const` object of integer type, not `volatile` and initialized with a constant, as the value it holds in two places: the size of an array and the initializer of an object with static storage. So `const int n = 4; char b[n];` is an array of four rather than a variable length array, and one at file scope compiles, with a warning under `-pedantic`. Linux 7.2 depends on it. The GNU dialects do the same here and the strict ones keep 6.6 as it is written. The other places a constant is required, `_Static_assert`, `case`, an enumerator, a bit-field width, `alignas`, `__builtin_choose_expr` and a designator, refuse the object, because gcc 16 refuses it in all of them in every dialect. An object with automatic storage counts only where its own initializer is a constant without this reading, so `const int m = n + 1;` in a body is still a variable length array's size, which is also where gcc draws the line.
+
 ## 7.6 Floating point semantics
 
 The default is `-ffp-contract=on` and `-fexcess-precision=fast`, matching GCC.

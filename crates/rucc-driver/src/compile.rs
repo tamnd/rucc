@@ -8951,12 +8951,16 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("global @e : i32 = 4,"), "{text}");
 
         // A `const` object is not one of them, which is what makes `int a[n];` a variable
-        // length array in C and is the distinction the keyword was added to draw.
+        // length array in C and is the distinction the keyword was added to draw. gcc reads one
+        // as its value in an array size all the same, and so do the GNU dialects here, so the
+        // refusal is the strict dialects' answer.
         let mut opts = options();
         opts.emit = EmitKind::Ir;
+        opts.gnu_extensions = false;
         let konst = "const int n = 1;\nint a[n];\n";
         let message = "/main.c:2:5: error: variably modified 'a' at file scope [E0538]";
         assert_eq!(run(&opts, konst).messages, [message]);
+        opts.gnu_extensions = true;
 
         // Nor is a subscript of one, which gcc 16 refuses in the same words.
         let subscript = "constexpr int t[3] = { 1, 2, 3 };\nint a[t[1]];\n";
@@ -8967,6 +8971,62 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let warning = "/main.c:2:6: warning: initialization discards 'const' qualifier from \
              pointer target type [E0514]";
         assert_eq!(run(&opts, address).messages, [warning]);
+    }
+
+    /// A `const` object of integer type is read as its value in an array size and in a static
+    /// initializer under the GNU dialects, which is gcc's extension and what Linux 7.2 relies on.
+    ///
+    /// Every answer here is what gcc 16 gives. The other places a constant is required are
+    /// unchanged, since gcc refuses the object in all of them, and so are the strict dialects.
+    #[test]
+    fn a_const_object_is_read_as_its_value_where_gcc_reads_one() {
+        let text = ir(concat!(
+            "const int n = 4;\n",
+            "static const long big = 1L << 40;\n",
+            "static const int twice = n * 2;\n",
+            "int a[n];\n",
+            "int b = n * 2 + 1;\n",
+            "int c = (int)(big >> 38);\n",
+            "int d = twice + 1;\n",
+            "int f(void) { const int m = 5; char buf[m]; static int s = m; return sizeof buf + s; }\n",
+        ));
+        assert!(text.contains("global @a : bytes 16 ="), "{text}");
+        assert!(text.contains("global @b : i32 = 9,"), "{text}");
+        assert!(text.contains("global @c : i32 = 4,"), "{text}");
+        assert!(text.contains("global @d : i32 = 9,"), "{text}");
+        assert!(text.contains("alloca, size 5,"), "{text}");
+        assert!(!text.contains("stacksave"), "{text}");
+
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        // An automatic object counts only where its own initializer is a constant without this
+        // reading, and `volatile` takes an object out of it, so both of these stay variable.
+        let variable = concat!(
+            "const int n = 4;\n",
+            "int f(void) { const int m = n + 1; volatile const int v = 3; char a[m]; char b[v];\n",
+            "  return sizeof a + sizeof b; }\n",
+        );
+        let compiled = run(&opts, variable);
+        assert!(compiled.messages.is_empty(), "{:?}", compiled.messages);
+        assert_eq!(compiled.text().matches("alloca %").count(), 2, "{}", compiled.text());
+
+        // gcc refuses the object everywhere else a constant is required.
+        let elsewhere = "const int n = 4;\n_Static_assert(n == 4, \"\");\n";
+        let message = "/main.c:2:16: error: expression in static assertion is not constant [E0614]";
+        assert_eq!(run(&opts, elsewhere).messages, [message]);
+
+        // `-pedantic` says so about the array, in gcc's words.
+        opts.pedantic = true;
+        let pedantic = "const int n = 4;\nint a[n];\n";
+        let warning = "/main.c:2:5: warning: variably modified 'a' at file scope [E0749]";
+        assert_eq!(run(&opts, pedantic).messages, [warning]);
+
+        // And the strict dialects keep 6.6 as it is written.
+        opts.pedantic = false;
+        opts.gnu_extensions = false;
+        let initializer = "const int n = 4;\nint b = n;\n";
+        let message = "/main.c:2:5: error: initializer element is not constant [E0618]";
+        assert_eq!(run(&opts, initializer).messages, [message]);
     }
 
     /// A member whose size was refused is not a flexible array member, whatever it looks like.
