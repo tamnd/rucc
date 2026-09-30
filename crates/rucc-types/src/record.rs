@@ -403,11 +403,13 @@ struct Builder {
     /// Whether an unnamed bit-field raises the record's alignment, which goes with the rule.
     ///
     /// The target's answer when the rule is the target's. When an attribute chose the other rule
-    /// the answer is the one that rule gives on x86, which is the one architecture gcc takes the
-    /// attributes on: yes under Microsoft's rule and no under the Itanium one. So on mingw
+    /// the answer is the one that rule gives on the same architecture: yes under Microsoft's rule,
+    /// and under the Itanium one no on x86-64 and yes on AArch64. So on x86-64 mingw
     /// `struct { char c; int :20; } __attribute__((gcc_struct))` is four bytes aligned to one, as
     /// it is on Linux, and the same record with `ms_struct` on Linux is eight bytes aligned to
-    /// four, as it is on mingw. Both measured with gcc 16 on x86-64 Linux and with mingw-w64 gcc.
+    /// four, as it is on mingw. Both measured with gcc 16 on x86-64 Linux and with mingw-w64 gcc,
+    /// and the AArch64 answer with llvm-mingw's clang. See
+    /// [`TargetInfo::unnamed_bit_field_aligns_under`].
     unnamed_aligns: bool,
     /// How long each member of no fixed size is, which is what makes a `union` as long as it is.
     ///
@@ -436,11 +438,7 @@ impl Builder {
         target: &TargetInfo,
     ) -> Builder {
         let style = options.bit_fields.unwrap_or(target.bit_field_style);
-        let unnamed_aligns = if style == target.bit_field_style {
-            target.unnamed_bit_field_aligns
-        } else {
-            style == BitFieldStyle::Microsoft
-        };
+        let unnamed_aligns = target.unnamed_bit_field_aligns_under(style);
         // One byte, not zero: a record with no members at all has an alignment of one, which is
         // what both compilers report for the GNU empty structure.
         Builder {

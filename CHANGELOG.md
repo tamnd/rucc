@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `__attribute__((gcc_struct))` on AArch64 Windows lets an unnamed bit-field raise the record's alignment, as AAPCS64 and llvm-mingw's clang do. (#2071)
 - A function on AArch64 Windows whose frame is bigger than a page saves x29 and x30 before it calls `__chkstk`, so one that calls nothing else no longer returns into its own prologue and loops forever. (#2071)
 - An `__int128` argument on AArch64 Linux and Windows starts at an even x register, as AAPCS64 rule C.9 says, so one after an `int` is in x2 and x3 rather than x1 and x2. On every AArch64 target, one that does not fit in the x registers left now spends them, so the argument after it goes in memory the way clang puts it. (#2222)
 - An import library indexes a name two exports define once, at the first of them, as `llvm-dlltool` does. `lib32/msvcr80d.def.in` exports `:` twice, and the library `rucc --dlltool` wrote for it had the name in its indexes twice and was 36 bytes longer than `llvm-dlltool`'s, so the i686 sysroot would not have been the one rucc pins (#2069).

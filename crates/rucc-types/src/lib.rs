@@ -1170,6 +1170,11 @@ mod tests {
         let unnamed = [member(char_), unnamed_bits(int_, 20)];
         assert_eq!(on(&mingw, &gcc, &unnamed).layout, Layout::new(4, 1));
         assert_eq!(on(&linux(), &ms, &unnamed).layout, Layout::new(8, 4));
+        // Except that the Itanium rule on AArch64 is AAPCS64's, which says yes, so on Windows on
+        // AArch64 gcc_struct gives four aligned to four, as llvm-mingw's clang does.
+        let arm_mingw = target("aarch64-pc-windows-gnu");
+        assert_eq!(on(&arm_mingw, &gcc, &unnamed).layout, Layout::new(4, 4));
+        assert_eq!(on(&arm_mingw, &RecordOptions::default(), &unnamed).layout, Layout::new(8, 4));
 
         // And so does what a zero width one does, with a bit-field before it and without one.
         let narrow = [
