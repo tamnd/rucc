@@ -4365,6 +4365,16 @@ impl<'u> Body<'_, 'u> {
                 self.discard(lhs);
                 self.complex_copy(at, rhs, ty, span);
             }
+            // `__builtin_complex(x, y)`, which is the two halves written where they go and
+            // nothing else. Sema has checked that both are already in the type of a half, so
+            // there is no conversion to make and, which is the point, no arithmetic either.
+            ExprKind::Complex { real, imag } => {
+                for (imaginary, half) in [(false, real), (true, imag)] {
+                    let value = self.value(half);
+                    let into = self.half_place(at, imaginary, part, span);
+                    self.write(into, value, span);
+                }
+            }
             // A conversion to a complex type, which is either the other complex type's halves
             // converted or a real value beside a zero. `(_Complex double)x` is written the same
             // way and means the same thing, which is why the cast comes through here as well.
@@ -5530,6 +5540,11 @@ impl<'u> Body<'_, 'u> {
             // A vector, which has no value form, so it is built where one would live. What a read
             // of that gives is what a read of any other vector object gives.
             ExprKind::Shuffle { .. } => {
+                let place = self.place(expr);
+                self.read(place, span)
+            }
+            // A complex value, which has no value form either and is built the same way.
+            ExprKind::Complex { .. } => {
                 let place = self.place(expr);
                 self.read(place, span)
             }
@@ -9561,6 +9576,7 @@ impl Scan<'_> {
             ExprKind::Unary { operand, .. } => self.expr(operand),
             ExprKind::Binary { lhs, rhs, .. }
             | ExprKind::Expect { value: lhs, hint: rhs, .. }
+            | ExprKind::Complex { real: lhs, imag: rhs }
             | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);

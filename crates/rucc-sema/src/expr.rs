@@ -288,6 +288,20 @@ pub enum ExprKind {
         /// a sign from anywhere other than nowhere.
         rhs: Option<ExprId>,
     },
+    /// `__builtin_complex`, a complex value whose halves are the two operands exactly as they
+    /// are, which is how `complex.h` spells `CMPLX` and the two beside it.
+    ///
+    /// A node rather than `real + imag * I` because that is arithmetic, and arithmetic is what
+    /// the builtin exists to avoid: `0.0 * INFINITY` is a nan and `0.0 + -0.0` is a positive
+    /// zero, so the sum would lose the very values the macro is there to build. Both operands
+    /// have the type the halves have, which sema has already checked. See
+    /// `check/builtin/parts.rs`.
+    Complex {
+        /// The real half.
+        real: ExprId,
+        /// The imaginary half.
+        imag: ExprId,
+    },
     /// `__builtin_shuffle`, a vector whose lanes are picked out of one or two others by a mask.
     ///
     /// A node rather than a call because there is no function to call: the answer is a vector,
