@@ -483,6 +483,7 @@ fn settle(
         HashSet::new()
     };
     let mut stats = Stats::new();
+    let mut spliced = false;
     for (_, call, callee, kind) in calls {
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
@@ -522,13 +523,25 @@ fn settle(
             continue;
         }
         match splice(module, id, call, callee, how.convention, kind) {
-            Ok(()) => stats.optimized(match kind {
-                Kind::Always => INLINED,
-                Kind::Hinted => HINT_INLINED,
-                Kind::Once => ONCE_INLINED,
-            }),
+            Ok(()) => {
+                spliced = true;
+                stats.optimized(match kind {
+                    Kind::Always => INLINED,
+                    Kind::Hinted => HINT_INLINED,
+                    Kind::Once => ONCE_INLINED,
+                });
+            }
             Err(failure) => stats.missed(why(failure)),
         }
+    }
+    // A body that never returns ends in something other than a jump back, so the block the call
+    // was in stops before the rest of the caller and nothing reaches the rest any more. The pass
+    // that strands a block deletes it, which is what the verifier holds every pass to, and doing it
+    // here rather than at the end means a caller that copies this body in does not copy the dead
+    // blocks along with it. What it removes is not a decision of this pass and is not counted.
+    if spliced {
+        let mut an = crate::Analyses::new(crate::machine::Machine::unknown());
+        crate::simplify_cfg::sweep(&mut module[id], &mut an, &mut Stats::new());
     }
     state.insert(id, State::Settled);
     if !stats.is_empty() {
@@ -2055,5 +2068,39 @@ block2:
         assert_eq!(outer.matches(", block1, ").count(), 3, "{outer}");
         // At -O0 nothing is inlined, pad or not.
         assert!(inlined(PADDED).contains("call @hinted"));
+    }
+
+    /// A call to a body that never returns is the end of the block it was in, so what came after
+    /// it in the caller is reached by nothing once the body is in, and the step deletes it rather
+    /// than leave it for the verifier to find. This is `spin` from #2058, a `static` function with
+    /// an empty `for (;;)` called under a condition the program never meets.
+    #[test]
+    fn what_follows_a_body_that_never_returns_is_deleted() {
+        let out = inlined_under(
+            r#"
+func @spin(), linkage(internal) {
+block0:
+    jump block1
+block1:
+    jump block1
+}
+
+func @main(i1) -> i32, linkage(external) {
+block0(%0: i1):
+    %1 = iconst.i32 1
+    br_if %0, block1, block2(%1)
+block1:
+    call @spin() : ()
+    %2 = iconst.i32 100
+    jump block2(%2)
+block2(%3: i32):
+    return %3
+}
+"#,
+            Some(15),
+        );
+        let main = &out[out.find("func @main").expect("main")..];
+        assert!(!main.contains("call @spin"), "{out}");
+        assert!(!main.contains("100"), "{out}");
     }
 }
