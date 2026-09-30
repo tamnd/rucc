@@ -118,6 +118,8 @@ const HINT_INLINED: &str = "inline call inlined";
 
 const ONCE_INLINED: &str = "call to a static function called once inlined";
 
+const ASKS_INLINED: &str = "call passing a constant __builtin_constant_p asks about inlined";
+
 /// Which of the two reasons a function is inlined for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -128,6 +130,14 @@ enum Kind {
     /// A `static` function reached by one call and no other way, whose out of line copy goes
     /// away once that call is inlined.
     Once,
+    /// A `static` function that asks `__builtin_constant_p` about one of its parameters, inlined
+    /// at a call that passes a constant there when the body is as small as a hinted one.
+    ///
+    /// gcc's inliner counts what an answer would take out of the body, so a call like that is one
+    /// it takes. The kernel relies on it: i915's `hwm_field_read_and_scale` hands its mask to
+    /// `REG_FIELD_GET`, whose `BUILD_BUG_ON` only goes away once the mask is the constant each of
+    /// its two callers passes.
+    Asks,
 }
 
 /// Why a call to an `always_inline` function was not inlined.
@@ -296,6 +306,11 @@ pub fn run(
                 Kind::Once
             } else if set.contains(AttrSet::INLINE_HINT) {
                 Kind::Hinted
+            } else if func.linkage == Linkage::Internal
+                && !set.contains(AttrSet::USED)
+                && !asked(func).is_empty()
+            {
+                Kind::Asks
             } else {
                 return None;
             };
@@ -317,7 +332,7 @@ pub fn run(
             let name = func.name;
             let gone = match kind {
                 Kind::Once => true,
-                Kind::Always | Kind::Hinted => {
+                Kind::Always | Kind::Hinted | Kind::Asks => {
                     func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
                 }
             };
@@ -497,6 +512,9 @@ fn settle(
                 }
                 let callee = func[info].callee?;
                 let &(callee, kind) = how.wanted.get(&callee)?;
+                if kind == Kind::Asks && !passes_asked(func, inst, &module[callee]) {
+                    return None;
+                }
                 (kind == Kind::Always || !optnone).then_some((block, inst, callee, kind))
             })
             .collect()
@@ -525,7 +543,7 @@ fn settle(
     for (_, call, callee, kind) in calls {
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
-            Kind::Hinted => failure.hint(),
+            Kind::Hinted | Kind::Asks => failure.hint(),
             Kind::Once => failure.once(),
         };
         if callee == id || state.get(&callee) == Some(&State::Settling) {
@@ -557,10 +575,14 @@ fn settle(
         // calls already inlined.
         let most = match kind {
             Kind::Always => usize::MAX,
-            Kind::Hinted => how.limit,
+            Kind::Hinted | Kind::Asks => how.limit,
             Kind::Once => INLINE_CALLED_ONCE_INSNS as usize,
         };
-        if size(&module[callee]) > most {
+        let large = match kind {
+            Kind::Asks => answered_size(&module[callee]),
+            _ => size(&module[callee]),
+        };
+        if large > most {
             stats.missed(why(InlineFailure::TooLarge));
             continue;
         }
@@ -577,6 +599,7 @@ fn settle(
                     Kind::Always => INLINED,
                     Kind::Hinted => HINT_INLINED,
                     Kind::Once => ONCE_INLINED,
+                    Kind::Asks => ASKS_INLINED,
                 });
             }
             Err(failure) => stats.missed(why(failure)),
@@ -595,6 +618,105 @@ fn settle(
     if !stats.is_empty() {
         done.push((id, stats));
     }
+}
+
+/// The parameters of a body that it asks `__builtin_constant_p` about, by position.
+fn asked(func: &Func) -> Vec<usize> {
+    let Some(entry) = func.entry() else { return Vec::new() };
+    let mut asked: Vec<usize> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::IsConstant)
+        .filter_map(|inst| {
+            let &value = func[func[inst].args].first()?;
+            match func[value].def {
+                Def::Param { block, index } if block == entry => usize::try_from(index).ok(),
+                _ => None,
+            }
+        })
+        .collect();
+    asked.sort_unstable();
+    asked.dedup();
+    asked
+}
+
+/// How many instructions a body has that are still work once the parameters it asks
+/// `__builtin_constant_p` about are constants.
+///
+/// That is what an inlined copy comes to after folding, and it is the size gcc's inliner weighs
+/// such a call by. Without it the arithmetic a `BUILD_BUG_ON` checks the constant with counts
+/// against the body, and in the kernel that is most of a body that asks, so a function the size
+/// of a hinted one looks two or three times larger than it is.
+fn answered_size(func: &Func) -> usize {
+    let Some(entry) = func.entry() else { return size(func) };
+    let asked = asked(func);
+    let mut known: Set<Value> = func[entry]
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| asked.contains(at))
+        .map(|(_, &value)| value)
+        .collect();
+    let mut work = 0;
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            let args = &func[data.args];
+            let free = match data.opcode {
+                // A jump is gone once the blocks either side of it are one, and a hint that a
+                // block cannot be reached is no code at all.
+                Opcode::IConst
+                | Opcode::FConst
+                | Opcode::IsConstant
+                | Opcode::Jump
+                | Opcode::UnreachableHint => true,
+                Opcode::Trunc
+                | Opcode::SExt
+                | Opcode::ZExt
+                | Opcode::Shl
+                | Opcode::LShr
+                | Opcode::AShr
+                | Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::And
+                | Opcode::Or
+                | Opcode::Xor
+                | Opcode::Ctlz
+                | Opcode::Cttz
+                | Opcode::Ctpop
+                | Opcode::ICmp
+                | Opcode::Select => args.iter().all(|arg| known.contains(arg)),
+                Opcode::BrIf => args.first().is_some_and(|arg| known.contains(arg)),
+                _ => false,
+            };
+            if free {
+                known.extend(data.results());
+            } else {
+                work += 1;
+            }
+        }
+    }
+    work
+}
+
+/// How far [`passes_asked`] looks through arithmetic over constants for an argument that works out
+/// to one. A mask the kernel writes with `GENMASK` is a dozen shifts, ands and subtractions of
+/// constants when this pass runs, since the folding comes after it.
+const ASKED_DEPTH: u32 = 32;
+
+/// Whether this call passes a constant for one of the parameters the callee asks about.
+fn passes_asked(func: &Func, call: Inst, callee: &Func) -> bool {
+    let args = &func[func[call].args];
+    asked(callee).into_iter().any(|at| {
+        args.get(at).is_some_and(|&arg| match func[arg].def {
+            Def::Result { inst, .. } => {
+                matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst)
+                    || crate::fold::evaluated(func, arg, ASKED_DEPTH).is_some()
+            }
+            _ => false,
+        })
+    })
 }
 
 /// Whether a body calls something that comes back more than once, by the rule the code generator
