@@ -60,6 +60,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("stdarg.h", include_str!("../runtime/include/stdarg.h")),
     ("stdatomic.h", include_str!("../runtime/include/stdatomic.h")),
     ("stdbool.h", include_str!("../runtime/include/stdbool.h")),
+    ("stdckdint.h", include_str!("../runtime/include/stdckdint.h")),
     ("stddef.h", include_str!("../runtime/include/stddef.h")),
     ("stdint.h", include_str!("../runtime/include/stdint.h")),
     ("stdnoreturn.h", include_str!("../runtime/include/stdnoreturn.h")),
