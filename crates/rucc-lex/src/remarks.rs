@@ -44,8 +44,8 @@ impl Remarks {
     /// wording, "suffix for double constant is a GCC extension", and gives it in every dialect
     /// rather than only under `-pedantic`.
     pub const DOUBLE_SUFFIX: Remarks = Remarks(128);
-    /// An `i` or `j` suffix. GCC says "imaginary constants are a GCC extension", in every
-    /// dialect, because no version of C has a spelling for one.
+    /// An `i` or `j` suffix. GCC 16 says "imaginary constants are a C2Y feature or GCC
+    /// extension" in every dialect before C2Y, which is the first to have a spelling for one.
     pub const IMAGINARY: Remarks = Remarks(256);
     /// A value too large for its type, which became an infinity. GCC says "floating constant
     /// exceeds range of 'double'" and names the type.
