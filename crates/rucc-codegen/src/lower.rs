@@ -78,6 +78,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
@@ -1003,6 +1004,9 @@ struct Lowering<'a> {
     /// The machine call each IR call with an unwind edge became, which [`Self::edges`] pairs with
     /// the pad the edge went to. See [`rucc_ir::Opcode::Unwound`].
     unwinding: HashMap<Inst, mir::Inst>,
+    /// The machine opcode each head a rule builds is and the operands it has, by where the head's
+    /// name is in the rule table. See [`Self::head`].
+    heads: Map<(usize, usize), (mir::Opcode, &'static [OperandDesc])>,
 }
 
 /// What a `va_start` in a variadic function writes into the list it is given.
@@ -1137,6 +1141,7 @@ impl<'a> Lowering<'a> {
             marks: HashMap::new(),
             frame_slots: HashMap::new(),
             unwinding: HashMap::new(),
+            heads: Map::default(),
         }
     }
 
@@ -6625,9 +6630,7 @@ impl<'a> Lowering<'a> {
         let Some(Piece::App { head, arity }) = pieces.get(at) else {
             return Err(self.unsupported(inst));
         };
-        let opcode =
-            head.strip_prefix(self.selector.prefix()).ok_or_else(|| self.unsupported(inst))?;
-        let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
+        let (opcode, descs) = self.head(inst, head)?;
 
         let mut read = Read::default();
         let mut at = at + 1;
@@ -6672,7 +6675,6 @@ impl<'a> Lowering<'a> {
         regs.extend(read.regs.iter().copied());
 
         let block = self.at.expect("a block is being filled");
-        let opcode = mir::Opcode::new(self.names.intern(head));
         let (span, flags) = (self.source.span(inst), self.carried(inst));
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
         for (desc, reg) in descs.iter().zip(regs) {
@@ -6692,6 +6694,29 @@ impl<'a> Lowering<'a> {
         }
         build.finish();
         Ok((at, written))
+    }
+
+    /// The machine opcode a rule's head names, and the operands the target says it has.
+    ///
+    /// Looked up by name the first time a head is met and kept after that. A function of any size
+    /// builds the same few hundred heads over and over, and each lookup by name was a hash of the
+    /// name into the target's table and another into the interner. The heads are strings in the
+    /// rule table, which is static, so where one is in memory says which head it is.
+    fn head(
+        &mut self,
+        inst: Inst,
+        head: &'static str,
+    ) -> Result<(mir::Opcode, &'static [OperandDesc]), Unsupported> {
+        let key = (head.as_ptr().addr(), head.len());
+        if let Some(&known) = self.heads.get(&key) {
+            return Ok(known);
+        }
+        let name =
+            head.strip_prefix(self.selector.prefix()).ok_or_else(|| self.unsupported(inst))?;
+        let descs = self.selector.operands(name).ok_or_else(|| self.unsupported(inst))?;
+        let known = (mir::Opcode::new(self.names.intern(head)), descs);
+        self.heads.insert(key, known);
+        Ok(known)
     }
 
     /// Read one argument of a replacement, which is a register, a number, an address or another
