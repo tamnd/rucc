@@ -129,6 +129,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::loop_delete::LoopDelete,
     &crate::rangetest::RangeTest,
     &crate::loop_idiom::LoopIdiom,
+    &crate::adce::Adce,
     &crate::split::Split,
     &crate::nests::Nests,
     &crate::ivopts::Ivopts,

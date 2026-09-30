@@ -42,9 +42,7 @@ use rucc_session::OptLevel;
 use rucc_target::{Isa, TargetInfo};
 
 use crate::{
-    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, dse,
-    extents, heap, image, inline, ipasra, ipcp, libcall, load, loop_idiom, modref, nofree, number,
-    objsize, outside, params, pass, purity, readonly, reload, sroa,
+    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse, extents, heap, image, inline, ipasra, ipcp, libcall, load, loop_idiom, modref, nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -87,7 +85,7 @@ const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME, dse::NAME
 /// which say which memory rather than whether any. A list from the start for the reason the two
 /// above it are lists, which is that a pass left out of one reads the empty answer and loses an
 /// optimization rather than producing a wrong program.
-const READS_PURITY: &[&str] = &[dce::NAME, number::NAME];
+const READS_PURITY: &[&str] = &[adce::NAME, dce::NAME, number::NAME];
 
 /// Which passes ask what a call does to the memory it was handed.
 ///
@@ -418,6 +416,7 @@ const O2: &[&str] = &[
     "plane-sink",
     "dce",
     "loop-delete",
+    "adce",
 ];
 
 /// `-O3`. `-O2` plus loop vectorization, larger inlining and unrolling thresholds, interchange
@@ -471,6 +470,7 @@ const O3: &[&str] = &[
     "plane-sink",
     "dce",
     "loop-delete",
+    "adce",
 ];
 
 /// `-Os`. `-O2`'s passes under a size cost model: inlining only where it shrinks, no unrolling
@@ -536,6 +536,7 @@ const OS: &[&str] = &[
     "loop-idiom",
     "dce",
     "loop-delete",
+    "adce",
 ];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
