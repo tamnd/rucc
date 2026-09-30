@@ -148,6 +148,22 @@
       (x64.xor_rr_8 x y)
       (spec (= (bvxor x y) (result))))
 
+;; And each of them with a constant, which the byte has room for as an immediate. `!b` on a
+;; `_Bool` the front end kept as a value is `xor` with a one, and without these the one was put
+;; in a register of its own first.
+
+(rule (lower (and.i1 (value.i1 x) (iconst.i1 k)))
+      (x64.and_ri_8 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (or.i1 (value.i1 x) (iconst.i1 k)))
+      (x64.or_ri_8 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (xor.i1 (value.i1 x) (iconst.i1 k)))
+      (x64.xor_ri_8 x k)
+      (spec (= (bvxor x k) (result))))
+
 (rule (lower (mul.i8 (value.i8 x) (value.i8 y)))
       (x64.imul_rr_8 x y)
       (spec (= (bvmul x y) (result))))
