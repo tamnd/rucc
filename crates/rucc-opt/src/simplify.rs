@@ -79,9 +79,9 @@
 //! rewrite that turns one written in the source into it, because the walk has already gone past
 //! the place it was built and would not come back to it.
 //!
-//! ## The four written by hand
+//! ## The five written by hand
 //!
-//! All four are about comparisons, and all four are here rather than in `rules/` for the same
+//! Four are about comparisons, and those four are here rather than in `rules/` for the same
 //! reason: what each one is, is one statement quantified over the predicates, and the rule language
 //! has no way to say that, so writing any of them as rules would mean writing out every predicate,
 //! every operand order and every width by hand and keeping the enumeration in step with the two
@@ -172,6 +172,23 @@
 //! at the levels that keep the `||` as two branches, where the second test is only reached when the
 //! pair is ordered.
 //!
+//! ### A lane read back out of a packed pair
+//!
+//! `trunc.i32` of `or (zext a, shl (zext b, 32))` is `a`, and the same truncation of that `or`
+//! shifted right by 32 is `b`. That is what a 16 byte vector looks like once `crate::sroa` has
+//! split it: the local is cut into two `i64` halves, every lane operation reads its two lanes out
+//! of a half and writes the half back as two lanes shifted into place, and the next operation reads
+//! them out again. An SSE2 salsa20/8 did that 68 times a round (tamnd/rucc#2320).
+//!
+//! It is written by hand because the pattern is three instructions deep under the truncation, and
+//! the rule tables expand an operand one level and no further. The walk goes through the pieces a
+//! lane cannot be in. For the low `w` bits, an `or`, `xor` or `add` with a value shifted left by
+//! `w` or more is the other operand, since nothing it adds reaches that far down. For `w` bits
+//! starting at `k`, an `or` or `xor` with a zero extension from `k` bits or fewer is the other
+//! operand, and a left shift by exactly `k` is the low `w` bits of what was shifted when all `w` of
+//! them fit. An `add` is not taken there, because a carry out of the low bits reaches the lane. At
+//! the bottom, an extension from `w` bits is the value it extended.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -226,6 +243,12 @@ const MAGNITUDE: &str = "comparison against a value whose sign bit is clear sett
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_MAGNITUDE: &str =
     "comparison against a magnitude left alone, the pass ran out of fuel";
+
+/// Recorded once for each floating point comparison a constant or a repeated operand settles.
+const LANE: &str = "lane read back out of a pair packed into a wider integer";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_LANE: &str = "lane read out of a packed pair left alone, the pass ran out of fuel";
 
 /// Recorded once for each floating point comparison a constant or a repeated operand settles.
 const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
@@ -347,8 +370,8 @@ impl Pass for Simplify {
     }
 
     fn describe(&self) -> &'static str {
-        "the identities, the strength reductions, the canonicalisations, and the four comparison \
-         rewrites written by hand"
+        "the identities, the strength reductions, the canonicalisations, the four comparison \
+         rewrites written by hand, and a lane read back out of a packed pair"
     }
 
     fn preserves(&self) -> Preserved {
@@ -443,6 +466,16 @@ impl Pass for Simplify {
                     }
                     fold_composite(func, inst, settled);
                     stats.optimized(BOUNDED);
+                    continue;
+                }
+                if let Some(lane) = packed_lane(func, inst) {
+                    if !fuel.take() {
+                        stats.missed(NO_FUEL_LANE);
+                        continue;
+                    }
+                    let result = func[inst].first_result.expect("a truncation has a result");
+                    forward.insert(result, lane);
+                    stats.optimized(LANE);
                     continue;
                 }
                 let Some((rewrite, pattern)) = identity(func, inst, address) else { continue };
@@ -1031,6 +1064,97 @@ fn negated_comparison(func: &Func, inst: Inst) -> Option<Flip> {
         lhs: *args.first()?,
         rhs: *args.get(1)?,
     })
+}
+
+/// The value a truncation reads when what it truncates is lanes packed into a wider integer.
+///
+/// `trunc.iW v` is the low `W` bits of `v`, and `trunc.iW (lshr v k)` is the `W` bits of `v` from
+/// bit `k` up. Either is answered by an existing value of type `iW` or by nothing.
+fn packed_lane(func: &Func, inst: Inst) -> Option<Value> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Trunc {
+        return None;
+    }
+    let width = func[data.first_result?].ty.bits();
+    let from = *func[data.args].first()?;
+    if let Some((Opcode::LShr, [shifted, by])) = producer(func, from) {
+        let by = u32::try_from(constant(func, by)?).ok()?;
+        if by < func[shifted].ty.bits() {
+            return lane_at(func, shifted, by, width, LANE_DEPTH);
+        }
+    }
+    low_lane(func, from, width, LANE_DEPTH)
+}
+
+/// How many instructions the lane walk goes through before it gives up.
+///
+/// A pair is an `or` of two pieces, each a shift of an extension, so four is the pair and nothing
+/// more. The bound is what keeps the walk cheap on a long chain of `or`s that is not a pair.
+const LANE_DEPTH: u32 = 4;
+
+/// The opcode of the instruction that computed a value and its two operands, where it has two.
+fn producer(func: &Func, value: Value) -> Option<(Opcode, [Value; 2])> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let args = &func[func[inst].args];
+    Some((func[inst].opcode, [*args.first()?, *args.get(1)?]))
+}
+
+/// A value of type `iW` equal to the low `width` bits of `value`.
+fn low_lane(func: &Func, value: Value, width: u32, depth: u32) -> Option<Value> {
+    let depth = depth.checked_sub(1)?;
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if matches!(data.opcode, Opcode::ZExt | Opcode::SExt) {
+        let from = *func[data.args].first()?;
+        return (func[from].ty == Type::int(width)).then_some(from);
+    }
+    let (opcode, [lhs, rhs]) = producer(func, value)?;
+    if !matches!(opcode, Opcode::Or | Opcode::Xor | Opcode::Add) {
+        return None;
+    }
+    let above = |side: Value| match producer(func, side) {
+        Some((Opcode::Shl, [_, by])) => {
+            constant(func, by).is_some_and(|by| by >= i128::from(width))
+        }
+        _ => false,
+    };
+    if above(rhs) {
+        low_lane(func, lhs, width, depth)
+    } else if above(lhs) {
+        low_lane(func, rhs, width, depth)
+    } else {
+        None
+    }
+}
+
+/// A value of type `iW` equal to the `width` bits of `value` from bit `at` up.
+fn lane_at(func: &Func, value: Value, at: u32, width: u32, depth: u32) -> Option<Value> {
+    let depth = depth.checked_sub(1)?;
+    let (opcode, [lhs, rhs]) = producer(func, value)?;
+    match opcode {
+        Opcode::Shl => {
+            let by = constant(func, rhs)?;
+            if by != i128::from(at) || at + width > func[value].ty.bits() {
+                return None;
+            }
+            low_lane(func, lhs, width, depth)
+        }
+        Opcode::Or | Opcode::Xor => {
+            let below = |side: Value| {
+                let Def::Result { inst, .. } = func[side].def else { return false };
+                func[inst].opcode == Opcode::ZExt
+                    && func[func[inst].args].first().is_some_and(|&from| func[from].ty.bits() <= at)
+            };
+            if below(lhs) {
+                lane_at(func, rhs, at, width, depth)
+            } else if below(rhs) {
+                lane_at(func, lhs, at, width, depth)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Where a pair of operands can stand in relation to each other, as one bit each.
@@ -2320,6 +2444,68 @@ mod tests {
         let outside = build.unary(outer, middle, to);
         build.ret(&[outside]);
         (func, block, x)
+    }
+
+    /// Two `i32` parameters packed into an `i64` the way `crate::sroa` leaves a vector's half,
+    /// with `joined` as the operation that puts them together and the high one shifted by `by`,
+    /// and `read` applied to the pair before it is truncated back to `i32`.
+    fn packed(joined: Opcode, by: i128, read: Option<i128>) -> (Func, Block, Value, Value) {
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let (narrow, wide) = (Type::int(32), Type::int(64));
+        let signature = Signature::new().with_params(&[narrow, narrow]).with_returns(&[narrow]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let a = func.append_param(block, narrow);
+        let b = func.append_param(block, narrow);
+        let mut build = Builder::new(&mut func, block);
+        let low = build.unary(Opcode::ZExt, a, wide);
+        let high = build.unary(Opcode::ZExt, b, wide);
+        let amount = build.iconst(wide, by);
+        let high = build.binary(Opcode::Shl, high, amount, Flags::NONE);
+        let mut pair = build.binary(joined, low, high, Flags::NONE);
+        if let Some(read) = read {
+            let amount = build.iconst(wide, read);
+            pair = build.binary(Opcode::LShr, pair, amount, Flags::NONE);
+        }
+        let lane = build.unary(Opcode::Trunc, pair, narrow);
+        build.ret(&[lane]);
+        (func, block, a, b)
+    }
+
+    /// Each lane of a packed pair read back is the value that went in, whichever way the two were
+    /// put together.
+    #[test]
+    fn a_lane_read_back_out_of_a_packed_pair_is_the_value_that_went_in() {
+        for joined in [Opcode::Or, Opcode::Xor] {
+            let (mut func, block, a, _) = packed(joined, 32, None);
+            assert!(simplify(&mut func), "{joined:?}: the low lane was left alone");
+            assert_eq!(returned(&func, block), a, "{joined:?}: the low lane");
+            let (mut func, block, _, b) = packed(joined, 32, Some(32));
+            assert!(simplify(&mut func), "{joined:?}: the high lane was left alone");
+            assert_eq!(returned(&func, block), b, "{joined:?}: the high lane");
+        }
+        // An addition cannot carry into the low lane from above it, so that one is taken too.
+        let (mut func, block, a, _) = packed(Opcode::Add, 32, None);
+        assert!(simplify(&mut func));
+        assert_eq!(returned(&func, block), a);
+    }
+
+    /// A lane the other piece reaches into, or one read from the wrong place, is not a lane.
+    #[test]
+    fn a_read_that_is_not_one_lane_of_the_pair_is_left_alone() {
+        // The high half shifted by less than a lane overlaps the low one.
+        let (mut func, block, a, _) = packed(Opcode::Or, 16, None);
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), a);
+        // Read from halfway through the low lane.
+        let (mut func, block, _, b) = packed(Opcode::Or, 32, Some(16));
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), b);
+        // An addition can carry out of the low lane into the high one.
+        let (mut func, block, _, b) = packed(Opcode::Add, 32, Some(32));
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), b);
     }
 
     /// Truncating an extension back to the width it came from is the value that was there.
