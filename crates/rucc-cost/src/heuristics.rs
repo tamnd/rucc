@@ -687,6 +687,13 @@ pub const DSE_WALK_LIMIT: u32 = 256;
 ///
 /// The point of having the list as data is that "which of our heuristics are guesses" becomes a
 /// question with an answer, rather than a question that needs somebody to read every pass.
+/// How many intervals a set of values compared against has to be before a bit test is written for
+/// it rather than a comparison per interval, per section 19.4.
+///
+/// Three, the same count `BIT_TEST_TARGETS` in the switch lowering starts at. Two intervals are two
+/// comparisons and an `or`, which is no more than the window comparison and the shift of a bit test.
+pub const RANGE_TEST_BIT_INTERVALS: usize = 3;
+
 pub const ALL: &[Constant] = &[
     Constant {
         name: "BRANCH_COST_FOR_SIZE",
@@ -1191,6 +1198,14 @@ pub const ALL: &[Constant] = &[
         document: "17.3",
         gcc: "dse-max-alias-queries-per-store",
         provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "RANGE_TEST_BIT_INTERVALS",
+        value: 3,
+        unit: "intervals",
+        document: "19.4",
+        gcc: "",
+        provenance: Provenance::Chosen,
     },
 ];
 
