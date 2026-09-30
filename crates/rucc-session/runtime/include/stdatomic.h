@@ -93,10 +93,8 @@ typedef _Atomic __UINTMAX_TYPE__ atomic_uintmax_t;
 #define atomic_thread_fence(order) __atomic_thread_fence(order)
 
 /* A signal fence keeps the compiler from moving accesses across it and asks nothing of the
- * machine, and a thread fence asks the machine as well. So this is stronger than the standard
- * requires, which costs an instruction and cannot give a wrong answer. It stays this way until
- * the IR can hold a barrier that binds one thread only. */
-#define atomic_signal_fence(order) __atomic_thread_fence(order)
+ * machine, which is what the builtin of the same name is. */
+#define atomic_signal_fence(order) __atomic_signal_fence(order)
 
 /* The width decides it, so the builtin is asked rather than the answer being written down here.
  * An object the machine reaches in a single instruction is lock free and one wider than that is a

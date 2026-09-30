@@ -3430,7 +3430,8 @@ mod tests {
         assert_eq!(clean("#if __has_builtin(__builtin_clz)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_builtin(__builtin_alloca)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_builtin(__builtin_object_size)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_builtin(__atomic_signal_fence)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_builtin(__atomic_signal_fence)\nyes\n#endif\n"), "yes");
+        assert_eq!(clean("#if __has_builtin(__builtin_va_arg_pack)\nyes\n#endif\n"), "");
         assert_eq!(clean("#if __has_builtin(__builtin_nonesuch)\nyes\n#endif\n"), "");
     }
 

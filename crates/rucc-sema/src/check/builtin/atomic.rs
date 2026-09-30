@@ -2,11 +2,12 @@
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5, and tamnd/rucc#311.
 //!
-//! Forty two names here, out of a family of forty three. `__atomic_load_n` reads an object, and
+//! Forty three names here, which is the whole family. `__atomic_load_n` reads an object, and
 //! `__atomic_store_n` writes one, both without tearing and both with an ordering that says what
 //! may be moved across them. `__atomic_load` and `__atomic_store` are the same two for an object
 //! too big to come back in a register, so the value travels through a second pointer rather than
-//! being taken or answered. `__atomic_thread_fence` is that ordering with no access attached, and
+//! being taken or answered. `__atomic_thread_fence` is that ordering with no access attached,
+//! `__atomic_signal_fence` is the same with nothing asked of the machine, and
 //! `__sync_synchronize` is the same barrier at sequential consistency under the older family's
 //! spelling. `__atomic_always_lock_free` and `__atomic_is_lock_free` are not operations at all:
 //! they ask whether an object of a given size is one the machine handles without a lock, and both
@@ -59,13 +60,16 @@
 //! refusal would break the macro-heavy code this family appears in, where an argument is often a
 //! macro that expands differently per platform.
 //!
-//! # What is not here
+//! # The fence that asks nothing of the machine
 //!
-//! `__atomic_signal_fence`, which orders against a signal handler on the same thread and so has to
-//! constrain the compiler while emitting no instruction at all. The IR's `fence` is a machine
-//! barrier, so spelling a signal fence as one would be correct and would cost an `mfence` that
-//! nothing needs. It waits for a barrier that says what it means, and it is the whole of what is
-//! left.
+//! `__atomic_signal_fence` orders against a signal handler on the same thread, and a handler runs
+//! on the same core as the code it interrupted, so the machine already sees that thread's accesses
+//! in program order. What is left is the compiler, which must not move a load or a store across
+//! it. The IR's `fence` is a machine barrier and would cost an `mfence` that nothing needs, so the
+//! walk to the IR builds what gcc builds instead, which is an empty volatile `asm` that clobbers
+//! memory: no instruction, and a wall no access is moved through. The ordering is checked the way
+//! a thread fence's is and then has nothing left to decide, since the wall is the same at every
+//! ordering. gcc emits nothing for a relaxed one either way.
 
 use rucc_ast::UnaryOp;
 use rucc_diag::{Diagnostic, Span};
@@ -85,6 +89,7 @@ const FAMILY: &[(&str, AtomicOp)] = &[
     ("__atomic_store_n", AtomicOp::Store),
     ("__atomic_store", AtomicOp::Store),
     ("__atomic_thread_fence", AtomicOp::Fence),
+    ("__atomic_signal_fence", AtomicOp::SignalFence),
     ("__atomic_compare_exchange_n", AtomicOp::CompareExchange),
     ("__atomic_compare_exchange", AtomicOp::CompareExchange),
     ("__sync_bool_compare_and_swap", AtomicOp::SwapBool),
@@ -225,6 +230,7 @@ fn allowed(op: AtomicOp, order: Ordering) -> bool {
             matches!(order, Ordering::Relaxed | Ordering::Release | Ordering::SeqCst)
         }
         AtomicOp::Fence
+        | AtomicOp::SignalFence
         | AtomicOp::CompareExchange
         | AtomicOp::SwapBool
         | AtomicOp::SwapValue
@@ -269,7 +275,7 @@ impl Checker<'_> {
         let Some(order) = self.order_of(op, args, spelled) else { return self.poison(span) };
 
         let operands = match op {
-            AtomicOp::Fence => Vec::new(),
+            AtomicOp::Fence | AtomicOp::SignalFence => Vec::new(),
             AtomicOp::Load => vec![args[0]],
             // The object and the place what was read goes into. Neither is converted, because
             // nothing is answered here for anything to convert: the walk to the IR reads at the
@@ -326,9 +332,11 @@ impl Checker<'_> {
             AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::TestAndSet => {
                 self.types.boolean()
             }
-            AtomicOp::Store | AtomicOp::LoadInto | AtomicOp::ExchangeInto | AtomicOp::Fence => {
-                self.types.void()
-            }
+            AtomicOp::Store
+            | AtomicOp::LoadInto
+            | AtomicOp::ExchangeInto
+            | AtomicOp::Fence
+            | AtomicOp::SignalFence => self.types.void(),
         };
         let args = self.tast.add_expr_refs(&operands);
         self.tast.expr(Expr::new(ExprKind::Atomic { op, order, args }, ty, Category::Rvalue), span)
@@ -739,8 +747,8 @@ mod tests {
         }
     }
 
-    /// A name outside the family asks for nothing, which is now the two that are not operations and
-    /// the one that is the rest of tamnd/rucc#311.
+    /// A name outside the family asks for nothing, which is now only the one of the older family
+    /// that carries a prototype.
     #[test]
     fn a_name_outside_the_family_asks_for_nothing() {
         assert_eq!(shape("__atomic_load_n"), Some(AtomicOp::Load));
@@ -766,7 +774,7 @@ mod tests {
         assert_eq!(shape("__atomic_exchange"), Some(AtomicOp::ExchangeInto));
         assert_eq!(shape("__atomic_test_and_set"), Some(AtomicOp::TestAndSet));
         assert_eq!(shape(CLEAR), Some(AtomicOp::Store));
-        assert_eq!(shape("__atomic_signal_fence"), None);
+        assert_eq!(shape("__atomic_signal_fence"), Some(AtomicOp::SignalFence));
         assert_eq!(shape(SYNCHRONIZE), None);
     }
 }
