@@ -158,7 +158,7 @@ use std::collections::VecDeque;
 
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Block, BlockCall, Def, Extra, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, BlockCall, Def, Extra, Func, Imm, Inst, InstData, Opcode, SwitchInfo, Value};
 
 use crate::copy::addressed;
 use crate::fold::constant;
@@ -166,6 +166,19 @@ use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
 
 /// Recorded once for each branch that turned into a jump.
 const FOLDED: &str = "branch on a condition that is always the same way replaced by a jump";
+
+/// Recorded once for each block cut short where control stops.
+const CUT: &str = "code after a stop or an unreachable promise removed and the block ended there";
+
+/// Recorded for a block that would have been cut short if there had been fuel for it.
+const NO_FUEL_CUT: &str =
+    "code after a stop or an unreachable promise kept, the pass ran out of fuel";
+
+/// Recorded once for each `switch` whose default went nowhere and now goes to one of its cases.
+const UNDEFAULTED: &str = "switch default that is never taken pointed at one of the cases";
+
+/// Recorded for a `switch` that would have been given a new default if there had been fuel.
+const NO_FUEL_DEFAULT: &str = "switch default that is never taken kept, the pass ran out of fuel";
 
 /// Recorded once for each block that went with it.
 pub(crate) const REMOVED: &str = "block nothing reaches removed";
@@ -221,11 +234,17 @@ impl Pass for SimplifyCfg {
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
+        // Step zero, which makes the promises into edges. A block that stops or promises it is
+        // never reached ends there, so what came after goes, the branch it ended with included,
+        // and the blocks only it reached are the ones step one takes out.
+        if cut(func, fuel, &mut stats) {
+            an.clear();
+        }
         // Step one, and it is first for a reason beyond tidiness: a branch in a block nothing
         // reaches is a branch nothing executes, and folding one would spend fuel on a change
         // nobody can see and charge the two steps below for walking blocks that are not there.
         sweep(func, an, &mut stats);
-        let mut folded = false;
+        let mut folded = undefault(func, fuel, &mut stats);
         // Nothing bound, because this step asks where a branch goes whichever way control arrived
         // at it. Binding a block's parameters to one edge's arguments is the question
         // [`crate::thread`] asks, and it is a different question with a different answer.
@@ -287,6 +306,99 @@ impl Pass for SimplifyCfg {
     }
 }
 
+/// Ends every block at the first place control cannot get past, and says whether any changed.
+///
+/// That is a `trap`, which stays, since it is the stop, and an `unreachable_hint`, which goes,
+/// since the `unreachable` put in its place says the same thing as a terminator. The front end
+/// writes both in the middle of a block because an expression can hold them and a block cannot
+/// end halfway through an expression, and until this runs the code after one is lowered as
+/// though it could run. That code is a `ret` after a `ud2` at the end of a function, which gcc
+/// never writes and objtool reports as an instruction nothing reaches.
+///
+/// Nothing a later block reads is lost. A value defined after the cut is read only in blocks
+/// the cut block dominates, and with no way out of it those blocks have no way in either.
+fn cut(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let mut changed = false;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(stop) = func.insts(block).find(|&inst| stops(func, inst)) else { continue };
+        let rest: Vec<Inst> =
+            std::iter::successors(func.next_inst(stop), |&inst| func.next_inst(inst)).collect();
+        if rest.len() == 1 && func[rest[0]].opcode == Opcode::Unreachable {
+            continue;
+        }
+        if !fuel.take() {
+            stats.missed(NO_FUEL_CUT);
+            continue;
+        }
+        let span = func.span(stop);
+        if func[stop].opcode == Opcode::UnreachableHint {
+            func.remove_inst(stop);
+        }
+        for inst in rest {
+            func.remove_inst(inst);
+        }
+        let end = func.create_inst(InstData::new(Opcode::Unreachable), &[], span);
+        func.append_inst(block, end);
+        stats.optimized(CUT);
+        changed = true;
+    }
+    changed
+}
+
+/// Gives every `switch` whose default goes where control never arrives a default it can take.
+///
+/// `default: __builtin_unreachable();` is the program promising the value is one of the cases,
+/// so the default is free to be any of them. It becomes the last live case, and every case that
+/// went there or nowhere stops being a case, which leaves a switch of two arms a branch on one
+/// compare and a switch of one arm a jump. Says whether any changed.
+fn undefault(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let mut changed = false;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        let Extra::Switch(info) = func[term].extra else { continue };
+        let calls: Vec<BlockCall> = func[func[info].targets].to_vec();
+        let cases: Vec<Imm> = func[func[info].cases].to_vec();
+        if !dead_end(func, calls[0].block) {
+            continue;
+        }
+        let Some(last) = calls[1..].iter().rposition(|call| !dead_end(func, call.block)) else {
+            continue;
+        };
+        if !fuel.take() {
+            stats.missed(NO_FUEL_DEFAULT);
+            continue;
+        }
+        let default = calls[last + 1];
+        let mut targets = vec![default];
+        let mut kept = Vec::with_capacity(cases.len());
+        for (call, &case) in calls[1..].iter().zip(&cases) {
+            let same = call.block == default.block && func[call.args] == func[default.args];
+            if !same && !dead_end(func, call.block) {
+                targets.push(*call);
+                kept.push(case);
+            }
+        }
+        let targets = func.push_block_calls(&targets);
+        let cases = func.push_imms(&kept);
+        let info = func.add_switch(SwitchInfo { targets, cases });
+        func[term].extra = Extra::Switch(info);
+        stats.optimized(UNDEFAULTED);
+        changed = true;
+    }
+    changed
+}
+
+/// Whether control cannot get past an instruction.
+fn stops(func: &Func, inst: Inst) -> bool {
+    matches!(func[inst].opcode, Opcode::Trap | Opcode::UnreachableHint)
+}
+
+/// Whether a block is only the place control does not reach, so that a branch to it is a branch
+/// that is never taken.
+fn dead_end(func: &Func, block: Block) -> bool {
+    func.insts(block).next().is_some_and(|inst| func[inst].opcode == Opcode::Unreachable)
+}
+
 /// What a block's parameters hold along one particular edge into it.
 ///
 /// Empty is the honest answer for a question asked about a block rather than about an edge, and it
@@ -316,6 +428,15 @@ pub(crate) fn taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCa
             let Extra::Targets(targets) = data.extra else { return None };
             if let Some(call) = one_place(func, &func[targets]) {
                 return Some(call);
+            }
+            // An arm that goes where control never arrives is an arm the program promised is
+            // never taken, which is how `if (x) __builtin_unreachable();` says what `x` is.
+            if let [then, otherwise] = func[targets] {
+                match (dead_end(func, then.block), dead_end(func, otherwise.block)) {
+                    (true, false) => return Some(otherwise),
+                    (false, true) => return Some(then),
+                    _ => {}
+                }
             }
             // The first target is the one taken when the condition is one, which is what
             // `Builder::br_if` writes and what the printer reads back.

@@ -5960,6 +5960,12 @@ impl<'a> Lowering<'a> {
     /// anything in this crate does and is why it is remembered before a single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
+        // No edges, like a return, and no epilogue either, which is the difference. What ends a
+        // block that stops is the stop, and a `ret` after a `ud2` is a return nothing reaches.
+        if self.source[term].opcode == Opcode::Unreachable {
+            self.out.set_dead_end(out);
+            return Ok(());
+        }
         // An `asm goto` whose template has nothing in it can only fall through, since there is no
         // instruction in it to jump with, so the only edge the machine block gets is the first
         // one. The labels it names are still arms in the IR, which is what kept the passes above

@@ -636,6 +636,11 @@ impl Func {
         self.blocks[block.index()].weight = weight;
     }
 
+    /// Says control never leaves a block. See [`BlockData::dead_end`].
+    pub fn set_dead_end(&mut self, block: Block) {
+        self.blocks[block.index()].dead_end = true;
+    }
+
     // Instructions.
 
     /// The instructions of a block, in order.

@@ -5238,9 +5238,9 @@ decl #0 x : int object external static defined
     /// program, and it is not a call, which is the half that matters in a kernel and in a
     /// freestanding program: neither has an `abort` for a call to reach.
     ///
-    /// The second half is the block going on after it. A statement written under a stop is
-    /// compiled the way it would have been without one, so the addition is still there, and that
-    /// is the front end declining to treat a stop as the end of a path.
+    /// The second half is the path ending there. A statement written under a stop is never
+    /// reached, so it is not compiled, and neither is the `ret` below it, which is what gcc writes
+    /// and what objtool wants to see in a kernel object.
     #[test]
     fn a_trap_is_the_instruction_the_machine_has_no_meaning_for() {
         let text = asm("void stop(void) { __builtin_trap(); }\n");
@@ -5249,7 +5249,8 @@ decl #0 x : int object external static defined
 
         let text = asm("int stop(int a) { __builtin_trap(); return a + 1; }\n");
         assert!(text.contains("\tud2\n"), "{text}");
-        assert!(text.contains("\taddl\t"), "the block goes on after a stop: {text}");
+        assert!(!text.contains("\taddl\t"), "nothing is compiled under a stop: {text}");
+        assert!(!text.contains("\tret"), "and nothing returns after it: {text}");
     }
 
     /// `__builtin_cpu_init` is a call to libgcc's `__cpu_indicator_init` and nothing else, which
@@ -7721,44 +7722,34 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(body(both).contains("add.nsw"), "and so does the one with three arguments");
     }
 
-    /// A point control does not arrive at, in both of the ways the compiler has one.
+    /// A point control does not arrive at ends the path it is on, at every level.
     ///
-    /// `__builtin_unreachable()` is the promise written down, and a function whose body can run
-    /// off the bottom is the walk arriving at the same place on its own. Neither writes an
-    /// instruction, which is what gcc 16.2.0 does at `-O0`: it emits the epilogue and the `ret`
-    /// for both of the functions below and nothing else, and the two of them come out byte for
-    /// byte the same there.
-    ///
-    /// The `ret` is the part worth holding on to. It is not there because anything runs it, it is
-    /// there because a function whose last instruction is not a return is one that falls into
-    /// whatever the assembler puts after it.
+    /// `__builtin_unreachable()` is the promise written down, and nothing after it is compiled:
+    /// not the statement below it and not the `return` the walk would have put at the bottom of
+    /// the function. gcc does the same at `-O0`, and objtool reads anything written after such a
+    /// point in a kernel object as an instruction nothing reaches. See tamnd/rucc-kernel#4.
     #[test]
-    fn a_promise_that_control_does_not_arrive_writes_no_instruction() {
+    fn a_promise_that_control_does_not_arrive_ends_the_path() {
         let promised = "int f(int x) { if (x) return 1; __builtin_unreachable(); }\n";
         let text = ir(promised);
-        assert!(text.contains("    unreachable_hint\n"), "{text}");
+        assert!(text.contains("    unreachable\n"), "{text}");
+        assert!(
+            !text.contains("unreachable_hint"),
+            "the promise became the end of a block:\n{text}"
+        );
         assert!(!text.contains("call"), "it is not a call to anything:\n{text}");
 
-        // The statement after it is still lowered. Continuing to translate a path the program
-        // promised is dead is one of the things a compiler may do with undefined behaviour, and
-        // it is the one that keeps a program built at `-O0` behaving the way it was watched to.
         let after = body("int g(int x) { __builtin_unreachable(); return x; }\n");
-        assert!(after.contains("return"), "{after}");
+        assert!(!after.contains("return"), "{after}");
 
-        // Both functions are the same instructions, because the hint writes none of them and the
-        // terminator underneath it writes none either.
+        // The path that returns still returns, and the promise writes no instruction of its own.
         let text = asm(promised);
         let mine = text.split_once("\nf:\n").expect("a definition").1;
         let mine = mine.split_once("\t.size").expect("a definition").0;
-        let plain = asm("int f(int x) { if (x) return 1; }\n");
-        let plain = plain.split_once("\nf:\n").expect("a definition").1;
-        let plain = plain.split_once("\t.size").expect("a definition").0;
-        assert_eq!(mine, plain);
-        // The last instruction, rather than the last line, because the unwind record is closed
-        // after it and a directive is not something the machine runs.
-        let last = mine.lines().rfind(|line| !line.trim_start().starts_with('.'));
-        assert_eq!(last.map(str::trim), Some("ret"), "{mine}");
+        assert_eq!(mine.matches("\tret").count(), 1, "{mine}");
         assert!(!mine.contains("ud2"), "{mine}");
+        let text = asm("int g(int x) { __builtin_unreachable(); return x; }\n");
+        assert!(!text.contains("\tret"), "{text}");
     }
 
     /// The two names stay apart, which is what having both of them is for.
@@ -8061,8 +8052,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 .map(|at| save + at)
                 .unwrap_or_else(|| panic!("the call that jumps back at {level:?}:\n{text}"));
             let printf = lines.iter().position(|l| *l == "call\tprintf").expect("the handler");
-            // The load that hands `v` to `printf` as its second argument.
-            let place = lines[jump..printf]
+            // The load that hands `v` to `printf` as its second argument. The handler can be laid
+            // out on either side of the first arm, since that arm ends in a call that does not
+            // come back, so this is the nearest one in front of the call and not one after the jump.
+            let place = lines[..printf]
                 .iter()
                 .rev()
                 .find_map(|l| l.strip_suffix(", %rsi").or_else(|| l.strip_suffix(", %esi")))

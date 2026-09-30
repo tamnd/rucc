@@ -350,7 +350,9 @@ pub fn finish(
     let returns: Vec<Block> = if bare {
         Vec::new()
     } else {
-        writer.func.blocks().filter(|&block| writer.func[block].succs.is_empty()).collect()
+        let returns =
+            |block: &Block| writer.func[*block].succs.is_empty() && !writer.func[*block].dead_end;
+        writer.func.blocks().filter(returns).collect()
     };
     for block in returns {
         // The check goes in front of the epilogue and takes the return with it. What is left in
