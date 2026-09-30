@@ -52,6 +52,7 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
         "-mharden-sls=all",
         "-fno-jump-tables",
         "-fconserve-stack",
+        "-gz=zstd",
     ] {
         assert!(cc_option(X86, flag), "{flag}");
     }
@@ -60,7 +61,7 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
 
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    for flag in ["-mindirect-branch=thunk", "-gz=zstd"] {
+    for flag in ["-mindirect-branch=thunk"] {
         assert!(!cc_option(X86, flag), "{flag}");
     }
     assert!(!cc_option(ARM64, "-mbranch-protection=pac-ret+bti"));

@@ -1547,11 +1547,12 @@ fn describe(
     };
     let mut info = rucc_debug::write(&unit).map_err(|why| why.to_string())?;
     info.chunks.extend(frames.clone());
-    // How an ELF object stores the sections, from `-gz`. zstd is refused before it gets here.
+    // How an ELF object stores the sections, from `-gz`.
     info.compress = match opts.compress {
+        rucc_session::Compress::None => rucc_object::Compress::None,
         rucc_session::Compress::Zlib => rucc_object::Compress::Zlib,
         rucc_session::Compress::ZlibGnu => rucc_object::Compress::ZlibGnu,
-        rucc_session::Compress::None | rucc_session::Compress::Zstd => rucc_object::Compress::None,
+        rucc_session::Compress::Zstd => rucc_object::Compress::Zstd,
     };
     Ok(info)
 }

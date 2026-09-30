@@ -231,6 +231,8 @@ pub enum Compress {
     /// `-gz=zlib-gnu`: the older layout, where `.debug_info` becomes `.zdebug_info` and starts with
     /// `ZLIB` and its size as eight big endian bytes.
     ZlibGnu,
+    /// `-gz=zstd`: as `Zlib`, with the `Elf_Chdr` saying zstd and a zstd frame after it.
+    Zstd,
 }
 
 /// One debug section, with the name it goes in the file under.

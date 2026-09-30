@@ -80,6 +80,7 @@ mod macho;
 mod section;
 mod source;
 mod zlib;
+mod zstd;
 
 pub use crate::file::{Error, defines, write};
 pub use crate::section::{

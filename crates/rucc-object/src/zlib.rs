@@ -29,16 +29,21 @@ pub(crate) fn debug_section(obj: &mut Writer<'_>, chunk: &Chunk, how: Compress) 
     if how == Compress::None || chunk.bytes.is_empty() {
         return plain(obj);
     }
-    let packed = compress(&chunk.bytes);
+    let packed = match how {
+        Compress::Zstd => crate::zstd::compress(&chunk.bytes),
+        _ => compress(&chunk.bytes),
+    };
     let size = chunk.bytes.len() as u64;
     match how {
         Compress::None => plain(obj),
-        Compress::Zlib => {
+        Compress::Zlib | Compress::Zstd => {
+            let kind =
+                if how == Compress::Zstd { elf::ELFCOMPRESS_ZSTD } else { elf::ELFCOMPRESS_ZLIB };
             let wide = obj.architecture().address_size() != Some(AddressSize::U32);
             // `Elf64_Chdr` is the type, four reserved bytes, the size and the alignment, and
             // `Elf32_Chdr` is the same without the reserved word and with four byte fields.
             let mut bytes = Vec::with_capacity(24 + packed.len());
-            bytes.extend_from_slice(&elf::ELFCOMPRESS_ZLIB.0.to_le_bytes());
+            bytes.extend_from_slice(&kind.0.to_le_bytes());
             if wide {
                 bytes.extend_from_slice(&0u32.to_le_bytes());
                 bytes.extend_from_slice(&size.to_le_bytes());
@@ -111,9 +116,9 @@ const ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 
 
 /// One thing a block says: a byte, or a length and a distance back.
 #[derive(Clone, Copy)]
-enum Sym {
+pub(crate) enum Sym {
     Lit(u8),
-    Copy { len: u16, dist: u16 },
+    Copy { len: u32, dist: u32 },
 }
 
 /// Those bytes as a zlib stream.
@@ -133,7 +138,7 @@ pub(crate) fn compress(data: &[u8]) -> Vec<u8> {
             .iter()
             .map(|sym| match sym {
                 Sym::Lit(_) => 1,
-                Sym::Copy { len, .. } => usize::from(*len),
+                Sym::Copy { len, .. } => *len as usize,
             })
             .sum();
         block(&mut out, chunk, &data[from..from + len], chunks.peek().is_none());
@@ -161,30 +166,60 @@ fn adler(data: &[u8]) -> u32 {
 
 /// Those bytes as literals and matches.
 fn matches(data: &[u8]) -> Vec<Sym> {
-    let mut syms = Vec::with_capacity(data.len() / 2);
-    let mut head = vec![usize::MAX; 1 << HASH_BITS];
-    let mut prev = vec![usize::MAX; WINDOW];
-    let hash = |at: usize| {
+    Matcher::new(data, WINDOW, MAX_MATCH).run(0, data.len())
+}
+
+/// Finds earlier copies of the bytes ahead, for deflate here and for zstd in `crate::zstd`.
+///
+/// It keeps what it has seen from one call of `run` to the next, so a zstd block can reach back
+/// into the blocks before it while its own matches stop at its end.
+pub(crate) struct Matcher<'a> {
+    data: &'a [u8],
+    window: usize,
+    most: usize,
+    head: Vec<usize>,
+    prev: Vec<usize>,
+}
+
+impl<'a> Matcher<'a> {
+    /// A matcher over `data` whose matches reach back at most `window` bytes and are at most
+    /// `most` long. The window is a power of two.
+    pub(crate) fn new(data: &'a [u8], window: usize, most: usize) -> Self {
+        Matcher {
+            data,
+            window,
+            most,
+            head: vec![usize::MAX; 1 << HASH_BITS],
+            prev: vec![usize::MAX; window],
+        }
+    }
+
+    fn hash(&self, at: usize) -> usize {
+        let data = self.data;
         let word =
             u32::from(data[at]) | u32::from(data[at + 1]) << 8 | u32::from(data[at + 2]) << 16;
         (word.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
-    };
-    let insert = |at: usize, head: &mut Vec<usize>, prev: &mut Vec<usize>| {
-        if at + MIN_MATCH <= data.len() {
-            let h = hash(at);
-            prev[at % WINDOW] = head[h];
-            head[h] = at;
+    }
+
+    fn insert(&mut self, at: usize) {
+        if at + MIN_MATCH <= self.data.len() {
+            let h = self.hash(at);
+            self.prev[at % self.window] = self.head[h];
+            self.head[h] = at;
         }
-    };
-    let longest = |at: usize, head: &Vec<usize>, prev: &Vec<usize>| -> (usize, usize) {
-        if at + MIN_MATCH > data.len() {
+    }
+
+    /// The longest match at `at` that ends by `end`, as its length and how far back it is.
+    fn longest(&self, at: usize, end: usize) -> (usize, usize) {
+        let data = self.data;
+        if at + MIN_MATCH > end {
             return (0, 0);
         }
-        let most = (data.len() - at).min(MAX_MATCH);
+        let most = (end - at).min(self.most);
         let (mut best, mut back) = (0, 0);
-        let mut cand = head[hash(at)];
+        let mut cand = self.head[self.hash(at)];
         let mut tries = CHAIN;
-        while cand != usize::MAX && cand < at && at - cand <= WINDOW && tries > 0 {
+        while cand != usize::MAX && cand < at && at - cand <= self.window && tries > 0 {
             if data[cand + best.min(most - 1)] == data[at + best.min(most - 1)] {
                 let len = data[cand..cand + most]
                     .iter()
@@ -199,7 +234,7 @@ fn matches(data: &[u8]) -> Vec<Sym> {
                     }
                 }
             }
-            let next = prev[cand % WINDOW];
+            let next = self.prev[cand % self.window];
             // The slot may have been reused by a later place, which would send the chain forward.
             if next == usize::MAX || next >= cand {
                 break;
@@ -208,32 +243,38 @@ fn matches(data: &[u8]) -> Vec<Sym> {
             tries -= 1;
         }
         if best >= MIN_MATCH { (best, back) } else { (0, 0) }
-    };
-    let mut at = 0;
-    while at < data.len() {
-        let (len, back) = longest(at, &head, &prev);
-        insert(at, &mut head, &mut prev);
-        if len == 0 {
-            syms.push(Sym::Lit(data[at]));
-            at += 1;
-            continue;
-        }
-        // One byte on may start a longer match, in which case this byte goes out as a literal.
-        if len < NICE && at + 1 < data.len() {
-            let (next, _) = longest(at + 1, &head, &prev);
-            if next > len {
+    }
+
+    /// The bytes from `from` to `end` as literals and matches, none of which runs past `end`.
+    pub(crate) fn run(&mut self, from: usize, end: usize) -> Vec<Sym> {
+        let data = self.data;
+        let mut syms = Vec::with_capacity((end - from) / 2);
+        let mut at = from;
+        while at < end {
+            let (len, back) = self.longest(at, end);
+            self.insert(at);
+            if len == 0 {
                 syms.push(Sym::Lit(data[at]));
                 at += 1;
                 continue;
             }
+            // One byte on may start a longer match, in which case this byte goes out as a literal.
+            if len < NICE && at + 1 < end {
+                let (next, _) = self.longest(at + 1, end);
+                if next > len {
+                    syms.push(Sym::Lit(data[at]));
+                    at += 1;
+                    continue;
+                }
+            }
+            syms.push(Sym::Copy { len: len as u32, dist: back as u32 });
+            for skip in at + 1..at + len {
+                self.insert(skip);
+            }
+            at += len;
         }
-        syms.push(Sym::Copy { len: len as u16, dist: back as u16 });
-        for skip in at + 1..at + len {
-            insert(skip, &mut head, &mut prev);
-        }
-        at += len;
+        syms
     }
-    syms
 }
 
 /// The length code and its extra bits for a match of this length.
@@ -257,8 +298,8 @@ fn block(out: &mut Bits, syms: &[Sym], raw: &[u8], last: bool) {
         match *sym {
             Sym::Lit(byte) => lit[usize::from(byte)] += 1,
             Sym::Copy { len, dist: back } => {
-                lit[len_code(len).0] += 1;
-                dist[dist_code(back).0] += 1;
+                lit[len_code(len as u16).0] += 1;
+                dist[dist_code(back as u16).0] += 1;
             }
         }
     }
@@ -317,10 +358,10 @@ fn block(out: &mut Bits, syms: &[Sym], raw: &[u8], last: bool) {
         match *sym {
             Sym::Lit(byte) => out.put(lit_codes[usize::from(byte)], lit_lens[usize::from(byte)]),
             Sym::Copy { len, dist: back } => {
-                let (code, extra, bits) = len_code(len);
+                let (code, extra, bits) = len_code(len as u16);
                 out.put(lit_codes[code], lit_lens[code]);
                 out.put(u32::from(extra), bits);
-                let (code, extra, bits) = dist_code(back);
+                let (code, extra, bits) = dist_code(back as u16);
                 out.put(dist_codes[code], dist_lens[code]);
                 out.put(u32::from(extra), bits);
             }
@@ -428,7 +469,7 @@ impl Header {
 /// Every table comes out with at least two codes in it. A table of one code is a set a reader has
 /// to take on trust as incomplete and zlib's own reader takes that only for the two main tables,
 /// so the second code is given to a symbol that never appears, which costs a bit at most.
-fn lengths(freq: &[u32], limit: u8) -> Vec<u8> {
+pub(crate) fn lengths(freq: &[u32], limit: u8) -> Vec<u8> {
     let mut freq = freq.to_vec();
     for sym in 0..freq.len() {
         if freq.iter().filter(|&&count| count > 0).count() >= 2 {
@@ -531,14 +572,14 @@ fn codes(lens: &[u8]) -> Vec<u32> {
 
 /// Bits packed bottom first into bytes, which is the order deflate reads them in.
 #[derive(Default)]
-struct Bits {
-    bytes: Vec<u8>,
+pub(crate) struct Bits {
+    pub(crate) bytes: Vec<u8>,
     held: u64,
     count: u32,
 }
 
 impl Bits {
-    fn put(&mut self, value: u32, bits: u8) {
+    pub(crate) fn put(&mut self, value: u32, bits: u8) {
         self.held |= u64::from(value) << self.count;
         self.count += u32::from(bits);
         while self.count >= 8 {
@@ -549,7 +590,7 @@ impl Bits {
     }
 
     /// Out to the next byte boundary, which a stored block starts on.
-    fn align(&mut self) {
+    pub(crate) fn align(&mut self) {
         if self.count > 0 {
             self.bytes.push(self.held as u8);
             self.held = 0;

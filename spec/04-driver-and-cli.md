@@ -253,11 +253,11 @@ Two things are deliberately not copied. gcc warns under `-Wmissing-profile` when
 
 ## 4.8 Debug info
 
-`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default), `-gdwarf-4`, `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz`, `-gz=none`, `-gz=zlib`, `-gz=zlib-gnu`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission. `-gz=zstd` is refused, as section 4.12 lists.
+`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default), `-gdwarf-4`, `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz`, `-gz=none`, `-gz=zlib`, `-gz=zlib-gnu`, `-gz=zstd`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
 
 The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` and `-gdwarf-5` turn debug information on as well as choosing the version, as they do in gcc, and the last one on the line wins. Any other version is refused, because a debugger handed version 5 when it was told version 3 is a worse outcome than a build that stopped.
 
-`-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. `zlib` and `zlib-gnu` are written, as section 11.4 describes, and `none` writes the sections as they are. `zstd` is refused with tamnd/rucc#2288 named until there is a zstd writer, because the kernel's `DEBUG_INFO_COMPRESSED_ZSTD` probe would otherwise configure a build around sections that are not compressed that way. A value outside the list is refused as not a way to compress, with the list given. Like gcc, the driver passes `--compress-debug-sections=` on to an ELF linker, so that debug sections arriving from objects it did not compile are compressed too. On Mach-O and COFF the flag is taken and the sections are written as they are, since neither linker has the option.
+`-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. `zlib`, `zlib-gnu` and `zstd` are written, as section 11.4 describes, and `none` writes the sections as they are. A value outside the list is refused as not a way to compress, with the list given. Like gcc, the driver passes `--compress-debug-sections=` on to an ELF linker, so that debug sections arriving from objects it did not compile are compressed too. On Mach-O and COFF the flag is taken and the sections are written as they are, since neither linker has the option.
 
 `-gsplit-dwarf` is refused. It writes the debug information into a `.dwo` file beside the object, and gcc writes that file whether or not it found anything to put in it, so a build system that declares it as an output or a make rule that depends on it gets a file from gcc and nothing from here. Section 4.1 takes a flag that changes nothing and refuses one that changes what is produced, and a file that never appears is the plainest case of the second there is. `-gno-split-dwarf` is taken, because writing it all into the object is what happens.
 
@@ -388,7 +388,6 @@ Refused, with the issue that would honor them:
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
 | `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
-| `-gz=zstd` | The debug sections are compressed with zlib and not zstd. The kernel probes it for `DEBUG_INFO_COMPRESSED_ZSTD`. | #2288 |
 
 Refused, with no issue, because nothing is planned for them:
 
