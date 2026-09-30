@@ -54,10 +54,6 @@ const fn only(arch: Arch, row: Row) -> Row {
 const X86: Arch = Arch::X86_64;
 const A64: Arch = Arch::Aarch64;
 
-const NO_PIC: &str = "position dependent code is not supported: an address that may be in \
-                      another object is loaded out of the global offset table, and nothing here \
-                      emits the absolute form this asks for. Use -no-pie if what you meant was how \
-                      to link";
 const NO_VECTOR: &str = "every function here may use the vector and x87 registers, for copies, \
                          fills and the variadic save area as well as for floating point, and \
                          nothing yet keeps them out";
@@ -197,19 +193,6 @@ pub(crate) const TABLE: &[Row] = &[
         None,
     ),
     refused("-fplugin-arg-*", "there are no gcc plugins here to hand an argument to", None),
-    // Position dependent code, which the kernel of every architecture asks for.
-    only(X86, refused("-fno-pic", NO_PIC, Some(2276))),
-    only(X86, refused("-fno-pie", NO_PIC, Some(2276))),
-    only(X86, refused("-fno-PIC", NO_PIC, Some(2276))),
-    only(X86, refused("-fno-PIE", NO_PIC, Some(2276))),
-    only(A64, refused("-fno-pic", NO_PIC, Some(2286))),
-    only(A64, refused("-fno-pie", NO_PIC, Some(2286))),
-    only(A64, refused("-fno-PIC", NO_PIC, Some(2286))),
-    only(A64, refused("-fno-PIE", NO_PIC, Some(2286))),
-    refused("-fno-pic", NO_PIC, None),
-    refused("-fno-pie", NO_PIC, None),
-    refused("-fno-PIC", NO_PIC, None),
-    refused("-fno-PIE", NO_PIC, None),
     // Debug information.
     refused(
         "-gdwarf-4",

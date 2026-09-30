@@ -203,3 +203,73 @@ void tell(const char *what) { (enter(), warn)(\"%s\", what); }
         assert!(!text.contains("warn@GOTPCREL"), "{level}: {text}");
     }
 }
+
+/// Every name there is a way to reach, for the position dependent tests below: a variable defined
+/// here, one defined elsewhere, a weak one nothing may define, a function this file only declares,
+/// a weak one, and the address of each.
+const EVERY: &str = "\
+extern int away;
+int here = 1;
+extern int maybe __attribute__((weak));
+extern void act(void);
+extern void perhaps(void) __attribute__((weak));
+int read_all(void) { return away + here; }
+int *address_of_maybe(void) { return &maybe; }
+int read_maybe(void) { return maybe; }
+void (*address_of_act(void))(void) { return act; }
+void call_perhaps(void) { if (perhaps) perhaps(); act(); }
+";
+
+/// `-fno-pic` and `-fno-pie` in every spelling gcc takes reach every name directly, and nothing at
+/// all goes through the global offset table, the weak ones included.
+///
+/// The weak ones are the point. An executable reads a weak variable out of the table, because
+/// in a link that is position independent nothing else can say zero for one nobody defined. A
+/// link that is not can, `ld` resolves a direct reference to an undefined weak name to zero, and
+/// a kernel's link script asserts there is no `.got` at all, so one slot for a `__start_` symbol
+/// is a kernel that does not link. tamnd/rucc#2276.
+#[test]
+fn position_dependent_code_reaches_every_name_directly() {
+    for flags in
+        [&["-fno-pic"][..], &["-fno-PIC"], &["-fno-pie"], &["-fno-PIE"], &["-fPIE", "-fno-pie"]]
+    {
+        let text = asm("absolute", flags, EVERY);
+        assert!(!text.contains("GOTPCREL"), "{flags:?}: {text}");
+        assert!(!text.contains("@PLT"), "{flags:?}: {text}");
+        assert!(text.contains("maybe(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("act(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("perhaps(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("call\tperhaps"), "{flags:?}: {text}");
+    }
+    // What gets the table without the flag, so that the test above is known to be asking about
+    // something the flag changes.
+    let executable = asm("absolute-exe", &[], EVERY);
+    assert!(executable.contains("maybe@GOTPCREL(%rip)"), "{executable}");
+}
+
+/// A no speaks only for its own family, the way gcc reads the two, so a library asked for is still
+/// a library after `-fno-pie`, and an executable asked for is still one after `-fno-pic`.
+#[test]
+fn a_no_for_one_family_leaves_the_other_alone() {
+    let library = asm("absolute-lib", &["-fPIC", "-fno-pie"], EVERY);
+    assert!(library.contains("away@GOTPCREL(%rip)"), "{library}");
+    let executable = asm("absolute-pie", &["-fPIE", "-fno-pic"], EVERY);
+    assert!(executable.contains("maybe@GOTPCREL(%rip)"), "{executable}");
+}
+
+/// Neither `__PIC__` nor `__PIE__` under `-fno-pic`, which is what gcc does, since there the claim
+/// both of them make stops being true.
+#[test]
+fn position_dependent_code_defines_neither_macro() {
+    let source = "\
+#if defined __PIC__ || defined __pic__ || defined __PIE__ || defined __pie__
+int position_independent(void) { return 1; }
+#else
+int position_dependent(void) { return 1; }
+#endif
+";
+    for flag in ["-fno-pic", "-fno-pie", "-fno-PIE"] {
+        let text = asm("absolute-macro", &[flag], source);
+        assert!(text.contains("position_dependent:"), "{flag}: {text}");
+    }
+}

@@ -211,8 +211,8 @@ impl Dll {
 
 /// Which link the module is being compiled for.
 ///
-/// Everything this compiler writes is position independent, so this is not about whether there are
-/// absolute addresses in the text. It is about whether the link that reads the object puts every
+/// The first two answers are position independent, so between them this is not about whether there
+/// are absolute addresses in the text. It is about whether the link that reads the object puts every
 /// name in the same program. An executable is such a link and a shared library is not, and that
 /// decides whether a name is one another object may define or replace, which is the question
 /// [`Self::replaceable`] answers and the reason the field is carried this far down.
@@ -226,6 +226,11 @@ pub enum Pic {
     Executable,
     /// The output may end up in a shared library. `-fPIC`.
     Library,
+    /// The output is not position independent and is linked where it runs, which is `-fno-pic` on
+    /// x86-64 ELF and what a kernel is built with. Nothing is replaceable, as in an executable, and
+    /// on top of that nothing is reached through the global offset table, not even a weak name
+    /// nothing defines, which the static linker resolves to zero in place.
+    Absolute,
 }
 
 impl Pic {
@@ -245,7 +250,7 @@ impl Pic {
     #[must_use]
     pub const fn replaceable(self, linkage: Linkage, visibility: Visibility) -> bool {
         match self {
-            Self::Executable => false,
+            Self::Executable | Self::Absolute => false,
             Self::Library => match visibility {
                 Visibility::Hidden | Visibility::Protected => false,
                 Visibility::Default => !matches!(linkage, Linkage::Internal),

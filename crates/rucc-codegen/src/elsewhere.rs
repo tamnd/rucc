@@ -210,6 +210,21 @@ impl Elsewhere {
         if format == ObjectFormat::Coff {
             return Self::default();
         }
+        // Position dependent code, which is `-fno-pic` and a kernel. The link puts every name at
+        // an address it knows and nothing moves the program afterwards, so there is no name this
+        // file cannot reach directly, and the table is empty. A function this file only declares
+        // gets the address the linker gives it, which in an executable is the canonical entry
+        // it makes for it. A weak variable nothing defines is resolved to zero where it is
+        // referenced, which `ld` does for `R_X86_64_PC32` and for the absolute forms alike. That
+        // second one is why this is not only an optimization: a slot the linker cannot relax
+        // leaves a `.got` behind, and the kernel's link script asserts there is none, so a single
+        // `__start_` symbol read out of a slot is a kernel that does not link. tamnd/rucc#2276.
+        //
+        // Only where the linker copies variables, which is the one machine the driver sends this
+        // for. Anywhere else the same code as an executable is what this answers, and it is right.
+        if pic == Pic::Absolute && copies && format == ObjectFormat::Elf {
+            return Self::default();
+        }
         let funcs = module.funcs().filter(|&id| {
             let func = &module[id];
             func.is_declaration() || pic.replaceable(func.linkage, func.visibility)
@@ -498,6 +513,29 @@ mod tests {
         module.add_global(maybe);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(elsewhere.holds(names.intern("maybe")));
+    }
+
+    /// Position dependent code reaches every name directly, the weak variable nothing may define
+    /// and the function this file only declares included. A kernel's link script asserts that
+    /// there is no `.got`, and one slot for a `__start_` symbol is enough to make one.
+    #[test]
+    fn position_dependent_code_puts_nothing_in_the_table() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut maybe = Global::new(names.intern("maybe"), 4, 4);
+        maybe.linkage = Linkage::Weak;
+        module.add_global(maybe);
+        let elsewhere = Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, true);
+        for name in ["here", "exit", "kept", "away", "quiet", "shy", "second", "maybe"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
+        }
+        // Thread-local storage is a different question and keeps its answer.
+        assert!(elsewhere.thread(names.intern("own")));
+        // A machine whose linker makes no copies keeps the executable's answer, since the driver
+        // never sends this for one and the executable's code is still right there.
+        let uncopied = Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, false);
+        assert!(uncopied.holds(names.intern("away")));
+        assert!(uncopied.holds(names.intern("maybe")));
     }
 
     /// Mach-O never copies a variable into the executable, so the one this file only declares is

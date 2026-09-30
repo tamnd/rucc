@@ -1236,11 +1236,11 @@ impl fmt::Display for Patchable {
     }
 }
 
-/// Which of the two position independent questions the output is answering.
+/// Which link the output is written for, and whether it has to be position independent at all.
 ///
-/// Everything this compiler writes is position independent, so this is not about whether there are
-/// absolute addresses in the text. It is about whether the link that reads the object is one that
-/// puts every name in the same program. An executable is such a link and a shared library is not,
+/// The first two answers are both position independent, so between them this is not about whether
+/// there are absolute addresses in the text. It is about whether the link that reads the object is
+/// one that puts every name in the same program. An executable is such a link and a shared library is not,
 /// and the difference decides how a name is reached: from the instruction pointer where the
 /// distance is a number the linker has, and out of the global offset table where it is not.
 ///
@@ -1260,6 +1260,12 @@ pub enum Pic {
     /// exports is one something loaded earlier may define too, and where a name defined elsewhere
     /// is not copied in. Both are reached through the global offset table.
     Library,
+    /// `-fno-pic`, `-fno-pie` and their capital spellings. The output is linked where it runs and
+    /// nothing relocates it afterwards, which is a kernel and a `-no-pie` executable. Every name is
+    /// reached directly, so the object asks for no global offset table at all: a weak name nothing
+    /// defines is resolved to zero by the static linker rather than read out of a slot, which is
+    /// what a kernel's link script asserts when it checks that `.got` is empty. See tamnd/rucc#2276.
+    Absolute,
 }
 
 impl Pic {
@@ -1268,6 +1274,7 @@ impl Pic {
         match self {
             Pic::Executable => "-fPIE",
             Pic::Library => "-fPIC",
+            Pic::Absolute => "-fno-pic",
         }
     }
 }
@@ -2340,7 +2347,8 @@ pub struct Options {
     /// Off unless asked for. A function declared `no_instrument_function` is left alone whatever
     /// this says, which is how the two hooks avoid calling themselves.
     pub instrument_functions: bool,
-    /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`.
+    /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`, or is not
+    /// position independent at all, from `-fno-pic` and `-fno-pie`.
     pub pic: Pic,
     /// Whether a definition in this unit may be replaced at load time by one in another object,
     /// from `-fsemantic-interposition` and `-fno-semantic-interposition`.
