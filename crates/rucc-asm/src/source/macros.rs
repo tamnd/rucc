@@ -886,6 +886,16 @@ fn plain_end(text: &str) -> usize {
                     at += usize::from(bytes[at] == b'\\') + 1;
                 }
             }
+            // A character constant, whose character may be the space or the comma that would
+            // otherwise end the argument. The kernel's `relocate_kernel_64.S` passes `' '` to a
+            // macro. The closing quote is optional, as it is to gas.
+            b'\'' => {
+                let mut end = at + 1;
+                if bytes.get(end) == Some(&b'\\') {
+                    end += 1;
+                }
+                at = if bytes.get(end + 1) == Some(&b'\'') { end + 1 } else { end };
+            }
             b'(' | b'[' => depth += 1,
             b')' | b']' => depth -= 1,
             b',' => return at,
@@ -1048,6 +1058,16 @@ mod tests {
             ".macro MODRM mod opd1 opd2\n.byte \\mod | (\\opd1 & 7) | ((\\opd2 & 7) << 3)\n.endm\n\
              MODRM 0xc0, 1, 2\nMODRM 0xc0 3 4",
             ".byte 0xc0 | 1 | (2 << 3)\n.byte 0xc0 | 3 | (4 << 3)",
+        );
+    }
+
+    #[test]
+    fn a_character_constant_is_one_argument_even_when_it_is_a_space_or_a_comma() {
+        // `relocate_kernel_64.S` prints a register's name a letter at a time, and `r8` is padded
+        // with `' '`.
+        same(
+            ".macro PR a, b, c, d\n.byte \\a, \\b, \\c, \\d\n.endm\nPR 'r', ' ', ',', ':'",
+            ".byte 0x72, 0x20, 0x2c, 0x3a",
         );
     }
 
