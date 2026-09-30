@@ -5477,6 +5477,16 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn a_loop_counts_down_with_one_byte_of_reach() {
+        // `relocate_kernel_64.S` copies a page with `loop`, which like `jrcxz` has only the short
+        // form.
+        let out = assembled(
+            "\t.text\nagain:\n\tnop\n\tloop again\n\tloopne again\n\tloope again\n\tret\n",
+        );
+        assert_eq!(bytes(&out, ".text"), vec![0x90, 0xe2, 0xfd, 0xe0, 0xfb, 0xe1, 0xf9, 0xc3]);
+    }
+
+    #[test]
     fn a_branch_to_somewhere_the_bytes_it_has_cannot_reach_is_refused() {
         // The other half of the same thing. There is no relaxing a `jrcxz` into something longer,
         // so a destination out of its reach is a mistake in the file, and quietly keeping the low

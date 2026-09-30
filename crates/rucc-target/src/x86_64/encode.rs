@@ -1928,6 +1928,14 @@ static ENCODINGS: &[Encoding] = &[
     // program that needs further writes a test and one of the jumps above. It reads `rcx` and names
     // it in the mnemonic rather than in an operand, so there is nothing here but a destination.
     bytes("jrcxz", &D, Long, &[0xE3], NO_MODRM, ImmSize::Cb),
+    // The loops, which count `rcx` down and branch while it is not zero, the last two also asking
+    // about the zero flag. They have the same single byte of reach. The kernel's
+    // `relocate_kernel_64.S` copies pages with one.
+    bytes("loop", &D, Long, &[0xE2], NO_MODRM, ImmSize::Cb),
+    bytes("loope", &D, Long, &[0xE1], NO_MODRM, ImmSize::Cb),
+    bytes("loopz", &D, Long, &[0xE1], NO_MODRM, ImmSize::Cb),
+    bytes("loopne", &D, Long, &[0xE0], NO_MODRM, ImmSize::Cb),
+    bytes("loopnz", &D, Long, &[0xE0], NO_MODRM, ImmSize::Cb),
     // The same mnemonic through a register, which is a different row for the reason the call above
     // has two: what a row is looked up by is the arguments as well as the name. It is another of
     // the eight that share `0xFF` and sits one place along from the call, and it is sixty four bits
