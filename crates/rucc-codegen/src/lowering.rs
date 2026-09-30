@@ -310,7 +310,7 @@ impl Step {
             Self::Counts => expand::counts(func),
             Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func),
-            Self::Bulk => expand::bulk(func, names, conv.word),
+            Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned),
             Self::Rounds => expand::rounds(func, conv.stack_align),
             Self::Varargs => varargs::lists(func, conv),
         }
