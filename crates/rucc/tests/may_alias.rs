@@ -94,21 +94,20 @@ void through(word *p) { *p = 1; }
 
 #[test]
 fn a_member_of_a_record_that_may_alias_carries_the_character_node() {
+    // Only a record that says it where it is defined. gcc drops the attribute from a typedef of a
+    // record that was already complete, with a warning, and so the member keeps its own node.
     let text = ir(
         "record",
         "\
 struct __attribute__((may_alias)) unaligned { unsigned int x; };
 typedef struct { unsigned int x; } __attribute__((may_alias)) after_t;
 struct plain { unsigned int x; };
-typedef struct plain __attribute__((may_alias)) plain_a;
 void tagged(struct unaligned *p) { p->x = 1; }
 void named(after_t *p) { p->x = 1; }
-void renamed(plain_a *p) { p->x = 1; }
 void ordinary(struct plain *p) { p->x = 1; }
 ",
     );
     assert_eq!(stored_through(&text, "tagged"), "char", "{text}");
     assert_eq!(stored_through(&text, "named"), "char", "{text}");
-    assert_eq!(stored_through(&text, "renamed"), "char", "{text}");
     assert_eq!(stored_through(&text, "ordinary"), "int", "{text}");
 }

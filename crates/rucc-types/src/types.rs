@@ -597,7 +597,12 @@ impl Types {
 
     /// A typedef name standing for `underlying`.
     pub fn typedef(&mut self, name: Symbol, underlying: TypeId) -> TypeId {
-        self.intern(Type::new(TypeKind::Typedef { name, underlying, align: None, may_alias: false }))
+        self.intern(Type::new(TypeKind::Typedef {
+            name,
+            underlying,
+            align: None,
+            may_alias: false,
+        }))
     }
 
     /// The same, for a typedef that said what an object of it is aligned to.
