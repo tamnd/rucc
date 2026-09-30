@@ -153,15 +153,6 @@ pub(crate) const TABLE: &[Row] = &[
         "registers a function used are left as they are when it returns",
         Some(2281),
     ),
-    same(
-        "-ftrivial-auto-var-init=uninitialized",
-        "an automatic variable with no initializer is left as it is, the default",
-    ),
-    refused(
-        "-ftrivial-auto-var-init=*",
-        "an automatic variable with no initializer is left as it is",
-        Some(2282),
-    ),
     refused(
         "-fplugin=*",
         "a gcc plugin is a shared object built against gcc's own internals, which this compiler \
@@ -319,8 +310,7 @@ mod tests {
         let answer = |arg| row(arg, Arch::X86_64).map(|row| row.answer);
         assert!(matches!(answer("-fzero-call-used-regs=skip"), Some(Answer::Same(_))));
         assert!(matches!(answer("-fzero-call-used-regs=all"), Some(Answer::Refused(..))));
-        assert!(matches!(answer("-ftrivial-auto-var-init=uninitialized"), Some(Answer::Same(_))));
-        assert!(matches!(answer("-ftrivial-auto-var-init=zero"), Some(Answer::Refused(..))));
+        assert!(row("-ftrivial-auto-var-init=zero", Arch::X86_64).is_none());
     }
 
     #[test]

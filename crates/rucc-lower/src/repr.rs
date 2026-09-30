@@ -170,6 +170,70 @@ pub(crate) fn size_of(types: &Types, target: &TargetInfo, id: TypeId) -> u64 {
     }
 }
 
+/// Marks in `mask` the bits of an object of type `id` at byte `at` that hold its value, leaving
+/// the padding bits clear.
+///
+/// What `-ftrivial-auto-var-init=pattern` needs, since gcc writes zero into padding and `0xfe`
+/// into everything else. A union's bytes are value bytes if any member's are. The x87 `long
+/// double` holds its value in ten of its bytes and the rest is padding. A byte past the end of
+/// `mask` is not marked, which only a record with a member of no fixed size could reach.
+pub(crate) fn value_bits(types: &Types, target: &TargetInfo, id: TypeId, at: u64, mask: &mut [u8]) {
+    let canonical = types.canonical(id);
+    let mark = |from: u64, bits: u64, mask: &mut [u8]| {
+        for bit in from..from + bits {
+            if let Some(byte) = usize::try_from(bit / 8).ok().and_then(|at| mask.get_mut(at)) {
+                *byte |= 1 << (bit % 8);
+            }
+        }
+    };
+    match types.kind(canonical) {
+        TypeKind::Array { elem, len: ArrayLen::Fixed(count) } => {
+            let step = size_of(types, target, elem);
+            if step == 0 {
+                return;
+            }
+            let first = usize::try_from(at).unwrap_or(usize::MAX);
+            value_bits(types, target, elem, at, mask);
+            // Every element is the same, so the first one is copied rather than worked out again.
+            // Merged rather than copied over, since in a union another member may have marked
+            // these bytes already.
+            let width = usize::try_from(step).unwrap_or(usize::MAX);
+            for n in 1..count {
+                let Some(to) = usize::try_from(at + n * step).ok() else { return };
+                if to + width > mask.len() || first + width > mask.len() {
+                    return;
+                }
+                for offset in 0..width {
+                    mask[to + offset] |= mask[first + offset];
+                }
+            }
+        }
+        TypeKind::Atomic(inner) => value_bits(types, target, inner, at, mask),
+        TypeKind::Record(record) => {
+            for field in &types.record_info(record).fields {
+                match field.bits {
+                    Some(width) => {
+                        let from = (at + field.offset) * 8 + u64::from(field.bit);
+                        mark(from, u64::from(width), mask);
+                    }
+                    None => value_bits(types, target, field.ty, at + field.offset, mask),
+                }
+            }
+        }
+        TypeKind::Float(kind)
+            if float_format(kind, target) == rucc_base::float::Format::X87Extended =>
+        {
+            mark(at * 8, 80, mask);
+        }
+        TypeKind::Complex(part) => {
+            let half = size_of(types, target, part);
+            value_bits(types, target, part, at, mask);
+            value_bits(types, target, part, at + half, mask);
+        }
+        _ => mark(at * 8, size_of(types, target, canonical) * 8, mask),
+    }
+}
+
 /// The alignment in bytes of a type, and one for a type with no layout.
 ///
 /// An array whose length is not a constant has no layout, and yet an object of one is a real

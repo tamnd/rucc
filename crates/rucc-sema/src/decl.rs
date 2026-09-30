@@ -373,6 +373,14 @@ impl DeclFlags {
     /// `-fstack-protector-explicit` it is the only thing that asks. Merged the same way.
     pub const STACK_PROTECT: Self = Self(1 << 19);
 
+    /// `__attribute__((uninitialized))` was written on a local, so `-ftrivial-auto-var-init`
+    /// leaves it as it is.
+    ///
+    /// The kernel writes it on the large buffers on hot paths where filling them on every call
+    /// costs more than it buys. A different bit from the ones merged with the function flags above
+    /// because it is only ever read off an automatic object.
+    pub const UNINITIALIZED: Self = Self(1 << 23);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

@@ -1030,7 +1030,8 @@ impl Checker<'_> {
     ///
     /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")` and `indirect_branch("keep")`, and
-    /// the `optimize` options that stand for two of them, under the namespace test
+    /// the `optimize` options that stand for two of them, and `uninitialized`, which is about an
+    /// object and not a function but is read in the same two places, under the namespace test
     /// [`Self::never_returns`] is under and through the same
     /// unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
     /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
@@ -1049,6 +1050,7 @@ impl Checker<'_> {
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
+                "uninitialized" => flags |= DeclFlags::UNINITIALIZED,
                 "cold" => flags |= DeclFlags::COLD,
                 "hot" => flags |= DeclFlags::HOT,
                 // Only `keep` changes anything. The other values ask for a thunk on a function

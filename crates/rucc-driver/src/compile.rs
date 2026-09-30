@@ -428,6 +428,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             common,
                             builtins: opts.builtins && opts.hosted,
                             no_builtin: &opts.no_builtin,
+                            auto_init: match opts.auto_var_init {
+                                None => rucc_lower::AutoInit::Uninitialized,
+                                Some(0) => rucc_lower::AutoInit::Zero,
+                                Some(_) => rucc_lower::AutoInit::Pattern,
+                            },
                             read: &mut read,
                         },
                     );

@@ -196,6 +196,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::STACK_PROTECT) {
             head.push_str(" stack_protect");
         }
+        if node.flags.contains(DeclFlags::UNINITIALIZED) {
+            head.push_str(" uninitialized");
+        }
         // Written under the name the attribute was written under rather than the name of the
         // bit it becomes, because what a dump of the tree shows is what the source said.
         match node.effects {

@@ -351,6 +351,7 @@ Honored, by doing what gcc does:
 | `-mindirect-branch-cs-prefix`, `-mno-indirect-branch-cs-prefix` (x86-64) | A `cs` segment override on its own line before a call or jump to the thunk for `%r8` to `%r15`, which is what gcc writes and gives the kernel room to patch the call into an inline `lfence; jmp *%r11`. Nothing without `-mindirect-branch=thunk-extern`. |
 | `-mfunction-return=thunk-extern`, `-mfunction-return=keep` (x86-64) | A `ret` is `jmp __x86_return_thunk`. `keep` is the default. |
 | `-mharden-sls=none`, `-mharden-sls=return`, `-mharden-sls=indirect-jmp`, `-mharden-sls=all` (x86-64) | An `int3` after every `ret`, after every jump through a register or to an indirect thunk, or after both, as gcc does. None goes after a call, or after the jump to the return thunk, which is a direct jump. |
+| `-ftrivial-auto-var-init=uninitialized`, `zero`, `pattern` | What an automatic object with no initializer holds, written where its declaration is reached, so one a `switch` jumps past is left alone as in gcc. `zero` is every byte zero and `pattern` is gcc's `0xfe` in every byte with the padding zero, and a `bool` on its own zero too. An array of run time length is one fill of the whole of it. A local with `__attribute__((uninitialized))` is left alone. `uninitialized` is the default. |
 | `-fjump-tables`, `-fno-jump-tables` | Whether a `switch` may become a jump table. Without one it is a search or a walk over the clusters, and a bit test is still written. `-Zswitch=table` asks for no table under `-fno-jump-tables`. |
 
 Taken because what they ask for is what happens:
@@ -369,7 +370,6 @@ Taken because what they ask for is what happens:
 | `-fzero-init-padding-bits=all`, `-fzero-init-padding-bits=unions`, `-fzero-init-padding-bits=standard` | An automatic object whose initializer does not cover every byte, padding and the rest of a union included, is zeroed whole before its members are stored. |
 | `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |
-| `-ftrivial-auto-var-init=uninitialized` | The default. |
 | `-fzero-call-used-regs=skip` | The default. |
 | `-mindirect-branch-register`, `-mno-indirect-branch-register` (x86-64) | Every indirect call and jump already goes through a register and never through memory. |
 | `-mharden-sls=none` (AArch64) | Nothing is put after a return or an indirect branch, the default. |
@@ -386,7 +386,6 @@ Refused, with the issue that would honor them:
 |---|---|---|
 | `-mstack-protector-guard*` (AArch64) | There is no stack protector on AArch64 yet, and the kernel's canary at an offset from `sp_el0` is part of that work. | #2279 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
-| `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
 | `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
 
 Refused, with no issue, because nothing is planned for them:

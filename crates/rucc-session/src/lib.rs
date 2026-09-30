@@ -2196,6 +2196,10 @@ pub struct Options {
     /// On by default. The kernel turns it off beside the thunks, because a jump through a table is
     /// an indirect branch and a table is read with no thunk in the way.
     pub jump_tables: bool,
+    /// What an automatic object with no initializer starts out holding, from
+    /// `-ftrivial-auto-var-init=`. `None` is `uninitialized`, which is the default, and otherwise
+    /// the byte every byte of it is, zero for `zero` and `0xfe` for `pattern`.
+    pub auto_var_init: Option<u8>,
     /// Whether every function calls a profiler's hook on the way in, from `-pg` and `-p`.
     ///
     /// A profiler wants a count of which function called which, and the moment a function is
@@ -2688,6 +2692,7 @@ impl Options {
             control: Control::default(),
             speculation: Speculation::default(),
             jump_tables: true,
+            auto_var_init: None,
             profile: false,
             hook: Hook::default(),
             record_mcount: false,

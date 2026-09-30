@@ -51,7 +51,7 @@ use crate::bits::{Piece, Run, shifted};
 use crate::repr;
 use crate::restrict::Scopes;
 use crate::ssa::{Ssa, Var};
-use crate::unit::{Protector, Unit};
+use crate::unit::{AutoInit, Protector, Unit};
 
 /// Builds the body of one function definition into `func`.
 ///
@@ -3320,7 +3320,10 @@ impl<'u> Body<'_, 'u> {
     fn init(&mut self, decl: DeclId) {
         let tast = self.tast();
         let ty = tast[decl].ty;
-        let Some(init) = tast[decl].init else { return };
+        let Some(init) = tast[decl].init else {
+            self.trivial_init(decl);
+            return;
+        };
         if tast[decl].duration != StorageDuration::Automatic {
             // The image of a `static` was built when the global was, at translation time.
             return;
@@ -3372,6 +3375,128 @@ impl<'u> Body<'_, 'u> {
         }
         for entry in entries {
             self.store_entry(place, entry, span);
+        }
+    }
+
+    /// What `-ftrivial-auto-var-init=` writes into a local that has no initializer, where the
+    /// declaration is reached.
+    ///
+    /// `zero` is every byte zero. `pattern` is gcc's: every byte `0xfe`, then the padding put
+    /// back to zero, down to the bits a bit-field leaves over, and a `bool` that is the whole
+    /// object zero as well so that it holds a value a `bool` can have. A `bool` inside a record
+    /// keeps the `0xfe`, as it does in gcc. An array whose length is worked out at run time is
+    /// one fill of the whole of it in either case.
+    fn trivial_init(&mut self, decl: DeclId) {
+        let how = self.unit.auto_init;
+        if how == AutoInit::Uninitialized {
+            return;
+        }
+        let tast = self.tast();
+        let node = &tast[decl];
+        // A register variable with a name is the register itself, which `seed_register` has
+        // already read, and `uninitialized` is the program saying to leave this one alone.
+        if node.kind != DeclKind::Object
+            || node.duration != StorageDuration::Automatic
+            || node.register.is_some()
+            || node.flags.contains(DeclFlags::UNINITIALIZED)
+        {
+            return;
+        }
+        let ty = node.ty;
+        let span = tast.decl_span(decl);
+        let byte = if how == AutoInit::Zero { 0 } else { 0xfe };
+        match self.vars.get(&decl).copied() {
+            Some(Local::Value(var)) => {
+                let Some(ir) = repr::value_type(self.types(), self.target(), ty) else { return };
+                let value = self.filled(ir, byte, span);
+                self.write(Place::new(Where::Var(var), ty), value, span);
+            }
+            Some(Local::Slot(slot)) => {
+                let align = repr::align_of(self.types(), self.target(), ty);
+                if repr::is_variable_length(self.types(), ty) {
+                    let length = self.size_value(ty, span);
+                    self.memset_value(slot, byte, length, align, span);
+                    return;
+                }
+                let size = repr::size_of(self.types(), self.target(), ty);
+                if byte == 0 {
+                    self.memset(slot, 0, size, align, span);
+                    return;
+                }
+                let Ok(len) = usize::try_from(size) else { return };
+                let mut mask = vec![0u8; len];
+                repr::value_bits(self.types(), self.target(), ty, 0, &mut mask);
+                if repr::value_type(self.types(), self.target(), ty) == Some(Type::I1) {
+                    mask.fill(0);
+                }
+                self.pattern_fill(slot, &mask, align, span);
+            }
+            None => {}
+        }
+    }
+
+    /// A value of type `ir` whose every byte is `byte`, which for a `bool` is zero whatever the
+    /// byte, since one holds nothing but zero or one.
+    fn filled(&mut self, ir: Type, byte: i128, span: Span) -> Value {
+        let repeated = u128::from_le_bytes([u8::try_from(byte).unwrap_or(0); 16]);
+        if ir.is_ptr() {
+            let address = self.address;
+            let width = address.bits();
+            let number = (repeated << (128 - width)) as i128 >> (128 - width);
+            let mut build = self.build(span);
+            let number = build.iconst(address, number);
+            return build.unary(Opcode::IntToPtr, number, Type::PTR);
+        }
+        if ir == Type::I1 {
+            return self.build(span).iconst(ir, 0);
+        }
+        let width = ir.bits();
+        if ir.is_float() {
+            let bits = if width >= 128 { repeated } else { repeated & ((1u128 << width) - 1) };
+            return self.build(span).fconst(ir, bits);
+        }
+        let number = (repeated << (128 - width)) as i128 >> (128 - width);
+        self.build(span).iconst(ir, number)
+    }
+
+    /// The object at `slot` filled with `0xfe`, then each byte `mask` does not wholly cover put
+    /// back to the bits of `0xfe` it does cover.
+    ///
+    /// A run of padding bytes is one zero fill and a byte a bit-field shares with padding is a
+    /// store of its own. An array of a great many records with padding in each would be a great
+    /// many of those, so past a limit the padding keeps the `0xfe` instead, which is still a
+    /// value nobody wrote and costs one fill.
+    fn pattern_fill(&mut self, slot: Value, mask: &[u8], align: u32, span: Span) {
+        const LIMIT: usize = 256;
+        if mask.iter().all(|&bits| bits == 0) {
+            self.memset(slot, 0, mask.len() as u64, align, span);
+            return;
+        }
+        self.memset(slot, 0xfe, mask.len() as u64, align, span);
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut at = 0;
+        while at < mask.len() {
+            if mask[at] == 0xff {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            if mask[at] == 0 {
+                while at < mask.len() && mask[at] == 0 {
+                    at += 1;
+                }
+            } else {
+                at += 1;
+            }
+            runs.push((start, at));
+        }
+        if runs.len() > LIMIT {
+            return;
+        }
+        for (start, end) in runs {
+            let addr = self.offset(slot, start as u64, span);
+            let byte = i128::from(0xfe & mask[start]);
+            self.memset(addr, byte, (end - start) as u64, 1, span);
         }
     }
 

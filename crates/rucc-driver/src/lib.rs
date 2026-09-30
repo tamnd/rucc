@@ -2283,6 +2283,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // because a jump through a table is an indirect branch that goes through no thunk.
             "-fjump-tables" => opts.jump_tables = true,
             "-fno-jump-tables" => opts.jump_tables = false,
+            // What a local with no initializer holds, which the kernel asks for under
+            // `CONFIG_INIT_STACK_ALL_ZERO` and `CONFIG_INIT_STACK_ALL_PATTERN`.
+            _ if arg.starts_with("-ftrivial-auto-var-init=") => {
+                opts.auto_var_init = match &arg["-ftrivial-auto-var-init=".len()..] {
+                    "uninitialized" => None,
+                    "zero" => Some(0),
+                    "pattern" => Some(0xfe),
+                    _ => {
+                        return Err(err(format!(
+                            "{arg}: the choices are uninitialized, zero and pattern"
+                        )));
+                    }
+                };
+            }
             // The head of every hot loop, which is padded when this is asked for so that a loop that
             // fits in a 64 byte line does not cross one. Both directions of the plain form are
             // answered. A number is taken and says nothing, because the boundary here is the
@@ -8379,13 +8393,25 @@ mod tests {
         }
     }
 
+    /// tamnd/rucc#2282. The last choice written wins, and one gcc does not have is refused.
+    #[test]
+    fn the_choices_of_trivial_auto_var_init_are_read() {
+        let init =
+            |flags: &[&str]| compile(&[&[KERNEL_X86, "-c", "a.c"], flags].concat()).0.auto_var_init;
+        assert_eq!(init(&[]), None);
+        assert_eq!(init(&["-ftrivial-auto-var-init=zero"]), Some(0));
+        assert_eq!(init(&["-ftrivial-auto-var-init=pattern"]), Some(0xfe));
+        let back = ["-ftrivial-auto-var-init=zero", "-ftrivial-auto-var-init=uninitialized"];
+        assert_eq!(init(&back), None);
+        let wrong = refused(&[KERNEL_X86, "-ftrivial-auto-var-init=ones", "-c", "a.c"]);
+        assert!(wrong.contains("pattern"), "{wrong}");
+    }
+
     /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
-        for (flag, issue) in
-            [("-fzero-call-used-regs=used-gpr", 2281), ("-ftrivial-auto-var-init=zero", 2282)]
-        {
+        for (flag, issue) in [("-fzero-call-used-regs=used-gpr", 2281)] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(flag), "the flag is named: {failed}");
             assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
