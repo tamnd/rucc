@@ -112,7 +112,7 @@ Neither of those is cosmetic. A warning costs nothing on a terminal and costs a 
 
 A `.S` file, and anything named `-x assembler-with-cpp`, goes through this stage before the assembler sees it, and the Linux kernel has several hundred of them. They are not C, and gcc reads them as its `-lang-asm` mode does, so this stage reads them differently from C in the five ways below and in no others.
 
-`__ASSEMBLER__` is defined to 1, because every header that a `.S` shares with C hides its declarations behind `#ifndef __ASSEMBLER__`. `__STDC_VERSION__`, `__STDC_UTF_16__` and `__STDC_UTF_32__` are left out, which is the whole of the difference gcc 16 makes between `-dM` for C and for assembly, and so are this compiler's own `__STDC_NO_ATOMICS__`, `__STDC_NO_COMPLEX__` and `__STDC_NO_THREADS__`, which qualify a version that is no longer there. Every other predefined name stays, since a `.S` asks about the machine as often as a C file does.
+`__ASSEMBLER__` is defined to 1, because every header that a `.S` shares with C hides its declarations behind `#ifndef __ASSEMBLER__`. `__STDC_VERSION__`, `__STDC_UTF_16__` and `__STDC_UTF_32__` are left out, which is the whole of the difference gcc 16 makes between `-dM` for C and for assembly. Every other predefined name stays, since a `.S` asks about the machine as often as a C file does.
 
 A `$` is a token of its own rather than a letter of a name. x86 writes an immediate as `$FOO`, and the kernel's `FOO` is often a macro from `asm-offsets.h`, so the name after the `$` has to be found and expanded. The output keeps the two together as `$3`, not `$ 3`, the way gcc prints it.
 

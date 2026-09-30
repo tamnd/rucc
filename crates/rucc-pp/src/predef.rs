@@ -416,13 +416,11 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // test failed for no other reason than this warning.
     d.set_if(iec, "__STDC_IEC_60559_BFP__", "201404L");
     // The same date for the complex half, which is the other name `<stdc-predef.h>` writes and
-    // which was missing here. Withholding it looked like the careful answer and was not one, for
-    // two reasons. `__STDC_NO_COMPLEX__` is defined, so there is no complex arithmetic for the
-    // claim to be about and a program that reads one of these has already been told there is
-    // none. And the library makes the claim anyway: the `#else` in `<stdc-predef.h>` is reached
-    // by a compiler that says nothing about its intent, and it presumes an older compiler that
-    // meant yes. Saying nothing therefore does not withhold anything, it only makes the value
-    // arrive from somewhere else.
+    // which was missing here. The library makes the claim anyway: the `#else` in
+    // `<stdc-predef.h>` is reached by a compiler that says nothing about its intent, and it
+    // presumes an older compiler that meant yes, so saying nothing would not withhold anything,
+    // it would only make the value arrive from somewhere else. And the claim is true, since the
+    // complex arithmetic is lowered.
     d.set_if(iec, "__STDC_IEC_60559_COMPLEX__", "201404L");
     // A promise that every `wchar_t` holds a UCS code point in every locale, which glibc's
     // `<stdc-predef.h>` makes and Apple's library does not: a Mac `wchar_t` in a legacy locale
@@ -436,25 +434,15 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // for it: gcc's own `stdatomic.h` writes `atomic_char8_t` under `#ifdef __CHAR8_TYPE__`
     // and gets it in C23 and not in C17.
     d.set_if(opts.std >= Std::C23, "__CHAR8_TYPE__", "unsigned char");
-    // C11 made these conditional features, and a header that sees `__STDC_VERSION__` at
-    // 201112 with no `__STDC_NO_ATOMICS__` next to it will use `_Atomic`. Each one here is a
-    // claim not to have something, so each one is only correct while it stays true: atomics
-    // because there is no `stdatomic.h` to include, threads because there is no `threads.h`,
-    // and complex because the arithmetic is not lowered.
-    //
-    // Variable length arrays are not on this list, because they work. Claiming otherwise is
-    // not a harmless overstatement of caution: glibc's `regex.h` writes the bound of
-    // `regexec`'s match array as `_REGEX_NELTS (__nmatch)`, which is the parameter when the
-    // dialect has them and nothing at all when a compiler says it does not, so the claim
-    // silently changes a declaration in a header rather than turning something off.
-    //
-    // Not in assembly, where they would qualify a `__STDC_VERSION__` that is not there and where
-    // gcc, which has none of them in any mode, defines nothing like them.
-    if opts.std.has_c11() && !opts.assembler {
-        d.flag("__STDC_NO_ATOMICS__");
-        d.flag("__STDC_NO_THREADS__");
-        d.flag("__STDC_NO_COMPLEX__");
-    }
+    // C11 made atomics, threads, complex arithmetic and variable length arrays conditional, and
+    // each has a `__STDC_NO_*` macro a compiler defines to say it has not got one. gcc 16 defines
+    // none of them in any mode, and neither does this compiler, because all four are here: the
+    // `_Atomic` type and `stdatomic.h`, the C library's `threads.h` with `_Thread_local` under
+    // it, and the complex arithmetic are all lowered, and a claim that is not true changes what
+    // a header declares rather than turning anything off. glibc's `regex.h` is the example of
+    // that: it writes the bound of `regexec`'s match array as `_REGEX_NELTS (__nmatch)`, which
+    // is the parameter when the dialect has variable length arrays and nothing at all when a
+    // compiler says it does not.
     // What `__has_embed` answers with. They are defined in every dialect and not only in C23,
     // because the operator is answerable in every dialect and a header that writes
     // `#if __has_embed(...) == __STDC_EMBED_FOUND__` under `-std=gnu17` would otherwise be
@@ -466,8 +454,7 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 
 /// The memory orders and the lock free answers.
 ///
-/// These are here whether or not `_Atomic` is, and `__STDC_NO_ATOMICS__` does not turn them
-/// off, because they are the numbering the `__atomic` builtins take rather than a promise
+/// These would be here whether or not `_Atomic` was, because they are the numbering the `__atomic` builtins take rather than a promise
 /// about the language. musl's `stdatomic.h` writes `memory_order_relaxed = __ATOMIC_RELAXED`
 /// with no test around it at all, so a compiler without them prints an enumerator whose value
 /// is an identifier.
@@ -1685,23 +1672,13 @@ mod tests {
         assert!(has(&asm, "#define __ASSEMBLER__ 1"), "{asm}");
         assert!(!c.contains("__ASSEMBLER__"), "{c}");
 
-        // These are the lines gcc 16 leaves out of `-dM` for `assembler-with-cpp`, plus rucc's
-        // own `__STDC_NO_*` ones, and nothing else goes.
+        // These are the lines gcc 16 leaves out of `-dM` for `assembler-with-cpp`, and nothing
+        // else goes.
         let gone: Vec<&str> = c.lines().filter(|l| !asm.lines().any(|a| a == *l)).collect();
         let mut names: Vec<&str> =
             gone.iter().map(|l| l.split_whitespace().nth(1).unwrap_or_default()).collect();
         names.sort_unstable();
-        assert_eq!(
-            names,
-            [
-                "__STDC_NO_ATOMICS__",
-                "__STDC_NO_COMPLEX__",
-                "__STDC_NO_THREADS__",
-                "__STDC_UTF_16__",
-                "__STDC_UTF_32__",
-                "__STDC_VERSION__",
-            ]
-        );
+        assert_eq!(names, ["__STDC_UTF_16__", "__STDC_UTF_32__", "__STDC_VERSION__",]);
         assert!(has(&asm, "#define __x86_64__ 1") && has(&asm, "#define __STDC__ 1"), "{asm}");
     }
 
@@ -2069,7 +2046,6 @@ mod tests {
         let linux = set_for("x86_64-unknown-linux-gnu");
         assert!(has(&linux, "#define __ATOMIC_RELAXED 0"));
         assert!(has(&linux, "#define __ATOMIC_SEQ_CST 5"));
-        assert!(has(&linux, "#define __STDC_NO_ATOMICS__ 1"), "and we still have no _Atomic");
         assert!(has(&linux, "#define __GCC_ATOMIC_INT_LOCK_FREE 2"));
         assert!(has(&linux, "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2"));
         assert!(has(&set_for("x86_64-pc-windows-msvc"), "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2"));
@@ -2284,16 +2260,15 @@ mod tests {
     }
 
     /// The conditional feature macros are claims not to have something, and a claim that is
-    /// not true changes what a header declares rather than turning anything off.
+    /// not true changes what a header declares rather than turning anything off. gcc 16 makes
+    /// none of them, and every one of the four features is here.
     #[test]
-    fn the_only_things_claimed_missing_are_the_ones_that_are_missing() {
+    fn nothing_is_claimed_missing_since_nothing_is() {
         let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
-        let opts = Predef::new();
-        let set = built_in(&target, &opts);
-        assert!(has(&set, "#define __STDC_NO_ATOMICS__ 1"), "there is no stdatomic.h to include");
-        assert!(has(&set, "#define __STDC_NO_THREADS__ 1"), "nor a threads.h");
-        assert!(has(&set, "#define __STDC_NO_COMPLEX__ 1"), "the arithmetic is not lowered");
-        assert!(!set.contains("__STDC_NO_VLA__"), "variable length arrays work");
+        for std in [Std::C11, Std::C17, Std::C23] {
+            let set = built_in(&target, &Predef { std, ..Predef::new() });
+            assert!(!set.contains("__STDC_NO_"), "{std:?}");
+        }
     }
 
     /// gcc's own `stdatomic.h` declares `atomic_char8_t` under `#ifdef __CHAR8_TYPE__`, so a
