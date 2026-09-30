@@ -872,7 +872,16 @@ impl Unit<'_> {
         if self.is_dropped(decl, name) {
             return;
         }
-        let Some(plan) = self.plan(ty, &[], span) else { return };
+        // A declaration with no body is let go quietly when its parameters cannot be laid out,
+        // which is a parameter of an enumeration nobody has finished yet. gcc says nothing about
+        // one of those until something calls it, and the kernel's `irq.h` declares one ahead of
+        // the header that finishes it. A call still reports it, from where the call is planned.
+        let plan = if body.is_none() {
+            self.try_plan(ty, &[], false).ok()
+        } else {
+            self.plan(ty, &[], span)
+        };
+        let Some(plan) = plan else { return };
 
         let mut func = Func::new(name, plan.signature.clone());
         // The name the source spelled, where an assembler name says the symbol is not it. A
@@ -1538,6 +1547,17 @@ impl Unit<'_> {
         at_call: bool,
         span: Span,
     ) -> Option<Plan> {
+        match self.try_plan(ty, actual, at_call) {
+            Ok(plan) => Some(plan),
+            Err(what) => {
+                self.unsupported(what, span);
+                None
+            }
+        }
+    }
+
+    /// The plan, or what stopped it, said to nobody.
+    fn try_plan(&self, ty: TypeId, actual: &[TypeId], at_call: bool) -> Result<Plan, &'static str> {
         let canonical = self.types.canonical(ty);
         let canonical = match self.types.kind(canonical) {
             // A call goes through a pointer to a function, and the type in hand may be either.
@@ -1545,8 +1565,7 @@ impl Unit<'_> {
             _ => canonical,
         };
         let TypeKind::Function(id) = self.types.kind(canonical) else {
-            self.unsupported("a call through something that is not a function", span);
-            return None;
+            return Err("a call through something that is not a function");
         };
         let signature = self.types.signature(id);
         let ret = signature.ret;
@@ -1569,13 +1588,7 @@ impl Unit<'_> {
             signature.params.clone()
         };
 
-        match abi::plan(self.types, self.target, convention, ret, &params, actual, variadic) {
-            Ok(plan) => Some(plan),
-            Err(what) => {
-                self.unsupported(what, span);
-                None
-            }
-        }
+        abi::plan(self.types, self.target, convention, ret, &params, actual, variadic)
     }
 
     /// The image of an initializer: the entries in ascending order, with the gaps zeroed, and
