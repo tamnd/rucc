@@ -1972,6 +1972,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("prefetcht0", &M, Long, &[0x0F, 0x18], ext(0, 1), NO_IMM),
     bytes("prefetcht1", &M, Long, &[0x0F, 0x18], ext(0, 2), NO_IMM),
     bytes("prefetcht2", &M, Long, &[0x0F, 0x18], ext(0, 3), NO_IMM),
+    // The two AMD added, the second of which fetches a line it is about to write. The kernel's
+    // `prefetchw()` is the second, and every processor since Broadwell runs it.
+    bytes("prefetch", &M, Long, &[0x0F, 0x0D], ext(0, 0), NO_IMM),
+    bytes("prefetchw", &M, Long, &[0x0F, 0x0D], ext(0, 1), NO_IMM),
     // The instruction a program stops on. Two bytes and no operands, and what makes it work is
     // that the manual promises this opcode will never be given a meaning, so every processor there
     // is raises the fault for an instruction it does not know rather than doing something.
@@ -2434,6 +2438,11 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cmpxchgw", &RM, Word, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
     bytes("cmpxchgl", &RM, Long, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
     bytes("cmpxchgq", &RM, Quad, &[0x0F, 0xB1], pair(1, 0), NO_IMM),
+    // The compare and exchange of two words at once, against `edx:eax` or `rdx:rax` and with
+    // `ecx:ebx` or `rcx:rbx` to store. Every register is fixed, so the one operand is the address.
+    // The kernel's SLUB allocator swaps a freelist and a counter together with the second.
+    bytes("cmpxchg8b", &M, Long, &[0x0F, 0xC7], ext(0, 1), NO_IMM),
+    bytes("cmpxchg16b", &M, Quad, &[0x0F, 0xC7], ext(0, 1), NO_IMM),
     // The exchange and the exchange and add, which are the two read modify writes this machine does
     // in one instruction. Both put the register beside the addressing byte and the object in the
     // addressing mode, the way a compare and exchange does, and both are a byte form one opcode
@@ -2882,6 +2891,11 @@ static ENCODINGS: &[Encoding] = &[
     // The store the other way, which goes around the cache, and is how lib/raid6 writes the
     // parity it worked out.
     bytes("movntdq", &VM, Word, &[0x0F, 0xE7], pair(1, 0), NO_IMM),
+    // The non-temporal store from a general purpose register, which the kernel's uncached user
+    // copy writes. The width comes from the register, so the letter is found the way it is for
+    // any other mnemonic written without one.
+    bytes("movntil", &RM, Long, &[0x0F, 0xC3], pair(1, 0), NO_IMM),
+    bytes("movntiq", &RM, Quad, &[0x0F, 0xC3], pair(1, 0), NO_IMM),
     // SSE4.1 and the SSE4.2 string comparisons behind the `0x3A` escape, each with its immediate.
     // `extractps` writes a general register or memory, which is the low bits of the addressing byte
     // the way it is for `pextrd`.
@@ -2997,6 +3011,27 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fstpl", &M, Long, &[0xDD], ext(0, 3), NO_IMM),
     bytes("fistpl", &M, Long, &[0xDB], ext(0, 3), NO_IMM),
     bytes("fistpll", &M, Long, &[0xDF], ext(0, 7), NO_IMM),
+    // The arithmetic with an operand in memory, on the top of the stack. `0xD8` reads four bytes
+    // of float and `0xDC` eight, and the extension is the operation in the order the stack forms
+    // number them: add, multiply, compare, compare and pop, subtract, subtract the other way,
+    // divide, divide the other way. The kernel's test for the Pentium division bug is `fdivl` and
+    // `fmull` on two doubles.
+    bytes("fadds", &M, Long, &[0xD8], ext(0, 0), NO_IMM),
+    bytes("faddl", &M, Long, &[0xDC], ext(0, 0), NO_IMM),
+    bytes("fmuls", &M, Long, &[0xD8], ext(0, 1), NO_IMM),
+    bytes("fmull", &M, Long, &[0xDC], ext(0, 1), NO_IMM),
+    bytes("fcoms", &M, Long, &[0xD8], ext(0, 2), NO_IMM),
+    bytes("fcoml", &M, Long, &[0xDC], ext(0, 2), NO_IMM),
+    bytes("fcomps", &M, Long, &[0xD8], ext(0, 3), NO_IMM),
+    bytes("fcompl", &M, Long, &[0xDC], ext(0, 3), NO_IMM),
+    bytes("fsubs", &M, Long, &[0xD8], ext(0, 4), NO_IMM),
+    bytes("fsubl", &M, Long, &[0xDC], ext(0, 4), NO_IMM),
+    bytes("fsubrs", &M, Long, &[0xD8], ext(0, 5), NO_IMM),
+    bytes("fsubrl", &M, Long, &[0xDC], ext(0, 5), NO_IMM),
+    bytes("fdivs", &M, Long, &[0xD8], ext(0, 6), NO_IMM),
+    bytes("fdivl", &M, Long, &[0xDC], ext(0, 6), NO_IMM),
+    bytes("fdivrs", &M, Long, &[0xD8], ext(0, 7), NO_IMM),
+    bytes("fdivrl", &M, Long, &[0xDC], ext(0, 7), NO_IMM),
     // The control word, which is two bytes and is the operand of two more extensions of `0xD9`.
     bytes("fnstcw", &M, Long, &[0xD9], ext(0, 7), NO_IMM),
     bytes("fldcw", &M, Long, &[0xD9], ext(0, 5), NO_IMM),
@@ -3628,6 +3663,32 @@ static ENCODINGS: &[Encoding] = &[
     evex("vpabsb", &MV, Word, &[0x1C], pair(0, 1), Evex::new(Map::Escape38, false).or_vex(false)),
     avx("vptest", &VV, Word, Map::Escape38, &[0x17], None, pair(0, 1)),
     avx("vptest", &MV, Word, Map::Escape38, &[0x17], None, pair(0, 1)),
+    // The widening moves, zero extended and sign extended, from the low part of a register or
+    // from memory. The kernel's BLAKE2s widens message bytes with `vpmovzxbd`.
+    avx("vpmovsxbw", &VV, Word, Map::Escape38, &[0x20], None, pair(0, 1)),
+    avx("vpmovsxbw", &MV, Word, Map::Escape38, &[0x20], None, pair(0, 1)),
+    avx("vpmovsxbd", &VV, Word, Map::Escape38, &[0x21], None, pair(0, 1)),
+    avx("vpmovsxbd", &MV, Word, Map::Escape38, &[0x21], None, pair(0, 1)),
+    avx("vpmovsxbq", &VV, Word, Map::Escape38, &[0x22], None, pair(0, 1)),
+    avx("vpmovsxbq", &MV, Word, Map::Escape38, &[0x22], None, pair(0, 1)),
+    avx("vpmovsxwd", &VV, Word, Map::Escape38, &[0x23], None, pair(0, 1)),
+    avx("vpmovsxwd", &MV, Word, Map::Escape38, &[0x23], None, pair(0, 1)),
+    avx("vpmovsxwq", &VV, Word, Map::Escape38, &[0x24], None, pair(0, 1)),
+    avx("vpmovsxwq", &MV, Word, Map::Escape38, &[0x24], None, pair(0, 1)),
+    avx("vpmovsxdq", &VV, Word, Map::Escape38, &[0x25], None, pair(0, 1)),
+    avx("vpmovsxdq", &MV, Word, Map::Escape38, &[0x25], None, pair(0, 1)),
+    avx("vpmovzxbw", &VV, Word, Map::Escape38, &[0x30], None, pair(0, 1)),
+    avx("vpmovzxbw", &MV, Word, Map::Escape38, &[0x30], None, pair(0, 1)),
+    avx("vpmovzxbd", &VV, Word, Map::Escape38, &[0x31], None, pair(0, 1)),
+    avx("vpmovzxbd", &MV, Word, Map::Escape38, &[0x31], None, pair(0, 1)),
+    avx("vpmovzxbq", &VV, Word, Map::Escape38, &[0x32], None, pair(0, 1)),
+    avx("vpmovzxbq", &MV, Word, Map::Escape38, &[0x32], None, pair(0, 1)),
+    avx("vpmovzxwd", &VV, Word, Map::Escape38, &[0x33], None, pair(0, 1)),
+    avx("vpmovzxwd", &MV, Word, Map::Escape38, &[0x33], None, pair(0, 1)),
+    avx("vpmovzxwq", &VV, Word, Map::Escape38, &[0x34], None, pair(0, 1)),
+    avx("vpmovzxwq", &MV, Word, Map::Escape38, &[0x34], None, pair(0, 1)),
+    avx("vpmovzxdq", &VV, Word, Map::Escape38, &[0x35], None, pair(0, 1)),
+    avx("vpmovzxdq", &MV, Word, Map::Escape38, &[0x35], None, pair(0, 1)),
     evex(
         "vpbroadcastd",
         &VV,
