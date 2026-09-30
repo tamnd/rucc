@@ -245,14 +245,14 @@ pub struct FrameInsts {
     pub thunks: Option<Thunks>,
 }
 
-/// What `-mindirect-branch=thunk-extern`, `-mindirect-branch-cs-prefix`,
-/// `-mfunction-return=thunk-extern` and `-mharden-sls=` rewrite a finished function's branches
-/// into.
+/// What `-mindirect-branch=`, `-mindirect-branch-cs-prefix`, `-mfunction-return=` and
+/// `-mharden-sls=` rewrite a finished function's branches into.
 ///
 /// Every name here is an x86 one, since the flags are, and the thunks are the kernel's: a call
-/// through `%rax` becomes a call to `__x86_indirect_thunk_rax`, a return becomes a jump to
-/// `__x86_return_thunk`, and the thunks themselves are defined somewhere else, which is what
-/// `extern` in the flag's value says.
+/// through `%rax` becomes a call to `__x86_indirect_thunk_rax` and a return becomes a jump to
+/// `__x86_return_thunk`. Under `thunk-extern` the thunks are defined somewhere else, under `thunk`
+/// the unit carries its own copy of each one it calls, and under `thunk-inline` the thunk's
+/// instructions are written where the branch was.
 #[derive(Debug, Clone, Copy)]
 pub struct Thunks {
     /// A call through a register, which is what a thunk call replaces.
@@ -279,6 +279,16 @@ pub struct Thunks {
     /// The first register whose thunk call is given the override. The ones below it need no REX
     /// byte, so a call to their thunk is what gcc leaves alone.
     pub padded_from: u8,
+    /// A template kept as text, which is what `thunk-inline` writes a branch as.
+    pub template: &'static str,
+    /// The instructions of the thunk for a jump through the register spelled `reg`, which are the
+    /// body of that thunk and what `thunk-inline` writes in place of the jump.
+    pub through: fn(reg: &str) -> String,
+    /// What `thunk-inline` writes in place of a call through the register spelled `reg`: a jump
+    /// over a copy of [`Self::through`] and a call to that copy.
+    pub around: fn(reg: &str) -> String,
+    /// The instructions of the return thunk, and what `thunk-inline` writes in place of a return.
+    pub back: &'static str,
 }
 
 impl FrameInsts {

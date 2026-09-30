@@ -47,6 +47,10 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
         "-fno-PIE",
         "-mindirect-branch=thunk-extern",
         "-mfunction-return=thunk-extern",
+        "-mindirect-branch=thunk-inline",
+        "-mindirect-branch=thunk",
+        "-mfunction-return=thunk-inline",
+        "-mfunction-return=thunk",
         "-mindirect-branch-register",
         "-mindirect-branch-cs-prefix",
         "-mharden-sls=all",
@@ -65,7 +69,7 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
 
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    for flag in ["-mindirect-branch=thunk", "-fzero-call-used-regs=all"] {
+    for flag in ["-fzero-call-used-regs=all", "-fzero-call-used-regs=used"] {
         assert!(!cc_option(X86, flag), "{flag}");
     }
     assert!(!cc_option(ARM64, "-mbranch-protection=pac-ret+bti"));

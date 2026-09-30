@@ -250,7 +250,29 @@ pub static THUNKS: Thunks = Thunks {
     ret: "__x86_return_thunk",
     regs: &GPR_NAMES,
     padded_from: 8,
+    template: TEMPLATE,
+    through: thunk_through,
+    around: thunk_around,
+    back: THUNK_BACK,
 };
+
+/// The retpoline for a jump through `reg`, gcc's sequence with numbered labels in place of its
+/// `.LIND` ones. The call pushes the address of the loop, and a processor that guesses the return
+/// goes there spins in it until it finds out. The real address is written over the pushed one,
+/// and the return goes to it.
+fn thunk_through(reg: &str) -> String {
+    format!("call 1f\n0:\npause\nlfence\njmp 0b\n1:\nmov {reg}, (%rsp)\nret")
+}
+
+/// The same for a call, which has to push its own return address first, so the call goes to a
+/// copy of [`thunk_through`] jumped over on the way in.
+fn thunk_around(reg: &str) -> String {
+    format!("jmp 3f\n2:\n{}\n3:\ncall 2b", thunk_through(reg))
+}
+
+/// The return thunk, which is [`thunk_through`] with the pushed address taken back off the stack
+/// rather than written over, so the return goes where the one it replaces would have.
+const THUNK_BACK: &str = "call 1f\n0:\npause\nlfence\njmp 0b\n1:\nlea 8(%rsp), %rsp\nret";
 
 /// How an x86-64 prologue touches a page of the stack it has just reached.
 ///
