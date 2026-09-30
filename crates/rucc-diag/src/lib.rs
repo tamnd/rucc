@@ -19,9 +19,11 @@
 #![doc(html_root_url = "https://docs.rs/rucc-diag/0.18.1")]
 
 mod errors;
+mod groups;
 mod source;
 
 pub use crate::errors::{DEFAULT_ERROR_LIMIT, Errors};
+pub use crate::groups::{WarningGroups, promoted};
 pub use crate::source::{
     FileId, Loc, PresumedLoc, SourceBytes, SourceFile, SourceMap, SourceMapFull, dropped,
 };
@@ -174,12 +176,23 @@ pub struct Diagnostic {
     pub span: Span,
     /// Notes and helps hanging off this diagnostic.
     pub children: Vec<Diagnostic>,
+    /// The gcc warning group a warning belongs to, such as `attributes` for one that
+    /// `-Wno-attributes` silences and `-Werror=attributes` makes fatal. `None` for a warning gcc
+    /// gives whatever is asked, which only `-w` silences and only `-Werror` makes fatal.
+    pub group: Option<&'static str>,
 }
 
 impl Diagnostic {
     /// A new diagnostic at `severity`.
     pub fn new(severity: Severity, message: impl Into<String>, span: Span) -> Self {
-        Self { severity, code: None, message: message.into(), span, children: Vec::new() }
+        Self {
+            severity,
+            code: None,
+            message: message.into(),
+            span,
+            children: Vec::new(),
+            group: None,
+        }
     }
 
     /// A new error.
@@ -196,6 +209,13 @@ impl Diagnostic {
     #[must_use]
     pub fn with_code(mut self, code: &'static str) -> Self {
         self.code = Some(code);
+        self
+    }
+
+    /// Puts a warning in a gcc warning group, named as it is after `-W`.
+    #[must_use]
+    pub fn in_group(mut self, group: &'static str) -> Self {
+        self.group = Some(group);
         self
     }
 

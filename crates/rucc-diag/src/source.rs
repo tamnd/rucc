@@ -30,7 +30,7 @@
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use crate::{BytePos, Diagnostic, Severity, Span};
+use crate::{BytePos, Diagnostic, Severity, Span, WarningGroups};
 
 /// The contents of a file, shared rather than copied.
 ///
@@ -565,19 +565,24 @@ impl SourceMap {
 /// An error is never dropped by either, whatever file it is in. A header that does not compile is
 /// still a translation unit that does not compile.
 ///
+/// A third reason is the warning's group, which `-Wno-` of its name turned off.
+///
 /// This is asked in three places, which are the compiler, the preprocessor and the session, and it
-/// is one function rather than three copies because the two rules have to agree about which one
+/// is one function rather than three copies because the rules have to agree about which one
 /// wins. `-w` does, and it wins by being asked first, so `-w -Wsystem-headers` is quiet.
 pub fn dropped(
     diag: &Diagnostic,
     sources: &SourceMap,
     warnings: bool,
     system_headers: bool,
+    groups: &WarningGroups,
 ) -> bool {
     if diag.severity != Severity::Warning {
         return false;
     }
-    !warnings || (!system_headers && sources.is_system(diag.span.lo))
+    !warnings
+        || (!system_headers && sources.is_system(diag.span.lo))
+        || diag.group.is_some_and(|group| groups.is_off(group))
 }
 
 #[cfg(test)]
@@ -605,14 +610,21 @@ mod tests {
         let theirs = Diagnostic::warning("said twice", here(ids[1]));
         let broken = Diagnostic::error("does not compile", here(ids[1]));
 
-        assert!(!dropped(&mine, &map, true, false));
-        assert!(dropped(&theirs, &map, true, false));
+        assert!(!dropped(&mine, &map, true, false, &WarningGroups::new()));
+        assert!(dropped(&theirs, &map, true, false, &WarningGroups::new()));
         // `-Wsystem-headers` asks for it, `-w` says nothing at all whatever the file is, and an
         // error is never dropped by either, because a header that does not compile is still a
         // translation unit that does not compile.
-        assert!(!dropped(&theirs, &map, true, true));
-        assert!(dropped(&mine, &map, false, true));
-        assert!(!dropped(&broken, &map, false, false));
+        assert!(!dropped(&theirs, &map, true, true, &WarningGroups::new()));
+        assert!(dropped(&mine, &map, false, true, &WarningGroups::new()));
+        assert!(!dropped(&broken, &map, false, false, &WarningGroups::new()));
+
+        // `-Wno-` of a warning's group drops it wherever it is, and drops nothing else.
+        let mut off = WarningGroups::new();
+        off.read("no-attributes");
+        let grouped = Diagnostic::warning("ignored", here(ids[0])).in_group("attributes");
+        assert!(dropped(&grouped, &map, true, false, &off));
+        assert!(!dropped(&mine, &map, true, false, &off));
 
         // A position in no file is nobody's header, so nothing about it is suppressed.
         assert!(!map.is_system(Span::DUMMY.lo));

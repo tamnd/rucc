@@ -1537,7 +1537,8 @@ impl Checker<'_> {
             if !either_void && !compatible(&self.types, a, b) {
                 self.report(
                     Diagnostic::warning("comparison of distinct pointer types lacks a cast", span)
-                        .with_code("E0517"),
+                        .with_code("E0517")
+                        .in_group("compare-distinct-pointer-types"),
                 );
             }
             rhs = self.conv().to_type(rhs, left);
@@ -2037,7 +2038,8 @@ impl Checker<'_> {
                         format!("{what} discards '{name}' qualifier from pointer target type"),
                         span,
                     )
-                    .with_code("E0514"),
+                    .with_code("E0514")
+                    .in_group("discarded-qualifiers"),
                 );
                 return;
             }

@@ -505,11 +505,12 @@ fn report(
     }
     if remarks.has(Remarks::OUT_OF_RANGE) {
         let ty = type_name.unwrap_or("double");
-        diagnostics
-            .push(Diagnostic::warning(format!("floating constant exceeds range of '{ty}'"), span));
+        let what = format!("floating constant exceeds range of '{ty}'");
+        diagnostics.push(Diagnostic::warning(what, span).in_group("overflow"));
     }
     if remarks.has(Remarks::TRUNCATED) {
-        diagnostics.push(Diagnostic::warning("floating constant truncated to zero", span));
+        let what = "floating constant truncated to zero";
+        diagnostics.push(Diagnostic::warning(what, span).in_group("overflow"));
     }
 
     if !cx.pedantic {

@@ -885,6 +885,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 })?;
             }
             "-Werror" => opts.warnings_are_errors = true,
+            "-Wno-error" => opts.warnings_are_errors = false,
             // Nothing that is not fatal is said at all. Read at the one place a diagnostic goes
             // through rather than here, so that a warning `-w` dropped is not counted either.
             "-w" => opts.warnings = false,
@@ -2426,7 +2427,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // status, so the answer has to be gcc's. A name gcc knows is accepted, and one it does
             // not is refused, the way gcc refuses clang's names. `-Wno-` of a name nobody knows is
             // accepted, because gcc accepts it too, but `-Werror=` and `-Wno-error=` of one are
-            // not. None of them turns anything on yet, which #485 is about.
+            // not. Each one is kept as what it says about its group, which decides whether a
+            // warning in that group is dropped or fatal. What the umbrellas such as `-Wall` turn
+            // on is the rest of #485.
             _ if arg.starts_with("-W") => {
                 let name = &arg["-W".len()..];
                 let named = name.strip_prefix("error=").or_else(|| name.strip_prefix("no-error="));
@@ -2437,6 +2440,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 } else if !name.is_empty() && !name.starts_with("no-") && !warnings::known(name) {
                     return Err(err(format!("unknown option `{arg}`")));
                 }
+                opts.warning_groups.read(name);
             }
             // Flags that name something this compiler does not do and would not do differently
             // if it did. `-fno-ident` is about a comment in the output that we do not write

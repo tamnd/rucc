@@ -866,7 +866,7 @@ impl Checker<'_> {
                 _ => {
                     let what = "'transparent_union' attribute ignored";
                     let note = "only a union is passed the way one of its members is";
-                    let warned = Diagnostic::warning(what, at).with_code("E0708");
+                    let warned = Diagnostic::warning(what, at).with_code("E0708").in_group("attributes");
                     self.report(warned.note(note, at));
                 }
             }

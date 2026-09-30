@@ -2317,6 +2317,10 @@ pub struct Options {
     pub prefix_map: PrefixMaps,
     /// Whether warnings are errors.
     pub warnings_are_errors: bool,
+    /// What `-W`, `-Wno-`, `-Werror=` and `-Wno-error=` said about each warning group, which
+    /// decides whether a warning in one is dropped and whether it is fatal. See
+    /// [`rucc_diag::WarningGroups`].
+    pub warning_groups: rucc_diag::WarningGroups,
     /// Whether a warning is raised at all, which is `-w` turned around.
     ///
     /// A build that passes this has decided it does not want to hear about anything that is not
@@ -2677,6 +2681,7 @@ impl Options {
             non_call_exceptions: false,
             prefix_map: PrefixMaps::default(),
             warnings_are_errors: false,
+            warning_groups: rucc_diag::WarningGroups::new(),
             warnings: true,
             system_header_warnings: false,
             error_limit: 20,
@@ -2852,10 +2857,11 @@ impl Session {
             &self.sources,
             self.opts.warnings,
             self.opts.system_header_warnings,
+            &self.opts.warning_groups,
         ) {
             return;
         }
-        if self.opts.warnings_are_errors && diag.severity == Severity::Warning {
+        if rucc_diag::promoted(&diag, &self.opts.warning_groups, self.opts.warnings_are_errors) {
             diag.severity = Severity::Error;
         }
         match diag.severity {

@@ -801,7 +801,8 @@ impl Checker<'_> {
             if eval::overflows(Const::Int(folded), range) {
                 self.report(
                     Diagnostic::warning("case label value exceeds maximum value for type", span)
-                        .with_code("E0625"),
+                        .with_code("E0625")
+                        .in_group("switch-outside-range"),
                 );
             }
         }

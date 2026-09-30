@@ -1180,7 +1180,8 @@ impl Checker<'_> {
         }
         self.report(
             Diagnostic::warning("second parameter of 'va_start' not last named argument", span)
-                .with_code("E0664"),
+                .with_code("E0664")
+                .in_group("varargs"),
         );
     }
 

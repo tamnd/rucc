@@ -248,7 +248,7 @@ impl Checker<'_> {
         let first = info.fields.first().copied();
         let dropped = |note: &str, checker: &mut Self| {
             let what = "'transparent_union' attribute ignored";
-            let warned = Diagnostic::warning(what, at).with_code("E0708");
+            let warned = Diagnostic::warning(what, at).with_code("E0708").in_group("attributes");
             checker.report(warned.note(note.to_owned(), at));
         };
         if kind != RecordKind::Union {

@@ -126,15 +126,21 @@ pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSyste
     let mut errors = 0;
     for diag in pp.take_diagnostics() {
         // `-w` and `-Wsystem-headers`, for the reason they are read here in the compiler proper.
-        if rucc_diag::dropped(&diag, &sess.sources, opts.warnings, opts.system_header_warnings) {
+        let groups = &opts.warning_groups;
+        if rucc_diag::dropped(
+            &diag,
+            &sess.sources,
+            opts.warnings,
+            opts.system_header_warnings,
+            groups,
+        ) {
             continue;
         }
-        let fatal = diag.severity.is_fatal()
-            || (diag.severity == Severity::Warning && opts.warnings_are_errors);
-        if fatal {
+        let promoted = rucc_diag::promoted(&diag, groups, opts.warnings_are_errors);
+        if diag.severity.is_fatal() || promoted {
             errors += 1;
         }
-        messages.push(render(&diag, &sess.sources, opts.warnings_are_errors));
+        messages.push(render(&diag, &sess.sources, promoted));
     }
     Preprocessed { text, messages, errors, deps: pp.dependencies().to_vec() }
 }
@@ -155,7 +161,7 @@ fn failure(message: String) -> Preprocessed {
 /// GCC's shape: the position, the severity, the message, then the code, then any notes
 /// underneath. The chain of includes that reached the file comes first, because a diagnostic
 /// in a header three levels down is unactionable without the path that got there.
-pub(crate) fn render(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> String {
+pub(crate) fn render(diag: &Diagnostic, sources: &SourceMap, promoted: bool) -> String {
     let mut out = String::new();
     let mut chain = sources.include_stack(diag.span.lo);
     chain.reverse();
@@ -163,7 +169,7 @@ pub(crate) fn render(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors
         let lead = if at == 0 { "In file included from" } else { "                 from" };
         out.push_str(&format!("{lead} {}:\n", sources.render_position(from.lo)));
     }
-    out.push_str(&line(diag, sources, warnings_are_errors));
+    out.push_str(&line(diag, sources, promoted));
     for child in &diag.children {
         out.push('\n');
         out.push_str(&line(child, sources, false));
@@ -172,8 +178,8 @@ pub(crate) fn render(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors
 }
 
 /// The one line a diagnostic or one of its notes prints.
-fn line(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> String {
-    let severity = if diag.severity == Severity::Warning && warnings_are_errors {
+fn line(diag: &Diagnostic, sources: &SourceMap, promoted: bool) -> String {
+    let severity = if diag.severity == Severity::Warning && promoted {
         // Not a relabelling for its own sake. A build that turned warnings into errors and
         // then reads "warning" next to a failed compilation has to go looking for why it
         // failed, and the answer is right here.
@@ -186,10 +192,20 @@ fn line(diag: &Diagnostic, sources: &SourceMap, warnings_are_errors: bool) -> St
     } else {
         sources.render_position(diag.span.lo)
     };
-    match diag.code {
+    let mut out = match diag.code {
         Some(code) => format!("{position}: {severity}: {} [{code}]", diag.message),
         None => format!("{position}: {severity}: {}", diag.message),
+    };
+    // The group, the way gcc names it, so the flag that silences the warning or that made it
+    // fatal is on the line that needs it.
+    if let Some(group) = diag.group.filter(|_| diag.severity == Severity::Warning) {
+        if promoted {
+            out.push_str(&format!(" [-Werror={group}]"));
+        } else {
+            out.push_str(&format!(" [-W{group}]"));
+        }
     }
+    out
 }
 
 #[cfg(test)]
