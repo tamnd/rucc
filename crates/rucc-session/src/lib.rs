@@ -788,6 +788,8 @@ pub enum Protector {
     Strong,
     /// `-fstack-protector-all`. Every function that has a frame.
     All,
+    /// `-fstack-protector-explicit`. Only a function that asks with `stack_protect`.
+    Explicit,
 }
 
 /// What overflows rather than being undefined, from `-fwrapv` and its relatives.
@@ -995,13 +997,14 @@ impl FromStr for Contract {
 
 impl Protector {
     /// The spelling this is asked for by, which is the whole flag rather than a part of one,
-    /// because these are four flags and not one flag with an argument.
+    /// because these are five flags and not one flag with an argument.
     pub const fn as_str(self) -> &'static str {
         match self {
             Protector::None => "-fno-stack-protector",
             Protector::Buffers => "-fstack-protector",
             Protector::Strong => "-fstack-protector-strong",
             Protector::All => "-fstack-protector-all",
+            Protector::Explicit => "-fstack-protector-explicit",
         }
     }
 }

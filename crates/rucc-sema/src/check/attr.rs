@@ -1028,8 +1028,10 @@ impl Checker<'_> {
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
-    /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`, `cold`, `hot`,
-    /// `function_return("keep")` and `indirect_branch("keep")`, under the namespace test [`Self::never_returns`] is under and through the same
+    /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`,
+    /// `stack_protect`, `cold`, `hot`, `function_return("keep")` and `indirect_branch("keep")`, and
+    /// the `optimize` options that stand for two of them, under the namespace test
+    /// [`Self::never_returns`] is under and through the same
     /// unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
     /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
     /// declaration.
@@ -1045,7 +1047,8 @@ impl Checker<'_> {
                 "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
                 "noinline" => flags |= DeclFlags::NOINLINE,
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
-                "no_stack_protector" => flags |= DeclFlags::NO_STACK_PROTECTOR,
+                "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
+                "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
                 "cold" => flags |= DeclFlags::COLD,
                 "hot" => flags |= DeclFlags::HOT,
                 // Only `keep` changes anything. The other values ask for a thunk on a function
@@ -1056,13 +1059,19 @@ impl Checker<'_> {
                 "indirect_branch" if self.optimize_options(attr) == ["keep"] => {
                     flags |= DeclFlags::INDIRECT_KEEP;
                 }
-                "optimize"
-                    if self.optimize_options(attr).iter().any(|option| {
-                        option.trim_start_matches('-').trim_start_matches('f')
-                            == "no-strict-aliasing"
-                    }) =>
-                {
-                    flags |= DeclFlags::NO_STRICT_ALIASING;
+                // An option is written with or without its `-f`. `no-stack-protector` here is
+                // what the kernel's `__nostackprotector` was before gcc 11 had the attribute, and
+                // what it still falls back to on a compiler that says it does not have it.
+                "optimize" => {
+                    for option in self.optimize_options(attr) {
+                        match option.trim_start_matches('-').trim_start_matches('f') {
+                            "no-strict-aliasing" => flags |= DeclFlags::NO_STRICT_ALIASING,
+                            "no-stack-protector" => {
+                                flags = flags.then(DeclFlags::NO_STACK_PROTECTOR);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 _ => {}
             }

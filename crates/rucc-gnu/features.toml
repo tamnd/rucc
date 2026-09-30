@@ -540,6 +540,15 @@ tests = ["rucc::a_function_that_says_keep_is_left_as_it_was"]
 notes = "x86-64. `indirect_branch` with the argument keep leaves a function's indirect calls and jumps as they are under `-mindirect-branch=thunk-extern`. The other values are read as nothing, as for `function_return`."
 
 [[feature]]
+name = "stack_protect"
+kind = "attribute"
+gcc_version = "4.9"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::a_function_that_says_stack_protect_gets_one_whenever_protection_is_on"]
+notes = "A canary under any `-fstack-protector` flag whatever the function's locals are, and the only functions `-fstack-protector-explicit` protects. Nothing under `-fno-stack-protector`. Of this and `no_stack_protector` on one function the one written first stands, as in gcc 13."
+
+[[feature]]
 name = "no_caller_saved_registers"
 kind = "attribute"
 gcc_version = "7.0"
@@ -571,8 +580,8 @@ kind = "attribute"
 gcc_version = "4.4"
 status = "partial"
 used_by = ["linux"]
-tests = ["rucc::an_inlined_body_keeps_the_aliasing_it_asked_for"]
-notes = "Only `no-strict-aliasing` is honoured, spelled with or without the `-f`, which lowers the function's accesses with no aliasing node. That matters once the body can be inlined into a function under the rule, as `gcc.c-torture/execute/pr79043.c` does. Every other option and every level is accepted and ignored."
+tests = ["rucc::an_inlined_body_keeps_the_aliasing_it_asked_for", "rucc::an_optimize_attribute_that_turns_the_protector_off_is_read_as_the_attribute"]
+notes = "Only `no-strict-aliasing` and `no-stack-protector` are honoured, spelled with or without the `-f`. The first lowers the function's accesses with no aliasing node and the second is read as the `no_stack_protector` attribute, which is what the kernel's `__nostackprotector` was before gcc 11. That matters once the body can be inlined into a function under the rule, as `gcc.c-torture/execute/pr79043.c` does. Every other option and every level is accepted and ignored."
 
 [[feature]]
 name = "interrupt"

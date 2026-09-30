@@ -365,6 +365,14 @@ impl DeclFlags {
     /// jumps stay as they are whatever `-mindirect-branch=` asked for.
     pub const INDIRECT_KEEP: Self = Self(1 << 18);
 
+    /// `__attribute__((stack_protect))` was written on a declaration of this name, so its body
+    /// gets a canary under any `-fstack-protector` flag, whatever locals it has.
+    ///
+    /// It is the other direction from [`Self::NO_STACK_PROTECTOR`], and loses to it when a name
+    /// has both, as it does in gcc. With `-fno-stack-protector` it asks for nothing, and with
+    /// `-fstack-protector-explicit` it is the only thing that asks. Merged the same way.
+    pub const STACK_PROTECT: Self = Self(1 << 19);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
@@ -376,6 +384,22 @@ impl DeclFlags {
     #[must_use]
     pub const fn with(self, flag: Self, on: bool) -> Self {
         if on { Self(self.0 | flag.0) } else { Self(self.0 & !flag.0) }
+    }
+
+    /// These flags and then `later`'s, where of [`Self::STACK_PROTECT`] and
+    /// [`Self::NO_STACK_PROTECTOR`] the one written first stands and the other is dropped. gcc
+    /// ignores the second of the two with a warning, and a function it was said on both ways gets
+    /// what it was asked for first.
+    #[must_use]
+    pub const fn then(self, later: Self) -> Self {
+        let mut later = later;
+        if self.contains(Self::STACK_PROTECT) {
+            later = later.with(Self::NO_STACK_PROTECTOR, false);
+        }
+        if self.contains(Self::NO_STACK_PROTECTOR) {
+            later = later.with(Self::STACK_PROTECT, false);
+        }
+        Self(self.0 | later.0)
     }
 }
 

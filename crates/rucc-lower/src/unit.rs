@@ -77,6 +77,9 @@ pub enum Protector {
     Strong,
     /// Every function that has a frame at all. `-fstack-protector-all`.
     All,
+    /// Only a function that asks for one with `__attribute__((stack_protect))`.
+    /// `-fstack-protector-explicit`.
+    Explicit,
 }
 
 /// What overflows rather than being undefined, which is `-fwrapv` and its relatives.

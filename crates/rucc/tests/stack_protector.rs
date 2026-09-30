@@ -147,6 +147,50 @@ int buf(void) { char b[16]; use(b); return 0; }
     }
 }
 
+/// `optimize("no-stack-protector")` is the older way to say the same, in any spelling gcc takes.
+///
+/// It is what the kernel's `__nostackprotector` was before gcc 11 had the attribute, and what
+/// `compiler_attributes.h` still falls back to on a compiler that does not have it.
+#[test]
+fn an_optimize_attribute_that_turns_the_protector_off_is_read_as_the_attribute() {
+    let source = "\
+void use(void *);
+__attribute__((optimize(\"no-stack-protector\"))) int one(void) { char b[64]; use(b); return 0; }
+__attribute__((optimize(\"-fno-stack-protector\"))) int two(void) { char b[64]; use(b); return 0; }
+__attribute__((__optimize__(\"O2,no-stack-protector\"))) int three(void) { char b[64]; use(b); return 0; }
+int buf(void) { char b[64]; use(b); return 0; }
+";
+    for flags in ["-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all"] {
+        let text = asm("optimize", &[flags], source);
+        assert_eq!(protected(&text), ["buf"], "{flags}: {text}");
+    }
+}
+
+/// `stack_protect` asks for a canary under any flag that turns protection on, even in a function
+/// with nothing to protect, and `-fstack-protector-explicit` protects only the functions that ask.
+/// With `-fno-stack-protector` it asks for nothing. Of `stack_protect` and `no_stack_protector` on
+/// the same function, the one written first stands. All of it measured against gcc 13.
+#[test]
+fn a_function_that_says_stack_protect_gets_one_whenever_protection_is_on() {
+    let source = "\
+void use(void *);
+__attribute__((stack_protect)) int asked(void) { return 1; }
+__attribute__((stack_protect)) int declared(void);
+int declared(void) { return 2; }
+__attribute__((stack_protect, no_stack_protector)) int first(void) { return 3; }
+__attribute__((no_stack_protector, stack_protect)) int second(void) { char b[64]; use(b); return 4; }
+int buf(void) { char b[64]; use(b); return 0; }
+";
+    let text = asm("explicit-off", &["-fno-stack-protector"], source);
+    assert_eq!(protected(&text), Vec::<&str>::new(), "{text}");
+    let text = asm("explicit", &["-fstack-protector-explicit"], source);
+    assert_eq!(protected(&text), ["asked", "declared", "first"], "{text}");
+    for flags in ["-fstack-protector", "-fstack-protector-strong"] {
+        let text = asm("explicit-on", &[flags], source);
+        assert_eq!(protected(&text), ["asked", "declared", "first", "buf"], "{flags}: {text}");
+    }
+}
+
 /// What a protected function is made of, in the order it is made of it.
 ///
 /// The prologue reads the word out of the block the thread has to itself and puts a copy above
