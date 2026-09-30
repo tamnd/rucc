@@ -1,6 +1,6 @@
 [package]
 name = "rucc-targets"
-description = "Target and psABI queries for the rucc C compiler, and the generator for docs/TARGETS.md."
+description = "Target and psABI queries for the rucc C compiler, and the generator for docs/TARGETS.md and docs/FEATURES.md."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 rucc-abi.workspace = true
 rucc-base.workspace = true
+rucc-gnu.workspace = true
 rucc-sysroot.workspace = true
 rucc-target.workspace = true
 rucc-tuple.workspace = true

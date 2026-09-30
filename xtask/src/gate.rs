@@ -286,7 +286,7 @@ fn docs() -> Step {
 /// which wants the lock the spine is holding for as long as the tests are building. After it they
 /// are a few seconds together.
 fn generated() -> Result<Vec<Step>> {
-    ["targets", "abi-corpus", "abi-signatures", "link-lines", "provenance"]
+    ["targets", "abi-corpus", "abi-signatures", "link-lines", "provenance", "features"]
         .iter()
         .map(|name| Step::task(name, &["--check"]))
         .collect()
