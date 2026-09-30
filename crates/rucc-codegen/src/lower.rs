@@ -412,6 +412,19 @@ fn spelled_registers(template: &str, gpr: RegClass, sse: RegClass) -> Vec<(PhysR
     found
 }
 
+/// What a call out of a template is given besides the operands, which is the same for every
+/// call in one template but for the argument registers the lines above it wrote.
+struct Called<'a> {
+    /// The function called.
+    symbol: &'a str,
+    /// The registers the clobber list names.
+    clobbered: &'a [PhysReg],
+    /// The operands carried in a register through the template, with their files.
+    carried: &'a [(usize, RegClass)],
+    /// The argument registers a line above the call wrote by name.
+    passed: &'a [PhysReg],
+}
+
 /// Whether a template calls out to a function, which is a `call` anywhere in it as a word of its
 /// own, whatever suffix it has.
 fn calls_out(template: &str) -> bool {
@@ -3768,7 +3781,11 @@ impl<'a> Lowering<'a> {
         }
         let spelled = self.names.resolve(symbol).to_owned();
         let bare = spelled.strip_prefix('%').unwrap_or(&spelled);
-        let named = if self.on_aarch64() {
+        // `sp` is not in AArch64's table of names, since no operand is ever given it, and it is the
+        // one the kernel reads as `current_stack_pointer`.
+        let named = if self.on_aarch64() && bare == "sp" {
+            Some((self.conv.stack_pointer, self.gpr))
+        } else if self.on_aarch64() {
             aarch64::named(bare)
         } else if self.class_of(ty) != self.gpr {
             return Err(self.unsupported(inst));
@@ -4361,6 +4378,16 @@ impl<'a> Lowering<'a> {
             // A call out of the template writes every register the convention lets the callee
             // leave anything in, and an output pinned to one of those is written by it.
             if let x86_64::Step::Call { .. } = step {
+                // And reads every operand pinned to a register on the way in, since that is how a
+                // template passes the callee its arguments: `"D" (x)` beside `call g` is `x` in
+                // `rdi` for `g`, and nothing else in the template reads it.
+                for (index, operand) in list.iter().enumerate() {
+                    if pinned(operand).is_some() && read_as(&list, index).is_some() {
+                        *held.get_mut(index).ok_or_else(refused)? = true;
+                        *reads.get_mut(index).ok_or_else(refused)? = true;
+                        after |= writes[index] > 0;
+                    }
+                }
                 for index in self.lost(&list).into_iter().filter_map(|(_, _, index)| index) {
                     *writes.get_mut(index).ok_or_else(refused)? += 1;
                 }
@@ -5113,6 +5140,10 @@ impl<'a> Lowering<'a> {
         }
 
         let mut wrote: Vec<usize> = Vec::new();
+        // The argument registers a line above wrote by name, such as the `rcx` of `movq %0,
+        // %%rcx`, which the next call reads as the argument that line put there.
+        let mut passed: Vec<PhysReg> = Vec::new();
+        let conv = self.conv.under(Convention::Target).unwrap_or(self.conv);
         for step in steps {
             match step {
                 x86_64::Step::Label(name) => {
@@ -5159,7 +5190,9 @@ impl<'a> Lowering<'a> {
                     self.at = Some(self.out.create_block());
                 }
                 x86_64::Step::Call { symbol } => {
-                    self.call_out(inst, symbol, places, list, clobbered, &carried, &mut wrote)?;
+                    let called = Called { symbol, clobbered, carried: &carried, passed: &passed };
+                    self.call_out(inst, &called, places, list, &mut wrote)?;
+                    passed.clear();
                 }
                 x86_64::Step::Line(line) => {
                     let form = x86_64::form(line.opcode).ok_or_else(refused)?;
@@ -5167,6 +5200,15 @@ impl<'a> Lowering<'a> {
                     for (desc, piece) in form.operands().iter().zip(&line.operands) {
                         if !desc.role.is_def() {
                             continue;
+                        }
+                        if let x86_64::Piece::Reg { reg, .. } | x86_64::Piece::Implicit { reg } =
+                            *piece
+                            && desc.class == self.gpr
+                            && conv.int_args.contains(&reg)
+                            && bound(list, reg, desc.role).is_none()
+                            && !passed.contains(&reg)
+                        {
+                            passed.push(reg);
                         }
                         let index = match *piece {
                             x86_64::Piece::Operand { index, .. } => index,
@@ -5226,18 +5268,36 @@ impl<'a> Lowering<'a> {
     /// the template says about it. Every other register the callee may leave anything in is
     /// written here, which is what a program that calls from a template never says and always
     /// means.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// What the callee reads is what the template put in the argument registers: every operand
+    /// pinned to a register on the way in, and every argument register a line above wrote by name.
+    /// Without those reads a write that only the callee reads is a write nobody reads, and the
+    /// allocator is free to drop it or to put something else there first.
     fn call_out(
         &mut self,
         inst: Inst,
-        symbol: &str,
+        called: &Called<'_>,
         places: &mut [Place],
         list: &[AsmOperand<'_>],
-        clobbered: &[PhysReg],
-        carried: &[(usize, RegClass)],
         wrote: &mut Vec<usize>,
     ) -> Result<(), Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
+        let &Called { symbol, clobbered, carried, passed } = called;
+        let mut reads = Vec::new();
+        for (index, operand) in list.iter().enumerate() {
+            let Some((reg, class)) = self.pinned_here(operand) else { continue };
+            if read_as(list, index).is_none() {
+                continue;
+            }
+            let read = places.get(index).and_then(|place| place.read).ok_or_else(refused)?;
+            reads.push(mir::Operand::read(read, class).with(Constraint::Fixed(reg)));
+        }
+        for &reg in passed {
+            let fixed = Constraint::Fixed(reg);
+            if reads.iter().all(|read| read.constraint != fixed) {
+                reads.push(mir::Operand::read(mir::Reg::physical(reg), self.gpr).with(fixed));
+            }
+        }
         let mut operands = Vec::new();
         let mut written = Vec::new();
         let lost = self.lost(list);
@@ -5264,6 +5324,7 @@ impl<'a> Lowering<'a> {
                 operands.push(mir::Operand::write(mir::Reg::physical(reg), self.gpr));
             }
         }
+        operands.extend(reads);
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let opcode = mir::Opcode::new(self.names.intern(abi::CALL));
@@ -5630,29 +5691,22 @@ impl<'a> Lowering<'a> {
         for (desc, piece) in described.iter().zip(pieces) {
             built.push(self.placed(inst, *desc, *piece, places, list)?);
         }
-        // The clobbers go in among the definitions rather than behind the reads, because an operand
-        // vector in the machine IR is every definition and then every use and what counts them
-        // reads that order rather than each operand's role.
-        let defs = built.iter().take_while(|operand| operand.role.is_def()).count();
-        let mut added = 0usize;
+        // The clobbers go on an instruction of their own right behind this one, with no text, rather
+        // than among this one's operands. The listing names a register by where it is in the operand
+        // vector as the description counts it, so a clobber put among the definitions moved every
+        // read behind it one place along, and `movq %1, %0` with `rcx` in the list was written as a
+        // move out of `rcx`. One the line writes by name is that write, not a second one. What is
+        // written right behind the line is taken from every value living past it all the same.
+        let mut clobbers = Vec::new();
         for &reg in clobbered {
-            if described.iter().any(|desc| desc.constraint == Constraint::Fixed(reg)) {
-                continue;
-            }
-            built.insert(defs, mir::Operand::write(mir::Reg::physical(reg), self.gpr));
-            added += 1;
-        }
-        // A constraint tying one operand to another names it by its place in this vector, and the
-        // clobbers were put in the middle of the vector, so everything behind them moved. The
-        // description is written against an instruction with no clobbers in it and cannot know
-        // that, which makes this the one place the two numberings have to be reconciled.
-        for operand in &mut built {
-            if let Constraint::Reuse(at) = operand.constraint {
-                if usize::from(at) >= defs {
-                    let moved = usize::from(at) + added;
-                    operand.constraint =
-                        Constraint::Reuse(u8::try_from(moved).map_err(|_| refused())?);
-                }
+            let named = built.iter().any(|operand| {
+                operand.role.is_def()
+                    && operand.class == self.gpr
+                    && (operand.reg.phys() == Some(reg)
+                        || operand.constraint == Constraint::Fixed(reg))
+            });
+            if !named && !described.iter().any(|desc| desc.constraint == Constraint::Fixed(reg)) {
+                clobbers.push(mir::Operand::write(mir::Reg::physical(reg), self.gpr));
             }
         }
         let at = match line.at {
@@ -5674,6 +5728,15 @@ impl<'a> Lowering<'a> {
             build = build.mem(mem);
         }
         build.finish();
+        if !clobbers.is_empty() {
+            let opcode = self.named(x86_64::TEMPLATE);
+            let empty = self.names.intern("");
+            let mut build = self.out.build(block, opcode).at(span).symbol(empty);
+            for operand in clobbers {
+                build = build.operand(operand);
+            }
+            build.finish();
+        }
         Ok(())
     }
 
@@ -9106,15 +9169,19 @@ mod tests {
     }
 
     /// A clobber the instruction does not write itself, which is the case the list is there for.
-    /// It goes on as a definition of the register, in among the other definitions, because that is
-    /// the whole of how a machine function says a register is not worth anything after this.
+    /// It is a definition of the register, because that is the whole of how a machine function
+    /// says a register is not worth anything after this, and it is on an empty instruction right
+    /// behind the line so that the line's own operands stay where its description counts them.
     #[test]
     fn a_clobber_the_instruction_does_not_write_itself_is_a_definition_of_that_register() {
         let (mut names, mut source, block, _) = blank(&[]);
         clobbering(&mut source, block, &mut names, "pause", "", "rsi,cc,memory", &[], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
-        assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n    $rsi = x64.pause\n}\n");
+        assert_eq!(
+            lower(&mut names, &source),
+            "mfunc @f {\nblock0:\n    x64.pause\n    $rsi = x64.template @\n}\n"
+        );
     }
 
     /// A template this cannot read, kept as its text, takes away what its list names and what its

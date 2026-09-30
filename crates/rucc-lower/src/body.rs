@@ -2310,13 +2310,50 @@ impl<'u> Body<'_, 'u> {
                 written.push(text);
             }
         }
+
+        // An output that is a register kept for the whole program is that register, and gcc writes
+        // its name where the template names the operand and leaves the operand out of what it
+        // allocates. The kernel's `current_stack_pointer` is the one that turns up, as
+        // `"+r" (current_stack_pointer)` on every `asm` that makes a call, which asks for nothing
+        // but that the call is made from a frame that is set up. So the operand goes from the list,
+        // the ones after it are counted down by one, and what the statement leaves in the register
+        // is already where the variable is, with nothing to write back.
+        let mut template = self.asm_text(node.template);
+        let mut spelled = Vec::new();
+        for index in (0..tast[node.outputs].len()).rev() {
+            let operand = tast[node.outputs][index];
+            let Some(name) = self.global_register_name(operand.value) else { continue };
+            let at = tast.expr_span(operand.value);
+            if operand.memory {
+                self.unsupported("an `asm` operand in memory and in a named register", at);
+                return;
+            }
+            let text = self.target().register_in_text(&name);
+            let Some(rewritten) = spell_operand(&template, index, &text) else {
+                self.unsupported("a modifier on an `asm` operand kept in a named register", at);
+                return;
+            };
+            template = rewritten;
+            written.remove(index);
+            let inputs = tast[node.outputs].len() - spelled.len() - 1;
+            for entry in &mut written[inputs..] {
+                let Some(counted) = counted_down(entry, index) else {
+                    self.unsupported(
+                        "an `asm` input tied to an output kept in a named register",
+                        at,
+                    );
+                    return;
+                };
+                *entry = counted;
+            }
+            spelled.push(index);
+        }
         let constraints = written.join(",");
         let mut clobbers = Vec::with_capacity(tast[node.clobbers].len());
         for index in 0..tast[node.clobbers].len() {
             clobbers.push(self.asm_text(tast[node.clobbers][index]));
         }
         let clobbers = clobbers.join(",");
-        let template = self.asm_text(node.template);
         let template = self.unit.names.intern(&template);
         let constraints = self.unit.names.intern(&constraints);
         let clobbers = self.unit.names.intern(&clobbers);
@@ -2327,6 +2364,10 @@ impl<'u> Body<'_, 'u> {
         for index in 0..tast[node.outputs].len() {
             let operand = tast[node.outputs][index];
             let at = tast.expr_span(operand.value);
+            if spelled.contains(&index) {
+                continue;
+            }
+            let slot = index - spelled.iter().filter(|&&gone| gone < index).count();
             let place = self.place(operand.value);
             if operand.memory {
                 let addr = self.address_of(place, at);
@@ -2338,7 +2379,7 @@ impl<'u> Body<'_, 'u> {
                 Some(ty) => ty,
                 None => self.value_type(place.ty, at),
             };
-            if written[index].starts_with('+') {
+            if written[slot].starts_with('+') {
                 let value = match record {
                     Some(ty) => self.load_record(place, ty, at),
                     None => match self.read(place, at) {
@@ -2351,7 +2392,7 @@ impl<'u> Body<'_, 'u> {
             results.push(ty);
             writes.push(place);
         }
-        let outputs = tast[node.outputs].len();
+        let outputs = tast[node.outputs].len() - spelled.len();
         for index in 0..tast[node.inputs].len() {
             let operand = tast[node.inputs][index];
             let at = tast.expr_span(operand.value);
@@ -2473,6 +2514,18 @@ impl<'u> Body<'_, 'u> {
     /// an input operand is the object with a read on top, so the read is looked through, and an
     /// expression with anything else on top is a value computed from the object rather than the
     /// object, which is what gcc makes of one too.
+    /// The register a file-scope `register` variable is kept in, when `expr` names one.
+    fn global_register_name(&self, expr: ExprId) -> Option<String> {
+        let tast = self.tast();
+        let ExprKind::Decl(decl) = tast[expr].kind else { return None };
+        let node = &tast[decl];
+        let register = node.register?;
+        if node.duration == StorageDuration::Automatic {
+            return None;
+        }
+        Some(tast[register].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect())
+    }
+
     fn named_register(&self, expr: ExprId) -> Option<rucc_sema::StrId> {
         let tast = self.tast();
         let named = match tast[expr].kind {
@@ -9005,4 +9058,86 @@ impl Scan<'_> {
             _ => {}
         }
     }
+}
+
+/// An `asm` template with operand `dropped` written as `register` and every operand and label
+/// after it counted down by one, or nothing when the template names `dropped` with a modifier.
+///
+/// A modifier asks for the register at another width, and the one name the declaration gave is
+/// the only one known here, so a template that asks for another is refused rather than guessed at.
+fn spell_operand(template: &str, dropped: usize, register: &str) -> Option<String> {
+    let mut text = String::with_capacity(template.len() + register.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        text.push(c);
+        if c != '%' {
+            continue;
+        }
+        let modifier = match chars.peek().copied() {
+            Some(c @ ('%' | '=' | '{' | '|' | '}')) => {
+                chars.next();
+                text.push(c);
+                continue;
+            }
+            Some(c) if c.is_ascii_alphabetic() => {
+                chars.next();
+                Some(c)
+            }
+            _ => None,
+        };
+        let mut digits = String::new();
+        while let Some(c) = chars.peek().copied().filter(char::is_ascii_digit) {
+            digits.push(c);
+            chars.next();
+        }
+        let Ok(index) = digits.parse::<usize>() else {
+            text.extend(modifier);
+            text.push_str(&digits);
+            continue;
+        };
+        if index == dropped {
+            if modifier.is_some() {
+                return None;
+            }
+            text.pop();
+            text.push_str(register);
+            continue;
+        }
+        text.extend(modifier);
+        let index = if index > dropped { index - 1 } else { index };
+        text.push_str(&index.to_string());
+    }
+    Some(text)
+}
+
+/// An input's constraint with a number tying it to an output after `dropped` counted down by one,
+/// or nothing when it is tied to `dropped` itself, which has no register of its own to share.
+/// What is inside braces is a register's name and is left alone.
+fn counted_down(constraint: &str, dropped: usize) -> Option<String> {
+    let mut text = String::with_capacity(constraint.len());
+    let mut inside = false;
+    let mut chars = constraint.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => inside = true,
+            '}' => inside = false,
+            '0'..='9' if !inside => {
+                let mut digits = c.to_string();
+                while let Some(c) = chars.peek().copied().filter(char::is_ascii_digit) {
+                    digits.push(c);
+                    chars.next();
+                }
+                let index: usize = digits.parse().ok()?;
+                if index == dropped {
+                    return None;
+                }
+                let index = if index > dropped { index - 1 } else { index };
+                text.push_str(&index.to_string());
+                continue;
+            }
+            _ => {}
+        }
+        text.push(c);
+    }
+    Some(text)
 }
