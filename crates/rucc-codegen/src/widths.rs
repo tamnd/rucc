@@ -9,8 +9,9 @@
 //! This is where the gap is closed.
 //!
 //! Every value of a width the machine has no register for is put into the narrowest one it does,
-//! which is the width rounded up to a byte and then to a power of two, and that is the same width
-//! the type's own layout already has: a `_BitInt(40)` object is eight bytes, so nothing here
+//! which is the width rounded up to a byte and then to a power of two, or into a hundred and twenty
+//! eight bits for one wider than sixty four, which [`crate::wide`] then splits into two registers.
+//! That is the same width the type's own layout already has: a `_BitInt(40)` object is eight bytes, so nothing here
 //! changes how wide a load or a store is against the object it reads.
 //!
 //! # What the spare bits hold
@@ -53,16 +54,19 @@ use rucc_ir::{Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Typ
 /// The width a value of this type is kept in, and [`None`] when the machine has one already.
 ///
 /// One bit is a width the rules name, since a comparison produces it and it is what a `bool`
-/// lives in, so it is not one of these. Above sixty four bits there is no register to round up
-/// into, and a hundred and twenty eight bit integer is refused by name in [`crate::coverage`]
-/// rather than being pretended about here.
+/// lives in, so it is not one of these. Between sixty four and a hundred and twenty eight bits the
+/// value is held in a hundred and twenty eight, which no register holds either but which
+/// [`crate::wide`] splits into two that do, and that step runs after this one for that reason. It
+/// is also the layout the type already has: a `_BitInt(65)` object is sixteen bytes, as it is in
+/// gcc. Above a hundred and twenty eight there is nothing to round up into, and the front end does
+/// not offer one, since that is where `BITINT_MAXWIDTH` is.
 #[must_use]
 fn container(ty: Type) -> Option<u32> {
     if !ty.is_int() || !ty.is_scalar() {
         return None;
     }
     let bits = ty.bits();
-    if bits == 1 || bits > 64 {
+    if bits == 1 || bits > 128 {
         return None;
     }
     let held = bits.next_power_of_two().max(8);
@@ -96,6 +100,10 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Trunc
             | Opcode::SExt
             | Opcode::ZExt
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::FPToSI
+            | Opcode::FPToUI
             | Opcode::Load
             | Opcode::Store
             | Opcode::Jump
@@ -217,6 +225,12 @@ fn rewrite(func: &mut Func, narrow: &[Option<u32>], inst: Inst) {
         Opcode::Trunc => truncate(func, narrow, inst),
         Opcode::SExt => extend(func, narrow, inst, true),
         Opcode::ZExt => extend(func, narrow, inst, false),
+        // A conversion to a float reads every bit of the integer, so the integer is put into
+        // shape the way the conversion reads it. The other way needs nothing: a value in range
+        // for the narrow width has the same low bits at the wide one, and a value out of range is
+        // one C does not give an answer for.
+        Opcode::SIToFP => shape_operand(func, narrow, inst, 0, true),
+        Opcode::UIToFP => shape_operand(func, narrow, inst, 0, false),
         // The value written goes into the object's padding as well as into the object, and it is
         // cleared so that the padding is the same on every run rather than being whatever was in
         // the register. C says those bits hold nothing in particular; a compiler that writes a
@@ -402,9 +416,12 @@ fn keeps_no_more_than(func: &Func, value: Value, width: u32) -> bool {
 }
 
 /// The low `width` bits set, as an immediate's value.
+///
+/// The subtraction wraps because a width of a hundred and twenty seven is a one shifted into the
+/// sign of the immediate, and one less than that is every bit below it, which is the answer.
 #[must_use]
 fn low_bits(width: u32) -> i128 {
-    (1i128 << width) - 1
+    (1i128 << width).wrapping_sub(1)
 }
 
 /// The type of the one value an instruction produces, and [`None`] when it produces none.
@@ -486,9 +503,12 @@ mod tests {
         for bits in [1, 8, 16, 32, 64] {
             assert_eq!(container(Type::int(bits)), None, "{bits} is a width the machine has");
         }
-        // Above sixty four there is nothing to round up into, and a vector is not a scalar.
-        assert_eq!(container(Type::int(65)), None);
+        // Above sixty four it is the pair of registers the next step splits a value into, and
+        // above that there is nothing. A vector is not a scalar.
+        assert_eq!(container(Type::int(65)), Some(128));
+        assert_eq!(container(Type::int(127)), Some(128));
         assert_eq!(container(Type::int(128)), None);
+        assert_eq!(container(Type::int(129)), None);
         assert_eq!(container(Type::vector(Type::int(40), 2)), None);
         assert_eq!(container(Type::PTR), None);
     }
@@ -574,6 +594,64 @@ mod tests {
             assert!(!text.contains("i33"), "no thirty three bit value is left: {text}");
             assert_eq!(text.matches(" = and ").count(), 1, "{pred:?} masks once: {text}");
             assert_eq!(text.matches(" = shl ").count(), shifts, "{pred:?} shifts up: {text}");
+        }
+    }
+
+    /// `_BitInt(65) c = (_BitInt(65))1 << 63;`, which is the widening of a `long long` to sixty
+    /// five bits and a shift, and which stopped the whole file before. It is held in a hundred and
+    /// twenty eight bits, where the widening is the machine's own and the pair splitting after this
+    /// step does the rest, and the signed comparison spreads the sign across sixty three spare
+    /// bits, which is the widest shaping this does and the one `low_bits` has to get right.
+    #[test]
+    fn a_width_above_sixty_four_is_held_in_a_hundred_and_twenty_eight() {
+        let mut names = Interner::new();
+        let (mut func, entry) = shell(&mut names);
+        let narrow = Type::int(65);
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(Type::int(64), 1);
+        let wide = build.unary(Opcode::SExt, one, narrow);
+        let count = build.iconst(narrow, 63);
+        let shifted = build.binary(Opcode::Shl, wide, count, Flags::NONE);
+        let zero = build.iconst(narrow, 0);
+        let negative = build.icmp(IntPred::Slt, shifted, zero);
+        let answer = build.unary(Opcode::ZExt, negative, Type::int(32));
+        build.ret(&[answer]);
+
+        assert!(integers(&mut func), "there is a width to widen");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i65"), "no sixty five bit value is left: {text}");
+        assert!(text.contains("sext.i128"), "the widening is to the pair: {text}");
+        assert!(text.contains("iconst.i128 63"), "the spare bits are counted: {text}");
+        assert_eq!(text.matches(" = ashr ").count(), 1, "the sign is spread once: {text}");
+        assert_eq!(super::low_bits(127), i128::MAX);
+    }
+
+    /// `(double)x` for a `_BitInt(40)` holding a negative number, which stopped the whole function
+    /// before because the conversion was not on the list. The integer has its sign spread first,
+    /// since the conversion reads the whole register, and the conversion back needs nothing.
+    #[test]
+    fn a_conversion_to_a_float_reads_the_integer_the_way_its_sign_says() {
+        for (to, from, shifts) in
+            [(Opcode::SIToFP, Opcode::FPToSI, 1), (Opcode::UIToFP, Opcode::FPToUI, 0)]
+        {
+            let mut names = Interner::new();
+            let (mut func, entry) = shell(&mut names);
+            let narrow = Type::int(40);
+            let mut build = Builder::new(&mut func, entry);
+            let value = seed(&mut build, narrow);
+            let real = build.unary(to, value, Type::float(rucc_ir::Float::F64));
+            let back = build.unary(from, real, narrow);
+            let answer = build.unary(Opcode::Trunc, back, Type::int(32));
+            build.ret(&[answer]);
+
+            assert!(integers(&mut func), "{to:?} is understood");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i40"), "no forty bit value is left: {text}");
+            assert_eq!(
+                text.matches(" = shl ").count(),
+                shifts,
+                "{to:?} shapes its operand: {text}"
+            );
         }
     }
 

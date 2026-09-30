@@ -112,18 +112,20 @@ pub enum Step {
     /// way rather than a shape it has never seen. A `_Float128` becoming one is a call this writes
     /// and the quad step never sees, which is what keeps the narrowing a single rounding.
     HalfFloats,
-    /// An integer wider than a register, as the two halves of one.
-    ///
-    /// Ahead of the width legalisation and not part of it, because the two go in opposite
-    /// directions: an integer of forty bits becomes one of sixty four down there and one of a
-    /// hundred and twenty eight becomes two of sixty four here. Doing this first means a function
-    /// holding both is one the step below still works on.
-    Halves,
     /// An integer at a width the machine does not have, as the width it is held in.
     ///
     /// Before everything after it, because every pass after it is written about widths the machine
-    /// has and an integer of forty bits is not one of them.
+    /// has and an integer of forty bits is not one of them. An integer of sixty five bits is held
+    /// in a hundred and twenty eight, which is still not a width the machine has, so this goes
+    /// ahead of the splitting below and a `_BitInt(65)` reaches it as a `__int128` does.
     Widths,
+    /// An integer wider than a register, as the two halves of one.
+    ///
+    /// Below the width legalisation and not part of it, because the two go in opposite
+    /// directions: an integer of forty bits becomes one of sixty four up there and one of a
+    /// hundred and twenty eight becomes two of sixty four here. Neither step touches a value at
+    /// the other's width, so a function holding both is one each of them still works on.
+    Halves,
     /// A division or remainder by a constant, as a multiply by its reciprocal and a shift.
     ///
     /// Below the widths, so every division it sees is at a width the machine has, and a widening
@@ -163,8 +165,8 @@ impl Step {
         Self::Overflows,
         Self::Decimals,
         Self::HalfFloats,
-        Self::Halves,
         Self::Widths,
+        Self::Halves,
         Self::Divisions,
         Self::Bytes,
         Self::Counts,
@@ -591,8 +593,10 @@ mod tests {
                 // Ahead of the integer splitting, because the calls it writes take and give back
                 // whole words that the splitting then has nothing left to say about.
                 "half-floats",
-                "halves",
+                // The widths first, because a sixty five bit integer is held in a hundred and
+                // twenty eight and that is a width the splitting after it is for.
                 "widths",
+                "halves",
                 "divisions",
                 "bytes",
                 "counts",
@@ -849,7 +853,7 @@ mod tests {
         // them is not evidence of anything and the dump does not print it.
         assert_eq!(
             Step::GROUP.iter().filter(|step| step.whole_function()).copied().collect::<Vec<_>>(),
-            [Step::Halves, Step::Widths]
+            [Step::Widths, Step::Halves]
         );
         for step in Step::GROUP {
             if step.whole_function() {
