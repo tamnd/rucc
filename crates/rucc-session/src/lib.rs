@@ -2191,6 +2191,13 @@ pub struct Options {
     /// rather than about one file, and `__CHAR_UNSIGNED__` is defined when the answer is unsigned
     /// so that a header can see what was decided.
     pub char_signed: Option<bool>,
+    /// Whether `wchar_t` is a 16 bit unsigned type whatever the target says, from `-fshort-wchar`,
+    /// with `false` meaning the target's own answer.
+    ///
+    /// Like plain `char`, this is put into the target when the session is made, so that the lexer
+    /// converting `L""`, the checker typing it and the macros that spell `wchar_t` all read one
+    /// answer. It changes the ABI of anything that passes a `wchar_t`.
+    pub short_wchar: bool,
     /// Whether an enumeration nothing wrote an underlying type for is represented in the smallest
     /// integer type that holds its enumerators, from `-fshort-enums`.
     ///
@@ -2610,6 +2617,7 @@ impl Options {
             patchable: Patchable::default(),
             wrapping: Wrapping::NONE,
             char_signed: None,
+            short_wchar: false,
             short_enums: false,
             ms_extensions: None,
             common: None,
@@ -2730,9 +2738,10 @@ pub struct Session {
 impl Session {
     /// A session for `opts`.
     ///
-    /// The command line's answer about plain `char` is put into the target here rather than
-    /// carried beside it, because every place that asks what a `char` is asks the target, and two
-    /// answers to one question is how a front end ends up disagreeing with its own back end.
+    /// The command line's answers about plain `char` and `wchar_t` are put into the target here
+    /// rather than carried beside it, because every place that asks what either is asks the
+    /// target, and two answers to one question is how a front end ends up disagreeing with its own
+    /// back end.
     pub fn new(opts: Options) -> Self {
         let mut target = TargetInfo::new(opts.target);
         if let Some(version) = opts.os_version {
@@ -2740,6 +2749,10 @@ impl Session {
         }
         if let Some(signed) = opts.char_signed {
             target.char_is_signed = signed;
+        }
+        if opts.short_wchar {
+            target.wchar_width = 16;
+            target.wchar_is_signed = false;
         }
         Self {
             opts,
@@ -3070,5 +3083,14 @@ mod tests {
         let s = session();
         assert_eq!(s.target.pointer_width, 64);
         assert!(s.target.char_is_signed);
+    }
+
+    #[test]
+    fn short_wchar_makes_wchar_t_sixteen_bits_and_unsigned() {
+        assert_eq!((session().target.wchar_width, session().target.wchar_is_signed), (32, true));
+        let mut opts = Options::new("x86_64-unknown-linux-gnu".parse().unwrap());
+        opts.short_wchar = true;
+        let s = Session::new(opts);
+        assert_eq!((s.target.wchar_width, s.target.wchar_is_signed), (16, false));
     }
 }
