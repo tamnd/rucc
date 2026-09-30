@@ -10,8 +10,8 @@
 //!
 //! # Three places
 //!
-//! [`mark`] works on the IR, before selection. It turns a direct call whose results are exactly
-//! what the block returns next into a `tail_call`, which ends the block the way a `return` did, and
+//! [`mark`] works on the IR, before selection. It turns a call whose results are exactly what the
+//! block returns next into a `tail_call`, which ends the block the way a `return` did, and
 //! it turns down the whole function when the callee could see something of the caller's frame. Its
 //! answer is what [`refusal`] says, a reason rather than a no.
 //!
@@ -25,6 +25,16 @@
 //! touching a register the call reads or writes, loses its call, and the `ret` at the end becomes a
 //! `jmp` to the callee. Anything else stays a call and a `ret`, which is right, just not as short.
 //!
+//! # Through a pointer
+//!
+//! `return ops->read(file, buf)` is the shape a kernel is full of, and it is a tail call like any
+//! other. The `tail_call` it becomes names nobody and takes the address as its first operand, the
+//! way a `call_indirect` does. What is different is that the address is in a register until the
+//! jump, and the epilogue puts back the registers a callee keeps. So [`crate::lower`] asks for the
+//! address in a register the callee may destroy and no argument is in, and the `ret` becomes a
+//! jump through it, which `-mindirect-branch=thunk-extern` then sends through the thunk the way it
+//! does any other jump through a register.
+//!
 //! # Why the frame check is this strict
 //!
 //! The one thing that makes a tail call wrong is a pointer into the frame that is given back, and
@@ -36,7 +46,7 @@
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{Abi, AttrSet, Extra, Func, Inst, Opcode, Value};
 use rucc_mir as mir;
-use rucc_target::{FrameInsts, RegClass};
+use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
 use crate::elsewhere::Elsewhere;
 
@@ -136,18 +146,21 @@ pub fn mark(func: &mut Func, names: &Interner, elsewhere: &Elsewhere) -> usize {
 
 /// Whether that call, straight in front of that instruction, is one the caller could jump to.
 ///
-/// A direct call, because the address of an indirect one is in a register and the epilogue may put
-/// something else back in it. The `return` gives back the call's results, in order, and nothing
-/// else, and the two signatures say the same about them, so the callee leaves the answer where the
+/// A call to a name or through a pointer, and the `return` gives back the call's results, in
+/// order, and nothing else, and the two signatures say the same about them, so the callee leaves the answer where the
 /// caller's caller looks and in the form it expects.
 fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
-    if func[ret].opcode != Opcode::Return || func[call].opcode != Opcode::Call {
+    if func[ret].opcode != Opcode::Return {
         return false;
     }
     let Extra::Call(info) = func[call].extra else { return false };
     let info = func[info];
-    if info.callee.is_none() {
-        return false;
+    // A `call` names its callee and a `call_indirect` never does, and a `tail_call` tells the two
+    // apart by the same thing.
+    match func[call].opcode {
+        Opcode::Call if info.callee.is_some() => (),
+        Opcode::CallIndirect if info.callee.is_none() => (),
+        _ => return false,
     }
     let results: Vec<Value> = func[call].results().collect();
     if func[func[ret].args] != results[..] {
@@ -166,43 +179,69 @@ fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
 /// Turns each [`Tail`] that can be into the epilogue and a jump, and says how many it turned.
 ///
 /// Nothing happens on a machine with no jump to a name, which is what [`FrameInsts::away`] says.
+/// A call through a pointer becomes the jump through a register that `branch` names, which is the
+/// one a computed `goto` is selected as.
 pub fn jumps(
     func: &mut mir::Func,
     tails: &[Tail],
     insts: &FrameInsts,
+    branch: &BranchInsts,
     names: &mut Interner,
 ) -> usize {
     let Some(away) = insts.away else { return 0 };
     let ret = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.ret)));
     let away = mir::Opcode::new(names.intern(&format!("{}{away}", insts.prefix)));
+    let through = mir::Opcode::new(names.intern(&format!("{}{}", branch.prefix, branch.indirect)));
     let mut jumped = 0;
     for tail in tails {
         let Some((last, callee)) = ending(func, tail, ret) else { continue };
         let span = func.span(tail.call);
+        let operands = func[func[tail.call].operands].to_vec();
         func.remove_inst(tail.call);
         for &pseudo in &tail.returns {
             func.remove_inst(pseudo);
         }
         // The same instruction rather than a new one, so the unwind rows the epilogue hung on the
         // `ret` stay where they were: the frame is in the same state at the jump as it was there.
-        func[last].opcode = away;
-        func[last].symbol = Some(callee);
+        match callee {
+            Callee::Named(callee) => {
+                func[last].opcode = away;
+                func[last].symbol = Some(callee);
+            }
+            // The address is the first thing the call read, which is where `crate::abi` put it,
+            // and it is all the jump reads.
+            Callee::Through => {
+                let address = operands[mir::defs(&operands)];
+                func[last].opcode = through;
+                func[last].symbol = None;
+                func[last].operands =
+                    func.push_operands(&[mir::Operand::read(address.reg, address.class)]);
+            }
+        }
         func.set_span(last, span);
         jumped += 1;
     }
     jumped
 }
 
-/// The `ret` the tail's block ends in and the name it calls, when everything between the call and
-/// the `ret` can run before the callee does.
+/// Where a tail call goes, which is a name or the register the call read its address from.
+#[derive(Debug, Clone, Copy)]
+enum Callee {
+    Named(Symbol),
+    Through,
+}
+
+/// The `ret` the tail's block ends in and where it goes, when everything between the call and the
+/// `ret` can run before the callee does.
 ///
 /// That is the return pseudos, which are nothing, and the epilogue, which puts back registers the
 /// callee saves for itself and moves the stack pointer. Anything that reads or writes a register
 /// the call names could be moving an argument or reading the answer, and anything with a name on
-/// it could be a call, so either keeps the call.
-fn ending(func: &mir::Func, tail: &Tail, ret: mir::Opcode) -> Option<(mir::Inst, Symbol)> {
+/// it could be a call, so either keeps the call. A call through a register names that register,
+/// so an epilogue that puts back the one the address is in keeps the call too.
+fn ending(func: &mir::Func, tail: &Tail, ret: mir::Opcode) -> Option<(mir::Inst, Callee)> {
     let block = func.block_of(tail.call)?;
-    let callee = func[tail.call].symbol?;
+    let callee = func[tail.call].symbol.map_or(Callee::Through, Callee::Named);
     if !func[block].succs.is_empty() {
         return None;
     }
@@ -231,7 +270,9 @@ fn ending(func: &mir::Func, tail: &Tail, ret: mir::Opcode) -> Option<(mir::Inst,
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Block, Builder, Flags, Func, InstData, Opcode, Signature, Type, Value};
+    use rucc_ir::{
+        Block, Builder, CallInfo, Extra, Flags, Func, InstData, Opcode, Signature, Type, Value,
+    };
 
     use super::{comes_back, mark, refusal};
     use crate::elsewhere::Elsewhere;
@@ -286,6 +327,37 @@ mod tests {
         let mut func = caller(&mut names, |_, _, got| got);
         assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
+    }
+
+    /// `int f(int (*g)(int), int a) { return g(a); }` is a tail call too, one that names nobody
+    /// and keeps the address as its first operand.
+    #[test]
+    fn a_call_through_a_pointer_whose_answer_is_returned_becomes_a_tail_call() {
+        let mut names = Interner::new();
+        let i32 = Type::int(32);
+        let mut func = Func::new(
+            names.intern("f"),
+            Signature::new().with_params(&[Type::PTR, i32]).with_returns(&[i32]),
+        );
+        let block = func.create_block();
+        let address = func.append_param(block, Type::PTR);
+        let arg = func.append_param(block, i32);
+        let sig = func.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee: None, signature: sig, varargs });
+        let mut build = Builder::new(&mut func, block);
+        let inst = InstData {
+            args: build.func().push_values(&[address, arg]),
+            extra: Extra::Call(info),
+            ..InstData::new(Opcode::CallIndirect)
+        };
+        let call = build.inst(inst, &[i32]);
+        let got = func[call].first_result.expect("an integer comes back");
+        Builder::new(&mut func, block).ret(&[got]);
+
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(opcodes(&func), [Opcode::TailCall]);
+        assert_eq!(func[func[call].args], [address, arg]);
     }
 
     #[test]

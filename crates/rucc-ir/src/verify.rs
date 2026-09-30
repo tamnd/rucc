@@ -1487,10 +1487,14 @@ impl<'a> Verifier<'a> {
                 let Extra::Call(at) = data.extra else { return };
                 let info = func[at];
                 let signature = &func[info.signature];
-                let indirect = usize::from(opcode == Opcode::CallIndirect);
+                // A `tail_call` with nobody named calls through its first operand, the way a
+                // `call_indirect` does.
+                let through = opcode == Opcode::CallIndirect
+                    || (opcode == Opcode::TailCall && info.callee.is_none());
+                let indirect = usize::from(through);
                 if indirect == 1 {
                     if arity == 0 {
-                        self.error("call_indirect calls through a pointer and has no operands");
+                        self.error(format!("{opcode} calls through a pointer and has no operands"));
                         return;
                     }
                     self.pointer(opcode, arg(0), 0);

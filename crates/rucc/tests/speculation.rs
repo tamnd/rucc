@@ -18,10 +18,17 @@ use std::process::{Command, Stdio};
 const TARGET: &str = "--target=x86_64-unknown-linux-gnu";
 
 /// Three calls through three pointers, each called twice so that every pointer outlives a call
-/// and has to be kept in a register the callee saves. Those are `%rbx`, which is below `%r8`, and
+/// and has to be kept in a register the callee saves, and none of them in tail position. Those are `%rbx`, which is below `%r8`, and
 /// `%r12` and `%r13`, which are not.
 const CALLS: &str = "\
-void three(void (*p)(void), void (*q)(void), void (*r)(void)) { p(); q(); r(); p(); q(); r(); }
+int three(void (*p)(void), void (*q)(void), void (*r)(void)) { p(); q(); r(); p(); q(); r(); return 0; }
+";
+
+/// A call through a pointer in tail position, which is a jump through a register once the frame
+/// is given back.
+const TAIL: &str = "\
+int (*const *ops)(int);
+int next(int x) { return ops[x & 3](x); }
 ";
 
 /// A computed `goto`, which is an indirect jump rather than an indirect call.
@@ -96,6 +103,15 @@ fn an_indirect_call_goes_to_the_thunk_for_its_register() {
     assert!(!lines.contains(&"cs"), "{text}");
     // Nothing is said about where the call sites are: objtool writes .retpoline_sites itself.
     assert!(!text.contains("retpoline_sites"), "{text}");
+}
+
+#[test]
+fn a_tail_call_through_a_pointer_jumps_to_the_thunk_and_stops_speculation_after_it() {
+    let text = asm(&["-mindirect-branch=thunk-extern", "-mharden-sls=all"], TAIL);
+    let lines = insts(&text);
+    assert_eq!(after(&lines, "jmp\t__x86_indirect_thunk_rax"), Some("int3"), "{text}");
+    assert!(!lines.iter().any(|line| line.starts_with("call")), "{text}");
+    assert!(!lines.contains(&"ret"), "{text}");
 }
 
 #[test]
