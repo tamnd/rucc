@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `-E` keeps a line joined by a backslash on one line, as gcc does. In a `.S` file this matters beyond looks: the kernel writes `ALTERNATIVE_2` over three lines joined this way, and the assembler read each piece as its own statement and stopped at a data directive with nothing after it.
+
 ## 0.18.3
 
 A patch release on the way to building the Linux kernel. The KVM units for VMX and SVM and the four lib/raid6 x86 files now compile: asm flag outputs, a second memory operand in a kept template, more AVX and AVX-512 rows in the assembler, and constant division folded so `BUILD_BUG_ON` in `reverse_cpuid.h` goes away. i686 objects, a dead store pass, frame slot sharing and `sccp` also land here.
