@@ -753,6 +753,22 @@ impl Writer<'_> {
                     opcode: spelled.to_owned(),
                 });
             }
+            // A label an `asm goto` jumps to is the block that arm of this one goes to, which has
+            // a name once the layout has numbered the blocks. A template read on its own has no
+            // numbers to go by, and one that jumps is then only right in the listing.
+            let arms = &func[block].succs;
+            let text = x86_64::template_arms(self.names.resolve(text), |arm| {
+                let to = arms.get(arm)?.block;
+                self.labels
+                    .get(to.index())
+                    .is_some_and(|&number| number != u32::MAX)
+                    .then(|| self.label(func_name, to))
+            })
+            .ok_or_else(|| Error::Encode {
+                func: func_name.to_owned(),
+                opcode: spelled.to_owned(),
+                why: "it jumps to a block, which only the whole listing can name".to_owned(),
+            })?;
             let prefix = self.directives.symbol();
             let reg = |at: usize, width: char| {
                 let Some(operand) = operands.get(at) else { return String::from("?") };
@@ -766,12 +782,8 @@ impl Writer<'_> {
                 };
                 format!("%{named}")
             };
-            let filled = x86_64::template_filled(
-                self.names.resolve(text),
-                &mem,
-                |name| format!("{prefix}{name}"),
-                reg,
-            );
+            let filled =
+                x86_64::template_filled(&text, &mem, |name| format!("{prefix}{name}"), reg);
             for line in filled.lines() {
                 let _ = writeln!(self.out, "\t{}", line.trim_start());
             }

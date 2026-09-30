@@ -365,6 +365,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     if_false: "b_eq",
     jump: "b",
     indirect: "br",
+    goto: "template",
     conditional: &CONDITIONAL,
     fused: &FUSED,
     moves: &MOVES,

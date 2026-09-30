@@ -1390,7 +1390,10 @@ pub const LITERAL: &str = "byte";
 /// The opcode that is a template kept as text, named the way [`ALIGN`] is. See [`Form::Template`].
 pub const TEMPLATE: &str = "template";
 
-pub use crate::template::{TEMPLATE_MEM, template_filled, template_name, template_reg};
+pub use crate::template::{
+    TEMPLATE_MEM, template_arm, template_arms, template_filled, template_jumps, template_name,
+    template_reg,
+};
 
 /// The most bytes one `.byte` directive may carry, which is how many fit beside the opcode.
 ///

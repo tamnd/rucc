@@ -32,6 +32,40 @@ pub fn template_reg(at: usize, width: char) -> String {
     format!("\u{1}r{at}{width}\u{2}")
 }
 
+/// A label an `asm goto` template jumps to, held the same way. What it says is the arm of the
+/// instruction's block the label is, counted the way the block's successors are, so the fall
+/// through is arm 0 and `%l` of the first label is arm 1. The block that arm goes to only has a
+/// name once the layout has numbered the blocks, which is after the text is written down. See
+/// [`TEMPLATE_MEM`].
+#[must_use]
+pub fn template_arm(arm: usize) -> String {
+    format!("\u{1}l{arm}\u{2}")
+}
+
+/// A kept template's text with the labels in it filled by `arm`, which is handed the arm
+/// [`template_arm`] kept and says the name of the block it goes to, and every other hole left for
+/// [`template_filled`]. `None` when a label names an arm `arm` has no name for.
+#[must_use]
+pub fn template_arms(text: &str, arm: impl Fn(usize) -> Option<String>) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\u{1}l") {
+        out.push_str(&rest[..at]);
+        let hole = &rest[at + 2..];
+        let end = hole.find('\u{2}').unwrap_or(hole.len());
+        out.push_str(&arm(hole[..end].parse().ok()?)?);
+        rest = hole.get(end + 1..).unwrap_or("");
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// Whether a kept template jumps to a label, which is an `asm goto` with instructions in it.
+#[must_use]
+pub fn template_jumps(text: &str) -> bool {
+    text.contains("\u{1}l")
+}
+
 /// A kept template's text with its holes filled: the address by `mem`, each name by `name`, and
 /// each register by `reg`, which is handed the operand and the width letter [`template_reg`] kept.
 #[must_use]

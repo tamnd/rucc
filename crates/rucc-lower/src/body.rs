@@ -2254,25 +2254,15 @@ impl<'u> Body<'_, 'u> {
     /// that way and the checking is where a wider one was turned down.
     ///
     /// An `asm goto` is a terminator, and its first target is where control arrives when the
-    /// assembly does not jump. That is what makes the outputs work: they are written into their
-    /// objects in that block, so a label the assembly jumps to is somewhere they never happened,
-    /// which is what gcc promises and what the register allocator will have to be told later.
+    /// assembly does not jump. Every label gets a block of its own after that, one edge from the
+    /// statement, and the outputs are written into their objects there as well as on the fall
+    /// through, because gcc says an output is valid on every way out of the statement. Each of
+    /// those blocks ends in an ordinary jump to its label, so a stack a variable length array
+    /// moved and a handler a block owes are settled in front of it the way they are for a `goto`.
     fn asm(&mut self, id: rucc_sema::AsmId, span: Span) {
         let tast = self.tast();
         let node = tast[id];
         let goto = !tast[node.labels].is_empty();
-        if goto && self.grows {
-            // The same reason a `goto` is turned down: where the stack should be on arrival
-            // depends on the scope the label is in, which the walk does not collect.
-            self.unsupported("an asm goto in a function with a variable length array", span);
-            return;
-        }
-        if goto && self.owes_anything() {
-            // And the same again for the handlers the blocks between here and the label owe,
-            // which are not built for a jump the walk does not remember.
-            self.unsupported("an asm goto out of a block with a cleanup handler", span);
-            return;
-        }
 
         // The constraints of every operand, in the order the template counts them, which is
         // also the order the operands below are built in.
@@ -2370,16 +2360,18 @@ impl<'u> Body<'_, 'u> {
         }
 
         // The fall through first and the labels after it, in the order they were written, which
-        // is the order `%l0` counts in. A label that was used and never defined was reported by
-        // the checking and has no block, so it is not somewhere control can arrive.
+        // is the order `%l0` counts in. Each label is reached through a block of its own, where
+        // the outputs are written and the jump to the label is made. A label that was used and
+        // never defined was reported by the checking and has no block, so it gets an edge that
+        // ends in nothing, which keeps `%l` counting the labels the program wrote.
         let mut blocks = Vec::new();
+        let mut landings = Vec::new();
         if goto {
             blocks.push(self.new_block());
             for index in 0..tast[node.labels].len() {
                 let label = tast[node.labels][index];
-                if let Some(body) = tast[label].stmt {
-                    blocks.push(self.label_block(body));
-                }
+                blocks.push(self.new_block());
+                landings.push(tast[label].stmt);
             }
         }
         let calls: Vec<BlockCall> = blocks.iter().map(|&block| BlockCall::to(block)).collect();
@@ -2388,14 +2380,36 @@ impl<'u> Body<'_, 'u> {
         let flags = if node.quals.has(AsmQuals::VOLATILE) { Flags::VOLATILE } else { Flags::NONE };
         let inst = self.build(span).inline_asm(info, &args, &results, flags);
 
+        let produced: Vec<Value> = self.func[inst].results().collect();
         if goto {
             self.ssa.branch(self.func, inst);
-            let after = blocks[0];
-            self.ssa.seal(self.func, after);
-            self.at = Some(after);
+            for &block in &blocks {
+                self.ssa.seal(self.func, block);
+            }
+            for (&edge, body) in blocks[1..].iter().zip(landings) {
+                self.at = Some(edge);
+                self.asm_writes(&writes, &produced, span);
+                match body {
+                    Some(body) => {
+                        let block = self.label_block(body);
+                        let inst = self.jump(block, span);
+                        let what = "an asm goto in a function with a variable length array";
+                        self.pending(inst, vec![body], what, span);
+                    }
+                    None => {
+                        self.build(span).unreachable();
+                    }
+                }
+            }
+            self.at = Some(blocks[0]);
         }
-        let produced: Vec<Value> = self.func[inst].results().collect();
-        for (place, value) in writes.into_iter().zip(produced) {
+        self.asm_writes(&writes, &produced, span);
+    }
+
+    /// The outputs of an `asm` statement written into the objects they name, which is done on
+    /// every edge out of an `asm goto` and once after any other.
+    fn asm_writes(&mut self, writes: &[Place], produced: &[Value], span: Span) {
+        for (&place, &value) in writes.iter().zip(produced) {
             match self.record_in_a_register(place.ty) {
                 Some(_) => self.store_record(place, value, span),
                 None => {

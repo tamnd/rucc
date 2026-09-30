@@ -41,7 +41,8 @@ use rucc_base::hash::Map;
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
-/// Splits every critical edge that carries values, and gives back how many it split.
+/// Splits every critical edge that carries values, and every critical edge out of an `asm goto`
+/// that writes any, and gives back how many it split.
 ///
 /// Run after lowering and before allocation. Running it twice is running it once, because the
 /// blocks it adds have one successor each and are never the source of a critical edge.
@@ -53,9 +54,16 @@ pub fn critical(func: &mut mir::Func) -> usize {
         if func[block].succs.len() < 2 {
             continue;
         }
+        // An `asm goto` that writes its outputs is the other thing with moves on its edges even
+        // when they carry nothing. What it wrote is valid on every edge out of it, and a value the
+        // allocator keeps in the frame is stored there behind the instruction, which for the last
+        // instruction of a block that leaves several ways is the start of each block it goes to.
+        let writes = func.insts(block).last().is_some_and(|last| {
+            func[func[last].operands].iter().any(|operand| operand.role.is_def())
+        });
         for index in 0..func[block].succs.len() {
             let call = func[block].succs[index].clone();
-            if call.args.is_empty() || preds[call.block.index()] < 2 {
+            if (call.args.is_empty() && !writes) || preds[call.block.index()] < 2 {
                 continue;
             }
             // The new block is at the end of the layout, which is where a block that is a jump

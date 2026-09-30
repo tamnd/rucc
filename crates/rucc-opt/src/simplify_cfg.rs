@@ -99,6 +99,12 @@
 //! more than the block is worth, so a forwarder in that position stays. A forwarder that carries
 //! nothing is taken out whatever the edges look like, since there is no move to find a place for.
 //!
+//! And one more that the dominance argument above does not cover. The results of an `asm goto`
+//! are written by the terminator of the block above, so they exist on its edges and in the blocks
+//! those edges arrive at, but not as arguments on the edges themselves. A forwarder that passes one
+//! of them on is where that edge first sees it, and taking the forwarder out would put the value on
+//! an edge out of the very instruction that makes it, so a forwarder like that stays.
+//!
 //! # Why this is not only an optimization
 //!
 //! Issue 359 is a program that does not link:
@@ -867,7 +873,19 @@ fn forwards(
     if carrying(func, block, call.block, func[call.args].len(), edges) {
         return None;
     }
+    if func[call.args].iter().any(|&arg| from_a_terminator(func, arg)) {
+        return None;
+    }
     Some((term, call.block, func[call.args].to_vec()))
+}
+
+/// Whether a value is a result of the instruction that ends its block, which only an `asm goto`
+/// has, and which an edge out of that block cannot carry.
+fn from_a_terminator(func: &Func, value: Value) -> bool {
+    match func[value].def {
+        Def::Result { inst, .. } => func.is_terminator(inst),
+        _ => false,
+    }
 }
 
 /// Whether taking this forwarder out would put arguments on an edge that has nowhere to move them.

@@ -33,9 +33,15 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// What the compiler says about that source, and whether it finished.
 fn run(what: &str, source: &str) -> (bool, String, String) {
+    run_with(what, source, &[])
+}
+
+/// The same, with more said on the command line.
+fn run_with(what: &str, source: &str, flags: &[&str]) -> (bool, String, String) {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={TARGET}"))
+        .args(flags)
         .args(["-S", "-o", "-"])
         .arg(&path)
         .output()
@@ -528,12 +534,17 @@ fn an_x87_input_the_template_leaves_on_the_stack_is_refused() {
 }
 
 #[test]
-fn an_asm_goto_that_jumps_says_what_is_missing_too() {
+fn an_asm_goto_that_jumps_names_the_block_its_label_became() {
+    // `%l0` is written as the local label of the block the label is, which is the only name the
+    // block has once the layout has numbered it.
     let source =
         "int f(int x) { asm goto (\"jmp %l0\" : : : : away); return x; away: return 0; }\n";
-    let (ok, _, said) = run("goto", source);
-    assert!(!ok, "an `asm goto` with a jump in it was accepted");
-    assert!(said.contains("jumps to a label"), "{said}");
+    let body = body(&asm("goto", source), "f");
+    let target = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("jmp "))
+        .unwrap_or_else(|| panic!("the template is missing:\n{body}"));
+    assert!(body.contains(&format!("\n{target}:")), "{target} is not a block:\n{body}");
 }
 
 #[test]
@@ -1022,4 +1033,81 @@ int f(int *p) {
     assert!(has(b".discard.annotate_insn"), "the annotation never reached the object");
     assert!(has(&[0x03, 0x02, 0, 0]), "the entry does not name the register the output is in");
     assert!(has(&[0x69, 0x22, 0, 0]), "the macro from file scope was not expanded");
+}
+
+/// An `asm goto` in each of the three shapes that used to be turned down: one with an output read
+/// on the edge to its label, one in a function with a variable length array that leaves the scope
+/// of the array every time round a loop, and one that leaves a block owing a cleanup handler. Each
+/// answer is folded into the exit status, so a wrong one says which it was.
+const GOTO_SHAPES: &str = r#"
+static int freed;
+static void done(int *p) { freed += *p; }
+__attribute__((noinline)) int out(int x) {
+    int v;
+    asm goto("testl %1, %1\n\tmovl $7, %0\n\tjz %l2" : "=r"(v) : "r"(x) : : zero);
+    return v;
+zero:
+    return v + 100;
+}
+__attribute__((noinline)) int vla(int n, int x) {
+    int total = 0;
+    for (int i = 0; i < 3; i++) {
+        int a[n];
+        a[0] = i;
+        asm goto("testl %0, %0\n\tjz %l1" : : "r"(x) : : again);
+        total += a[0];
+        continue;
+    again:
+        total += 10;
+    }
+    return total;
+}
+__attribute__((noinline)) int cleanup(int x) {
+    {
+        __attribute__((cleanup(done))) int k = 5;
+        asm goto("testl %0, %0\n\tjz %l1" : : "r"(x) : : away);
+        freed += 1000;
+    }
+    return freed;
+away:
+    return -freed;
+}
+int main(void) {
+    if (out(0) != 107 || out(1) != 7) return 1;
+    if (vla(4, 0) != 30 || vla(4, 1) != 3) return 2;
+    if (cleanup(0) != -5 || cleanup(1) != 1010) return 3;
+    return 42;
+}
+"#;
+
+#[test]
+fn an_asm_goto_leaving_a_cleanup_handler_runs_it_on_the_way_to_the_label() {
+    // The handler is called once on each way out of the block, and the edge to the label is one of
+    // them, so it is in the listing twice.
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with(&format!("goto-shapes{level}"), GOTO_SHAPES, &[level]);
+        assert!(ok, "the compiler refused the fixture at {level}:\n{said}");
+        let calls = body(&text, "cleanup").matches("call\tdone").count();
+        assert_eq!(calls, 2, "at {level}:\n{}", body(&text, "cleanup"));
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn an_asm_goto_with_an_output_an_array_or_a_handler_gives_the_right_answers() {
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let path = fixture(&format!("goto-run{level}"), GOTO_SHAPES);
+        let prog = path.with_extension("");
+        let built = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .arg(level)
+            .arg("-o")
+            .arg(&prog)
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let ran = Command::new(&prog).output().expect("what was linked can be run");
+        let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+        assert_eq!(ran.status.code(), Some(42), "a wrong answer at {level}");
+    }
 }
