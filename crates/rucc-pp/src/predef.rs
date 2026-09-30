@@ -477,8 +477,11 @@ fn atomics(d: &mut Defs, target: &TargetInfo) {
     d.set("__ATOMIC_ACQ_REL", "4");
     d.set("__ATOMIC_SEQ_CST", "5");
     // The gate is the machine word rather than `long`, because Windows has a thirty two bit
-    // `long` on a sixty four bit machine and its `long long` is still one instruction.
-    let llong = if target.pointer_width == 64 { "2" } else { "1" };
+    // `long` on a sixty four bit machine and its `long long` is still one instruction. i386 is
+    // the thirty two bit machine that says two anyway, because every processor it builds for
+    // has `cmpxchg8b`, and gcc and clang both say two there.
+    let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
+    let llong = if target.pointer_width == 64 || x86 { "2" } else { "1" };
     for name in [
         "BOOL", "CHAR", "CHAR8_T", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG",
         "POINTER",
@@ -500,7 +503,7 @@ fn atomics(d: &mut Defs, target: &TargetInfo) {
     // They are numbers a program passes back to a builtin rather than a claim that the prefix
     // is emitted, and a program that computes one on a machine where the macro is missing gets
     // a preprocessor error rather than a slower atomic.
-    if target.tuple.arch() == tuple::Arch::X86_64 {
+    if x86 {
         d.set("__ATOMIC_HLE_ACQUIRE", "65536");
         d.set("__ATOMIC_HLE_RELEASE", "131072");
     }
@@ -624,9 +627,32 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__riscv_compressed");
             d.set("__riscv_cmodel_medlow", "1");
         }
-        // Nothing yet, for the reason at the top of this function: i386 has no backend, and its
-        // macros arrive with it (#2247).
-        Arch::X86 => {}
+        Arch::X86 => {
+            d.flag("__i386__");
+            d.flag("__i386");
+            // The processor the unit is built for, which gcc spells both as the family and as
+            // the product. The backend writes SSE2 for floating point, so the product is the
+            // Pentium 4 rather than the i686 that a plain `i686-linux-gnu-gcc` says, and a
+            // header choosing an intrinsic by processor takes the branch for what the code runs
+            // on.
+            d.flag("__i686__");
+            d.flag("__i686");
+            d.flag("__pentium4__");
+            d.flag("__pentium4");
+            // The same four extensions as the x86-64 baseline, because they are what the
+            // Pentium 4 has and what the backend emits. `__SSE2_MATH__` is the promise that
+            // `double` arithmetic happens in an SSE register, which is also why
+            // `__FLT_EVAL_METHOD__` is zero here rather than the two that x87 math gives.
+            for name in Isa::baseline().macros() {
+                d.flag(&name);
+            }
+            d.flag("__SSE_MATH__");
+            d.flag("__SSE2_MATH__");
+            d.flag("__code_model_32__");
+            if opts.gnu_extensions {
+                d.flag("i386");
+            }
+        }
     }
     match triple.os {
         Os::Linux => {
@@ -761,6 +787,13 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     if target.long_width == 64 && target.pointer_width == 64 {
         d.flag("__LP64__");
         d.flag("_LP64");
+    }
+    // Its thirty two bit counterpart, which gcc and clang say for i686 on Linux and on Windows
+    // and for x32. A program that tests `__ILP32__` to pick a 32-bit syscall layout gets the one
+    // it wrote for this machine.
+    if target.long_width == 32 && target.pointer_width == 32 {
+        d.flag("__ILP32__");
+        d.flag("_ILP32");
     }
     // What the assembler prepends to a C name to get the symbol. Mach-O keeps the leading
     // underscore that every a.out toolchain had and ELF dropped it. It has to be defined even
@@ -2021,6 +2054,34 @@ mod tests {
         assert!(has(&set_for("x86_64-unknown-linux-gnu"), line));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), line));
         assert!(!set_for_tuple("i686-linux-gnu").contains("__SIZEOF_INT128__"));
+    }
+
+    #[test]
+    fn i686_says_it_is_an_i386_with_sse2_and_nothing_sixty_four_bit() {
+        let i686 = set_for("i686-unknown-linux-gnu");
+        for line in [
+            "#define __i386__ 1",
+            "#define __i386 1",
+            "#define i386 1",
+            "#define __i686__ 1",
+            "#define __pentium4__ 1",
+            "#define __SSE2__ 1",
+            "#define __SSE2_MATH__ 1",
+            "#define __FLT_EVAL_METHOD__ 0",
+            "#define __ILP32__ 1",
+            "#define _ILP32 1",
+            "#define __code_model_32__ 1",
+            "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2",
+            "#define __ATOMIC_HLE_ACQUIRE 65536",
+            "#define __SIZEOF_POINTER__ 4",
+        ] {
+            assert!(has(&i686, line), "{line}");
+        }
+        for name in ["__x86_64__", "__amd64__", "__LP64__", "__k8", "__code_model_small__"] {
+            assert!(!i686.contains(name), "{name}");
+        }
+        let x86 = set_for("x86_64-unknown-linux-gnu");
+        assert!(!x86.contains("__i386") && !x86.contains("ILP32"));
     }
 
     #[test]
