@@ -17,7 +17,7 @@
 use object::write::{Object as Writer, SymbolId};
 use object::{SectionFlags, SectionKind, SymbolFlags, elf};
 
-use crate::section::{Array, Binding, Property, Reference, Visibility};
+use crate::section::{Array, Binding, Property, Reference, Tls, Visibility};
 
 /// Which relocation of this machine one reference is, and nothing for one this machine has none of.
 ///
@@ -54,9 +54,14 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Address { .. } | Reference::Image | Reference::Section | Reference::Field(_) => {
             return None;
         }
-        // The i386 ways of reaching the global offset table, counted from a register holding it.
-        // This machine counts from the instruction pointer instead and has kinds of its own above.
-        Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
+        // The i386 ways of reaching the global offset table, counted from a register holding it,
+        // and its thread-local storage. This machine counts from the instruction pointer instead
+        // and has kinds of its own above.
+        Reference::GotOffset
+        | Reference::GotFront
+        | Reference::Slot
+        | Reference::SlotKept
+        | Reference::Tls(_) => {
             return None;
         }
     })
@@ -80,11 +85,10 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
 /// address an x86-64 instruction would have sign extended is the same four bytes here, since there
 /// is nothing wider to extend it into.
 ///
-/// Nothing for thread-local storage yet. It is reached through `%gs` on this machine with
-/// relocations of its own, and which of them a reference is depends on the model the back end
-/// picks, so [`Reference::Thread`], which is the x86-64 table slot, is refused rather than written
-/// as whichever of them looks closest. Nothing either for anything eight bytes wide, or for the
-/// kinds that belong to another machine or another format.
+/// Thread-local storage is reached through `%gs` on this machine with a relocation for each step of
+/// each model, which [`Reference::Tls`] names. [`Reference::Thread`], which is the x86-64 table
+/// slot, is refused rather than written as whichever of them looks closest. Nothing either for
+/// anything eight bytes wide, or for the kinds that belong to another machine or another format.
 pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Call => elf::R_386_PLT32,
@@ -93,6 +97,14 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
         Reference::GotFront => elf::R_386_GOTPC,
         Reference::Slot => elf::R_386_GOT32X,
         Reference::SlotKept => elf::R_386_GOT32,
+        Reference::Tls(Tls::General) => elf::R_386_TLS_GD,
+        Reference::Tls(Tls::Module) => elf::R_386_TLS_LDM,
+        Reference::Tls(Tls::InModule) => elf::R_386_TLS_LDO_32,
+        Reference::Tls(Tls::Slot) => elf::R_386_TLS_GOTIE,
+        Reference::Tls(Tls::SlotAddress) => elf::R_386_TLS_IE,
+        Reference::Tls(Tls::SlotNegated) => elf::R_386_TLS_IE_32,
+        Reference::Tls(Tls::Offset) => elf::R_386_TLS_LE,
+        Reference::Tls(Tls::Negated) => elf::R_386_TLS_LE_32,
         Reference::Address { bytes: 4 } | Reference::Signed => elf::R_386_32,
         Reference::Address { bytes: 2 } => elf::R_386_16,
         Reference::Address { bytes: 1 } => elf::R_386_8,
@@ -125,7 +137,15 @@ pub(crate) fn width_i386(r_type: elf::RelocationType) -> Option<usize> {
         | elf::R_386_GOTOFF
         | elf::R_386_GOTPC
         | elf::R_386_GOT32
-        | elf::R_386_GOT32X => Some(4),
+        | elf::R_386_GOT32X
+        | elf::R_386_TLS_GD
+        | elf::R_386_TLS_LDM
+        | elf::R_386_TLS_LDO_32
+        | elf::R_386_TLS_GOTIE
+        | elf::R_386_TLS_IE
+        | elf::R_386_TLS_IE_32
+        | elf::R_386_TLS_LE
+        | elf::R_386_TLS_LE_32 => Some(4),
         _ => None,
     }
 }

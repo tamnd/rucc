@@ -784,12 +784,13 @@ impl Assembler<'_> {
                     | Reference::Field(_) => {
                         unreachable!("an instruction wanting an address")
                     }
-                    // The ways i386 reaches the global offset table, which this encoder does not
-                    // write yet.
+                    // The ways i386 reaches the global offset table and thread-local storage,
+                    // which this encoder does not write yet.
                     Reference::GotOffset
                     | Reference::GotFront
                     | Reference::Slot
-                    | Reference::SlotKept => {
+                    | Reference::SlotKept
+                    | Reference::Tls(_) => {
                         unreachable!("an x86-64 instruction reaching the table the i386 way")
                     }
                 };

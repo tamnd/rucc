@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - A new pass, `rangetest`, reads comparisons of one value against constants joined by `and` and `or` as the set of values that passes and writes it back as the fewest tests (#2375). `x == 1 || x == 2 || x == 3` is one subtract and one comparison, `c >= '0' && c <= '9'` is one comparison, and a scattered set inside one word, like the whitespace characters, is a window comparison and one bit.
+- The assembler reads the i386 thread-local forms gcc writes and asks for the relocations gas does. `x@ntpoff` is `R_386_TLS_LE`, in an address such as `%gs:x@ntpoff`, an immediate or a `.long`, `x@gotntpoff(%ebx)` is `R_386_TLS_GOTIE`, `x@indntpoff` is `R_386_TLS_IE`, `x@gottpoff` is `R_386_TLS_IE_32`, `x@tpoff` is `R_386_TLS_LE_32`, `x@tlsgd` is `R_386_TLS_GD` and `x@tlsldm` is `R_386_TLS_LDM` ahead of `call ___tls_get_addr@PLT`, and `x@dtpoff` is `R_386_TLS_LDO_32`, which is also what gcc puts in the debug information. The suffixes are read in either case, what is added goes in the bytes, and the relocation names the variable even when it is local. A name one of these reaches, and anything in a thread-local section, is `STT_TLS` as gas makes it, whatever `.type` said. The bytes and relocations match gas 2.42 for gcc's four models with and without `-fPIC` and `-mno-tls-direct-seg-refs`. See #2247.
 
 ### Fixed
 

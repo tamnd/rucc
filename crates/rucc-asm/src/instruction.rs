@@ -27,6 +27,7 @@
 //! instruction, is the address of the name, which is how code that is not position independent
 //! reaches its data. Those come back as holes too, for the whole address rather than a distance.
 
+use rucc_object::Tls;
 use rucc_target::x86_64::{
     Addr, Encoding, ImmSize, Kind, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width,
     encode_masked, encode_masked_in, encoding_in, gpr_name, gpr_named, xmm,
@@ -86,6 +87,10 @@ pub(crate) enum Sort {
     /// A slot of the global offset table as a distance from the table, which is what
     /// `message@GOT(%ebx)` is on i386 and is the same question [`Sort::Table`] asks on x86-64.
     Slot,
+    /// One of the i386 ways of reaching a thread-local variable, which is `x@ntpoff` in an address
+    /// or a number and `x@tlsgd(,%ebx,1)` in front of a call to `___tls_get_addr`. The bytes hold
+    /// what the relocation says and nothing is taken off for where the instruction ends.
+    Tls(Tls),
 }
 
 /// The name in a displacement, and which of the three ways of reaching it the suffix asks for.
@@ -106,7 +111,7 @@ fn reached(named: &str) -> Result<(String, Sort), String> {
 /// The same for i386, where an address is counted from registers and never from the instruction.
 ///
 /// A bare name is the address of the name. `@GOTOFF` and `@GOT` are what gcc writes for position
-/// independent code there, and the thread-local suffixes are left for when this reads those.
+/// independent code there, and the rest are the thread-local ones. See [`threaded`].
 fn reached_i386(named: &str) -> Result<(String, Sort), String> {
     let Some((name, how)) = named.split_once('@') else {
         return Ok((named.to_owned(), Sort::Extended));
@@ -114,10 +119,31 @@ fn reached_i386(named: &str) -> Result<(String, Sort), String> {
     match how {
         "GOTOFF" => Ok((name.to_owned(), Sort::Offset)),
         "GOT" => Ok((name.to_owned(), Sort::Slot)),
-        _ => {
-            Err(format!("'@{how}' is not a way of reaching something this compiler reads on i386"))
-        }
+        _ => match threaded(how) {
+            Some(tls) => Ok((name.to_owned(), Sort::Tls(tls))),
+            None => Err(format!(
+                "'@{how}' is not a way of reaching something this compiler reads on i386"
+            )),
+        },
     }
+}
+
+/// The i386 thread-local relocation a suffix asks for, when it is one.
+///
+/// gas reads these in either case and gcc writes them in lower case, `x@ntpoff` and `x@tlsgd`, so
+/// the case is not looked at.
+pub(crate) fn threaded(how: &str) -> Option<Tls> {
+    const SUFFIXES: [(&str, Tls); 8] = [
+        ("TLSGD", Tls::General),
+        ("TLSLDM", Tls::Module),
+        ("DTPOFF", Tls::InModule),
+        ("GOTNTPOFF", Tls::Slot),
+        ("INDNTPOFF", Tls::SlotAddress),
+        ("GOTTPOFF", Tls::SlotNegated),
+        ("NTPOFF", Tls::Offset),
+        ("TPOFF", Tls::Negated),
+    ];
+    SUFFIXES.iter().find(|(suffix, _)| suffix.eq_ignore_ascii_case(how)).map(|&(_, tls)| tls)
 }
 
 /// An expression with the suffix taken out of it, and the suffix, when it has one.
@@ -475,12 +501,14 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         // nothing plus its addend, which is what gas leaves: `pushq $sym` is `68 00 00 00 00`.
         bytes[at..].fill(0);
         // On i386 the number may be a name's distance from the global offset table, or a slot of
-        // it, which is `$message@GOTOFF` and is four bytes whatever the instruction.
+        // it, which is `$message@GOTOFF` and is four bytes whatever the instruction. Or it may be
+        // where a thread-local variable is, `$x@ntpoff` added to the thread pointer.
         if let Some((rest, how)) = unsuffixed(&text).filter(|_| mode == Mode::Bits32) {
-            let sort = match how {
-                "GOTOFF" => Sort::Offset,
-                "GOT" => Sort::Slot,
-                _ => {
+            let sort = match (how, threaded(how)) {
+                ("GOTOFF", _) => Sort::Offset,
+                ("GOT", _) => Sort::Slot,
+                (_, Some(tls)) => Sort::Tls(tls),
+                (_, None) => {
                     return Err(format!(
                         "'@{how}' is not a way of reaching something this compiler reads on i386"
                     ));
@@ -821,6 +849,8 @@ fn slotted(name: &str) -> bool {
 /// with a suffix is left alone, since every suffix asks for something reached from the instruction.
 /// On i386 none does, and `movl foo@GOT, %eax` is a slot of the table at an address of its own,
 /// which gas takes and which only a program that has put the table at a fixed place would write.
+/// `movl x@indntpoff, %eax` is the same for a thread-local variable's slot, and is what gcc writes
+/// for one in code that is not position independent.
 fn outright(operand: &mut Operand, mode: Mode) {
     let Operand::Dest(Named { name, addend }) = operand else { return };
     if *addend == 0 {
@@ -829,7 +859,9 @@ fn outright(operand: &mut Operand, mode: Mode) {
             return;
         }
     }
-    let suffixed = matches!(unsuffixed(name), Some((_, "GOT" | "GOTOFF"))) && mode == Mode::Bits32;
+    let suffixed = mode == Mode::Bits32
+        && unsuffixed(name)
+            .is_some_and(|(_, how)| matches!(how, "GOT" | "GOTOFF") || threaded(how).is_some());
     if number(name).is_ok() || name.contains('@') && !suffixed || name == "." {
         return;
     }

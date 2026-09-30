@@ -86,7 +86,7 @@ pub use crate::file::{Error, defines, write};
 pub use crate::section::{
     Alias, Apart, Array, Binding, Chunk, Compress, Data, EXCEPT_TABLE, Export, Extent, FUNC_ALIGN,
     Holds, Info, MCOUNT_LOC, Marker, Object, Offer, Output, Patch, Place, Property, Reference,
-    Reloc, Sections, Site, Table, Text, Unwind, Visibility,
+    Reloc, Sections, Site, Table, Text, Tls, Unwind, Visibility,
 };
 pub use crate::source::{
     Assembled, Group, Held, Keep, Name, Part, Shape, Sort, assembled, assembled_defines,
