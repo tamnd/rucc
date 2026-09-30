@@ -832,6 +832,40 @@ fn a_register_the_template_writes_and_also_clobbers_is_written_once() {
     }
 }
 
+#[test]
+fn the_register_modifiers_the_kernel_uses_are_spelled_the_way_gcc_spells_them() {
+    // `%V` is the retpoline thunk's name, `%a` a register as an address and `%z` the suffix for
+    // the operand's width. Each of them used to send the whole function back as unsupported.
+    let source = "void (*fp)(void);\n\
+                  void thunk(void) { asm volatile (\"call __x86_indirect_thunk_%V0\" : : \"r\" (fp)); }\n\
+                  void load(long *p) { asm volatile (\"incq %a0\" : : \"r\" (p) : \"memory\"); }\n\
+                  int wide(int x) { asm (\"add%z0 $1, %0\" : \"+r\" (x)); return x; }\n\
+                  short half(short x) { asm (\"add%z0 $1, %0\" : \"+r\" (x)); return x; }\n";
+    let (ok, text, said) = run_with("register-modifiers", source, &["-O2"]);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    let thunk = body(&text, "thunk");
+    assert!(thunk.contains("call __x86_indirect_thunk_r"), "no bare register:\n{thunk}");
+    assert!(!thunk.contains("thunk_%"), "the register kept its percent:\n{thunk}");
+    assert!(body(&text, "load").contains("incq (%rdi)"), "not an address:\n{text}");
+    assert!(body(&text, "wide").contains("addl $1, %e"), "not a long:\n{text}");
+    assert!(body(&text, "half").contains("addw $1, %"), "not a word:\n{text}");
+}
+
+#[test]
+fn a_constant_can_be_negated_and_a_memory_operand_read_eight_bytes_on() {
+    let source = "long arr[2];\n\
+                  long less(long x) { asm (\"addq $%n1, %0\" : \"+r\" (x) : \"i\" (4)); return x; }\n\
+                  long high(long *p) { long r; asm (\"movq %H1, %0\" : \"=r\" (r) : \"m\" (*p)); \
+                  return r; }\n\
+                  void *at(void) { void *r; asm (\"leaq %a1(%%rip), %0\" : \"=r\" (r) : \"i\" (arr)); \
+                  return r; }\n";
+    let (ok, text, said) = run_with("constant-modifiers", source, &["-O2"]);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(body(&text, "less").contains("addq $-4, %"), "not negated:\n{text}");
+    assert!(body(&text, "high").contains("movq 8(%rdi), %"), "not eight bytes on:\n{text}");
+    assert!(body(&text, "at").contains("leaq arr(%rip), %"), "not a bare name:\n{text}");
+}
+
 /// What the compiler makes of that source as an object, and what it said.
 fn object(what: &str, source: &str, flags: &[&str]) -> (bool, Vec<u8>, String) {
     let path = fixture(what, source);

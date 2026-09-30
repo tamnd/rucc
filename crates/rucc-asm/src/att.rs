@@ -803,14 +803,16 @@ impl Writer<'_> {
             let reg = |at: usize, width: char| {
                 let Some(operand) = operands.get(at) else { return String::from("?") };
                 let phys = operand.reg.phys().expect("every operand was checked above");
-                let named = match width {
+                // A capital is the same width with no `%`, which is what `%V` asks for.
+                let bare = width.is_ascii_uppercase();
+                let named = match width.to_ascii_lowercase() {
                     'b' => name_of(operand.class, phys, Width::Byte),
                     'w' => name_of(operand.class, phys, Width::Word),
                     'k' => name_of(operand.class, phys, Width::Long),
                     'h' => x86_64::gpr_high(phys).unwrap_or("?"),
                     _ => name_of(operand.class, phys, Width::Quad),
                 };
-                format!("%{named}")
+                if bare { named.to_owned() } else { format!("%{named}") }
             };
             let filled =
                 x86_64::template_filled(&text, &mem, |name| format!("{prefix}{name}"), reg);

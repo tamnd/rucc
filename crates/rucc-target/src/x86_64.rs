@@ -44,8 +44,8 @@ pub use crate::x86_64::encode::{
 };
 pub use crate::x86_64::insts::{
     ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,
-    form, packed, template_arm, template_arms, template_filled, template_jumps, template_name,
-    template_reg, unpacked,
+    form, packed, template_arm, template_arms, template_filled, template_jumps, template_mem_at,
+    template_name, template_reg, unpacked,
 };
 pub use crate::x86_64::read::{
     At, Disp, Line, Piece, Step, known, read, read_in, refused, unlabelled,

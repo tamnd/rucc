@@ -122,6 +122,18 @@ fn held_bits(ty: Type, address: u32) -> u32 {
     }
 }
 
+/// The letter an x86-64 instruction is suffixed with for an operand that many bits wide, which is
+/// what gcc's `%z` modifier spells.
+fn suffix_of(bits: u32) -> Option<char> {
+    match bits {
+        8 => Some('b'),
+        16 => Some('w'),
+        32 => Some('l'),
+        64 => Some('q'),
+        _ => None,
+    }
+}
+
 /// How many bytes a `long double` takes in memory, and what it is aligned to, which are the same
 /// number and are both more than the ten bytes that mean anything.
 ///
@@ -4900,11 +4912,17 @@ impl<'a> Lowering<'a> {
                     continue;
                 }
                 if operand.memory {
-                    if modifier.is_some() || memory.is_some_and(|had| had != index) {
+                    if memory.is_some_and(|had| had != index) {
                         return Err(refused());
                     }
                     memory = Some(index);
-                    text.push_str(x86_64::TEMPLATE_MEM);
+                    // `%H` is the word eight bytes on, for the high half of a sixteen byte
+                    // object.
+                    match modifier {
+                        None => text.push_str(x86_64::TEMPLATE_MEM),
+                        Some('H') => text.push_str(&x86_64::template_mem_at(8)),
+                        Some(_) => return Err(refused()),
+                    }
                     continue;
                 }
                 let placed = def_of[index].or(use_of[index].map(|at| first_use + at));
@@ -4928,15 +4946,32 @@ impl<'a> Lowering<'a> {
                             _ => return Err(refused()),
                         }
                     } else {
+                        let natural = match bits {
+                            8 => 'b',
+                            16 => 'w',
+                            32 => 'k',
+                            64 => 'q',
+                            _ => return Err(refused()),
+                        };
                         match modifier {
-                            None => match held_bits(self.source[value].ty, self.address_bits()) {
-                                8 => 'b',
-                                16 => 'w',
-                                32 => 'k',
-                                64 => 'q',
-                                _ => return Err(refused()),
-                            },
+                            None => natural,
                             Some(width @ ('b' | 'w' | 'k' | 'q')) => width,
+                            // The name without the `%` in front, which is how the kernel spells
+                            // the thunk a retpoline calls through: `__x86_indirect_thunk_%V0`.
+                            Some('V') => natural.to_ascii_uppercase(),
+                            // The register as an address, the way `call *%a0` and a load through
+                            // it want it.
+                            Some('a') => {
+                                text.push('(');
+                                text.push_str(&template_reg(at, 'q'));
+                                text.push(')');
+                                continue;
+                            }
+                            // The suffix an instruction takes for an operand of this width.
+                            Some('z') => {
+                                text.push(suffix_of(bits).ok_or_else(refused)?);
+                                continue;
+                            }
                             // The second byte is a name only four registers have, so it is taken for
                             // an operand pinned to one of them and for nothing the allocator chose.
                             Some('h') if pinned(operand).and_then(x86_64::gpr_high).is_some() => {
@@ -4951,7 +4986,19 @@ impl<'a> Lowering<'a> {
                 let value = operand.value.ok_or_else(refused)?;
                 let bare = match modifier {
                     None => false,
-                    Some('c' | 'P' | 'p') => true,
+                    Some('c' | 'P' | 'p' | 'a') => true,
+                    // The constant negated and bare, for the other half of an `add` written
+                    // as a `sub`. A name has no negative, so only a number is taken.
+                    Some('n') => {
+                        let number = self.number(value).ok_or_else(refused)?;
+                        text.push_str(&number.wrapping_neg().to_string());
+                        continue;
+                    }
+                    Some('z') if !a64 => {
+                        let bits = held_bits(self.source[value].ty, self.address_bits());
+                        text.push(suffix_of(bits).ok_or_else(refused)?);
+                        continue;
+                    }
                     Some(_) => return Err(refused()),
                 };
                 // A constant is bare on AArch64 whatever the modifier, which is how gcc prints one

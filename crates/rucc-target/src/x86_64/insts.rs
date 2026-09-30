@@ -1391,8 +1391,8 @@ pub const LITERAL: &str = "byte";
 pub const TEMPLATE: &str = "template";
 
 pub use crate::template::{
-    TEMPLATE_MEM, template_arm, template_arms, template_filled, template_jumps, template_name,
-    template_reg,
+    TEMPLATE_MEM, template_arm, template_arms, template_filled, template_jumps, template_mem_at,
+    template_name, template_reg,
 };
 
 /// The most bytes one `.byte` directive may carry, which is how many fit beside the opcode.
