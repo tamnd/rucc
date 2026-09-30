@@ -47,6 +47,32 @@ pub(super) fn wanted(mnemonic: &str, values: &[Value]) -> bool {
         || matches!(mnemonic, "movi" | "mvni")
         || (matches!(values.first(), Some(Value::Fp(Scalar::D, _)))
             && SCALAR_NAMES.contains(&mnemonic))
+        || (matches!(values, [Value::Fp(Scalar::S | Scalar::D, _), Value::Fp(..), ..])
+            && FP_SCALAR_NAMES.contains(&mnemonic))
+}
+
+/// The floating point instructions on one scalar that are Advanced SIMD ones, which the
+/// conversions between two registers of the same kind are, and the comparisons that write a mask.
+/// The rest of what a scalar floating point register can be given, `fadd s0, s1, s2` and `fabs`
+/// among them, is in the encoder above.
+const FP_SCALAR_NAMES: &[&str] = &[
+    "fcmeq", "fcmge", "fcmgt", "fcmle", "fcmlt", "facge", "facgt", "fabd", "fmulx", "frecps",
+    "frsqrts", "frecpe", "frsqrte", "fcvtns", "fcvtnu", "fcvtms", "fcvtmu", "fcvtps", "fcvtpu",
+    "fcvtzs", "fcvtzu", "fcvtas", "fcvtau", "scvtf", "ucvtf",
+];
+
+/// One floating point scalar in the precision an instruction on one takes, and whether it is a
+/// double, which is the low bit of the size field.
+fn precision(scalars: &[Scalar]) -> Option<u32> {
+    let first = scalars[0];
+    if scalars.iter().any(|&other| other != first) {
+        return None;
+    }
+    match first {
+        Scalar::S => Some(0),
+        Scalar::D => Some(1),
+        _ => None,
+    }
 }
 
 impl Arrangement {
@@ -690,6 +716,22 @@ impl At<'_> {
         else {
             return Ok(None);
         };
+        if let [Value::Fp(a, d), Value::Fp(b, n), Value::Fp(c, r)] = values {
+            if !FP_SCALAR_NAMES.contains(&self.mnemonic) {
+                return Ok(None);
+            }
+            let double = precision(&[*a, *b, *c]).ok_or_else(|| self.register())?;
+            return Ok(Some(
+                0x5E20_0400
+                    | u << 29
+                    | high << 23
+                    | double << 22
+                    | u32::from(*r) << 16
+                    | opcode << 11
+                    | u32::from(*n) << 5
+                    | u32::from(*d),
+            ));
+        }
         let [Value::Vector(a, d), Value::Vector(b, n), Value::Vector(c, r)] = values else {
             return Ok(None);
         };
@@ -764,17 +806,29 @@ impl At<'_> {
         if let Some((u, high, opcode)) =
             row(&FP_MISC.map(|(name, u, high, opcode)| (name, (u, high, opcode))), m)
         {
-            if let [Value::Vector(a, d), Value::Vector(b, n)] = values {
-                let a = self.alike(&[*a, *b], S | D)?;
-                return Ok(Some(fp(a.q(), u, high, a.size() == 3, opcode, *n, *d)));
+            match values {
+                [Value::Vector(a, d), Value::Vector(b, n)] => {
+                    let a = self.alike(&[*a, *b], S | D)?;
+                    return Ok(Some(fp(a.q(), u, high, a.size() == 3, opcode, *n, *d)));
+                }
+                [Value::Fp(a, d), Value::Fp(b, n)] if FP_SCALAR_NAMES.contains(&m) => {
+                    let double = precision(&[*a, *b]).ok_or_else(|| self.register())?;
+                    return Ok(Some(fp(1, u, high, double == 1, opcode, *n, *d) | 0x1000_0000));
+                }
+                _ => {}
             }
         }
         if let Some((u, opcode)) = row(&FP_ZERO.map(|(name, u, opcode)| (name, (u, opcode))), m) {
-            if let [Value::Vector(a, d), Value::Vector(b, n), _] = values {
-                if zero {
+            match values {
+                [Value::Vector(a, d), Value::Vector(b, n), _] if zero => {
                     let a = self.alike(&[*a, *b], S | D)?;
                     return Ok(Some(fp(a.q(), u, 1, a.size() == 3, opcode, *n, *d)));
                 }
+                [Value::Fp(a, d), Value::Fp(b, n), _] if zero => {
+                    let double = precision(&[*a, *b]).ok_or_else(|| self.register())?;
+                    return Ok(Some(fp(1, u, 1, double == 1, opcode, *n, *d) | 0x1000_0000));
+                }
+                _ => {}
             }
         }
         Ok(None)
@@ -873,10 +927,18 @@ impl At<'_> {
             }
         }
         if let Some((u, opcode)) = row(&FIXED.map(|(name, u, opcode)| (name, (u, opcode))), m) {
-            if let [Value::Vector(a, d), Value::Vector(b, n), Value::Imm(by)] = values {
-                let a = self.alike(&[*a, *b], S | D)?;
-                let immhb = amount(8 << a.size(), *by, false)?;
-                return Ok(Some(shift(a.q(), u, immhb, opcode, *n, *d)));
+            match values {
+                [Value::Vector(a, d), Value::Vector(b, n), Value::Imm(by)] => {
+                    let a = self.alike(&[*a, *b], S | D)?;
+                    let immhb = amount(8 << a.size(), *by, false)?;
+                    return Ok(Some(shift(a.q(), u, immhb, opcode, *n, *d)));
+                }
+                [Value::Fp(a, d), Value::Fp(b, n), Value::Imm(by)] => {
+                    let double = precision(&[*a, *b]).ok_or_else(|| self.register())?;
+                    let immhb = amount(32 << double, *by, false)?;
+                    return Ok(Some(shift(1, u, immhb, opcode, *n, *d) | 0x1000_0000));
+                }
+                _ => {}
             }
         }
         let (base, second) = upper(m);

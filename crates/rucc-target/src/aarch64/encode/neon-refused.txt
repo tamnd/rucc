@@ -334,3 +334,44 @@ st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x0]
 st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [sp], #32
 st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x2], x3
 st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x2], 32
+fcmeq s1, d2, s3
+fcmeq h1, h2, h3
+fcmge s1, d2, s3
+fcmge h1, h2, h3
+fcmgt s1, d2, s3
+fcmgt h1, h2, h3
+facge s1, d2, s3
+facge h1, h2, h3
+facgt s1, d2, s3
+facgt h1, h2, h3
+fabd s1, d2, s3
+fabd h1, h2, h3
+fmulx s1, d2, s3
+fmulx h1, h2, h3
+frecps s1, d2, s3
+frecps h1, h2, h3
+frsqrts s1, d2, s3
+frsqrts h1, h2, h3
+frecpe s1, d2
+frsqrte s1, d2
+fcvtns s1, d2
+fcvtnu s1, d2
+fcvtms s1, d2
+fcvtmu s1, d2
+fcvtps s1, d2
+fcvtpu s1, d2
+fcvtzs s1, d2
+fcvtzu s1, d2
+fcvtas s1, d2
+fcvtau s1, d2
+scvtf s1, d2
+ucvtf s1, d2
+fcmeq s1, d2, #0.0
+fcmge s1, d2, #0.0
+fcmgt s1, d2, #0.0
+fcmle s1, d2, #0.0
+fcmlt s1, d2, #0.0
+scvtf s1, s2, #33
+ucvtf s1, s2, #33
+fcvtzs s1, s2, #33
+fcvtzu s1, s2, #33

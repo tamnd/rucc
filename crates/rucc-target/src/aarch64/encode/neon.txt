@@ -1895,3 +1895,75 @@
 0d60ec05	ld4r {v5.1d, v6.1d, v7.1d, v8.1d}, [x0]
 0dffec05	ld4r {v5.1d, v6.1d, v7.1d, v8.1d}, [x0], #32
 0de9ec05	ld4r {v5.1d, v6.1d, v7.1d, v8.1d}, [x0], x9
+5e23e441	fcmeq s1, s2, s3
+5e63e441	fcmeq d1, d2, d3
+7e23e441	fcmge s1, s2, s3
+7e63e441	fcmge d1, d2, d3
+7ea3e441	fcmgt s1, s2, s3
+7ee3e441	fcmgt d1, d2, d3
+7e23ec41	facge s1, s2, s3
+7e63ec41	facge d1, d2, d3
+7ea3ec41	facgt s1, s2, s3
+7ee3ec41	facgt d1, d2, d3
+7ea3d441	fabd s1, s2, s3
+7ee3d441	fabd d1, d2, d3
+5e23dc41	fmulx s1, s2, s3
+5e63dc41	fmulx d1, d2, d3
+5e23fc41	frecps s1, s2, s3
+5e63fc41	frecps d1, d2, d3
+5ea3fc41	frsqrts s1, s2, s3
+5ee3fc41	frsqrts d1, d2, d3
+5ea1d841	frecpe s1, s2
+5ee1dbfe	frecpe d30, d31
+7ea1d841	frsqrte s1, s2
+7ee1dbfe	frsqrte d30, d31
+5e21a841	fcvtns s1, s2
+5e61abfe	fcvtns d30, d31
+7e21a841	fcvtnu s1, s2
+7e61abfe	fcvtnu d30, d31
+5e21b841	fcvtms s1, s2
+5e61bbfe	fcvtms d30, d31
+7e21b841	fcvtmu s1, s2
+7e61bbfe	fcvtmu d30, d31
+5ea1a841	fcvtps s1, s2
+5ee1abfe	fcvtps d30, d31
+7ea1a841	fcvtpu s1, s2
+7ee1abfe	fcvtpu d30, d31
+5ea1b841	fcvtzs s1, s2
+5ee1bbfe	fcvtzs d30, d31
+7ea1b841	fcvtzu s1, s2
+7ee1bbfe	fcvtzu d30, d31
+5e21c841	fcvtas s1, s2
+5e61cbfe	fcvtas d30, d31
+7e21c841	fcvtau s1, s2
+7e61cbfe	fcvtau d30, d31
+5e21d841	scvtf s1, s2
+5e61dbfe	scvtf d30, d31
+7e21d841	ucvtf s1, s2
+7e61dbfe	ucvtf d30, d31
+5ea0d841	fcmeq s1, s2, #0.0
+5ee0d841	fcmeq d1, d2, 0.0
+7ea0c841	fcmge s1, s2, #0.0
+7ee0c841	fcmge d1, d2, 0.0
+5ea0c841	fcmgt s1, s2, #0.0
+5ee0c841	fcmgt d1, d2, 0.0
+7ea0d841	fcmle s1, s2, #0.0
+7ee0d841	fcmle d1, d2, 0.0
+5ea0e841	fcmlt s1, s2, #0.0
+5ee0e841	fcmlt d1, d2, 0.0
+5f3fe441	scvtf s1, s2, #1
+5f20e441	scvtf s1, s2, #32
+5f40e441	scvtf d1, d2, #64
+5f7de441	scvtf d1, d2, #3
+7f3fe441	ucvtf s1, s2, #1
+7f20e441	ucvtf s1, s2, #32
+7f40e441	ucvtf d1, d2, #64
+7f7de441	ucvtf d1, d2, #3
+5f3ffc41	fcvtzs s1, s2, #1
+5f20fc41	fcvtzs s1, s2, #32
+5f40fc41	fcvtzs d1, d2, #64
+5f7dfc41	fcvtzs d1, d2, #3
+7f3ffc41	fcvtzu s1, s2, #1
+7f20fc41	fcvtzu s1, s2, #32
+7f40fc41	fcvtzu d1, d2, #64
+7f7dfc41	fcvtzu d1, d2, #3
