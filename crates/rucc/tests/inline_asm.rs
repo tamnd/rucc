@@ -1190,3 +1190,27 @@ fn an_asm_goto_with_an_output_an_array_or_a_handler_gives_the_right_answers() {
         assert_eq!(ran.status.code(), Some(42), "a wrong answer at {level}");
     }
 }
+
+/// An `"i"` operand that is the address of a member of a static is the static's name plus the
+/// member's offset, spelled the way gcc spells it. The kernel's dynamic debug passes one of those
+/// to the jump label's `asm goto`, which writes it into `__jump_table` with `%c0`.
+#[test]
+fn an_immediate_that_is_a_name_plus_an_offset_is_spelled_as_both() {
+    let source = "\
+struct key { int enabled; };
+struct entry { const char *format; long flags; struct key key; };
+static struct entry entry;
+void *before;
+int on(void) {
+    asm goto(\"1: jmp %l[yes]\\n\\t.pushsection __jump_table, \\\"aw\\\"\\n\\t\"
+             \".quad %c0 + %c1 - .\\n\\t.quad %c2\\n\\t.popsection\"
+             : : \"i\" (&entry.key), \"i\" (2), \"i\" ((char *)&before - 8) : : yes);
+    return 0;
+yes:
+    return 1;
+}
+";
+    let text = asm("symbol-offset", source);
+    assert!(text.contains(".quad entry+16 + 2 - ."), "{text}");
+    assert!(text.contains(".quad before-8"), "{text}");
+}

@@ -5101,8 +5101,13 @@ impl<'a> Lowering<'a> {
                 }
                 if let Some(number) = self.number(value) {
                     text.push_str(&number.to_string());
-                } else if let Some(symbol) = self.named_address(value) {
+                } else if let Some((symbol, offset)) = self.named_address(value) {
                     text.push_str(&template_name(self.names.resolve(symbol)));
+                    match offset {
+                        0 => {}
+                        1.. => text.push_str(&format!("+{offset}")),
+                        _ => text.push_str(&offset.to_string()),
+                    }
                 } else {
                     return Err(refused());
                 }
@@ -5160,14 +5165,49 @@ impl<'a> Lowering<'a> {
         self.frame_slots.get(&value).copied()
     }
 
-    /// The name a value is the address of, for one a `global_addr` defined.
-    fn named_address(&self, value: Value) -> Option<Symbol> {
+    /// The name a value is the address of and how far past it, for one a `global_addr` defined
+    /// or a `ptr_add` of a constant to one.
+    ///
+    /// The offset is what `&d.key` is when `d` is a static and `key` is not its first member, and
+    /// the kernel's dynamic debug hands exactly that to an `"i"` operand of its jump label, which
+    /// writes it into `__jump_table` as `%c0`. gcc spells it `d+16`, and so does this.
+    fn named_address(&self, value: Value) -> Option<(Symbol, i128)> {
         let Def::Result { inst, .. } = self.source[value].def else { return None };
-        if self.source[inst].opcode != Opcode::GlobalAddr {
-            return None;
+        match self.source[inst].opcode {
+            Opcode::GlobalAddr => {
+                let Extra::Symbol(symbol) = self.source[inst].extra else { return None };
+                Some((symbol, 0))
+            }
+            Opcode::PtrAdd => {
+                let &[base, step] = &self.source[self.source[inst].args] else { return None };
+                let (symbol, offset) = self.named_address(base)?;
+                Some((symbol, offset.checked_add(self.folded(step)?)?))
+            }
+            _ => None,
         }
-        let Extra::Symbol(symbol) = self.source[inst].extra else { return None };
-        Some(symbol)
+    }
+
+    /// An integer worked out from constants alone, which is what the offset in an address constant
+    /// is before the optimizer has folded it. At `-O0` nothing has, so `&p - 1` reaches here as a
+    /// subtraction from zero of a widened constant rather than as one number.
+    fn folded(&self, value: Value) -> Option<i128> {
+        if let Some(number) = self.number(value) {
+            return Some(number);
+        }
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        let args = &self.source[self.source[inst].args];
+        match (self.source[inst].opcode, args) {
+            (Opcode::SExt, &[narrow]) => self.folded(narrow),
+            (Opcode::ZExt, &[narrow]) => {
+                let bits = self.source[narrow].ty.bits();
+                let mask = if bits >= 128 { -1 } else { (1i128 << bits) - 1 };
+                Some(self.folded(narrow)? & mask)
+            }
+            (Opcode::Add, &[a, b]) => self.folded(a)?.checked_add(self.folded(b)?),
+            (Opcode::Sub, &[a, b]) => self.folded(a)?.checked_sub(self.folded(b)?),
+            (Opcode::Mul, &[a, b]) => self.folded(a)?.checked_mul(self.folded(b)?),
+            _ => None,
+        }
     }
 
     /// A register holding a zero, for an operand of a template that is read before anything filled
