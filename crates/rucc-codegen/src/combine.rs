@@ -297,9 +297,8 @@
 //! the longer of the two here is three. What makes a fourth worth having is a rule set that has
 //! something to say about four, and the rule set here grows one measured entry at a time.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_mir::{Amode, Flags, Func, Inst, Opcode, Operand, Reg};
 use rucc_target::{FlagInsts, MachineInsts};
 
@@ -958,7 +957,7 @@ pub fn loads(
 ) -> usize {
     let mut reads = Reads::of(func);
     let mut done = 0;
-    let mut seen = HashMap::new();
+    let mut seen = Map::default();
     for block in func.blocks().collect::<Vec<_>>() {
         let mut waiting: Option<Waiting> = None;
         for (at, inst) in func.insts(block).collect::<Vec<_>>().into_iter().enumerate() {

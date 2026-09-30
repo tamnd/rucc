@@ -181,6 +181,9 @@ pub fn clean(
 ) -> Cleaned {
     let blocks: Vec<Block> = func.blocks().collect();
     let mut cleaned = Cleaned::default();
+    // Whether each opcode is a call or one the target does not have, asked once per opcode rather
+    // than by name for every instruction. tamnd/rucc#2233.
+    let mut stops: Map<Opcode, bool> = Map::default();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         let mut holds = Holds::default();
@@ -206,8 +209,12 @@ pub fn clean(
                 holds.moved(edit.class, edit.mov.to, edit.mov.from);
                 continue;
             }
-            let name = names.resolve(func[inst].opcode.name());
-            if machine.calls(name) || !machine.has(name) {
+            let opcode = func[inst].opcode;
+            let stop = *stops.entry(opcode).or_insert_with(|| {
+                let name = names.resolve(opcode.name());
+                machine.calls(name) || !machine.has(name)
+            });
+            if stop {
                 holds.nothing();
                 continue;
             }

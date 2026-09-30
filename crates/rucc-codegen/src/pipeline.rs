@@ -24,6 +24,7 @@
 //! are still in the output.
 
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_cost::Goal;
 use rucc_ir as ir;
 use rucc_mir as mir;
@@ -886,8 +887,13 @@ pub fn compile_recording(
 /// Marks every instruction the machine says reads its two sources either way round.
 fn commuting(func: &mut mir::Func, shapes: &MachineInsts, names: &Interner) {
     let insts: Vec<mir::Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    // Asked once per opcode rather than by name for every instruction. tamnd/rucc#2233.
+    let mut known: Map<mir::Opcode, bool> = Map::default();
     for inst in insts {
-        if shapes.commutes(names.resolve(func[inst].opcode.name())) {
+        let opcode = func[inst].opcode;
+        let commutes =
+            *known.entry(opcode).or_insert_with(|| shapes.commutes(names.resolve(opcode.name())));
+        if commutes {
             func[inst].flags = func[inst].flags.with(mir::Flags::COMMUTES);
         }
     }

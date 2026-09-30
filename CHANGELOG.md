@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Finding the conversions whose upper bits nothing reads asks the target for the width of each operand once, instead of on every round of the walk (#2231).
 - Encoding x86-64 into an object file looks each opcode up in the target's table once per unit, instead of by name for every instruction (#2234).
 - Lowering keeps the opcode and operands of each rule head it has built, instead of looking them up by name for every machine instruction (#2236).
+- Cleaning up the allocator's copies and marking the instructions that commute ask the target about each opcode once per function instead of by name for every instruction, and the scheduler and load folding keep their answers per opcode with the shared hasher (#2238).
 
 ### Fixed
 
