@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `static` function kept alive only by an `alias` now has its callees kept too, so a `static inline` it calls is emitted instead of left as an undefined reference. The kernel's syscall stubs are aliases of this kind.
 - Attributes after a `struct`, `union` or `enum` tag with no body, as in `struct mem_section __ref *f(int)`, are now specifiers of the declaration, the way gcc reads them, instead of being kept on the tag where nothing read them.
 - A `section` or `used` attribute beside the star of a function that returns a pointer, as in `void * __init f(void)`, now places the function too, on a definition as well as a declaration.
 - A `section` or `used` attribute written between a `*` and the name, as the kernel's `__ADDRESSABLE` does, now applies to the declaration the way gcc applies it, so the object lands in its section instead of `.data`.

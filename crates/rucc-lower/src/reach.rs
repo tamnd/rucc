@@ -46,7 +46,7 @@ use rucc_base::Interner;
 use rucc_base::hash::Set;
 use rucc_sema::{
     Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Eval, ExprId, ExprKind, InitList,
-    Linkage, Stmt, StmtId, Tast,
+    Linkage, Stmt, StmtId, StrId, Tast,
 };
 use rucc_target::TargetInfo;
 use rucc_types::Types;
@@ -67,10 +67,44 @@ pub(crate) fn reachable(decide: Decide<'_>) -> Set<DeclId> {
             walk.mark(decl);
         }
     }
+    // What an alias points at is emitted because of the alias, and so is reached from it. The
+    // name is a string rather than a reference, so it is looked up among the file's names here.
+    // Without this the body of the target was written and the `static inline` functions it calls
+    // were not, which is how the kernel's `SYSCALL_DEFINE0(vhangup)` came to call a `capable` the
+    // file never defined: `__x64_sys_vhangup` is an alias of the `static` function with the body.
+    for decl in aliased(tast, decide.names) {
+        walk.mark(decl);
+    }
     while let Some(decl) = walk.work.pop() {
         walk.decl(decl);
     }
     walk.seen
+}
+
+/// The declarations an `alias` attribute in the file names, found by the symbol each is emitted
+/// under, which is its assembler name when it was given one.
+fn aliased(tast: &Tast, names: &Interner) -> Vec<DeclId> {
+    let spelled = |id: StrId| -> String {
+        tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
+    };
+    let wanted: Set<String> =
+        tast.top_level().iter().filter_map(|&decl| tast[decl].alias).map(spelled).collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    tast.top_level()
+        .iter()
+        .copied()
+        .filter(|&decl| {
+            let node = &tast[decl];
+            let symbol = match (node.asm_label, node.name) {
+                (Some(label), _) => spelled(label),
+                (None, Some(name)) => names.resolve(name).to_owned(),
+                (None, None) => return false,
+            };
+            wanted.contains(&symbol)
+        })
+        .collect()
 }
 
 /// Whether the file has a reason to emit this declaration without anything having named it.

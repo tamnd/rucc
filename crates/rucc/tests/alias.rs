@@ -112,6 +112,33 @@ extern int loud(void) __attribute__((alias(\"quiet\")));
 }
 
 #[test]
+fn what_the_target_of_a_second_name_calls_is_kept_as_well() {
+    // The kernel's syscalls: `__x64_sys_vhangup` is an alias of a `static` function, and that
+    // function calls `capable`, a `static inline` from a header. The target is kept for the alias,
+    // so what it calls has to be kept with it, or the call goes to a name nothing defines.
+    let text = asm(
+        "reached-callee",
+        "\
+static inline int allowed(int c) {
+    return c > 3;
+}
+
+extern void side(void);
+
+static long do_it(int x) {
+    if (allowed(x))
+        side();
+    return 0;
+}
+
+long sys_it(int x) __attribute__((alias(\"do_it\")));
+",
+    );
+    assert!(text.contains("\tcall\tallowed\n"), "{text}");
+    assert!(text.contains("\nallowed:\n"), "a callee of the target was dropped:\n{text}");
+}
+
+#[test]
 fn a_second_name_for_something_no_file_defines_is_refused() {
     // Not an undefined reference: an alias is a second name for an address rather than a use of
     // one, so there is nothing for the linker to go looking for.
