@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler writes the i386 unwind table the way gas does for `i686-linux-gnu-gcc -S` output. The header says a data alignment of -4 with the return address in column 8, `%eip`, and starts the frame at `%esp` plus 4, the records hold four byte distances to the code as `R_386_PC32` and are padded and aligned to four, and a frame rule names registers by their i386 numbers, `%ebp` as 5 and `%ebx` as 3. Before this the table had the x86-64 layout, which an i386 unwinder reads as garbage. See #2247.
 - A constant argument that only becomes constant once the caller is folded now reaches the callee at `-O2` and above, even when the callee is too large to inline. The kernel's `fpu__restore_sig` relies on this to drop a call to `convert_to_fxsr`, which a kernel without 32 bit support does not have.
 - A `static` function marked `used` is kept at `-O1` and above even when nothing in the file calls it. The kernel's `asm-offsets.c` writes every offset from such a function, and since the last release those offsets were missing.
 - From `-O1`, a `static` function whose last call the optimizer removed is no longer emitted, so a symbol only its body names is not left undefined at link time. gcc drops these too, and the kernel relies on it for `load_vdso32` in a 64-bit-only build.
