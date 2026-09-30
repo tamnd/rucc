@@ -4243,6 +4243,49 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.globl\t_g\n\t.zerofill\t__DATA,__bss,_g,16,2\n"), "{text}");
     }
 
+    /// A computed goto table on Darwin, which Postgres's expression interpreter is built around.
+    ///
+    /// The table held `_.Llbl.0` and the label in the function was written `.Llbl.0`, so the
+    /// object named an undefined external that ld64 could not find (#2403). The label is spelled
+    /// the way the table spells it, and the object has no symbol for it at all: the table's
+    /// relocation names the function, the way clang's names the function for an `Ltmp` label.
+    #[test]
+    fn a_darwin_computed_goto_table_names_labels_the_object_defines() {
+        let source = "int f(int i) {\n\
+                      static void *table[] = { &&a, &&b };\n\
+                      goto *table[i];\n\
+                      a: return 1;\n\
+                      b: return 2;\n\
+                      }\n";
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = options();
+            opts.opt_level = level;
+            opts.emit = EmitKind::Asm;
+            opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
+            let result = run(&opts, source);
+            assert!(!result.failed(), "{:?}", result.messages);
+            let text = result.text();
+            // Every label the table holds is one the function defines, spelled the same way.
+            let held: Vec<&str> =
+                text.lines().filter_map(|line| line.strip_prefix("\t.quad\t_.Llbl.")).collect();
+            if level == rucc_session::OptLevel::O0 {
+                assert_eq!(held.len(), 2, "{text}");
+            }
+            for label in held {
+                let defined = format!("\n_.Llbl.{label}:\n");
+                assert!(text.contains(&defined), "{level:?}: {defined:?} in {text}");
+            }
+
+            opts.emit = EmitKind::Object;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+            let bytes = result.artifact.bytes();
+            let has = |what: &[u8]| bytes.windows(what.len()).any(|window| window == what);
+            assert!(has(b"_f\0"), "{level:?}: the function is in the symbol table");
+            assert!(!has(b".Llbl"), "{level:?}: no symbol for a label");
+        }
+    }
+
     /// A `signed char` read from memory and added to at 32 bits is widened with its sign first.
     ///
     /// The widening was being taken out as unneeded, because its source is written as a `w`
