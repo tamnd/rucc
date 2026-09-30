@@ -336,12 +336,23 @@ pub enum Fits {
     /// the widest immediate the machine has outside that one move.
     Signed32,
     /// One that fits in a byte, counted either way, since a number over a hundred and twenty
-    /// seven and the negative one it would be read as are the same eight bits.
+    /// seven and the negative one it would be read as are the same eight bits. A negative number
+    /// down to -255 is taken too, which is gas's rule and which it keeps quiet about: gcc prints
+    /// `(u8)~0x80` passed as an `int` to an `"iq"` operand under `%b` as `andb $-129`, and the
+    /// kernel's `clear_bit` is that, so it is the low eight bits that are meant.
     Byte,
-    /// One that fits in two bytes, counted either way.
+    /// One that fits in two bytes, counted either way, with the same rule for a negative one.
     Word,
-    /// One that fits in four bytes, counted either way.
+    /// One that fits in four bytes, counted either way, with the same rule for a negative one.
     Long,
+}
+
+/// Whether gas writes that number in that many bits without a word, which is `offset_in_range` in
+/// its tc-i386.c: either the number or its negation has nothing above those bits. So a byte takes
+/// everything from -255 to 255, and -256, which gas shortens to zero with a warning, is refused.
+fn quietly(imm: i64, bits: u32) -> bool {
+    let above = !((1i64 << bits) - 1);
+    imm & above == 0 || imm.wrapping_neg() & above == 0
 }
 
 impl Fits {
@@ -351,9 +362,9 @@ impl Fits {
             Fits::Any => true,
             Signed8 => i8::try_from(imm).is_ok(),
             Signed32 => i32::try_from(imm).is_ok(),
-            Fits::Byte => i8::try_from(imm).is_ok() || u8::try_from(imm).is_ok(),
-            Fits::Word => i16::try_from(imm).is_ok() || u16::try_from(imm).is_ok(),
-            Fits::Long => i32::try_from(imm).is_ok() || u32::try_from(imm).is_ok(),
+            Fits::Byte => quietly(imm, 8),
+            Fits::Word => quietly(imm, 16),
+            Fits::Long => quietly(imm, 32),
         }
     }
 }
@@ -5026,6 +5037,27 @@ mod tests {
         assert_eq!(hex("movl", &[Value::Imm(0xffff_ffff), long(RAX)]), "b8 ff ff ff ff");
         assert_eq!(hex("addb", &[Value::Imm(200), byte(RAX)]), "80 c0 c8");
         assert_eq!(hex("shlq", &[Value::Imm(63), quad(RAX)]), "48 c1 e0 3f");
+    }
+
+    /// gcc prints `(u8)~0x80`, promoted to an `int`, as `$-129` under `%b`, which is the kernel's
+    /// `clear_bit`, and gas writes its low eight bits without a word. Down to -255 is what gas
+    /// takes quietly, and -256 is where it starts warning that it cut the number down, so that is
+    /// where this starts refusing.
+    #[test]
+    fn a_negative_number_is_cut_to_the_width_as_far_as_gas_does_it_quietly() {
+        assert_eq!(hex("andb", &[Value::Imm(-129), byte(RAX)]), "80 e0 7f");
+        assert_eq!(hex("andb", &[Value::Imm(-255), byte(RCX)]), "80 e1 01");
+        assert_eq!(
+            hex("andw", &[Value::Imm(-32769), Value::Reg(RCX, Width::Word)]),
+            "66 81 e1 ff 7f"
+        );
+        assert_eq!(hex("andl", &[Value::Imm(-0xffff_ffff), long(RCX)]), "81 e1 01 00 00 00");
+        let mut out = Vec::new();
+        assert!(encode("andb", &[Value::Imm(-256), byte(RCX)], &mut out).is_err());
+        assert!(encode("andb", &[Value::Imm(256), byte(RCX)], &mut out).is_err());
+        assert!(
+            encode("andw", &[Value::Imm(-65536), Value::Reg(RCX, Width::Word)], &mut out).is_err()
+        );
     }
 
     #[test]
