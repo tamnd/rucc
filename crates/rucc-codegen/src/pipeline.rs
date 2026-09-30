@@ -269,6 +269,21 @@ pub enum Profile {
     Late,
 }
 
+/// What `-mrecord-mcount` and `-mnop-mcount` ask of the call `-pg` writes, which is nothing at all
+/// without `-pg`, as in gcc.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mcount {
+    /// Whether where the call is goes into `__mcount_loc`.
+    pub record: bool,
+    /// Whether the call is written as a nop as long as it, for a tracer to write the call over.
+    pub nop: bool,
+}
+
+/// The nop `-mnop-mcount` writes on this target, if it asked for one and the target has one.
+fn trace_nop(trace: Option<rucc_target::Trace>, mcount: Mcount) -> Option<&'static str> {
+    trace.and_then(|trace| trace.nop).filter(|_| mcount.nop)
+}
+
 /// How much room every function opens with for something to be written over it later.
 ///
 /// What `-fpatchable-function-entry=` asks for, as the two halves a prologue deals in rather than
@@ -326,6 +341,8 @@ pub struct Flags {
     pub jump_tables: bool,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
+    /// What `-mrecord-mcount` and `-mnop-mcount` ask of that call.
+    pub mcount: Mcount,
     /// How much room every function opens with for a patcher, which
     /// `-fpatchable-function-entry=` asks for. See [`Room`].
     pub patch: Room,
@@ -400,6 +417,7 @@ impl Default for Flags {
             speculation: Speculation::default(),
             jump_tables: true,
             profile: Profile::No,
+            mcount: Mcount::default(),
             patch: Room::default(),
             reorder: false,
             reuse: false,
@@ -625,9 +643,10 @@ pub fn compile_recording(
     // Nothing at all on a target with no hook to call, which is the same answer the protector gives
     // on a target with nowhere to keep its word, and the driver refuses the command line over it
     // before any of this runs.
+    // A function that said `no_instrument_function` gets none either, as with gcc.
     let profile = match machine.conv.trace {
-        Some(_) => flags.profile,
-        None => Profile::No,
+        Some(_) if !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT) => flags.profile,
+        _ => Profile::No,
     };
     let base = stack.layout(Layout::new(machine.conv, machine.file));
     let layout = Layout {
@@ -828,10 +847,11 @@ pub fn compile_recording(
         .then_some(machine.insts.probe.as_ref())
         .flatten()
         .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
+    let (record, nop) = (flags.mcount.record, trace_nop(machine.conv.trace, flags.mcount));
     let trace = machine.conv.trace.and_then(|trace| match profile {
         Profile::No => None,
-        Profile::Early => Some(Tracing { name: trace.early, early: true }),
-        Profile::Late => Some(Tracing { name: trace.late, early: false }),
+        Profile::Early => Some(Tracing { name: trace.early, early: true, record, nop }),
+        Profile::Late => Some(Tracing { name: trace.late, early: false, record, nop }),
     });
     // And once more for the room a patcher was promised, which is a run of the shortest
     // instruction that does nothing and so needs the target to have one. Nothing is written on a

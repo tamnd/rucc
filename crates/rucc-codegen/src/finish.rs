@@ -73,7 +73,10 @@ use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch,
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
-use rucc_target::{BranchInsts, CallRegs, Chkstk, FrameInsts, Guard, PhysReg, Probe, RegClass};
+use rucc_target::template::template_name;
+use rucc_target::{
+    BranchInsts, CallRegs, Chkstk, FrameInsts, Guard, PhysReg, Probe, RegClass, x86_64,
+};
 
 use crate::frame::Frame;
 use crate::lower::Stack;
@@ -126,6 +129,12 @@ pub struct Tracing {
     pub name: &'static str,
     /// Whether the call goes in front of the prologue rather than once the frame is taken.
     pub early: bool,
+    /// Whether where the call is goes into `__mcount_loc` as well, which `-mrecord-mcount` asks
+    /// for so that ftrace can find every hook without reading the code.
+    pub record: bool,
+    /// What is written in place of the call, from `-mnop-mcount`, which is an instruction as long
+    /// as the call that does nothing. `None` for the call itself.
+    pub nop: Option<&'static str>,
 }
 
 /// The room at the top of a function for something to be written over later, in a function that
@@ -791,10 +800,27 @@ impl Writer<'_> {
     /// No arguments and no result. Which function is being entered is not passed, because the hook
     /// reads its own return address to find out, and that is the whole reason the call is written
     /// rather than something cheaper.
+    ///
+    /// Under `-mrecord-mcount` or `-mnop-mcount` it is a template kept as text instead, gcc's own
+    /// lines: a label on the call or on the nop, and the address of that label in `__mcount_loc`.
     fn hook(&mut self, trace: Tracing) -> Inst {
-        let call = self.opcode(self.insts.call);
-        let symbol = self.names.intern(trace.name);
-        self.func.build_loose(call).symbol(symbol).finish()
+        if !trace.record && trace.nop.is_none() {
+            let call = self.opcode(self.insts.call);
+            let symbol = self.names.intern(trace.name);
+            return self.func.build_loose(call).symbol(symbol).finish();
+        }
+        let site = match trace.nop {
+            Some(nop) => nop.to_owned(),
+            None => format!("call {}", template_name(trace.name)),
+        };
+        let text = if trace.record {
+            format!("1:\t{site}\n.section __mcount_loc, \"a\",@progbits\n.quad 1b\n.previous")
+        } else {
+            site
+        };
+        let template = self.opcode(x86_64::TEMPLATE);
+        let symbol = self.names.intern(&text);
+        self.func.build_loose(template).symbol(symbol).finish()
     }
 
     /// Takes the frame, which is one subtraction unless the command line asked for the stack to be

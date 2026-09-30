@@ -211,3 +211,81 @@ fn a_target_whose_profiler_is_a_different_one_is_refused() {
     assert!(!ok, "a flag that cannot be honoured is news rather than nothing");
     assert!(err.contains("-pg is not supported"), "{err}");
 }
+
+/// The kernel's flags for the earlier hook, which is how every x86-64 build with ftrace is compiled.
+const KERNEL: &[&str] = &["-pg", "-mfentry", "-fno-pie", "-mcmodel=kernel"];
+
+/// `-mrecord-mcount` puts the address of every hook in `__mcount_loc`.
+///
+/// ftrace reads the section at boot to find every call it may patch, so a function missing from
+/// it is a function that cannot be traced, and an entry that is not a hook is a place the kernel
+/// would write a call into the middle of an instruction. The text is gcc's, one local label on the
+/// hook and one `.quad` for it.
+#[test]
+fn every_hook_is_recorded_under_record_mcount() {
+    let text = asm("record", &[KERNEL, &["-mrecord-mcount"]].concat(), THREE);
+    assert_eq!(text.matches("1:\tcall __fentry__").count(), 3, "{text}");
+    assert_eq!(text.matches(".section __mcount_loc, \"a\",@progbits").count(), 3, "{text}");
+    assert_eq!(text.matches(".quad 1b").count(), 3, "{text}");
+    assert_eq!(text.matches(".previous").count(), 3, "{text}");
+}
+
+/// `-mnop-mcount` writes a five byte nop where the call would be.
+///
+/// The kernel patches the calls to nops at boot anyway, and one that starts out as a nop saves
+/// the work. The nop is the same five bytes gcc writes, the ones the kernel checks for before it
+/// patches the site.
+#[test]
+fn the_hook_is_a_nop_under_nop_mcount() {
+    let text = asm("nop", &[KERNEL, &["-mrecord-mcount", "-mnop-mcount"]].concat(), THREE);
+    assert!(!text.contains("__fentry__"), "{text}");
+    assert_eq!(text.matches("1:\t.byte 0x0f, 0x1f, 0x44, 0x00, 0x00").count(), 3, "{text}");
+    assert_eq!(text.matches(".quad 1b").count(), 3, "{text}");
+}
+
+/// A function that said `no_instrument_function` gets no hook and no record.
+///
+/// This is the kernel's `notrace`, which it puts on the tracer itself and on everything that runs
+/// before the tracer can, so a hook there calls back into the code that is handling a hook.
+#[test]
+fn a_function_that_said_no_instrument_function_gets_no_hook() {
+    let source = "\
+int g(int);
+__attribute__((no_instrument_function)) int quiet(int x) { return g(x); }
+int loud(int x) { return g(x); }
+";
+    for flags in [
+        KERNEL,
+        &[KERNEL, &["-mrecord-mcount"]].concat(),
+        &[KERNEL, &["-mrecord-mcount", "-mnop-mcount"]].concat(),
+    ] {
+        let text = asm("notrace", flags, source);
+        let quiet = insts(&text, "quiet");
+        assert!(
+            quiet.iter().all(|line| !line.contains("__fentry__") && !line.contains(".byte")),
+            "{flags:?}: {quiet:?}"
+        );
+        assert!(
+            !text
+                .split("quiet:")
+                .nth(1)
+                .unwrap_or("")
+                .split("loud:")
+                .next()
+                .unwrap_or("")
+                .contains("__mcount_loc"),
+            "{flags:?}: {text}"
+        );
+        assert!(text.contains("loud:"), "{text}");
+    }
+}
+
+/// gcc refuses `-mnop-mcount` in position independent code, and so does rucc.
+///
+/// The nop cannot be patched into a call through the PLT, so there is nothing sensible to write.
+#[test]
+fn nop_mcount_is_refused_with_pic() {
+    let (ok, _, err) = run("nop-pic", TARGET, &["-pg", "-mfentry", "-fPIC", "-mnop-mcount"], THREE);
+    assert!(!ok, "{err}");
+    assert!(err.contains("'-mnop-mcount' is not implemented for '-fPIC'"), "{err}");
+}

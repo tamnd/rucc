@@ -61,8 +61,6 @@ const GUARD: &str = "the canary is read from where the target's C library keeps 
                      x86-64, and nothing yet moves it";
 const THUNKS: &str = "a branch goes through a thunk the program links in, which is thunk-extern, \
                       and no thunk body is written into the unit";
-const MCOUNT: &str = "the __fentry__ calls -pg writes are not listed in a __mcount_loc section and \
-                      are not written as nops";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
                                  landing pad";
 
@@ -248,10 +246,6 @@ pub(crate) const TABLE: &[Row] = &[
             None,
         ),
     ),
-    only(X86, refused("-mrecord-mcount", MCOUNT, Some(2283))),
-    only(X86, refused("-mnop-mcount", MCOUNT, Some(2283))),
-    only(X86, same("-mno-record-mcount", "no __mcount_loc section is written, the default")),
-    only(X86, same("-mno-nop-mcount", "the __fentry__ calls are calls, the default")),
     only(
         X86,
         same(

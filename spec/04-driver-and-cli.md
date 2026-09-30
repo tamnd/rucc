@@ -337,6 +337,8 @@ Honored, by doing what gcc does:
 | `-fshort-wchar`, `-fno-short-wchar` | `wchar_t` is a 16 bit unsigned type, in `L""`, in `__WCHAR_TYPE__` and its neighbours and in the checker, because the session puts it into the target the way it puts `-funsigned-char` there. The negative form is the target's own `wchar_t`. |
 | `-fmin-function-alignment=N` | A floor under every function, rounded up to a power of two the way gcc rounds `-falign-functions=`. `-falign-functions` may raise it and cannot lower it, in whichever order the two are written. |
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
+| `-mrecord-mcount` (x86-64) | Every hook `-pg` writes gets a local label, and its address goes into `__mcount_loc` as a `.quad`, which is where ftrace finds the calls it may patch. A function marked `no_instrument_function` has no hook and so no entry. |
+| `-mnop-mcount` (x86-64) | The hook is written as the five byte nop `0f 1f 44 00 00` rather than a call, the same bytes gcc writes and the kernel checks for before it patches the site. Refused with `-fPIC`, `-fpic`, `-fPIE` and `-fpie`, as gcc refuses it. |
 | `-mpreferred-stack-boundary=N` (x86-64) | The stack pointer is kept on a multiple of 2 to the N at every call and counted on to be no more than that on entry, for N from 4 to 12. A frame is rounded to that and not to sixteen, and a local that asks for more is aligned by the prologue behind a frame pointer with `and`, which is gcc's sequence and the one objtool reads. 3, which the x86-64 kernel passes, waits on `-mno-sse`. |
 | `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
 | `-mindirect-branch=thunk-extern`, `-mindirect-branch=keep` (x86-64) | An indirect call or jump goes to the thunk for the register the address is in, `call __x86_indirect_thunk_rax` rather than `call *%rax`, and the kernel links the thunks in. `keep` is the default. The branch is always through a register, so nothing is loaded out of memory first. |
@@ -385,7 +387,6 @@ Refused, with the issue that would honor them:
 | `-mstack-protector-guard*` | The canary is read from where the C library keeps it. | #2279 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
-| `-mrecord-mcount`, `-mnop-mcount` (x86-64) | The `__fentry__` calls `-pg` writes are neither listed in `__mcount_loc` nor written as nops. | #2283 |
 | `-fconserve-stack` | Inlining does not weigh how much it grows the caller's frame. | #2284 |
 | `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
 | `-gdwarf-4` | DWARF 5 is the only version written. | #2287 |

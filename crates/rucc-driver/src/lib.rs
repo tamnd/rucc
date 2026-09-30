@@ -1051,6 +1051,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // directory is a build system that would otherwise fail on every other directory.
             "-mfentry" => opts.hook = Hook::Early,
             "-mno-fentry" => opts.hook = Hook::Late,
+            // What the call is and whether it is listed, both nothing without `-pg`, as in gcc.
+            // x86 only, and the kernel passes them on x86 alone. See tamnd/rucc#2283.
+            "-mrecord-mcount" if arch == rucc_target::Arch::X86_64 => opts.record_mcount = true,
+            "-mno-record-mcount" if arch == rucc_target::Arch::X86_64 => opts.record_mcount = false,
+            "-mnop-mcount" if arch == rucc_target::Arch::X86_64 => opts.nop_mcount = true,
+            "-mno-nop-mcount" if arch == rucc_target::Arch::X86_64 => opts.nop_mcount = false,
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -2615,6 +2621,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 "code model kernel does not support PIC mode: add -fno-pie or -fno-pic".to_owned(),
             ));
         }
+    }
+    // The nop is written where a direct call would be, and a position independent call to the hook
+    // goes through the global offset table and is longer, so gcc refuses the pair, with or without
+    // `-pg`, and so does this, in its words.
+    if opts.nop_mcount && opts.pic != Pic::Absolute {
+        return Err(err("'-mnop-mcount' is not implemented for '-fPIC'".to_owned()));
     }
     opts.code_model = cmodel;
     link.sysroot = sysroot.clone();
@@ -8123,6 +8135,22 @@ mod tests {
         assert!(!compile(&[KERNEL_ARM64, "-fno-jump-tables", "-c", "a.c"]).0.jump_tables);
     }
 
+    /// `-mrecord-mcount` and `-mnop-mcount` are read on x86-64, last one wins, and the nop is
+    /// refused beside anything position independent, as gcc refuses it.
+    #[test]
+    fn the_mcount_flags_are_read_on_x86_64() {
+        let (opts, _) =
+            compile(&[KERNEL_X86, "-fno-pie", "-mrecord-mcount", "-mnop-mcount", "-c", "a.c"]);
+        assert!(opts.record_mcount && opts.nop_mcount);
+        let back =
+            [KERNEL_X86, "-fno-pie", "-mrecord-mcount", "-mno-record-mcount", "-mnop-mcount"];
+        let (opts, _) = compile(&[&back[..], &["-mno-nop-mcount", "-c", "a.c"]].concat());
+        assert!(!opts.record_mcount && !opts.nop_mcount);
+        let pic =
+            refused(&["--target=x86_64-unknown-linux-gnu", "-fpic", "-mnop-mcount", "-c", "a.c"]);
+        assert!(pic.contains("'-mnop-mcount' is not implemented for '-fPIC'"), "{pic}");
+    }
+
     /// The boundary is a power of two, as gcc spells it, and only on x86-64, where gcc has the
     /// flag. 3 is the kernel's and waits on the vector registers being kept out.
     #[test]
@@ -8154,8 +8182,6 @@ mod tests {
             ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
-            ("-mrecord-mcount", 2283),
-            ("-mnop-mcount", 2283),
             ("-fconserve-stack", 2284),
             ("-gdwarf-4", 2287),
             ("-gz=zlib", 2288),

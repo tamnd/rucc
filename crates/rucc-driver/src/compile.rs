@@ -980,6 +980,7 @@ fn generate(
             Some(true) => pipeline::Profile::Early,
             Some(false) => pipeline::Profile::Late,
         },
+        mcount: pipeline::Mcount { record: opts.record_mcount, nop: opts.nop_mcount },
         patch: pipeline::Room { after: opts.patchable.after(), before: opts.patchable.before },
         // On at every level above `-O0`, which is where gcc turns `-freorder-blocks` on
         // (`gcc/opts.cc:604`) and what `spec/optimizer/38-scheduling-and-layout.md` section 38.3

@@ -231,6 +231,10 @@ pub static FRAME: FrameInsts = FrameInsts {
     thunks: Some(THUNKS),
 };
 
+/// The five byte `nopl 0(%rax,%rax,1)`, which is as long as a call to a name and is what
+/// `-mnop-mcount` writes in place of the profiler's hook, as bytes the way gcc writes it.
+pub const NOP5: &str = ".byte 0x0f, 0x1f, 0x44, 0x00, 0x00";
+
 /// What the x86 speculation hardening flags rewrite branches into, with the names gcc and the
 /// kernel's `arch/x86/lib/retpoline.S` agree on.
 ///
@@ -1353,7 +1357,7 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     // The newer hook by default, which is what gcc has done on this platform for years and what
     // every kernel needs. `mcount` is the older one and it reads the frame pointer, so a function
     // that calls it is given one whatever the rest of the command line said.
-    trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: true }),
+    trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: true, nop: Some(NOP5) }),
     // None, and it is the platform saying so rather than a gap. A stack on this platform grows by
     // faulting: a write anywhere below the stack pointer is a page the kernel maps on the spot, in
     // any order, so a frame taken in one step is a frame that works. The one page that is not like

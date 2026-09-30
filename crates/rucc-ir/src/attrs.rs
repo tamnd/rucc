@@ -154,6 +154,9 @@ impl AttrSet {
     /// function is a declaration. An `extern inline` definition under GNU's reading, whose
     /// external definition is in some other object.
     pub const INLINE_ONLY: Self = Self(1 << 17);
+    /// `__attribute__((no_instrument_function))`. No profiling hook goes in this function under
+    /// `-pg`, which is how the kernel's `notrace` keeps the tracer out of itself.
+    pub const NO_INSTRUMENT: Self = Self(1 << 18);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -259,6 +262,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::STACK_PROTECT, "stack_protect"),
     (AttrSet::NO_STACK_PROTECTOR, "no_stack_protector"),
     (AttrSet::INLINE_ONLY, "inline_only"),
+    (AttrSet::NO_INSTRUMENT, "no_instrument"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

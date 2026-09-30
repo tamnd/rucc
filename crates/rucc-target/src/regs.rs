@@ -316,6 +316,10 @@ pub struct Trace {
     pub late: &'static str,
     /// Which of the two a command line that named neither gets.
     pub fentry: bool,
+    /// An instruction as long as the call that does nothing, as the text of a `.byte` line, which
+    /// is what `-mnop-mcount` writes in the call's place. `None` on a target where gcc has no such
+    /// flag.
+    pub nop: Option<&'static str>,
 }
 
 /// What a platform calls the routine that reaches the pages of a frame before the frame is taken.

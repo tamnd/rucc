@@ -179,7 +179,12 @@ pub static SYSV: CallRegs = CallRegs {
     guard: Some(Guard { segment: Segment::Gs, at: 20, fail: "__stack_chk_fail" }),
     // The older hook by default, which is gcc's default on this target: `-mfentry` is there, and
     // nothing asks for it without saying so.
-    trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: false }),
+    trace: Some(Trace {
+        early: "__fentry__",
+        late: "mcount",
+        fentry: false,
+        nop: Some(crate::x86_64::NOP5),
+    }),
     chkstk: None,
     conventions: Conventions::ONLY,
 };

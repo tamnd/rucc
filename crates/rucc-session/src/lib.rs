@@ -2197,6 +2197,12 @@ pub struct Options {
     /// See [`Hook`]. Read even on a command line that did not ask for the call, since gcc accepts
     /// the flag on its own and does nothing with it.
     pub hook: Hook,
+    /// Whether where that call is goes into `__mcount_loc`, from `-mrecord-mcount`, which is how
+    /// ftrace finds every hook on a kernel from before objtool collected them. x86 only, as in gcc.
+    pub record_mcount: bool,
+    /// Whether that call is written as a nop as long as it, from `-mnop-mcount`, for ftrace to
+    /// write the call over when tracing is turned on. x86 only, as in gcc.
+    pub nop_mcount: bool,
     /// How much room every function opens with for somebody to write over later, from
     /// `-fpatchable-function-entry=`.
     ///
@@ -2650,6 +2656,8 @@ impl Options {
             jump_tables: true,
             profile: false,
             hook: Hook::default(),
+            record_mcount: false,
+            nop_mcount: false,
             patchable: Patchable::default(),
             wrapping: Wrapping::NONE,
             char_signed: None,
