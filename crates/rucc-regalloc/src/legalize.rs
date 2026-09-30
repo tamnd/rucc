@@ -237,10 +237,18 @@ pub fn instruction(
     // everything else, since what happens in between is the instruction using it and the moves
     // that carry its operands in and out. Nothing borrowed at one instruction is still borrowed at
     // the next, which is what lets the slot be shared.
+    //
+    // An instruction that borrowed nothing has no saves, and then the moves in front are the ones
+    // already made. Putting them behind an empty list of saves would copy them into a new one.
     let (saves, restores) = scratch.finish();
 
-    let mut first = saves;
-    first.extend(before);
+    let first = if saves.is_empty() {
+        before
+    } else {
+        let mut first = saves;
+        first.extend(before);
+        first
+    };
     let mut last = after;
     last.extend(restores);
     Legal { operands, before: first, after: last }
