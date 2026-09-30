@@ -690,10 +690,13 @@ impl Checker<'_> {
         // The tag is bound before the members are read, which is what makes
         // `struct S { struct S *next; };` refer to the structure being defined rather than
         // declare a second one inside it.
-        let (id, ty) = self.record_defined(kind, tag, tag_kind, span);
+        let (id, ty, again) = self.record_defined(kind, tag, tag_kind, span);
         self.built.defined.insert(ty);
         self.record_body(id, kind, members, attrs, pack, span);
-        ty
+        match again {
+            Some(first) => self.redefined(first, ty, span),
+            None => ty,
+        }
     }
 
     /// An `enum`, referred to by tag or declared by one, with C23's underlying type.
@@ -734,13 +737,16 @@ impl Checker<'_> {
                 }
             };
         };
-        let (id, ty) = self.enum_defined(tag, span);
+        let (id, ty, again) = self.enum_defined(tag, span);
         self.built.defined.insert(ty);
         // `packed` on an enumeration is `-fshort-enums` for that one type, which is how the
         // kernel keeps `enum rw_hint` to a byte.
         let short = self.packing(attrs).packed;
-        self.enum_body(id, list, underlying, short, span);
-        ty
+        self.enum_body(id, list, underlying, short, again.is_some(), span);
+        match again {
+            Some(first) => self.redefined(first, ty, span),
+            None => ty,
+        }
     }
 
     /// What a mention of a tag turns out to be.
@@ -1698,6 +1704,11 @@ mod tests {
 
         pub(super) fn checker(&self) -> Checker<'_> {
             Checker::new(&self.ast, Context::new(&self.names, &self.target, Std::C23))
+        }
+
+        /// The same in another dialect, for the rules C23 changed.
+        pub(super) fn checker_in(&self, std: Std) -> Checker<'_> {
+            Checker::new(&self.ast, Context::new(&self.names, &self.target, std))
         }
 
         /// The same under `-fshort-enums`, which changes what type an enumeration gets.

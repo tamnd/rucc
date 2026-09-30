@@ -16,7 +16,7 @@
 //! The rules here were checked by writing each pair of declarations and seeing which ones gcc
 //! 13.3 and clang 18 refuse. They agree everywhere except one place, recorded on
 //! [`records`]: clang implements the C23 rule that an identical structure redefinition in one
-//! translation unit is the same type, and gcc 13.3 still rejects it.
+//! translation unit is the same type, and gcc 13.3 still rejects it. gcc 16 takes it too.
 //!
 //! Nothing in here needs the target. Everything target dependent about a type has already been
 //! decided by the time it is in the table: an enumeration knows what it is represented in and
@@ -299,7 +299,8 @@ fn survives_promotion(types: &Types, id: TypeId) -> bool {
 ///
 /// The same declaration always is. Two different ones are in C23 when they have the same tag and
 /// the same members, which is the rule that lets a header be included twice without a guard.
-/// clang 18 implements it and gcc 13.3 still rejects the redefinition outright. In the older
+/// clang 18 and gcc 16 implement it, and gcc 13.3 still rejects the redefinition outright. The
+/// checker leans on it when a tag is defined again in C23. In the older
 /// dialects the question does not arise, because a second definition of a tag in one scope is
 /// refused before anything asks whether the two types match.
 fn records(

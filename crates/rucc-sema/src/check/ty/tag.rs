@@ -49,10 +49,11 @@ use rucc_ast::{self as ast, Member, TypeSpec};
 use rucc_base::Symbol;
 use rucc_base::hash::Set;
 use rucc_diag::{Diagnostic, Span};
+use rucc_session::Std;
 use rucc_types::{
     ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
     RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, Spelled, TypeId, TypeKind,
-    integer_info, is_complete, is_function, is_integer, is_void, layout, layout_record,
+    compatible, integer_info, is_complete, is_function, is_integer, is_void, layout, layout_record,
 };
 
 use super::{MEMBER, Subject};
@@ -69,21 +70,27 @@ enum Defining {
     New,
     /// The tag names something a definition cannot fill in, which has been reported.
     Refused,
+    /// The tag names a type this scope has already defined, and the dialect is C23 or later,
+    /// where a second definition with the same content is the same type rather than an error.
+    /// The body is read into a type of its own, which the tag is never bound to, and compared
+    /// against this one once it is complete.
+    Again(TypeId),
 }
 
 impl Checker<'_> {
-    /// The record a definition fills in, and the type its tag names.
+    /// The record a definition fills in, the type its tag names, and the earlier definition of
+    /// the same tag that C23 lets this one repeat, if it is one.
     pub(super) fn record_defined(
         &mut self,
         kind: RecordKind,
         tag: Option<Symbol>,
         tag_kind: TagKind,
         span: Span,
-    ) -> (RecordId, TypeId) {
+    ) -> (RecordId, TypeId, Option<TypeId>) {
         let defining = self.defining(tag, tag_kind, span);
         if let Defining::Complete(ty) = defining {
             if let TypeKind::Record(id) = self.types.kind(self.types.canonical(ty)) {
-                return (id, ty);
+                return (id, ty, None);
             }
         }
         let id = self.types.declare_record(kind, tag);
@@ -93,15 +100,24 @@ impl Checker<'_> {
                 self.scopes.declare_tag(name, Tag { kind: tag_kind, ty });
             }
         }
-        (id, ty)
+        let again = match defining {
+            Defining::Again(first) => Some(first),
+            _ => None,
+        };
+        (id, ty, again)
     }
 
-    /// The enumeration a definition fills in, and the type its tag names.
-    pub(super) fn enum_defined(&mut self, tag: Option<Symbol>, span: Span) -> (EnumId, TypeId) {
+    /// The enumeration a definition fills in, the type its tag names, and the earlier definition
+    /// of the same tag that C23 lets this one repeat, if it is one.
+    pub(super) fn enum_defined(
+        &mut self,
+        tag: Option<Symbol>,
+        span: Span,
+    ) -> (EnumId, TypeId, Option<TypeId>) {
         let defining = self.defining(tag, TagKind::Enum, span);
         if let Defining::Complete(ty) = defining {
             if let TypeKind::Enum(id) = self.types.kind(self.types.canonical(ty)) {
-                return (id, ty);
+                return (id, ty, None);
             }
         }
         let id = self.types.declare_enum(tag);
@@ -111,7 +127,81 @@ impl Checker<'_> {
                 self.scopes.declare_tag(name, Tag { kind: TagKind::Enum, ty });
             }
         }
-        (id, ty)
+        let again = match defining {
+            Defining::Again(first) => Some(first),
+            _ => None,
+        };
+        (id, ty, again)
+    }
+
+    /// The type a C23 redefinition of a tag leaves the declaration with, once its body has been
+    /// read into `second`.
+    ///
+    /// The same content is the same type, which is what lets a header without a guard be read
+    /// twice, and the tag goes on naming the first definition so that every use of it agrees.
+    /// Different content is refused with gcc 16's wording, which is not the wording of the older
+    /// dialects: "redefinition of struct or union 'struct S'" and "conflicting redefinition of
+    /// enum 'enum E'". The first definition is kept either way, as it is before C23.
+    pub(super) fn redefined(&mut self, first: TypeId, second: TypeId, span: Span) -> TypeId {
+        if self.same_content(first, second) {
+            return first;
+        }
+        let first_kind = self.types.kind(self.types.canonical(first));
+        let (message, tag) = match first_kind {
+            TypeKind::Enum(id) => {
+                ("conflicting redefinition of enum", self.types.enum_info(id).tag)
+            }
+            TypeKind::Record(id) => {
+                ("redefinition of struct or union", self.types.record_info(id).tag)
+            }
+            _ => return first,
+        };
+        let spelled = self.text(tag.expect("a redefinition has a tag")).to_owned();
+        let what = match first_kind {
+            TypeKind::Enum(_) => "enum",
+            TypeKind::Record(id) if self.types.record_info(id).kind == RecordKind::Union => "union",
+            _ => "struct",
+        };
+        self.report(
+            Diagnostic::error(format!("{message} '{what} {spelled}'"), span).with_code("E0561"),
+        );
+        first
+    }
+
+    /// Whether two complete definitions of one tag have the same content, C23 6.2.7p1.
+    ///
+    /// For a record that is the compatibility rule, the same members with the same names, widths
+    /// and compatible types in the same order, and on top of it the same placement, since an
+    /// `aligned` or a `packed` on one of them and not the other is a different type to gcc even
+    /// where the members agree. For an enumeration it is the same enumerators with the same
+    /// values in the same order, and the same underlying type, written or chosen alike.
+    fn same_content(&self, first: TypeId, second: TypeId) -> bool {
+        let types = &self.types;
+        match (types.kind(types.canonical(first)), types.kind(types.canonical(second))) {
+            (TypeKind::Record(a), TypeKind::Record(b)) => {
+                let (x, y) = (types.record_info(a), types.record_info(b));
+                compatible(types, first, second)
+                    && x.layout == y.layout
+                    && x.transparent == y.transparent
+                    && x.reverse == y.reverse
+                    && x.may_alias == y.may_alias
+                    && x.fields
+                        .iter()
+                        .zip(&y.fields)
+                        .all(|(f, g)| f.offset == g.offset && f.bit == g.bit && f.align == g.align)
+            }
+            (TypeKind::Enum(a), TypeKind::Enum(b)) => {
+                let (x, y) = (types.enum_info(a), types.enum_info(b));
+                x.fixed == y.fixed
+                    && x.underlying == y.underlying
+                    && x.enumerators.len() == y.enumerators.len()
+                    && x.enumerators
+                        .iter()
+                        .zip(&y.enumerators)
+                        .all(|(e, f)| e.name == f.name && e.value == f.value)
+            }
+            _ => false,
+        }
     }
 
     /// What the tag of a definition already means in the scope the definition is written in.
@@ -129,6 +219,13 @@ impl Checker<'_> {
             return Defining::Refused;
         }
         if self.built.defined.contains(&found.ty) {
+            // C23 made a second definition with the same content the same type, and whether the
+            // content is the same is only known once the body has been read. gcc 16 takes it in
+            // `-std=c23` and `-std=gnu23` alike, pedantic or not, and refuses it in every mode
+            // before them with the words below.
+            if self.cx.std >= Std::C23 {
+                return Defining::Again(found.ty);
+            }
             let spelled = self.text(name).to_owned();
             // gcc has two words for the one thing here and does not use them interchangeably:
             // a structure or a union is redefined and an enumeration is redeclared.
@@ -613,6 +710,7 @@ impl Checker<'_> {
         list: ast::EnumeratorList,
         fixed: Option<TypeId>,
         short: bool,
+        again: bool,
         span: Span,
     ) {
         let ast = self.ast;
@@ -676,7 +774,7 @@ impl Checker<'_> {
                 None => self.enumerator_placeholder(value, written.unwrap_or(previous)),
             };
             previous = provisional;
-            self.declare_enumerator(enumerator.name, value, provisional, enumerator.span);
+            self.declare_enumerator(enumerator.name, value, provisional, again, enumerator.span);
             values.push((enumerator.name, value, enumerator.span));
             next = if value < high { Some(value + 1) } else { None };
         }
@@ -785,8 +883,23 @@ impl Checker<'_> {
     }
 
     /// Puts one enumerator in scope, reporting a name that is taken already.
-    fn declare_enumerator(&mut self, name: Symbol, value: i128, ty: TypeId, span: Span) {
-        if let Some(binding) = self.scopes.lookup_here(name) {
+    ///
+    /// `again` is a C23 redefinition of an enumeration, whose enumerators are the first
+    /// definition's over again, so one already here with the same value is that enumerator and
+    /// not a clash. Whether the two enumerations agree as a whole is asked once the list is read.
+    fn declare_enumerator(
+        &mut self,
+        name: Symbol,
+        value: i128,
+        ty: TypeId,
+        again: bool,
+        span: Span,
+    ) {
+        let repeated = |binding: &Binding| {
+            again
+                && matches!(*binding, Binding::Enumerator { value: earlier, .. } if earlier == value)
+        };
+        if let Some(binding) = self.scopes.lookup_here(name).filter(|b| !repeated(b)) {
             let spelled = self.text(name).to_owned();
             let message = match binding {
                 Binding::Enumerator { .. } => format!("redeclaration of enumerator '{spelled}'"),
@@ -1482,7 +1595,8 @@ mod tests {
         let again = structure(&mut fixture, Some("S"), &[member(int, y)]);
         let hole = fixture.declarator(None, &[]);
 
-        let mut checker = fixture.checker();
+        // Before C23, where any second body is refused whatever it holds.
+        let mut checker = fixture.checker_in(Std::C17);
         let declared = checker.declared_type(forward, hole);
         assert!(!is_complete(&checker.types, declared));
         let defined = checker.declared_type(definition, hole);
@@ -1494,6 +1608,59 @@ mod tests {
         checker.declared_type(again, hole);
         assert_eq!(message(&checker), "redefinition of 'struct S'");
         assert_eq!(checker.declared_type(forward, hole), declared);
+    }
+
+    /// C23 6.7.3.4 makes a second definition of a tag in one scope with the same content the
+    /// same type, and gcc 16 takes it in every C23 mode. Different content is still refused, in
+    /// C23's own words, and before C23 any second definition is, as it always was.
+    #[test]
+    fn a_c23_redefinition_with_the_same_members_is_the_same_type() {
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let x = fixture.declarator(Some("x"), &[]);
+        let x_again = fixture.declarator(Some("x"), &[]);
+        let y = fixture.declarator(Some("y"), &[]);
+        let definition = structure(&mut fixture, Some("S"), &[member(int, x)]);
+        let same = structure(&mut fixture, Some("S"), &[member(int, x_again)]);
+        let different = structure(&mut fixture, Some("S"), &[member(int, y)]);
+        let hole = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker_in(Std::C23);
+        let first = checker.declared_type(definition, hole);
+        assert_eq!(checker.declared_type(same, hole), first);
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
+        assert_eq!(checker.declared_type(different, hole), first);
+        assert_eq!(message(&checker), "redefinition of struct or union 'struct S'");
+
+        let mut older = fixture.checker_in(Std::C17);
+        older.declared_type(definition, hole);
+        older.declared_type(same, hole);
+        assert_eq!(message(&older), "redefinition of 'struct S'");
+    }
+
+    /// The same for an enumeration, whose enumerators are declared a second time by the second
+    /// list and are not a clash when they have the values they had.
+    #[test]
+    fn a_c23_redefinition_of_an_enumeration_with_the_same_list_is_the_same_type() {
+        let mut fixture = Fixture::new();
+        let (a, b) = (enumerator(&mut fixture, "A", None), enumerator(&mut fixture, "B", None));
+        let c = enumerator(&mut fixture, "C", None);
+        let first_list = enumeration(&mut fixture, Some("E"), None, &[a, b]);
+        let same_list = enumeration(&mut fixture, Some("E"), None, &[a, b]);
+        let other_list = enumeration(&mut fixture, Some("E"), None, &[a, c]);
+        let hole = fixture.declarator(None, &[]);
+
+        let mut checker = fixture.checker_in(Std::C23);
+        let first = checker.declared_type(first_list, hole);
+        assert_eq!(checker.declared_type(same_list, hole), first);
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
+        assert_eq!(checker.declared_type(other_list, hole), first);
+        assert_eq!(message(&checker), "conflicting redefinition of enum 'enum E'");
+
+        let mut older = fixture.checker_in(Std::C17);
+        older.declared_type(first_list, hole);
+        older.declared_type(same_list, hole);
+        assert_eq!(messages(&older)[0], "redeclaration of 'enum E'");
     }
 
     #[test]
