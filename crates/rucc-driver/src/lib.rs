@@ -737,6 +737,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-fmin-function-alignment=`, which is weighed after the loop against what
     // `-falign-functions` said, in whichever order the two came.
     let mut min_function_align: Option<u32> = None;
+    // The register files the kernel keeps out of every function, which are weighed after the
+    // loop: the vector registers are off once the extensions they belong to are, whichever flag
+    // took those away, and `-mno-fp-ret-in-387` and a boundary of 3 are each taken only with the
+    // flags that make them mean nothing to the code, in whichever order they came.
+    let mut general_regs_only = false;
+    let mut x87 = true;
+    let mut fp_ret_in_387 = true;
+    let mut boundary_of_eight: Option<&str> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -2082,26 +2090,40 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // The boundary the stack pointer is kept on at a call, as a power of two, which the
             // x86-64 kernel sets to 3 because interrupt entry leaves its stack on eight bytes.
             // gcc's range is 4 to 12 while the vector registers are in use, because a spilled
-            // vector is stored with an instruction that needs sixteen, and 3 only once they are
-            // not. Nothing here turns them off yet (#2277), so 3 is refused the way gcc refuses
-            // it with SSE on. Only on x86-64, where gcc has the flag at all.
+            // vector is stored with an instruction that needs sixteen, and 3 only once `-mno-sse`
+            // has turned them off, which is weighed after the loop. Only on x86-64, where gcc has
+            // the flag at all.
             _ if arch == rucc_target::Arch::X86_64
                 && arg.starts_with("-mpreferred-stack-boundary=") =>
             {
                 let text = &arg["-mpreferred-stack-boundary=".len()..];
-                let power = text.parse::<u32>().ok();
-                if power == Some(3) {
-                    return Err(err(kbuild::refusal(
-                        arg,
-                        "gcc takes 3 only once -mno-sse has kept the vector registers out of every \
-                         function, and nothing here does that yet",
-                        Some(2277),
-                    )));
-                }
-                let power = power.filter(|power| (4..=12).contains(power)).ok_or_else(|| {
-                    err(format!("{arg}: the boundary is a power of two between 4 and 12"))
+                let power = text.parse::<u32>().ok().filter(|power| (3..=12).contains(power));
+                let power = power.ok_or_else(|| {
+                    err(format!("{arg}: the boundary is a power of two between 3 and 12"))
                 })?;
+                boundary_of_eight = (power == 3).then_some(arg);
                 opts.stack_boundary = Some(1 << power);
+            }
+            // The x87 stack, which is where `long double` is on x86-64. The kernel turns it off
+            // along with the vector registers. `-msoft-float` is the older spelling, and on this
+            // machine gcc means the same by it. Where a `float` is returned when there is no x87
+            // is only a question once there is none, so `-mno-fp-ret-in-387` is taken then.
+            "-mno-80387" | "-msoft-float" if arch == rucc_target::Arch::X86_64 => x87 = false,
+            "-m80387" | "-mhard-float" if arch == rucc_target::Arch::X86_64 => x87 = true,
+            "-mno-fp-ret-in-387" if arch == rucc_target::Arch::X86_64 => fp_ret_in_387 = false,
+            "-mfp-ret-in-387" if arch == rucc_target::Arch::X86_64 => fp_ret_in_387 = true,
+            // Nothing but the general purpose registers, which on x86-64 is the vector
+            // extensions and the x87 stack all turned off at once, and on AArch64 is the FP and
+            // SIMD registers. A function with a `float` in it is then refused, as gcc refuses it.
+            "-mgeneral-regs-only"
+                if matches!(arch, rucc_target::Arch::X86_64 | rucc_target::Arch::Aarch64) =>
+            {
+                general_regs_only = true;
+                if arch == rucc_target::Arch::X86_64 {
+                    isa.read("no-mmx").map_err(|_| err("-mno-mmx is a name gcc knows"))?;
+                    isa.read("no-sse").map_err(|_| err("-mno-sse is a name gcc knows"))?;
+                    x87 = false;
+                }
             }
             // A floor under every function that `-falign-functions` cannot lower, which is gcc's
             // difference between the two: the kernel passes this one because ftrace and the call
@@ -2246,22 +2268,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // relatives. Only the ones this compiler has the intrinsics for may be turned on for a
             // whole unit, because what turning one on does here is define the macro, and a macro
             // is a promise to a header that the names behind it exist. Turning one off is taken
-            // for any name gcc knows, since nothing is promised by it, except for the baseline:
-            // SSE2 is where the psABI passes a `double`, so a unit without it is a different
-            // calling convention and not a smaller instruction set.
+            // for any name gcc knows, since nothing is promised by it. That includes the baseline,
+            // which is what the kernel does to keep the vector registers out: a unit without SSE2
+            // has nowhere to put a `double`, and a function that uses one is refused, the way gcc
+            // refuses it.
             _ if isa_name(arg).is_some() => {
                 let Some((_, feature, on)) = isa_name(arg) else { continue };
                 if on && !feature.honoured() {
                     return Err(err(format!(
                         "{arg}: this compiler has no intrinsics for {} yet, so it cannot build a \
                          whole unit for it",
-                        feature.name()
-                    )));
-                }
-                if !on && rucc_target::Isa::baseline().has(feature) {
-                    return Err(err(format!(
-                        "{arg}: {} is part of the x86-64 baseline and the psABI passes values in \
-                         it, so a unit built without it would call and be called differently",
                         feature.name()
                     )));
                 }
@@ -2530,6 +2546,27 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 _ => rucc_target::Isa::NONE,
             };
         }
+    }
+    // The register files, now that the extensions are known. On x86-64 the vector registers are
+    // there for as long as SSE2 is, since that is where a `double` is kept, and on AArch64 until
+    // `-mgeneral-regs-only` says otherwise.
+    let sse = |name| rucc_target::Feature::named(name).is_some_and(|it| opts.isa.has(it));
+    opts.vector = match opts.target.arch {
+        rucc_target::Arch::X86_64 => sse("sse2"),
+        _ => !general_regs_only,
+    };
+    opts.x87 = x87;
+    if let Some(arg) = boundary_of_eight.filter(|_| sse("sse")) {
+        return Err(err(format!(
+            "{arg}: a boundary of 3 is taken only with -mno-sse, since a spilled vector is \
+             stored with an instruction that needs sixteen bytes"
+        )));
+    }
+    if !fp_ret_in_387 && x87 {
+        return Err(err(
+            "-mno-fp-ret-in-387: a `long double` is returned on the x87 stack while there is one, and \
+             this is taken only together with -mno-80387, where nothing returns one at all",
+        ));
     }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
     // After the loop, since whether `--64` or `-march=` is true of the target is a question about
@@ -7087,12 +7124,12 @@ mod tests {
         let x86 = ["--target=x86_64-unknown-linux-gnu", "-c", "a.c"];
         let said = refused(&[&x86[..], &["-mavx2"]].concat());
         assert!(said.contains("no intrinsics for avx2"), "{said}");
-        // Turning the baseline off is what a kernel asks for, and the kernel's table answers it
-        // with the issue about keeping the vector registers out.
-        let said = refused(&[&x86[..], &["-mno-sse2"]].concat());
-        assert!(said.contains("tamnd/rucc#2277"), "{said}");
-        let said = refused(&[&x86[..], &["-mno-fxsr"]].concat());
-        assert!(said.contains("baseline"), "{said}");
+        // Turning the baseline off is what a kernel asks for, and it takes the vector registers
+        // away with it.
+        let (opts, _) = compile(&[&x86[..], &["-mno-sse2"]].concat());
+        assert!(!opts.vector && opts.x87);
+        let (opts, _) = compile(&[&x86[..], &["-mno-fxsr"]].concat());
+        assert!(opts.vector);
         assert!(refused(&[&x86[..], &["-msse5"]].concat()).contains("unknown option"));
         // No other target has these, whichever side of the target the flag was written on.
         let said = refused(&["-msse4.2", "--target=aarch64-linux-gnu", "-c", "a.c"]);
@@ -8023,12 +8060,45 @@ mod tests {
         assert_eq!(boundary("-mpreferred-stack-boundary=5"), Some(32));
         assert_eq!(boundary("-mpreferred-stack-boundary=12"), Some(4096));
         for bad in ["-mpreferred-stack-boundary=13", "-mpreferred-stack-boundary=2"] {
-            assert!(refused(&[KERNEL_X86, bad, "-c", "a.c"]).contains("between 4 and 12"));
+            assert!(refused(&[KERNEL_X86, bad, "-c", "a.c"]).contains("between 3 and 12"));
         }
+        // Eight bytes only without SSE, whichever of the two flags comes first.
         let three = refused(&[KERNEL_X86, "-mpreferred-stack-boundary=3", "-c", "a.c"]);
         assert!(three.contains("-mno-sse"), "{three}");
+        let eight = [KERNEL_X86, "-mpreferred-stack-boundary=3", "-mno-sse", "-c", "a.c"];
+        assert_eq!(compile(&eight).0.stack_boundary, Some(8));
+        let eight = [KERNEL_X86, "-mno-sse", "-mpreferred-stack-boundary=3", "-c", "a.c"];
+        assert_eq!(compile(&eight).0.stack_boundary, Some(8));
         let arm = refused(&[KERNEL_ARM64, "-mpreferred-stack-boundary=4", "-c", "a.c"]);
         assert!(arm.contains("unknown option"), "{arm}");
+    }
+
+    /// tamnd/rucc#2277. The kernel keeps the vector registers and the x87 stack out of every
+    /// function, which is `-mno-sse` and `-mno-80387` on x86-64 and `-mgeneral-regs-only` on
+    /// either machine.
+    #[test]
+    fn the_kernel_can_take_the_vector_and_x87_registers_away() {
+        let files = |line: &[&str]| {
+            let (opts, _) = compile(&[line, &["-c", "a.c"]].concat());
+            (opts.vector, opts.x87)
+        };
+        assert_eq!(files(&[KERNEL_X86]), (true, true));
+        assert_eq!(files(&[KERNEL_X86, "-mno-sse"]), (false, true));
+        assert_eq!(files(&[KERNEL_X86, "-mno-80387"]), (true, false));
+        assert_eq!(files(&[KERNEL_X86, "-msoft-float"]), (true, false));
+        assert_eq!(files(&[KERNEL_X86, "-mno-80387", "-m80387"]), (true, true));
+        assert_eq!(files(&[KERNEL_X86, "-mgeneral-regs-only"]), (false, false));
+        assert_eq!(files(&[KERNEL_ARM64]), (true, true));
+        assert_eq!(files(&[KERNEL_ARM64, "-mgeneral-regs-only"]), (false, true));
+        // What the x86-64 kernel passes, all of it.
+        let kernel = [KERNEL_X86, "-mno-sse", "-mno-mmx", "-mno-sse2", "-mno-80387"];
+        assert_eq!(files(&[&kernel[..], &["-mno-fp-ret-in-387"]].concat()), (false, false));
+        // Where a `long double` comes back is only free to change once there is none.
+        let said = refused(&[KERNEL_X86, "-mno-fp-ret-in-387", "-c", "a.c"]);
+        assert!(said.contains("-mno-80387"), "{said}");
+        // `-mno-80387` is an x86 flag, and gcc for AArch64 does not know it.
+        let said = refused(&[KERNEL_ARM64, "-mno-80387", "-c", "a.c"]);
+        assert!(said.contains("unknown option"), "{said}");
     }
 
     /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
@@ -8036,10 +8106,6 @@ mod tests {
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
         for (flag, issue) in [
-            ("-mno-sse", 2277),
-            ("-mno-80387", 2277),
-            ("-mgeneral-regs-only", 2277),
-            ("-mpreferred-stack-boundary=3", 2277),
             ("-mstack-protector-guard-reg=gs", 2279),
             ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
             ("-mindirect-branch=thunk-extern", 2280),
@@ -8062,7 +8128,6 @@ mod tests {
         for (flag, issue) in [
             ("-mbranch-protection=pac-ret+bti", 2286),
             ("-msign-return-address=non-leaf", 2286),
-            ("-mgeneral-regs-only", 2277),
             ("-mstack-protector-guard=sysreg", 2279),
         ] {
             let failed = refused(&[KERNEL_ARM64, flag, "-c", "a.c"]);

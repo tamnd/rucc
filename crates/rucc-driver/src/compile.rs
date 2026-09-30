@@ -910,12 +910,6 @@ fn generate(
             target.tuple
         ))]);
     };
-    // Once for the whole unit rather than for each function, because the boundary is the command
-    // line's and every function in the unit is compiled against it.
-    let machine = match opts.stack_boundary {
-        Some(bytes) => machine.aligned_to(bytes),
-        None => machine,
-    };
     // Refused rather than dropped. A command line that asks for a stack protector on a target
     // that has nowhere to keep the word one is compared against would otherwise get code with no
     // protection in it and no indication that the flag did nothing, which is the one outcome worse
@@ -970,6 +964,8 @@ fn generate(
         frame_pointer: opts.keeps_frame_pointer(),
         red_zone: opts.red_zone,
         code_model: opts.code_model,
+        vector: opts.vector,
+        x87: opts.x87,
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         profile: match profile {
@@ -1095,7 +1091,15 @@ fn generate(
                 // the line somebody wrote rather than on the file as a whole.
                 let span = why.inst().map_or(Span::DUMMY, |inst| module[id].span(inst));
                 let said = format!("cannot generate code for '{name}': {why}");
-                complaints.push(unsupported_at(&said, span));
+                // A register file the command line took away is the program asking for something
+                // the flags forbid, which gcc refuses too, and not a part of this compiler that is
+                // missing, so it is an error and not a note pointing at the tracker.
+                complaints.push(match why {
+                    rucc_codegen::lower::Unsupported::Registers { .. } => {
+                        Diagnostic::error(said, span)
+                    }
+                    _ => unsupported_at(&said, span),
+                });
             }
         }
     }
@@ -4204,6 +4208,48 @@ decl #0 x : int object external static defined
         assert!(result.messages[0].contains("wants more alignment"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
+    }
+
+    /// tamnd/rucc#2277. With the vector registers taken away a function with a `double` in it is
+    /// refused, as gcc refuses it, and one without is compiled with no vector register in it,
+    /// the register save area of a variadic function included.
+    #[test]
+    fn a_unit_without_vector_registers_has_none_in_it() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.vector = false;
+        opts.x87 = false;
+        opts.stack_boundary = Some(8);
+        let result = run(&opts, "double half(double x) { return x / 2; }\n");
+        assert!(result.failed());
+        assert!(
+            result.messages[0].contains("a `f64` is kept in the vector registers"),
+            "{result:?}"
+        );
+        assert!(!result.messages[0].contains("not lowered yet"), "{result:?}");
+        let result = run(&opts, "long double same(long double x) { return x; }\n");
+        assert!(result.messages[0].contains("a `f80` is kept in the x87 registers"), "{result:?}");
+
+        let source = "#include <stdarg.h>\n\
+                      struct big { long a[8]; };\n\
+                      void copy(struct big *d, struct big *s) { *d = *s; }\n\
+                      void fill(struct big *d) { *d = (struct big){0}; }\n\
+                      extern void use(char *);\n\
+                      void buffer(void) { char b[32] = {0}; use(b); }\n\
+                      int first(int n, ...) { va_list ap; va_start(ap, n);\n\
+                      int r = va_arg(ap, int); va_end(ap); return r; }\n";
+        let mut free = freestanding();
+        free.emit = EmitKind::Asm;
+        free.vector = false;
+        free.x87 = false;
+        free.stack_boundary = Some(8);
+        free.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&free, source);
+        assert!(!result.failed(), "{result:?}");
+        let text = result.text();
+        assert!(!text.contains("xmm"), "{text}");
+        // Nothing asks for more than eight, so no frame is realigned by hand.
+        assert!(!text.contains("$-16"), "{text}");
     }
 
     /// A variable length array walks its pages under the flag that says every page is touched.

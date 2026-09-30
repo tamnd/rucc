@@ -152,6 +152,10 @@ pub struct Predef {
     /// The instruction set extensions the unit is built for, which decides `__SSE4_2__` and the
     /// rest of that family on x86-64 and nothing anywhere else.
     pub isa: Isa,
+    /// Whether a value may be kept in a vector register, which `-mgeneral-regs-only` turns off.
+    /// On AArch64 it decides `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros, which gcc
+    /// leaves out under that flag. On x86-64 the extensions say the same thing, through `__SSE__`.
+    pub vector: bool,
     /// Whether the file is assembly on its way to the assembler, `.S` or `-x assembler-with-cpp`.
     /// It defines `__ASSEMBLER__`, which every header that is also read from assembly tests to
     /// leave its C declarations out, and it takes away the macros that describe the C language
@@ -183,6 +187,7 @@ impl Predef {
             defines: Vec::new(),
             undefines: Vec::new(),
             isa: Isa::baseline(),
+            vector: true,
             assembler: false,
         }
     }
@@ -216,6 +221,7 @@ impl Predef {
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
             isa: opts.isa,
+            vector: opts.vector,
             assembler: false,
         }
     }
@@ -556,8 +562,15 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             for name in opts.isa.macros() {
                 d.flag(&name);
             }
-            d.flag("__SSE_MATH__");
-            d.flag("__SSE2_MATH__");
+            // Floating point is done in the vector registers for as long as there are some. gcc
+            // takes both macros away with `-mno-sse`, which is how the kernel's headers find out.
+            let has = |name| Feature::named(name).is_some_and(|it| opts.isa.has(it));
+            if has("sse") {
+                d.flag("__SSE_MATH__");
+            }
+            if has("sse2") {
+                d.flag("__SSE2_MATH__");
+            }
             d.flag("__k8");
             d.flag("__k8__");
             // Which code model, which is the small one unless `-mcmodel=kernel` said otherwise.
@@ -570,7 +583,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // through SSE instead. gcc's own `xmmintrin.h` reads this to decide how to write
             // `_mm_maskmove_si64`, so a compiler that leaves it undefined is handed a
             // different function body than gcc is, which is what the header sweep found.
-            d.flag("__MMX_WITH_SSE__");
+            if has("sse2") {
+                d.flag("__MMX_WITH_SSE__");
+            }
         }
         Arch::Aarch64 => {
             d.flag("__aarch64__");
@@ -579,8 +594,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__ARM_ARCH_PROFILE", "'A'");
             d.set("__ARM_64BIT_STATE", "1");
             d.set("__ARM_ALIGN_MAX_PWR", "28");
-            d.set("__ARM_FP", "0xe");
-            d.set("__ARM_NEON", "1");
+            if opts.vector {
+                d.set("__ARM_FP", "0xe");
+                d.set("__ARM_NEON", "1");
+            }
             d.set("__ARM_FEATURE_UNALIGNED", "1");
             d.set("__ARM_PCS_AAPCS64", "1");
             // The rest of what gcc says for a plain Armv8-A. Every one is an instruction the
@@ -590,9 +607,11 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__ARM_ARCH_8A", "1");
             d.set("__ARM_ARCH_ISA_A64", "1");
             d.set("__ARM_FEATURE_CLZ", "1");
-            d.set("__ARM_FEATURE_FMA", "1");
+            if opts.vector {
+                d.set("__ARM_FEATURE_FMA", "1");
+                d.set("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
+            }
             d.set("__ARM_FEATURE_IDIV", "1");
-            d.set("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
             d.set("__ARM_ALIGN_MAX_STACK_PWR", "16");
             d.set("__ARM_SIZEOF_MINIMAL_ENUM", "4");
             // The target's own `wchar_t`, which is two bytes on Windows and four everywhere else.
@@ -603,7 +622,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // A fused multiply add is one instruction here, and glibc's `math.h` turns these
             // into `FP_FAST_FMA` and `FP_FAST_FMAF`, which a program reads to decide whether
             // calling `fma` is cheaper than writing the product and the sum apart.
-            for name in ["", "F", "F32", "F64", "F32x"] {
+            for name in ["", "F", "F32", "F64", "F32x"].into_iter().filter(|_| opts.vector) {
                 d.set(&format!("__FP_FAST_FMA{name}"), "1");
             }
             // The CRC32 instructions, which are optional in Armv8.0 and part of every architecture
@@ -2392,6 +2411,29 @@ mod tests {
         let x86: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
         let opts = Predef { isa: Isa::aarch64_march("armv8-a+crc"), ..Predef::new() };
         assert!(!built_in(&TargetInfo::new(x86), &opts).contains("__ARM_FEATURE_CRC32"));
+    }
+
+    #[test]
+    fn a_unit_without_vector_registers_says_so_the_way_gcc_does() {
+        // tamnd/rucc#2277. `-mno-sse` takes the floating point macros away along with the
+        // extensions, and `-mgeneral-regs-only` on AArch64 takes FP and NEON away.
+        let x86: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
+        let mut choices = rucc_target::Choices::new();
+        choices.read("no-sse").expect("a name gcc knows");
+        let opts = Predef { isa: choices.over(Isa::baseline()), vector: false, ..Predef::new() };
+        let text = built_in(&TargetInfo::new(x86), &opts);
+        for name in ["__SSE__", "__SSE2__", "__SSE_MATH__", "__SSE2_MATH__", "__MMX_WITH_SSE__"] {
+            assert!(!text.contains(name), "{name}");
+        }
+        assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __SSE2_MATH__ 1"));
+        let arm: Triple = "aarch64-unknown-linux-gnu".parse().expect("a triple");
+        let opts = Predef { vector: false, ..Predef::new() };
+        let text = built_in(&TargetInfo::new(arm), &opts);
+        for name in ["__ARM_FP ", "__ARM_NEON ", "__ARM_FEATURE_FMA", "__FP_FAST_FMA"] {
+            assert!(!text.contains(name), "{name}");
+        }
+        assert!(has(&text, "#define __ARM_FEATURE_IDIV 1"));
+        assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __ARM_NEON 1"));
     }
 
     #[test]
