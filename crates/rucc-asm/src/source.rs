@@ -619,7 +619,6 @@ impl Reader {
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
-        let args: Vec<String> = args.iter().map(|arg| crate::instruction::joined(arg)).collect();
         let mode = if self.i386 { Mode::Bits32 } else { Mode::Bits64 };
         let mut written =
             crate::instruction::one_in(word, &args, mode).map_err(|why| self.bad(&why))?;
