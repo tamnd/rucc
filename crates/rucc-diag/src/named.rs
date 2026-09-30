@@ -44,6 +44,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0680", "pragmas"),
     ("E0681", "pragmas"),
     ("E0691", "pragmas"),
+    ("E0703", "attributes"),
     ("E0707", "attributes"),
     ("E0708", "attributes"),
     ("E0713", "builtin-declaration-mismatch"),
@@ -53,6 +54,8 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0750", "attributes"),
     ("E0751", "attributes"),
     ("E0752", "attribute-warning"),
+    ("E0768", "compare-distinct-pointer-types"),
+    ("E0769", "prio-ctor-dtor"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -128,6 +131,18 @@ mod tests {
         assert!(OPTIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
         assert_eq!(option_of("E0673"), Some("pointer-sign"));
         assert_eq!(option_of("E0001"), None);
+    }
+
+    /// A code names one option, so two warnings gcc files under different names cannot share
+    /// one. The reserved constructor priority is `prio-ctor-dtor` rather than `attributes`, and
+    /// comparing pointers to distinct types is an option of its own where comparing a pointer
+    /// with an integer answers to none.
+    #[test]
+    fn warnings_gcc_files_apart_have_codes_of_their_own() {
+        assert_eq!(option_of("E0703"), Some("attributes"));
+        assert_eq!(option_of("E0769"), Some("prio-ctor-dtor"));
+        assert_eq!(option_of("E0768"), Some("compare-distinct-pointer-types"));
+        assert_eq!(option_of("E0517"), None);
     }
 
     #[test]

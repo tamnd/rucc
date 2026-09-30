@@ -616,7 +616,7 @@ impl Checker<'_> {
                 "{name} priorities from 0 to {RESERVED_PRIORITY} are reserved for the \
                  implementation"
             );
-            self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+            self.report(Diagnostic::warning(what, attr.span).with_code("E0769"));
         }
         Some(Priority::Numbered(number))
     }

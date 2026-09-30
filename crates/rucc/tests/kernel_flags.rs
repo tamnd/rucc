@@ -225,3 +225,30 @@ fn a_warning_turned_off_by_name_is_not_heard() {
     assert!(kept.status.success(), "{}", String::from_utf8_lossy(&kept.stderr));
     assert!(String::from_utf8_lossy(&kept.stderr).contains("warning: pointer targets"));
 }
+
+/// `-Wno-attributes` quiets an attribute that does nothing where it was written, and the
+/// reserved constructor priority answers to its own name. `-Wno-error` takes back `-Werror`.
+#[test]
+fn an_ignored_attribute_and_a_reserved_priority_answer_to_gcc_s_names() {
+    let target = "--target=x86_64-unknown-linux-gnu";
+    let compile = |source: &str, flags: &[&str]| {
+        let mut all = vec![target, "-c", "-o", "/dev/null"];
+        all.extend_from_slice(flags);
+        run(&all, source)
+    };
+    let object = "__attribute__((constructor)) int not_a_function;\n";
+    let quiet = compile(object, &["-Werror", "-Wno-attributes"]);
+    assert!(quiet.status.success(), "{}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(quiet.stderr.is_empty(), "{}", String::from_utf8_lossy(&quiet.stderr));
+
+    let early = "__attribute__((constructor(50))) void early(void) {}\n";
+    let heard = compile(early, &["-Werror", "-Wno-attributes"]);
+    assert!(!heard.status.success(), "{}", String::from_utf8_lossy(&heard.stderr));
+    let quiet = compile(early, &["-Werror", "-Wno-prio-ctor-dtor"]);
+    assert!(quiet.status.success(), "{}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(quiet.stderr.is_empty(), "{}", String::from_utf8_lossy(&quiet.stderr));
+
+    let back = compile(early, &["-Werror", "-Wno-error"]);
+    assert!(back.status.success(), "{}", String::from_utf8_lossy(&back.stderr));
+    assert!(String::from_utf8_lossy(&back.stderr).contains("warning: "));
+}

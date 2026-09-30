@@ -1555,7 +1555,7 @@ impl Checker<'_> {
             } else if !either_void && !compatible(&self.types, a, b) {
                 self.report(
                     Diagnostic::warning("comparison of distinct pointer types lacks a cast", span)
-                        .with_code("E0517"),
+                        .with_code("E0768"),
                 );
             }
             rhs = self.conv().to_type(rhs, left);
