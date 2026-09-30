@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An `asm` operand that is a constant can be named with `%b`, `%w`, `%k` or `%q` again, which prints the constant the way gcc does. The kernel's `outb` with a known port was refused before.
 - The driver takes `-C` and `-CC`. Comments still come out of `-E` as spaces, which is enough for the kernel's vDSO linker script, the one place a build was seen asking for them.
 - Preprocessing a `.S` no longer stops on a `##` whose two sides do not make one token. gcc keeps both halves side by side in assembly, and the kernel relies on that in linkage.h (`L__sym_size_\name`) and in vmlinux.lds.S (`initcall0.init`). C still reports E0313.
 - A dependency rule for a source read from standard input listed `-` as a prerequisite and named the target `-.o`. gcc lists nothing for standard input, writes no rule when nothing else is left, and calls the target `-`, and rucc now does the same. The kernel's `scripts/checksyscalls.sh` compiles this way under `-Wp,-MMD`, and fixdep stopped the build trying to open a file called `-`.
