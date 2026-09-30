@@ -619,6 +619,7 @@ impl Reader {
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
+        let args: Vec<String> = args.iter().map(|arg| crate::instruction::joined(arg)).collect();
         let mode = if self.i386 { Mode::Bits32 } else { Mode::Bits64 };
         let mut written =
             crate::instruction::one_in(word, &args, mode).map_err(|why| self.bad(&why))?;
@@ -4429,6 +4430,25 @@ f:
         let named: Vec<&str> = frame.relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
         assert!(named.contains(&"DW.ref.__gcc_personality_v0"), "{named:?}");
         assert!(named.contains(&".LLSDA0"), "{named:?}");
+    }
+
+    /// A space between a `%` and its register is skipped, as gas skips it, which is how the
+    /// kernel's `vmenter.S` reaches the assembler after the preprocessor. A `%` in an expression is
+    /// still the remainder. The bytes are the ones GNU as writes for the same four lines.
+    #[test]
+    fn a_space_after_the_sigil_of_a_register_is_skipped() {
+        let text = "\tcmpb $0, kvm_rebooting (% rip)\n\tmovq % rax, %rbx\n\
+                    \tmovl $(10 % 3), %eax\n\tmovw % gs:8, %ax\n";
+        let done = assembled(text);
+        let code = done.parts.iter().find(|part| part.name == ".text").expect("one");
+        assert_eq!(
+            code.bytes,
+            [
+                0x80, 0x3d, 0, 0, 0, 0, 0, 0x48, 0x89, 0xc3, 0xb8, 1, 0, 0, 0, 0x65, 0x66, 0x8b,
+                0x04, 0x25, 8, 0, 0, 0
+            ]
+        );
+        assert_eq!(code.relocs[0].symbol, "kvm_rebooting");
     }
 
     /// A `.cfi_lsda` in an encoding the table has no way to write is refused, rather than passed
