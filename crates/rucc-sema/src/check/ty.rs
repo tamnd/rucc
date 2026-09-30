@@ -569,7 +569,9 @@ impl Checker<'_> {
         // has asked for its value and it is the asking that decays it.
         let ty = match operand {
             TypeofArg::Expr(expr) => {
+                self.unevaluated += 1;
                 let node = self.expr(expr);
+                self.unevaluated -= 1;
                 self.tast[node].ty
             }
             TypeofArg::Type(name) => self.type_name(name),

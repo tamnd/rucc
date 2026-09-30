@@ -300,6 +300,20 @@ pub struct Checker<'a> {
     /// The attribute lists `__builtin_has_attribute` and `__builtin_counted_by_ref` read, which
     /// is in `check/annotate.rs` with both of them.
     pub(in crate::check) annotations: annotate::Annotations,
+    /// How many operands that are never evaluated the expression being checked is inside, which
+    /// is the operand of `sizeof`, `__alignof__` and `typeof`.
+    ///
+    /// gcc keeps quiet in there about what reading the value would do, since nothing reads it.
+    /// `__is_constexpr` in the kernel dereferences a `void *` inside `sizeof` on purpose, and a
+    /// warning there is an error in every build with `CONFIG_WERROR`.
+    pub(in crate::check) unevaluated: u32,
+    /// The constants this compiler answered where gcc answers in a later pass, which is what
+    /// `__builtin_object_size` gives when nothing is known about the object.
+    ///
+    /// gcc has no number there while it is still checking the program, so it never warns that
+    /// the number does not fit. The kernel's `check_copy_size` puts that answer in an `int` on
+    /// purpose, and a warning there is an error under `CONFIG_WERROR`.
+    pub(in crate::check) answered_late: rucc_base::hash::Set<ExprId>,
 }
 
 impl<'a> Checker<'a> {
@@ -321,6 +335,8 @@ impl<'a> Checker<'a> {
             calling: None,
             defining: None,
             annotations: annotate::Annotations::default(),
+            unevaluated: 0,
+            answered_late: rucc_base::hash::Set::default(),
         };
         checker.declare_type_names();
         checker

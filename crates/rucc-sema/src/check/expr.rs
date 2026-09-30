@@ -2216,7 +2216,9 @@ impl Checker<'_> {
     fn warn_overflow(&mut self, value: ExprId, target: TypeId) {
         // `bool` is left out because converting to it is a comparison against zero and not a
         // truncation, so `bool b = 2;` loses nothing and gcc warns about neither.
-        if matches!(eval::bare(&self.types, target), TypeKind::Bool) {
+        if matches!(eval::bare(&self.types, target), TypeKind::Bool)
+            || self.answered_late.contains(&value)
+        {
             return;
         }
         let Some(info) = eval::int_shape(&self.types, target, self.cx.target) else {
@@ -2295,10 +2297,14 @@ impl Checker<'_> {
     /// Whether a type may be reached through a pointer, having reported it when it may not.
     ///
     /// A `void *` may be dereferenced, which is a warning and not an error, because gcc accepts
-    /// it and real code relies on that. An incomplete record may not, and that is the message
-    /// people actually hit, which is why it names the type.
+    /// it and real code relies on that. Not even a warning inside an operand nothing evaluates,
+    /// which is gcc's rule too. An incomplete record may not, and that is the message people
+    /// actually hit, which is why it names the type.
     fn target_of_indirection(&mut self, ty: TypeId, span: Span) -> bool {
         if is_void(&self.types, ty) {
+            if self.unevaluated > 0 {
+                return true;
+            }
             self.report(
                 Diagnostic::warning("dereferencing 'void *' pointer", span).with_code("E0520"),
             );
