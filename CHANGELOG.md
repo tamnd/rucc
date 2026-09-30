@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.17.0
+
+The W3 release, for UCRT, winpthreads and the real corpus on Windows. x86_64-windows-gnu is tier 2: SQLite's tests pass under Wine with nothing failing in rucc's build that passes in MinGW GCC's, a program imports only `KERNEL32.dll` and the `api-ms-win-crt-*` sets, six real projects pass under Wine and five natively, and the ABI differential against MinGW GCC is clean. The windows-gnu sysroots are built with import libraries from `rucc --dlltool`, byte for byte what llvm-dlltool writes. This release also carries most of the AArch64 Windows work for W5: the calling convention, unwind tables, `__chkstk`, x18 and thread-local storage.
+
 ### Added
 
 - `x86_64-windows-gnu` is tier 2. `tests/sqlite/windows.sh` is rung 1 for it: SQLite 3.53.4's testfixture built by rucc and by MinGW GCC from Linux, `test/veryquick.test` run from both under Wine, and a failure when a test fails only in rucc's build. The nightly workflow runs it, and with the ABI differential against MinGW GCC that is what tier 2 asks for. `docs/DIVERGENCE.md` lists what Wine and the msvcrt reference change about the suite (#2226).
