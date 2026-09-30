@@ -33,9 +33,9 @@
 //! bytes that are not characters replaced, which is right for a message and wrong for an object,
 //! and the object is what `resolve_bytes` is for.
 
-use std::collections::HashMap;
 use std::fmt;
 
+use crate::hash::Map;
 use crate::index::Idx;
 
 /// Marker for the symbol table, so that `Idx<SymbolTable>` cannot be confused with any
@@ -133,16 +133,16 @@ pub struct Interner {
     spans: Vec<(u32, u32)>,
     /// Lookup from text to symbol. The key is a span into `buf` rather than an owned
     /// `String`, which is why the map is keyed by the string and rebuilt through `resolve`.
-    map: HashMap<Box<str>, Symbol>,
+    map: Map<Box<str>, Symbol>,
     /// The spelling of a symbol whose bytes are not UTF-8, which `buf` cannot hold because
     /// `buf` is a `String`. A map rather than a column beside `spans`, because a compilation
     /// has a handful of these at most and usually none: a raw byte in a string literal is the
     /// only thing that puts one here.
-    raw: HashMap<Symbol, Box<[u8]>>,
+    raw: Map<Symbol, Box<[u8]>>,
     /// Lookup from those bytes back to their symbol, so that interning the same spelling twice
     /// is the same symbol. Kept apart from `map` because two spellings that are not text can
     /// read the same lossily and still have to be told apart.
-    raw_map: HashMap<Box<[u8]>, Symbol>,
+    raw_map: Map<Box<[u8]>, Symbol>,
 }
 
 impl Default for Interner {
@@ -163,9 +163,9 @@ impl Interner {
         let mut interner = Self {
             buf: String::with_capacity(cap * 8),
             spans: Vec::with_capacity(cap),
-            map: HashMap::with_capacity(cap),
-            raw: HashMap::new(),
-            raw_map: HashMap::new(),
+            map: Map::with_capacity_and_hasher(cap, Default::default()),
+            raw: Map::default(),
+            raw_map: Map::default(),
         };
         for name in RESERVED {
             interner.intern(name);

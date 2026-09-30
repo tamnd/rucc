@@ -274,6 +274,7 @@ name = "rucc-object"
 version = "0.18.0"
 dependencies = [
  "object",
+ "rucc-base",
  "rucc-target",
  "rucc-tuple",
 ]

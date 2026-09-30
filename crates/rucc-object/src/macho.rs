@@ -32,8 +32,6 @@
 //! written against the symbol before it with the distance added, the way Apple's assembler does
 //! it.
 
-use std::collections::{HashMap, HashSet};
-
 use object::macho;
 use object::write::SymbolSection;
 use object::write::{MachOBuildVersion, Mangling, Object as Writer, Relocation, Symbol};
@@ -41,6 +39,7 @@ use object::{
     Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
     SectionFlags, SectionKind, SymbolFlags,
 };
+use rucc_base::hash::{Map, Set};
 use rucc_target::TargetInfo;
 use rucc_target::aarch64::Fixup;
 use rucc_tuple::{Env, Os, Version};
@@ -87,7 +86,7 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
     // with no real name in front of it is kept as a symbol after all, which is what the linker
     // then cuts the section at. That is at the start of what it was in front of, so nothing is cut
     // in two.
-    let defined: HashMap<&str, &Name> =
+    let defined: Map<&str, &Name> =
         input.names.iter().map(|name| (name.name.as_str(), name)).collect();
     let mut atoms: Vec<Vec<(u64, &str)>> = vec![Vec::new(); input.parts.len()];
     for name in &input.names {
@@ -116,7 +115,7 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
             }
         }
     };
-    let kept: HashSet<String> = input
+    let kept: Set<String> = input
         .parts
         .iter()
         .flat_map(|part| &part.relocs)
@@ -124,7 +123,7 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
         .filter(|name| temporary(name))
         .collect();
 
-    let mut symbols = HashMap::new();
+    let mut symbols = Map::default();
     for name in &input.names {
         if temporary(&name.name) && !kept.contains(&name.name) {
             continue;
@@ -187,10 +186,10 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
 /// those by their C names, and the symbol is the same name with the underscore in front.
 fn described(
     obj: &mut Writer<'_>,
-    symbols: &HashMap<&str, object::write::SymbolId>,
+    symbols: &Map<&str, object::write::SymbolId>,
     info: &Info,
 ) -> Result<(), String> {
-    let debug = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect::<HashSet<_>>();
+    let debug = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect::<Set<_>>();
     for chunk in &info.chunks {
         let section = debug_section(&chunk.name)?;
         let id = obj.add_section(b"__DWARF".to_vec(), section.into_bytes(), SectionKind::Debug);

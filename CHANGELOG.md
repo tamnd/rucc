@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The optimizer's maps and sets hash with the shared hasher instead of SipHash (#2291).
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
+- The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
 
 ## 0.18.0
 
