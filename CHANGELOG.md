@@ -10,6 +10,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
 - The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
+### Fixed
+
+- Any integer constant expression with the value zero is a null pointer constant, not only a literal `0`, so `(void *)((long)(x) * 0l)` is one exactly when `x` is a constant. The kernel's `__is_constexpr` is built on that and answered "not constant" for everything, which turned arrays sized with `max()` into variable length arrays and broke some `BUILD_BUG_ON_ZERO` uses (#2261).
 
 ## 0.18.0
 

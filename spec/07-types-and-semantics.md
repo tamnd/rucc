@@ -70,6 +70,8 @@ Arithmetic is exact where the standard requires it and target-faithful where it 
 
 An address constant is an object and a distance into it rather than a value, because the value is the linker's to decide. The object is a declaration, a string literal, a label whose address GNU C lets a program take, or nothing at all. The last of those is the one that is not obvious and it is what `((size_t) &((type *)0)->field)` needs: there is no object under a null pointer, so the whole of the address is the distance, and a distance is a number this compiler knows. That makes it a constant expression, which is what every spelling of `offsetof` that predates `__builtin_offsetof` depends on, and every header that has to work on a compiler without the builtin still writes one. It is also the one address that converts to an integer of any width, since there is no relocation for a narrow type to lose half of, and it is the one that reaches the object file as a number rather than as a reference to a symbol.
 
+A null pointer constant is any integer constant expression with the value zero, or one cast to `void *`, and the evaluator is what decides it rather than the shape of the tree. `(void *)((long)(x) * 0l)` is one exactly when `x` is an integer constant expression, which is the whole of how the kernel's `__is_constexpr` tells a constant from a variable: the conditional it builds has type `int *` for a constant and `void *` for anything else. The question is asked with the strict folding, so a `const` object is not a constant there in any dialect, and gcc gives the same answer.
+
 ## 7.6 Floating point semantics
 
 The default is `-ffp-contract=on` and `-fexcess-precision=fast`, matching GCC.
