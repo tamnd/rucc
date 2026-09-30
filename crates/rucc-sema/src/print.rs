@@ -553,6 +553,7 @@ impl<'a> Printer<'a> {
             ExprKind::FpClassify { .. } => "fpclassify".to_owned(),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
             ExprKind::Abs { .. } => "abs".to_owned(),
+            ExprKind::Complex { .. } => "complex".to_owned(),
             ExprKind::Shuffle { .. } => "shuffle".to_owned(),
             ExprKind::ByteSwap { .. } => "bswap".to_owned(),
             ExprKind::BitCount { count, .. } => format!("count {}", count.as_str()),
@@ -651,6 +652,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Assign { lhs, rhs, .. }
             | ExprKind::VaCopy { dst: lhs, src: rhs }
             | ExprKind::Expect { value: lhs, hint: rhs, .. }
+            | ExprKind::Complex { real: lhs, imag: rhs }
             | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);

@@ -9167,6 +9167,85 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call"), "{text}");
     }
 
+    /// `__builtin_complex` is the two halves written where they go, with no arithmetic between.
+    ///
+    /// It is what glibc's `complex.h` defines `CMPLX` as, and the reason C11 added the macro is
+    /// that `x + y * I` gets some values wrong: `0.0 * INFINITY` is a nan, and a negative zero
+    /// added to a positive one is a positive zero. So there is nothing to compute, and a constant
+    /// pair folds, which is what a static initializer written with the macro needs. Measured
+    /// against gcc 16.2.0, which emits the same bits for every initializer here.
+    #[test]
+    fn builtin_complex_is_the_two_halves_with_no_arithmetic() {
+        let text =
+            body("_Complex double f(double x, double y) { return __builtin_complex(x, y); }\n");
+        for op in ["fadd", "fsub", "fmul", "call"] {
+            assert!(!text.contains(op), "{op}: {text}");
+        }
+
+        // The halves keep the type they were written in, so two floats are a `_Complex float`.
+        let text = body("_Complex float f(float x, float y) { return __builtin_complex(x, y); }\n");
+        assert!(!text.contains("fpext") && !text.contains("fptrunc"), "{text}");
+
+        // Constants fold into a static initializer, and a negative zero and an infinity are the
+        // halves that were written rather than what a sum or a product would make of them.
+        let text = ir(concat!(
+            "static _Complex double a = __builtin_complex(1.5, -0.0);\n",
+            "static _Complex double b = __builtin_complex(0.0, __builtin_inf());\n",
+            "static _Complex float c = __builtin_complex(-0.0f, 2.5f);\n",
+            "_Complex double *pa = &a, *pb = &b;\n",
+            "_Complex float *pc = &c;\n",
+        ));
+        assert!(text.contains("{ f64 0x3ff8000000000000, f64 0x8000000000000000 }"), "{text}");
+        assert!(text.contains("{ f64 0x0, f64 0x7ff0000000000000 }"), "{text}");
+        assert!(text.contains("{ f32 0x80000000, f32 0x40200000 }"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // glibc's own definition of the macro, which casts each argument to the type it wants.
+        let text = ir(concat!(
+            "#define CMPLX(x, y) __builtin_complex ((double) (x), (double) (y))\n",
+            "#define INFINITY (__builtin_inff ())\n",
+            "_Complex double z = CMPLX(0.0, INFINITY);\n",
+        ));
+        assert!(text.contains("{ f64 0x0, f64 0x7ff0000000000000 }"), "{text}");
+    }
+
+    /// `__builtin_complex` refuses what gcc refuses, in gcc's words.
+    ///
+    /// The halves have to have the same real binary floating type already, because the builtin
+    /// converts nothing. An integer is refused rather than converted, and so is a `float` beside
+    /// a `double`, which is why glibc's macros cast both arguments first.
+    #[test]
+    fn builtin_complex_refuses_what_gcc_refuses() {
+        let cases = [
+            (
+                "int i; double d; void f(void) { __builtin_complex(i, d); }\n",
+                "operand not of real binary floating-point type",
+            ),
+            (
+                "int i; double d; void f(void) { __builtin_complex(d, i); }\n",
+                "operand not of real binary floating-point type",
+            ),
+            (
+                "float g; double d; void f(void) { __builtin_complex(g, d); }\n",
+                "operands of different types",
+            ),
+            ("double d; void f(void) { __builtin_complex(d); }\n", "wrong number of arguments to"),
+            (
+                "double d; void f(void) { __builtin_complex(d, d, d); }\n",
+                "wrong number of arguments to",
+            ),
+        ];
+        for (source, wanted) in cases {
+            let messages = errors(source);
+            assert_eq!(messages.len(), 1, "{messages:?}");
+            assert!(messages[0].contains(wanted), "{messages:?}");
+            assert!(messages[0].contains("'__builtin_complex'"), "{messages:?}");
+        }
+        // Answered by the table, so a header that asks before it uses the builtin gets a yes.
+        let text = ir("int yes = __has_builtin(__builtin_complex);\n");
+        assert!(text.contains("global @yes : i32 = 1,"), "{text}");
+    }
+
     /// A math library builtin handed a constant is the answer, and is not a call.
     ///
     /// This is the reason the family is answered in the front end at all. `double x =

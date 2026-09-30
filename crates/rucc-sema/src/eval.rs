@@ -280,6 +280,7 @@ impl<'a> Eval<'a> {
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
             ExprKind::FpClassify { value, answers } => self.fpclassify(expr, value, answers),
             ExprKind::Sign { op, lhs, rhs } => self.sign(expr, op, lhs, rhs),
+            ExprKind::Complex { real, imag } => self.complex(expr, real, imag),
             ExprKind::Overflow { op, args, stores: false, .. } => self.overflows(expr, op, args),
             ExprKind::ByteSwap { operand } => self.byte_swap(expr, operand),
             ExprKind::BitCount { operand, count } => self.bit_count(expr, operand, count),
@@ -437,6 +438,21 @@ impl<'a> Eval<'a> {
             }
         };
         Ok(Const::Float(left.with_sign(sign)))
+    }
+
+    /// `__builtin_complex` of two constants, which is the pair of them as they are.
+    ///
+    /// This is what lets `static _Complex double z = CMPLX(0.0, INFINITY);` initialize an object
+    /// with static storage duration, which C11 promises of the macro and gcc does. Nothing is
+    /// computed, so a negative zero and an infinity come out as the halves that were written.
+    fn complex(&mut self, expr: ExprId, real: ExprId, imag: ExprId) -> Result<Const, NotConstant> {
+        let Const::Float(real) = self.eval(real)? else {
+            return Err(self.stop(expr));
+        };
+        let Const::Float(imag) = self.eval(imag)? else {
+            return Err(self.stop(expr));
+        };
+        Ok(Const::Complex { real, imag })
     }
 
     /// `__builtin_bswap16`, `32` and `64` of a constant.

@@ -309,6 +309,7 @@ impl Reach<'_> {
             | ExprKind::Assign { lhs, rhs, .. }
             | ExprKind::VaCopy { dst: lhs, src: rhs }
             | ExprKind::Expect { value: lhs, hint: rhs, .. }
+            | ExprKind::Complex { real: lhs, imag: rhs }
             | ExprKind::Comma { lhs, rhs } => {
                 self.expr(lhs);
                 self.expr(rhs);

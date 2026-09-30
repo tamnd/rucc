@@ -274,6 +274,11 @@ impl Checker<'_> {
         if let Some(answer) = self.sign_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // A complex value made of two halves with no arithmetic in between, which is what
+        // `complex.h` spells `CMPLX`. In `check/builtin/parts.rs`.
+        if let Some(answer) = self.parts_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // A vector made of the lanes of others, which has no function behind it to call. In
         // `check/builtin/shuffle.rs`.
         if let Some(answer) = self.shuffle_builtin_call(name, args, span) {
@@ -756,6 +761,7 @@ mod tests {
             let known = GENERIC.iter().any(|generic| generic.name == feature.name)
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
+                || crate::check::builtin::parts::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
                 || crate::check::builtin::apply::is_family(feature.name)
                 || crate::check::annotate::is_family(feature.name)

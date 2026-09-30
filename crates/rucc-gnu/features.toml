@@ -2509,6 +2509,15 @@ used_by = ["gcc-torture", "glibc"]
 tests = ["rucc-sema::every_prefixed_spelling_of_the_complex_family_is_a_row_of_the_table_with_its_type", "rucc-driver::the_complex_builtins_are_the_halves_of_the_value_and_not_a_call"]
 
 [[feature]]
+name = "__builtin_complex"
+kind = "builtin"
+gcc_version = "4.7"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::builtin_complex_is_the_two_halves_with_no_arithmetic", "rucc-driver::builtin_complex_refuses_what_gcc_refuses"]
+
+[[feature]]
 name = "__builtin_conj"
 kind = "builtin"
 gcc_version = "3.0"

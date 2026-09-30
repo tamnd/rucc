@@ -75,6 +75,7 @@ mod math;
 mod msvc;
 mod overflow;
 mod pack;
+mod parts;
 mod prefetch;
 mod shuffle;
 mod sign;
