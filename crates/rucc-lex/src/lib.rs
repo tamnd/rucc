@@ -572,6 +572,64 @@ mod tests {
         assert_eq!(last as usize, src.len());
     }
 
+    /// The kinds and spellings of every token in `src` read as assembly, and what was reported.
+    fn scan_assembly(src: &str) -> (Vec<(PpTokenKind, String)>, Vec<String>) {
+        let mut interner = Interner::new();
+        let opts = Options::new().for_assembly();
+        let (tokens, diagnostics) = tokenize(src.as_bytes(), 0, opts, &mut interner);
+        let out = tokens
+            .iter()
+            .filter(|t| !t.is_eof())
+            .map(|t| {
+                let text = match t.value {
+                    Some(sym) => interner.resolve(sym).to_owned(),
+                    None => t.punct().map_or_else(String::new, |p| p.as_str().to_owned()),
+                };
+                (t.kind, text)
+            })
+            .collect();
+        (out, diagnostics.iter().map(|d| d.message.clone()).collect())
+    }
+
+    #[test]
+    fn in_c_a_dollar_is_part_of_the_name() {
+        assert_eq!(spellings("$sym a$b"), ["$sym", "a$b"]);
+    }
+
+    #[test]
+    fn in_assembly_a_dollar_stands_alone_so_the_name_after_it_can_be_a_macro() {
+        let (tokens, diagnostics) = scan_assembly("movq $__START_KERNEL_map, %rax\n1$x 2$");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let expect = [
+            (PpTokenKind::Ident, "movq"),
+            (PpTokenKind::Other, "$"),
+            (PpTokenKind::Ident, "__START_KERNEL_map"),
+            (PpTokenKind::Punct(Punct::Comma), ","),
+            (PpTokenKind::Punct(Punct::Percent), "%"),
+            (PpTokenKind::Ident, "rax"),
+            (PpTokenKind::Number, "1"),
+            (PpTokenKind::Other, "$"),
+            (PpTokenKind::Ident, "x"),
+            (PpTokenKind::Number, "2"),
+            (PpTokenKind::Other, "$"),
+        ];
+        let got: Vec<(PpTokenKind, &str)> = tokens.iter().map(|(k, t)| (*k, t.as_str())).collect();
+        assert_eq!(got, expect);
+    }
+
+    #[test]
+    fn in_assembly_a_lone_apostrophe_takes_the_rest_of_its_line_and_is_not_an_error() {
+        let (tokens, diagnostics) = scan_assembly("# it's here\n.ascii \"a'\"\nnext");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let spellings: Vec<&str> = tokens.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(spellings, ["#", "it", "'s here", ".", "ascii", "\"a'\"", "next"]);
+        assert_eq!(tokens[2].0, PpTokenKind::Other);
+        // A character constant that is closed is still one.
+        assert_eq!(scan_assembly("$'a'").0[1].0, PpTokenKind::CharConst);
+        // And in C the same apostrophe is still reported.
+        assert!(!scan("it's").1.is_empty());
+    }
+
     #[test]
     fn milestone_is_recorded() {
         assert!(MILESTONE.starts_with('M'));

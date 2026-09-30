@@ -267,6 +267,20 @@ pub fn parse_define(
     tokens: &[PpToken],
     interner: &mut Interner,
 ) -> (Option<MacroDef>, Vec<Diagnostic>) {
+    parse_define_in(tokens, interner, false)
+}
+
+/// [`parse_define`] for a file that is C when `assembly` is false and assembly on its way to the
+/// assembler when it is true.
+///
+/// The one difference is a `#` in a function-like macro that names no parameter. In C that is an
+/// error, and in assembly it is kept as a `#`, because it is how an x86 immediate or an AArch64
+/// one is written: `#define LOAD(r) mov r, #0`. gcc lets it through for the same reason.
+pub(crate) fn parse_define_in(
+    tokens: &[PpToken],
+    interner: &mut Interner,
+    assembly: bool,
+) -> (Option<MacroDef>, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
     let Some(&first) = tokens.first() else {
         return (None, vec![Diagnostic::error("no macro name given in `#define`", Span::DUMMY)]);
@@ -306,7 +320,7 @@ pub fn parse_define(
         span,
         builtin: None,
     };
-    check_body(&def, interner, &mut diagnostics);
+    check_body(&def, assembly, interner, &mut diagnostics);
     (Some(def), diagnostics)
 }
 
@@ -394,7 +408,12 @@ fn parse_params(
 }
 
 /// The constraint checks on a replacement list that do not need the expander to run.
-fn check_body(def: &MacroDef, interner: &mut Interner, diagnostics: &mut Vec<Diagnostic>) {
+fn check_body(
+    def: &MacroDef,
+    assembly: bool,
+    interner: &mut Interner,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let va_opt = interner.intern("__VA_OPT__");
     let va_args = interner.intern("__VA_ARGS__");
 
@@ -423,7 +442,7 @@ fn check_body(def: &MacroDef, interner: &mut Interner, diagnostics: &mut Vec<Dia
                 t.value.is_some_and(|v| def.param_index(v).is_some())
                     || (def.is_variadic() && t.value == Some(va_opt))
             });
-            if !names_param {
+            if !names_param && !assembly {
                 diagnostics.push(
                     Diagnostic::error("`#` must be followed by a macro parameter", tok.span)
                         .with_code("E0305"),

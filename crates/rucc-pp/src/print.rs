@@ -329,7 +329,12 @@ fn avoid_paste(prev: Tok, prev_text: &str, next: Tok, next_text: &str) -> bool {
     // Anything that ends in a word character followed by anything that starts as one. This
     // covers name and name, name and number, number and number, and the prefixed forms of a
     // character constant and a string literal, which are a name followed by a quote.
-    let word = matches!(prev.kind, PpTokenKind::Ident | PpTokenKind::Number | PpTokenKind::Other);
+    //
+    // A `$` on its own is not one. It only stands alone in assembly, where `$` and a macro that
+    // expands to `3` have to come out as the immediate `$3` and not as `$ 3`, which is what gcc
+    // writes too.
+    let word = matches!(prev.kind, PpTokenKind::Ident | PpTokenKind::Number)
+        || (prev.kind == PpTokenKind::Other && prev_text != "$");
     if word {
         let joins = matches!(
             next.kind,
@@ -413,11 +418,21 @@ mod tests {
         }
 
         fn print(&mut self, src: &str, opts: PrintOptions) -> String {
+            self.print_as(src, opts, rucc_lex::Options::new())
+        }
+
+        /// The same, reading `src` as assembly the way a `.S` is read.
+        fn assembly(&mut self, src: &str) -> String {
+            self.print_as(src, PrintOptions::new(), rucc_lex::Options::new().for_assembly())
+        }
+
+        fn print_as(&mut self, src: &str, opts: PrintOptions, lex: rucc_lex::Options) -> String {
             let main =
                 self.sources.add("/main.c", src.as_bytes().to_vec()).expect("the map has room");
             let out = {
                 let mut cx =
                     Context::new(&mut self.interner, &mut self.sources, &self.fs, &self.search);
+                cx.lex = lex;
                 self.pp.run(main, &mut cx)
             };
             assert!(self.pp.diagnostics().is_empty(), "{:?}", self.pp.diagnostics());
@@ -506,6 +521,15 @@ mod tests {
         let mut run = Run::new();
         // `x1` would read back as one identifier, so the space is not optional.
         assert_eq!(run.go("#define J(a,b) a b\nJ(x,1)J(2,y)\n"), "# 1 \"/main.c\"\n\nx 1 2 y\n");
+    }
+
+    #[test]
+    fn a_dollar_and_the_macro_after_it_stay_together_as_an_immediate() {
+        let mut run = Run::new();
+        // `$ 3` is what the paste test would write if a `$` counted as a word, and gcc writes
+        // `$3`, which is the form every x86 assembler reads.
+        let src = "#define FOO 3\nmovq $FOO, %rax\na$FOO\n";
+        assert_eq!(run.assembly(src), "# 1 \"/main.c\"\n\nmovq $3, %rax\na$3\n");
     }
 
     /// The paste test is for tokens a macro put next to each other. Two the user wrote next to
