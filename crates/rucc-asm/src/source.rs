@@ -37,7 +37,7 @@ use rucc_object::{
     Sort, Visibility,
 };
 use rucc_target::aarch64::{self, AAPCS64};
-use rucc_target::x86_64::{SYSV, gpr_named, nops};
+use rucc_target::x86_64::{Mode, SYSV, gpr_named, nops};
 use rucc_target::{CallRegs, ObjectFormat};
 use rucc_tuple::Arch;
 
@@ -133,12 +133,14 @@ pub fn read_with(
     let mut moving = 0;
     loop {
         let aarch64 = arch == Arch::Aarch64;
+        let i386 = arch == Arch::X86;
         let macho = format == ObjectFormat::MachO;
         let coff = format == ObjectFormat::Coff;
         let mut reader = Reader {
             long: long.clone(),
             guesses,
             aarch64,
+            i386,
             macho,
             coff,
             fatal_warnings: flags.fatal_warnings,
@@ -210,6 +212,10 @@ struct Sym {
 
 /// How many bytes a LEB128 number that names a label further on is given. See [`Reader::leb`].
 const LEB_ROOM: u8 = 4;
+
+/// The name of the global offset table, which gas turns into a distance to the table wherever it
+/// is written on i386.
+const TABLE: &str = "_GLOBAL_OFFSET_TABLE_";
 
 /// A place in a section whose bytes are an expression that could not be worked out yet.
 #[derive(Debug, Clone)]
@@ -396,6 +402,9 @@ struct Reader {
     doubts: Vec<Trouble>,
     /// Whether the file is for AArch64 rather than x86-64.
     aarch64: bool,
+    /// Whether the file is for i386, whose instructions are x86-64's read in thirty two bit mode
+    /// and whose position independent code reaches things from the global offset table.
+    i386: bool,
     /// Whether the file is for Mach-O, where a section is named by its segment as well.
     macho: bool,
     /// Whether the file is for COFF, whose `.section` flags are letters of their own.
@@ -610,11 +619,17 @@ impl Reader {
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
-        let mut written = crate::instruction::one(word, &args).map_err(|why| self.bad(&why))?;
+        let mode = if self.i386 { Mode::Bits32 } else { Mode::Bits64 };
+        let mut written =
+            crate::instruction::one_in(word, &args, mode).map_err(|why| self.bad(&why))?;
         // `jmp .+10` has been given its short form already, where the distance is known.
         let mut branch = None;
         let short = crate::instruction::short(&written).filter(|_| written.holes[0].name != ".");
-        let jump = short.is_some();
+        // gas works a jump to a global name in this section out itself, and on i386 leaves one
+        // that asked for `@PLT` to the linker, since the name may be taken from another object.
+        let stub =
+            self.i386 && written.holes.first().is_some_and(|hole| hole.sort == Reach::Branch);
+        let jump = short.is_some() && !stub;
         if let Some(short) = short {
             if !self.long.contains(&self.branches) {
                 branch = Some(self.branches);
@@ -629,16 +644,30 @@ impl Reader {
         let at = self.at();
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
-        let slot = crate::bytes::slot(&written.bytes, rucc_target::x86_64::Mode::Bits64);
+        let slot = if self.i386 {
+            slot_i386(&written.bytes)
+        } else {
+            crate::bytes::slot(&written.bytes, Mode::Bits64)
+        };
         for hole in written.holes {
             // `.` in an instruction is where the instruction starts, which is what gas means by it
             // and what `mov .-4(%rip), %eax` counts back from.
             let here = (part, at as i64);
-            let sum = if matches!(hole.sort, Reach::Value | Reach::Extended) {
+            let sum = if matches!(
+                hole.sort,
+                Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot
+            ) {
                 // The number itself, with nothing taken off for where the instruction ends. A name
                 // in an address carries what is added to it apart, and a number carries nothing.
                 let mut sum = self.expression_at(&hole.name, here)?;
                 sum.constant += hole.addend;
+                // The global offset table's own name in an i386 instruction is the distance from
+                // these bytes to the table, which gas counts from the start of the instruction. So
+                // `addl $_GLOBAL_OFFSET_TABLE_, %ebx` has the two bytes in front of the number
+                // added, and the `+[.-.L1]` gcc used to write moves the start back to the label.
+                if self.i386 && sum.terms.iter().any(|term| term.what.is(TABLE)) {
+                    sum.constant += hole.at as i64;
+                }
                 sum
             } else {
                 let what = if hole.name == "." {
@@ -1953,9 +1982,28 @@ impl Reader {
             return Err(self.bad("a data directive with nothing after it"));
         }
         for arg in args {
-            let sum = self.expression(arg)?;
+            // How far a name is from the global offset table, or a slot of it, which is what gcc
+            // fills a jump table with in i386 code that is position independent: `.long .L3@GOTOFF`.
+            let suffix = crate::instruction::unsuffixed(arg).filter(|_| self.i386);
+            let (sum, reach, slot) = match suffix {
+                Some((rest, how @ ("GOTOFF" | "GOT"))) => {
+                    if width != 4 {
+                        return Err(self.bad(&format!(
+                            "'@{how}' in {width} bytes, and the global offset table only reaches \
+                             four"
+                        )));
+                    }
+                    let sum = self.expression(&rest)?;
+                    if how == "GOT" {
+                        (sum, Reach::Slot, Reference::SlotKept)
+                    } else {
+                        (sum, Reach::Offset, Reference::GotOffset)
+                    }
+                }
+                _ => (self.expression(arg)?, Reach::Near, Reference::Got),
+            };
             let at = self.at();
-            if let Some(value) = sum.flat() {
+            if let (Some(value), Reach::Near) = (sum.flat(), reach) {
                 self.put(&value.to_le_bytes()[..width as usize])?;
                 continue;
             }
@@ -1975,8 +2023,8 @@ impl Reader {
                 at,
                 width,
                 sum,
-                reach: Reach::Near,
-                slot: Reference::Got,
+                reach,
+                slot,
                 branch: None,
                 jump: false,
                 field: None,
@@ -2940,7 +2988,7 @@ impl Reader {
         for fixup in &self.fixups {
             let Some(nth) = fixup.branch else { continue };
             let residue = self
-                .reduce_kept(&fixup.sum, true)
+                .reduce_kept(&fixup.sum, fixup.jump)
                 .map_err(|why| Trouble { line: fixup.line, why })?;
             if !residue.left.is_empty() {
                 away.push(nth);
@@ -3045,7 +3093,8 @@ impl Reader {
             // the linker has to write and which only fits in four bytes or more. Anything else
             // left over, a difference of names across sections say, is not a number the linker
             // writes into an instruction.
-            let value = matches!(fixup.reach, Reach::Value | Reach::Extended);
+            let value =
+                matches!(fixup.reach, Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot);
             let named =
                 matches!(residue.left.as_slice(), [Left { coeff: 1, what: What::Symbol(_), .. }]);
             if value && !residue.left.is_empty() && !named {
@@ -3056,6 +3105,15 @@ impl Reader {
                 ));
             }
             let (symbol, kind, addend, after) = match residue.left.as_slice() {
+                // A distance from the table or a slot of it is about a name, and a number on its
+                // own has neither.
+                [] if matches!(fixup.reach, Reach::Offset | Reach::Slot) => {
+                    return Err(bad(
+                        "'@GOTOFF' or '@GOT' of something that comes out as a number, which has \
+                         no place in the global offset table"
+                            .to_owned(),
+                    ));
+                }
                 [] => {
                     // A distance a branch carries is signed and nothing else, so a byte of it
                     // reaches a hundred and twenty seven forwards and a hundred and twenty eight
@@ -3067,7 +3125,7 @@ impl Reader {
                     let width = fixup.width as usize;
                     let room = 8 * width as u32;
                     let low = -(1i64 << (room - 1));
-                    let high = if fixup.reach == Reach::Branch {
+                    let high = if matches!(fixup.reach, Reach::Branch | Reach::Plain) {
                         (1i64 << (room - 1)) - 1
                     } else {
                         (1i64 << room) - 1
@@ -3087,11 +3145,17 @@ impl Reader {
                 // The address of something, which is the whole of what a table of pointers holds.
                 // An instruction on sixty four bits sign extends four bytes of it, which the linker
                 // is told so that it checks the address fits that way. See [`Reach::Extended`].
+                //
+                // On i386 the name may be how far something is from the global offset table, or a
+                // slot of it, or the table itself, which gas writes as the distance to it from these
+                // bytes whether or not the file took `.` away.
                 [Left { coeff: 1, what: What::Symbol(name), .. }] => {
-                    let kind = if fixup.reach == Reach::Extended && fixup.width == 4 {
-                        Reference::Signed
-                    } else {
-                        Reference::Address { bytes: fixup.width }
+                    let kind = match fixup.reach {
+                        Reach::Offset => Reference::GotOffset,
+                        Reach::Slot => fixup.slot,
+                        _ if self.i386 && name == TABLE => self.front(fixup.width, line)?,
+                        Reach::Extended if fixup.width == 4 => Reference::Signed,
+                        _ => Reference::Address { bytes: fixup.width },
                     };
                     (name.clone(), kind, residue.constant, 0)
                 }
@@ -3137,7 +3201,15 @@ impl Reader {
                         self.syms[sym].binding == Binding::Local
                             && matches!(self.syms[sym].at, Held::In { .. })
                     });
-                    let kind = if wide {
+                    let table = self.i386 && name == TABLE;
+                    if table && fixup.reach != Reach::Near {
+                        return Err(bad(format!(
+                            "a branch to '{TABLE}', which is a table and not somewhere to go"
+                        )));
+                    }
+                    let kind = if table {
+                        self.front(fixup.width, line)?
+                    } else if wide {
                         Reference::AwayWide
                     } else if fixup.reach == Reach::Branch && !near {
                         Reference::Call
@@ -3199,6 +3271,16 @@ impl Reader {
             });
         }
         Ok(())
+    }
+
+    /// The relocation an i386 file gets for the global offset table's own name, which is only ever
+    /// written in four bytes.
+    fn front(&self, width: u8, line: usize) -> Result<Reference, Trouble> {
+        if width != 4 {
+            let why = format!("'{TABLE}' written into {width} bytes, and it is only ever four");
+            return Err(Trouble { line, why });
+        }
+        Ok(Reference::GotFront)
     }
 
     /// A LEB128 number that was waiting for a label further on, written into every byte it was
@@ -3441,6 +3523,13 @@ enum What {
     /// `.`, which is a place and never a name. Worked out as the expression is parsed, because it
     /// means where the file had got to when it was written and not where it got to in the end.
     Here { part: usize, at: i64 },
+}
+
+impl What {
+    /// Whether this is that name.
+    fn is(&self, name: &str) -> bool {
+        matches!(self, What::Symbol(named) if named == name)
+    }
 }
 
 impl Sum {
@@ -3700,13 +3789,17 @@ impl Parser<'_> {
         if rest.is_empty() {
             return Err("an expression that stops before it says anything".to_owned());
         }
-        if self.eat("(") {
-            let inner = self.logical()?;
-            self.space();
-            if !self.eat(")") {
-                return Err("a bracket that was opened and never closed".to_owned());
+        // gas takes square brackets in an expression the way it takes round ones, and gcc's i386
+        // code writes `_GLOBAL_OFFSET_TABLE_+[.-.L1]` with them.
+        for (open, close) in [("(", ")"), ("[", "]")] {
+            if self.eat(open) {
+                let inner = self.logical()?;
+                self.space();
+                if !self.eat(close) {
+                    return Err("a bracket that was opened and never closed".to_owned());
+                }
+                return Ok(inner);
             }
-            return Ok(inner);
         }
         let first = rest.as_bytes()[0];
         if first == b'\'' {
@@ -4033,6 +4126,30 @@ fn assigned(text: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((&text[..end], rest.trim()))
+}
+
+/// Which relocation a read of a slot of the global offset table asks for on i386, from the bytes of
+/// the instruction it is in.
+///
+/// The instructions are the ones [`crate::bytes::slot`] names for x86-64. gas asks for
+/// `R_386_GOT32X` in them only when the address is four bytes of displacement after a base, or the
+/// displacement alone, since those are the shapes the linker knows how to rewrite, and asks for
+/// `R_386_GOT32` everywhere else: `foo@GOT(,%ecx,4)`, a store, `lea` and `push` among them.
+fn slot_i386(bytes: &[u8]) -> Reference {
+    if crate::bytes::slot(bytes, Mode::Bits32) != Reference::GotBare {
+        return Reference::SlotKept;
+    }
+    let prefixes = bytes
+        .iter()
+        .take_while(|byte| {
+            matches!(byte, 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3)
+        })
+        .count();
+    // Every instruction [`crate::bytes::slot`] lets through has an opcode of one byte, so the
+    // addressing byte is the one after it.
+    let Some(&modrm) = bytes.get(prefixes + 1) else { return Reference::SlotKept };
+    let (mode, rm) = (modrm >> 6, modrm & 7);
+    if mode == 2 || (mode == 0 && rm == 5) { Reference::Slot } else { Reference::SlotKept }
 }
 
 /// Whether a name may start with this.
@@ -5719,5 +5836,225 @@ g:
     fn a_type_written_with_a_space_and_an_extern_are_read() {
         let out = assembled(".extern g\n.globl f\n.type f STT_FUNC\nf:\n\tret\n");
         assert_eq!(name(&out, "f").sort, Sort::Func);
+    }
+
+    /// An i386 file, read, with a failure reported as a panic naming the line it was on.
+    fn i386(text: &str) -> Assembled {
+        match read(text, Arch::X86) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        }
+    }
+
+    /// The relocations of a section, as where, against what, which and with what added.
+    fn relocs<'a>(assembled: &'a Assembled, name: &str) -> Vec<(usize, &'a str, Reference, i64)> {
+        let part = assembled.parts.iter().find(|part| part.name == name).unwrap();
+        part.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect()
+    }
+
+    /// What reading an i386 file said about the line it could not read.
+    fn i386_refused(text: &str) -> String {
+        match read(text, Arch::X86) {
+            Ok(_) => panic!("'{text}' was read and should not have been"),
+            Err(trouble) => trouble.why,
+        }
+    }
+
+    /// A call on i386 goes through the stub only when the file asks with `@PLT`, and is the plain
+    /// distance otherwise, which is `R_386_PLT32` and `R_386_PC32` the way gas writes them.
+    #[test]
+    fn an_i386_call_asks_for_the_stub_only_when_it_says_plt() {
+        let read = i386("\tcall puts@PLT\n\tcall puts\n\tjmp puts\n\tjmp puts@PLT\n");
+        let ops: Vec<u8> = bytes(&read, ".text").chunks(5).map(|op| op[0]).collect();
+        assert_eq!(ops, [0xe8, 0xe8, 0xe9, 0xe9]);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (1, "puts", Reference::Call, -4),
+                (6, "puts", Reference::Data, -4),
+                (11, "puts", Reference::Data, -4),
+                (16, "puts", Reference::Call, -4),
+            ]
+        );
+    }
+
+    /// A global name in the same section is one another object may take the place of. gas leaves
+    /// a call to it to the linker and works a jump to it out, unless the jump asked for the stub,
+    /// in which case it is long and a relocation.
+    #[test]
+    fn an_i386_branch_to_a_global_here_is_worked_out_unless_it_asks_for_the_stub() {
+        let read = i386(
+            "\t.globl g\ng:\n\tcall g\n\tcall g@PLT\n\tjmp g\n\tje g\n\tjmp g@PLT\n\tje g@PLT\n\
+             \tjmp sf@PLT\nsf:\tret\n",
+        );
+        let text = bytes(&read, ".text");
+        assert_eq!(text[10..14], [0xeb, 0xf4, 0x74, 0xf2]);
+        assert_eq!(text[14], 0xe9);
+        assert_eq!(text[19..21], [0x0f, 0x84]);
+        assert_eq!(text[25..27], [0xeb, 0x00]);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (1, "g", Reference::Data, -4),
+                (6, "g", Reference::Call, -4),
+                (15, "g", Reference::Call, -4),
+                (21, "g", Reference::Call, -4),
+            ]
+        );
+    }
+
+    /// `@GOTOFF` is how far a name is from the table and `@GOT` is a slot of it. gas asks for
+    /// `R_386_GOT32X` where the linker can rewrite the load and `R_386_GOT32` everywhere else.
+    #[test]
+    fn i386_names_reached_from_the_global_offset_table() {
+        let read = i386(concat!(
+            "\tleal .LC0@GOTOFF(%ebx), %eax\n",
+            "\tmovl foo@GOT(%ebx), %eax\n",
+            "\tmovl %eax, foo@GOT(%ebx)\n",
+            "\taddl foo@GOT(%ebx), %eax\n",
+            "\ttestl %eax, foo@GOT(%ebx)\n",
+            "\tpushl foo@GOT(%ebx)\n",
+            "\tcall *foo@GOT(%ebx)\n",
+            "\tmovw foo@GOT(%ebx), %ax\n",
+            "\tmovl foo@GOT(%ebx,%ecx,4), %eax\n",
+            "\tmovl foo@GOT(,%ecx,4), %eax\n",
+            "\tleal foo@GOT(%ebx), %eax\n",
+            "\tmovl sv@GOTOFF+4(%ebx), %eax\n",
+            "\tmovl sv+8@GOTOFF(%ebx), %eax\n",
+            "\tmovl $foo@GOT, %eax\n",
+            "\tmovl foo@GOT, %eax\n",
+            "\t.section .rodata\n",
+            ".LC0:\t.string \"hi\"\n",
+            "\t.data\n",
+            "sv:\t.long 0\n",
+        ));
+        let text = bytes(&read, ".text");
+        // Every one of them keeps its addressing byte, `movl foo@GOT, %eax` included.
+        assert_eq!(text[..2], [0x8d, 0x83]);
+        assert_eq!(text[text.len() - 6..text.len() - 4], [0x8b, 0x05]);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (2, ".LC0", Reference::GotOffset, 0),
+                (8, "foo", Reference::Slot, 0),
+                (14, "foo", Reference::SlotKept, 0),
+                (20, "foo", Reference::Slot, 0),
+                (26, "foo", Reference::Slot, 0),
+                (32, "foo", Reference::SlotKept, 0),
+                (38, "foo", Reference::Slot, 0),
+                (45, "foo", Reference::SlotKept, 0),
+                (52, "foo", Reference::Slot, 0),
+                (59, "foo", Reference::SlotKept, 0),
+                (65, "foo", Reference::SlotKept, 0),
+                (71, "sv", Reference::GotOffset, 4),
+                (77, "sv", Reference::GotOffset, 8),
+                (82, "foo", Reference::SlotKept, 0),
+                (88, "foo", Reference::Slot, 0),
+            ]
+        );
+    }
+
+    /// The table's own name is the distance from the bytes to it, counted from the start of the
+    /// instruction, so the bytes in front of the number are added. gcc's older `+[.-.L1]` moves
+    /// that start back to the label the address was popped at.
+    #[test]
+    fn the_global_offset_table_on_i386_is_counted_from_the_start_of_the_instruction() {
+        let read = i386(concat!(
+            "\taddl $_GLOBAL_OFFSET_TABLE_, %ebx\n",
+            "\tcall .L1\n",
+            ".L1:\tpopl %ebx\n",
+            "\taddl $_GLOBAL_OFFSET_TABLE_+[.-.L1], %ebx\n",
+            "\tmovl $_GLOBAL_OFFSET_TABLE_+4, %eax\n",
+            "\tleal _GLOBAL_OFFSET_TABLE_(%ebx), %eax\n",
+            "\t.data\n",
+            "\t.long _GLOBAL_OFFSET_TABLE_\n",
+            "\t.long _GLOBAL_OFFSET_TABLE_-.\n",
+            "\t.long _GLOBAL_OFFSET_TABLE_+8\n",
+        ));
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (2, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 2),
+                (14, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 3),
+                (19, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 5),
+                (25, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 2),
+            ]
+        );
+        assert_eq!(
+            relocs(&read, ".data"),
+            [
+                (0, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 0),
+                (4, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 0),
+                (8, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 8),
+            ]
+        );
+    }
+
+    /// An address with no registers in it is four bytes the linker fills with the address, and a
+    /// `mov` of one into or out of the accumulator takes the form with no addressing byte.
+    #[test]
+    fn an_i386_address_of_a_name_is_four_bytes_of_it() {
+        let read = i386(concat!(
+            "\tmovl $foo, %eax\n",
+            "\tpushl $foo\n",
+            "\tmovl foo, %eax\n",
+            "\tmovl foo+8, %ecx\n",
+            "\tmovl %eax, foo\n",
+            "\tmovb foo, %al\n",
+            "\tmovl bar(,%eax,4), %eax\n",
+            "\tmovl foo@GOTOFF, %eax\n",
+            "\t.data\n",
+            "\t.long foo\n",
+            "bar:\t.long 0\n",
+        ));
+        let text = bytes(&read, ".text");
+        assert_eq!(
+            [text[0], text[5], text[10], text[15], text[16], text[21], text[26], text[38]],
+            [0xb8, 0x68, 0xa1, 0x8b, 0x0d, 0xa3, 0xa0, 0xa1]
+        );
+        let text = relocs(&read, ".text");
+        let at: Vec<usize> = text.iter().map(|reloc| reloc.0).collect();
+        assert_eq!(at, [1, 6, 11, 17, 22, 27, 34, 39]);
+        assert_eq!(text[3].3, 8);
+        assert_eq!(text[6].1, "bar");
+        assert_eq!(text[7].2, Reference::GotOffset);
+        assert_eq!(relocs(&read, ".data")[0].1, "foo");
+    }
+
+    /// gcc fills a jump table with how far each case is from the global offset table.
+    #[test]
+    fn an_i386_directive_holds_a_distance_from_the_table_or_a_slot_of_it() {
+        let read = i386(
+            "\t.text\n.L1:\tret\n\t.data\n\t.long .L1@GOTOFF\n\t.long foo@GOT\n\t.long foo@GOTOFF+4\n",
+        );
+        assert_eq!(
+            relocs(&read, ".data"),
+            [
+                (0, ".L1", Reference::GotOffset, 0),
+                (4, "foo", Reference::SlotKept, 0),
+                (8, "foo", Reference::GotOffset, 4),
+            ]
+        );
+    }
+
+    /// What i386 has no relocation for is refused rather than written as something else.
+    #[test]
+    fn i386_forms_that_are_not_read_yet_are_refused() {
+        assert!(i386_refused("\tmovl foo@TLSGD(%ebx), %eax\n").contains("@TLSGD"));
+        assert!(i386_refused("\tmovl foo@GOTPCREL(%rip), %eax\n").contains("i386"));
+        assert!(i386_refused("\tmovl (%rax), %eax\n").contains("sixty four"));
+        assert!(i386_refused("\t.quad foo@GOTOFF\n").contains("four"));
+        assert!(i386_refused("\tcall foo@GOT\n").contains("@GOT"));
+        assert!(i386_refused("\tmovw $foo@GOTOFF, %ax\n").contains("four"));
+        assert!(i386_refused("\tjmp _GLOBAL_OFFSET_TABLE_\n").contains("table"));
+    }
+
+    /// The same lines on x86-64 are what they always were.
+    #[test]
+    fn x86_64_calls_are_left_as_they_were() {
+        let read = assembled("\tcall puts\n\tcall puts@PLT\n\tmovl $foo, %eax\n");
+        let kinds: Vec<_> =
+            relocs(&read, ".text").into_iter().map(|(_, _, kind, _)| kind).collect();
+        assert_eq!(kinds[..2], [Reference::Call, Reference::Call]);
     }
 }
