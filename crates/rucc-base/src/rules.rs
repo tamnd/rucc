@@ -293,10 +293,27 @@ impl Table {
         // Both start with room for a pattern of the usual size. Starting them empty grew them a
         // few times on every instruction selected, and that was most of what the walk allocated.
         let mut left = Vec::with_capacity(16);
-        left.push(term);
         let mut bindings = Vec::with_capacity(8);
-        let rule = self.run(subject, 0, &mut left, &mut bindings)?;
+        let rule = self.find_in(subject, term, &mut left, &mut bindings)?;
         Some(Match { rule, bindings })
+    }
+
+    /// [`Table::find`] with the two stacks the walk needs handed in, for a caller that asks more
+    /// than once and would rather not pay for them every time.
+    ///
+    /// Both are emptied before the walk. What `bindings` holds afterwards is what the pattern
+    /// bound when a rule fired, and nothing anybody reads when none did.
+    pub fn find_in<S: Subject>(
+        &self,
+        subject: &S,
+        term: S::Node,
+        left: &mut Vec<S::Node>,
+        bindings: &mut Vec<S::Node>,
+    ) -> Option<usize> {
+        left.clear();
+        left.push(term);
+        bindings.clear();
+        self.run(subject, 0, left, bindings)
     }
 
     /// The rule a match found, which is the one thing every caller wants out of it.

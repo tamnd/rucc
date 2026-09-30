@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
 - The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
 - The rule matcher starts each walk with room on its stacks, which saves several reallocations per selected instruction (#2329).
+- Instruction selection hands the rule matcher one pair of stacks for every plan it tries on an instruction, rather than making a new pair per plan (#2337).
 
 ### Fixed
 

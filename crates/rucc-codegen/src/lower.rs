@@ -6491,11 +6491,18 @@ impl<'a> Lowering<'a> {
     /// The plans are tried in order and the first that matches wins, which is the maximal munch
     /// `spec/10-backend.md` asks for: a plan that offers more to the matcher is tried before one
     /// that offers less.
+    ///
+    /// The matcher's two stacks are made once here and handed to every plan. An instruction with
+    /// several plans tries them in turn, and each try used to make its own.
     fn select(&self, inst: Inst, refused: &Set<Value>) -> Option<(Plan, Match<Term>)> {
+        let mut left = Vec::with_capacity(16);
+        let mut bindings = Vec::with_capacity(8);
         for plan in self.plans(inst, refused) {
             let terms = Terms::new(self.source, inst, plan);
-            if let Some(matched) = self.selector.table.find(&terms, Term::Root) {
-                return Some((plan, matched));
+            if let Some(rule) =
+                self.selector.table.find_in(&terms, Term::Root, &mut left, &mut bindings)
+            {
+                return Some((plan, Match { rule, bindings }));
             }
         }
         None
