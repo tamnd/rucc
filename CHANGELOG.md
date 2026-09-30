@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `aarch64-windows-gnu` is tier 2. Rung 0 runs in CI under Wine and natively on `windows-11-arm`, and rung 1, SQLite's veryquick suite, runs nightly on `windows-11-arm` with llvm-mingw's clang as the reference and nothing failing only in rucc's build. The `rucc.exe` that runs there is the one built for `aarch64-pc-windows-msvc` (#2071).
 - The nightly run builds SQLite's veryquick suite for `aarch64-windows-gnu` natively on `windows-11-arm` with rucc and with llvm-mingw's clang, over a Tcl clang builds, and fails when a test fails only in rucc's build. `tests/sqlite/windows.sh` takes `ARCH=aarch64` and `REF_CC`, and runs without Wine under a Windows shell. (#2071)
 
 ### Changed
