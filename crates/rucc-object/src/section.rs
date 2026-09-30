@@ -749,6 +749,12 @@ pub enum Reference {
         /// a narrower relocation for it. `R_X86_64_64` and `R_X86_64_32` on ELF.
         bytes: u8,
     },
+    /// The address itself in four bytes of an x86-64 instruction that sign extends them to eight,
+    /// which is an immediate on sixty four bits and a displacement. `R_X86_64_32S` on ELF, which
+    /// is what code that is not position independent reaches its data with: `table(,%rax,4)` and
+    /// `movq $.LC0, %rdi`. The linker checks the address fits in the lower two gigabytes, where
+    /// `R_X86_64_32` would let one between two and four through to come out negative.
+    Signed,
     /// How far the thing is from where the four bytes holding the answer are, written into an
     /// image rather than reached by an instruction. `.long target - .` in an `asm` at file scope,
     /// which is how a table of places in a program says where each of them is in four bytes rather

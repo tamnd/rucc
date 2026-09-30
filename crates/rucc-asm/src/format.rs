@@ -174,7 +174,8 @@ impl Directives {
             return;
         }
         let _ = writeln!(out, "\t.section\t__patchable_function_entries,\"awo\",@progbits,{label}");
-        let _ = writeln!(out, "\t.align\t8");
+        // `.balign`, since `.align 8` is two hundred and fifty six bytes to gas on AArch64.
+        let _ = writeln!(out, "\t.balign\t8");
         let _ = writeln!(out, "\t.quad\t{label}");
         let _ = writeln!(out, "{back}");
     }

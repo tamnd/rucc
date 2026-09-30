@@ -170,7 +170,7 @@ fn what_is_recorded_is_the_front_of_the_room() {
         // The section it is ordered after is named by the label rather than by the section, which
         // is how an assembler is told about one it has not seen yet.
         assert!(lines[section].ends_with(&format!(",.Lpfe_{name}")), "{}", lines[section]);
-        assert_eq!(lines[section + 1], ".align\t8");
+        assert_eq!(lines[section + 1], ".balign\t8");
         assert_eq!(lines[section + 2], format!(".quad\t.Lpfe_{name}"));
         // And the label is at the first byte of the room, which is in front of the function.
         let front = at(&lines, &format!(".Lpfe_{name}:"));

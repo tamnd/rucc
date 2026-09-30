@@ -23,11 +23,9 @@
 //! caller to fill in or to turn into a relocation, because which of those it is depends on what the
 //! name turns out to be and the whole file has to be read before that is known.
 //!
-//! # What is not read yet
-//!
-//! A symbol as an immediate is not read, nor a symbol as the displacement of an address that names
-//! a register, because both want a relocation this does not write yet and a wrong guess about
-//! either is silent.
+//! A name as an immediate, or as the displacement of an address that is not counted from the
+//! instruction, is the address of the name, which is how code that is not position independent
+//! reaches its data. Those come back as holes too, for the whole address rather than a distance.
 
 use rucc_target::x86_64::{
     Addr, Encoding, ImmSize, Length, Opmask, RAX, Value, Width, encode_masked, encoding, gpr_named,
@@ -60,8 +58,16 @@ pub(crate) enum Sort {
     Near,
     /// A number the instruction carries that the file wrote as an expression, which is what
     /// `$4f-3b` is. The name is the whole of the expression and the bytes are the value of it,
-    /// worked out once the labels in it have places, and never a relocation.
+    /// worked out once the labels in it have places. A name from another section, or one this file
+    /// does not define, makes it the address of that name, which the linker writes: four bytes of
+    /// it for an instruction that uses them as they are and eight for `movabs`.
     Value,
+    /// The same, for four bytes the machine sign extends to eight, which is an immediate of an
+    /// instruction on sixty four bits and the displacement of every address that is not counted
+    /// from the instruction. `R_X86_64_32S` rather than `R_X86_64_32` when it is an address, which
+    /// is what gas asks for and what makes the linker check the address the right way: one above
+    /// two gigabytes fits in four unsigned bytes and comes out negative once it is extended.
+    Extended,
     /// An entry in the global offset table, which is what `message@GOTPCREL(%rip)` is. The bytes
     /// hold the distance to a word the linker makes and fills with the address, so the instruction
     /// loads the address rather than computing it, and what it names has to be relocated even when
@@ -274,6 +280,23 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             wanted.push(Hole { at, width: 4, name, addend: named.addend, sort });
         }
     }
+    // A name in an address that is counted from registers or from nothing, which is the address of
+    // the name added to them. See [`Sort::Extended`].
+    if let Some(at) = holes.disp {
+        let Some(named) = operands.iter().find_map(|op| match op {
+            Operand::Mem(_, Some(named)) => Some(named.clone()),
+            _ => None,
+        }) else {
+            return Err(format!("'{word}' left room for a name in an address and was given none"));
+        };
+        wanted.push(Hole {
+            at,
+            width: 4,
+            name: named.name,
+            addend: named.addend,
+            sort: Sort::Extended,
+        });
+    }
     // A number is the last thing in an instruction on this machine, so an expression the
     // instruction carries is the last bytes of it, however many the row gave it.
     if let Some(text) = operands.iter().find_map(|op| match op {
@@ -284,12 +307,35 @@ pub(crate) fn one(word: &str, args: &[String]) -> Result<Written, String> {
             ImmSize::Ib => 1,
             ImmSize::Iw => 2,
             ImmSize::Id => 4,
+            ImmSize::Io => 8,
             _ => return Err(format!("'{word}' carries '{text}' somewhere this cannot write one")),
         };
         let at = bytes.len() - width;
-        wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort: Sort::Value });
+        let sort = if width == 4 && extends(&bytes) { Sort::Extended } else { Sort::Value };
+        wanted.push(Hole { at, width: width as u8, name: text, addend: 0, sort });
     }
     Ok(Written { bytes, holes: wanted })
+}
+
+/// Whether an instruction sign extends a four byte immediate to eight bytes, which is one whose REX
+/// byte asks for sixty four bits and `push`, which is sixty four bits without asking.
+///
+/// Read off the bytes rather than off the mnemonic, since the suffix is optional and the operand
+/// size is what the encoding settled on either way. The prefixes this machine writes in front of an
+/// instruction with an immediate are stepped over to get to the REX byte, which is last of them.
+fn extends(bytes: &[u8]) -> bool {
+    let mut at = 0;
+    while bytes
+        .get(at)
+        .is_some_and(|byte| matches!(byte, 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 | 0x64 | 0x65))
+    {
+        at += 1;
+    }
+    match bytes.get(at) {
+        Some(rex) if rex & 0xF0 == 0x40 => rex & 0x08 != 0,
+        Some(0x68) => true,
+        _ => false,
+    }
 }
 
 /// The two byte form of a jump written with four bytes of distance to a name, or nothing for any
@@ -408,12 +454,23 @@ const BRANCHES: [&str; 4] = ["j", "call", "loop", "xbegin"];
 /// `movq %rax, 0` stores to address zero, which is what a program writes to crash on purpose, and
 /// gas takes it as an address with no base and no index. A bare number is read as somewhere to go
 /// because in front of a jump that is what it is, so anything that is not a jump reads it again.
+///
+/// A bare name is the same, `movl counter, %eax` being what gcc writes for a global under
+/// `-fno-pie`: four bytes of address with no base and no index, which the linker fills in. A name
+/// with a suffix is left alone, since every suffix asks for something reached from the instruction.
 fn outright(operand: &mut Operand) {
-    let Operand::Dest(Named { name, addend: 0 }) = operand else { return };
-    let Some(disp) = number(name).ok().and_then(|value| i32::try_from(value).ok()) else {
+    let Operand::Dest(Named { name, addend }) = operand else { return };
+    if *addend == 0 {
+        if let Some(disp) = number(name).ok().and_then(|value| i32::try_from(value).ok()) {
+            *operand = Operand::Mem(Addr { disp, scale: 1, ..Addr::default() }, None);
+            return;
+        }
+    }
+    if number(name).is_ok() || name.contains('@') || name == "." {
         return;
-    };
-    *operand = Operand::Mem(Addr { disp, scale: 1, ..Addr::default() }, None);
+    }
+    let named = Named { name: std::mem::take(name), addend: *addend };
+    *operand = Operand::Mem(Addr { scale: 1, linked: true, ..Addr::default() }, Some(named));
 }
 
 /// The mnemonic with the width letter on it that the encoder knows this instruction by.
@@ -819,11 +876,19 @@ fn address(text: &str) -> Result<Operand, String> {
         addr.scale = u8::try_from(by).unwrap_or(1);
     }
 
-    if named.is_some() && !addr.rip {
-        return Err(format!(
-            "'{text}' names something in an address that is not counted from the instruction, \
-             which wants a relocation this compiler does not write yet"
-        ));
+    // A name in an address that is not counted from the instruction is the name's address, which
+    // the linker writes into four bytes of displacement however small the rest of it is. A suffix
+    // asks for a table slot or a thread's offset, which is only reached from the instruction.
+    if let Some(named) = &named {
+        if !addr.rip {
+            if let Some((_, how)) = named.name.split_once('@') {
+                return Err(format!(
+                    "'@{how}' in an address that is not counted from the instruction, which is \
+                     not a way this compiler reaches anything"
+                ));
+            }
+            addr.linked = true;
+        }
     }
     if !addr.rip && addr.base.is_none() && addr.index.is_none() && named.is_none() {
         // A bare number in brackets is an address the machine holds outright, which is legal and
@@ -1537,11 +1602,53 @@ mod tests {
         assert!(why.contains("32 bits"), "{why}");
     }
 
+    /// What a line was read as, holes and all.
+    fn written(line: &str) -> Written {
+        let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let args = crate::source::split(rest, ',');
+        one(word, &args).unwrap_or_else(|why| panic!("{line}: {why}"))
+    }
+
     #[test]
-    fn a_name_in_an_address_that_is_not_counted_from_the_instruction_is_refused() {
-        // Rather than assembled as a zero displacement, which links and reads the wrong address.
-        let why = refused("movq message(%rbx), %rax");
-        assert!(why.contains("relocation"), "{why}");
+    fn a_name_in_an_address_that_is_not_counted_from_the_instruction_is_four_bytes_of_address() {
+        // Four bytes however near the name turns out to be, and none of them guessed now. With a
+        // register, with an index and no base, and with nothing at all, which is every shape gcc
+        // writes for `-fno-pie`.
+        for (line, at) in [
+            ("movq message+8(%rbx), %rax", 3),
+            ("movl table(,%rax,4), %eax", 3),
+            ("movl counter, %eax", 3),
+        ] {
+            let written = written(line);
+            assert_eq!(written.bytes.len(), at + 4, "{line}");
+            let hole = &written.holes[0];
+            assert_eq!((hole.at, hole.width, hole.sort), (at, 4, Sort::Extended), "{line}");
+        }
+        let hole = &written("movq message+8(%rbx), %rax").holes[0];
+        assert_eq!((hole.name.as_str(), hole.addend), ("message", 8));
+    }
+
+    #[test]
+    fn a_name_as_an_immediate_is_sign_extended_only_where_the_machine_extends_it() {
+        // `movl` writes four bytes as they are and `movq` sign extends them to eight, which is the
+        // difference between `R_X86_64_32` and `R_X86_64_32S`. `movabs` has room for all eight.
+        for (line, width, sort) in [
+            ("movl $.LC0, %edi", 4, Sort::Value),
+            ("movq $.LC0, %rdi", 4, Sort::Extended),
+            ("pushq $.LC0", 4, Sort::Extended),
+            ("movabsq $.LC0, %rax", 8, Sort::Value),
+        ] {
+            let written = written(line);
+            let hole = &written.holes[0];
+            assert_eq!(hole.at + hole.width as usize, written.bytes.len(), "{line}");
+            assert_eq!((hole.width, hole.sort), (width, sort), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_name_in_an_address_asking_for_a_table_slot_without_the_instruction_is_refused() {
+        let why = refused("movq message@GOTPCREL(%rbx), %rax");
+        assert!(why.contains("@GOTPCREL"), "{why}");
     }
 
     #[test]

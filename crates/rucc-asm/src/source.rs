@@ -447,9 +447,12 @@ impl Reader {
             // `.` in an instruction is where the instruction starts, which is what gas means by it
             // and what `mov .-4(%rip), %eax` counts back from.
             let here = (part, at as i64);
-            let sum = if hole.sort == Reach::Value {
-                // The number itself, with nothing taken off for where the instruction ends.
-                self.expression_at(&hole.name, here)?
+            let sum = if matches!(hole.sort, Reach::Value | Reach::Extended) {
+                // The number itself, with nothing taken off for where the instruction ends. A name
+                // in an address carries what is added to it apart, and a number carries nothing.
+                let mut sum = self.expression_at(&hole.name, here)?;
+                sum.constant += hole.addend;
+                sum
             } else {
                 let what = if hole.name == "." {
                     What::Here { part, at: here.1 }
@@ -1649,16 +1652,17 @@ impl Reader {
 
     /// `.align`, `.balign` and `.p2align`, which differ only in what the first number means.
     ///
-    /// On this machine `.align` counts bytes, which is the trap: on some other machines the same
-    /// directive counts bits, and a file written for one read by the other is off by a factor it
-    /// never says out loud.
+    /// On x86-64 ELF `.align` counts bytes, which is the trap: on AArch64, and on Apple's platforms
+    /// whatever the machine, the same directive is a power of two the way `.p2align` is. gcc writes
+    /// `.align 3` for eight bytes on AArch64, and read as bytes that is not an alignment at all.
     fn align(&mut self, word: &str, args: &[String]) -> Result<(), Trouble> {
         let Some(head) = args.first() else {
             return Err(self.bad(&format!(".{word} with nothing after it")));
         };
         let first = self.number(head)?;
         let first = self.count(first)?;
-        let boundary = if word == "p2align" {
+        let powers = word == "p2align" || (word == "align" && (self.aarch64 || self.macho));
+        let boundary = if powers {
             if first > 31 {
                 return Err(self.bad(".p2align of more than two gigabytes"));
             }
@@ -2382,10 +2386,17 @@ impl Reader {
             }
             let residue =
                 self.reduce_kept(&fixup.sum, fixup.jump).map_err(|why| Trouble { line, why })?;
-            if fixup.reach == Reach::Value && !residue.left.is_empty() {
+            // A number in an instruction that is still a name is the address of the name, which
+            // the linker has to write and which only fits in four bytes or more. Anything else
+            // left over, a difference of names across sections say, is not a number the linker
+            // writes into an instruction.
+            let value = matches!(fixup.reach, Reach::Value | Reach::Extended);
+            let named =
+                matches!(residue.left.as_slice(), [Left { coeff: 1, what: What::Symbol(_), .. }]);
+            if value && !residue.left.is_empty() && !named {
                 return Err(bad(
-                    "a number in an instruction that names something outside this section, \
-                     which wants a relocation this compiler does not write yet"
+                    "a number in an instruction that is not a name and a constant once the names \
+                     in this section are counted, which no relocation writes"
                         .to_owned(),
                 ));
             }
@@ -2419,8 +2430,14 @@ impl Reader {
                     continue;
                 }
                 // The address of something, which is the whole of what a table of pointers holds.
+                // An instruction on sixty four bits sign extends four bytes of it, which the linker
+                // is told so that it checks the address fits that way. See [`Reach::Extended`].
                 [Left { coeff: 1, what: What::Symbol(name), .. }] => {
-                    let kind = Reference::Address { bytes: fixup.width };
+                    let kind = if fixup.reach == Reach::Extended && fixup.width == 4 {
+                        Reference::Signed
+                    } else {
+                        Reference::Address { bytes: fixup.width }
+                    };
                     (name.clone(), kind, residue.constant, 0)
                 }
                 // The distance from these bytes to something, which is what a position independent
@@ -3593,6 +3610,15 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn align_on_aarch64_is_a_power_of_two_and_on_x86_64_a_count_of_bytes() {
+        // What gcc writes in front of an eight byte variable on each machine.
+        let read = aarch64("\t.data\n\t.byte 1\n\t.align 3\n\t.byte 2\n");
+        assert_eq!(bytes(&read, ".data"), [1, 0, 0, 0, 0, 0, 0, 0, 2]);
+        let read = assembled("\t.data\n\t.byte 1\n\t.align 4\n\t.byte 2\n");
+        assert_eq!(bytes(&read, ".data"), [1, 0, 0, 0, 2]);
+    }
+
+    #[test]
     fn an_aarch64_branch_in_the_file_is_filled_in_and_a_name_is_left_to_the_linker() {
         let read = aarch64(concat!(
             "# 1 \"f.s\"\n",
@@ -3963,6 +3989,38 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn code_that_is_not_position_independent_reaches_its_data_by_address() {
+        // What gcc writes under `-fno-pie`. The immediate of `movl` is the address as it is, and
+        // the displacement and the immediate of `movq` are sign extended, which the linker is told
+        // so that it checks the address fits that way. A name in this section is still an address
+        // the linker writes, since where the section lands is not known here either.
+        let out = assembled(
+            "\t.text\nf:\n\tmovl $.LC0, %edi\n\tmovq $.LC0+4, %rdi\n\tmovl \
+             table(,%rax,4), %eax\n\tmovabsq $f, %rax\n\tret\n\t.section .rodata\n.LC0:\n\t\
+             .string \"hi\"\n",
+        );
+        let text = out.parts.iter().find(|part| part.name == ".text").unwrap();
+        let kinds: Vec<_> =
+            text.relocs.iter().map(|reloc| (reloc.at, reloc.kind, reloc.addend)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (1, Reference::Address { bytes: 4 }, 0),
+                (8, Reference::Signed, 4),
+                (15, Reference::Signed, 0),
+                (21, Reference::Address { bytes: 8 }, 0),
+            ]
+        );
+        assert_eq!(text.relocs[2].symbol, "table");
+    }
+
+    #[test]
+    fn a_name_in_an_immediate_too_narrow_for_an_address_is_refused() {
+        let why = refused("\t.text\n\tmovw $message, %ax\n");
+        assert!(why.why.contains("bytes"), "{why}");
+    }
+
+    #[test]
     fn a_distance_from_here_to_something_else_is_a_relocation_relative_to_here() {
         // The other shape a reduced expression can have, and the one whose addend is not zero: the
         // four bytes sit at offset four, and a relocation counts from where it starts.
@@ -4317,8 +4375,8 @@ _tls$tlv$init:
     }
 
     #[test]
-    fn a_number_an_instruction_carries_may_not_name_something_elsewhere() {
-        let why = refused("\tmov $elsewhere, %eax\n");
+    fn a_number_an_instruction_carries_may_not_be_two_names_elsewhere() {
+        let why = refused("\tmov $elsewhere-there, %eax\n");
         assert!(why.why.contains("relocation"), "{why}");
     }
 

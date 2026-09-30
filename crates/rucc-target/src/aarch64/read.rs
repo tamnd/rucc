@@ -63,12 +63,13 @@ pub fn read(text: &str) -> Result<Line, Error> {
     if mnemonic.is_empty() {
         return Err(error(text));
     }
-    let mut line = Line {
-        mnemonic: mnemonic.to_ascii_lowercase(),
-        values: Vec::new(),
-        symbol: None,
-        addend: 0,
-    };
+    // `bne` is the older spelling of `b.ne`, from before the dot, and gcc still writes it in places.
+    // Nothing else that starts with `b` has a condition after it, `bl` and `bic` among them.
+    let mut mnemonic = mnemonic.to_ascii_lowercase();
+    if mnemonic.len() == 3 && mnemonic.starts_with('b') && Cond::named(&mnemonic[1..]).is_some() {
+        mnemonic.insert(1, '.');
+    }
+    let mut line = Line { mnemonic, values: Vec::new(), symbol: None, addend: 0 };
     let mut named = (None, 0);
     let pieces = split(rest);
     let mut at = 0;
@@ -79,9 +80,7 @@ pub fn read(text: &str) -> Result<Line, Error> {
             // it moves by, and it is one operand to the machine.
             let mut addr = address(piece, &mut named)?;
             if addr.mode == Mode::Offset && piece.ends_with(']') && at + 1 < pieces.len() {
-                if let (Offset::Imm(0), Some(imm)) =
-                    (addr.offset, pieces[at + 1].strip_prefix('#').and_then(number))
-                {
+                if let (Offset::Imm(0), Some(imm)) = (addr.offset, immediate(pieces[at + 1])) {
                     addr.offset = Offset::Imm(imm);
                     addr.mode = Mode::Post;
                     at += 1;
@@ -135,11 +134,29 @@ fn split(text: &str) -> Vec<&str> {
     pieces
 }
 
+/// A whole number with the `#` in front of it or without.
+///
+/// GNU as takes either, and gcc leaves it off: `stp x29, x30, [sp, -16]!` and `mov w0, 0` are what
+/// its listings say. Nothing but a number reads as one, since a name never starts with a digit.
+fn immediate(piece: &str) -> Option<i64> {
+    number(piece.strip_prefix('#').unwrap_or(piece))
+}
+
 /// One operand that is not an address.
 fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
     let lower = piece.to_ascii_lowercase();
     if let Some(value) = register(&lower) {
         return Ok(value);
+    }
+    // A number without the `#`, which is how gcc writes every immediate. A float has to start with
+    // a digit or a sign to be one, since `inf` and `nan` are names a file may use.
+    if lower.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+        if let Some(value) = number(&lower) {
+            return Ok(Value::Imm(value));
+        }
+        if let Ok(value) = lower.parse::<f64>() {
+            return Ok(Value::Float(value));
+        }
     }
     if let Some(imm) = lower.strip_prefix('#') {
         if let Some(value) = number(imm) {
@@ -452,8 +469,8 @@ fn address(piece: &str, symbol: &mut Named) -> Result<Addr, Error> {
         [imm] if imm.contains('@') => {
             Offset::Symbol(apple(imm.strip_prefix('#').unwrap_or(imm), symbol)?)
         }
-        [imm] if imm.starts_with('#') => {
-            Offset::Imm(imm.strip_prefix('#').and_then(number).ok_or_else(|| error(piece))?)
+        [imm] if imm.starts_with('#') || immediate(imm).is_some() => {
+            Offset::Imm(immediate(imm).ok_or_else(|| error(piece))?)
         }
         [index, rest @ ..] => {
             let (width, reg) = match register(&index.to_ascii_lowercase()) {
@@ -503,6 +520,25 @@ mod tests {
             line.values[1],
             Value::Mem(Addr { base: 31, offset: Offset::Imm(-16), mode: Mode::Pre })
         );
+    }
+
+    #[test]
+    fn a_number_without_its_hash_is_the_same_number() {
+        // How gcc writes them, in an address, after one, and as an operand of its own.
+        for (plain, hashed) in [
+            ("stp x29, x30, [sp, -16]!", "stp x29, x30, [sp, #-16]!"),
+            ("ldp x29, x30, [sp], 16", "ldp x29, x30, [sp], #16"),
+            ("ldr w1, [x0, 8]", "ldr w1, [x0, #8]"),
+            ("mov w0, 0", "mov w0, #0"),
+            ("cmp w0, 0x10", "cmp w0, #0x10"),
+            ("fmov d0, 1.5e+0", "fmov d0, #1.5"),
+            ("tbnz w0, 3, .L2", "tbnz w0, #3, .L2"),
+            ("bne .L2", "b.ne .L2"),
+        ] {
+            assert_eq!(read(plain).unwrap(), read(hashed).unwrap(), "{plain}");
+        }
+        // A name that happens to spell a float is still a name.
+        assert_eq!(read("adrp x0, inf").unwrap().symbol.as_deref(), Some("inf"));
     }
 
     #[test]
