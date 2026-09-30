@@ -44,6 +44,7 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
         "-fno-allow-store-data-races",
         "-fzero-init-padding-bits=all",
         "-fshort-wchar",
+        "-fno-PIE",
         "-mindirect-branch=thunk-extern",
         "-mfunction-return=thunk-extern",
         "-mindirect-branch-register",
