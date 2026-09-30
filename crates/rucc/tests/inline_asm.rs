@@ -1380,6 +1380,24 @@ fn a_constant_outside_its_range_letter_goes_in_the_register_the_constraint_also_
 }
 
 #[test]
+fn a_constant_wider_than_thirty_two_bits_goes_in_a_register_under_e_and_z() {
+    // The kernel's `atomic64_add` is `"er"`, and `addq` has room for a sign extended thirty two
+    // bit number and no more, so lib/atomic64_test.c adding 0x1111111111111122 needs the `r`.
+    let source = "void f(long *p) {\n\
+                  asm volatile(\"lock; addq %1,%0\" : \"+m\"(*p) : \"er\"(0x1111111111111122L));\n\
+                  asm volatile(\"lock; addq %1,%0\" : \"+m\"(*p) : \"er\"(-1L));\n\
+                  asm volatile(\"movl %1,%k0\" : \"=r\"(*p) : \"Zr\"(0xffffffffL));\n\
+                  asm volatile(\"movl %1,%k0\" : \"=r\"(*p) : \"Zr\"(-1L)); }\n";
+    let (ok, text, said) = run_with("e-and-z", source, &["-O2"]);
+    assert!(ok, "{said}");
+    assert!(!text.contains("addq $1229782938247303458"), "{text}");
+    assert!(text.contains("lock; addq %rax,"), "{text}");
+    assert!(text.contains("lock; addq $-1,"), "{text}");
+    assert!(text.contains("movl $4294967295,"), "{text}");
+    assert!(!text.contains("movl $-1,"), "{text}");
+}
+
+#[test]
 fn an_address_turned_into_a_number_and_back_is_still_a_constant() {
     // The kernel's gdt_idt.c hands `rip_rel_ptr` a per cpu variable as
     // `(void *)(unsigned long)&gdt_page`, and the template asks for it with `"i"`.

@@ -133,6 +133,8 @@ fn in_range(range: Option<char>, number: i128) -> bool {
         Some('M') => (0..=3).contains(&number),
         Some('N') => (0..=255).contains(&number),
         Some('O') => (0..=127).contains(&number),
+        Some('e') => i32::try_from(number).is_ok(),
+        Some('Z') => u32::try_from(number).is_ok(),
         _ => true,
     }
 }
@@ -5031,7 +5033,9 @@ impl<'a> Lowering<'a> {
                     && operand.immediate
                     && match (self.number(value), operand.range) {
                         (Some(number), range) => a64 || in_range(range, number),
-                        (None, None) => self.named_address(value).is_some(),
+                        // The two thirty two bit letters take an address too, which fits under the
+                        // code models gcc takes them in.
+                        (None, None | Some('e' | 'Z')) => self.named_address(value).is_some(),
                         (None, Some(_)) => false,
                     };
                 // An operand in memory is spelled on AArch64 as the register its address is in,
