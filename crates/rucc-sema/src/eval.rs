@@ -80,10 +80,11 @@ use rucc_base::float::{Float, Format, Status};
 use rucc_diag::Diagnostic;
 use rucc_target::TargetInfo;
 use rucc_types::{
-    IntegerInfo, TypeId, TypeKind, Types, float_format, integer_info, layout, real_part, spell,
+    IntegerInfo, Qualifiers, TypeId, TypeKind, Types, float_format, integer_info, layout,
+    real_part, spell,
 };
 
-use crate::decl::{DeclFlags, DeclId, StorageDuration};
+use crate::decl::{DeclFlags, DeclId, DeclKind, StorageDuration};
 use crate::expr::{BitCount, Classify, Conversion, ExprId, ExprKind, ExprList, OverflowOp, Sign};
 use crate::tast::{Address, Base, Const, Tast};
 
@@ -113,7 +114,18 @@ pub struct Eval<'a> {
     addressed: bool,
     deferred: bool,
     literals: bool,
+    objects: bool,
+    read_object: bool,
+    depth: u32,
 }
+
+/// How many `const` objects deep the folding follows one initializer into the next.
+///
+/// Only an object with static storage can have an initializer that reads another one, and one
+/// that reads itself, `static const int a = a;`, is refused where it is written but keeps the
+/// initializer it was given. Nothing real is more than a few deep, so the bound is there to make
+/// that one stop rather than to limit anything a program would write.
+const OBJECT_DEPTH: u32 = 32;
 
 impl<'a> Eval<'a> {
     /// A folder over a tree, the types it points into, and the target it is being compiled for.
@@ -133,7 +145,40 @@ impl<'a> Eval<'a> {
             addressed: false,
             deferred: false,
             literals: false,
+            objects: false,
+            read_object: false,
+            depth: 0,
         }
+    }
+
+    /// The same folder, reading a `const` object of integer type as the value it was initialized
+    /// with where `objects` is true.
+    ///
+    /// That is gcc's reading rather than C's, and gcc takes it in two places only: the size of an
+    /// array and an initializer for an object with static storage. `const int n = 4; char b[n];`
+    /// is an array of four there rather than a variable length array, and `static int x = n;`
+    /// compiles, while `_Static_assert (n == 4, "")`, a `case n:` and `enum { e = n }` are refused
+    /// by gcc 16 in every dialect. The object has to be `const` and not `volatile`, of an integer
+    /// type, and initialized with something that is itself a constant. One with automatic storage
+    /// counts only where that initializer is an integer constant expression the strict way, so
+    /// `const int m = n + 1;` in a body is not one, and one with static storage counts where its
+    /// initializer folds this way too, since gcc folds that initializer before it keeps it.
+    ///
+    /// Only the dialect decides whether the caller asks, which is why this is a switch rather than
+    /// a mode of its own: the strict dialects keep 6.6 as it is written.
+    #[must_use]
+    pub fn objects(mut self, objects: bool) -> Eval<'a> {
+        self.objects = objects;
+        self
+    }
+
+    /// Whether the folding read a `const` object the way [`Self::objects`] allows.
+    ///
+    /// A caller that has a pedantic warning to give about that asks this afterwards, because the
+    /// same answer without the reading would have been a variable length array or an error.
+    #[must_use]
+    pub fn read_object(&self) -> bool {
+        self.read_object
     }
 
     /// Whether the folding went looking for the address of something.
@@ -271,7 +316,8 @@ impl<'a> Eval<'a> {
             // `const int n = 1; int a[n];` is a variable length array in C, and it is this arm
             // that makes it one. A named constant is the exception C23 added and the reason
             // `constexpr` is a keyword rather than a promise. A character of a string literal is
-            // the other exception, and it is one only where [`Self::initializer`] was asked.
+            // the other exception, and it is one only where [`Self::initializer`] was asked. The
+            // `const` object gcc reads is a third, and only where [`Self::objects`] was asked.
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
                 match self.named_constant(operand).or_else(|| self.string_element(expr, operand)) {
                     Some(value) => Ok(value),
@@ -901,13 +947,55 @@ impl<'a> Eval<'a> {
         let (decl, offset) = self.designation(expr)?;
         let node = &self.tast[decl];
         if !node.flags.contains(DeclFlags::CONSTANT) {
-            return None;
+            return self.const_object(expr);
         }
         let entries = self.tast[node.init?].to_vec();
         let entry = entries.iter().find(|entry| entry.offset == offset && entry.bit_offset == 0)?;
         // A member the initializer did not reach holds a zero, which is what the contract on
         // an initializer list says: the object starts as zero and the entries are applied to it.
         self.eval(entry.value).ok()
+    }
+
+    /// The value of a `const` object of integer type, where [`Self::objects`] asked for gcc's
+    /// reading of one, and [`None`] everywhere else.
+    ///
+    /// Only the object named on its own counts. A member of a `const` structure is not one gcc
+    /// folds, and neither is anything with more than one entry in its initializer.
+    fn const_object(&mut self, expr: ExprId) -> Option<Const> {
+        if !self.objects || self.depth >= OBJECT_DEPTH {
+            return None;
+        }
+        let ExprKind::Decl(decl) = self.tast[expr].kind else { return None };
+        let node = &self.tast[decl];
+        let ty = self.types.canonical(node.ty);
+        let quals = self.types.quals(ty);
+        if node.kind != DeclKind::Object
+            || !quals.has(Qualifiers::CONST)
+            || quals.has(Qualifiers::VOLATILE)
+            || self.int_shape(ty).is_none()
+        {
+            return None;
+        }
+        let automatic = node.duration == StorageDuration::Automatic;
+        let entries = self.tast[node.init?].to_vec();
+        let [entry] = entries.as_slice() else { return None };
+        if entry.offset != 0 || entry.bit_width != 0 {
+            return None;
+        }
+        // An automatic object's initializer is kept as written, so it counts only where it is a
+        // constant without this reading, which is where gcc draws the line as well.
+        self.objects = !automatic;
+        self.depth += 1;
+        let value = self.eval(entry.value);
+        self.depth -= 1;
+        self.objects = true;
+        match value {
+            Ok(Const::Int(value)) => {
+                self.read_object = true;
+                Some(Const::Int(value))
+            }
+            _ => None,
+        }
     }
 
     /// The character a string literal holds at a place, and [`None`] when the expression is not a
@@ -2540,7 +2628,7 @@ mod tests {
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
-        let constant = c.types.qualified(int, rucc_types::Qualifiers::CONST);
+        let constant = c.types.qualified(int, Qualifiers::CONST);
         c.declare_object(name, constant, Span::DUMMY);
         // C says `const int n = 1; int a[n];` is a variable length array and C++ says it is not.
         // This is the arm that decides which language is being compiled.

@@ -1926,8 +1926,12 @@ impl Unit<'_> {
     /// 6.6 does, so it asks for the reading the front end already accepted there. Asking the
     /// strict way instead would refuse here what was allowed a pass earlier, which is a wrong
     /// answer arriving late rather than an extra check.
+    ///
+    /// A `const` object is read as its value for the same reason. The front end allowed that only
+    /// under the GNU dialects and refused the program under the others, so whatever reaches here
+    /// with one in it was allowed, and the dialect does not need asking again.
     fn fold(&mut self, expr: ExprId) -> Option<Const> {
-        let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
+        let mut eval = Eval::new(self.tast, self.types, self.target, self.names).objects(true);
         let folded = eval.initializer(expr);
         let reported = eval.finish();
         self.diagnostics.extend(reported);

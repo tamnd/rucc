@@ -11,6 +11,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
 - The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
 
+### Added
+
+- Under the GNU dialects a `const` object of integer type that is not `volatile` and was initialized with a constant is read as its value in the size of an array and in the initializer of an object with static storage, the two places gcc reads one. `const int n = 4; char buf[n];` is an array of four rather than a variable length array, one at file scope compiles, and `static int x = n;` does too, with a warning under `-pedantic` for the array as gcc gives. `_Static_assert`, `case`, enumerators and the other places a constant is required still refuse it, as gcc 16 does, and the strict dialects are unchanged. Linux 7.2 relies on this (#2262).
+
+### Fixed
+
+- Any integer constant expression with the value zero is a null pointer constant, not only a literal `0`, so `(void *)((long)(x) * 0l)` is one exactly when `x` is a constant. The kernel's `__is_constexpr` is built on that and answered "not constant" for everything, which turned arrays sized with `max()` into variable length arrays and broke some `BUILD_BUG_ON_ZERO` uses (#2261).
+
 ## 0.18.0
 
 The W5 release, for AArch64 Windows. aarch64-windows-gnu is tier 2: rung 0 passes 42 of 42 under Wine on an arm64 runner and natively on `windows-11-arm`, rung 1 is SQLite's veryquick suite built by rucc and by llvm-mingw's clang and run natively there every night with nothing failing only in rucc's build, and the `rucc.exe` doing it is the one built for `aarch64-pc-windows-msvc`. Calls to `dllimport` functions and reads of imported data now work on AArch64 Windows, and the AArch64 assembler takes the Advanced SIMD instructions gcc writes.
