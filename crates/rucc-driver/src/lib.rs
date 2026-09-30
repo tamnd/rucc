@@ -19,8 +19,8 @@
 //! and writes the typed tree. The flags those two read are real with them, which is `-D`, `-U`,
 //! `-I`, `-I-`, `-iquote`, `-isystem`, `-idirafter`, `-iprefix`, `-iwithprefix`,
 //! `-iwithprefixbefore`, `-include`, `-imacros`, `--sysroot=`, `-isysroot`, `-P`, `-std=`,
-//! `-fgnuc-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`, `-fno-builtin-<name>`,
-//! `-fgnu89-inline`, `-pedantic` and `-Werror`.
+//! `-fgnuc-version=`, `-fgnu-as-version=`, `-ansi`, `-ffreestanding`, `-fno-builtin`,
+//! `-fno-builtin-<name>`, `-fgnu89-inline`, `-pedantic` and `-Werror`.
 //! The phases after them still say they are not implemented.
 //!
 //! This crate is tier 3 in `spec/18-package-layout.md` section 18.5: its Rust API is
@@ -249,7 +249,7 @@ options:
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
   -std=<dialect>         c89 through c2y, and the gnu spellings
-  -fgnuc-version=<v> -fms-compatibility-version=<v>   the GCC (16.0.0) or MSVC (19.40) to claim
+  -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z, fast
   -fsafety=<tier>        check memory safety: off, detect, enforce, kernel
@@ -270,7 +270,7 @@ options:
   -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
-  -Wl,<arg>, -Xlinker <arg>, -fuse-ld=<name>   hand an argument to the linker, or pick one
+  -Wl,<arg> -Xlinker <arg> -fuse-ld=<name>, -Wa,<arg> -Xassembler <arg>   the linker, the assembler
   -Werror -pedantic -pedantic-errors -w -W[no-]system-headers   how much to say, and how fatal
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
@@ -706,6 +706,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // here, so with no `-iprefix` the prefix is nothing and `-iwithprefix` names a directory
     // outright.
     let mut iprefix = String::new();
+    // Every word handed to the assembler with `-Wa,` or `-Xassembler`, beside the argument it came
+    // from so that a refusal can name both.
+    let mut asm_words: Vec<(String, String)> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -1115,6 +1118,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // something by a name this compiler has never heard of.
             _ if arg.starts_with("-fno-builtin-") => {
                 opts.no_builtin.push(arg["-fno-builtin-".len()..].to_owned());
+            }
+            // The assembler this compiler stands in for, which is what `-Wa,--version` names.
+            _ if arg.starts_with("-fgnu-as-version=") => {
+                let v = &arg["-fgnu-as-version=".len()..];
+                opts.gnu_as = v.parse().map_err(|why| err(format!("-fgnu-as-version=: {why}")))?;
             }
             _ if arg.starts_with("-fgnuc-version=") => {
                 let v = &arg["-fgnuc-version=".len()..];
@@ -2230,22 +2238,36 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      section 4.4",
                 ));
             }
-            // Arguments meant for a separate assembler, which this compiler does not have: it is
-            // inside it and does not read a command line. Refused rather than dropped, because
-            // every one of these says something about the output and a build that asked for
-            // `-Wa,--noexecstack` and was silently given an executable stack got the opposite of
-            // what it asked for. The `-Wp,` ones this compiler understands were turned into its
-            // own flags before the loop, so one that reaches here is one it does not.
-            _ if arg.starts_with("-Wa,") || arg.starts_with("-Wp,") => {
+            // What a build hands the assembler. gcc splits `-Wa,` at every comma and passes
+            // `-Xassembler`'s word whole, and both are kept in order and read after the loop,
+            // because whether `--64` is true depends on a `--target=` that may come later. See
+            // `assembler_words` for which of them this compiler takes.
+            _ if arg.starts_with("-Wa,") => {
+                for word in arg["-Wa,".len()..].split(',') {
+                    asm_words.push((word.to_owned(), arg.to_owned()));
+                }
+            }
+            "-Xassembler" => {
+                let word = args.get(i).ok_or_else(|| err("-Xassembler requires an argument"))?;
+                i += 1;
+                asm_words.push((word.clone(), format!("-Xassembler {word}")));
+            }
+            // Arguments meant for a separate preprocessor, which this compiler does not have: it is
+            // inside it and does not read a command line. The `-Wp,` ones this compiler understands
+            // were turned into its own flags before the loop, so one that reaches here is one it
+            // does not, and it is refused rather than dropped, because a build that asked the
+            // preprocessor for something and was silently not given it has been told something
+            // untrue.
+            _ if arg.starts_with("-Wp,") => {
                 return Err(err(format!(
-                    "`{arg}` is an argument for a separate assembler or preprocessor, and both \
-                     are inside this compiler rather than programs it runs"
+                    "`{arg}` is an argument for a separate preprocessor, and the preprocessor is \
+                     inside this compiler rather than a program it runs"
                 )));
             }
-            "-Xassembler" | "-Xpreprocessor" => {
+            "-Xpreprocessor" => {
                 return Err(err(format!(
-                    "{arg} hands an argument to a separate assembler or preprocessor, and both \
-                     are inside this compiler rather than programs it runs"
+                    "{arg} hands an argument to a separate preprocessor, and the preprocessor is \
+                     inside this compiler rather than a program it runs"
                 )));
             }
             // Everything else in the `-W` family. `spec/04-driver-and-cli.md` section 4.1 has
@@ -2410,6 +2432,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
+    // After the loop, since whether `--64` or `-march=` is true of the target is a question about
+    // the last `--target=`.
+    let assembler = assembler_words(&asm_words, opts.target)?;
+    opts.asm_fatal_warnings = assembler.fatal_warnings;
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -2534,6 +2560,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             plan: Box::new(plan),
             link: Box::new(link),
         });
+    }
+    // gas answers `--version` and stops without reading its input, and gcc passes its exit status
+    // on, so a compiler asked this writes its one line and nothing else. After the plan, so that a
+    // command line gcc would refuse before it ran the assembler is refused here too.
+    if assembler.version {
+        return Ok(Action::Print(gas_banner(opts.gnu_as)));
     }
     Ok(Action::Compile {
         opts: Box::new(opts),
@@ -3786,6 +3818,111 @@ fn banner() -> String {
     format!(
         "rucc {VERSION}\nA C compiler for the GNU C dialect of GCC 16 from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.\n"
     )
+}
+
+/// The first line of what gas prints for `--version`, which is all of what this compiler prints.
+///
+/// gas writes `GNU assembler (GNU Binutils) 2.44` and then a copyright and a licence, and what
+/// reads it is the Linux kernel's `scripts/as-version.sh`, which takes the first line, wants its
+/// first two words to be `GNU assembler` and takes the last word as the version. The part in
+/// brackets is where a distribution names its build, so it is where this names itself. One line
+/// rather than gas's six, since the rest is gas's licence and not ours.
+fn gas_banner(version: rucc_session::GasVersion) -> String {
+    format!("GNU assembler (rucc {VERSION} integrated) {version}")
+}
+
+/// What the words a build handed the assembler come to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Assembler {
+    /// `--version`, which prints the assembler's banner instead of assembling anything.
+    version: bool,
+    /// `--fatal-warnings`, which makes the assembler's one warning an error.
+    fatal_warnings: bool,
+}
+
+/// The words of every `-Wa,` and `-Xassembler`, each one honored, taken because it describes what
+/// the assembler inside this compiler already does, or refused by name.
+///
+/// There is no separate assembler here, but builds pass these as if there were, and the Linux
+/// kernel passes a good many. Refusing the ones that are not on this list matters as much as taking
+/// the ones that are: kbuild's `as-option` and `cc-option` find out whether an assembler takes an
+/// option by passing it and looking at the exit status, so an option taken and ignored is a
+/// feature switched on that the output does not have. Each word is paired with the argument it came
+/// from, so that the refusal names both. `spec/04-driver-and-cli.md` section 4.9 has the list and
+/// why each entry is on it.
+fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembler, CliError> {
+    let mut out = Assembler::default();
+    let x86 = target.arch == rucc_target::Arch::X86_64;
+    let aarch64 = target.arch == rucc_target::Arch::Aarch64;
+    let mut words = words.iter();
+    while let Some((word, from)) = words.next() {
+        let refuse = |why: &str| err(format!("`{word}` in `{from}`: {why}"));
+        match word.as_str() {
+            "--version" => out.version = true,
+            "--fatal-warnings" => out.fatal_warnings = true,
+            // Every ELF object this compiler writes, from C or from assembly, carries an empty
+            // `.note.GNU-stack` with no flags on it, which is the marker that says the stack is not
+            // executable. Mach-O and COFF have no marker and a stack that is not executable unless
+            // the link says otherwise, so on those it is true as well.
+            "--noexecstack" => {}
+            // The note gas writes on x86 with the instruction sets and features a file used. This
+            // compiler never writes it, so asking for it not to be written asks for what happens.
+            "-mx86-used-note=no" if x86 => {}
+            // The word size gas assembles for. Every x86 target this compiler has is 64 bit, so
+            // `--64` is what it does and `--32` is a machine it has no encoder for.
+            "--64" if x86 => {}
+            "--32" if x86 => {
+                return Err(refuse(
+                    "this compiler assembles only 64 bit x86, and 32 bit code would need an \
+                     assembler for the i386 encodings, which it does not have",
+                ));
+            }
+            // The data model gas assembles for on AArch64, where LP64 is the only one this compiler
+            // has.
+            "-mabi=lp64" if aarch64 => {}
+            // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
+            // and refuses both directives, so a place to look for one changes nothing.
+            "-I" => {
+                if words.next().is_none() {
+                    return Err(refuse("-I requires a directory"));
+                }
+            }
+            _ if word.starts_with("-I") => {}
+            // The architecture gas takes instructions from. The kernel passes `armv8.4-a` or
+            // `armv8.5-a` on AArch64 so that the assembler takes instructions the compiler must not
+            // generate, and this assembler takes every instruction it can encode whatever
+            // architecture is named, so a name it knows is taken. On x86 gas's names are processors
+            // rather than the compiler's levels and they narrow what it takes, which this assembler
+            // cannot do.
+            _ if word.starts_with("-march=") => {
+                let name = &word["-march=".len()..];
+                let arch = name.split_once('+').map_or(name, |(arch, _)| arch);
+                if !aarch64 || rucc_target::Isa::aarch64_arch(arch).is_none() {
+                    return Err(refuse(
+                        "the assembler inside this compiler takes every instruction it can encode \
+                         and cannot be narrowed to a processor, and on AArch64 it takes the \
+                         armv8 and armv9 architecture names",
+                    ));
+                }
+            }
+            // Line tables for a file of assembly, which gas writes from the source lines when the
+            // file has no `.loc` of its own. This assembler writes no debug information for a file
+            // of assembly at all, so the option is refused rather than taken and not done.
+            _ if word.starts_with("-gdwarf") || word.starts_with("--gdwarf") || word == "-g" => {
+                return Err(refuse(
+                    "the assembler inside this compiler writes no debug information for a file of \
+                     assembly, so it cannot write the line table this asks for",
+                ));
+            }
+            _ => {
+                return Err(refuse(
+                    "the assembler is inside this compiler, and this is not one of the options it \
+                     takes, see spec/04-driver-and-cli.md section 4.9",
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Runs the driver and returns the process exit code.
@@ -6352,8 +6489,8 @@ mod tests {
     #[test]
     fn an_argument_for_a_separate_tool_is_refused_rather_than_dropped() {
         // Every one of these says something about the output, so the wrong answer is silence.
-        assert!(refused(&["-Wa,--noexecstack", "-c", "a.c"]).contains("separate assembler"));
-        assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-Wa,--execstack", "-c", "a.c"]).contains("`--execstack`"));
+        assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate preprocessor"));
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
         assert!(refused(&["-mcmodel=kernel", "-c", "a.c"]).contains("small code model"));
         assert!(refused(&["-gdwarf-4", "-c", "a.c"]).contains("DWARF 5"));
@@ -6963,8 +7100,103 @@ mod tests {
 
     #[test]
     fn a_preprocessor_flag_this_compiler_does_not_read_is_still_refused_whole() {
-        assert!(refused(&["-Wp,-MD", "-c", "a.c"]).contains("separate assembler"));
+        assert!(refused(&["-Wp,-MD", "-c", "a.c"]).contains("separate preprocessor"));
         assert!(refused(&["-Wp,-MD,x.d,-C", "-c", "a.c"]).contains("-Wp,-MD,x.d,-C"));
+    }
+
+    #[test]
+    fn the_assembler_version_is_its_own_claim_beside_the_gcc_one() {
+        let line = |extra: &[&str]| {
+            let mut words = vec!["-Wa,--version", "-c", "-x", "assembler", "/dev/null"];
+            words.extend_from_slice(extra);
+            words.extend_from_slice(&["-o", "/dev/null"]);
+            printed(&words)
+        };
+        let ours = format!("GNU assembler (rucc {VERSION} integrated)");
+        assert_eq!(line(&["-fgnu-as-version=2.44"]), format!("{ours} 2.44"));
+        assert_eq!(line(&[]), format!("{ours} 2.46"), "the documented default moved");
+        assert_eq!(line(&["-fgnu-as-version=2.35.1"]), format!("{ours} 2.35.1"));
+        // The two personas do not move each other.
+        assert_eq!(line(&["-fgnuc-version=4.9.4"]), format!("{ours} 2.46"));
+        let (opts, _) = compile(&["-fgnu-as-version=2.25", "-c", "a.c"]);
+        assert_eq!(opts.gnu_as.to_string(), "2.25");
+        assert_eq!(opts.gnuc, GnucVersion::default());
+        let bad = refused(&["-fgnu-as-version=2.x", "-c", "a.c"]);
+        assert!(bad.contains("-fgnu-as-version="), "{bad}");
+    }
+
+    #[test]
+    fn the_assembler_version_is_asked_the_way_as_version_sh_asks_it() {
+        // `scripts/as-version.sh` in the kernel, which puts its flags after the compiler's own and
+        // reads the preprocessor's spelling of an assembler file.
+        let said = printed(&[
+            "-fgnuc-version=14.2.0",
+            "-fgnu-as-version=2.44",
+            "-Wa,--version",
+            "-c",
+            "-x",
+            "assembler-with-cpp",
+            "/dev/null",
+            "-o",
+            "/dev/null",
+        ]);
+        assert!(said.starts_with("GNU assembler "), "{said}");
+        assert!(said.ends_with(" 2.44"), "{said}");
+        // And `-Xassembler`, which is the same word by another road, and a list in one `-Wa,`.
+        let x = printed(&["-Xassembler", "--version", "-c", "-x", "assembler", "/dev/null"]);
+        assert_eq!(x, format!("GNU assembler (rucc {VERSION} integrated) 2.46"));
+        let list = printed(&["-Wa,--noexecstack,--version", "-c", "-x", "assembler", "/dev/null"]);
+        assert_eq!(list, x);
+    }
+
+    #[test]
+    fn what_the_kernel_hands_the_assembler_is_taken_where_it_is_true() {
+        let x86 = "--target=x86_64-unknown-linux-gnu";
+        let arm = "--target=aarch64-unknown-linux-gnu";
+        for word in [
+            "-Wa,--noexecstack",
+            "-Wa,-mx86-used-note=no",
+            "-Wa,--64",
+            "-Wa,-Iinclude",
+            "-Wa,-I,include",
+        ] {
+            compile(&[x86, word, "-c", "a.c"]);
+        }
+        compile(&[x86, "-Xassembler", "--noexecstack", "-c", "a.c"]);
+        for word in ["-Wa,-march=armv8.5-a", "-Wa,-march=armv8.4-a+crc", "-Wa,-mabi=lp64"] {
+            compile(&[arm, word, "-c", "a.c"]);
+        }
+        let (opts, _) = compile(&[x86, "-Wa,--fatal-warnings", "-c", "a.c"]);
+        assert!(opts.asm_fatal_warnings, "--fatal-warnings did not reach the assembler");
+        assert!(!compile(&[x86, "-c", "a.c"]).0.asm_fatal_warnings);
+    }
+
+    #[test]
+    fn what_the_assembler_would_not_do_is_refused_by_name() {
+        // kbuild's `as-option` takes an exit status of zero as the option being supported, so
+        // each of these has to fail or the kernel switches on something the output does not have.
+        let x86 = "--target=x86_64-unknown-linux-gnu";
+        let arm = "--target=aarch64-unknown-linux-gnu";
+        let cases: [(&[&str], &str); 10] = [
+            (&[x86, "-Wa,--32"], "`--32`"),
+            (&[arm, "-Wa,--64"], "`--64`"),
+            (&[arm, "-Wa,-mx86-used-note=no"], "`-mx86-used-note=no`"),
+            (&[x86, "-Wa,-mx86-used-note=yes"], "`-mx86-used-note=yes`"),
+            (&[x86, "-Wa,-gdwarf-5"], "debug information"),
+            (&[x86, "-Wa,--gdwarf-4"], "debug information"),
+            (&[x86, "-Wa,-march=corei7"], "`-march=corei7`"),
+            (&[arm, "-Wa,-march=armv7-a"], "`-march=armv7-a`"),
+            (&[x86, "-Wa,-mrelax-relocations=no"], "`-mrelax-relocations=no`"),
+            (&[x86, "-Wa,--noexecstack,-isa=foo"], "`-Wa,--noexecstack,-isa=foo`"),
+        ];
+        for (words, needle) in cases {
+            let mut line = words.to_vec();
+            line.extend_from_slice(&["-c", "a.c"]);
+            let why = refused(&line);
+            assert!(why.contains(needle), "{words:?}: {why}");
+        }
+        let lonely = refused(&[x86, "-Xassembler"]);
+        assert!(lonely.contains("requires an argument"), "{lonely}");
     }
 
     /// A directory of sources for one test, removed when the test is done with it.
