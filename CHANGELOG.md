@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A call to a `warn_unused_result` function at the end of a statement expression with other statements in front of it is quiet when the whole is thrown away, as in gcc 14, so `drmm_mutex_init` in i915's `intel_guc_log.c` builds under `-Werror`.
 - A GNU attribute written right after a named label belongs to the label, as in gcc, so `out: __maybe_unused` in `fs/ext4/super.c` no longer warns that the attribute on the next statement is ignored.
 - A pointer made from an integer constant that fits in thirty two bits and cast back to an integer folds to that constant, so the kernel's `BUILD_BUG_ON` on `xa_mk_value (0)` in `mm/swap_table.h` builds.
 - `-fgcse` and `-fno-gcse` are taken and ignored like the other flags that name a gcc pass, so the kernel's `kernel/bpf/core.c` builds.

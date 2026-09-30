@@ -196,9 +196,12 @@ fn the_last_value_of_a_statement_expression_is_not_thrown_away_unless_the_whole_
          int use(void) {\n\
              int kept = ({ u(); });\n\
              ({ u(); });\n\
+             ({ (void)0; u(); });\n\
              return kept;\n\
          }\n",
     );
+    // The second only: gcc 14 is quiet about a statement expression with anything in front of
+    // the call, which the kernel's `drmm_mutex_init` relies on.
     assert_eq!(lines_with(&got, "ignoring return value of 'u'").len(), 1, "{got}");
 }
 
