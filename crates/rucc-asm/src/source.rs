@@ -3137,14 +3137,27 @@ impl Reader {
             let residue =
                 self.reduce_kept(&fixup.sum, fixup.jump).map_err(|why| Trouble { line, why })?;
             // A number in an instruction that is still a name is the address of the name, which
-            // the linker has to write and which only fits in four bytes or more. Anything else
-            // left over, a difference of names across sections say, is not a number the linker
-            // writes into an instruction.
+            // the linker has to write and which only fits in four bytes or more. A name less a
+            // label that is somewhere in this file is the other thing the linker can write, as the
+            // distance to the name from these bytes, and whether the label is in the right section
+            // is for the arm below that writes it to say. Anything else left over, two names this
+            // file does not define say, is not a number the linker writes into an instruction.
             let value =
                 matches!(fixup.reach, Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot);
             let named =
                 matches!(residue.left.as_slice(), [Left { coeff: 1, what: What::Symbol(_), .. }]);
-            if value && !residue.left.is_empty() && !named {
+            let distance = matches!(fixup.reach, Reach::Value | Reach::Extended)
+                && matches!(
+                    residue.left.as_slice(),
+                    [
+                        Left { coeff: 1, what: What::Symbol(_), .. },
+                        Left { coeff: -1, at: Some(_), .. },
+                    ] | [
+                        Left { coeff: -1, at: Some(_), .. },
+                        Left { coeff: 1, what: What::Symbol(_), .. },
+                    ]
+                );
+            if value && !residue.left.is_empty() && !named && !distance {
                 return Err(bad(
                     "a number in an instruction that is not a name and a constant once the names \
                      in this section are counted, which no relocation writes"
@@ -3210,6 +3223,12 @@ impl Reader {
                 // table of offsets holds and what `.long foo - .` is asking for. The subtracted
                 // side has to be these bytes or somewhere else in the same section, because a
                 // distance to another section is not a number until the linker has laid both out.
+                //
+                // An instruction gets here too, with a number or a displacement that is a name
+                // less a label of its own section. The kernel's decompressor writes
+                // `leal ((gdt) - startup_32)(%ebp), %eax` to reach `gdt` from wherever it was
+                // loaded, and gas writes that as the distance from these bytes to `gdt` with the
+                // distance from `startup_32` to these bytes added on, which is this same addend.
                 [
                     Left { coeff: 1, what: What::Symbol(name), .. },
                     Left { coeff: -1, at: Some((part, offset)), .. },
@@ -5503,6 +5522,118 @@ _tls$tlv$init:
     fn a_number_an_instruction_carries_may_not_be_two_names_elsewhere() {
         let why = refused("\tmov $elsewhere-there, %eax\n");
         assert!(why.why.contains("relocation"), "{why}");
+    }
+
+    /// The relocations of the section of that name, as where, against what, which kind and the
+    /// addend, which is everything a test of one of them looks at.
+    fn relocated(assembled: &Assembled, name: &str) -> Vec<(usize, String, Reference, i64)> {
+        let part = assembled.parts.iter().find(|part| part.name == name).unwrap();
+        part.relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.clone(), reloc.kind, reloc.addend))
+            .collect()
+    }
+
+    /// The shape of the kernel's `arch/x86/boot/compressed/head_64.S`, which reaches its data and
+    /// the end of its image from a register holding where `startup_32` was loaded. gas writes each
+    /// name less a label of this section as the distance from the four bytes to the name, with the
+    /// distance from the label to the bytes as the addend, and these are the bytes and relocations
+    /// `llvm-mc` writes for the same lines. The label is taken away both before and after it is
+    /// defined, and in thirty two bit code as well as sixty four.
+    #[test]
+    fn a_name_less_a_label_of_this_section_is_the_distance_to_the_name_from_here() {
+        let out = assembled(
+            "\t.section .head.text,\"ax\"\n\t.code32\nstartup_32:\n\tnop\n\
+             \tleal ((gdt) - startup_32)(%ebp), %eax\n\
+             \tleal ((gdt) - later)(%ebp), %eax\n\
+             \tsubl $ ((_end) - startup_32), %ebx\n\
+             \tmovl $(boot_stack_end - later), %ecx\n\
+             later:\n\
+             \tleal ((pgtable + 0x1000) - startup_32)(%ebx), %edi\n\
+             \tmovl $(_bss - later), %ecx\n\
+             \t.code64\n\
+             \tleaq ((top_pgtable) - startup_32)(%rbx), %rsi\n\
+             \tleaq ((gdt) - startup_32)(%rbx), %rdx\n\
+             \tsubq $((_end) - last), %rbx\n\
+             last:\n\
+             \t.data\ngdt:\t.quad 0\n\t.bss\nboot_stack_end:\t.skip 8\n",
+        );
+        #[rustfmt::skip]
+        let want: [u8; 0x38] = [
+            0x90,
+            0x8d, 0x85, 0, 0, 0, 0,
+            0x8d, 0x85, 0, 0, 0, 0,
+            0x81, 0xeb, 0, 0, 0, 0,
+            0xb9, 0, 0, 0, 0,
+            0x8d, 0xbb, 0, 0, 0, 0,
+            0xb9, 0, 0, 0, 0,
+            0x48, 0x8d, 0xb3, 0, 0, 0, 0,
+            0x48, 0x8d, 0x93, 0, 0, 0, 0,
+            0x48, 0x81, 0xeb, 0, 0, 0, 0,
+        ];
+        assert_eq!(bytes(&out, ".head.text"), want);
+        let pc = Reference::Data;
+        assert_eq!(
+            relocated(&out, ".head.text"),
+            [
+                (0x03, "gdt".to_owned(), pc, 3),
+                (0x09, "gdt".to_owned(), pc, 0x09 - 0x18),
+                (0x0f, "_end".to_owned(), pc, 0x0f),
+                (0x14, "boot_stack_end".to_owned(), pc, 0x14 - 0x18),
+                (0x1a, "pgtable".to_owned(), pc, 0x1000 + 0x1a),
+                (0x1f, "_bss".to_owned(), pc, 0x1f - 0x18),
+                (0x26, "top_pgtable".to_owned(), pc, 0x26),
+                (0x2d, "gdt".to_owned(), pc, 0x2d),
+                (0x34, "_end".to_owned(), pc, 0x34 - 0x38),
+            ]
+        );
+    }
+
+    /// The same two lines in a file for i386, where the relocation is `R_386_PC32` and the addend
+    /// is written into the bytes rather than kept beside them, which is the object writer's
+    /// business and not this one's.
+    #[test]
+    fn a_name_less_a_label_of_this_section_is_the_same_distance_on_i386() {
+        let out = read(
+            "\t.text\nstartup_32:\n\tnop\n\tleal ((gdt) - startup_32)(%ebp), %eax\n\
+             \tsubl $ ((_end) - later), %ebx\nlater:\n\t.data\ngdt:\t.long 0\n",
+            Arch::X86,
+        )
+        .unwrap();
+        assert_eq!(bytes(&out, ".text"), [0x90, 0x8d, 0x85, 0, 0, 0, 0, 0x81, 0xeb, 0, 0, 0, 0]);
+        let pc = Reference::Data;
+        assert_eq!(
+            relocated(&out, ".text"),
+            [(3, "gdt".to_owned(), pc, 3), (9, "_end".to_owned(), pc, -4)]
+        );
+    }
+
+    /// Two labels of this section in a displacement come out as the number between them, in the
+    /// four bytes the address was given while that number was not known yet.
+    #[test]
+    fn a_label_less_a_label_of_this_section_in_a_displacement_is_a_number() {
+        let out =
+            assembled(".code32\nstartup_32:\n\tnop\n1:\tleal ((1b) - startup_32)(%ebp), %eax\n");
+        assert_eq!(bytes(&out, ".text"), [0x90, 0x8d, 0x85, 1, 0, 0, 0]);
+        assert!(relocated(&out, ".text").is_empty());
+    }
+
+    /// A name less a label is only a relocation when the label is in the section the bytes are,
+    /// and a name less a name that nothing here defines is not one at all.
+    #[test]
+    fn a_name_less_a_label_somewhere_else_is_refused() {
+        let other = "\t.text\n\tleal ((gdt) - there)(%ebp), %eax\n\t.data\nthere:\n\t.long 0\n";
+        let why = refused(other);
+        assert!(why.why.contains("another section"), "{why}");
+        let other = "\t.text\n\tmovl $(gdt - there), %eax\n\t.data\nthere:\n\t.long 0\n";
+        let why = refused(other);
+        assert!(why.why.contains("another section"), "{why}");
+        let why = refused("\t.text\n\tleal ((gdt) - there)(%ebp), %eax\n");
+        assert!(why.why.contains("relocation"), "{why}");
+        let why = refused("here:\n\tleaq (gdt - here)(%rip), %rax\n");
+        assert!(why.why.contains("counted from the instruction"), "{why}");
+        let why = refused("here:\n\tleaq (gdt - here - there)(%rbx), %rax\n");
+        assert!(why.why.contains("two names taken away"), "{why}");
     }
 
     #[test]

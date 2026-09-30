@@ -1331,6 +1331,9 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
     // name is only read in front of `(%rip)`, since every other shape of address wants a
     // relocation against a place rather than against a distance and this does not write one.
     let mut named = None;
+    // Whether the name in it has a label taken away from it, which only an address counted from
+    // registers or from nothing can have. See [`apart`].
+    let mut taken = false;
     // A suffix on i386 is taken out before the rest is read and put back on the name, since gas
     // takes it anywhere in the expression and what it is about is the one name there.
     let suffix = unsuffixed(front).filter(|_| mode == Mode::Bits32);
@@ -1341,12 +1344,20 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
         };
         named = Some(Named { name: format!("{name}@{how}"), addend: value });
     } else if !front.is_empty() {
-        let (value, name) = parted(front)?;
-        match name {
+        let (value, name, away) = apart(front)?;
+        taken = away.is_some();
+        match (name, away) {
             // The number goes with the name rather than into the bytes, because what the bytes end
             // up holding is the linker's business and it is told the whole sum at once.
-            Some(name) => named = Some(Named { name, addend: value }),
-            None => {
+            (Some(name), None) => named = Some(Named { name, addend: value }),
+            // A name less a label, which goes on as the expression it is. What it comes to is
+            // worked out once the file is laid out, as a number when both are in this section and
+            // as the distance to the first name counted from these bytes when only the label is.
+            (Some(name), Some(away)) => {
+                named = Some(Named { name: format!("({name}) - ({away})"), addend: value });
+            }
+            (None, Some(_)) => return Err(format!("'{front}' takes a name away")),
+            (None, None) => {
                 addr.disp = i32::try_from(value).map_err(|_| {
                     format!("'{front}' does not fit in the four bytes of an address")
                 })?;
@@ -1373,6 +1384,13 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
         if *base == "%rip" && mode == Mode::Bits32 {
             return Err(format!(
                 "'{text}' is counted from the instruction, which i386 has no way to address"
+            ));
+        }
+        if *base == "%rip" && taken {
+            // The instruction pointer is already the place the distance is counted from, and a
+            // second place to count it from is not something one relocation says.
+            return Err(format!(
+                "'{text}' is counted from the instruction and takes a name away as well"
             ));
         }
         if *base == "%rip" {
@@ -1464,58 +1482,75 @@ fn whole(text: &str) -> Result<PhysReg, String> {
 ///
 /// So what comes back is the numbers folded together and the name if there was one. At most one
 /// term may be a name and it may not be the subtracted one, since the distance back from something
-/// is not a thing a relocation says.
+/// is not a thing a relocation says on its own. [`apart`] is the reading that also keeps one name
+/// that is taken away, for the one kind of address that has a relocation for it.
 fn parted(text: &str) -> Result<(i64, Option<String>), String> {
+    match apart(text)? {
+        (_, _, Some(_)) => Err(format!("'{}' takes a name away", text.trim())),
+        (value, named, None) => Ok((value, named)),
+    }
+}
+
+/// The same as [`parted`], with one name that is taken away kept apart rather than refused.
+///
+/// The kernel's decompressor is linked to run wherever it is loaded, so it reaches everything
+/// through a register holding the address it started at, and what it adds to the register is the
+/// distance from there to the thing: `((gdt) - startup_32)(%ebp)`. The name taken away is a label
+/// of the section the instruction is in and the other one is in another section or in no section
+/// of this file, and gas writes that as the distance from these bytes to the first name with the
+/// distance from the label to these bytes added on, since `A - B` is `(A - .) + (. - B)`. So the
+/// third thing that comes back is the name taken away, and [`crate::source`] is the one that knows
+/// whether it is a label of this section once the file has been laid out.
+fn apart(text: &str) -> Result<(i64, Option<String>, Option<String>), String> {
     let text = text.trim();
     if let Some(value) = crate::source::constant(text) {
-        return Ok((value, None));
+        return Ok((value, None, None));
     }
     // Brackets round the whole of it say nothing, and `(K_table-8)` is `K_table-8`.
     if text.starts_with('(') && grouped(text) == Some(0) {
-        return parted(&text[1..text.len() - 1]);
+        return apart(&text[1..text.len() - 1]);
     }
     let mut total: i64 = 0;
     let mut sign: i64 = 1;
     let mut depth = 0usize;
     let mut start = 0usize;
     let mut named: Option<String> = None;
+    let mut taken: Option<String> = None;
+    // A name, counted into the side its sign puts it on, and each side has room for one.
+    let mut count = |name: String, sign: i64| {
+        let (slot, why) = if sign < 0 {
+            (&mut taken, "two names taken away, which is not a place a linker can find")
+        } else {
+            (&mut named, "two names added together, which is not a place a linker can find")
+        };
+        if slot.is_some() {
+            return Err(why.to_owned());
+        }
+        *slot = Some(name);
+        Ok(())
+    };
     // A term may be arithmetic of its own, as `K256+8*16` is.
     let reckon = |term: &str| number(term).or_else(|why| crate::source::constant(term).ok_or(why));
-    let mut fold = |term: &str, sign: i64, named: &mut Option<String>| match reckon(term) {
+    let mut fold = |term: &str, sign: i64| match reckon(term) {
         Ok(value) => {
             total = total.wrapping_add(sign.wrapping_mul(value));
             Ok(())
         }
         // A bracketed term with a name in it, `((s1) + (64*8))`, which a macro that builds one
-        // table's address from the one before it writes, is read the same way inside.
+        // table's address from the one before it writes, is read the same way inside. A name
+        // taken away inside brackets that are themselves taken away is added, as it is on paper.
         Err(_) if term.trim().starts_with('(') && grouped(term.trim()) == Some(0) => {
-            let (value, inner) = parted(term)?;
+            let (value, inner, inner_taken) = apart(term)?;
             total = total.wrapping_add(sign.wrapping_mul(value));
-            match inner {
-                Some(_) if named.is_some() => {
-                    Err("two names added together, which is not a place a linker can find"
-                        .to_owned())
-                }
-                Some(_) if sign < 0 => Err(format!("'{term}' takes a name away")),
-                Some(inner) => {
-                    *named = Some(inner);
-                    Ok(())
-                }
-                None => Ok(()),
+            if let Some(inner) = inner {
+                count(inner, sign)?;
             }
-        }
-        Err(why) => {
-            if named.is_some() {
-                return Err(
-                    "two names added together, which is not a place a linker can find".to_owned()
-                );
+            if let Some(inner) = inner_taken {
+                count(inner, -sign)?;
             }
-            if sign < 0 {
-                return Err(why);
-            }
-            *named = Some(term.trim().to_owned());
             Ok(())
         }
+        Err(_) => count(term.trim().to_owned(), sign),
     };
     for (at, ch) in text.char_indices() {
         match ch {
@@ -1528,12 +1563,12 @@ fn parted(text: &str) -> Result<(i64, Option<String>), String> {
         if at == start || depth > 0 || !matches!(ch, '+' | '-') {
             continue;
         }
-        fold(&text[start..at], sign, &mut named)?;
+        fold(&text[start..at], sign)?;
         sign = if ch == '-' { -1 } else { 1 };
         start = at + 1;
     }
-    fold(&text[start..], sign, &mut named)?;
-    Ok((total, named))
+    fold(&text[start..], sign)?;
+    Ok((total, named, taken))
 }
 
 /// A number written the way an assembler writes one.
