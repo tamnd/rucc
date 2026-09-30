@@ -1281,3 +1281,16 @@ fn a_width_modifier_on_a_constant_prints_the_constant() {
     assert!(ok, "{said}");
     assert!(text.contains("outb %al, $33"), "{text}");
 }
+
+#[test]
+fn a_constant_outside_its_range_letter_goes_in_the_register_the_constraint_also_allows() {
+    // `N` is a port from 0 to 255, so the kernel's `outb` to 0x4d0 needs the `d` half of `"Nd"`.
+    let (ok, text, said) = run_with(
+        "outside-range",
+        "void f(unsigned char v) { asm volatile(\"outb %b0, %w1\" : : \"a\"(v), \"Nd\"((unsigned short)0x4d0)); }\n",
+        &["-O2"],
+    );
+    assert!(ok, "{said}");
+    assert!(text.contains("movw\t$1232, %dx"), "{text}");
+    assert!(text.contains("outb %al, %dx"), "{text}");
+}

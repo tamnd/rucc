@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An `asm` constant is only written into the template when it fits the range letter that allowed it, such as `N` for 0 to 255 on x86. One that does not fit goes in the register the constraint also names, the way gcc does it, so the kernel's `outb` to port 0x4d0 comes out as `outb %al, %dx` instead of an instruction the assembler refuses.
 - `__builtin_extract_return_addr` and `__builtin_frob_return_addr` are their argument, the way gcc has them on x86-64 and AArch64. The kernel's `vsprintf.c` calls the first.
 - A function declared with a parameter of an enumeration nobody has finished is taken, the way gcc takes it, as long as nothing calls it. The kernel's `irq.h` declares one, which stopped five units in an x86-64 tinyconfig build.
 - An `asm` operand that is a constant can be named with `%b`, `%w`, `%k` or `%q` again, which prints the constant the way gcc does. The kernel's `outb` with a known port was refused before.
