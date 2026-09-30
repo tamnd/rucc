@@ -678,6 +678,11 @@ pub struct BlockData {
     pub succs: Vec<BlockCall>,
     /// How often the block runs, next to how often the function is entered. See [`Weight`].
     pub weight: Weight,
+    /// Whether control never leaves it, which is a block that ended in `unreachable` or on a stop.
+    /// Such a block has no successors, the way a block that returns has none, and this is what
+    /// tells the two apart: one that returns gets an epilogue and a `ret`, and this one gets
+    /// nothing, because nothing reaches its end.
+    pub dead_end: bool,
     pub(crate) first_inst: Option<Inst>,
     pub(crate) last_inst: Option<Inst>,
     pub(crate) prev: Option<Block>,

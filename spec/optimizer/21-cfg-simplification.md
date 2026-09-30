@@ -58,6 +58,10 @@ The constant-condition case is where document 14's SCCP hands off: SCCP marks ed
 and does not delete anything, per document 14.4, and this pass reads the marks. Keeping the two
 separate is what lets SCCP be an analysis.
 
+**Ending a block where control stops.** The front end writes `trap` and `unreachable_hint` in the middle of a block, because an expression can hold `__builtin_trap()` or `__builtin_unreachable()` and a block cannot end halfway through an expression, and it writes an `unreachable_hint` after a call to a `noreturn` function for the same reason. The first thing this pass does is end each block at the first of them: the instructions after it go, the hint becomes an `unreachable` terminator, and a `trap` stays with an `unreachable` after it. Nothing a later block reads is lost, since a value defined after the cut is read only in blocks the cut block dominates, and with no way out of it those blocks have no way in. gcc does this at every level, and at `-O0` too, since a `ret` after a `ud2` is an instruction objtool reports as one nothing reaches.
+
+**Acting on the promise.** A branch arm that goes to a block holding only `unreachable` is an arm the program promised is never taken, so a two way branch with one such arm is a jump to the other, and a `switch` whose default is such a block takes its last live case as its default and drops the cases that went there or nowhere. This is how `if (x > 3) __builtin_unreachable();` and `default: __builtin_unreachable();` cost no instructions, which is what gcc gives for both.
+
 **Cross jumping**, also called tail merging: two blocks ending in the same instruction sequence and
 branching to the same place have their common tails merged, with one branching to the other's tail.
 This is a size optimization and it is the reason `gcc/cfgcleanup.cc` is twice the size of the tree
@@ -113,9 +117,11 @@ pipeline ends, which the next cleanup round removes.
 Per document 03.4 and the refinement in 17.5, the cleanup group is DCE, DSE, simplify-cfg, DCE, run
 twice at `-O2` and once at `-O1`. Within `simplify-cfg`, the order is:
 
+0. Ending blocks where control stops, before anything else, since what it removes are edges and
+   the blocks only those edges reached are what step 1 takes out.
 1. Unreachable removal, first, because it makes everything else cheaper and because other passes'
    marks are consumed here.
-2. Constant-condition branch simplification, which creates unreachable blocks, so a second
+2. Constant-condition branch simplification, together with the arms that go only to `unreachable`, which creates unreachable blocks, so a second
    reachability sweep is folded into this step rather than run separately.
 3. Forwarder removal and redundant block parameter removal, interleaved on one worklist, because
    each enables the other.

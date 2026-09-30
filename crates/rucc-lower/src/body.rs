@@ -5262,18 +5262,15 @@ impl<'u> Body<'_, 'u> {
             // it read and the other two answer with nothing, which is what their type in C says.
             ExprKind::Atomic { op, order, args } => self.atomic(op, order, args, ty, span),
             // A promise and not a computation, so it is written where it was written and read by
-            // whoever comes to read promises. The block goes on: what ends a block is a
-            // terminator, and this is not one, so the statement after a `__builtin_unreachable()`
-            // is lowered the way it would have been without it. That is the conservative half of
-            // the pair, and the half that is right until something acts on the promise.
+            // whoever comes to read promises. The block goes on here, since this can be the middle
+            // of an expression and a block cannot end there, and `rucc_opt::simplify_cfg` is what
+            // ends it at the promise and throws away what was lowered after it.
             ExprKind::Unreachable => {
                 self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
                 None
             }
             // A stop, which is one instruction and nothing under it. The block goes on here for
-            // the reason it goes on above, and with less at stake: what follows a stop is written
-            // and never reached, since the program is gone by the time control would have got
-            // there.
+            // the reason it goes on above, and is ended at the stop in the same place.
             ExprKind::Trap => {
                 self.build(span).inst(InstData::new(Opcode::Trap), &[]);
                 None
@@ -8431,6 +8428,12 @@ impl<'u> Body<'_, 'u> {
             }
         };
         self.landing_pad(span);
+        // A call that does not come back is where the block stops, and it says so the same way
+        // `__builtin_unreachable()` does, with a promise the optimizer turns into the end of the
+        // block. What is written after it here, the result included, is code nothing reaches.
+        if self.noreturn(callee) {
+            self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
+        }
 
         match plan.ret.pass {
             Pass::Ignore => None,
@@ -8631,6 +8634,18 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// Whether a call's callee is a function declared `always_inline`, by name.
+    /// Whether a call goes by name to a function declared `noreturn` or `_Noreturn`.
+    fn noreturn(&self, callee: ExprId) -> bool {
+        let tast = self.tast();
+        let callee = self.named_callee(callee).1;
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
+        else {
+            return false;
+        };
+        let ExprKind::Decl(decl) = tast[operand].kind else { return false };
+        tast[decl].flags.contains(DeclFlags::NORETURN)
+    }
+
     fn always_inlined(&self, callee: ExprId) -> bool {
         let tast = self.tast();
         let callee = self.named_callee(callee).1;

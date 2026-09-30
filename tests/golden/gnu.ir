@@ -372,15 +372,12 @@ block1:
     return %3
 
 block2:
-    unreachable_hint
-    %4 = iconst.i32 0
-    return %4
+    unreachable
 }
 
 func @promised_early(i32) -> i32, linkage(external) {
 block0(%0: i32):
-    unreachable_hint
-    return %0
+    unreachable
 }
 
 func @elsewhere(i32) -> i32, linkage(internal), spelled "renamed" {
@@ -435,7 +432,7 @@ func @give_up(i32), linkage(external), attrs(noreturn);
 func @stops_here(i32), linkage(external) {
 block0(%0: i32):
     call @bail(%0) : (i32)
-    return
+    unreachable
 }
 
 func @weigh(i32) -> i32, linkage(external), attrs(readnone);
