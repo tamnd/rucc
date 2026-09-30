@@ -37,6 +37,18 @@ impl Qualifiers {
     pub const VOLATILE: Qualifiers = Qualifiers(2);
     /// `restrict`.
     pub const RESTRICT: Qualifiers = Qualifiers(4);
+    /// `__seg_fs`, the x86 named address space counted from the `%fs` segment base.
+    ///
+    /// A named address space is a qualifier in the C extension that defines them (ISO/IEC TR
+    /// 18037) and in gcc, so it lives here with the other three. Two pointers to the same type in
+    /// different address spaces are different types, which the table gets for free by keeping
+    /// the qualifier on the pointee, and lvalue conversion drops it the way it drops `const`.
+    pub const SEG_FS: Qualifiers = Qualifiers(8);
+    /// `__seg_gs`, the same for the `%gs` segment base, which is what the Linux percpu
+    /// accessors on x86 use from 6.9.
+    pub const SEG_GS: Qualifiers = Qualifiers(16);
+    /// Both address space qualifiers, for asking which one a type is in.
+    pub const SPACES: Qualifiers = Qualifiers(8 | 16);
 
     /// Whether every qualifier in `other` is present here.
     #[inline]
@@ -57,6 +69,14 @@ impl Qualifiers {
     #[must_use]
     pub const fn without(self, other: Qualifiers) -> Qualifiers {
         Qualifiers(self.0 & !other.0)
+    }
+
+    /// The address space qualifier on this set, which is [`Qualifiers::NONE`] for the generic
+    /// one.
+    #[inline]
+    #[must_use]
+    pub const fn space(self) -> Qualifiers {
+        Qualifiers(self.0 & Self::SPACES.0)
     }
 
     /// Whether there are no qualifiers at all.

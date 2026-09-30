@@ -297,7 +297,7 @@ impl Pass for RedundantLoad {
 fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
     let data = func[inst];
     if !matches!(data.opcode, Opcode::Memcpy | Opcode::Memmove)
-        || data.flags.contains(Flags::VOLATILE)
+        || data.flags.intersects(Flags::KEEP)
     {
         return None;
     }
@@ -388,7 +388,7 @@ fn count(of: u64) -> u32 {
 /// ordering never reaches here as something to forward.
 fn reads(func: &Func, inst: Inst) -> Option<(Value, Type)> {
     let data = &func[inst];
-    if data.opcode != Opcode::Load || data.flags.contains(Flags::VOLATILE) {
+    if data.opcode != Opcode::Load || data.flags.intersects(Flags::KEEP) {
         return None;
     }
     let mut results = data.results();
@@ -404,7 +404,7 @@ fn reads(func: &Func, inst: Inst) -> Option<(Value, Type)> {
 /// `memcpy` or a `memset` can do that without there being one value anywhere to take.
 fn stored(func: &Func, inst: Inst) -> Option<Value> {
     let data = &func[inst];
-    if data.opcode != Opcode::Store || data.flags.contains(Flags::VOLATILE) {
+    if data.opcode != Opcode::Store || data.flags.intersects(Flags::KEEP) {
         return None;
     }
     func[data.args].first().copied()

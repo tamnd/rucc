@@ -720,7 +720,7 @@ impl<'a> Walk<'a> {
         // Section 9.5, and it is first. Alias analysis says nothing about how many times an
         // access happens and `volatile` constrains that too, so this is a separate bit rather
         // than a strong alias fact, and it is checked before the analysis is asked anything.
-        if reference.volatile || self.func[inst].flags.contains(Flags::VOLATILE) {
+        if reference.volatile || self.func[inst].flags.intersects(Flags::KEEP) {
             return Some(Clobber::Maybe(inst));
         }
         // Every atomic and every fence is a full def and a full use. Pessimistic for lock-free

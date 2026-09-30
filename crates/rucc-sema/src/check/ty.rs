@@ -138,6 +138,17 @@ pub(in crate::check) struct Place {
 }
 
 /// A member of a structure or a union, which is the one place that is named by a constant.
+/// The keyword for the address space those qualifiers put an object in, when it is a named one.
+pub(in crate::check) fn space_spelling(quals: Qualifiers) -> Option<&'static str> {
+    if quals.has(Qualifiers::SEG_GS) {
+        Some("__seg_gs")
+    } else if quals.has(Qualifiers::SEG_FS) {
+        Some("__seg_fs")
+    } else {
+        None
+    }
+}
+
 pub(in crate::check) const MEMBER: Place =
     Place { parameter: false, member: true, prototype: false };
 
@@ -218,6 +229,10 @@ impl Checker<'_> {
         };
         let base = self.specified_type(specs, subject, place);
         let ty = self.derive(base, declarator, subject, place);
+        if place.parameter || place.member {
+            let what = if place.member { "structure field" } else { "parameter" };
+            self.check_space(ty, subject.name, subject.span, what);
+        }
         // A calling convention in the specifiers belongs to the function the whole declarator
         // declares, or the one it points at, rather than to the type the specifiers name: in
         // `int __attribute__((ms_abi)) f(int)` that type is `int`. So it is read here, once the
@@ -779,6 +794,18 @@ impl Checker<'_> {
         if quals.has(ast::Quals::VOLATILE) {
             result = result.with(Qualifiers::VOLATILE);
         }
+        match (quals.has(ast::Quals::SEG_FS), quals.has(ast::Quals::SEG_GS)) {
+            (true, true) => self.report(
+                Diagnostic::error(
+                    "incompatible address space qualifiers '__seg_fs' and '__seg_gs'".to_string(),
+                    span,
+                )
+                .with_code("E0761"),
+            ),
+            (true, false) => result = result.with(Qualifiers::SEG_FS),
+            (false, true) => result = result.with(Qualifiers::SEG_GS),
+            (false, false) => {}
+        }
         if quals.has(ast::Quals::RESTRICT) {
             if is_pointer(&self.types, self.types.canonical(ty)) {
                 result = result.with(Qualifiers::RESTRICT);
@@ -790,6 +817,31 @@ impl Checker<'_> {
             }
         }
         self.types.qualified(ty, result)
+    }
+
+    /// Refuses a named address space on an object that has to live in the generic one, which is
+    /// a parameter, a structure member or an automatic variable, in gcc's words.
+    ///
+    /// The object has to be somewhere the compiler put it, and the compiler put it in the frame
+    /// or inside another object, neither of which is in `%gs`. A pointer to one is fine, since
+    /// the qualifier is then on what it points at, and so is a function returning one, since
+    /// what a call returns is a value and lvalue conversion has already dropped it.
+    pub(in crate::check) fn check_space(
+        &mut self,
+        ty: TypeId,
+        name: Option<Symbol>,
+        span: Span,
+        what: &str,
+    ) {
+        if is_function(&self.types, ty) {
+            return;
+        }
+        let Some(space) = space_spelling(self.types.object_quals(ty)) else { return };
+        let message = match name {
+            Some(name) => format!("'{space}' specified for {what} '{}'", self.text(name)),
+            None => format!("'{space}' specified for unnamed {what}"),
+        };
+        self.report(Diagnostic::error(message, span).with_code("E0761"));
     }
 
     /// Folds the declarator onto the type the specifiers named.

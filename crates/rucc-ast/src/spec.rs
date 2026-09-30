@@ -131,6 +131,10 @@ impl Quals {
     pub const RESTRICT: Quals = Quals(4);
     /// `_Atomic` without parentheses.
     pub const ATOMIC: Quals = Quals(8);
+    /// `__seg_fs`, a named address space on x86.
+    pub const SEG_FS: Quals = Quals(16);
+    /// `__seg_gs`, the other one.
+    pub const SEG_GS: Quals = Quals(32);
 
     /// Whether every qualifier in `other` is set here.
     #[inline]

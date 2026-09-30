@@ -927,6 +927,20 @@ impl<'a> Alias<'a> {
         flags: Flags,
     ) -> Access {
         let (origin, offset) = origin(self.func, pointer);
+        // An access through `%fs` or `%gs` is at the segment base plus the address, and the base
+        // is nothing this function can see, so the only thing left to say about where it lands is
+        // that it is not in a frame slot nobody took the address of. The offset goes and so does
+        // the type, which is what gcc does with two pointers in different address spaces.
+        if flags.intersects(Flags::SEG_FS.union(Flags::SEG_GS)) {
+            return Access {
+                origin,
+                offset: None,
+                size: None,
+                tbaa: None,
+                restrict: Restrict::NONE,
+                volatile: true,
+            };
+        }
         Access {
             origin,
             offset,

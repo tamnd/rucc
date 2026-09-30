@@ -1532,9 +1532,15 @@ impl Checker<'_> {
                 pointee(&self.types, left).expect("a pointer"),
                 pointee(&self.types, right).expect("a pointer"),
             );
+            let disjoint = self.types.object_quals(a).space() != self.types.object_quals(b).space();
             let (a, b) = (self.types.unqualified(a), self.types.unqualified(b));
             let either_void = is_void(&self.types, a) || is_void(&self.types, b);
-            if !either_void && !compatible(&self.types, a, b) {
+            if disjoint {
+                self.report(
+                    Diagnostic::error("comparison of pointers to disjoint address spaces", span)
+                        .with_code("E0761"),
+                );
+            } else if !either_void && !compatible(&self.types, a, b) {
                 self.report(
                     Diagnostic::warning("comparison of distinct pointer types lacks a cast", span)
                         .with_code("E0517"),
@@ -1996,6 +2002,9 @@ impl Checker<'_> {
             pointee(&self.types, member).expect("a pointer"),
             pointee(&self.types, source).expect("a pointer"),
         );
+        if self.types.object_quals(a).space() != self.types.object_quals(b).space() {
+            return false;
+        }
         let (a, b) = (self.types.unqualified_object(a), self.types.unqualified_object(b));
         is_void(&self.types, a) || is_void(&self.types, b) || compatible(&self.types, a, b)
     }
@@ -2018,6 +2027,27 @@ impl Checker<'_> {
         // qualifiers: that is where 6.7.3p10 puts them, and a `const int (*)[4]` is a pointer to
         // something nobody may write to however little the array node says.
         let (target_quals, source_quals) = (self.types.object_quals(a), self.types.object_quals(b));
+        // An address space before anything else, since a pointer into `%gs` and a pointer into
+        // the flat address space are not two views of one object and nothing converts one to
+        // the other without a cast. gcc makes it an error in every dialect.
+        if target_quals.space() != source_quals.space() {
+            let what = match to {
+                Target::Assignment => "assignment".to_owned(),
+                Target::Argument { index, function } => {
+                    format!("passing argument {index}{}", self.of_function(function))
+                }
+                Target::Initialization => "initialization".to_owned(),
+                Target::Return => "return".to_owned(),
+            };
+            self.report(
+                Diagnostic::error(
+                    format!("{what} from pointer to non-enclosed address space"),
+                    span,
+                )
+                .with_code("E0761"),
+            );
+            return;
+        }
         for (qual, name) in [
             (Qualifiers::CONST, "const"),
             (Qualifiers::VOLATILE, "volatile"),
@@ -3398,6 +3428,29 @@ mod tests {
         c.check_expr(assign);
 
         assert_eq!(message(&c), "assignment discards 'const' qualifier from pointer target type");
+    }
+
+    /// A pointer into `__seg_gs` and an ordinary one reach different memory with the same
+    /// number, so the one is not the other and gcc makes it an error rather than a warning.
+    #[test]
+    fn a_pointer_into_another_address_space_does_not_assign() {
+        let mut f = Fixture::new();
+        let p = f.name("p");
+        let q = f.name("q");
+        let left = f.expr(ast::Expr::Name(p));
+        let right = f.expr(ast::Expr::Name(q));
+        let assign = f.assign(None, left, right);
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let in_gs = c.types.qualified(int, Qualifiers::SEG_GS);
+        let to_int = c.types.pointer(int);
+        let to_gs = c.types.pointer(in_gs);
+        c.declare_object(p, to_int, Span::DUMMY);
+        c.declare_object(q, to_gs, Span::DUMMY);
+        c.check_expr(assign);
+
+        assert_eq!(message(&c), "assignment from pointer to non-enclosed address space");
     }
 
     #[test]

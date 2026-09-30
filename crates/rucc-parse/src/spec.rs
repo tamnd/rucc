@@ -90,6 +90,8 @@ fn qual_keyword(word: Keyword) -> Option<Quals> {
         // `__ptr32`, `__ptr64`, `__unaligned` and `__w64` qualify nothing a 64-bit target
         // distinguishes, so they are read where a qualifier may be and add none.
         Keyword::MsQualifier => Some(Quals::NONE),
+        Keyword::SegFs => Some(Quals::SEG_FS),
+        Keyword::SegGs => Some(Quals::SEG_GS),
         _ => None,
     }
 }

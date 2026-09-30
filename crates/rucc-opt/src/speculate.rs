@@ -105,7 +105,7 @@ pub fn why_not(
     at: Block,
 ) -> Option<&'static str> {
     let data = func[inst];
-    if data.flags.contains(Flags::VOLATILE) {
+    if data.flags.intersects(Flags::KEEP) {
         return Some(VOLATILE);
     }
     let order = match data.extra {

@@ -190,6 +190,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // a lookup to be a subtraction, and the preprocessor interns every identifier it reads, so
     // building this after the expansion would mean building it after `char` had been seen.
     let mut keywords = Keywords::new(&mut sess.interner, opts.std, opts.gnu_extensions);
+    if matches!(sess.target.tuple.arch(), Arch::X86_64 | Arch::X86) {
+        keywords = keywords.x86(opts.gnu_extensions);
+    }
     if sess.target.tuple.os() == rucc_tuple::Os::Windows {
         keywords = if sess.target.tuple.env() == rucc_tuple::Env::Msvc {
             keywords.msvc(&mut sess.interner)
