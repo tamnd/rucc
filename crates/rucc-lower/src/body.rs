@@ -40,7 +40,8 @@ use rucc_sema::{
     ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign,
     Stmt, StmtId, StorageDuration, Tast,
 };
-use rucc_target::{Arch, Pass, TargetInfo};
+use rucc_target::{Pass, TargetInfo};
+use rucc_tuple::Arch;
 use rucc_types::{
     ArrayLen, Extent, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId,
     integer_info, pointee,
