@@ -89,6 +89,16 @@ pub enum Kind {
     /// have forms that take an address, and a lookup that could not tell the two apart would
     /// encode one as the other.
     Stack,
+    /// A control register, which only a kernel names and only a move reads or writes.
+    ///
+    /// Its own kind because `movq %cr3, %rax` and `movq %rbx, %rax` are two register arguments
+    /// to the same mnemonic and two different opcodes, the way a vector register and a general
+    /// purpose one are.
+    Control,
+    /// A debug register, for the same reason.
+    Debug,
+    /// A segment register, which a move reads and writes and a push and a pop save and restore.
+    Seg,
 }
 
 impl Kind {
@@ -710,6 +720,19 @@ static KR: [Kind; 2] = [Kind::Mask, Kind::Reg];
 // names a stack position and a register in the same breath.
 static S: [Kind; 1] = [Kind::Stack];
 static SS: [Kind; 2] = [Kind::Stack, Kind::Stack];
+// A register and a number, in the order `outb %al, $0x80` writes them, which is the one
+// instruction here whose immediate comes second.
+static RI: [Kind; 2] = [Kind::Reg, Kind::Imm];
+// The registers only a kernel names, each moved to and from a general purpose register, and a
+// segment register to and from memory as well.
+static CONTROL_R: [Kind; 2] = [Kind::Control, Kind::Reg];
+static R_CONTROL: [Kind; 2] = [Kind::Reg, Kind::Control];
+static DEBUG_R: [Kind; 2] = [Kind::Debug, Kind::Reg];
+static R_DEBUG: [Kind; 2] = [Kind::Reg, Kind::Debug];
+static SEG_R: [Kind; 2] = [Kind::Seg, Kind::Reg];
+static R_SEG: [Kind; 2] = [Kind::Reg, Kind::Seg];
+static SEG_M: [Kind; 2] = [Kind::Seg, Kind::Mem];
+static M_SEG: [Kind; 2] = [Kind::Mem, Kind::Seg];
 
 /// Every instruction [`crate::x86_64::written`] can name, and the bytes it comes out as.
 ///
@@ -1847,12 +1870,6 @@ static ENCODINGS: &[Encoding] = &[
     // jump, where nothing runs it except a processor speculating straight past the branch, and it
     // stops that speculation there.
     bytes("int3", &NO_ARGS, Long, &[0xCC], NO_MODRM, NO_IMM),
-    // The code segment override on a line of its own, which is how gcc writes the byte it puts in
-    // front of a call or jump to a retpoline thunk through `r8` to `r15` under
-    // `-mindirect-branch-cs-prefix`. The segment means nothing to a direct branch, so the byte only
-    // makes the instruction six bytes long, which is the length the kernel needs to write
-    // `lfence; call *%r11` over it in place.
-    bytes("cs", &NO_ARGS, Long, &[0x2E], NO_MODRM, NO_IMM),
     // The landing pad, and four bytes for the same reason the barrier is three: no operands, so
     // the addressing byte at the end of it is part of the opcode. A machine that does not check
     // reads the whole of it as a wider `nop`, which is what makes an object built with it run
@@ -1877,6 +1894,359 @@ static ENCODINGS: &[Encoding] = &[
     // since a processor that has the registers is no use when the kernel does not keep them. The
     // three bytes are one opcode with the addressing byte fixed, which is why there is no pair.
     bytes("xgetbv", &NO_ARGS, Long, &[0x0F, 0x01, 0xD0], NO_MODRM, NO_IMM),
+    // The system instructions, which nothing this compiler generates and every kernel writes by
+    // hand, in `.S` files and in `asm` statements. The bytes are the manual's and every one of them
+    // is pinned in the tests below against what gas and llvm-mc write for the same line.
+    //
+    // First the ones with no operand, most of which are a two or three byte opcode whose last byte
+    // is an addressing byte fixed by the manual, the way `mfence` is. The ones with a mandatory
+    // prefix carry it in the opcode for the same reason `endbr64` does: there is no REX byte for it
+    // to have to come in front of.
+    bytes("clts", &NO_ARGS, Long, &[0x0F, 0x06], NO_MODRM, NO_IMM),
+    bytes("invd", &NO_ARGS, Long, &[0x0F, 0x08], NO_MODRM, NO_IMM),
+    bytes("wbinvd", &NO_ARGS, Long, &[0x0F, 0x09], NO_MODRM, NO_IMM),
+    bytes("wbnoinvd", &NO_ARGS, Long, &[0xF3, 0x0F, 0x09], NO_MODRM, NO_IMM),
+    bytes("wrmsr", &NO_ARGS, Long, &[0x0F, 0x30], NO_MODRM, NO_IMM),
+    bytes("rdtsc", &NO_ARGS, Long, &[0x0F, 0x31], NO_MODRM, NO_IMM),
+    bytes("rdmsr", &NO_ARGS, Long, &[0x0F, 0x32], NO_MODRM, NO_IMM),
+    bytes("rdpmc", &NO_ARGS, Long, &[0x0F, 0x33], NO_MODRM, NO_IMM),
+    bytes("wrmsrns", &NO_ARGS, Long, &[0x0F, 0x01, 0xC6], NO_MODRM, NO_IMM),
+    bytes("rdtscp", &NO_ARGS, Long, &[0x0F, 0x01, 0xF9], NO_MODRM, NO_IMM),
+    bytes("swapgs", &NO_ARGS, Long, &[0x0F, 0x01, 0xF8], NO_MODRM, NO_IMM),
+    bytes("syscall", &NO_ARGS, Long, &[0x0F, 0x05], NO_MODRM, NO_IMM),
+    bytes("sysenter", &NO_ARGS, Long, &[0x0F, 0x34], NO_MODRM, NO_IMM),
+    // The returns from a system call and from an interrupt, which go back to thirty two bit code
+    // without `REX.W` and to sixty four bit code with it. The name with no letter is the thirty two
+    // bit one, which is what gas takes it for.
+    bytes("sysret", &NO_ARGS, Long, &[0x0F, 0x07], NO_MODRM, NO_IMM),
+    bytes("sysretl", &NO_ARGS, Long, &[0x0F, 0x07], NO_MODRM, NO_IMM),
+    bytes("sysretq", &NO_ARGS, Quad, &[0x0F, 0x07], NO_MODRM, NO_IMM),
+    bytes("sysexit", &NO_ARGS, Long, &[0x0F, 0x35], NO_MODRM, NO_IMM),
+    bytes("sysexitl", &NO_ARGS, Long, &[0x0F, 0x35], NO_MODRM, NO_IMM),
+    bytes("sysexitq", &NO_ARGS, Quad, &[0x0F, 0x35], NO_MODRM, NO_IMM),
+    bytes("iret", &NO_ARGS, Long, &[0xCF], NO_MODRM, NO_IMM),
+    bytes("iretw", &NO_ARGS, Word, &[0xCF], NO_MODRM, NO_IMM),
+    bytes("iretl", &NO_ARGS, Long, &[0xCF], NO_MODRM, NO_IMM),
+    bytes("iretq", &NO_ARGS, Quad, &[0xCF], NO_MODRM, NO_IMM),
+    // The far return, which pops a segment as well as an address, and the form that also drops
+    // that many bytes of arguments.
+    bytes("lret", &NO_ARGS, Long, &[0xCB], NO_MODRM, NO_IMM),
+    bytes("lretl", &NO_ARGS, Long, &[0xCB], NO_MODRM, NO_IMM),
+    bytes("lretq", &NO_ARGS, Quad, &[0xCB], NO_MODRM, NO_IMM),
+    takes("lret", &I, Fits::Word, Long, &[0xCA], NO_MODRM, ImmSize::Iw),
+    takes("lretl", &I, Fits::Word, Long, &[0xCA], NO_MODRM, ImmSize::Iw),
+    takes("lretq", &I, Fits::Word, Quad, &[0xCA], NO_MODRM, ImmSize::Iw),
+    // The far jump and call through memory, which read a segment and an address from it. Four
+    // bytes of address without `REX.W` and eight with it, and gas takes the name with no letter
+    // for the first.
+    bytes("ljmp", &M, Long, &[0xFF], ext(0, 5), NO_IMM),
+    bytes("ljmpl", &M, Long, &[0xFF], ext(0, 5), NO_IMM),
+    bytes("ljmpq", &M, Quad, &[0xFF], ext(0, 5), NO_IMM),
+    bytes("lcall", &M, Long, &[0xFF], ext(0, 3), NO_IMM),
+    bytes("lcalll", &M, Long, &[0xFF], ext(0, 3), NO_IMM),
+    bytes("lcallq", &M, Quad, &[0xFF], ext(0, 3), NO_IMM),
+    // Interrupts and the flags that mask them. `int $3` is two bytes rather than the one byte
+    // `int3` further up, which is what gas writes for it and what a debugger looking for either tells apart.
+    bytes("cli", &NO_ARGS, Long, &[0xFA], NO_MODRM, NO_IMM),
+    bytes("sti", &NO_ARGS, Long, &[0xFB], NO_MODRM, NO_IMM),
+    bytes("hlt", &NO_ARGS, Long, &[0xF4], NO_MODRM, NO_IMM),
+    bytes("int1", &NO_ARGS, Long, &[0xF1], NO_MODRM, NO_IMM),
+    bytes("icebp", &NO_ARGS, Long, &[0xF1], NO_MODRM, NO_IMM),
+    takes("int", &I, Fits::Byte, Long, &[0xCD], NO_MODRM, ImmSize::Ib),
+    bytes("cld", &NO_ARGS, Long, &[0xFC], NO_MODRM, NO_IMM),
+    bytes("std", &NO_ARGS, Long, &[0xFD], NO_MODRM, NO_IMM),
+    bytes("lahf", &NO_ARGS, Long, &[0x9F], NO_MODRM, NO_IMM),
+    bytes("sahf", &NO_ARGS, Long, &[0x9E], NO_MODRM, NO_IMM),
+    bytes("rsm", &NO_ARGS, Long, &[0x0F, 0xAA], NO_MODRM, NO_IMM),
+    // SMAP, and the protection keys a user page may carry.
+    bytes("clac", &NO_ARGS, Long, &[0x0F, 0x01, 0xCA], NO_MODRM, NO_IMM),
+    bytes("stac", &NO_ARGS, Long, &[0x0F, 0x01, 0xCB], NO_MODRM, NO_IMM),
+    bytes("rdpkru", &NO_ARGS, Long, &[0x0F, 0x01, 0xEE], NO_MODRM, NO_IMM),
+    bytes("wrpkru", &NO_ARGS, Long, &[0x0F, 0x01, 0xEF], NO_MODRM, NO_IMM),
+    // Waiting for a store to a line. The registers are fixed, `rax`, `ecx` and `edx` for the first
+    // and `eax` and `ecx` for the second, so a file may name them or leave them off and the bytes
+    // are the same. Which registers were named is checked where the line is read.
+    bytes("monitor", &NO_ARGS, Long, &[0x0F, 0x01, 0xC8], NO_MODRM, NO_IMM),
+    bytes("monitor", &RRR, Long, &[0x0F, 0x01, 0xC8], NO_MODRM, NO_IMM),
+    bytes("mwait", &NO_ARGS, Long, &[0x0F, 0x01, 0xC9], NO_MODRM, NO_IMM),
+    bytes("mwait", &RR, Long, &[0x0F, 0x01, 0xC9], NO_MODRM, NO_IMM),
+    bytes("monitorx", &NO_ARGS, Long, &[0x0F, 0x01, 0xFA], NO_MODRM, NO_IMM),
+    bytes("monitorx", &RRR, Long, &[0x0F, 0x01, 0xFA], NO_MODRM, NO_IMM),
+    bytes("mwaitx", &NO_ARGS, Long, &[0x0F, 0x01, 0xFB], NO_MODRM, NO_IMM),
+    bytes("mwaitx", &RRR, Long, &[0x0F, 0x01, 0xFB], NO_MODRM, NO_IMM),
+    // The other two barriers beside `mfence`, and the one that waits for everything in flight.
+    bytes("lfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xE8], NO_MODRM, NO_IMM),
+    bytes("sfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xF8], NO_MODRM, NO_IMM),
+    bytes("serialize", &NO_ARGS, Long, &[0x0F, 0x01, 0xE8], NO_MODRM, NO_IMM),
+    bytes("endbr32", &NO_ARGS, Long, &[0xF3, 0x0F, 0x1E, 0xFB], NO_MODRM, NO_IMM),
+    bytes("xsetbv", &NO_ARGS, Long, &[0x0F, 0x01, 0xD1], NO_MODRM, NO_IMM),
+    bytes("xend", &NO_ARGS, Long, &[0x0F, 0x01, 0xD5], NO_MODRM, NO_IMM),
+    bytes("xtest", &NO_ARGS, Long, &[0x0F, 0x01, 0xD6], NO_MODRM, NO_IMM),
+    takes("xabort", &I, Fits::Byte, Long, &[0xC6, 0xF8], NO_MODRM, ImmSize::Ib),
+    // The x87 and MMX state a kernel clears or saves by hand.
+    bytes("fnclex", &NO_ARGS, Long, &[0xDB, 0xE2], NO_MODRM, NO_IMM),
+    bytes("fwait", &NO_ARGS, Long, &[0x9B], NO_MODRM, NO_IMM),
+    bytes("wait", &NO_ARGS, Long, &[0x9B], NO_MODRM, NO_IMM),
+    bytes("emms", &NO_ARGS, Long, &[0x0F, 0x77], NO_MODRM, NO_IMM),
+    bytes("fnsave", &M, Long, &[0xDD], ext(0, 6), NO_IMM),
+    waits("fsave", &M, Long, &[0xDD], ext(0, 6)),
+    bytes("frstor", &M, Long, &[0xDD], ext(0, 4), NO_IMM),
+    bytes("fldenv", &M, Long, &[0xD9], ext(0, 4), NO_IMM),
+    // VMX. The two that move a field of the current structure are always sixty four bits in long
+    // mode, with no `REX.W`, and gas spells them with or without the `q`.
+    bytes("vmcall", &NO_ARGS, Long, &[0x0F, 0x01, 0xC1], NO_MODRM, NO_IMM),
+    bytes("vmlaunch", &NO_ARGS, Long, &[0x0F, 0x01, 0xC2], NO_MODRM, NO_IMM),
+    bytes("vmresume", &NO_ARGS, Long, &[0x0F, 0x01, 0xC3], NO_MODRM, NO_IMM),
+    bytes("vmxoff", &NO_ARGS, Long, &[0x0F, 0x01, 0xC4], NO_MODRM, NO_IMM),
+    bytes("vmfunc", &NO_ARGS, Long, &[0x0F, 0x01, 0xD4], NO_MODRM, NO_IMM),
+    bytes("vmxon", &M, Single, &[0x0F, 0xC7], ext(0, 6), NO_IMM),
+    bytes("vmclear", &M, Word, &[0x0F, 0xC7], ext(0, 6), NO_IMM),
+    bytes("vmptrld", &M, Long, &[0x0F, 0xC7], ext(0, 6), NO_IMM),
+    bytes("vmptrst", &M, Long, &[0x0F, 0xC7], ext(0, 7), NO_IMM),
+    bytes("vmreadq", &RR, Long, &[0x0F, 0x78], pair(1, 0), NO_IMM),
+    bytes("vmreadq", &RM, Long, &[0x0F, 0x78], pair(1, 0), NO_IMM),
+    bytes("vmwriteq", &RR, Long, &[0x0F, 0x79], pair(0, 1), NO_IMM),
+    bytes("vmwriteq", &MR, Long, &[0x0F, 0x79], pair(0, 1), NO_IMM),
+    bytes("invept", &MR, Word, &[0x0F, 0x38, 0x80], pair(0, 1), NO_IMM),
+    bytes("invvpid", &MR, Word, &[0x0F, 0x38, 0x81], pair(0, 1), NO_IMM),
+    // SVM. The register forms name `rax`, and `invlpga` names `rax` and `ecx`, and `skinit` names
+    // `eax`, all fixed, the way `monitor` does.
+    bytes("vmmcall", &NO_ARGS, Long, &[0x0F, 0x01, 0xD9], NO_MODRM, NO_IMM),
+    bytes("vmgexit", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xD9], NO_MODRM, NO_IMM),
+    bytes("vmrun", &NO_ARGS, Long, &[0x0F, 0x01, 0xD8], NO_MODRM, NO_IMM),
+    bytes("vmrun", &R, Long, &[0x0F, 0x01, 0xD8], NO_MODRM, NO_IMM),
+    bytes("vmload", &NO_ARGS, Long, &[0x0F, 0x01, 0xDA], NO_MODRM, NO_IMM),
+    bytes("vmload", &R, Long, &[0x0F, 0x01, 0xDA], NO_MODRM, NO_IMM),
+    bytes("vmsave", &NO_ARGS, Long, &[0x0F, 0x01, 0xDB], NO_MODRM, NO_IMM),
+    bytes("vmsave", &R, Long, &[0x0F, 0x01, 0xDB], NO_MODRM, NO_IMM),
+    bytes("stgi", &NO_ARGS, Long, &[0x0F, 0x01, 0xDC], NO_MODRM, NO_IMM),
+    bytes("clgi", &NO_ARGS, Long, &[0x0F, 0x01, 0xDD], NO_MODRM, NO_IMM),
+    bytes("skinit", &NO_ARGS, Long, &[0x0F, 0x01, 0xDE], NO_MODRM, NO_IMM),
+    bytes("skinit", &R, Long, &[0x0F, 0x01, 0xDE], NO_MODRM, NO_IMM),
+    bytes("invlpga", &NO_ARGS, Long, &[0x0F, 0x01, 0xDF], NO_MODRM, NO_IMM),
+    bytes("invlpga", &RR, Long, &[0x0F, 0x01, 0xDF], NO_MODRM, NO_IMM),
+    // SEV-SNP, TDX, SGX and the platform configuration, which are fixed opcodes the same way.
+    bytes("pvalidate", &NO_ARGS, Long, &[0xF2, 0x0F, 0x01, 0xFF], NO_MODRM, NO_IMM),
+    bytes("rmpadjust", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xFE], NO_MODRM, NO_IMM),
+    bytes("rmpupdate", &NO_ARGS, Long, &[0xF2, 0x0F, 0x01, 0xFE], NO_MODRM, NO_IMM),
+    bytes("psmash", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xFF], NO_MODRM, NO_IMM),
+    bytes("tdcall", &NO_ARGS, Long, &[0x66, 0x0F, 0x01, 0xCC], NO_MODRM, NO_IMM),
+    bytes("seamret", &NO_ARGS, Long, &[0x66, 0x0F, 0x01, 0xCD], NO_MODRM, NO_IMM),
+    bytes("seamops", &NO_ARGS, Long, &[0x66, 0x0F, 0x01, 0xCE], NO_MODRM, NO_IMM),
+    bytes("seamcall", &NO_ARGS, Long, &[0x66, 0x0F, 0x01, 0xCF], NO_MODRM, NO_IMM),
+    bytes("enclv", &NO_ARGS, Long, &[0x0F, 0x01, 0xC0], NO_MODRM, NO_IMM),
+    bytes("pconfig", &NO_ARGS, Long, &[0x0F, 0x01, 0xC5], NO_MODRM, NO_IMM),
+    bytes("encls", &NO_ARGS, Long, &[0x0F, 0x01, 0xCF], NO_MODRM, NO_IMM),
+    bytes("enclu", &NO_ARGS, Long, &[0x0F, 0x01, 0xD7], NO_MODRM, NO_IMM),
+    // FRED's two returns, from 6.9 on.
+    bytes("eretu", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xCA], NO_MODRM, NO_IMM),
+    bytes("erets", &NO_ARGS, Long, &[0xF2, 0x0F, 0x01, 0xCA], NO_MODRM, NO_IMM),
+    // The descriptor tables and the task register. The four table instructions read or write ten
+    // bytes of memory in long mode whatever the letter says, and gas takes them with a `q` or
+    // without. The selector ones read a word, from a register or from memory, and write no prefix
+    // for it. Storing a selector into a register is the one that has a width, since it writes the
+    // whole register, so those are named by the letter the register works out to.
+    bytes("sgdt", &M, Long, &[0x0F, 0x01], ext(0, 0), NO_IMM),
+    bytes("sgdtq", &M, Long, &[0x0F, 0x01], ext(0, 0), NO_IMM),
+    bytes("sidt", &M, Long, &[0x0F, 0x01], ext(0, 1), NO_IMM),
+    bytes("sidtq", &M, Long, &[0x0F, 0x01], ext(0, 1), NO_IMM),
+    bytes("lgdt", &M, Long, &[0x0F, 0x01], ext(0, 2), NO_IMM),
+    bytes("lgdtq", &M, Long, &[0x0F, 0x01], ext(0, 2), NO_IMM),
+    bytes("lidt", &M, Long, &[0x0F, 0x01], ext(0, 3), NO_IMM),
+    bytes("lidtq", &M, Long, &[0x0F, 0x01], ext(0, 3), NO_IMM),
+    bytes("sldt", &M, Long, &[0x0F, 0x00], ext(0, 0), NO_IMM),
+    bytes("sldtw", &R, Word, &[0x0F, 0x00], ext(0, 0), NO_IMM),
+    bytes("sldtl", &R, Long, &[0x0F, 0x00], ext(0, 0), NO_IMM),
+    bytes("sldtq", &R, Quad, &[0x0F, 0x00], ext(0, 0), NO_IMM),
+    bytes("str", &M, Long, &[0x0F, 0x00], ext(0, 1), NO_IMM),
+    bytes("strw", &R, Word, &[0x0F, 0x00], ext(0, 1), NO_IMM),
+    bytes("strl", &R, Long, &[0x0F, 0x00], ext(0, 1), NO_IMM),
+    bytes("strq", &R, Quad, &[0x0F, 0x00], ext(0, 1), NO_IMM),
+    bytes("lldt", &R, Long, &[0x0F, 0x00], ext(0, 2), NO_IMM),
+    bytes("lldt", &M, Long, &[0x0F, 0x00], ext(0, 2), NO_IMM),
+    bytes("ltr", &R, Long, &[0x0F, 0x00], ext(0, 3), NO_IMM),
+    bytes("ltr", &M, Long, &[0x0F, 0x00], ext(0, 3), NO_IMM),
+    bytes("verr", &R, Long, &[0x0F, 0x00], ext(0, 4), NO_IMM),
+    bytes("verr", &M, Long, &[0x0F, 0x00], ext(0, 4), NO_IMM),
+    bytes("verw", &R, Long, &[0x0F, 0x00], ext(0, 5), NO_IMM),
+    bytes("verw", &M, Long, &[0x0F, 0x00], ext(0, 5), NO_IMM),
+    bytes("smsw", &M, Long, &[0x0F, 0x01], ext(0, 4), NO_IMM),
+    bytes("smsww", &R, Word, &[0x0F, 0x01], ext(0, 4), NO_IMM),
+    bytes("smswl", &R, Long, &[0x0F, 0x01], ext(0, 4), NO_IMM),
+    bytes("smswq", &R, Quad, &[0x0F, 0x01], ext(0, 4), NO_IMM),
+    bytes("lmsw", &R, Long, &[0x0F, 0x01], ext(0, 6), NO_IMM),
+    bytes("lmsw", &M, Long, &[0x0F, 0x01], ext(0, 6), NO_IMM),
+    // The limit and the access rights of a segment, which the vDSO reads the processor number out
+    // of.
+    bytes("larw", &RR, Word, &[0x0F, 0x02], pair(0, 1), NO_IMM),
+    bytes("larw", &MR, Word, &[0x0F, 0x02], pair(0, 1), NO_IMM),
+    bytes("larl", &RR, Long, &[0x0F, 0x02], pair(0, 1), NO_IMM),
+    bytes("larl", &MR, Long, &[0x0F, 0x02], pair(0, 1), NO_IMM),
+    bytes("larq", &RR, Quad, &[0x0F, 0x02], pair(0, 1), NO_IMM),
+    bytes("larq", &MR, Quad, &[0x0F, 0x02], pair(0, 1), NO_IMM),
+    bytes("lslw", &RR, Word, &[0x0F, 0x03], pair(0, 1), NO_IMM),
+    bytes("lslw", &MR, Word, &[0x0F, 0x03], pair(0, 1), NO_IMM),
+    bytes("lsll", &RR, Long, &[0x0F, 0x03], pair(0, 1), NO_IMM),
+    bytes("lsll", &MR, Long, &[0x0F, 0x03], pair(0, 1), NO_IMM),
+    bytes("lslq", &RR, Quad, &[0x0F, 0x03], pair(0, 1), NO_IMM),
+    bytes("lslq", &MR, Quad, &[0x0F, 0x03], pair(0, 1), NO_IMM),
+    // The control and debug registers, moved to and from a general purpose one. Always sixty four
+    // bits in long mode and never with `REX.W`, and the special register is the one beside the
+    // addressing byte, so `REX.R` is what reaches `%cr8`.
+    bytes("movq", &CONTROL_R, Long, &[0x0F, 0x20], pair(1, 0), NO_IMM),
+    bytes("movq", &R_CONTROL, Long, &[0x0F, 0x22], pair(0, 1), NO_IMM),
+    bytes("movq", &DEBUG_R, Long, &[0x0F, 0x21], pair(1, 0), NO_IMM),
+    bytes("movq", &R_DEBUG, Long, &[0x0F, 0x23], pair(0, 1), NO_IMM),
+    // A segment register moved to and from a general purpose one or memory. Reading one into a
+    // register writes as much of the register as the letter says, so that direction has a prefix
+    // per width. Loading one reads a word whatever the letter is, and gas writes no prefix for a
+    // `movw` into one, nor for a store of one to memory. A sixty four bit register carries
+    // `REX.W` in both directions, which changes nothing about what is loaded and is what the
+    // other assemblers write for it.
+    bytes("movw", &SEG_R, Word, &[0x8C], pair(1, 0), NO_IMM),
+    bytes("movl", &SEG_R, Long, &[0x8C], pair(1, 0), NO_IMM),
+    bytes("movq", &SEG_R, Quad, &[0x8C], pair(1, 0), NO_IMM),
+    bytes("movw", &R_SEG, Long, &[0x8E], pair(0, 1), NO_IMM),
+    bytes("movl", &R_SEG, Long, &[0x8E], pair(0, 1), NO_IMM),
+    bytes("movq", &R_SEG, Quad, &[0x8E], pair(0, 1), NO_IMM),
+    bytes("mov", &SEG_M, Long, &[0x8C], pair(1, 0), NO_IMM),
+    bytes("movw", &SEG_M, Long, &[0x8C], pair(1, 0), NO_IMM),
+    bytes("mov", &M_SEG, Long, &[0x8E], pair(0, 1), NO_IMM),
+    bytes("movw", &M_SEG, Long, &[0x8E], pair(0, 1), NO_IMM),
+    // The only two segment registers long mode can push and pop, each an opcode of its own. They
+    // are looked up under a name with the register in it, since which register it is is the whole
+    // of which opcode it is and an argument cannot say that to a lookup by kind.
+    bytes("pushq %fs", &NO_ARGS, Long, &[0x0F, 0xA0], NO_MODRM, NO_IMM),
+    bytes("popq %fs", &NO_ARGS, Long, &[0x0F, 0xA1], NO_MODRM, NO_IMM),
+    bytes("pushq %gs", &NO_ARGS, Long, &[0x0F, 0xA8], NO_MODRM, NO_IMM),
+    bytes("popq %gs", &NO_ARGS, Long, &[0x0F, 0xA9], NO_MODRM, NO_IMM),
+    // The base of `%fs` and `%gs` read and written without an MSR, at either width.
+    bytes("rdfsbasel", &R, Single, &[0x0F, 0xAE], ext(0, 0), NO_IMM),
+    bytes("rdfsbaseq", &R, SingleQuad, &[0x0F, 0xAE], ext(0, 0), NO_IMM),
+    bytes("rdgsbasel", &R, Single, &[0x0F, 0xAE], ext(0, 1), NO_IMM),
+    bytes("rdgsbaseq", &R, SingleQuad, &[0x0F, 0xAE], ext(0, 1), NO_IMM),
+    bytes("wrfsbasel", &R, Single, &[0x0F, 0xAE], ext(0, 2), NO_IMM),
+    bytes("wrfsbaseq", &R, SingleQuad, &[0x0F, 0xAE], ext(0, 2), NO_IMM),
+    bytes("wrgsbasel", &R, Single, &[0x0F, 0xAE], ext(0, 3), NO_IMM),
+    bytes("wrgsbaseq", &R, SingleQuad, &[0x0F, 0xAE], ext(0, 3), NO_IMM),
+    // Paging and the caches. `invpcid` names its type in a register that is sixty four bits in
+    // long mode without `REX.W`, and the descriptor in memory.
+    bytes("invlpg", &M, Long, &[0x0F, 0x01], ext(0, 7), NO_IMM),
+    bytes("invpcid", &MR, Word, &[0x0F, 0x38, 0x82], pair(0, 1), NO_IMM),
+    bytes("clflush", &M, Long, &[0x0F, 0xAE], ext(0, 7), NO_IMM),
+    bytes("clflushopt", &M, Word, &[0x0F, 0xAE], ext(0, 7), NO_IMM),
+    bytes("clwb", &M, Word, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    // The extended state, saved and restored. The `64` forms are the same opcode with `REX.W`,
+    // which is what makes the saved instruction pointers eight bytes wide, and `fxsaveq` is gas's
+    // other name for `fxsave64`.
+    bytes("fxsave", &M, Long, &[0x0F, 0xAE], ext(0, 0), NO_IMM),
+    bytes("fxsave64", &M, Quad, &[0x0F, 0xAE], ext(0, 0), NO_IMM),
+    bytes("fxsaveq", &M, Quad, &[0x0F, 0xAE], ext(0, 0), NO_IMM),
+    bytes("fxrstor", &M, Long, &[0x0F, 0xAE], ext(0, 1), NO_IMM),
+    bytes("fxrstor64", &M, Quad, &[0x0F, 0xAE], ext(0, 1), NO_IMM),
+    bytes("fxrstorq", &M, Quad, &[0x0F, 0xAE], ext(0, 1), NO_IMM),
+    bytes("ldmxcsr", &M, Long, &[0x0F, 0xAE], ext(0, 2), NO_IMM),
+    bytes("stmxcsr", &M, Long, &[0x0F, 0xAE], ext(0, 3), NO_IMM),
+    bytes("xsave", &M, Long, &[0x0F, 0xAE], ext(0, 4), NO_IMM),
+    bytes("xsave64", &M, Quad, &[0x0F, 0xAE], ext(0, 4), NO_IMM),
+    bytes("xrstor", &M, Long, &[0x0F, 0xAE], ext(0, 5), NO_IMM),
+    bytes("xrstor64", &M, Quad, &[0x0F, 0xAE], ext(0, 5), NO_IMM),
+    bytes("xsaveopt", &M, Long, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    bytes("xsaveopt64", &M, Quad, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    bytes("xrstors", &M, Long, &[0x0F, 0xC7], ext(0, 3), NO_IMM),
+    bytes("xrstors64", &M, Quad, &[0x0F, 0xC7], ext(0, 3), NO_IMM),
+    bytes("xsavec", &M, Long, &[0x0F, 0xC7], ext(0, 4), NO_IMM),
+    bytes("xsavec64", &M, Quad, &[0x0F, 0xC7], ext(0, 4), NO_IMM),
+    bytes("xsaves", &M, Long, &[0x0F, 0xC7], ext(0, 5), NO_IMM),
+    bytes("xsaves64", &M, Quad, &[0x0F, 0xC7], ext(0, 5), NO_IMM),
+    // Random numbers from the processor, and its own number.
+    bytes("rdrandw", &R, Word, &[0x0F, 0xC7], ext(0, 6), NO_IMM),
+    bytes("rdrandl", &R, Long, &[0x0F, 0xC7], ext(0, 6), NO_IMM),
+    bytes("rdrandq", &R, Quad, &[0x0F, 0xC7], ext(0, 6), NO_IMM),
+    bytes("rdseedw", &R, Word, &[0x0F, 0xC7], ext(0, 7), NO_IMM),
+    bytes("rdseedl", &R, Long, &[0x0F, 0xC7], ext(0, 7), NO_IMM),
+    bytes("rdseedq", &R, Quad, &[0x0F, 0xC7], ext(0, 7), NO_IMM),
+    bytes("rdpid", &R, Single, &[0x0F, 0xC7], ext(0, 7), NO_IMM),
+    // The instruction that is undefined on purpose and carries an addressing byte, which is what
+    // a kernel's warnings are made of when it wants to say which one it was.
+    bytes("ud1l", &RR, Long, &[0x0F, 0xB9], pair(0, 1), NO_IMM),
+    bytes("ud1l", &MR, Long, &[0x0F, 0xB9], pair(0, 1), NO_IMM),
+    bytes("ud1q", &RR, Quad, &[0x0F, 0xB9], pair(0, 1), NO_IMM),
+    bytes("ud1q", &MR, Quad, &[0x0F, 0xB9], pair(0, 1), NO_IMM),
+    // Stores of sixty four bytes in one go to a device, and direct stores. The destination is an
+    // address held in a register, which is sixty four bits in long mode without `REX.W`.
+    bytes("movdir64b", &MR, Word, &[0x0F, 0x38, 0xF8], pair(0, 1), NO_IMM),
+    bytes("enqcmds", &MR, Single, &[0x0F, 0x38, 0xF8], pair(0, 1), NO_IMM),
+    bytes("enqcmd", &MR, Double, &[0x0F, 0x38, 0xF8], pair(0, 1), NO_IMM),
+    bytes("movdiril", &RM, Long, &[0x0F, 0x38, 0xF9], pair(1, 0), NO_IMM),
+    bytes("movdiriq", &RM, Quad, &[0x0F, 0x38, 0xF9], pair(1, 0), NO_IMM),
+    // The shadow stack, which gas names with `d` and `q` rather than `l` and `q`.
+    bytes("wrssd", &RM, Long, &[0x0F, 0x38, 0xF6], pair(1, 0), NO_IMM),
+    bytes("wrssq", &RM, Quad, &[0x0F, 0x38, 0xF6], pair(1, 0), NO_IMM),
+    bytes("wrussd", &RM, Word, &[0x0F, 0x38, 0xF5], pair(1, 0), NO_IMM),
+    bytes("wrussq", &RM, WordQuad, &[0x0F, 0x38, 0xF5], pair(1, 0), NO_IMM),
+    bytes("rdsspd", &R, Single, &[0x0F, 0x1E], ext(0, 1), NO_IMM),
+    bytes("rdsspq", &R, SingleQuad, &[0x0F, 0x1E], ext(0, 1), NO_IMM),
+    bytes("incsspd", &R, Single, &[0x0F, 0xAE], ext(0, 5), NO_IMM),
+    bytes("incsspq", &R, SingleQuad, &[0x0F, 0xAE], ext(0, 5), NO_IMM),
+    bytes("rstorssp", &M, Single, &[0x0F, 0x01], ext(0, 5), NO_IMM),
+    bytes("clrssbsy", &M, Single, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    bytes("saveprevssp", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xEA], NO_MODRM, NO_IMM),
+    bytes("setssbsy", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xE8], NO_MODRM, NO_IMM),
+    // Waiting for a while or for a store, from user space.
+    bytes("tpause", &R, Word, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    bytes("umwait", &R, Double, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    bytes("umonitor", &R, Single, &[0x0F, 0xAE], ext(0, 6), NO_IMM),
+    // Port I/O. The port is `dx` or a byte the instruction carries and the value is in the
+    // accumulator, both fixed, so the registers are checked where the line is read and write
+    // nothing here. The word forms carry the operand size prefix and the long ones do not.
+    bytes("inb", &RR, Long, &[0xEC], NO_MODRM, NO_IMM),
+    bytes("inw", &RR, Word, &[0xED], NO_MODRM, NO_IMM),
+    bytes("inl", &RR, Long, &[0xED], NO_MODRM, NO_IMM),
+    takes("inb", &IR, Fits::Byte, Long, &[0xE4], NO_MODRM, ImmSize::Ib),
+    takes("inw", &IR, Fits::Byte, Word, &[0xE5], NO_MODRM, ImmSize::Ib),
+    takes("inl", &IR, Fits::Byte, Long, &[0xE5], NO_MODRM, ImmSize::Ib),
+    bytes("outb", &RR, Long, &[0xEE], NO_MODRM, NO_IMM),
+    bytes("outw", &RR, Word, &[0xEF], NO_MODRM, NO_IMM),
+    bytes("outl", &RR, Long, &[0xEF], NO_MODRM, NO_IMM),
+    takes("outb", &RI, Fits::Byte, Long, &[0xE6], NO_MODRM, ImmSize::Ib),
+    takes("outw", &RI, Fits::Byte, Word, &[0xE7], NO_MODRM, ImmSize::Ib),
+    takes("outl", &RI, Fits::Byte, Long, &[0xE7], NO_MODRM, ImmSize::Ib),
+    // The string forms, alone and repeated, with the repeat prefix behind the operand size one
+    // the way the other string instructions have it.
+    bytes("insb", &NO_ARGS, Byte, &[0x6C], NO_MODRM, NO_IMM),
+    bytes("insw", &NO_ARGS, Word, &[0x6D], NO_MODRM, NO_IMM),
+    bytes("insl", &NO_ARGS, Long, &[0x6D], NO_MODRM, NO_IMM),
+    bytes("outsb", &NO_ARGS, Byte, &[0x6E], NO_MODRM, NO_IMM),
+    bytes("outsw", &NO_ARGS, Word, &[0x6F], NO_MODRM, NO_IMM),
+    bytes("outsl", &NO_ARGS, Long, &[0x6F], NO_MODRM, NO_IMM),
+    bytes("rep insb", &NO_ARGS, Single, &[0x6C], NO_MODRM, NO_IMM),
+    bytes("rep insw", &NO_ARGS, Word, &[0xF3, 0x6D], NO_MODRM, NO_IMM),
+    bytes("rep insl", &NO_ARGS, Single, &[0x6D], NO_MODRM, NO_IMM),
+    bytes("rep outsb", &NO_ARGS, Single, &[0x6E], NO_MODRM, NO_IMM),
+    bytes("rep outsw", &NO_ARGS, Word, &[0xF3, 0x6F], NO_MODRM, NO_IMM),
+    bytes("rep outsl", &NO_ARGS, Single, &[0x6F], NO_MODRM, NO_IMM),
+    bytes("rep lodsb", &NO_ARGS, Single, &[0xAC], NO_MODRM, NO_IMM),
+    bytes("rep lodsw", &NO_ARGS, Word, &[0xF3, 0xAD], NO_MODRM, NO_IMM),
+    bytes("rep lodsl", &NO_ARGS, Single, &[0xAD], NO_MODRM, NO_IMM),
+    bytes("rep lodsq", &NO_ARGS, SingleQuad, &[0xAD], NO_MODRM, NO_IMM),
+    // The other prefixes, each a row of its own for the reason `lock` is one, so that a file may
+    // write one on a line by itself. `notrack` is the byte `ds` is. gcc writes `cs` on its own in
+    // front of a call or jump to a retpoline thunk through `r8` to `r15` under
+    // `-mindirect-branch-cs-prefix`, which makes it six bytes, the length the kernel needs to write
+    // `lfence; call *%r11` over it in place.
+    bytes("es", &NO_ARGS, Long, &[0x26], NO_MODRM, NO_IMM),
+    bytes("cs", &NO_ARGS, Long, &[0x2E], NO_MODRM, NO_IMM),
+    bytes("ss", &NO_ARGS, Long, &[0x36], NO_MODRM, NO_IMM),
+    bytes("ds", &NO_ARGS, Long, &[0x3E], NO_MODRM, NO_IMM),
+    bytes("notrack", &NO_ARGS, Long, &[0x3E], NO_MODRM, NO_IMM),
+    bytes("fs", &NO_ARGS, Long, &[0x64], NO_MODRM, NO_IMM),
+    bytes("gs", &NO_ARGS, Long, &[0x65], NO_MODRM, NO_IMM),
+    bytes("data16", &NO_ARGS, Long, &[0x66], NO_MODRM, NO_IMM),
+    bytes("addr32", &NO_ARGS, Long, &[0x67], NO_MODRM, NO_IMM),
+    bytes("rex64", &NO_ARGS, Long, &[0x48], NO_MODRM, NO_IMM),
+    bytes("xacquire", &NO_ARGS, Long, &[0xF2], NO_MODRM, NO_IMM),
+    bytes("xrelease", &NO_ARGS, Long, &[0xF3], NO_MODRM, NO_IMM),
     // The other string instructions and the move again with a repeat prefix, whose operands are
     // registers the opcode names for itself. A repeat
     // prefix is one of the mandatory prefixes as far as the table is concerned, since it has to
@@ -2817,6 +3187,12 @@ pub enum Value {
     /// which depth that is comes from the text table, so what is left here is the fact that an
     /// argument was there at all, which is what the lookup needs.
     Stack,
+    /// A control register, `cr0` to `cr15`, by number.
+    Control(u8),
+    /// A debug register, `dr0` to `dr15`, by number.
+    Debug(u8),
+    /// A segment register.
+    Seg(Segment),
 }
 
 impl Value {
@@ -2824,6 +3200,9 @@ impl Value {
     #[must_use]
     pub fn kind(self) -> Kind {
         match self {
+            Value::Control(_) => Kind::Control,
+            Value::Debug(_) => Kind::Debug,
+            Value::Seg(_) => Kind::Seg,
             Value::Reg(_, _) | Value::High(_) => Kind::Reg,
             Value::Xmm(_) | Value::Vector(_, _) => Kind::Vec,
             Value::Mask(_) => Kind::Mask,
@@ -3248,16 +3627,12 @@ impl Writer<'_> {
         }
     }
 
-    /// The prefix that says the address is in a thread's own block, when one of the arguments is
+    /// The prefix that says the address is counted from a segment, when one of the arguments is
     /// such an address. At most one argument of an instruction is an address at all.
     fn segment(&self) -> Option<u8> {
-        let segment = self.values.iter().find_map(|value| match value {
-            Value::Mem(addr) => addr.segment,
+        self.values.iter().find_map(|value| match value {
+            Value::Mem(addr) => addr.segment.map(Segment::prefix),
             _ => None,
-        })?;
-        Some(match segment {
-            Segment::Fs => 0x64,
-            Segment::Gs => 0x65,
         })
     }
 
@@ -3300,6 +3675,15 @@ impl Writer<'_> {
                 Ok(number & 7)
             }
             Some(&Value::Mask(number)) if number < 8 => Ok(number),
+            // A control or debug register is numbered to fifteen the way a general purpose one is,
+            // with the top bit in the REX byte, which is how `%cr8` is reached at all.
+            Some(&(Value::Control(number) | Value::Debug(number))) if number < 16 => {
+                if number >= 8 {
+                    self.rex |= bit;
+                }
+                Ok(number & 7)
+            }
+            Some(&Value::Seg(segment)) => Ok(segment.number()),
             // `ah` is `al` plus four, and so are the other three, which is also why only the
             // first four registers have one.
             Some(&Value::High(reg)) if reg.number() < 4 => {
@@ -4572,6 +4956,75 @@ mod tests {
         assert_eq!(hex("kmovq", &[quad(R13), Value::Mask(7)]), "c4 c1 fb 92 fd");
         assert_eq!(hex("kmovq", &[Value::Mask(1), quad(RAX)]), "c4 e1 fb 93 c1");
         assert_eq!(hex("kmovq", &[Value::Mask(3), quad(R9)]), "c4 61 fb 93 cb");
+    }
+
+    /// A control, debug or segment register goes in the field beside the addressing byte, and a
+    /// control or debug register past seven reaches it through `REX.R` the way a general purpose
+    /// one does. The bytes are llvm-mc's for the same lines.
+    #[test]
+    fn a_control_debug_or_segment_register_is_the_register_field_of_the_addressing_byte() {
+        let cr = Value::Control;
+        let dr = Value::Debug;
+        assert_eq!(hex("movq", &[cr(3), quad(R9)]), "41 0f 20 d9");
+        assert_eq!(hex("movq", &[quad(RAX), cr(8)]), "44 0f 22 c0");
+        assert_eq!(hex("movq", &[dr(7), quad(RAX)]), "0f 21 f8");
+        assert_eq!(hex("movq", &[quad(R10), dr(1)]), "41 0f 23 ca");
+        let mut out = Vec::new();
+        assert!(encode("movq", &[cr(16), quad(RAX)], &mut out).is_err());
+        let ds = Value::Seg(Segment::Ds);
+        let gs = Value::Seg(Segment::Gs);
+        assert_eq!(hex("movl", &[ds, long(RAX)]), "8c d8");
+        assert_eq!(hex("movw", &[ds, word(RAX)]), "66 8c d8");
+        assert_eq!(hex("movq", &[ds, quad(RAX)]), "48 8c d8");
+        assert_eq!(hex("movl", &[gs, long(R8)]), "41 8c e8");
+        assert_eq!(hex("movw", &[word(RAX), Value::Seg(Segment::Es)]), "8e c0");
+        let at = Value::Mem(Addr { base: Some(RAX), scale: 1, ..Addr::default() });
+        assert_eq!(hex("mov", &[at, ds]), "8e 18");
+        assert_eq!(hex("mov", &[ds, at]), "8c 18");
+        assert_eq!(hex("pushq %fs", &[]), "0f a0");
+        assert_eq!(hex("popq %gs", &[]), "0f a9");
+    }
+
+    /// Every segment override is the prefix byte the manual gives it, in front of everything else.
+    #[test]
+    fn every_segment_override_is_its_own_prefix() {
+        for (segment, prefix) in [
+            (Segment::Es, "26"),
+            (Segment::Cs, "2e"),
+            (Segment::Ss, "36"),
+            (Segment::Ds, "3e"),
+            (Segment::Fs, "64"),
+            (Segment::Gs, "65"),
+        ] {
+            let at = Value::Mem(Addr {
+                segment: Some(segment),
+                base: Some(RAX),
+                scale: 1,
+                ..Addr::default()
+            });
+            assert_eq!(hex("movl", &[at, long(RAX)]), format!("{prefix} 8b 00"));
+        }
+    }
+
+    /// A few of the system instructions with no operand, one with an immediate, and the port I/O
+    /// forms, against llvm-mc.
+    #[test]
+    fn the_system_instructions_are_the_manuals_bytes() {
+        assert_eq!(hex("swapgs", &[]), "0f 01 f8");
+        assert_eq!(hex("sysretq", &[]), "48 0f 07");
+        assert_eq!(hex("iretq", &[]), "48 cf");
+        assert_eq!(hex("wrmsrns", &[]), "0f 01 c6");
+        assert_eq!(hex("eretu", &[]), "f3 0f 01 ca");
+        assert_eq!(hex("tdcall", &[]), "66 0f 01 cc");
+        assert_eq!(hex("int", &[Value::Imm(0x80)]), "cd 80");
+        assert_eq!(hex("lretq", &[Value::Imm(8)]), "48 ca 08 00");
+        let at = Value::Mem(Addr { base: Some(RDI), scale: 1, ..Addr::default() });
+        assert_eq!(hex("xsaves64", &[at]), "48 0f c7 2f");
+        assert_eq!(hex("wrussq", &[quad(RAX), at]), "66 48 0f 38 f5 07");
+        assert_eq!(hex("rdfsbaseq", &[quad(RAX)]), "f3 48 0f ae c0");
+        assert_eq!(hex("inw", &[word(RDX), word(RAX)]), "66 ed");
+        assert_eq!(hex("outb", &[byte(RAX), Value::Imm(0x80)]), "e6 80");
+        assert_eq!(hex("rep insw", &[]), "66 f3 6d");
     }
 
     #[test]

@@ -514,10 +514,25 @@ impl Reader {
         if self.aarch64 {
             return self.a64(text);
         }
-        if let Some((word, rest)) = repeated(word, rest) {
-            return self.instruction(&word, rest);
+        // A prefix written on the same line as the instruction it goes in front of, which is how a
+        // kernel writes `lock` and how it writes `cs` in front of a call it wants a byte longer.
+        // Taken off one at a time, so that `xacquire lock incl (%rax)` is two of them.
+        let (mut word, mut rest) = (word.to_owned(), rest);
+        let mut prefixes = Vec::new();
+        loop {
+            if let Some((joined, after)) = repeated(&word, rest) {
+                (word, rest) = (joined, after);
+                break;
+            }
+            let Some(byte) = prefix(&word).filter(|_| !rest.is_empty()) else { break };
+            prefixes.push(byte);
+            let (next, after) = match rest.find(char::is_whitespace) {
+                Some(cut) => (&rest[..cut], rest[cut..].trim()),
+                None => (rest, ""),
+            };
+            (word, rest) = (next.to_owned(), after);
         }
-        self.instruction(word, rest)
+        self.instruction(&word, rest, &prefixes)
     }
 
     /// One instruction, as the bytes of it.
@@ -533,7 +548,10 @@ impl Reader {
     /// section cancels down to a number and is written into the bytes, and one that does not is a
     /// relocation with the right addend on it. A branch says so, because a call to a name another
     /// object defines is allowed to go through a stub and a load of a datum is not.
-    fn instruction(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
+    ///
+    /// `prefixes` are the bytes of any prefix the line wrote in front of the mnemonic, which go in
+    /// among the ones the instruction already has in the order gas puts them.
+    fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
         let mut written = crate::instruction::one(word, &args).map_err(|why| self.bad(&why))?;
         // `jmp .+10` has been given its short form already, where the distance is known.
@@ -546,6 +564,9 @@ impl Reader {
                 written = short;
             }
             self.branches += 1;
+        }
+        for &byte in prefixes {
+            prefixed(&mut written, byte).map_err(|why| self.bad(&why))?;
         }
         let part = self.here;
         let at = self.at();
@@ -3994,6 +4015,71 @@ pub(crate) fn split(text: &str, on: char) -> Vec<String> {
     out.into_iter().map(|piece| piece.trim().to_owned()).collect()
 }
 
+/// The byte a prefix written as a word is, for the ones a line may write in front of an instruction.
+///
+/// `rex64` is not one of them, since a REX byte has to be merged with the one the instruction may
+/// already have rather than put in front of it, and nothing a kernel writes asks for that. It is
+/// still a line of its own, which the encoder has a row for.
+fn prefix(word: &str) -> Option<u8> {
+    Some(match word {
+        "es" => 0x26,
+        "cs" => 0x2E,
+        "ss" => 0x36,
+        "ds" => 0x3E,
+        "fs" => 0x64,
+        "gs" => 0x65,
+        "addr32" => 0x67,
+        "data16" => 0x66,
+        "rep" | "repe" | "repz" | "xrelease" => 0xF3,
+        "repne" | "repnz" | "xacquire" => 0xF2,
+        "lock" => 0xF0,
+        _ => return None,
+    })
+}
+
+/// Where a prefix goes among the others, in the order gas writes them.
+///
+/// A segment first, then the address size, then the operand size, then a repeat, then `lock`, and
+/// the REX byte last of all, since it has to be right in front of the opcode. Two of the same rank
+/// are two prefixes that say the same thing, which is a line gas refuses too.
+fn rank(byte: u8) -> Option<u8> {
+    match byte {
+        0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 => Some(1),
+        0x67 => Some(2),
+        0x66 => Some(3),
+        0xF2 | 0xF3 => Some(4),
+        0xF0 => Some(5),
+        0x40..=0x4F => Some(6),
+        _ => None,
+    }
+}
+
+/// An instruction with one more prefix in front of it, put among the prefixes it already has where
+/// gas would put it, so that `lock incl %gs:(%rax)` comes out `65 f0 ff 00` the way gas writes it.
+///
+/// Every place in the instruction that names something is after the prefixes, so each of them moves
+/// along by the byte.
+fn prefixed(written: &mut crate::instruction::Written, byte: u8) -> Result<(), String> {
+    let mine = rank(byte).unwrap_or(0);
+    let mut at = 0;
+    while let Some(theirs) = written.bytes.get(at).and_then(|&had| rank(had)) {
+        if theirs == mine && theirs != 6 {
+            return Err(format!(
+                "a prefix of the same kind as {byte:#04x} is already on the instruction"
+            ));
+        }
+        if theirs > mine {
+            break;
+        }
+        at += 1;
+    }
+    written.bytes.insert(at, byte);
+    for hole in &mut written.holes {
+        hole.at += 1;
+    }
+    Ok(())
+}
+
 /// A repeat prefix and the string instruction behind it, as the one mnemonic the encoder knows the
 /// pair by, and what is left of the line after the two.
 ///
@@ -4030,10 +4116,10 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
         "repne" | "repnz" => true,
         _ => return None,
     };
-    let string = next.len() == 5 && next.ends_with(['b', 'w', 'l', 'q']);
-    let which = if string { &next[..4] } else { "" };
+    let string = next.len() > 1 && next.ends_with(['b', 'w', 'l', 'q']);
+    let which = if string { &next[..next.len() - 1] } else { "" };
     let prefix = match (unequal, which) {
-        (false, "movs" | "stos") => "rep",
+        (false, "movs" | "stos" | "lods" | "ins" | "outs") => "rep",
         (false, "scas" | "cmps") => "repe",
         (true, "scas" | "cmps") => "repne",
         _ => return None,
@@ -5430,5 +5516,52 @@ g:
         assert!(why.why.contains("depends on itself"), "{why}");
         let why = refused("0: nop\n.org 1f\n.byte 1\n1:\n");
         assert!(why.why.contains("still move"), "{why}");
+    }
+
+    /// A prefix written on the same line as its instruction goes in among the prefixes the
+    /// instruction already has where gas puts it: a segment first, then the operand size, then a
+    /// repeat, then `lock`, then REX. The bytes are the ones gas and llvm-mc write, except `rep
+    /// insw`, whose two prefixes llvm-mc writes the other way round from gas. This follows gas. A
+    /// prefix on a line of its own is the byte and nothing else.
+    #[test]
+    fn a_prefix_on_the_same_line_goes_where_gas_puts_it() {
+        let text = "\t.text
+\tlock incl (%rax)
+\tlock incl %gs:(%rax)
+\tlock addq $1, %gs:8(%rax)
+\tlock cmpxchgq %rcx, (%rdx)
+\tcs call *%rax
+\tds jmp *%rax
+\trep ret
+\txacquire lock incl (%rax)
+\trep insb
+\trep insw
+\trep outsl
+\trep lodsb
+\trep lodsq
+\tlock
+\tincl (%rax)
+";
+        let done = assembled(text);
+        let code = done.parts.iter().find(|part| part.name == ".text").expect("one");
+        let expected: &[u8] = &[
+            0xf0, 0xff, 0x00, // lock incl (%rax)
+            0x65, 0xf0, 0xff, 0x00, // lock incl %gs:(%rax)
+            0x65, 0xf0, 0x48, 0x83, 0x40, 0x08, 0x01, // lock addq $1, %gs:8(%rax)
+            0xf0, 0x48, 0x0f, 0xb1, 0x0a, // lock cmpxchgq %rcx, (%rdx)
+            0x2e, 0xff, 0xd0, // cs call *%rax
+            0x3e, 0xff, 0xe0, // ds jmp *%rax
+            0xf3, 0xc3, // rep ret
+            0xf2, 0xf0, 0xff, 0x00, // xacquire lock incl (%rax)
+            0xf3, 0x6c, // rep insb
+            0x66, 0xf3, 0x6d, // rep insw
+            0xf3, 0x6f, // rep outsl
+            0xf3, 0xac, // rep lodsb
+            0xf3, 0x48, 0xad, // rep lodsq
+            0xf0, 0xff, 0x00, // lock, then incl (%rax)
+        ];
+        assert_eq!(code.bytes, expected);
+        let Err(trouble) = read("\tlock lock incl (%rax)\n", Arch::X86_64) else { panic!("read") };
+        assert!(trouble.why.contains("same kind"), "{}", trouble.why);
     }
 }

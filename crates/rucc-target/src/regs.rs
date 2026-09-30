@@ -209,6 +209,67 @@ pub enum Segment {
     Fs,
     /// `%gs`, which is where it is on x86-64 under Windows and inside a kernel.
     Gs,
+    /// `%es`, which in long mode is the flat segment again and is only named by a file that asks
+    /// for the override byte on purpose.
+    Es,
+    /// `%cs`, the code segment. A kernel reads a word through it to reach data kept beside its
+    /// code.
+    Cs,
+    /// `%ss`, the stack segment.
+    Ss,
+    /// `%ds`, the data segment, whose override byte is also what a file writes in front of an
+    /// instruction to make it longer without changing what it does.
+    Ds,
+}
+
+impl Segment {
+    /// The name of the register, without its sigil.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Segment::Fs => "fs",
+            Segment::Gs => "gs",
+            Segment::Es => "es",
+            Segment::Cs => "cs",
+            Segment::Ss => "ss",
+            Segment::Ds => "ds",
+        }
+    }
+
+    /// The segment register with that name, without its sigil.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Segment> {
+        [Segment::Es, Segment::Cs, Segment::Ss, Segment::Ds, Segment::Fs, Segment::Gs]
+            .into_iter()
+            .find(|segment| segment.name() == name)
+    }
+
+    /// The number an instruction that moves the register names it by, which is the order the
+    /// manual lists the six in.
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            Segment::Es => 0,
+            Segment::Cs => 1,
+            Segment::Ss => 2,
+            Segment::Ds => 3,
+            Segment::Fs => 4,
+            Segment::Gs => 5,
+        }
+    }
+
+    /// The byte in front of an instruction that says its address is counted from this segment.
+    #[must_use]
+    pub const fn prefix(self) -> u8 {
+        match self {
+            Segment::Es => 0x26,
+            Segment::Cs => 0x2E,
+            Segment::Ss => 0x36,
+            Segment::Ds => 0x3E,
+            Segment::Fs => 0x64,
+            Segment::Gs => 0x65,
+        }
+    }
 }
 
 /// Where a target keeps the word a stack protector's canary is a copy of.
