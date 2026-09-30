@@ -405,6 +405,10 @@ struct Reader {
     /// Whether the file is for i386, whose instructions are x86-64's read in thirty two bit mode
     /// and whose position independent code reaches things from the global offset table.
     i386: bool,
+    /// The mode `.code32` or `.code64` last put instructions in, which is otherwise the file's
+    /// own. The kernel's la57toggle.S switches to thirty two bits for the code it copies below
+    /// four gigabytes, in the middle of an x86-64 file.
+    code: Option<Mode>,
     /// Whether the file is for Mach-O, where a section is named by its segment as well.
     macho: bool,
     /// Whether the file is for COFF, whose `.section` flags are letters of their own.
@@ -619,7 +623,7 @@ impl Reader {
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
-        let mode = if self.i386 { Mode::Bits32 } else { Mode::Bits64 };
+        let mode = self.code.unwrap_or(if self.i386 { Mode::Bits32 } else { Mode::Bits64 });
         let mut written =
             crate::instruction::one_in(word, &args, mode).map_err(|why| self.bad(&why))?;
         // `jmp .+10` has been given its short form already, where the distance is known.
@@ -647,7 +651,7 @@ impl Reader {
         let slot = if self.i386 {
             slot_i386(&written.bytes)
         } else {
-            crate::bytes::slot(&written.bytes, Mode::Bits64)
+            crate::bytes::slot(&written.bytes, mode)
         };
         for hole in written.holes {
             // `.` in an instruction is where the instruction starts, which is what gas means by it
@@ -1464,8 +1468,11 @@ impl Reader {
             // Said for a debugger or a reader and holding nothing a link depends on. Passed over
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
-            "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64" | "att_syntax"
+            "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "att_syntax"
             | "intel_syntax" => {}
+            "code32" | "code64" if !self.aarch64 => {
+                self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
+            }
             // gas takes every name it does not know to be defined elsewhere, so `.extern` says
             // nothing it would not have assumed anyway.
             "extern" => {}
@@ -4382,6 +4389,23 @@ mod tests {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
+    }
+
+    /// The shape of the kernel's la57toggle.S, which drops to thirty two bits in the middle of
+    /// an x86-64 file, writes to a control register there and jumps back to a segment.
+    #[test]
+    fn code32_reads_what_follows_in_thirty_two_bit_mode_until_code64() {
+        let file = assembled(
+            ".text\nmovq %cr0, %rax\n.code32\na: movl %cr0, %eax\nljmpl $0x10, $(b - a)\nb: incl %eax\n.code64\nincl %eax\n",
+        );
+        assert_eq!(
+            bytes(&file, ".text"),
+            [0x0f, 0x20, 0xc0, 0x0f, 0x20, 0xc0, 0xea, 0x0a, 0, 0, 0, 0x10, 0, 0x40, 0xff, 0xc0]
+        );
+        let long = read(".text\nljmpl $0x10, $0\n", Arch::X86_64).unwrap_err();
+        assert!(long.why.contains("sixty four bit mode"), "{}", long.why);
+        let narrow = read(".text\nmovl %cr0, %eax\n", Arch::X86_64).unwrap_err();
+        assert!(narrow.why.contains("sixty four bit register"), "{}", narrow.why);
     }
 
     /// A listing that names a personality routine and a call site table, the way gcc writes a

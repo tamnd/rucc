@@ -228,6 +228,51 @@ pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written,
     Ok(written)
 }
 
+/// A far jump or call to a segment and an offset both written out, `ljmpl $0x10, $1f`, which is
+/// the opcode, the offset and then two bytes of segment.
+///
+/// The encoder has no row with two immediates, so this is written here. Only thirty two bit code
+/// has it, which the kernel switches to with `.code32` to leave long mode and come back.
+fn far(word: &str, args: &[String], mode: Mode) -> Option<Result<Written, String>> {
+    let (opcode, width) = match word {
+        "ljmp" | "ljmpl" => (0xEA, 4),
+        "ljmpw" => (0xEA, 2),
+        "lcall" | "lcalll" => (0x9A, 4),
+        "lcallw" => (0x9A, 2),
+        _ => return None,
+    };
+    let [segment, offset] = args else { return None };
+    let segment = segment.trim().strip_prefix('$')?.trim();
+    let offset = offset.trim().strip_prefix('$')?.trim();
+    if mode == Mode::Bits64 {
+        return Some(Err(format!(
+            "'{word}' to a segment and an offset is not an instruction in sixty four bit mode"
+        )));
+    }
+    let known = |text: &str| number(text).ok().or_else(|| crate::source::constant(text));
+    let Some(segment) = known(segment).and_then(|value| u16::try_from(value).ok()) else {
+        return Some(Err(format!("'{segment}' is not a segment, which is a number up to 65535")));
+    };
+    let mut bytes = if width == 2 { vec![0x66, opcode] } else { vec![opcode] };
+    let mut holes = Vec::new();
+    match known(offset) {
+        Some(value) => bytes.extend_from_slice(&value.to_le_bytes()[..width]),
+        None => {
+            let name = offset.to_owned();
+            holes.push(Hole {
+                at: bytes.len(),
+                width: width as u8,
+                name,
+                addend: 0,
+                sort: Sort::Value,
+            });
+            bytes.resize(bytes.len() + width, 0);
+        }
+    }
+    bytes.extend_from_slice(&segment.to_le_bytes());
+    Some(Ok(Written { bytes, holes }))
+}
+
 /// Whether the operand is an address whose registers are thirty two bits wide.
 fn narrow(arg: &str) -> bool {
     addressed(arg, Width::Long)
@@ -254,6 +299,9 @@ fn segment_prefix(byte: u8) -> bool {
 
 /// [`one_in`], for an address of whole registers.
 fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
+    if let Some(far) = far(word, args, mode) {
+        return far;
+    }
     let mut mask = Opmask::default();
     let mut operands = Vec::with_capacity(args.len());
     let ported = matches!(word, "in" | "inb" | "inw" | "inl" | "out" | "outb" | "outw" | "outl");
@@ -327,7 +375,7 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     {
         return Err(format!("'{word}' only writes the status word into ax"));
     }
-    special(word, &mnemonic, &operands)?;
+    special(word, &mnemonic, &operands, mode)?;
 
     let mut bytes = Vec::with_capacity(16);
     let mut holes = encode_masked_in(mode, &mnemonic, &values, mask, &mut bytes)
@@ -557,15 +605,19 @@ fn ported(word: &str, operands: &[Operand]) -> Result<(), String> {
 /// encoder chooses a row by what kinds its operands are and not by how wide the registers are.
 ///
 /// A control or a debug register is moved to and from a whole general purpose register and no
-/// part of one. A segment register is read into, or loaded from, a register as wide as the letter
+/// part of one, which is sixty four bits in long mode and thirty two in thirty two bit mode. A segment register is read into, or loaded from, a register as wide as the letter
 /// on the mnemonic says.
-fn special(word: &str, mnemonic: &str, operands: &[Operand]) -> Result<(), String> {
+fn special(word: &str, mnemonic: &str, operands: &[Operand], mode: Mode) -> Result<(), String> {
     let system = operands.iter().any(|op| matches!(op, Operand::Control(_) | Operand::Debug(_)));
-    let partial =
-        operands.iter().any(|op| matches!(op, Operand::Reg(_, width) if *width != Width::Quad));
+    let (whole, bits) = if mode == Mode::Bits32 {
+        (Width::Long, "thirty two")
+    } else {
+        (Width::Quad, "sixty four")
+    };
+    let partial = operands.iter().any(|op| matches!(op, Operand::Reg(_, width) if *width != whole));
     if system && partial {
         return Err(format!(
-            "'{word}' moves a control or a debug register to or from a sixty four bit register"
+            "'{word}' moves a control or a debug register to or from a {bits} bit register"
         ));
     }
     if operands.iter().any(|op| matches!(op, Operand::Seg(_))) {
