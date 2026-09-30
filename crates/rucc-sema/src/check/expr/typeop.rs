@@ -301,12 +301,15 @@ impl Checker<'_> {
         let from = self.tast[operand].ty;
         let pointer = u64::from(self.cx.target.pointer_width);
         let width = |ty| layout(&self.types, ty, self.cx.target).map(|l| l.size * 8).ok();
+        // gcc only measures a plain integer type. An enum is left alone either way, and so is a
+        // `_Bool`, and the kernel's kunit attributes cast an enum to `void *` under `-Werror`.
+        let enumerated = |ty| matches!(eval::bare(&self.types, ty), TypeKind::Enum(_));
         let (message, code) = if is_pointer(&self.types, from) && is_integer(&self.types, target) {
             // A `_Bool` is the one integer the address does not have to fit in, since the cast
             // asks whether the pointer is null rather than keeping its bits. gcc says nothing,
             // and the kernel's kunit attributes cast a `void *` to `bool` under `-Werror`.
             let boolean = matches!(eval::bare(&self.types, target), TypeKind::Bool);
-            if boolean || width(target) == Some(pointer) {
+            if boolean || enumerated(target) || width(target) == Some(pointer) {
                 return;
             }
             ("cast from pointer to integer of different size", "E0567")
@@ -316,7 +319,10 @@ impl Checker<'_> {
             // into the pointer, and a constant is a number the program chose rather than an
             // address it was given. `(void *) 0` is what `NULL` expands to, `(D) -1` is how
             // every library writes a sentinel, and neither lost anything.
-            if width(from) == Some(pointer) || self.eval_integer(operand).is_ok() {
+            if width(from) == Some(pointer)
+                || enumerated(from)
+                || self.eval_integer(operand).is_ok()
+            {
                 return;
             }
             ("cast to pointer from integer of different size", "E0568")
