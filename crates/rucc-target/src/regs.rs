@@ -651,31 +651,36 @@ impl CallRegs {
     /// rather than on [`CallRegs::stack_align`], which is what `-mpreferred-stack-boundary=` asks
     /// for.
     ///
-    /// Everything that reads a convention holds it for as long as the compilation, so the answer
-    /// is made once for each convention and boundary and kept. There are a handful of each, which
-    /// bounds what is kept to a few dozen of these however many units are compiled.
+    /// The answer is made once for each convention and boundary and kept, see [`made`].
     ///
     /// # Panics
     ///
     /// Panics when `bytes` is not a power of two.
     #[must_use]
     pub fn aligned_to(&'static self, bytes: u32) -> &'static CallRegs {
-        use std::sync::Mutex;
-
-        static MADE: Mutex<Vec<&'static CallRegs>> = Mutex::new(Vec::new());
-
         assert!(bytes.is_power_of_two(), "a stack boundary that is not a power of 2");
         if bytes == self.stack_align {
             return self;
         }
-        let wanted = CallRegs { stack_align: bytes, ..*self };
-        let mut made = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(&regs) = made.iter().find(|&&regs| *regs == wanted) {
-            return regs;
+        made(CallRegs { stack_align: bytes, ..*self })
+    }
+
+    /// The same convention with no vector register carrying an argument, which is what a
+    /// function compiled under `-mno-sse` or `-mgeneral-regs-only` sees.
+    ///
+    /// Nothing that would travel in one gets this far, since a function with a value of that kind
+    /// in it is refused before selection. What is left for the convention to say is the register
+    /// save area of a variadic function, which then holds the general purpose registers and none
+    /// of the vector ones, and that is the area gcc lays out for the same flags. A variadic call
+    /// says no vector register carries anything, which is true.
+    ///
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see [`made`].
+    #[must_use]
+    pub fn without_vectors(&'static self) -> &'static CallRegs {
+        if self.sse_args.is_empty() {
+            return self;
         }
-        let regs: &'static CallRegs = Box::leak(Box::new(wanted));
-        made.push(regs);
-        regs
+        made(CallRegs { sse_args: &[], ..*self })
     }
 
     /// The number DWARF gives that register, or `None` for one it has no column for.
@@ -894,6 +899,25 @@ impl fmt::Display for RegFile {
         }
         Ok(())
     }
+}
+
+/// The one copy of a convention one of the flags made, made the first time it is asked for.
+///
+/// Everything that reads a convention holds it for as long as the compilation, so each is made
+/// once and kept. There are a handful of conventions and a handful of flags, which bounds what is
+/// kept to a few dozen of these however many units are compiled.
+fn made(wanted: CallRegs) -> &'static CallRegs {
+    use std::sync::Mutex;
+
+    static MADE: Mutex<Vec<&'static CallRegs>> = Mutex::new(Vec::new());
+
+    let mut made = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&regs) = made.iter().find(|&&regs| *regs == wanted) {
+        return regs;
+    }
+    let regs: &'static CallRegs = Box::leak(Box::new(wanted));
+    made.push(regs);
+    regs
 }
 
 #[cfg(test)]

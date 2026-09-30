@@ -211,29 +211,22 @@ impl Machine {
     /// Only the convention changes. The allocator's order and the scratch registers are worked out
     /// again from it, because which registers the function owes back is the thing that differs,
     /// and a scratch register has to be one it does not owe.
-    #[must_use]
     ///
-    /// The boundary the stack is kept on is the command line's rather than the convention's, so
-    /// a machine made with [`Machine::aligned_to`] gives one with the same boundary.
+    /// The boundary the stack is kept on is the command line's rather than the convention's, so the
+    /// answer keeps the boundary this machine has, and it keeps the vector registers out of the
+    /// arguments if this machine does. See [`rucc_target::CallRegs::aligned_to`] and
+    /// [`rucc_target::CallRegs::without_vectors`].
+    #[must_use]
     pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
-        let conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
+        let mut conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
+        if self.conv.sse_args.is_empty() {
+            conv = conv.without_vectors();
+        }
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Some(Self::aarch64(conv))
         } else {
             Some(Self::x86_64(conv))
         }
-    }
-
-    /// The same machine with the stack pointer kept on a multiple of `bytes` at every call rather
-    /// than on the convention's boundary, which is what `-mpreferred-stack-boundary=` asks for.
-    ///
-    /// Nothing but the frame reads the boundary. A function may count on no more than it on entry
-    /// and owes no more than it at a call, and a local that asks for more is aligned by the
-    /// prologue behind a frame pointer, which is what [`crate::frame`] already does for a local
-    /// that asks for more than sixteen.
-    #[must_use]
-    pub fn aligned_to(self, bytes: u32) -> Self {
-        Self { conv: self.conv.aligned_to(bytes), ..self }
     }
 
     /// The machine a target describes, or `None` when no backend in this crate covers it.
@@ -381,13 +374,20 @@ pub struct Flags {
     /// over which instructions is worked out only then, since nothing else reads it. See
     /// [`crate::kept`].
     pub debug: bool,
+    /// Whether a value may be kept in a vector register, which `-mno-sse` on x86-64 and
+    /// `-mgeneral-regs-only` on either machine turn off. Every `float`, `double` and vector is one
+    /// of those, and a function with one in it is refused. See [`lower::off_registers`].
+    pub vector: bool,
+    /// Whether a value may be kept on the x87 stack, which `-mno-80387` turns off. That is the
+    /// eighty bit `long double`, and a function with one in it is refused too.
+    pub x87: bool,
 }
 
 impl Default for Flags {
     /// No frame pointer, the red zone allowed, the frame taken in one subtraction, no landing pad,
     /// no branch rewritten for speculation, jump tables allowed, no profiling, no room for a patcher, the blocks in the order the graph's shape gives,
     /// nothing in the frame sharing with anything, no scheduling, no loop padded to a boundary and
-    /// code that is meant to be fast rather than small, with no debugging information, which is
+    /// code that is meant to be fast rather than small, with no debugging information and every register file in use, which is
     /// what a convention that has a red zone says at `-O0` when nobody on the command line has said
     /// otherwise.
     fn default() -> Self {
@@ -412,6 +412,8 @@ impl Default for Flags {
             switch: None,
             sibling: false,
             debug: false,
+            vector: true,
+            x87: true,
         }
     }
 }
@@ -537,6 +539,9 @@ pub fn compile_recording(
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
+    // Before selection, which would otherwise pick a register the command line said is not there.
+    // Read after the lowerings above, since a value one of them makes is a value in the function.
+    lower::off_registers(source, flags.vector, flags.x87)?;
     let lowered =
         lower::func_for(source, names, machine.selector, machine.conv, elsewhere, flags.debug)?;
     recording.fired.merge(&lowered.fired);
@@ -546,6 +551,14 @@ pub fn compile_recording(
     // there is. See `crate::weights`.
     if flags.reorder {
         weights::carry(source, &blocks, &mut func);
+    }
+    // What the refusal before selection missed, which would be a rule that reaches for a vector
+    // register on its own to do something that is not about a float at all. None does now, and
+    // this is what says so if one ever starts.
+    let vector =
+        |number| func.class_of(rucc_mir::Reg::virtual_reg(number)) == Some(machine.conv.sse_class);
+    if !flags.vector && (0..func.vregs()).filter_map(|n| u32::try_from(n).ok()).any(vector) {
+        return Err(Unsupported::Registers { inst: None, ty: None, off: lower::Off::Vector });
     }
     // The one thing a frame that grows while it runs cannot be asked for, which is a refusal rather
     // than wrong code.

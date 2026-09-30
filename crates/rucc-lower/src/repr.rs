@@ -213,9 +213,16 @@ const LOCAL_AGGREGATE: u32 = 16;
 /// one that asked for less gets more, which every alignment already permits. A scalar is left
 /// alone however wide it is, which is gcc's rule and not an accident: an `__int128` is aligned to
 /// sixteen by its own type and a `long double` is deliberately not.
+///
+/// And never past the boundary the stack is kept on, which is sixteen unless
+/// `-mpreferred-stack-boundary=3` said eight. Raising it past that would make the prologue align
+/// the frame by hand for something that was only ever a choice, and a kernel built that way has
+/// no vector registers to want the sixteen for.
 #[must_use]
 pub(crate) fn local_align(types: &Types, target: &TargetInfo, id: TypeId, align: u32) -> u32 {
-    if target.pointer_width < 64 || align >= LOCAL_AGGREGATE {
+    let raised = target.call_regs.map_or(LOCAL_AGGREGATE, |regs| regs.stack_align);
+    let raised = LOCAL_AGGREGATE.min(raised);
+    if target.pointer_width < 64 || align >= raised {
         return align;
     }
     let aggregate =
@@ -226,7 +233,7 @@ pub(crate) fn local_align(types: &Types, target: &TargetInfo, id: TypeId, align:
     if !aggregate || is_variable_length(types, id) {
         return align;
     }
-    if size_of(types, target, id) >= WIDE_ENOUGH { LOCAL_AGGREGATE } else { align }
+    if size_of(types, target, id) >= WIDE_ENOUGH { raised } else { align }
 }
 
 /// The integer type a pointer is as wide as, which is what an address arrives as when it is not

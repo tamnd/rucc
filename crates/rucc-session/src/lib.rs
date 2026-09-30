@@ -2077,6 +2077,13 @@ pub struct Options {
     /// no more than this on entry and owes no more than this at its calls, and a local that asks
     /// for more is aligned by the prologue behind a frame pointer, as gcc does.
     pub stack_boundary: Option<u32>,
+    /// Whether a value may be kept in a vector register, which `-mno-sse` on x86-64 and
+    /// `-mgeneral-regs-only` on either machine turn off. A kernel turns them off so that entering
+    /// it does not mean saving them, and a function with a `float` in it is then refused.
+    pub vector: bool,
+    /// Whether a value may be kept on the x87 stack, which `-mno-80387` and `-msoft-float` turn
+    /// off. That is the eighty bit `long double`.
+    pub x87: bool,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2631,6 +2638,8 @@ impl Options {
             red_zone: true,
             code_model: CodeModel::Small,
             stack_boundary: None,
+            vector: true,
+            x87: true,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 // Nothing for i686 yet: x86-64's baseline promises SSE2, which an i686 does not.
@@ -2774,7 +2783,8 @@ pub struct Session {
 impl Session {
     /// A session for `opts`.
     ///
-    /// The command line's answers about plain `char` and `wchar_t` are put into the target here
+    /// The command line's answers about plain `char`, `wchar_t` and the calling convention are put
+    /// into the target here
     /// rather than carried beside it, because every place that asks what either is asks the
     /// target, and two answers to one question is how a front end ends up disagreeing with its own
     /// back end.
@@ -2789,6 +2799,13 @@ impl Session {
         if opts.short_wchar {
             target.wchar_width = 16;
             target.wchar_is_signed = false;
+        }
+        // The boundary the stack is kept on and whether the vector registers carry arguments,
+        // which the front end reads to decide how far it may align a local and the back end
+        // reads for everything else.
+        if let Some(regs) = target.call_regs {
+            let regs = opts.stack_boundary.map_or(regs, |bytes| regs.aligned_to(bytes));
+            target.call_regs = Some(if opts.vector { regs } else { regs.without_vectors() });
         }
         Self {
             opts,

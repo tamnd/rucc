@@ -210,6 +210,74 @@ fn on_x87(ty: Type) -> bool {
     ty.is_scalar() && ty.is_float() && ty.bits() == 80
 }
 
+/// A register file the command line can take away from the compiler. See [`off_registers`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Off {
+    /// The vector registers, which are the xmm registers on x86-64 and the v registers on
+    /// AArch64, and which `-mno-sse` and `-mgeneral-regs-only` take away.
+    Vector,
+    /// The x87 stack, which `-mno-80387` takes away.
+    X87,
+}
+
+impl Off {
+    /// What the message calls it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Off::Vector => "vector",
+            Off::X87 => "x87",
+        }
+    }
+}
+
+/// Refuses a function with a value in it that would be kept in a register file the command line
+/// took away, and names the first one.
+///
+/// A kernel is built with no vector registers and no x87 stack, so that entering it does not mean
+/// saving the ones the program was using. That leaves nowhere for a `float` to be, and gcc refuses
+/// a function that uses one all the same, which is what this does before selection gets to pick a
+/// register that is not there. Every float but the eighty bit one is in a vector register, and so
+/// is every vector, whatever its lanes are.
+///
+/// It reads the values rather than the types the program declared. A structure with a `double` in
+/// it is copied as bytes and asks for no vector register, which is what gcc does too.
+///
+/// # Errors
+///
+/// [`Unsupported::Registers`] for the first value that wants a file that is off.
+pub fn off_registers(source: &Func, vector: bool, x87: bool) -> Result<(), Unsupported> {
+    if vector && x87 {
+        return Ok(());
+    }
+    let wants = |ty: Type| {
+        if on_x87(ty) {
+            (!x87).then_some(Off::X87)
+        } else if ty.is_float() || ty.is_vector() {
+            (!vector).then_some(Off::Vector)
+        } else {
+            None
+        }
+    };
+    let refuse = |inst, ty| wants(ty).map(|off| Unsupported::Registers { inst, ty: Some(ty), off });
+    let signature = source.signature();
+    for param in signature.params.iter().chain(&signature.returns) {
+        if let Some(refused) = refuse(None, param.ty) {
+            return Err(refused);
+        }
+    }
+    for block in source.blocks() {
+        for inst in source.insts(block) {
+            for value in source[inst].results() {
+                if let Some(refused) = refuse(Some(inst), source[value].ty) {
+                    return Err(refused);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Where one operand of an assembly statement is, on each side of the assembly.
 ///
 /// Two registers rather than one, because an operand written `+` is a value that arrives and a
@@ -533,6 +601,17 @@ pub enum Unsupported {
         /// How many bytes it wanted, which is the whole of what is wrong.
         bytes: u32,
     },
+    /// A value in a register file the command line turned off, which is a `double` under
+    /// `-mno-sse` or a `long double` under `-mno-80387`. See [`off_registers`].
+    Registers {
+        /// Where the value is made, or nothing for a parameter or a value the check after
+        /// selection found without one.
+        inst: Option<Inst>,
+        /// Its type, or nothing when the check after selection is what found it.
+        ty: Option<Type>,
+        /// Which file.
+        off: Off,
+    },
     /// Something the x86-64 lowering writes by hand and nothing has written for this machine yet.
     ///
     /// Refused rather than written with the x86 instructions, which is what the walk would do
@@ -660,7 +739,7 @@ impl Unsupported {
             | Unsupported::Dynamic { inst, .. }
             | Unsupported::Assembly { inst, .. }
             | Unsupported::Register { inst, .. } => Some(inst),
-            Unsupported::Unported { inst, .. } => inst,
+            Unsupported::Unported { inst, .. } | Unsupported::Registers { inst, .. } => inst,
             Unsupported::Argument { .. } | Unsupported::Phi { .. } | Unsupported::Naked { .. } => {
                 None
             }
@@ -702,6 +781,16 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::Assembly { refused, .. } => write!(f, "this `asm` {}", refused.why()),
             Unsupported::Unported { what, .. } => f.write_str(what.why()),
+            Unsupported::Registers { ty: Some(ty), off, .. } => write!(
+                f,
+                "a `{ty}` is kept in the {} registers, which the command line turned off",
+                off.name()
+            ),
+            Unsupported::Registers { ty: None, off, .. } => write!(
+                f,
+                "this function reaches for the {} registers, which the command line turned off",
+                off.name()
+            ),
             Unsupported::Register { ref name, .. } => {
                 write!(
                     f,
@@ -6170,7 +6259,10 @@ impl<'a> Lowering<'a> {
         }
 
         let save = self.stack.locals.len();
-        self.stack.locals.push(Local { size: area.size, align: varargs::VECTOR_SLOT });
+        // On a word when there is no vector half, which is what `-mno-sse` leaves, so that a frame
+        // kept on eight bytes is not realigned for an area with nothing in it that needs sixteen.
+        let align = if area.holds(true) == 0 { self.conv.word } else { varargs::VECTOR_SLOT };
+        self.stack.locals.push(Local { size: area.size, align });
         let took = |count: usize, float: bool| {
             let count = u32::try_from(count).unwrap_or(0).min(area.holds(float));
             area.starts_at(float) + count * area.stride(float)

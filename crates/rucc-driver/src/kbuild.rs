@@ -54,9 +54,6 @@ const fn only(arch: Arch, row: Row) -> Row {
 const X86: Arch = Arch::X86_64;
 const A64: Arch = Arch::Aarch64;
 
-const NO_VECTOR: &str = "every function here may use the vector and x87 registers, for copies, \
-                         fills and the variadic save area as well as for floating point, and \
-                         nothing yet keeps them out";
 const GUARD: &str = "the canary is read from where the target's C library keeps it, %fs:40 on \
                      x86-64, and nothing yet moves it";
 const THUNKS: &str = "a branch goes through a thunk the program links in, which is thunk-extern, \
@@ -202,13 +199,6 @@ pub(crate) const TABLE: &[Row] = &[
     refused("-gz=zlib-gnu", "the debug sections are written uncompressed", Some(2288)),
     refused("-gz=zstd", "the debug sections are written uncompressed", Some(2288)),
     // x86-64.
-    only(X86, refused("-mno-sse", NO_VECTOR, Some(2277))),
-    only(X86, refused("-mno-sse2", NO_VECTOR, Some(2277))),
-    only(X86, refused("-mno-mmx", NO_VECTOR, Some(2277))),
-    only(X86, refused("-mno-80387", NO_VECTOR, Some(2277))),
-    only(X86, refused("-mno-fp-ret-in-387", NO_VECTOR, Some(2277))),
-    only(X86, refused("-msoft-float", NO_VECTOR, Some(2277))),
-    only(X86, refused("-mgeneral-regs-only", NO_VECTOR, Some(2277))),
     only(X86, same("-mstack-protector-guard=tls", "the canary is the thread's own, the default")),
     only(X86, same("-mstack-protector-guard-reg=fs", "the canary is read through %fs")),
     only(X86, same("-mstack-protector-guard-offset=40", "the canary is read from %fs:40")),
@@ -309,7 +299,6 @@ pub(crate) const TABLE: &[Row] = &[
     only(A64, refused("-mbranch-protection=*", BRANCH_PROTECTION, Some(2286))),
     only(A64, same("-msign-return-address=none", "no return address is signed")),
     only(A64, refused("-msign-return-address=*", BRANCH_PROTECTION, Some(2286))),
-    only(A64, refused("-mgeneral-regs-only", NO_VECTOR, Some(2277))),
     only(
         A64,
         same("-mno-strict-align", "an access here may be unaligned, which is what this allows"),
