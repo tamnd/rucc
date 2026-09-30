@@ -166,6 +166,40 @@ jobs:
             ${{ runner.temp }}/postgresql-${{ env.PG_VERSION }}/src/test/isolation/output_iso/log/
           if-no-files-found: ignore
 
+  # Rung 1 for x86_64-windows-gnu, which is what keeps that row at tier 2: SQLite's veryquick
+  # suite from a testfixture rucc built, run under Wine, held against the same suite from a
+  # testfixture MinGW GCC built. It fails on a test that fails only in rucc's build.
+  sqlite-windows:
+    name: sqlite for x86_64-windows-gnu under wine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install lld 19, wine, MinGW GCC and tclsh
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y lld-19 wine64 gcc-mingw-w64-x86-64 tcl8.6
+      - name: build rucc, the sysroot and the runtime
+        run: |
+          cargo build --release --bin rucc
+          ./target/release/rucc --fetch x86_64-windows-gnu
+          cargo xtask builtins --target x86_64-windows-gnu
+      - name: build and run the suite both ways
+        run: |
+          export PATH="/usr/lib/wine:$PATH"
+          tests/sqlite/windows.sh "$PWD/target/release/rucc" "$RUNNER_TEMP/sqlite-windows" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: keep what the suites said
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: sqlite-windows
+          path: |
+            ${{ runner.temp }}/sqlite-windows/*/suite.log
+            ${{ runner.temp }}/sqlite-windows/*/test-out.txt
+            ${{ runner.temp }}/sqlite-windows/*/failures.txt
+          if-no-files-found: ignore
+
   # Named so the gap is visible rather than implicit. Each of these turns into a real job at
   # the milestone that makes it possible, per spec/15-testing.md section 15.7.
   planned:

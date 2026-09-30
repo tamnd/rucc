@@ -18,6 +18,7 @@ Each entry says what was run, on what, and what the difference was. A divergence
 | `cargo xtask abi-differential`, four builds | x86-64 Linux hardware, in CI | rucc and the reference agree about the calling convention there |
 | `cargo xtask abi-differential`, four builds | x86-64 under qemu, in a container, on an arm64 developer machine | the same, and this is where the emulator was measured |
 | `cargo xtask abi-differential --target x86_64-windows-gnu`, nine builds | under Wine on x86-64 Linux, and natively on a `windows-2025` runner, in CI | rucc and MinGW GCC agree about the Microsoft x64 convention, and the native run is the one that settles anything Wine might be hiding |
+| `tests/sqlite/windows.sh`, SQLite's veryquick suite built by rucc and by MinGW GCC | under Wine on x86-64 Linux, nightly | rung 1 for `x86_64-windows-gnu`: nothing fails in rucc's build that passes in MinGW GCC's |
 | `bin/run-corpus` in tamnd/rucc-cross | four musl rows under qemu, and the runner's own row on hardware | the reference and the emulator agree about the corpus there |
 | `bin/run-abi-signatures` in tamnd/rucc-cross | the same rows | the signature corpus is a program that runs, on those architectures |
 
@@ -52,6 +53,16 @@ The android rows have no bionic available. What the reference ships is bionic's 
 The Darwin and Windows rows need a different kind of emulator than qemu user mode, which runs Linux binaries. The Darwin rows run on the machine they were built for, when that machine is a mac. `x86_64-windows-gnu` runs in two places on every pull request: natively on a `windows-2025` runner, and under Wine on Linux. Wine is not an emulator but a second implementation of the Windows API, so a program that passes under Wine and fails on Windows is a Wine or C runtime difference rather than a compiler bug, and the native job is the one that settles it. The two jobs also have to write the same objects byte for byte. The other Windows rows are compiled and not run yet.
 
 `loongarch64-linux-gnu` is the row that will stay emulated the longest. Document 04.6 records that the hardware is not purchasable outside China, so unless that changes it is a qemu-only target permanently, and its entry in this document is the whole of its evidence rather than a supplement to hardware.
+
+## x86_64-windows-gnu
+
+**Rung 1 runs under Wine, and the reference build is the oracle rather than a clean pass.** `tests/sqlite/windows.sh` builds SQLite 3.53.4's testfixture twice from Linux, once with rucc and once with Ubuntu's MinGW GCC 13, against one Tcl 8.6.16 built by that GCC, and runs `test/veryquick.test` from both under Wine. Neither build passes everything there, so the rule is that nothing may fail in rucc's build that passes in GCC's. What differs between the two builds, and what is left out, is listed here.
+
+**The two builds link different C runtimes.** rucc's sysroot is UCRT and Ubuntu's MinGW GCC links msvcrt, and so does the Tcl DLL both testfixtures load. `date4.test` compares SQLite's `strftime` with the C library's for every conversion, and msvcrt lacks the C99 ones, so GCC's build fails about 24,800 of those cases and rucc's build passes all of them. That part of the suite has no oracle on this row. The environment is the other place the split shows: Tcl's `set env(...)` lands in msvcrt's copy, and a UCRT `getenv` does not see it, which broke `vtabH.test` in rucc's build until the script started setting `fstreeDrive` before Wine does.
+
+**Three test files are removed, and a few cases fail in both builds.** `symlink2.test`, `win32lock.test` and `win32longpath.test` each end the whole suite under Wine, the first on a `del` that fails, the second on a file lock that answers busy where Windows waits, and the third on a long path it cannot delete. Sixteen cases fail in both builds and are left to the reference to excuse: writes to a read-only database succeed (`delete-8.*`, `backup2-6`), an unopenable file reports an I/O error instead (`pager1.4.7.2`, `pager1.4.8.1`), four `temptable-6.*` cases, `sessionnoact-4.3`, `extension01-1.6` and `win32longpath-1.3`.
+
+**The build flags carry workarounds for SQLite's source.** `ext/misc/fileio.c` uses Windows types and `dirent` without including their headers and uses `S_ISLNK`, so both builds get `-include windows.h -include dirent.h -DS_ISLNK=0*`. Including `windows.h` first means `off_t` is fixed at 32 bits before `sqliteInt.h` asks for `_FILE_OFFSET_BITS=64`, and the mingw-w64 headers in rucc's sysroot then declare `struct stat` with a 32 bit `st_size` and send `fstat` to `fstat64`, so `test_fs.c` read every file as empty. MinGW GCC does the same with those headers. `-D_FILE_OFFSET_BITS=64` on the command line keeps them consistent.
 
 ## The MSVC rows
 
