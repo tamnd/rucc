@@ -147,9 +147,13 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // Before the walk, because it is a question about what the function declares rather than about
     // what it does, and the scan above is where that is already known. What the attribute then
     // costs the function is a slot in its frame and a comparison before each of its returns.
-    // The function's own attribute wins over the flag, which is the point of it.
-    if !tast[decl].flags.contains(DeclFlags::NO_STACK_PROTECTOR)
-        && protects(&body, &locals, &escaped)
+    // The function's own attribute wins over the flag, which is the point of it. `stack_protect`
+    // asks for one under any of the flags that turn protection on, whatever the locals are, and
+    // `no_stack_protector` wins over it, which is how gcc 13 reads a name with both.
+    let flags = tast[decl].flags;
+    let asked = flags.contains(DeclFlags::STACK_PROTECT) && body.unit.protector != Protector::None;
+    if !flags.contains(DeclFlags::NO_STACK_PROTECTOR)
+        && (asked || protects(&body, &locals, &escaped))
     {
         body.func.attrs.set |= AttrSet::STACK_PROTECT;
     }
@@ -337,7 +341,7 @@ const fn order_of(order: MemOrder) -> i128 {
 fn protects(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> bool {
     let want = body.unit.protector;
     match want {
-        Protector::None => return false,
+        Protector::None | Protector::Explicit => return false,
         Protector::All => return true,
         Protector::Buffers | Protector::Strong => {}
     }

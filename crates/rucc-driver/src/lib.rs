@@ -263,7 +263,7 @@ options:
   -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
   -fprofile-use[=<path>] -fprofile-dir=<dir>   read too, where -fprofile-generate is refused
-  -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
+  -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
@@ -1044,16 +1044,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-optimize-sibling-calls" => opts.sibling_calls = Some(false),
             "-mno-red-zone" => opts.red_zone = false,
             "-mred-zone" => opts.red_zone = true,
-            // Four flags rather than one with an argument, which is how gcc spells them and how
+            // Five flags rather than one with an argument, which is how gcc spells them and how
             // every build line writes them. Last one wins, because a package build puts
             // `-fstack-protector-strong` in its global flags and a directory that cannot have one
             // turns it back off on the line after.
-            "-fno-stack-protector" | "-fno-stack-protector-all" | "-fno-stack-protector-strong" => {
+            "-fno-stack-protector"
+            | "-fno-stack-protector-all"
+            | "-fno-stack-protector-strong"
+            | "-fno-stack-protector-explicit" => {
                 opts.protector = Protector::None;
             }
             "-fstack-protector" => opts.protector = Protector::Buffers,
             "-fstack-protector-strong" => opts.protector = Protector::Strong,
             "-fstack-protector-all" => opts.protector = Protector::All,
+            "-fstack-protector-explicit" => opts.protector = Protector::Explicit,
             // The other half of what a hardened build asks for, and it is a question about the
             // frame rather than about the function, so it is a switch rather than a level.
             "-fstack-clash-protection" => opts.stack_clash = true,
@@ -6441,10 +6445,10 @@ mod tests {
         assert!(opts.red_zone);
     }
 
-    /// Four flags rather than one with an argument, which is how gcc spells them, and the negative
-    /// spelled three ways because a build that turns one off writes whichever it turned on.
+    /// Five flags rather than one with an argument, which is how gcc spells them, and the negative
+    /// spelled four ways because a build that turns one off writes whichever it turned on.
     #[test]
-    fn the_stack_protector_is_four_flags_and_the_last_one_wins() {
+    fn the_stack_protector_is_five_flags_and_the_last_one_wins() {
         let (opts, _) = compile(&["-c", "a.c"]);
         assert_eq!(opts.protector, Protector::None, "gcc protects nothing unless it was asked");
 
@@ -6452,6 +6456,7 @@ mod tests {
             ("-fstack-protector", Protector::Buffers),
             ("-fstack-protector-strong", Protector::Strong),
             ("-fstack-protector-all", Protector::All),
+            ("-fstack-protector-explicit", Protector::Explicit),
         ] {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.protector, want, "{flag}");
@@ -6459,7 +6464,9 @@ mod tests {
 
         // What a package build does: the strong one in the global flags and one directory that
         // cannot have a protector turning it off on the line after.
-        for off in ["-fno-stack-protector", "-fno-stack-protector-strong"] {
+        for off in
+            ["-fno-stack-protector", "-fno-stack-protector-strong", "-fno-stack-protector-explicit"]
+        {
             let (opts, _) = compile(&["-c", "-fstack-protector-strong", off, "a.c"]);
             assert_eq!(opts.protector, Protector::None, "{off}");
         }
@@ -8362,10 +8369,9 @@ mod tests {
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
-        for (flag, issue) in [
-            ("-fzero-call-used-regs=used-gpr", 2281),
-            ("-ftrivial-auto-var-init=zero", 2282),
-        ] {
+        for (flag, issue) in
+            [("-fzero-call-used-regs=used-gpr", 2281), ("-ftrivial-auto-var-init=zero", 2282)]
+        {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(flag), "the flag is named: {failed}");
             assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");

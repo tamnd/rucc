@@ -94,8 +94,9 @@ struct Declared {
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`],
-    /// [`DeclFlags::NO_STACK_PROTECTOR`], [`DeclFlags::COLD`], [`DeclFlags::HOT`],
-    /// [`DeclFlags::RETURN_KEEP`] and [`DeclFlags::INDIRECT_KEEP`] and nothing else.
+    /// [`DeclFlags::NO_STACK_PROTECTOR`], [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`],
+    /// [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`] and [`DeclFlags::INDIRECT_KEEP`] and nothing
+    /// else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.
@@ -711,7 +712,9 @@ impl Checker<'_> {
             // declarator, as `extern int setjmp (jmp_buf __env) __THROWNL __returns_twice;`.
             twice: self.returns_twice(specs.attrs) || self.returns_twice(item.attrs),
             // Both places, for the reason `noreturn` above reads both.
-            inlining: (self.inlining(specs.attrs) | self.inlining(item.attrs))
+            inlining: self
+                .inlining(specs.attrs)
+                .then(self.inlining(item.attrs))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
             // Both places, for the reason `noreturn` above reads both. `__declspec` is written
             // in front and the attribute spelling is as often written after the declarator.
@@ -1375,7 +1378,7 @@ impl Checker<'_> {
         // One declaration saying it is enough, for the reason `noreturn` above is under that
         // rule: a prototype that says `always_inline` and a definition that does not is a
         // function gcc inlines.
-        flags |= declared.inlining;
+        flags = flags.then(declared.inlining);
         // One declaration saying it is enough, for the reason `weak` below is under that rule:
         // the header says where the name lives and the file that defines it need not repeat it.
         flags |= declared.dll;

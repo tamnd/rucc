@@ -403,6 +403,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Protector::Buffers => LowerProtector::Buffers,
                                 Protector::Strong => LowerProtector::Strong,
                                 Protector::All => LowerProtector::All,
+                                Protector::Explicit => LowerProtector::Explicit,
                             },
                             wrapping: rucc_lower::Wrapping {
                                 signed: opts.wrapping.signed,
