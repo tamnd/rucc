@@ -167,7 +167,17 @@ impl Printer<'_> {
         let sources = self.sources;
         if let Some(file) = sources.lookup_file(at) {
             if let Some(loc) = sources.presumed(at) {
-                self.move_to(file, loc.name, loc.line, loc.column);
+                // A token further down that does not start a line is one a backslash joined to
+                // the line above, and it stays there, as in gcc. In a `.S` that is not only
+                // looks: `ALTERNATIVE_2 a, \` then `b` has to reach the assembler as one line.
+                let joined = !starts_line
+                    && self.printed
+                    && file == self.file
+                    && loc.name == self.name
+                    && loc.line > self.line;
+                if !joined {
+                    self.move_to(file, loc.name, loc.line, loc.column);
+                }
                 if breaks && self.printed {
                     self.end_line();
                     self.jump(loc.name, loc.line);
@@ -444,6 +454,21 @@ mod tests {
     fn the_first_line_says_which_file_this_is() {
         let mut run = Run::new();
         assert_eq!(run.go("int x;\n"), "# 1 \"/main.c\"\nint x;\n");
+    }
+
+    #[test]
+    fn a_line_joined_by_a_backslash_stays_one_line() {
+        let mut run = Run::new();
+        assert_eq!(
+            run.go("int a = 1 + \\\n  2;\nint b = 1 +\n  2;\n"),
+            "# 1 \"/main.c\"\nint a = 1 + 2;\n\nint b = 1 +\n  2;\n"
+        );
+        // The shape of the kernel's `ALTERNATIVE_2`, which the assembler reads as one statement
+        // only when it arrives on one line.
+        assert_eq!(
+            run.assembly(" ALT a, \\\n   b, \\\n   c\nnop\n"),
+            "# 1 \"/main.c\"\n ALT a, b, c\n\n\nnop\n"
+        );
     }
 
     #[test]
