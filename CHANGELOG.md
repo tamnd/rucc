@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `defconfig` kernel gets past `asm-offsets.c`: a `__seg_gs` pointer compares with `NULL`, `typeof_unqual` takes the address space off the elements of an array such as a percpu `cpumask_var_t`, and a constant converted in the arm of a conditional that a constant condition never takes is no longer warned about, which `ilog2` of a 64 bit constant in `mmzone.h` relied on.
 - Lowering no longer leaves the address of a name in a register when a kept `asm` template spells that operand as the name itself, so `call *%[op]` against `pv_ops.op` is no longer preceded by an unread `movq $pv_ops, %rax; addq $8, %rax`.
 - An `asm` operand under `e` or `Z`, x86-64's sign and zero extended thirty two bit immediates, is handed over as a number only when it fits, and otherwise goes in the register the rest of the constraint allows. The kernel's `atomic64_add` is `"er"`, and lib/atomic64_test.c adding `0x1111111111111122` wrote an `addq` the assembler refused. Before this `e` took any constant and `Z` was not read at all.
 - An inline `vmovapd`, `vmovaps`, `vmovupd` or `vmovups` with a `zmm` register, one numbered 16 or above, or a mask is now EVEX encoded the way gas does it, which lib/raid6/recov_avx512.c needs.

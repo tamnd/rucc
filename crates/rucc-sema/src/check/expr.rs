@@ -1547,7 +1547,12 @@ impl Checker<'_> {
                 pointee(&self.types, left).expect("a pointer"),
                 pointee(&self.types, right).expect("a pointer"),
             );
-            let disjoint = self.types.object_quals(a).space() != self.types.object_quals(b).space();
+            // A null pointer constant is in every address space, and the kernel compares a
+            // `__seg_gs` percpu pointer with `NULL`.
+            let null = self.conv().is_null_pointer_constant(lhs)
+                || self.conv().is_null_pointer_constant(rhs);
+            let disjoint =
+                !null && self.types.object_quals(a).space() != self.types.object_quals(b).space();
             let (a, b) = (self.types.unqualified(a), self.types.unqualified(b));
             let either_void = is_void(&self.types, a) || is_void(&self.types, b);
             if disjoint {
@@ -1751,17 +1756,32 @@ impl Checker<'_> {
     ) -> ExprId {
         let cond = self.expr(cond);
         let cond = self.value(cond);
+        // Which arm a constant condition picks, asked quietly, since the condition is folded
+        // again with whatever it has to say once the whole expression is.
+        let picked = {
+            let mut eval = self.eval();
+            let value = eval.constant(cond);
+            drop(eval.finish());
+            value.ok().and_then(eval::truth)
+        };
         // GNU's `a ?: b` evaluates `a` once and yields it when it is true, which the tree says
         // by having the second arm be the very node the condition was converted from.
         let then = match then {
             Some(then) => {
+                let skipped = u32::from(picked == Some(false));
+                self.not_taken += skipped;
                 let then = self.expr(then);
-                self.value(then)
+                let then = self.value(then);
+                self.not_taken -= skipped;
+                then
             }
             None => cond,
         };
+        let skipped = u32::from(picked == Some(true));
+        self.not_taken += skipped;
         let otherwise = self.expr(otherwise);
         let otherwise = self.value(otherwise);
+        self.not_taken -= skipped;
         let cond = self.condition(cond, span);
         if self.is_poisoned(cond) || self.is_poisoned(then) || self.is_poisoned(otherwise) {
             return self.poison(span);
@@ -2229,6 +2249,7 @@ impl Checker<'_> {
         // truncation, so `bool b = 2;` loses nothing and gcc warns about neither.
         if matches!(eval::bare(&self.types, target), TypeKind::Bool)
             || self.answered_late.contains(&value)
+            || self.not_taken > 0
         {
             return;
         }

@@ -311,6 +311,13 @@ pub struct Checker<'a> {
     /// `__is_constexpr` in the kernel dereferences a `void *` inside `sizeof` on purpose, and a
     /// warning there is an error in every build with `CONFIG_WERROR`.
     pub(in crate::check) unevaluated: u32,
+    /// How many arms of a conditional whose condition is a constant that picks the other arm the
+    /// expression being checked is inside.
+    ///
+    /// gcc keeps quiet in there about a constant that does not survive a conversion, since the
+    /// conversion never happens. The kernel's `ilog2(n)` is `sizeof(n) <= 4 ? __ilog2_u32(n) :
+    /// __ilog2_u64(n)`, and a 64 bit constant for `n` goes into the first arm.
+    pub(in crate::check) not_taken: u32,
     /// The constants this compiler answered where gcc answers in a later pass, which is what
     /// `__builtin_object_size` gives when nothing is known about the object.
     ///
@@ -341,6 +348,7 @@ impl<'a> Checker<'a> {
             annotations: annotate::Annotations::default(),
             advice: advice::Advice::default(),
             unevaluated: 0,
+            not_taken: 0,
             answered_late: rucc_base::hash::Set::default(),
         };
         checker.declare_type_names();
