@@ -576,7 +576,7 @@ impl Reader {
         let at = self.at();
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
-        let slot = crate::bytes::slot(&written.bytes);
+        let slot = crate::bytes::slot(&written.bytes, rucc_target::x86_64::Mode::Bits64);
         for hole in written.holes {
             // `.` in an instruction is where the instruction starts, which is what gas means by it
             // and what `mov .-4(%rip), %eax` counts back from.

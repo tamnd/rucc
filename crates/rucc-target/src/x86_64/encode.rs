@@ -198,6 +198,61 @@ impl Size {
     }
 }
 
+/// Which of the two machines the bytes are for, the sixty four bit one or the i386 one.
+///
+/// One table serves both, because almost every instruction is the same bytes in either: an i386
+/// instruction is an x86-64 one that names none of the registers the second half of the machine
+/// added and none of its sixty four bit operand sizes. What differs is small and all of it is in
+/// how an instruction is put together rather than in which instructions there are:
+///
+/// - There is no REX byte. `0x40` to `0x4F` are instructions of their own, `inc` and `dec` of a
+///   thirty two bit register, so a register numbered eight or above, a sixty four bit operand and
+///   a byte register that needs a REX byte to be named (`spl`, `bpl`, `sil`, `dil`) cannot be
+///   written, and asking for one is an error rather than a byte the processor reads as `inc`.
+/// - `mod=00 rm=101` is a four byte absolute address rather than one counted from the end of the
+///   instruction, so an address with neither base nor index is that and needs no SIB byte, and an
+///   address counted from the instruction cannot be written at all.
+/// - `inc` and `dec` of a sixteen or thirty two bit register take the one byte form gas writes.
+/// - A push and a pop move four bytes and are spelled `pushl` and `popl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Mode {
+    /// Sixty four bit mode, which is what [`encode`] writes for.
+    #[default]
+    Bits64,
+    /// Thirty two bit protected mode, which is what an i386 program runs in.
+    Bits32,
+}
+
+impl Mode {
+    /// The low four bits of `byte` when it is a REX byte in this mode, which it never is in thirty
+    /// two bit mode.
+    ///
+    /// For something reading an instruction back from its bytes, which has to know whether the
+    /// byte in front of an opcode is a prefix of it or an instruction of its own.
+    #[must_use]
+    pub const fn rex(self, byte: u8) -> Option<u8> {
+        match self {
+            Mode::Bits64 if byte & 0xF0 == 0x40 => Some(byte & 0x0F),
+            _ => None,
+        }
+    }
+
+    /// The instruction `byte` is on its own in this mode, when it is `0x40` to `0x4F` and this is
+    /// thirty two bit mode: `incl` of the register in its low three bits for the first eight and
+    /// `decl` for the second. In sixty four bit mode those bytes are REX prefixes and this is
+    /// [`None`], as it is for every other byte.
+    #[must_use]
+    pub const fn counted(self, byte: u8) -> Option<(&'static str, PhysReg)> {
+        match self {
+            Mode::Bits32 if byte & 0xF0 == 0x40 => {
+                let reg = PhysReg::new(byte & 7);
+                Some((if byte & 8 == 0 { "incl" } else { "decl" }, reg))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Where the arguments of an instruction go in the byte that addresses them.
 ///
 /// An index rather than the argument, for the reason [`Arg`] gives: the order an instruction is
@@ -3075,6 +3130,36 @@ static ENCODINGS: &[Encoding] = &[
     vexed("kmovq", &KR, DoubleQuad, &[0x93], pair(0, 1)),
 ];
 
+/// The rows only thirty two bit mode has, which are looked at in front of the shared table there
+/// and not at all in sixty four bit mode.
+///
+/// Two kinds. `inc` and `dec` of a sixteen or thirty two bit register have a one byte form,
+/// `0x40` plus the register and `0x48` plus the register, which sixty four bit mode gave up to make
+/// room for the REX byte, and gas writes it wherever it can. And a push or a pop of four bytes,
+/// which is what `pushl` and `popl` are: the same opcodes as `pushq` and `popq`, since each mode
+/// pushes its own width without being told, under the name that says the width they push here.
+static ONLY32: &[Encoding] = &[
+    bytes("incw", &R, Word, &[0x40], plus(0), NO_IMM),
+    bytes("incl", &R, Long, &[0x40], plus(0), NO_IMM),
+    bytes("decw", &R, Word, &[0x48], plus(0), NO_IMM),
+    bytes("decl", &R, Long, &[0x48], plus(0), NO_IMM),
+    bytes("pushl", &R, Long, &[0x50], plus(0), NO_IMM),
+    bytes("popl", &R, Long, &[0x58], plus(0), NO_IMM),
+    bytes("pushl", &M, Long, &[0xFF], ext(0, 6), NO_IMM),
+    bytes("popl", &M, Long, &[0x8F], ext(0, 0), NO_IMM),
+    takes("pushl", &I, Signed8, Long, &[0x6A], NO_MODRM, ImmSize::Ib),
+    takes("pushl", &I, Fits::Long, Long, &[0x68], NO_MODRM, ImmSize::Id),
+    bytes("pushfl", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
+    bytes("popfl", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
+];
+
+/// The mnemonics of the shared table that move eight bytes in sixty four bit mode without a size
+/// that says so, and so are not in thirty two bit mode at all. Their rows are [`Size::Long`]
+/// because nothing in front of the opcode says sixty four bits, which is why they are named here
+/// rather than caught by [`Size::wide`]; the thirty two bit instructions with the same bytes are
+/// the rows of [`ONLY32`].
+const ONLY64: [&str; 4] = ["pushq", "popq", "pushfq", "popfq"];
+
 /// The encoding of the instruction of that mnemonic, given those arguments and that immediate.
 ///
 /// `None` for a mnemonic this target does not encode, for one it does encode with arguments that
@@ -3086,7 +3171,23 @@ static ENCODINGS: &[Encoding] = &[
 /// such mnemonic accepts anyway.
 #[must_use]
 pub fn encoding(mnemonic: &str, args: &[Kind], imm: i64) -> Option<&'static Encoding> {
-    rows(mnemonic, args).find(|row| row.fits.holds(seen(row, imm)))
+    encoding_in(Mode::Bits64, mnemonic, args, imm)
+}
+
+/// [`encoding`] in that mode.
+///
+/// In thirty two bit mode the rows only it has come first, so `incl %eax` is the one byte form, and
+/// the push and pop that move eight bytes are not found. A row that is found may still be one the
+/// mode cannot write, a sixty four bit operand size or a register it has no name for, and that is
+/// [`encode_in`]'s to refuse, since it is the one that sees the registers.
+#[must_use]
+pub fn encoding_in(
+    mode: Mode,
+    mnemonic: &str,
+    args: &[Kind],
+    imm: i64,
+) -> Option<&'static Encoding> {
+    rows_in(mode, mnemonic, args).find(|row| row.fits.holds(seen(row, imm)))
 }
 
 /// The immediate as a row that sign extends a byte sees it.
@@ -3101,6 +3202,21 @@ fn seen(row: &Encoding, imm: i64) -> i64 {
         (Signed8, Word) => u16::try_from(imm).map_or(imm, |bits| i64::from(bits as i16)),
         _ => imm,
     }
+}
+
+/// Every row of that mnemonic with those arguments in that mode, in the order they are tried.
+fn rows_in<'a>(
+    mode: Mode,
+    mnemonic: &'a str,
+    args: &'a [Kind],
+) -> impl Iterator<Item = &'static Encoding> + 'a {
+    let (only, shared): (&'static [Encoding], bool) = match mode {
+        Mode::Bits64 => (&[], true),
+        Mode::Bits32 => (ONLY32, !ONLY64.contains(&mnemonic)),
+    };
+    only.iter()
+        .filter(move |row| row.mnemonic == mnemonic && row.args == args)
+        .chain(rows(mnemonic, args).filter(move |_| shared))
 }
 
 /// Every row of that mnemonic with those arguments, in the order they are written.
@@ -3279,6 +3395,27 @@ pub enum Error {
         /// The mnemonic that was asked for.
         mnemonic: String,
     },
+    /// A register thirty two bit mode has no name for: one numbered eight or above, or `spl`,
+    /// `bpl`, `sil` or `dil`, which only a REX byte can name. See [`Mode`].
+    Register {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+        /// The number of the register, which for a byte register is the one `spl` to `dil` share
+        /// with `ah` to `bh`.
+        number: u8,
+    },
+    /// A sixty four bit operand in thirty two bit mode, which has no REX byte to say so with and
+    /// no sixty four bit push or pop.
+    Wide {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+    },
+    /// An address counted from the end of the instruction in thirty two bit mode, where the
+    /// encoding that says so in sixty four bit mode is an absolute address instead.
+    Relative {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -3299,6 +3436,16 @@ impl fmt::Display for Error {
                 write!(f, "argument {at} of {mnemonic} is not what its encoding expects")
             }
             Error::Mask { mnemonic } => write!(f, "{mnemonic} cannot take a mask"),
+            Error::Register { mnemonic, number } => {
+                write!(f, "{mnemonic} names register {number}, which 32 bit mode cannot name")
+            }
+            Error::Wide { mnemonic } => {
+                write!(f, "{mnemonic} has a 64 bit operand, which 32 bit mode cannot write")
+            }
+            Error::Relative { mnemonic } => write!(
+                f,
+                "{mnemonic} has an address counted from the instruction, which 32 bit mode lacks"
+            ),
         }
     }
 }
@@ -3330,6 +3477,21 @@ pub fn encode(mnemonic: &str, values: &[Value], out: &mut Vec<u8>) -> Result<Hol
     encode_masked(mnemonic, values, Opmask::default(), out)
 }
 
+/// [`encode`] in that mode.
+///
+/// # Errors
+///
+/// What [`encode`] returns, and in thirty two bit mode [`Error::Register`], [`Error::Wide`] and
+/// [`Error::Relative`] for what that mode has no way to write. See [`Mode`].
+pub fn encode_in(
+    mode: Mode,
+    mnemonic: &str,
+    values: &[Value],
+    out: &mut Vec<u8>,
+) -> Result<Holes, Error> {
+    encode_masked_in(mode, mnemonic, values, Opmask::default(), out)
+}
+
 /// The mask an AVX-512 instruction writes its result under, which is what `{%k1}{z}` after its
 /// destination says.
 ///
@@ -3356,6 +3518,24 @@ pub fn encode_masked(
     mask: Opmask,
     out: &mut Vec<u8>,
 ) -> Result<Holes, Error> {
+    encode_masked_in(Mode::Bits64, mnemonic, values, mask, out)
+}
+
+/// [`encode_masked`] in that mode.
+///
+/// # Errors
+///
+/// What [`encode_masked`] and [`encode_in`] return.
+pub fn encode_masked_in(
+    mode: Mode,
+    mnemonic: &str,
+    values: &[Value],
+    mask: Opmask,
+    out: &mut Vec<u8>,
+) -> Result<Holes, Error> {
+    if mode == Mode::Bits32 && ONLY64.contains(&mnemonic) {
+        return Err(Error::Wide { mnemonic: mnemonic.to_owned() });
+    }
     let args: Vec<Kind> = values.iter().map(|value| value.kind()).collect();
     let imm = values
         .iter()
@@ -3364,11 +3544,11 @@ pub fn encode_masked(
             _ => None,
         })
         .unwrap_or(0);
-    let Some(row) = encoding(mnemonic, &args, imm) else {
+    let Some(row) = encoding_in(mode, mnemonic, &args, imm) else {
         // Which of the two it is says something different to whoever reads it. An instruction
         // with no row at all is a hole in this description, and one whose rows are all too narrow
         // is a lowering that produced a constant the instruction it chose cannot hold.
-        return Err(if rows(mnemonic, &args).next().is_some() {
+        return Err(if rows_in(mode, mnemonic, &args).next().is_some() {
             Error::Immediate { mnemonic: mnemonic.to_owned(), imm }
         } else {
             Error::Unwritten { mnemonic: mnemonic.to_owned(), args }
@@ -3377,9 +3557,13 @@ pub fn encode_masked(
     if mask != Opmask::default() && row.evex.is_none() {
         return Err(Error::Mask { mnemonic: mnemonic.to_owned() });
     }
+    if mode == Mode::Bits32 && row.size.wide() {
+        return Err(Error::Wide { mnemonic: mnemonic.to_owned() });
+    }
     let mut writer = Writer {
         row,
         values,
+        mode,
         rex: 0,
         high: 0,
         forced: false,
@@ -3398,6 +3582,8 @@ pub fn encode_masked(
 struct Writer<'a> {
     row: &'a Encoding,
     values: &'a [Value],
+    /// Which machine the bytes are for.
+    mode: Mode,
     /// The low four bits of the REX byte, which are the tops of the register numbers.
     rex: u8,
     /// Whether a REX byte has to be written even when it would say nothing, which is what naming
@@ -3641,6 +3827,11 @@ impl Writer<'_> {
         match self.values.get(usize::from(at)) {
             Some(&Value::Reg(reg, width)) => {
                 let number = reg.number();
+                if self.mode == Mode::Bits32
+                    && (number >= 8 || (width == Width::Byte && (4..8).contains(&number)))
+                {
+                    return Err(self.unnamed(number));
+                }
                 if number >= 8 {
                     self.rex |= bit;
                 }
@@ -3656,6 +3847,9 @@ impl Writer<'_> {
             // width to look at, since the whole of it is what the instruction works on.
             Some(&Value::Xmm(reg)) => {
                 let number = reg.number();
+                if self.mode == Mode::Bits32 && number >= 8 {
+                    return Err(self.unnamed(number));
+                }
                 if number >= 8 {
                     self.rex |= bit;
                 }
@@ -3666,6 +3860,9 @@ impl Writer<'_> {
             Some(&Value::Vector(number, _))
                 if self.row.evex.is_some() && (number < 16 || self.evex.is_some()) =>
             {
+                if self.mode == Mode::Bits32 && number >= 8 {
+                    return Err(self.unnamed(number));
+                }
                 if number & 8 != 0 {
                     self.rex |= bit;
                 }
@@ -3701,11 +3898,20 @@ impl Writer<'_> {
     /// the one that holds the low three, so the two have to be worked out separately and put in two
     /// places. This operand's four bits are all in the prefix, which is the only place it appears.
     fn vvvv(&self, at: u8) -> Result<u8, Error> {
-        match self.values.get(usize::from(at)) {
-            Some(&Value::Reg(reg, _)) | Some(&Value::Xmm(reg)) => Ok(reg.number()),
-            Some(&Value::Vector(number, _)) if number < 32 => Ok(number),
-            _ => Err(Error::Argument { mnemonic: self.row.mnemonic.to_owned(), at }),
+        let number = match self.values.get(usize::from(at)) {
+            Some(&Value::Reg(reg, _)) | Some(&Value::Xmm(reg)) => reg.number(),
+            Some(&Value::Vector(number, _)) if number < 32 => number,
+            _ => return Err(Error::Argument { mnemonic: self.row.mnemonic.to_owned(), at }),
+        };
+        if self.mode == Mode::Bits32 && number >= 8 {
+            return Err(self.unnamed(number));
         }
+        Ok(number)
+    }
+
+    /// The refusal of a register thirty two bit mode has no name for.
+    fn unnamed(&self, number: u8) -> Error {
+        Error::Register { mnemonic: self.row.mnemonic.to_owned(), number }
     }
 
     /// The addressing byte and whatever follows it, which is a register or a whole address.
@@ -3741,6 +3947,10 @@ impl Writer<'_> {
         // Counted from the end of the instruction, which is the one mode with no register in it
         // and is said by naming the base the encoding would otherwise use for no base at all.
         if addr.rip {
+            // Thirty two bit mode has the same bits, and they say an absolute address there.
+            if self.mode == Mode::Bits32 {
+                return Err(Error::Relative { mnemonic: self.row.mnemonic.to_owned() });
+            }
             out.push((reg << 3) | 0b101);
             holes.rip = Some(out.len());
             out.extend_from_slice(&addr.disp.to_le_bytes());
@@ -3749,6 +3959,9 @@ impl Writer<'_> {
 
         let index = match addr.index {
             Some(index) if index.number() == 4 => return Err(Error::Index),
+            Some(index) if self.mode == Mode::Bits32 && index.number() >= 8 => {
+                return Err(self.unnamed(index.number()));
+            }
             Some(index) => {
                 if index.number() >= 8 {
                     self.rex |= REX_X;
@@ -3765,12 +3978,28 @@ impl Writer<'_> {
             8 => 3,
             scale => return Err(Error::Scale { scale }),
         };
+        let far = addr.base.map(PhysReg::number).filter(|&number| number >= 8);
+        if let Some(number) = far.filter(|_| self.mode == Mode::Bits32) {
+            return Err(self.unnamed(number));
+        }
         let base = addr.base.map(|base| {
             if base.number() >= 8 {
                 self.rex |= REX_B;
             }
             base.number() & 7
         });
+
+        // Nothing but a number, which in thirty two bit mode is the one mode with no register in
+        // it said directly, where sixty four bit mode spent those bits on counting from the end of
+        // the instruction and has to say it through a SIB byte that names neither.
+        if self.mode == Mode::Bits32 && base.is_none() && index.is_none() {
+            out.push((reg << 3) | 0b101);
+            if addr.linked {
+                holes.disp = Some(out.len());
+            }
+            out.extend_from_slice(&addr.disp.to_le_bytes());
+            return Ok(());
+        }
 
         // The stack pointer's number in the addressed field means there is a second byte instead
         // of a register, so an address whose base really is the stack pointer needs that byte
@@ -5032,5 +5261,187 @@ mod tests {
         let mut out = Vec::new();
         let error = encode("addss", &[x(16), Value::Xmm(xmm(1))], &mut out);
         assert!(matches!(error, Err(Error::Argument { .. })), "{error:?}");
+    }
+
+    /// The bytes of that instruction in thirty two bit mode.
+    fn hex32(mnemonic: &str, values: &[Value]) -> String {
+        let mut out = Vec::new();
+        encode_in(Mode::Bits32, mnemonic, values, &mut out)
+            .unwrap_or_else(|error| panic!("{mnemonic} {values:?}: {error}"));
+        out.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn an_i386_instruction_is_the_bytes_an_i386_assembler_writes() {
+        // Every expected string is what `as --32` (GNU as 2.42) and `llvm-mc --triple=i386
+        // --show-encoding` both write for the line in the comment beside it.
+        let mem = |base, index, scale, disp| {
+            Value::Mem(Addr { base, index, scale, disp, ..Addr::default() })
+        };
+        let absolute = mem(None, None, 1, 0x1234);
+        let indexed = mem(None, Some(RAX), 4, 0x1234);
+        let sum = mem(Some(RBX), Some(RSI), 2, 4);
+        let wide = mem(Some(RBX), Some(RCX), 8, 0x40);
+        let tls = Value::Mem(Addr { disp: 0x14, segment: Some(Segment::Gs), ..Addr::default() });
+        let table: [(&str, Vec<Value>, &str); 44] = [
+            ("incl", vec![long(RAX)], "40"),                          // incl %eax
+            ("decl", vec![long(RDI)], "4f"),                          // decl %edi
+            ("incw", vec![word(RCX)], "66 41"),                       // incw %cx
+            ("decw", vec![word(RDX)], "66 4a"),                       // decw %dx
+            ("incb", vec![byte(RAX)], "fe c0"),                       // incb %al
+            ("incl", vec![at(RAX, 0)], "ff 00"),                      // incl (%eax)
+            ("decl", vec![at(RSI, 4)], "ff 4e 04"),                   // decl 4(%esi)
+            ("pushl", vec![long(RBP)], "55"),                         // pushl %ebp
+            ("popl", vec![long(RBP)], "5d"),                          // popl %ebp
+            ("pushl", vec![long(RDI)], "57"),                         // pushl %edi
+            ("pushl", vec![Value::Imm(1)], "6a 01"),                  // pushl $1
+            ("pushl", vec![Value::Imm(0x12345)], "68 45 23 01 00"),   // pushl $0x12345
+            ("pushl", vec![at(RBP, 8)], "ff 75 08"),                  // pushl 8(%ebp)
+            ("popl", vec![at(RAX, 0)], "8f 00"),                      // popl (%eax)
+            ("pushfl", vec![], "9c"),                                 // pushfl
+            ("popfl", vec![], "9d"),                                  // popfl
+            ("movl", vec![long(RSP), long(RBP)], "89 e5"),            // movl %esp, %ebp
+            ("movl", vec![at(RBP, 8), long(RAX)], "8b 45 08"),        // movl 8(%ebp), %eax
+            ("movl", vec![absolute, long(RCX)], "8b 0d 34 12 00 00"), // movl 0x1234, %ecx
+            ("movl", vec![long(RDX), indexed], "89 14 85 34 12 00 00"), // movl %edx, 0x1234(,%eax,4)
+            ("movl", vec![at(RSP, 0), long(RAX)], "8b 04 24"),          // movl (%esp), %eax
+            ("movl", vec![long(RBX), at(RBP, -4)], "89 5d fc"),         // movl %ebx, -4(%ebp)
+            ("leal", vec![sum, long(RDI)], "8d 7c 73 04"),              // leal 4(%ebx,%esi,2), %edi
+            ("addl", vec![Value::Imm(1000), long(RBX)], "81 c3 e8 03 00 00"), // addl $1000, %ebx
+            ("subl", vec![Value::Imm(16), long(RSP)], "83 ec 10"),      // subl $16, %esp
+            ("movb", vec![Value::High(RAX), byte(RBX)], "88 e3"),       // movb %ah, %bl
+            ("movb", vec![byte(RDX), Value::High(RBX)], "88 d7"),       // movb %dl, %bh
+            ("movzbl", vec![byte(RBX), long(RAX)], "0f b6 c3"),         // movzbl %bl, %eax
+            ("movl", vec![tls, long(RCX)], "65 8b 0d 14 00 00 00"),     // movl %gs:0x14, %ecx
+            ("movsd", vec![at(RSP, 8), Value::Xmm(xmm(7))], "f2 0f 10 7c 24 08"), // movsd 8(%esp), %xmm7
+            ("addsd", vec![Value::Xmm(xmm(1)), Value::Xmm(xmm(0))], "f2 0f 58 c1"), // addsd %xmm1, %xmm0
+            ("cvtsi2sdl", vec![long(RAX), Value::Xmm(xmm(0))], "f2 0f 2a c0"), // cvtsi2sdl %eax, %xmm0
+            ("call", vec![long(RAX)], "ff d0"),                                // call *%eax
+            ("call", vec![at(RBX, 4)], "ff 53 04"),                            // call *4(%ebx)
+            ("ret", vec![], "c3"),                                             // ret
+            ("leave", vec![], "c9"),                                           // leave
+            ("cltd", vec![], "99"),                                            // cltd
+            ("bswapl", vec![long(RCX)], "0f c9"),                              // bswapl %ecx
+            ("fldl", vec![at(RSP, 8)], "dd 44 24 08"),                         // fldl 8(%esp)
+            ("imull", vec![Value::Imm(3), long(RCX), long(RDX)], "6b d1 03"), // imull $3, %ecx, %edx
+            ("shldl", vec![Value::Imm(5), long(RSI), long(RDI)], "0f a4 f7 05"), // shldl $5, %esi, %edi
+            ("xorl", vec![long(RAX), long(RAX)], "31 c0"),                       // xorl %eax, %eax
+            ("cmpl", vec![Value::Imm(1), at(RBP, 0)], "83 7d 00 01"),            // cmpl $1, (%ebp)
+            ("movl", vec![Value::Imm(0x1234_5678), wide], "c7 44 cb 40 78 56 34 12"), // movl $0x12345678, 0x40(%ebx,%ecx,8)
+        ];
+        for (mnemonic, values, bytes) in table {
+            assert_eq!(hex32(mnemonic, &values), bytes, "{mnemonic} {values:?}");
+        }
+    }
+
+    #[test]
+    fn an_i386_absolute_address_the_linker_fills_in_leaves_its_four_bytes_open() {
+        let mut out = Vec::new();
+        let named = Addr { linked: true, ..Addr::default() };
+        let holes = encode_in(Mode::Bits32, "movl", &[Value::Mem(named), long(RCX)], &mut out)
+            .expect("an absolute load");
+        assert_eq!(out, [0x8b, 0x0d, 0, 0, 0, 0]);
+        assert_eq!(holes, Holes { disp: Some(2), ..Holes::default() });
+    }
+
+    #[test]
+    fn what_i386_has_no_way_to_write_is_refused_rather_than_written_as_something_else() {
+        let refused = |mnemonic: &str, values: &[Value]| {
+            let mut out = Vec::new();
+            let error = encode_in(Mode::Bits32, mnemonic, values, &mut out)
+                .expect_err("an instruction i386 cannot write");
+            assert!(out.is_empty(), "{mnemonic} wrote {out:02x?} before it was refused");
+            error
+        };
+        let register =
+            |mnemonic: &str, number| Error::Register { mnemonic: mnemonic.into(), number };
+        let wide = |mnemonic: &str| Error::Wide { mnemonic: mnemonic.into() };
+        assert_eq!(refused("addl", &[long(R8), long(RAX)]), register("addl", 8));
+        assert_eq!(refused("addl", &[long(RAX), long(R15)]), register("addl", 15));
+        assert_eq!(refused("movb", &[byte(RSI), byte(RAX)]), register("movb", 6));
+        assert_eq!(refused("movl", &[at(R9, 0), long(RAX)]), register("movl", 9));
+        let index =
+            Value::Mem(Addr { base: Some(RAX), index: Some(R10), scale: 1, ..Addr::default() });
+        assert_eq!(refused("movl", &[index, long(RAX)]), register("movl", 10));
+        let sse = [Value::Xmm(xmm(8)), Value::Xmm(xmm(0))];
+        assert_eq!(refused("addsd", &sse), register("addsd", 8));
+        assert_eq!(refused("addq", &[quad(RAX), quad(RBX)]), wide("addq"));
+        assert_eq!(refused("cltq", &[]), wide("cltq"));
+        assert_eq!(refused("movabsq", &[Value::Imm(1 << 40), quad(RAX)]), wide("movabsq"));
+        assert_eq!(refused("pushq", &[quad(RBP)]), wide("pushq"));
+        assert_eq!(refused("popfq", &[]), wide("popfq"));
+        let rip = Value::Mem(Addr { rip: true, ..Addr::default() });
+        assert_eq!(refused("movl", &[rip, long(RAX)]), Error::Relative { mnemonic: "movl".into() });
+    }
+
+    #[test]
+    fn a_sixty_four_bit_instruction_is_the_same_bytes_it_was_before_there_were_two_modes() {
+        // The rows only i386 has are never looked at in sixty four bit mode, so `incl %eax` and
+        // `pushq %rbp` are still what they were, and `pushl` is still nothing at all.
+        assert_eq!(hex("incl", &[long(RAX)]), "ff c0");
+        assert_eq!(hex("decw", &[word(RDX)]), "66 ff ca");
+        assert_eq!(hex("pushq", &[quad(RBP)]), "55");
+        let absolute = Value::Mem(Addr { disp: 0x1234, ..Addr::default() });
+        assert_eq!(hex("movl", &[absolute, long(RCX)]), "8b 0c 25 34 12 00 00");
+        let mut out = Vec::new();
+        let error = encode("pushl", &[long(RBP)], &mut out);
+        assert!(matches!(error, Err(Error::Unwritten { .. })), "{error:?}");
+    }
+
+    #[test]
+    fn a_shared_row_naming_only_what_i386_has_is_the_same_bytes_in_both_modes() {
+        // Every row of the shared table, given arguments both modes can name, comes out the same
+        // unless thirty two bit mode chose a row of its own for it or refused it outright.
+        let value = |kind: Kind| match kind {
+            Kind::Reg => long(RCX),
+            Kind::Vec => Value::Xmm(xmm(2)),
+            Kind::Mem => at(RBX, 8),
+            Kind::Imm => Value::Imm(1),
+            Kind::Dest => Value::Dest,
+            Kind::Mask => Value::Mask(1),
+            Kind::Stack => Value::Stack,
+            Kind::Control => Value::Control(0),
+            Kind::Debug => Value::Debug(0),
+            Kind::Seg => Value::Seg(Segment::Es),
+        };
+        let mut compared = 0;
+        for row in ENCODINGS {
+            let values: Vec<Value> = row.args.iter().map(|&kind| value(kind)).collect();
+            let chosen = encoding_in(Mode::Bits32, row.mnemonic, row.args, 1);
+            if !chosen.is_some_and(|chosen| {
+                std::ptr::eq(chosen, encoding(row.mnemonic, row.args, 1).unwrap())
+            }) {
+                continue;
+            }
+            let (mut long_mode, mut legacy) = (Vec::new(), Vec::new());
+            let Ok(holes) = encode_in(Mode::Bits32, row.mnemonic, &values, &mut legacy) else {
+                continue;
+            };
+            let same = encode(row.mnemonic, &values, &mut long_mode).expect("both modes encode it");
+            assert_eq!(legacy, long_mode, "{} {:?}", row.mnemonic, row.args);
+            assert_eq!(holes, same);
+            compared += 1;
+        }
+        assert!(compared > 500, "only {compared} rows compared");
+    }
+
+    #[test]
+    fn a_byte_from_0x40_to_0x4f_is_a_prefix_in_one_mode_and_an_instruction_in_the_other() {
+        assert_eq!(Mode::Bits64.rex(0x48), Some(0x8));
+        assert_eq!(Mode::Bits64.rex(0x41), Some(0x1));
+        assert_eq!(Mode::Bits64.rex(0x8b), None);
+        assert_eq!(Mode::Bits32.rex(0x48), None);
+        assert_eq!(Mode::Bits32.counted(0x40), Some(("incl", RAX)));
+        assert_eq!(Mode::Bits32.counted(0x47), Some(("incl", RDI)));
+        assert_eq!(Mode::Bits32.counted(0x48), Some(("decl", RAX)));
+        assert_eq!(Mode::Bits32.counted(0x4f), Some(("decl", RDI)));
+        assert_eq!(Mode::Bits32.counted(0x50), None);
+        assert_eq!(Mode::Bits64.counted(0x40), None);
+        // And what the encoder writes for those two reads back as them.
+        for (mnemonic, reg) in [("incl", RBX), ("decl", RSI)] {
+            let mut out = Vec::new();
+            encode_in(Mode::Bits32, mnemonic, &[long(reg)], &mut out).expect("a one byte form");
+            assert_eq!(Mode::Bits32.counted(out[0]), Some((mnemonic, reg)));
+        }
     }
 }
