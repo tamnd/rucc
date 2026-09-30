@@ -127,6 +127,26 @@ fn nothing_is_protected_unless_the_command_line_asked_for_it() {
     }
 }
 
+/// A function that says `no_stack_protector` gets none, whatever the flag asked for.
+///
+/// The kernel writes it on the code that runs before the canary is set up, and it is written on a
+/// prototype there as often as on the definition. `__has_attribute` answers yes for it, so a header
+/// that asks and then writes it is owed a function with no check on the way out.
+#[test]
+fn a_function_that_says_no_stack_protector_gets_none_under_any_flag() {
+    let source = "\
+void use(void *);
+__attribute__((__no_stack_protector__)) int early(void);
+int early(void) { char b[16]; use(b); return 0; }
+__attribute__((no_stack_protector)) int late(void) { int n = 0; use(&n); return n; }
+int buf(void) { char b[16]; use(b); return 0; }
+";
+    for flags in ["-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all"] {
+        let text = asm("refused", &[flags], source);
+        assert_eq!(protected(&text), ["buf"], "{flags}: {text}");
+    }
+}
+
 /// What a protected function is made of, in the order it is made of it.
 ///
 /// The prologue reads the word out of the block the thread has to itself and puts a copy above

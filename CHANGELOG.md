@@ -27,6 +27,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Any integer constant expression with the value zero is a null pointer constant, not only a literal `0`, so `(void *)((long)(x) * 0l)` is one exactly when `x` is a constant. The kernel's `__is_constexpr` is built on that and answered "not constant" for everything, which turned arrays sized with `max()` into variable length arrays and broke some `BUILD_BUG_ON_ZERO` uses (#2261).
 
+### Fixed
+
+- `__has_attribute` answers yes for the attributes rucc honours and no for the ones it does not, so the kernel's `compiler_attributes.h` no longer defines `__always_inline`, `fallthrough` and the rest as nothing. `always_inline`, `noreturn`, `unused`, `fallthrough`, `noclone`, `nonstring`, `uninitialized`, `externally_visible` and `no_profile_instrument_function` now answer yes, a name the standard also has is answered with the standard's number as gcc does, and the attribute checker reads names through the same table, so it acts on an attribute only when the table says it is there. `no_stack_protector` is honoured and wins over every `-fstack-protector` flag. A test walks every name the kernel's header asks about and compares with GCC 14 (#2266).
+
 ## 0.18.0
 
 The W5 release, for AArch64 Windows. aarch64-windows-gnu is tier 2: rung 0 passes 42 of 42 under Wine on an arm64 runner and natively on `windows-11-arm`, rung 1 is SQLite's veryquick suite built by rucc and by llvm-mingw's clang and run natively there every night with nothing failing only in rucc's build, and the `rucc.exe` doing it is the one built for `aarch64-pc-windows-msvc`. Calls to `dllimport` functions and reads of imported data now work on AArch64 Windows, and the AArch64 assembler takes the Advanced SIMD instructions gcc writes.

@@ -38,9 +38,10 @@
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
 
-use rucc_ast::{AlignSpec, AttrArg, AttrList};
+use rucc_ast::{AlignSpec, AttrArg, AttrList, Attribute};
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
+use rucc_gnu::{Kind, Status};
 use rucc_lex::Encoding;
 use rucc_target::{BitFieldStyle, Convention, Isa, Target, TargetInfo};
 use rucc_types::{
@@ -213,6 +214,25 @@ fn is_vector_mode(name: &str, target: &TargetInfo) -> bool {
 }
 
 impl Checker<'_> {
+    /// The name an attribute has in `crates/rucc-gnu/features.toml`, or an empty string when the
+    /// checker does not read it.
+    ///
+    /// Every attribute the checker gives a meaning to is named through here, so what the checker
+    /// acts on and what `__has_attribute` answers come out of the same table. A row marked
+    /// implemented or partial is read. A row marked unimplemented or rejected, and a name the
+    /// table has no row for, come back empty and match nothing, which is what the preprocessor
+    /// answering no has already told the program. `__packed__` is read as `packed`, and an
+    /// attribute in some namespace other than `gnu` is not GCC's and is not read.
+    fn gnu_name(&self, attr: &Attribute) -> &'static str {
+        if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+            return "";
+        }
+        match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
+            Some(row) if matches!(row.status, Status::Implemented | Status::Partial) => row.name,
+            _ => "",
+        }
+    }
+
     /// The `packed` and the `aligned` in an attribute list.
     ///
     /// Both spellings are read, since `[[gnu::packed]]` and `__attribute__((packed))` are the
@@ -228,7 +248,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            match rucc_gnu::unarmour(self.text(attr.name)) {
+            match self.gnu_name(&attr) {
                 "packed" => packing.packed = true,
                 "aligned" => {
                     if let Some(align) = self.aligned_argument(attr) {
@@ -252,7 +272,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 return None;
             }
-            (rucc_gnu::unarmour(self.text(attr.name)) == "transparent_union").then_some(attr.span)
+            (self.gnu_name(attr) == "transparent_union").then_some(attr.span)
         })
     }
 
@@ -273,7 +293,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) == "scalar_storage_order" {
+            if self.gnu_name(&attr) == "scalar_storage_order" {
                 return self.storage_order_argument(attr);
             }
         }
@@ -285,7 +305,7 @@ impl Checker<'_> {
     /// gcc's wording, down to the quotes around the two words, because the attribute exists for
     /// programs that read a wire format and one of those would rather be told the spelling it got
     /// wrong than be handed a record laid out in the order it did not ask for.
-    fn storage_order_argument(&mut self, attr: rucc_ast::Attribute) -> Option<bool> {
+    fn storage_order_argument(&mut self, attr: Attribute) -> Option<bool> {
         let args = self.ast[attr.args].to_vec();
         let what = "'scalar_storage_order' argument must be one of \"big-endian\" or \
                     \"little-endian\"";
@@ -342,7 +362,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            let name = rucc_gnu::unarmour(self.text(attr.name));
+            let name = self.gnu_name(&attr);
             let style = match name {
                 "ms_struct" => BitFieldStyle::Microsoft,
                 "gcc_struct" => BitFieldStyle::Itanium,
@@ -386,7 +406,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) != "format" {
+            if self.gnu_name(&attr) != "format" {
                 continue;
             }
             // `format(printf, 1, 2)` keeps its first argument as an identifier. Anything else in
@@ -437,8 +457,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 return None;
             }
-            matches!(rucc_gnu::unarmour(self.text(attr.name)), "weak" | "selectany")
-                .then_some(attr.span)
+            matches!(self.gnu_name(attr), "weak" | "selectany").then_some(attr.span)
         })
     }
 
@@ -455,7 +474,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if RETAINING.contains(&rucc_gnu::unarmour(self.text(attr.name))) {
+            if RETAINING.contains(&self.gnu_name(&attr)) {
                 return true;
             }
         }
@@ -483,7 +502,7 @@ impl Checker<'_> {
             }
             // Copied out because reading the priority folds an expression, which borrows the
             // checker that the name was read through.
-            let name = rucc_gnu::unarmour(self.text(attr.name)).to_owned();
+            let name = self.gnu_name(&attr).to_owned();
             let before = match name.as_str() {
                 "constructor" => true,
                 "destructor" => false,
@@ -513,7 +532,7 @@ impl Checker<'_> {
     /// or less is warned about and then honoured, since those are the ones the implementation's own
     /// start-up code claims and a program that takes one is asking to run before something it did
     /// not write.
-    fn priority(&mut self, attr: rucc_ast::Attribute, name: &str) -> Option<Priority> {
+    fn priority(&mut self, attr: Attribute, name: &str) -> Option<Priority> {
         let args = self.ast[attr.args].to_vec();
         let range = format!("{name} priorities must be integers from 0 to 65535 inclusive");
         let asked = match args.first() {
@@ -571,7 +590,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) == "alias" {
+            if self.gnu_name(&attr) == "alias" {
                 return self.alias_argument(attr);
             }
         }
@@ -579,7 +598,7 @@ impl Checker<'_> {
     }
 
     /// The string one `alias` was written with, and nothing when it was not written with one.
-    fn alias_argument(&mut self, attr: rucc_ast::Attribute) -> Option<StrId> {
+    fn alias_argument(&mut self, attr: Attribute) -> Option<StrId> {
         let args = self.ast[attr.args].to_vec();
         let what = "'alias' requires a string naming the symbol to alias";
         let expr = match args.first() {
@@ -638,7 +657,7 @@ impl Checker<'_> {
     }
 
     /// The string one `section` was written with, and nothing when it was not written with one.
-    fn section_argument(&mut self, attr: rucc_ast::Attribute) -> Option<StrId> {
+    fn section_argument(&mut self, attr: Attribute) -> Option<StrId> {
         let args = self.ast[attr.args].to_vec();
         let expr = match args.as_slice() {
             [AttrArg::Expr(expr)] => *expr,
@@ -800,7 +819,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) == "cleanup" {
+            if self.gnu_name(&attr) == "cleanup" {
                 return self.cleanup_argument(attr, kind, duration);
             }
         }
@@ -811,7 +830,7 @@ impl Checker<'_> {
     /// what was named is not something that can be called.
     fn cleanup_argument(
         &mut self,
-        attr: rucc_ast::Attribute,
+        attr: Attribute,
         kind: DeclKind,
         duration: StorageDuration,
     ) -> Option<DeclId> {
@@ -890,7 +909,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) == "visibility" {
+            if self.gnu_name(&attr) == "visibility" {
                 return self.visibility_argument(attr);
             }
         }
@@ -899,7 +918,7 @@ impl Checker<'_> {
 
     /// The visibility one `visibility` was written with, and nothing when it was not one of the
     /// four strings the attribute takes.
-    fn visibility_argument(&mut self, attr: rucc_ast::Attribute) -> Option<Visibility> {
+    fn visibility_argument(&mut self, attr: Attribute) -> Option<Visibility> {
         let args = self.ast[attr.args].to_vec();
         let what = "'visibility' requires a string, which is default, hidden, internal or \
                     protected";
@@ -947,7 +966,7 @@ impl Checker<'_> {
     pub(in crate::check) fn gnu_inlined(&self, attrs: AttrList) -> bool {
         self.ast[attrs].iter().any(|attr| {
             !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
-                && rucc_gnu::unarmour(self.text(attr.name)) == "gnu_inline"
+                && self.gnu_name(attr) == "gnu_inline"
         })
     }
 
@@ -965,7 +984,7 @@ impl Checker<'_> {
     pub(in crate::check) fn never_returns(&self, attrs: AttrList) -> bool {
         self.ast[attrs].iter().any(|attr| {
             !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
-                && rucc_gnu::unarmour(self.text(attr.name)) == "noreturn"
+                && self.gnu_name(attr) == "noreturn"
         })
     }
 
@@ -978,7 +997,7 @@ impl Checker<'_> {
     pub(in crate::check) fn is_naked(&self, attrs: AttrList) -> bool {
         self.ast[attrs].iter().any(|attr| {
             !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
-                && rucc_gnu::unarmour(self.text(attr.name)) == "naked"
+                && self.gnu_name(attr) == "naked"
         })
     }
 
@@ -991,17 +1010,18 @@ impl Checker<'_> {
     pub(in crate::check) fn returns_twice(&self, attrs: AttrList) -> bool {
         self.ast[attrs].iter().any(|attr| {
             !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
-                && rucc_gnu::unarmour(self.text(attr.name)) == "returns_twice"
+                && self.gnu_name(attr) == "returns_twice"
         })
     }
 
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
-    /// `always_inline`, `noinline`, `no_instrument_function`, `cold` and `hot`, under the namespace
-    /// test [`Self::never_returns`] is under and through the same unarmouring, so
-    /// `__always_inline__` in a header and `[[gnu::noinline]]` are both read. Nothing else in the
-    /// list is looked at, so the answer is [`DeclFlags::NONE`] for almost every declaration.
+    /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`, `cold` and
+    /// `hot`, under the namespace test [`Self::never_returns`] is under and through the same
+    /// unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
+    /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
+    /// declaration.
     pub(in crate::check) fn inlining(&mut self, attrs: AttrList) -> DeclFlags {
         let mut flags = DeclFlags::NONE;
         let ast = self.ast;
@@ -1009,11 +1029,12 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            let name = rucc_gnu::unarmour(self.text(attr.name)).to_string();
+            let name = self.gnu_name(&attr).to_string();
             match name.as_str() {
                 "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
                 "noinline" => flags |= DeclFlags::NOINLINE,
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
+                "no_stack_protector" => flags |= DeclFlags::NO_STACK_PROTECTOR,
                 "cold" => flags |= DeclFlags::COLD,
                 "hot" => flags |= DeclFlags::HOT,
                 "optimize"
@@ -1043,7 +1064,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            match rucc_gnu::unarmour(self.text(attr.name)) {
+            match self.gnu_name(attr) {
                 "dllimport" => flags |= DeclFlags::DLLIMPORT,
                 "dllexport" => flags |= DeclFlags::DLLEXPORT,
                 _ => {}
@@ -1055,7 +1076,7 @@ impl Checker<'_> {
     /// The options an `optimize` attribute names, one for each string and each comma in one.
     ///
     /// A number, such as `optimize (2)`, is a level and names no option, so it gives nothing.
-    fn optimize_options(&mut self, attr: rucc_ast::Attribute) -> Vec<String> {
+    fn optimize_options(&mut self, attr: Attribute) -> Vec<String> {
         let mut options = Vec::new();
         let ast = self.ast;
         for &arg in &ast[attr.args] {
@@ -1099,7 +1120,7 @@ impl Checker<'_> {
         for &list in lists {
             for &attr in &ast[list] {
                 if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
-                    || rucc_gnu::unarmour(self.text(attr.name)) != "target"
+                    || self.gnu_name(&attr) != "target"
                 {
                     continue;
                 }
@@ -1150,7 +1171,7 @@ impl Checker<'_> {
         self.ast[attrs]
             .iter()
             .filter(|attr| !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu"))
-            .map(|attr| match rucc_gnu::unarmour(self.text(attr.name)) {
+            .map(|attr| match self.gnu_name(attr) {
                 "const" => Effects::Const,
                 "pure" => Effects::Pure,
                 _ => Effects::Any,
@@ -1273,7 +1294,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            let name = rucc_gnu::unarmour(self.text(attr.name)).to_owned();
+            let name = self.gnu_name(&attr).to_owned();
             match name.as_str() {
                 "ms_abi" | "sysv_abi" => {
                     let Some(convention) = Convention::asked(tuple, &name) else {
@@ -1396,7 +1417,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) != "mode" {
+            if self.gnu_name(&attr) != "mode" {
                 continue;
             }
             if let Some(made) = self.mode_of(ty, attr) {
@@ -1422,7 +1443,7 @@ impl Checker<'_> {
     /// ignored because ignoring it declares one lane where the program asked for four, and the
     /// note points at `vector_size`, which is the spelling GCC's own note points at and which
     /// this compiler does build.
-    fn mode_of(&mut self, ty: TypeId, attr: rucc_ast::Attribute) -> Option<TypeId> {
+    fn mode_of(&mut self, ty: TypeId, attr: Attribute) -> Option<TypeId> {
         let args = self.ast[attr.args].to_vec();
         // A mode written as anything but a bare name is ignored rather than refused, which is what
         // GCC does with it: `mode(1)` is an attribute it cannot read and not a type it disagrees
@@ -1512,7 +1533,7 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if rucc_gnu::unarmour(self.text(attr.name)) != "vector_size" {
+            if self.gnu_name(&attr) != "vector_size" {
                 continue;
             }
             if let Some(made) = self.vector_of(ty, attr) {
@@ -1535,7 +1556,7 @@ impl Checker<'_> {
     /// machine has such a register and gcc turns one down as well. And a lane type that is not
     /// arithmetic is refused, which is where this is narrower than gcc: gcc takes a vector of
     /// pointers and this does not have one yet.
-    fn vector_of(&mut self, elem: TypeId, attr: rucc_ast::Attribute) -> Option<TypeId> {
+    fn vector_of(&mut self, elem: TypeId, attr: Attribute) -> Option<TypeId> {
         let args = self.ast[attr.args].to_vec();
         let bytes = match args.as_slice() {
             [AttrArg::Expr(expr)] => {
@@ -1600,7 +1621,7 @@ impl Checker<'_> {
     }
 
     /// What one `aligned` asked for, which is a number or nothing when it was written bare.
-    fn aligned_argument(&mut self, attr: rucc_ast::Attribute) -> Option<u32> {
+    fn aligned_argument(&mut self, attr: Attribute) -> Option<u32> {
         let args = self.ast[attr.args].to_vec();
         let requested = match args.first() {
             None => return Some(BIGGEST_ALIGNMENT),
