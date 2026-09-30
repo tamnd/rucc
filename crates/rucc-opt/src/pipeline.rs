@@ -43,8 +43,8 @@ use rucc_target::{Isa, TargetInfo};
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, dse,
-    extents, heap, image, inline, ipasra, ipcp, libcall, load, modref, nofree, number, objsize,
-    outside, params, pass, purity, readonly, reload, sroa,
+    extents, heap, image, inline, ipasra, ipcp, libcall, load, loop_idiom, modref, nofree, number,
+    objsize, outside, params, pass, purity, readonly, reload, sroa,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -409,6 +409,7 @@ const O2: &[&str] = &[
     "split",
     "canon",
     "licm",
+    "loop-idiom",
     "ivopts",
     "simplify-cfg",
     "discharge",
@@ -461,6 +462,7 @@ const O3: &[&str] = &[
     "split",
     "canon",
     "licm",
+    "loop-idiom",
     "ivopts",
     "simplify-cfg",
     "discharge",
@@ -531,6 +533,7 @@ const OS: &[&str] = &[
     "dead-plane",
     "coalesce",
     "plane-sink",
+    "loop-idiom",
     "dce",
     "loop-delete",
 ];
@@ -573,6 +576,7 @@ const OZ: &[&str] = &[
     "dead-plane",
     "coalesce",
     "plane-sink",
+    "loop-idiom",
     "dce",
     "loop-delete",
 ];
@@ -762,7 +766,14 @@ impl Options {
                 false => names.retain(|it| *it != name || required(it)),
             }
         }
-        names.into_iter().filter_map(pass::find).map(Pass::name).collect()
+        // A loop turned into a call to `memset` is a call to whatever the program links against
+        // once `-ffreestanding` or `-fno-builtin` says the name is not the library's.
+        names
+            .into_iter()
+            .filter_map(pass::find)
+            .map(Pass::name)
+            .filter(|&name| self.builtins || name != loop_idiom::NAME)
+            .collect()
     }
 
     /// Whether a module at a time transformation the level asked for is still asked for.
@@ -1165,6 +1176,11 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
                 // No remark either. A pass that did not run on a function has nothing to say
                 // about it, and a record saying it found nothing would read as a pass that
                 // looked.
+                continue;
+            }
+            // The loop inside `memset` itself is the one loop that must not become a call to it.
+            if name == loop_idiom::NAME && loop_idiom::writes_itself(names.resolve(module[id].name))
+            {
                 continue;
             }
             let an = cached.entry(id).or_insert_with(|| {

@@ -134,6 +134,7 @@ pub mod licm;
 pub mod live;
 pub mod load;
 pub mod loop_delete;
+pub mod loop_idiom;
 pub mod loops;
 pub mod machine;
 pub mod memssa;
