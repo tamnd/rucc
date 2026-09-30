@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
 - The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
+
 ### Added
 
 - `__attribute__((error("...")))` and `warning("...")` are honoured, where before they were accepted and dropped. A call to such a function that is still there after inlining and dead code removal is an error or a warning quoting the message and pointing at the call, and a call the optimizer took out says nothing, so the kernel's `BUILD_BUG_ON` reports the failing assertion instead of leaving a link error naming `__compiletime_assert_N`. A `static inline` function every call to which was inlined is no longer emitted from `-O1` up, which is what gcc does and what keeps the call in its body from counting (#2264).
