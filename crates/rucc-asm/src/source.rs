@@ -264,6 +264,9 @@ struct Reader {
     stack: Vec<usize>,
     /// What `.previous` goes back to.
     before: Option<usize>,
+    /// The parts that are a numbered subsection of another, with the part that is the section
+    /// itself and the number. See [`Reader::subsection`].
+    subs: Map<usize, (usize, u64)>,
     syms: Vec<Sym>,
     known: Map<String, usize>,
     /// How many times each numbered local label has been written so far, which is what `1b` counts
@@ -1091,9 +1094,29 @@ impl Reader {
             | "data_region"
             | "end_data_region"
                 if self.macho => {}
+            // A number after the name is a subsection, which `.section` does not take on ELF and
+            // this one does.
             "pushsection" => {
                 self.stack.push(self.here);
-                self.section_directive(&args)?;
+                let (was, before) = (self.here, self.before);
+                let numbered = args.get(1).filter(|arg| !arg.trim().starts_with('"'));
+                match numbered {
+                    Some(number) => {
+                        let number = self.subsection_number(number)?;
+                        let mut args = args.clone();
+                        args.remove(1);
+                        self.section_directive(&args)?;
+                        self.subsection(number);
+                    }
+                    None => self.section_directive(&args)?,
+                }
+                self.came_from(was, before);
+            }
+            "subsection" => {
+                let (was, before) = (self.here, self.before);
+                let number = self.subsection_number(rest)?;
+                self.subsection(number);
+                self.came_from(was, before);
             }
             "popsection" => {
                 let Some(back) = self.stack.pop() else {
@@ -1271,19 +1294,154 @@ impl Reader {
 
     /// `.text`, `.data`, `.bss` and `.rodata`, which name a section this already knows the flags of.
     fn plain(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
-        // A number after one of these is a subsection, and gas lays the numbered ones out after the
-        // unnumbered one at the end of the file rather than where they were written. Refused rather
-        // than merged in place, because merging is right only for a file that never goes back to a
-        // lower number and wrong silently for one that does.
-        if !rest.trim().is_empty() && rest.trim() != "0" {
-            let what =
-                format!("'.{word} {}' is a subsection, which is not written yet", rest.trim());
-            return Err(self.bad(&what));
-        }
+        // A number after one of these is a subsection. See [`Reader::subsection`].
+        let number = self.subsection_number(rest)?;
+        let (was, before) = (self.here, self.before);
         let name = format!(".{word}");
         let shape = Shape::of(&name);
         self.section(&name, shape);
+        self.subsection(number);
+        self.came_from(was, before);
         Ok(())
+    }
+
+    /// The number a `.subsection`, a `.text` or a `.pushsection` gave, or zero when it gave none.
+    fn subsection_number(&mut self, text: &str) -> Result<u64, Trouble> {
+        if text.trim().is_empty() {
+            return Ok(0);
+        }
+        let number = self.number(text)?;
+        u64::try_from(number).map_err(|_| {
+            self.bad(&format!("{number} is not a subsection, which is never negative"))
+        })
+    }
+
+    /// Go to that subsection of the section being written to.
+    ///
+    /// A subsection is a run of a section that gas lays out after the runs with lower numbers,
+    /// whatever order the file wrote them in, so `.subsection 1` is how a template puts its slow
+    /// path at the end of `.text` without naming a section of its own. Each one is a part of its
+    /// own here while the file is read, since that is what keeps the bytes of each in the order
+    /// they were written, and [`Reader::join_subsections`] puts them behind their section at the
+    /// end. Zero is the section itself.
+    fn subsection(&mut self, number: u64) {
+        let parent = self.subs.get(&self.here).map_or(self.here, |&(parent, _)| parent);
+        if number == 0 {
+            self.go(parent);
+            return;
+        }
+        // No section name starts with a zero byte, so this key is nothing a `.section` can say.
+        let key = format!("\0{parent}\0{number}");
+        if let Some(&at) = self.named.get(&key) {
+            self.go(at);
+            return;
+        }
+        let at = self.parts.len();
+        let of = &self.parts[parent];
+        self.parts.push(Part {
+            name: of.name.clone(),
+            bytes: Vec::new(),
+            size: 0,
+            align: 1,
+            shape: of.shape,
+            relocs: Vec::new(),
+            group: of.group.clone(),
+        });
+        self.named.insert(key, at);
+        self.subs.insert(at, (parent, number));
+        self.go(at);
+    }
+
+    /// Say that `.previous` goes back to where the file was before a directive that went through
+    /// a section on the way to a subsection of it, which is one move to gas and two here.
+    fn came_from(&mut self, was: usize, before: Option<usize>) {
+        self.before = if self.here == was { before } else { Some(was) };
+    }
+
+    /// Every subsection behind the section it is part of, in the order of their numbers, and every
+    /// place that pointed into one moved to where it went.
+    ///
+    /// Each one starts on the boundary it asked for, which is the largest alignment written inside
+    /// it, so an alignment worked out while it was a part of its own is still right where it lands.
+    /// gas may put one closer when the boundary happens to fall that way already, and the bytes that
+    /// makes different are padding in either case. The padding is no-ops in code, since the one in
+    /// front may fall through into it, and zeroes everywhere else.
+    fn join_subsections(&mut self) {
+        if self.subs.is_empty() {
+            return;
+        }
+        let mut order: Vec<(usize, u64, usize)> =
+            self.subs.iter().map(|(&sub, &(parent, number))| (parent, number, sub)).collect();
+        order.sort_unstable();
+        let mut moved: Map<usize, (usize, u64)> = Map::default();
+        for (parent, _, sub) in order {
+            let taken = std::mem::take(&mut self.parts[sub].bytes);
+            let relocs = std::mem::take(&mut self.parts[sub].relocs);
+            let (size, align) = (self.parts[sub].size, self.parts[sub].align.max(1));
+            let exec = self.parts[parent].shape.exec;
+            let whole = &mut self.parts[parent];
+            let start = whole.size.next_multiple_of(align);
+            if whole.shape.bits {
+                let need = usize::try_from(start - whole.size).unwrap_or(0);
+                if exec && self.aarch64 {
+                    whole.bytes.resize(whole.bytes.len() + need % 4, 0);
+                    for _ in 0..need / 4 {
+                        whole.bytes.extend_from_slice(&A64_NOP.to_le_bytes());
+                    }
+                } else if exec {
+                    nops(need, &mut whole.bytes);
+                } else {
+                    whole.bytes.resize(whole.bytes.len() + need, 0);
+                }
+                whole.bytes.extend(taken);
+            }
+            whole.size = start + size;
+            whole.align = whole.align.max(align);
+            let shift = usize::try_from(start).unwrap_or(usize::MAX);
+            whole
+                .relocs
+                .extend(relocs.into_iter().map(|reloc| Reloc { at: reloc.at + shift, ..reloc }));
+            self.parts[sub].size = 0;
+            if self.labelled.contains(&sub) {
+                self.labelled.insert(parent);
+            }
+            moved.insert(sub, (parent, start));
+        }
+        let place = |part: &mut usize, at: &mut u64| {
+            if let Some(&(parent, start)) = moved.get(part) {
+                *part = parent;
+                *at += start;
+            }
+        };
+        for sym in &mut self.syms {
+            if let Held::In { part, offset } = &mut sym.at {
+                place(part, offset);
+            }
+        }
+        for fixup in &mut self.fixups {
+            place(&mut fixup.part, &mut fixup.at);
+        }
+        for aligned in &mut self.aligns {
+            place(&mut aligned.part, &mut aligned.at);
+        }
+        for frame in &mut self.frames {
+            place(&mut frame.part, &mut frame.start);
+        }
+        for described in &mut self.prologues {
+            place(&mut described.part, &mut described.start);
+        }
+        let sums = self.fixups.iter_mut().map(|fixup| &mut fixup.sum);
+        let sums = sums.chain(self.sets.iter_mut().map(|(_, sum, _)| sum));
+        for sum in sums.chain(self.sizes.iter_mut().map(|(_, sum, _)| sum)) {
+            for term in &mut sum.terms {
+                if let What::Here { part, at } = &mut term.what {
+                    if let Some(&(parent, start)) = moved.get(part) {
+                        *part = parent;
+                        *at += start as i64;
+                    }
+                }
+            }
+        }
     }
 
     /// `.section name[, "flags"[, @type]]`.
@@ -1538,7 +1696,9 @@ impl Reader {
     /// The symbol of each `.linkonce` group, which is the first name its section defines.
     fn leaders(&mut self) -> Result<(), Trouble> {
         for at in 0..self.parts.len() {
-            if !self.parts[at].group.as_ref().is_some_and(|group| group.symbol.is_empty()) {
+            if self.subs.contains_key(&at)
+                || !self.parts[at].group.as_ref().is_some_and(|group| group.symbol.is_empty())
+            {
                 continue;
             }
             let first = self
@@ -2013,6 +2173,7 @@ impl Reader {
         if self.described.is_some() {
             return Err(self.bad("a '.seh_proc' that is never ended"));
         }
+        self.join_subsections();
         self.unwind_table();
         self.seh_table()?;
         self.resolve_sets()?;
@@ -2031,7 +2192,8 @@ impl Reader {
             .iter()
             .enumerate()
             .map(|(at, part)| {
-                part.size > 0 || !part.relocs.is_empty() || self.labelled.contains(&at)
+                !self.subs.contains_key(&at)
+                    && (part.size > 0 || !part.relocs.is_empty() || self.labelled.contains(&at))
             })
             .collect();
         let mut moved = vec![0usize; self.parts.len()];
@@ -3985,6 +4147,52 @@ _tls$tlv$init:
         );
         assert_eq!(bytes(&out, ".data"), vec![1, 2]);
         assert_eq!(bytes(&out, ".rodata"), vec![9]);
+    }
+
+    /// A subsection goes behind the section it is part of, in the order of the numbers and not the
+    /// order the file wrote them in, and each spelling of one reaches the same run: `.subsection`,
+    /// a number after `.text`, and a number after the name in `.pushsection`. A jump from one run
+    /// to another is a distance inside one section once they are put together, and `.previous`
+    /// goes back to the run the file was in and not to the section as a whole.
+    #[test]
+    fn subsections_go_behind_their_section_in_the_order_of_their_numbers() {
+        let out = assembled(
+            "\t.text\n\t.byte 1\n\t.subsection 2\n\t.byte 5\n\t.text 1\n2:\n\t.byte 3\n\
+             \t.subsection 0\n\t.byte 2\n\t.pushsection .text, 1\n\t.byte 4\n\t.popsection\n\
+             \tjmp 2b\n\t.section .data\n\t.byte 9\n\t.previous\n\t.byte 0xcc\n",
+        );
+        // The jump back to `2:` is written after the unnumbered run, which ends with it and the
+        // `int3` behind it, and the label is the first byte of subsection 1 behind those.
+        assert_eq!(bytes(&out, ".text"), vec![1, 2, 0xeb, 1, 0xcc, 3, 4, 5]);
+        assert_eq!(bytes(&out, ".data"), vec![9]);
+        assert_eq!(out.parts.iter().filter(|part| part.name == ".text").count(), 1);
+
+        // A run that asked for a boundary starts on it, so the alignment inside it still holds.
+        let out = assembled("\t.data\n\t.byte 1\n\t.subsection 1\n\t.balign 4\n\t.byte 2\n");
+        assert_eq!(bytes(&out, ".data"), vec![1, 0, 0, 0, 2]);
+    }
+
+    /// The same numbered label written by two templates is two places, and a table entry each
+    /// template pushes into a section of its own names the one behind it. That is what every
+    /// `_ASM_EXTABLE` in the kernel is, and what the compiler's listing hands this with every
+    /// template of a unit in one stream.
+    #[test]
+    fn numbered_labels_and_pushed_sections_are_one_stream() {
+        let entry = "\t.pushsection __ex_table,\"a\"\n\t.balign 4\n\t.long 1b - .\n\t.long 2f - .\n\
+                     \t.popsection\n";
+        let out = assembled(&format!("1:\tnop\n{entry}2:\tnop\n1:\tnop\n{entry}2:\tret\n"));
+        assert_eq!(bytes(&out, ".text"), vec![0x90, 0x90, 0x90, 0xc3]);
+        let table = out.parts.iter().find(|part| part.name == "__ex_table").unwrap();
+        // Where in `.text` each entry points, from the place each relocation names and its addend.
+        let relocs: Vec<(usize, i64)> = table
+            .relocs
+            .iter()
+            .map(|reloc| match name(&out, &reloc.symbol).at {
+                Held::In { offset, .. } => (reloc.at, offset as i64 + reloc.addend),
+                other => panic!("'{}' is {other:?}", reloc.symbol),
+            })
+            .collect();
+        assert_eq!(relocs, [(0, 0), (4, 1), (8, 2), (12, 3)]);
     }
 
     #[test]

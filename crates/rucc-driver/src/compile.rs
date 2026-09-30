@@ -5895,6 +5895,70 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(result.messages[0].contains(":3:"), "the call in calls: {:?}", result.messages);
     }
 
+    /// The kernel's `get_user`, cut down: a numbered label on a load whose address is an operand,
+    /// a fixup in a section of its own reached with `.previous`, and an exception table entry that
+    /// names both labels from a `.pushsection`. Every copy of the template writes the same `1:`,
+    /// and each entry has to name its own copy, which only holds when every template of the unit
+    /// and every `asm` at file scope is one stream for the assembler, the way gcc hands them to
+    /// gas. The one at file scope is a directive the reader of those does not take, which on ELF
+    /// goes into the same stream.
+    #[test]
+    fn numbered_labels_and_section_stacks_are_one_stream_across_templates() {
+        let source = concat!(
+            "__asm__(\".pushsection .rodata.marks, \\\"a\\\"\\n1: .long 1b - .\\n",
+            ".subsection 1\\n.long 1b - .\\n.popsection\\n\");\n",
+            "static inline int get(const int *p, int *out) {\n",
+            "  int err = 0, v;\n",
+            "  __asm__ volatile(\"1: movl (%2),%1\\n2:\\n\"\n",
+            "    \".section .fixup,\\\"ax\\\"\\n3: movl $-14,%0\\n jmp 2b\\n.previous\\n\"\n",
+            "    \".pushsection __ex_table,\\\"a\\\"\\n.balign 4\\n.long 1b - .\\n.long 3b - .\\n\"\n",
+            "    \".popsection\\n\" : \"+r\"(err), \"=r\"(v) : \"r\"(p));\n",
+            "  *out = v;\n",
+            "  return err;\n",
+            "}\n",
+            "int f(const int *p, int *o) { return get(p, o) + get(p + 1, o); }\n",
+            "int g(const int *p, int *o) { return get(p + 2, o); }\n",
+        );
+        // One copy of the template at `-O0`, where `get` is a function of its own, and three at
+        // `-O2`, where it is inlined into each call.
+        for (level, copies) in [(rucc_session::OptLevel::O0, 1), (rucc_session::OptLevel::O2, 3)] {
+            let mut opts = options();
+            opts.opt_level = level;
+            opts.emit = EmitKind::Asm;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{level:?}");
+            let read = rucc_asm::read(result.text(), Arch::X86_64)
+                .unwrap_or_else(|trouble| panic!("{level:?}: {trouble}\n{}", result.text()));
+            let part = |name: &str| read.parts.iter().find(|part| part.name == name);
+            let table = part("__ex_table").expect("the exception table");
+            // An entry of two words for each copy, each naming a place of its own: the first word
+            // the load of its copy in `.text`, the second the fixup of it.
+            assert_eq!(table.relocs.len(), 2 * copies, "{level:?}");
+            let places: rucc_base::hash::Set<(String, i64)> = table
+                .relocs
+                .iter()
+                .map(|reloc| {
+                    let name = read.names.iter().find(|name| name.name == reloc.symbol);
+                    let (part, offset) = match name.map(|name| name.at) {
+                        Some(rucc_object::Held::In { part, offset }) => (part, offset),
+                        other => panic!("'{}' is {other:?}", reloc.symbol),
+                    };
+                    (read.parts[part].name.clone(), offset as i64 + reloc.addend)
+                })
+                .collect();
+            assert_eq!(places.len(), 2 * copies, "{level:?}: {places:?}");
+            // The jump back from each fixup lands in `.text`, another section, so each is one
+            // relocation of its own.
+            assert_eq!(part(".fixup").expect("the fixups").relocs.len(), copies, "{level:?}");
+            let marks = part(".rodata.marks").expect("the section the file scope asm pushed");
+            assert_eq!(marks.bytes, [0, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff], "{level:?}");
+
+            opts.emit = EmitKind::Object;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{level:?}");
+        }
+    }
+
     /// An `asm` at file scope with an instruction in it, which is how a unit writes a whole
     /// function in assembly. The template goes into the listing as it was written, between the
     /// markers gcc writes, and an object is assembled from that listing, so the function it
@@ -10679,13 +10743,19 @@ block2:
         );
     }
 
-    /// A template of directives the reader does not take is refused by name rather than dropped.
-    /// One with an instruction in it goes to the assembler instead, which
-    /// `an_asm_at_file_scope_with_an_instruction_in_it_is_assembled` covers.
+    /// A template of directives the reader does not take is refused by name rather than dropped on
+    /// a format with no listing reader behind it. On ELF it goes to the assembler instead, which
+    /// `an_asm_at_file_scope_with_an_instruction_in_it_is_assembled` covers for an instruction and
+    /// `numbered_labels_and_section_stacks_are_one_stream_across_templates` for a directive.
     #[test]
     fn a_directive_in_an_asm_at_file_scope_is_refused_rather_than_ignored() {
         let source = "__asm__(\".data\\n.set alias, 4\\n\");\n";
-        let messages = errors(source);
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
+        let result = run(&opts, source);
+        assert!(result.failed(), "expected this to be refused:\n{source}");
+        let messages = result.messages;
         assert!(
             messages
                 .iter()

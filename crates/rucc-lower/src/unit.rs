@@ -494,6 +494,17 @@ impl Unit<'_> {
             let template = self.spelled(asm.template);
             let read = match directives::assemble(&template, &mut *self.read) {
                 Ok(read) => read,
+                // A directive this reader does not take, which on ELF is the assembler's to read
+                // for the same reason an instruction is. The listing is one stream for the whole
+                // object, so a `.macro` written here is there for a template in a function below
+                // to use, and a `.pushsection` or a numbered label here is read in the same place
+                // and the same order as gcc would have handed it to gas.
+                Err(directives::Failed::Unsupported(_))
+                    if self.target.object_format == ObjectFormat::Elf =>
+                {
+                    self.module.add_file_asm(template);
+                    continue;
+                }
                 Err(directives::Failed::Unsupported(what)) => {
                     self.unsupported(&format!("{what} in an `asm` at file scope"), asm.span);
                     continue;
