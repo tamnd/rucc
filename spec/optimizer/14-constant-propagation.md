@@ -113,12 +113,18 @@ read out of objects, with no call, increment, `volatile` read, pointer followed 
 becomes an `is_constant` instruction instead, and `crates/rucc-opt/src/constant_p.rs` answers it.
 At `-O0` every one is answered zero before any pass runs. Above that the `constant-p` pass sits
 after the second `load-forward` (after `redundant-load` at `-O2` and `-O3`) and in front of a
-`fold`, `simplify` and `simplify-cfg`, so the arm the answer did not choose is taken out, and it
-answers one where the operand has become an `iconst` or an `fconst` and zero elsewhere. The pass
+`fold`, `simplify` and `simplify-cfg`, and it answers one where the operand has become an `iconst`
+or an `fconst`, or where the ranges pin it to one number at the question, and zero elsewhere. In a
+function where it answered something it does not leave the arm to those passes: it folds, points
+the readers of a `select` on a constant at the arm it picks, prunes the branches the ranges settle
+and simplifies the graph, round after round, and only answers the rest zero once a round changes
+nothing. The contract, which the kernel's `BUILD_BUG_ON`, `percpu.h` size switch and FORTIFY checks
+rely on, is that under `-O1` and above every branch an answer rules out is gone before code
+generation and no call in it reaches the object. `crates/rucc/tests/constant_p.rs` holds it to
+that. The pass
 is required, and whatever a pass list without it leaves is answered the same way once the list is
 done. Where a constant is needed, such as `__builtin_choose_expr` or a static initializer, the
-answer is zero, which is gcc's. There is no inliner and no `sccp` yet, so a parameter of a function
-that would be inlined, or a `static` that nothing writes, is still zero where gcc says one.
+answer is zero, which is gcc's.
 
 ## 14.4 What rucc builds
 
