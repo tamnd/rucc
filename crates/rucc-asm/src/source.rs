@@ -315,6 +315,10 @@ struct Reader {
     /// The parts that are a numbered subsection of another, with the part that is the section
     /// itself and the number. See [`Reader::subsection`].
     subs: Map<usize, (usize, u64)>,
+    /// The ELF sections a `.section` or a `.pushsection` named, which are written even when
+    /// nothing went into them, as gas writes them. A linker script may keep one and take its
+    /// address.
+    declared: Set<usize>,
     syms: Vec<Sym>,
     known: Map<String, usize>,
     /// How many times each numbered local label has been written so far, which is what `1b` counts
@@ -1174,6 +1178,7 @@ impl Reader {
             "section" if self.macho => self.apple_section_directive(&args)?,
             "section" => self.section_directive(&args)?,
             "linkonce" if self.coff => self.linkonce(rest)?,
+            "linkonce" if !self.macho => self.elf_linkonce(rest)?,
             "zerofill" if self.macho => self.zerofill(&args, false)?,
             "tbss" if self.macho => self.zerofill(&args, true)?,
             "subsections_via_symbols" if self.macho => self.subsections = true,
@@ -1561,7 +1566,7 @@ impl Reader {
         if self.coff {
             return self.coff_section(&name, shape, args);
         }
-        let (mut merge, mut strings) = (false, false);
+        let (mut merge, mut strings, mut grouped, mut linked) = (false, false, false, false);
         if let Some(flags) = args.get(1) {
             let letters = unquoted(flags.trim());
             shape = Shape { bits: true, ..Shape::default() };
@@ -1573,10 +1578,13 @@ impl Reader {
                     'T' => shape.thread = true,
                     'M' => merge = true,
                     'S' => strings = true,
-                    // Part of a group, and the rest. They are about what a linker may do with two
-                    // copies of the section, and taking them as an ordinary section of the same
-                    // bytes is correct and merely larger.
-                    'G' | 'o' | 'e' | 'R' | 'd' => {}
+                    'G' => grouped = true,
+                    'R' => shape.retain = true,
+                    // The section it goes with, which comes after the type and is read past below.
+                    'o' => linked = true,
+                    // Excluded from the link, and a section of large data. Taking either as an
+                    // ordinary section of the same bytes is correct and merely larger.
+                    'e' | 'd' => {}
                     _ => {
                         let what = format!("'{letter}' is not a section flag this compiler knows");
                         return Err(self.bad(&what));
@@ -1598,7 +1606,10 @@ impl Reader {
                 "init_array" => shape.array = Some(Array::Init),
                 "fini_array" => shape.array = Some(Array::Fini),
                 "preinit_array" => shape.array = Some(Array::Preinit),
-                "note" => shape.bits = true,
+                "note" => {
+                    shape.bits = true;
+                    shape.note = true;
+                }
                 _ => {
                     let what = format!("'{kind}' is not a section type this compiler writes");
                     return Err(self.bad(&what));
@@ -1606,12 +1617,47 @@ impl Reader {
             }
         }
         // How long an entry is follows the type, and a section with `M` and no length, or one this
-        // cannot read, is taken as an ordinary one, which is correct and merely larger.
+        // cannot read, is taken as an ordinary one, which is correct and merely larger. Then the
+        // section `o` goes with, and then the group `G` puts it in with the word that makes that a
+        // COMDAT, in the order gas reads them.
+        let mut next = 3;
         if merge {
-            shape.merge = args.get(3).and_then(|entry| entry.trim().parse().ok()).unwrap_or(0);
+            shape.merge = args.get(next).and_then(|entry| entry.trim().parse().ok()).unwrap_or(0);
             shape.strings = strings;
+            next += 1;
         }
-        self.section(&name, shape);
+        if linked {
+            next += 1;
+        }
+        let group = match grouped.then(|| args.get(next)).flatten() {
+            Some(symbol) => {
+                let keep = match args.get(next + 1).map(|word| word.trim()) {
+                    Some("comdat") => Keep::Any,
+                    None => Keep::Together,
+                    Some(word) => {
+                        return Err(self.bad(&format!("'{word}' is not a kind of section group")));
+                    }
+                };
+                Some(Group { symbol: unquoted(symbol.trim()), keep })
+            }
+            None if grouped => return Err(self.bad("a section group with no name")),
+            None => None,
+        };
+        self.section_in(&name, shape, group);
+        self.declared.insert(self.here);
+        Ok(())
+    }
+
+    /// `.linkonce [selection]`, on ELF, which makes the section a COMDAT group about its own name,
+    /// the one copy of it the linker keeps being any one. gas takes the words COFF has for which
+    /// copy, and ELF has no way to say them.
+    fn elf_linkonce(&mut self, rest: &str) -> Result<(), Trouble> {
+        let word = rest.trim();
+        if !word.is_empty() && Keep::of(word).is_none() {
+            return Err(self.bad(&format!("'{word}' is not a COMDAT selection")));
+        }
+        let part = &mut self.parts[self.here];
+        part.group = Some(Group { symbol: part.name.clone(), keep: Keep::Any });
         Ok(())
     }
 
@@ -2505,16 +2551,19 @@ impl Reader {
         }
         self.resolve_fixups()?;
         self.leaders()?;
-        // A section the file only ever mentioned is dropped, so that a `.section` in a macro that
-        // turned out to be unused does not put an empty header in the object. `.text` at the top is
-        // the common case of one.
+        // A section the file only ever mentioned by its short name is dropped, and `.text` at the
+        // top is the common case of one. One an ELF `.section` named is kept however empty, as gas
+        // keeps it, since a linker script may keep it and take its address.
         let keep: Vec<bool> = self
             .parts
             .iter()
             .enumerate()
             .map(|(at, part)| {
                 !self.subs.contains_key(&at)
-                    && (part.size > 0 || !part.relocs.is_empty() || self.labelled.contains(&at))
+                    && (part.size > 0
+                        || !part.relocs.is_empty()
+                        || self.labelled.contains(&at)
+                        || self.declared.contains(&at))
             })
             .collect();
         let mut moved = vec![0usize; self.parts.len()];
