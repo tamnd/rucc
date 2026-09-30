@@ -99,6 +99,8 @@ nothing in between touching a register the call names, removes the call and turn
 epilogue hung on it stay right. It runs at `-O2`, `-O3`, `-Os` and `-Oz`, which is where gcc turns
 `-foptimize-sibling-calls` on, on x86-64 as a `jmp` and on AArch64 as a `b`.
 
+A call through a function pointer is a sibling call on the same conditions, since its signature comes from the pointer's type. The `tail_call` names nobody and takes the address as its first operand, the way a `call_indirect` does, and the `ret` becomes the jump through a register a computed `goto` is selected as. The address is pinned to a register the callee may destroy and no argument of the call is in, so the epilogue never puts anything back over it, which is `rax` on x86-64 unless the call is variadic and the first free argument register on AArch64. `-mindirect-branch=thunk-extern` sends that jump through the thunk for its register like any other.
+
 A function whose every call became a jump is laid out as a leaf. It leaves no return address below its frame, so it owes nobody an aligned stack pointer, and on AArch64 it has no link register to save, so `int f(int a) { return g(a + 1); }` is an add and a jump with no frame at all, which is what gcc writes. The frame is settled long before `tail::jumps` runs, so the layout counts on every such call becoming a jump, and the pipeline stops with an internal error if one does not rather than make a call from a frame that was never aligned for it.
 
 The escape rule is stricter than the paragraph above asks for, because document 08.4's analysis is
@@ -158,11 +160,6 @@ forgetting it produces an IR the verifier rejects, which is the good outcome.
 ## 25.5 What is deliberately not built
 
 **The accumulator transformation.** 25.1.
-
-**Tail calls through function pointers.** Legal and useful, since interpreter dispatch is exactly
-this, and it requires the same conditions plus knowing the callee's signature, which an indirect call
-site has from its type. Worth building; not M4, because M4's escape analysis on an indirect call
-gives up anyway, so the transformation would never fire.
 
 **Tail calls to a different function with a larger argument area.** Requires target support for
 growing the frame before the jump, which some ABIs allow and some do not. M4's condition is

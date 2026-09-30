@@ -941,7 +941,7 @@ pub fn compile_recording(
     // A frame with no call left in it but these was laid out as a leaf, so each of them has to go:
     // one left a call would be made with the stack pointer wherever the leaf left it and with the
     // return address of a function that never saved its own.
-    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, names);
+    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, machine.branch, names);
     assert!(
         stack.kept || jumped == stack.tails.len(),
         "a leaf whose tail calls did not all become jumps"
@@ -1321,6 +1321,36 @@ mod tests {
         let text = tail(2, false);
         assert!(text.contains("x64.call"), "{text}");
         assert!(text.contains("x64.ret"), "{text}");
+    }
+
+    /// `int f(int (*g)(int), int a) { return g(a); }`, which gives its frame back and jumps through
+    /// the register the address is in, and that register is one the epilogue leaves alone.
+    #[test]
+    fn a_call_through_a_pointer_in_tail_position_is_a_jump_through_a_register() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, i32]);
+        source.set_signature(Signature::new().with_params(&[Type::PTR, i32]).with_returns(&[i32]));
+        let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let varargs = source.push_abis(&[]);
+        let info = source.add_call(ir::CallInfo { callee: None, signature: sig, varargs });
+        let mut build = Builder::new(&mut source, block);
+        let inst = ir::InstData {
+            args: build.func().push_values(&[args[0], args[1]]),
+            extra: ir::Extra::Call(info),
+            ..ir::InstData::new(Opcode::CallIndirect)
+        };
+        let called = build.inst(inst, &[i32]);
+        let got = source[called].first_result.expect("an integer comes back");
+        Builder::new(&mut source, block).ret(&[got]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let flags = Flags { sibling: true, ..Flags::default() };
+        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+            .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("x64.jmp_reg $rax"), "{text}");
+        assert!(!text.contains("x64.call"), "{text}");
+        assert!(!text.contains("x64.ret"), "{text}");
     }
 
     /// Eight arguments are two more than there are registers for, so two go in the argument area

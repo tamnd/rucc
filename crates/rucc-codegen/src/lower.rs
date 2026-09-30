@@ -1719,7 +1719,8 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Call(info) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[info];
-        let indirect = data.opcode == Opcode::CallIndirect;
+        // A `tail_call` that names nobody is one through a pointer, per `crate::tail`.
+        let indirect = data.opcode == Opcode::CallIndirect || info.callee.is_none();
 
         let values: Vec<Value> = self.source[data.args].to_vec();
         let callee = if indirect {
@@ -1845,6 +1846,9 @@ impl<'a> Lowering<'a> {
         let outgoing = self.called(inst)?;
         let block = self.at.expect("a block is being filled");
         let call = self.out.insts(block).last().expect("the call just built");
+        if self.out[call].symbol.is_none() {
+            self.through_scratch(call);
+        }
         let values: Vec<Value> = self.source[inst].results().collect();
         let x87 = self.x87_values(&values);
         self.returned(inst, values)?;
@@ -1854,6 +1858,36 @@ impl<'a> Lowering<'a> {
             self.stack.kept = kept;
         }
         Ok(())
+    }
+
+    /// Puts the address a tail call through a pointer reads in a register the epilogue leaves
+    /// alone, so that [`crate::tail::jumps`] can always jump through it.
+    ///
+    /// That is a register the callee may destroy, since the epilogue only puts back the ones it
+    /// keeps, and one no argument of this call is in. The first such in the allocator's order is
+    /// `rax` on x86-64 unless the call is variadic, where `al` is the count, and the first
+    /// argument register the call does not use on AArch64. Both are what gcc picks. Left to the
+    /// allocator the address could land in a kept register in a leaf, and a leaf's tail call has
+    /// to become a jump.
+    fn through_scratch(&mut self, call: mir::Inst) {
+        let list = self.out[call].operands;
+        let first = mir::defs(&self.out[list]);
+        let Some(address) = self.out[list].get(first).copied() else { return };
+        let taken: Vec<PhysReg> = self.out[list][first..]
+            .iter()
+            .filter_map(|operand| match operand.constraint {
+                Constraint::Fixed(reg) if operand.class == address.class => Some(reg),
+                _ => None,
+            })
+            .collect();
+        let free = self
+            .conv
+            .int_order
+            .iter()
+            .find(|reg| !self.conv.int_saved.contains(reg) && !taken.contains(reg));
+        if let Some(&reg) = free {
+            self.out[list][first] = address.with(Constraint::Fixed(reg));
+        }
     }
 
     /// The pointer a function returning through memory was handed, or nothing in a function that
