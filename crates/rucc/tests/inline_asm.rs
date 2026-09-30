@@ -1268,3 +1268,16 @@ fn a_template_with_empty_colons_and_a_doubled_percent_is_extended() {
     let body = body(&text, "f");
     assert!(body.contains("vpxorq %zmm5,%zmm5,%zmm5"), "{body}");
 }
+
+#[test]
+fn a_width_modifier_on_a_constant_prints_the_constant() {
+    // The kernel's `outb`, with the port known. `%w1` asks for the word register the port is in,
+    // and when `"Nd"` made it a constant there is none, so gcc writes the number.
+    let (ok, text, said) = run_with(
+        "width-on-constant",
+        "void f(unsigned char v) { asm volatile(\"outb %b0, %w1\" : : \"a\"(v), \"Nd\"((unsigned short)0x21)); }\n",
+        &["-O2"],
+    );
+    assert!(ok, "{said}");
+    assert!(text.contains("outb %al, $33"), "{text}");
+}

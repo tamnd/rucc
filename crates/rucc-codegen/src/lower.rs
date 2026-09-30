@@ -5133,6 +5133,10 @@ impl<'a> Lowering<'a> {
                         text.push(suffix_of(bits).ok_or_else(refused)?);
                         continue;
                     }
+                    // A width names a register, and a constant has none, so gcc prints the
+                    // constant as it would with no modifier. The kernel's `outb` is written
+                    // `%w1` against `"Nd"`, which is a constant whenever the port is.
+                    Some('b' | 'w' | 'k' | 'q') if !a64 => false,
                     Some(_) => return Err(refused()),
                 };
                 // A constant is bare on AArch64 whatever the modifier, which is how gcc prints one
