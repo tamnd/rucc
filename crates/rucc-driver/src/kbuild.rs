@@ -54,8 +54,8 @@ const fn only(arch: Arch, row: Row) -> Row {
 const X86: Arch = Arch::X86_64;
 const A64: Arch = Arch::Aarch64;
 
-const GUARD: &str = "the canary is read from where the target's C library keeps it, %fs:40 on \
-                     x86-64, and nothing yet moves it";
+const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
+                     at an offset from sp_el0 is part of that work";
 const THUNKS: &str = "a branch goes through a thunk the program links in, which is thunk-extern, \
                       and no thunk body is written into the unit";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
@@ -197,10 +197,7 @@ pub(crate) const TABLE: &[Row] = &[
     refused("-gz=zlib-gnu", "the debug sections are written uncompressed", Some(2288)),
     refused("-gz=zstd", "the debug sections are written uncompressed", Some(2288)),
     // x86-64.
-    only(X86, same("-mstack-protector-guard=tls", "the canary is the thread's own, the default")),
-    only(X86, same("-mstack-protector-guard-reg=fs", "the canary is read through %fs")),
-    only(X86, same("-mstack-protector-guard-offset=40", "the canary is read from %fs:40")),
-    refused("-mstack-protector-guard*", GUARD, Some(2279)),
+    only(A64, refused("-mstack-protector-guard*", GUARD, Some(2279))),
     // The thunk spellings nothing here writes. `keep` and `thunk-extern` have their own arms.
     only(X86, refused("-mindirect-branch=thunk", THUNKS, None)),
     only(X86, refused("-mindirect-branch=thunk-inline", THUNKS, None)),
