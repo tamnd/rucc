@@ -57,7 +57,7 @@
 //! Such a local is not asked about the way the others are. The touches this pass can see are still
 //! where it starts, but it cannot be asked where the last touch is, because the call it was handed
 //! to may have kept the address and any later call may use it. So its area is every point that a
-//! touch reaches going forward without meeting an end on the way, see [`ended`]. That is exact for
+//! touch reaches going forward without meeting an end on the way, see `ended`. That is exact for
 //! a straight run, and a loop comes out right too: the declaration is at the top of the body, the
 //! end is at the bottom, and the back edge carries nothing because the end stands in the way. What
 //! a declaration a `goto` jumps into or out of does is covered by the front end, which writes no
