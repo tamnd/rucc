@@ -2125,6 +2125,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // scheduler and hoisting pass blow up the register pressure.
             "-fschedule-insns" | "-fno-schedule-insns" => {}
             "-fcode-hoisting" | "-fno-code-hoisting" => {}
+            // The scheduler's own knobs, which serpent asks for with `-fsched-pressure`. Every
+            // name under `-fsched-` and `-fsched2-` tunes that pass and nothing else, so the family
+            // is taken whole like the two above.
+            _ if ["-fsched-", "-fno-sched-", "-fsched2-", "-fno-sched2-"]
+                .iter()
+                .any(|family| arg.starts_with(family)) => {}
             // The one of the family that does reach the optimizer, since the step it names is built:
             // `-fno-inline` stops a function declared `inline` from being inlined and leaves
             // `always_inline` alone, which is what it does in gcc.
@@ -5173,6 +5179,10 @@ mod tests {
             "-fno-schedule-insns",
             "-fschedule-insns",
             "-fno-code-hoisting",
+            "-fsched-pressure",
+            "-fno-sched-interblock",
+            "-fsched-stalled-insns=2",
+            "-fsched2-use-superblocks",
         ] {
             let (opts, _) = compile(&["-c", flag, "a.c"]);
             assert_eq!(opts.emit, EmitKind::Object, "{flag}");
