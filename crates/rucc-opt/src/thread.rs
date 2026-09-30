@@ -762,7 +762,8 @@ fn allowed(loops: &Loops, from: Block, into: Block) -> bool {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Restrict, Signature, Type, Value,
+        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict, Signature, Type,
+        Value,
     };
 
     use rucc_base::hash::Map;
@@ -868,6 +869,47 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, crate::simplify_cfg::REMOVED), 1);
     }
 
+    /// `if (!begin(p)) return -EFAULT;` with `begin` inlined: the arms carry the one bit `begin`
+    /// returns and the join branches on its `xor` with one, which is what `!` on a `_Bool` is.
+    /// Each edge decides the branch through the `xor`, and the kernel's `user_access_begin` needs
+    /// both threaded so that the edge where the check failed does not join the one after `stac`.
+    #[test]
+    fn a_join_that_tests_the_not_of_a_bit_it_was_given_is_threaded() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(1));
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([0, -1]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(1), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let ones = build.iconst(Type::int(1), -1);
+        let not = build.binary(Opcode::Xor, param, ones, Flags::default());
+        build.br_if(not, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = thread(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
+        // The arm carrying 0 goes to the side the `!` is true on, and the one carrying 1 to the
+        // other side.
+        assert_eq!(goes_to(&func, 1), vec![4]);
+        assert_eq!(goes_to(&func, 2), vec![5]);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
     #[test]
     fn an_edge_that_does_not_decide_the_test_is_left_alone() {
         let mut names = Interner::new();
@@ -958,7 +1000,7 @@ mod tests {
         // path may walk past it, and threading either edge would be a path that did.
         let what = build.iconst(Type::int(32), 7);
         let address = build.iconst(Type::int(64), 16);
-        let address = build.unary(rucc_ir::Opcode::IntToPtr, address, Type::PTR);
+        let address = build.unary(Opcode::IntToPtr, address, Type::PTR);
         let info = MemInfo {
             size: 4,
             align: 4,
@@ -1065,7 +1107,7 @@ mod tests {
         let mut func = clamp_with(|build, _| {
             let what = build.iconst(Type::int(32), 7);
             let address = build.iconst(Type::int(64), 16);
-            let address = build.unary(rucc_ir::Opcode::IntToPtr, address, Type::PTR);
+            let address = build.unary(Opcode::IntToPtr, address, Type::PTR);
             let info = MemInfo {
                 size: 4,
                 align: 4,
@@ -1089,7 +1131,7 @@ mod tests {
             let mut func = clamp_with(|build, param| {
                 let mut sum = param;
                 for _ in 0..adds {
-                    sum = build.binary(rucc_ir::Opcode::Add, sum, param, Flags::NONE);
+                    sum = build.binary(Opcode::Add, sum, param, Flags::NONE);
                 }
             });
             // The one, the test and the adds, which is fifteen and then sixteen.
@@ -1152,7 +1194,7 @@ mod tests {
         let test = build.icmp(IntPred::Eq, param, one);
         // A sum the false arm reads, so that every edge still wants a copy after the first ones:
         // the merge they leave behind is carried a value the join works out.
-        let sum = build.binary(rucc_ir::Opcode::Add, param, one, Flags::NONE);
+        let sum = build.binary(Opcode::Add, param, one, Flags::NONE);
         build.br_if(test, yes, &[], no, &[]);
         let mut build = Builder::new(&mut func, yes);
         let zero = build.iconst(Type::int(32), 0);
@@ -1204,7 +1246,7 @@ mod tests {
         let mut build = Builder::new(&mut func, join);
         let one = build.iconst(Type::int(32), 1);
         let test = build.icmp(IntPred::Eq, param, one);
-        let sum = build.binary(rucc_ir::Opcode::Add, param, one, Flags::NONE);
+        let sum = build.binary(Opcode::Add, param, one, Flags::NONE);
         build.br_if(test, yes, &[sum], no, &[]);
         let mut build = Builder::new(&mut func, yes);
         build.ret(&[got]);
@@ -1245,7 +1287,7 @@ mod tests {
         let test = build.icmp(IntPred::Eq, param, one);
         // The true arm carries a sum this block worked out, which is exactly the value section
         // 23.1's copy of the block exists to make available on the threaded path.
-        let sum = build.binary(rucc_ir::Opcode::Add, param, one, Flags::NONE);
+        let sum = build.binary(Opcode::Add, param, one, Flags::NONE);
         build.br_if(test, yes, &[sum], no, &[]);
         for block in [yes, no] {
             let mut build = Builder::new(&mut func, block);
