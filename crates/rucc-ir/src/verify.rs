@@ -2108,8 +2108,11 @@ impl Layout {
 ///
 /// The one in the verifier rather than a shared analysis, because the optimizer's dominator
 /// tree is incrementally maintained across a pass and this one is built from nothing every time
-/// it is asked for. The two want different things from the same idea.
-struct Doms {
+/// it is asked for. The two want different things from the same idea. It is public for the passes
+/// after the optimizer that need to ask the question once and have no tree of their own, which
+/// `rucc_safety::handover` is: a capability it hands to a call has to be one the call can see.
+#[derive(Debug)]
+pub struct Doms {
     /// Where each block is in reverse postorder, which is the order the fixed point converges
     /// fastest in, and `None` for one the entry does not reach.
     rank: Vec<Option<u32>>,
@@ -2118,7 +2121,13 @@ struct Doms {
 }
 
 impl Doms {
-    fn new(func: &Func) -> Self {
+    /// Works out the tree for a function as it stands.
+    ///
+    /// # Panics
+    ///
+    /// On a function with no blocks, which has nothing to dominate.
+    #[must_use]
+    pub fn new(func: &Func) -> Self {
         let counts = func.counts();
         let entry = func.entry().expect("a function with blocks has a first one");
 
@@ -2221,7 +2230,8 @@ impl Doms {
     /// A block the entry does not reach is dominated by everything, which is vacuously true and
     /// keeps an unreachable block from being reported twice over, once for being unreachable
     /// and once for every value it uses.
-    fn dominates(&self, of: Block, block: Block) -> bool {
+    #[must_use]
+    pub fn dominates(&self, of: Block, block: Block) -> bool {
         let (Some(a), Some(b)) = (self.rank[of.index()], self.rank[block.index()]) else {
             return true;
         };
