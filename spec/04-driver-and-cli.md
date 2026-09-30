@@ -341,6 +341,7 @@ Honored, by doing what gcc does:
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
 | `-mpreferred-stack-boundary=N` (x86-64) | The stack pointer is kept on a multiple of 2 to the N at every call and counted on to be no more than that on entry, for N from 4 to 12, and from 3 once `-mno-sse` is on the line as well, which is gcc's range. A frame is rounded to that and not to sixteen, and a local that asks for more is aligned by the prologue behind a frame pointer with `and`, which is gcc's sequence and the one objtool reads. A local aggregate of sixteen bytes or more, which is otherwise raised to sixteen, is raised no further than the boundary. |
 | `-mno-sse`, `-mno-sse2`, `-mno-mmx` (x86-64), `-mgeneral-regs-only` | The vector registers are kept out of every function. The extension macros such as `__SSE2__` and `__SSE2_MATH__` go, the register save area of a variadic function holds the general purpose registers only, and a function with a `float`, a `double` or a vector in it is refused with the type named, as gcc refuses it. On x86-64 they are off once SSE2 is. On AArch64 `-mgeneral-regs-only` does the same to the FP and SIMD registers, and `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros go. On x86-64 it also turns the x87 stack off. |
+| `-mstack-protector-guard=tls`, `-mstack-protector-guard=global`, `-mstack-protector-guard-reg=`, `-mstack-protector-guard-offset=`, `-mstack-protector-guard-symbol=` (x86-64) | Where the canary is read from. `tls` is a thread's block through `-mstack-protector-guard-reg=`, `fs` or `gs`, at `-mstack-protector-guard-offset=` or at the symbol `-mstack-protector-guard-symbol=` names when there is one, which is `%gs:__ref_stack_chk_guard(%rip)` for the kernel from 6.13 on and `%gs:40` before it. The register is `gs` under `-mcmodel=kernel` and `fs` otherwise, as in gcc. `global` is the variable `__stack_chk_guard` and the other three are not read. Under `-fPIC` a symbol's address is read out of the global offset table first, as gcc does. The default is `%fs:40`, and `%gs:40` under `-mcmodel=kernel`. |
 | `-mno-80387`, `-msoft-float` (x86-64) | The x87 stack is kept out of every function, and a function with a `long double` in it is refused. `-m80387` and `-mhard-float` turn it back on. |
 | `-mno-fp-ret-in-387` (x86-64) | Taken with `-mno-80387`, where nothing is returned on the x87 stack, and refused without it, since there it would change where a `long double` comes back. |
 | `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
@@ -370,7 +371,6 @@ Taken because what they ask for is what happens:
 | `-ftrivial-auto-var-init=uninitialized` | The default. |
 | `-fzero-call-used-regs=skip` | The default. |
 | `-gz=none` | The debug sections are not compressed. |
-| `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=fs`, `-mstack-protector-guard-offset=40` (x86-64) | Where the canary is read from already, `%fs:40`. |
 | `-mindirect-branch-register`, `-mno-indirect-branch-register` (x86-64) | Every indirect call and jump already goes through a register and never through memory. |
 | `-mharden-sls=none` (AArch64) | Nothing is put after a return or an indirect branch, the default. |
 | `-mskip-rax-setup`, `-mno-skip-rax-setup` (x86-64) | `%al` is set before every variadic call, which is always correct whether or not gcc would have skipped it. |
@@ -384,7 +384,7 @@ Refused, with the issue that would honor them:
 
 | Flag | Why | Issue |
 |---|---|---|
-| `-mstack-protector-guard*` | The canary is read from where the C library keeps it. | #2279 |
+| `-mstack-protector-guard*` (AArch64) | There is no stack protector on AArch64 yet, and the kernel's canary at an offset from `sp_el0` is part of that work. | #2279 |
 | `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
 | `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
 | `-fconserve-stack` | Inlining does not weigh how much it grows the caller's frame. | #2284 |

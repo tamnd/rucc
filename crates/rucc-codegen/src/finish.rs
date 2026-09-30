@@ -775,7 +775,8 @@ impl Writer<'_> {
         if let Some(protect) = protect {
             let at = frame.canary().expect("a protected function has a slot for its canary");
             let [into, _] = protect.scratch;
-            out.push(self.read_guard(into, protect.guard));
+            let read = self.read_guard(into, protect.guard);
+            out.extend(read);
             out.push(self.store(self.conv.int_class, into, at));
         }
         // The rules the body runs under, kept so that each epilogue can put them back rather than
@@ -1176,8 +1177,9 @@ impl Writer<'_> {
 
         let inst = self.load(class, ours, at);
         self.func.append_inst(block, inst);
-        let inst = self.read_guard(theirs, protect.guard);
-        self.func.append_inst(block, inst);
+        for inst in self.read_guard(theirs, protect.guard) {
+            self.func.append_inst(block, inst);
+        }
         let differ = self.opcode(self.insts.differ);
         let inst = self
             .func
@@ -1207,17 +1209,38 @@ impl Writer<'_> {
 
     /// Reads the word the canary is a copy of into a register.
     ///
-    /// The address is a constant and names no register at all, because where the block a thread
-    /// has to itself begins is something only the machine knows and the segment register is what
-    /// holds it.
-    fn read_guard(&mut self, into: PhysReg, guard: &Guard) -> Inst {
+    /// One load, except for a global guard in code that may end up in a shared library, where the
+    /// word's address is read out of the global offset table into the same register first.
+    ///
+    /// The address of a word in a thread's block names no register at all, because where that
+    /// block begins is something only the machine knows and the segment register is what holds it.
+    /// A symbol read through the segment is the same load with the symbol's distance from the
+    /// instruction added, which is `%gs:__ref_stack_chk_guard(%rip)` in a kernel.
+    fn read_guard(&mut self, into: PhysReg, guard: &Guard) -> Vec<Inst> {
         let class = self.conv.int_class;
         let load = self.opcode(self.insts.moves(class).expect("a class to load").load);
-        self.func
-            .build_loose(load)
-            .def(Reg::physical(into), class)
-            .mem(Mem::in_segment(guard.segment, guard.at))
-            .finish()
+        let mut out = Vec::with_capacity(2);
+        let mem = match guard.symbol {
+            None => {
+                let segment = guard.segment.expect("a guard with no symbol is in a segment");
+                Mem::in_segment(segment, guard.at)
+            }
+            Some(name) if guard.table => {
+                let symbol = self.names.intern(name);
+                let at = Mem::got(symbol);
+                out.push(
+                    self.func.build_loose(load).def(Reg::physical(into), class).mem(at).finish(),
+                );
+                let base = Operand::read(Reg::physical(into), class);
+                Mem { segment: guard.segment, ..Mem::at(base).plus(guard.at) }
+            }
+            Some(name) => {
+                let symbol = self.names.intern(name);
+                Mem { segment: guard.segment, ..Mem::of(symbol).plus(guard.at) }
+            }
+        };
+        out.push(self.func.build_loose(load).def(Reg::physical(into), class).mem(mem).finish());
+        out
     }
 
     /// The instructions the epilogue is, in the order they run.
@@ -2044,6 +2067,34 @@ mod tests {
                 "$rsp = x64.add_ri_64 $rsp, 24",
                 "x64.ret",
             ]
+        );
+    }
+
+    #[test]
+    fn a_kernel_reads_its_canary_through_gs_at_a_symbol() {
+        let reads = |guard: Guard| {
+            let (mut func, allocation, mut names) = pressure(&SYSV, 4, 2);
+            let base = Layout::new(&SYSV, REGS);
+            let layout = Layout { leaf: false, protect: true, ..base };
+            let protect = Protect { guard: &guard, branch: &BRANCH, scratch: [R10, R11] };
+            let lines = with_protector(&mut func, &allocation, &layout, Some(protect), &mut names);
+            let added = added(&lines).into_iter().filter(|line| line.contains("$r11 = x64.mov"));
+            added.map(ToString::to_string).collect::<Vec<_>>()
+        };
+        let fail = "__stack_chk_fail";
+        let symbol = Some("__ref_stack_chk_guard");
+        let segment = Some(rucc_target::Segment::Gs);
+        // What 6.13 and later ask for, which is one load through the segment and the distance to
+        // the symbol from the instruction, like gcc's `%gs:__ref_stack_chk_guard(%rip)`.
+        assert_eq!(
+            reads(Guard { segment, symbol, table: false, at: 0, fail }),
+            ["$r11 = x64.mov_rm_64 [gs:@__ref_stack_chk_guard]"]
+        );
+        // The same in code that may be in a shared library, where the address comes out of the
+        // table first and the load through the segment is from the register.
+        assert_eq!(
+            reads(Guard { segment, symbol, table: true, at: 0, fail }),
+            ["$r11 = x64.mov_rm_64 [got @__ref_stack_chk_guard]", "$r11 = x64.mov_rm_64 [gs:$r11]",]
         );
     }
 

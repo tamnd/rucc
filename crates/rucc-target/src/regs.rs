@@ -274,22 +274,42 @@ impl Segment {
 
 /// Where a target keeps the word a stack protector's canary is a copy of.
 ///
-/// Not a register and not a symbol either, on the conventions here. The word is in the block a
-/// thread has to itself, which is reached through a segment register and no other way, so the only
-/// way to name it is a distance into that block. That is why `%fs:40` appears in every protected
-/// function glibc has ever linked and why no object file carries a relocation for it.
+/// On the conventions here the word is in the block a thread has to itself, which is reached
+/// through a segment register and no other way, so the only way to name it is a distance into that
+/// block. That is why `%fs:40` appears in every protected function glibc has ever linked and why no
+/// object file carries a relocation for it.
+///
+/// A kernel is the other kind of program, and it says where the word is on its command line. x86-64
+/// Linux keeps it at `%gs:__ref_stack_chk_guard` from 6.13 on, which is a symbol read through the
+/// segment, and at `%gs:40` before that. A kernel with no per CPU block keeps it in a plain global
+/// named `__stack_chk_guard`, which is what `-mstack-protector-guard=global` asks for. All three
+/// are this one struct with different fields set.
 ///
 /// A convention that answers `None` is one this compiler has no protector for, and a command line
 /// that asks for one on such a target is told so rather than quietly given an unprotected frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Guard {
-    /// The storage the word is in.
-    pub segment: Segment,
-    /// How far into it the word is.
+    /// The segment the word is read through, or `None` for a word in the flat address space like
+    /// any other global.
+    pub segment: Option<Segment>,
+    /// The symbol the word is at, or `None` for a word only a distance names.
+    pub symbol: Option<&'static str>,
+    /// Whether the symbol's address is read out of the global offset table first, which is what a
+    /// global guard needs in code that may end up in a shared library.
+    pub table: bool,
+    /// How far past the symbol, or into the segment when there is no symbol, the word is.
     pub at: i32,
     /// The function called when the copy in the frame no longer matches it, which does not come
     /// back.
     pub fail: &'static str,
+}
+
+impl Guard {
+    /// The word at a distance into a thread's block, which is where every C library keeps it.
+    #[must_use]
+    pub const fn in_segment(segment: Segment, at: i32) -> Self {
+        Self { segment: Some(segment), symbol: None, table: false, at, fail: "__stack_chk_fail" }
+    }
 }
 
 /// What a profiler's hook at the top of every function is called on this platform.
@@ -687,6 +707,18 @@ impl CallRegs {
             return self;
         }
         made(CallRegs { sse_args: &[], ..*self })
+    }
+
+    /// The same convention with the stack protector's word somewhere else, which is what the
+    /// `-mstack-protector-guard` flags ask for.
+    ///
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see [`made`].
+    #[must_use]
+    pub fn guarded_by(&'static self, guard: Guard) -> &'static CallRegs {
+        if self.guard == Some(guard) {
+            return self;
+        }
+        made(CallRegs { guard: Some(guard), ..*self })
     }
 
     /// The number DWARF gives that register, or `None` for one it has no column for.

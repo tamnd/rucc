@@ -2084,6 +2084,10 @@ pub struct Options {
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` and `-msoft-float` turn
     /// off. That is the eighty bit `long double`.
     pub x87: bool,
+    /// Where the stack protector's canary is copied from when the command line moved it, from the
+    /// `-mstack-protector-guard` flags. `None` is the target's own place, which is `%fs:40` on
+    /// x86-64 Linux. A kernel moves it to its per CPU block behind `%gs`.
+    pub guard: Option<rucc_target::Guard>,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///
@@ -2650,6 +2654,7 @@ impl Options {
             stack_boundary: None,
             vector: true,
             x87: true,
+            guard: None,
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 // Nothing for i686 yet: x86-64's baseline promises SSE2, which an i686 does not.
@@ -2812,12 +2817,13 @@ impl Session {
             target.wchar_width = 16;
             target.wchar_is_signed = false;
         }
-        // The boundary the stack is kept on and whether the vector registers carry arguments,
-        // which the front end reads to decide how far it may align a local and the back end
-        // reads for everything else.
+        // The boundary the stack is kept on, whether the vector registers carry arguments and
+        // where the canary is, which the front end reads to decide how far it may align a local
+        // and the back end reads for everything else.
         if let Some(regs) = target.call_regs {
             let regs = opts.stack_boundary.map_or(regs, |bytes| regs.aligned_to(bytes));
-            target.call_regs = Some(if opts.vector { regs } else { regs.without_vectors() });
+            let regs = if opts.vector { regs } else { regs.without_vectors() };
+            target.call_regs = Some(opts.guard.map_or(regs, |guard| regs.guarded_by(guard)));
         }
         Self {
             opts,

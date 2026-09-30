@@ -177,7 +177,7 @@ pub static SYSV: CallRegs = CallRegs {
     dwarf_return_address: DWARF_RETURN_ADDRESS,
     // Twenty bytes into the thread's block, which is `%gs:20` in every protected function glibc
     // and musl on this target have linked.
-    guard: Some(Guard { segment: Segment::Gs, at: 20, fail: "__stack_chk_fail" }),
+    guard: Some(Guard::in_segment(Segment::Gs, 20)),
     // The older hook by default, which is gcc's default on this target: `-mfentry` is there, and
     // nothing asks for it without saying so.
     trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: false }),

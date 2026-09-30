@@ -761,6 +761,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
     let mut boundary_of_eight: Option<&str> = None;
+    // Where the stack protector's canary is, which is put together after the loop because the
+    // four flags that say it may come in any order and gcc lets the later one win for each.
+    let mut guard_global = false;
+    let mut guard_reg: Option<rucc_target::Segment> = None;
+    let mut guard_offset: Option<i32> = None;
+    let mut guard_symbol: Option<&str> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -2149,6 +2155,49 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     x87 = false;
                 }
             }
+            // Where the canary is read from. gcc's default on x86-64 is `%fs:40`, where glibc keeps
+            // it, and a kernel moves it into its own per CPU block behind `%gs`, at offset 40 up to
+            // 6.12 and at the symbol `__ref_stack_chk_guard` from 6.13 on. `global` is a plain
+            // variable named `__stack_chk_guard`, and then the other three are not read.
+            "-mstack-protector-guard=tls" if arch == rucc_target::Arch::X86_64 => {
+                guard_global = false;
+            }
+            "-mstack-protector-guard=global" if arch == rucc_target::Arch::X86_64 => {
+                guard_global = true;
+            }
+            _ if arch == rucc_target::Arch::X86_64
+                && arg.starts_with("-mstack-protector-guard-reg=") =>
+            {
+                guard_reg = Some(match &arg["-mstack-protector-guard-reg=".len()..] {
+                    "fs" => rucc_target::Segment::Fs,
+                    "gs" => rucc_target::Segment::Gs,
+                    _ => return Err(err(format!("{arg}: the register is fs or gs"))),
+                });
+            }
+            _ if arch == rucc_target::Arch::X86_64
+                && arg.starts_with("-mstack-protector-guard-offset=") =>
+            {
+                let text = &arg["-mstack-protector-guard-offset=".len()..];
+                // gcc reads it as C reads a number, so `0x28` is 40 too.
+                let (sign, digits) = text.strip_prefix('-').map_or((1, text), |rest| (-1, rest));
+                let number = match digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+                    Some(hex) => i64::from_str_radix(hex, 16),
+                    None => digits.parse::<i64>(),
+                };
+                let offset = number.ok().and_then(|n| i32::try_from(sign * n).ok());
+                guard_offset = Some(offset.ok_or_else(|| {
+                    err(format!("{arg}: the offset is a number that fits in 32 bits"))
+                })?);
+            }
+            _ if arch == rucc_target::Arch::X86_64
+                && arg.starts_with("-mstack-protector-guard-symbol=") =>
+            {
+                let name = &arg["-mstack-protector-guard-symbol=".len()..];
+                if name.is_empty() {
+                    return Err(err(format!("{arg}: the symbol has a name")));
+                }
+                guard_symbol = Some(name);
+            }
             // A floor under every function that `-falign-functions` cannot lower, which is gcc's
             // difference between the two: the kernel passes this one because ftrace and the call
             // padding it writes need every function on the boundary, the cold ones included. It is
@@ -2662,6 +2711,29 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
     opts.code_model = cmodel;
+    // The canary's place, when a flag moved it or the code model did, once both it and the
+    // position independence are settled. gcc reads it through `%gs`
+    // rather than `%fs` under `-mcmodel=kernel`, which is what `gcc-x86_64-has-stack-protector.sh`
+    // looks for. Under `-fPIC` a symbol is reached through the global offset table like any
+    // other, which is also what gcc writes.
+    let kernel = opts.code_model == rucc_target::CodeModel::Kernel;
+    let moved =
+        guard_global || guard_reg.is_some() || guard_offset.is_some() || guard_symbol.is_some();
+    if (moved || kernel) && opts.target.arch == rucc_target::Arch::X86_64 {
+        let table = opts.pic == Pic::Library;
+        let fail = "__stack_chk_fail";
+        let reg = if kernel { rucc_target::Segment::Gs } else { rucc_target::Segment::Fs };
+        let reg = guard_reg.unwrap_or(reg);
+        opts.guard = Some(if guard_global {
+            let symbol = Some("__stack_chk_guard");
+            rucc_target::Guard { segment: None, symbol, table, at: 0, fail }
+        } else if let Some(name) = guard_symbol {
+            let symbol = Some(&*Box::leak(name.to_owned().into_boxed_str()));
+            rucc_target::Guard { segment: Some(reg), symbol, table, at: 0, fail }
+        } else {
+            rucc_target::Guard::in_segment(reg, guard_offset.unwrap_or(40))
+        });
+    }
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -8217,13 +8289,62 @@ mod tests {
         assert!(said.contains("unknown option"), "{said}");
     }
 
+    /// The canary moved to where a kernel keeps it, which is `%gs:40` up to 6.12 and a symbol read
+    /// through `%gs` from 6.13 on, and to a plain global, each as gcc reads the four flags.
+    #[test]
+    fn the_kernel_can_move_the_canary() {
+        use rucc_target::{Guard, Segment};
+
+        let guard = |more: &[&str]| {
+            let line = [&[KERNEL_X86, "-c", "a.c"], more].concat();
+            compile(&line).0.guard
+        };
+        assert_eq!(guard(&[]), None);
+        let gs = ["-mstack-protector-guard-reg=gs", "-mstack-protector-guard-offset=40"];
+        assert_eq!(guard(&gs), Some(Guard::in_segment(Segment::Gs, 40)));
+        let hex = ["-mstack-protector-guard-offset=0x28"];
+        assert_eq!(guard(&hex), Some(Guard::in_segment(Segment::Fs, 40)));
+        let symbol = [
+            "-mstack-protector-guard-reg=gs",
+            "-mstack-protector-guard-symbol=__ref_stack_chk_guard",
+        ];
+        let got = guard(&symbol).expect("the guard moved");
+        assert_eq!(
+            (got.segment, got.symbol, got.table),
+            (Some(Segment::Gs), Some("__ref_stack_chk_guard"), false)
+        );
+        // A symbol wins over an offset, as it does for gcc.
+        let both = ["-mstack-protector-guard-symbol=foo", "-mstack-protector-guard-offset=8"];
+        assert_eq!(guard(&both).map(|it| (it.segment, it.at)), Some((Some(Segment::Fs), 0)));
+        // A global ignores the other three, and under -fPIC its address is read out of the table.
+        let global = ["-mstack-protector-guard=global", "-mstack-protector-guard-reg=gs", "-fPIC"];
+        let got = guard(&global).expect("the guard moved");
+        assert_eq!((got.segment, got.symbol, got.table), (None, Some("__stack_chk_guard"), true));
+        // And the later of two wins, which here is the target's own place again.
+        let back = ["-mstack-protector-guard=global", "-mstack-protector-guard=tls"];
+        assert_eq!(guard(&back), None);
+        // The kernel's code model reads it through `%gs` unless a flag names the register.
+        let kernel = ["-mcmodel=kernel", "-fno-PIE"];
+        assert_eq!(guard(&kernel), Some(Guard::in_segment(Segment::Gs, 40)));
+        let fs = ["-mcmodel=kernel", "-fno-PIE", "-mstack-protector-guard-reg=fs"];
+        assert_eq!(guard(&fs), Some(Guard::in_segment(Segment::Fs, 40)));
+
+        for bad in [
+            "-mstack-protector-guard-reg=ds",
+            "-mstack-protector-guard-offset=x",
+            "-mstack-protector-guard-offset=4294967296",
+            "-mstack-protector-guard-symbol=",
+        ] {
+            let said = refused(&[KERNEL_X86, bad, "-c", "a.c"]);
+            assert!(said.starts_with(bad), "{said}");
+        }
+    }
+
     /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
         for (flag, issue) in [
-            ("-mstack-protector-guard-reg=gs", 2279),
-            ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
             ("-fconserve-stack", 2284),
