@@ -788,10 +788,10 @@ notes = "The type and its operators are here and the lanes are computed one at a
 name = "may_alias"
 kind = "attribute"
 gcc_version = "3.3"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["ffmpeg", "glibc"]
-tests = []
+tests = ["rucc-lower::a_typedef_that_may_alias_anything_is_the_root_and_its_type_is_not", "rucc::a_store_through_a_typedef_that_may_alias_carries_the_character_node", "rucc::the_attribute_after_the_typedef_name_says_the_same", "rucc::a_member_of_a_record_that_may_alias_carries_the_character_node"]
+notes = "On a typedef or a record. An access through the type, or to a member of the record, carries the character type's aliasing node, so strict aliasing never separates it from anything. A vector or an aggregate had no node to begin with, so the cases that changed are a scalar typedef and a member."
 
 [[feature]]
 name = "designated_init"

@@ -872,9 +872,13 @@ impl Checker<'_> {
             }
         }
         let asked = self.packing(specs.attrs).align.or(self.packing(item.attrs).align);
-        let ty = match asked.and_then(NonZeroU32::new) {
-            Some(align) => self.types.aligned_typedef(name, ty, align),
-            None => ty,
+        // `may_alias` in either place, and it is a node of its own for the reason an alignment
+        // is: the alias analysis has to tell the typedef from the type it names.
+        let aliases = self.may_alias(specs.attrs) || self.may_alias(item.attrs);
+        let ty = match (asked.and_then(NonZeroU32::new), aliases) {
+            (align, true) => self.types.may_alias_typedef(name, ty, align),
+            (Some(align), false) => self.types.aligned_typedef(name, ty, align),
+            (None, false) => ty,
         };
         // The name goes beside the table whether or not anything was interned for it, which is
         // the only record of it there will be: the binding below is in a scope that closes, and

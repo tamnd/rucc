@@ -276,6 +276,17 @@ impl Checker<'_> {
         })
     }
 
+    /// Whether `may_alias` was written in an attribute list.
+    ///
+    /// It is read on a typedef and on a record, which are the two places it says something about
+    /// a type, and the alias analysis is what listens: an access through the type carries the
+    /// character type's node, so nothing is reordered across it on the strength of the type it
+    /// was written with. That is what `<emmintrin.h>` and every `get_unaligned` rely on, and
+    /// ignoring it is wrong code under `-fstrict-aliasing` rather than slow code.
+    pub(in crate::check) fn may_alias(&self, attrs: AttrList) -> bool {
+        self.ast[attrs].iter().any(|attr| self.gnu_name(attr) == "may_alias")
+    }
+
     /// The byte order a `scalar_storage_order` in an attribute list asked for.
     ///
     /// True for `"big-endian"` and false for `"little-endian"`, and nothing at all when the

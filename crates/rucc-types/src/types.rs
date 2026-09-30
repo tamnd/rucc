@@ -90,6 +90,12 @@ pub struct RecordInfo {
     /// store, and the end of a storage unit a bit-field is allocated from. Both are in
     /// `spec/13-gnu-compat.md`.
     pub reverse: bool,
+    /// Whether `__attribute__((may_alias))` was written on it.
+    ///
+    /// An access to a member of it may then touch an object of any type, the way an access
+    /// through a character type may, which is what a program that lays a structure over bytes it
+    /// did not write as that structure asks for. Nothing about the layout changes.
+    pub may_alias: bool,
 }
 
 /// What is known about one `enum` declaration.
@@ -395,6 +401,7 @@ impl Types {
             fields: Vec::new(),
             transparent: false,
             reverse: false,
+            may_alias: false,
         });
         id
     }
@@ -427,6 +434,15 @@ impl Types {
     /// Panics if `id` came from a different table.
     pub fn make_reverse_order(&mut self, id: RecordId) {
         self.records[id.0 as usize].reverse = true;
+    }
+
+    /// Records that a record said `may_alias`. See [`RecordInfo::may_alias`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    pub fn make_may_alias(&mut self, id: RecordId) {
+        self.records[id.0 as usize].may_alias = true;
     }
 
     /// The type of a declared record.
@@ -581,7 +597,12 @@ impl Types {
 
     /// A typedef name standing for `underlying`.
     pub fn typedef(&mut self, name: Symbol, underlying: TypeId) -> TypeId {
-        self.intern(Type::new(TypeKind::Typedef { name, underlying, align: None }))
+        self.intern(Type::new(TypeKind::Typedef {
+            name,
+            underlying,
+            align: None,
+            may_alias: false,
+        }))
     }
 
     /// The same, for a typedef that said what an object of it is aligned to.
@@ -595,7 +616,46 @@ impl Types {
         underlying: TypeId,
         align: NonZeroU32,
     ) -> TypeId {
-        self.intern(Type::new(TypeKind::Typedef { name, underlying, align: Some(align) }))
+        self.intern(Type::new(TypeKind::Typedef {
+            name,
+            underlying,
+            align: Some(align),
+            may_alias: false,
+        }))
+    }
+
+    /// A typedef that said `may_alias`, and perhaps what an object of it is aligned to as well.
+    /// See [`TypeKind::Typedef`].
+    pub fn may_alias_typedef(
+        &mut self,
+        name: Symbol,
+        underlying: TypeId,
+        align: Option<NonZeroU32>,
+    ) -> TypeId {
+        self.intern(Type::new(TypeKind::Typedef { name, underlying, align, may_alias: true }))
+    }
+
+    /// Whether any typedef in `id`'s sugar said `may_alias`.
+    ///
+    /// Any of them rather than the nearest, unlike [`Self::align_override`], because a typedef
+    /// of a type that may alias anything cannot take that back: `typedef A B` over an `A` that
+    /// said it is still a type an access through which may touch anything.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    #[must_use]
+    pub fn may_alias(&self, id: TypeId) -> bool {
+        let mut id = id;
+        loop {
+            let TypeKind::Typedef { underlying, may_alias, .. } = self.kind(id) else {
+                return false;
+            };
+            if may_alias {
+                return true;
+            }
+            id = underlying;
+        }
     }
 
     /// What a typedef in `id`'s sugar asked an object of it to be aligned to, and [`None`] when

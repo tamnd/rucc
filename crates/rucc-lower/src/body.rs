@@ -4546,14 +4546,15 @@ impl<'u> Body<'_, 'u> {
                 ..Place::new(Where::Addr(addr), ty)
             };
         };
-        let (kind, reverse, found) = {
+        let (kind, reverse, aliases, found) = {
             let info = self.types().record_info(id);
-            (info.kind, info.reverse, info.fields.get(field as usize).copied())
+            (info.kind, info.reverse, info.may_alias, info.fields.get(field as usize).copied())
         };
         // A member of something that is punned is punned too. `u.s.x` names bytes that another
         // member of `u` may have been written through, and how deep in the nesting the name went
-        // does not change which bytes they are.
-        let punned = place.punned || kind == RecordKind::Union;
+        // does not change which bytes they are. A record that said `may_alias` is the same
+        // promise made by the program rather than by C.
+        let punned = place.punned || kind == RecordKind::Union || aliases;
         let Some(member) = found else {
             return Place {
                 punned,

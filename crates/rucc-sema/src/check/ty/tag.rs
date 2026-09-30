@@ -224,6 +224,9 @@ impl Checker<'_> {
         if self.storage_order(attrs) == Some(self.cx.target.little_endian) {
             self.types.make_reverse_order(id);
         }
+        if self.may_alias(attrs) {
+            self.types.make_may_alias(id);
+        }
     }
 
     /// `transparent_union` on a union, checked against the union it was written on.
