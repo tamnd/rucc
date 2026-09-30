@@ -1239,3 +1239,32 @@ int zero(int *v) {
         run("flag-output-bad", "int f(void) { int z; asm(\"\" : \"=@ccq\" (z)); return z; }");
     assert!(!ok && said.contains("flag output"), "{said}");
 }
+
+/// A template kept as text that names two operands in memory, which lib/raid6 writes to load one
+/// block and fetch the next in the same statement. One is the instruction's own memory operand and
+/// the other is read through the register its address is in.
+#[test]
+fn a_kept_template_naming_two_operands_in_memory_reaches_both() {
+    let source = "\
+void f(unsigned char *p, unsigned char *q) {
+    asm volatile(\"prefetchnta %0\\n\\tvmovdqa64 %0,%%zmm2\\n\\tvmovntdq %%zmm2,%1\"
+                 : : \"m\" (*p), \"m\" (*q));
+}
+";
+    let text = asm("two-in-memory", source);
+    let body = body(&text, "f");
+    assert!(body.contains("prefetchnta (%rdi)"), "{body}");
+    assert!(body.contains("vmovdqa64 (%rdi),%zmm2"), "{body}");
+    assert!(body.contains("vmovntdq %zmm2,(%rsi)"), "{body}");
+}
+
+/// A statement with no operands and no clobbers written with the colons anyway is extended
+/// assembly, whose `%%` is one `%`. Basic assembly would hand `%%zmm5` to the assembler as it is,
+/// which no assembler takes, so a template with `%%` in it was written with them.
+#[test]
+fn a_template_with_empty_colons_and_a_doubled_percent_is_extended() {
+    let source = "void f(void) { asm volatile(\"vpxorq %%zmm5,%%zmm5,%%zmm5\" : : ); }\n";
+    let text = asm("empty-colons", source);
+    let body = body(&text, "f");
+    assert!(body.contains("vpxorq %zmm5,%zmm5,%zmm5"), "{body}");
+}
