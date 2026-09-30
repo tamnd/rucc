@@ -231,6 +231,12 @@ pub struct Table {
 pub struct Func {
     /// The name it is called by, which is the name of the IR function it was lowered from.
     pub name: Symbol,
+    /// The section the program put it in with `__attribute__((section(...)))`, from the IR
+    /// function it was lowered from, or `None` for the one code goes in anyway.
+    ///
+    /// Carried for the reason [`Func::binding`] is: the assembler and the object writer are handed
+    /// functions and nothing else.
+    pub section: Option<Symbol>,
     /// What its first instruction has to be aligned to, from the IR function it was lowered
     /// from, or `None` for the alignment every function gets anyway.
     pub align: Option<u32>,
@@ -406,6 +412,7 @@ impl Func {
     pub fn new(name: Symbol) -> Self {
         Self {
             name,
+            section: None,
             align: None,
             binding: Binding::Global,
             visibility: Visibility::Default,

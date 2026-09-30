@@ -162,6 +162,7 @@ pub struct Tast {
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     targets: Vec<(DeclId, Isa)>,
+    sections: Map<DeclId, StrId>,
     defined_at: Map<DeclId, Span>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
@@ -393,6 +394,23 @@ impl Tast {
         if self.target(decl).is_none() {
             self.targets.push((decl, isa));
         }
+    }
+
+    /// Records the section `__attribute__((section(...)))` put a function or an object in.
+    ///
+    /// A list beside the tree for the reason [`Tast::record_target`] is one: most declarations
+    /// name no section, and the ones that do are a kernel's `__init` functions and its tables. The
+    /// first declaration to name one stands, which is what gcc does with a later one that names
+    /// another, and the caller is what warns about that.
+    pub fn record_section(&mut self, decl: DeclId, section: StrId) {
+        self.sections.entry(decl).or_insert(section);
+    }
+
+    /// The section a `section` attribute put this declaration in, and nothing when no declaration
+    /// of it named one.
+    #[must_use]
+    pub fn section(&self, decl: DeclId) -> Option<StrId> {
+        self.sections.get(&decl).copied()
     }
 
     /// The extensions a function was built for, when a `target` attribute said, and nothing when

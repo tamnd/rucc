@@ -1139,8 +1139,14 @@ fn generate(
             // Every unit for AArch64 goes this way for now. The listing is already written from
             // the encoder's own tables, so reading it back is the encoder run over the same values,
             // and it is one path to get right rather than two.
+            //
+            // A function the program put in a section of its own comes this way as well. The
+            // object writer lays the code out as one run of bytes, and the listing is where a
+            // function's section is already said, so it is the one place the answer has to be
+            // right rather than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
-            if aarch64 || globals.kept() || rucc_asm::kept(&funcs, names, target) {
+            let placed_code = funcs.iter().any(|func| func.section.is_some());
+            if aarch64 || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and
                 // `.cfi_lsda`, writes the table in `.gcc_except_table`, and the reader keeps both.
@@ -1154,6 +1160,8 @@ fn generate(
                     .map_err(|trouble| {
                         let what = if aarch64 {
                             "a unit for aarch64"
+                        } else if placed_code {
+                            "a function in a section the program named"
                         } else if globals.kept() {
                             "an `asm` at file scope"
                         } else {

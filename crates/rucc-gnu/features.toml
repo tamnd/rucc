@@ -329,11 +329,11 @@ notes = "Reverses the byte order of every scalar in a record, which is what a pr
 name = "section"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 answer = "error"
 used_by = ["linux", "systemd"]
-tests = []
-notes = "The kernel's initcall and section placement machinery is built on it, and ignoring it silently produces a kernel that does not boot."
+tests = ["rucc::an_elf_listing_puts_each_definition_in_the_section_it_named_with_gccs_flags", "rucc::an_elf_object_has_the_sections_gcc_writes_for_the_same_source", "rucc::a_darwin_listing_maps_an_elf_name_to_a_segment_and_a_section", "rucc::a_windows_listing_names_the_section_with_coff_flags", "rucc-asm::a_variable_in_a_named_section_is_there_with_the_flags_its_contents_ask_for", "rucc-object::a_named_section_carries_the_flags_of_what_is_in_it"]
+notes = "The kernel's initcall and section placement machinery is built on it. A function goes in the named section as code and an object with the writability its contents ask for, zeros are bytes there unless the name is `.bss` or under it, and several definitions share one section in the order they were written. On Mach-O a name with no comma is given a segment, so `.mine` is `__DATA,__mine`."
 
 [[feature]]
 name = "no_sanitize"

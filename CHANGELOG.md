@@ -10,6 +10,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).
 - The interner, the scope map and the object writers hash with the shared hasher instead of SipHash (#2309).
+### Added
+
+- `__attribute__((section("name")))` puts a function or an object in the section it names, where before the attribute was accepted and dropped. A function goes there as code, `"ax"`, and an object as `"a"` when it is a constant holding no address and `"aw"` otherwise, which are gcc's flags. Zeros are written as bytes in the named section rather than sent to `.bss`, except in a section whose name means zeros such as `.bss..page_aligned`, relocations are kept, and several definitions naming one section share it in the order they were written. On Mach-O a name written for ELF becomes `__DATA,__name` or `__TEXT,__name`. The attribute on an automatic object or a typedef is refused, and a later declaration naming a different section is warned about and ignored, as gcc does (#909).
 
 ### Added
 
