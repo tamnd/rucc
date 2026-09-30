@@ -4995,9 +4995,10 @@ _tls$tlv$init:
         // The failure this crate is written to prevent. An assembler that skipped what it did not
         // recognise would write an object that links, and what would be wrong with it is a run of
         // missing bytes in the middle of a function.
-        let why = refused("\t.text\nf:\n\tmovq %rdi, %rax\n\taesenc %xmm1, %xmm0\n\tret\n");
+        let why =
+            refused("\t.text\nf:\n\tmovq %rdi, %rax\n\tvpdpbusd %zmm1, %zmm2, %zmm3\n\tret\n");
         assert_eq!(why.line, 4);
-        assert!(why.why.contains("aesenc"), "{why}");
+        assert!(why.why.contains("vpdpbusd"), "{why}");
     }
 
     #[test]

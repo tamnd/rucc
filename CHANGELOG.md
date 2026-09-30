@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- The assembler writes the AVX and AVX2 integer instructions, AES-NI, carry-less multiplication, `vzeroupper`, `vzeroall`, `rorx` and `andn`, which is most of what the kernel's x86 crypto code is written in. A VEX instruction takes its length from the registers it names, and a move between two vector registers is written in its store form when that is what lets the prefix be two bytes, which is what gas does. 41 of the 48 x86-64 crypto files in a 6.12 allmodconfig now assemble, and each object has the same bytes and relocations as the one gas writes. What stops the other seven is AVX-512 and GFNI, and `vpblendvb`, whose fourth register goes in the immediate. See tamnd/rucc-kernel#6.
+
 ## 0.18.2
 
 A patch release on the way to building the Linux kernel. The hardening flags distributions build with are taken: `-fzero-call-used-regs`, `-ftrivial-auto-var-init`, `-fstrict-flex-arrays`, `-mstack-protector-guard` and `-fstack-protector-explicit`. `-gdwarf-4` writes DWARF 4, and `-gz` compresses debug sections with zlib or zstd. `__seg_gs` and `__seg_fs`, `__builtin_has_attribute` and `counted_by` are in, `-mgeneral-regs-only` keeps vector registers out, and the assembler reads much more of the kernel's x86 crypto code.
