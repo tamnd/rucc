@@ -1294,3 +1294,18 @@ fn a_constant_outside_its_range_letter_goes_in_the_register_the_constraint_also_
     assert!(text.contains("movw\t$1232, %dx"), "{text}");
     assert!(text.contains("outb %al, %dx"), "{text}");
 }
+
+#[test]
+fn an_address_turned_into_a_number_and_back_is_still_a_constant() {
+    // The kernel's gdt_idt.c hands `rip_rel_ptr` a per cpu variable as
+    // `(void *)(unsigned long)&gdt_page`, and the template asks for it with `"i"`.
+    let source = "extern char page[4096];\n\
+                  static inline __attribute__((always_inline)) void *rel(void *p) {\n\
+                  asm(\"leaq %c1(%%rip), %0\" : \"=r\"(p) : \"i\"(p)); return p; }\n\
+                  void *f(void) { return rel((void *)(unsigned long)&page[8]); }\n";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with("cast-address", source, &[level]);
+        assert!(ok, "{level}: {said}");
+        assert!(text.contains("leaq page+8(%rip)"), "{level}: {text}");
+    }
+}
