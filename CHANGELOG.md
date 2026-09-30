@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.4
+
+A patch release on the way to building the Linux kernel. The 36 AMD display units that turn SSE back on, both KVM `vmenter.S` files, and a wider slice of `allmodconfig` across block, crypto, btrfs, net core and mm now compile: enumerators wider than an `int`, attributes in front of a later declarator, byte immediates gas takes, and a stack boundary of 3 with SSE on.
+
 ### Fixed
 
 - The assembler writes the i386 unwind table the way gas does for `i686-linux-gnu-gcc -S` output. The header says a data alignment of -4 with the return address in column 8, `%eip`, and starts the frame at `%esp` plus 4, the records hold four byte distances to the code as `R_386_PC32` and are padded and aligned to four, and a frame rule names registers by their i386 numbers, `%ebp` as 5 and `%ebx` as 3. Before this the table had the x86-64 layout, which an i386 unwinder reads as garbage. See #2247.
