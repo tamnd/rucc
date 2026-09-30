@@ -25,7 +25,7 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// Neither constant is a power of two and neither is one of the small ones tier one is about,
 /// because the multiplication is the marker these tests read and a marker another pass would
-/// rewrite says nothing about the pass being gated. Fifteen is the product.
+/// rewrite says nothing about the pass being gated. Fifteen is the product. `sccp` finds the same product from the known bits of the two constants, so the tests that want the multiplication kept gate it along with `fold`.
 const SOURCE: &str = "\
 int f(int x) {
     int a = 3;
@@ -85,7 +85,7 @@ fn without_a_gate_the_two_functions_come_out_the_same() {
 
 #[test]
 fn disabling_a_pass_for_one_function_leaves_the_other_optimized() {
-    let ir = ir("disable", &["-O2", "-fdisable-fold=g"]);
+    let ir = ir("disable", &["-O2", "-fdisable-fold=g", "-fdisable-sccp=g"]);
     assert!(body(&ir, "f").contains("iconst.i32 15"), "f was not gated:\n{ir}");
     assert!(body(&ir, "g").contains("mul"), "g kept the multiply it was told to keep:\n{ir}");
 }
@@ -94,8 +94,8 @@ fn disabling_a_pass_for_one_function_leaves_the_other_optimized() {
 fn a_function_is_named_by_its_number_as_well_as_by_its_name() {
     // Which is what a script bisecting a file it has never read gives, since it can count
     // functions without knowing what any of them are called.
-    let by_number = ir("number", &["-O2", "-fdisable-fold=1"]);
-    let by_name = ir("name", &["-O2", "-fdisable-fold=g"]);
+    let by_number = ir("number", &["-O2", "-fdisable-fold=1", "-fdisable-sccp=1"]);
+    let by_name = ir("name", &["-O2", "-fdisable-fold=g", "-fdisable-sccp=g"]);
     // The bodies rather than the whole module, because the header carries the path of the
     // fixture and each of these two wrote its own.
     for name in ["f", "g"] {
