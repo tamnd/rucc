@@ -198,6 +198,15 @@ pub struct Context<'a> {
     /// Whether a tentative definition with external linkage is a common symbol, which is
     /// `-fcommon` and the default on Darwin, rather than a zeroed object in `.bss`.
     pub common: bool,
+    /// Whether a call to a library function by its plain name may be taken to mean that function,
+    /// which is `-fno-builtin` and `-ffreestanding` turned around.
+    ///
+    /// Read for `memcpy`, `memset` and `memmove` with a small constant length, which are built as
+    /// the IR's own copy and fill rather than as calls, as gcc expands them. A `__builtin_` spelling
+    /// means the library whatever this says.
+    pub builtins: bool,
+    /// The names `-fno-builtin-<name>` took away one at a time, without the prefix.
+    pub no_builtin: &'a [String],
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -224,6 +233,8 @@ impl fmt::Debug for Context<'_> {
             .field("exceptions", &self.exceptions)
             .field("non_call_exceptions", &self.non_call_exceptions)
             .field("common", &self.common)
+            .field("builtins", &self.builtins)
+            .field("no_builtin", &self.no_builtin)
             .finish_non_exhaustive()
     }
 }
@@ -292,6 +303,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         exceptions,
         non_call_exceptions,
         common,
+        builtins,
+        no_builtin,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -314,6 +327,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         exceptions,
         non_call_exceptions,
         common,
+        builtins,
+        no_builtin,
         read,
         module,
         diagnostics: Vec::new(),
@@ -367,6 +382,10 @@ pub(crate) struct Unit<'a> {
     pub(crate) non_call_exceptions: bool,
     /// Whether a tentative definition is a common symbol. See [`Context::common`].
     common: bool,
+    /// Whether a plain library name means the library. See [`Context::builtins`].
+    builtins: bool,
+    /// The names taken away one at a time. See [`Context::no_builtin`].
+    no_builtin: &'a [String],
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
@@ -925,6 +944,11 @@ impl Unit<'_> {
         // [`Self::out_of_line`].
         if copied && node.flags.contains(DeclFlags::GNU_INLINE) {
             func.attrs.set |= AttrSet::INLINE_ONLY;
+        }
+        // The backend writes a small constant `memcpy` it finds after inlining as moves, which is
+        // only right while the name means the library's function.
+        if !["memcpy", "memset", "memmove"].iter().all(|name| self.means_the_library(name)) {
+            func.attrs.set |= AttrSet::NO_BUILTIN;
         }
         func.linkage = if copied { IrLinkage::LinkOnce } else { self.told(decl, linkage) };
         // The same question as for an object, and the same answer, with one wrinkle: an inline
@@ -1949,6 +1973,15 @@ impl Unit<'_> {
         // `__builtin_memcpy`, and what it means by that is the renamed one: the prefix picks the
         // function out of the library, it does not ask for a symbol the file has renamed away.
         Some(self.renamed.get(&symbol).copied().unwrap_or(symbol))
+    }
+
+    /// Whether a call written with this name may be taken to mean the C library function of the
+    /// name without the prefix, which is the checker's rule read again where the call is built.
+    pub(crate) fn means_the_library(&self, spelled: &str) -> bool {
+        match spelled.strip_prefix("__builtin_") {
+            Some(_) => true,
+            None => self.builtins && !self.no_builtin.iter().any(|off| off == spelled),
+        }
     }
 
     /// The symbol of one of the objects libgcc defines and the program only reads, declared in

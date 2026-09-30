@@ -525,11 +525,11 @@ pub struct CallRegs {
     /// accesses around them and an acquire or a release has an instruction of its own. Here beside
     /// the word because the same pass asks both questions about the same access.
     pub total_store_order: bool,
-    /// Whether a word may be loaded from and stored to any address, aligned or not, at the cost of
-    /// an aligned one or near it.
+    /// Whether a plain load or store of a word may be at any address, as fast and as correct as
+    /// an aligned one, so a copy of bytes may move them a word at a time whatever the alignment.
     ///
-    /// True on x86-64. What reads it is the copy and the fill a call to `memcpy` or `memset` of a
-    /// small constant size becomes, where nothing is known about how the two pointers are aligned.
+    /// True on x86 and on AArch64, where it holds for normal memory, which is all a copy of bytes
+    /// ever touches. `-mstrict-align`, which would make it false there, is refused.
     pub unaligned: bool,
     /// How far one push moves the stack pointer.
     ///

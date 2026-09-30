@@ -8430,6 +8430,12 @@ impl<'u> Body<'_, 'u> {
         }
 
         let direct = self.direct(callee, &plan, &actual, span);
+        if let Some((symbol, _)) = &direct {
+            if let Some(made) = self.small_bulk(callee, *symbol, &values, &plan, destination, span)
+            {
+                return made;
+            }
+        }
         let inst = match direct {
             Some((mut symbol, mut settled)) => {
                 // `(enter(s), f)(x)` still calls `enter`, after the arguments as the pointer
@@ -8587,6 +8593,84 @@ impl<'u> Body<'_, 'u> {
         Some((self.unit.symbol_of(decl), settled))
     }
 
+    /// A call to `memcpy`, `memset` or `memmove` with a constant length of at most [`SMALL`] bytes,
+    /// built as the IR's copy, fill or move rather than as a call, with the destination as its
+    /// value. Nothing for every other call.
+    ///
+    /// gcc expands these inline at every level, with general purpose registers where the vector
+    /// ones are off, and the kernel counts on it: a call to `memcpy` in `noinstr` code is an
+    /// objtool error, and a struct copy written as `memcpy(&a, &b, sizeof(a))` is in hot paths
+    /// everywhere. The call has to mean the library, so under `-fno-builtin` only the `__builtin_`
+    /// spelling qualifies, and a declaration that renamed the symbol leaves the call alone. The
+    /// code generator decides how the bytes move, which is a word at a time wherever the machine
+    /// allows it.
+    fn small_bulk(
+        &mut self,
+        callee: ExprId,
+        symbol: Symbol,
+        values: &[Value],
+        plan: &Plan,
+        destination: Option<Value>,
+        span: Span,
+    ) -> Option<Option<Value>> {
+        let spelled = self.builtin_named(callee)?;
+        let name = spelled.strip_prefix("__builtin_").unwrap_or(spelled);
+        let opcode = match name {
+            "memcpy" => Opcode::Memcpy,
+            "memset" => Opcode::Memset,
+            "memmove" => Opcode::Memmove,
+            _ => return None,
+        };
+        if !self.unit.means_the_library(spelled)
+            || self.unit.names.resolve(symbol) != name
+            || !self.named_callee(callee).0.is_empty()
+            || destination.is_some()
+            || !matches!(plan.ret.pass, Pass::Direct | Pass::Ignore)
+        {
+            return None;
+        }
+        let &[to, with, length] = values else { return None };
+        let size = self.small_length(length)?;
+        if size > 0 {
+            let info = MemInfo {
+                size,
+                align: 1,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            // A fill passes an `int` and the IR's fill takes the byte, which is the low eight bits.
+            let with = match opcode {
+                Opcode::Memset => match self.bits_of(with) {
+                    Some(bits) => self.build(span).iconst(Type::int(8), i128::from(bits as u8)),
+                    None => self.build(span).unary(Opcode::Trunc, with, Type::int(8)),
+                },
+                _ => with,
+            };
+            let mut build = self.build(span);
+            let mem = build.func().add_mem(info);
+            let args = build.func().push_values(&[to, with]);
+            build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(opcode) }, &[]);
+        }
+        Some(matches!(plan.ret.pass, Pass::Direct).then_some(to))
+    }
+
+    /// A length that is a constant of at most [`SMALL`], looking through the widening an `int`
+    /// argument gets on its way to a `size_t` parameter. A small constant widens to itself either
+    /// way, so which extension it was does not matter.
+    fn small_length(&self, mut value: Value) -> Option<u64> {
+        loop {
+            let Def::Result { inst, .. } = self.func[value].def else { return None };
+            let data = &self.func[inst];
+            match data.opcode {
+                Opcode::SExt | Opcode::ZExt => value = self.func[data.args][0],
+                _ => break,
+            }
+        }
+        u64::try_from(self.bits_of(value)?).ok().filter(|&size| size <= SMALL)
+    }
+
     /// The callee with the commas in front of it taken off, and the left sides they had.
     ///
     /// tcc writes `(tcc_enter_state(s1), _tcc_warning)(fmt, ...)`, and gcc calls `_tcc_warning`
@@ -8733,6 +8817,14 @@ impl<'u> Body<'_, 'u> {
         self.unit.unsupported(what, span);
     }
 }
+
+/// The longest `memcpy`, `memset` or `memmove` of a constant length built as the IR's own copy,
+/// fill or move rather than as a call. See [`Body::small_bulk`].
+///
+/// Sixty four bytes, which is eight words on a machine with eight byte words and is where the
+/// kernel needs no call. gcc goes further with its own cost model, and a longer one is left to the
+/// library.
+const SMALL: u64 = 64;
 
 /// The IR's spelling of an ordering the typed tree carries.
 ///

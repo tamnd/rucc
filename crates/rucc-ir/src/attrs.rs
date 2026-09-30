@@ -163,6 +163,10 @@ impl AttrSet {
     /// `__attribute__((no_instrument_function))`. No profiling hook goes in this function under
     /// `-pg`, which is how the kernel's `notrace` keeps the tracer out of itself.
     pub const NO_INSTRUMENT: Self = Self(1 << 20);
+    /// A call to `memcpy`, `memset` or `memmove` in this function means whatever function has that
+    /// name, not the library's, because the unit was built with `-ffreestanding` or `-fno-builtin`.
+    /// The backend leaves such a call a call.
+    pub const NO_BUILTIN: Self = Self(1 << 21);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -271,6 +275,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::RETURN_KEEP, "return_keep"),
     (AttrSet::INDIRECT_KEEP, "indirect_keep"),
     (AttrSet::NO_INSTRUMENT, "no_instrument"),
+    (AttrSet::NO_BUILTIN, "no_builtin"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
