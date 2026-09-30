@@ -2373,6 +2373,9 @@ pub struct Options {
     pub std: Std,
     /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`.
     pub gnu_extensions: bool,
+    /// Whether `-trigraphs` was given, which replaces trigraphs whatever the dialect says. The
+    /// ISO modes before C23 replace them without it.
+    pub trigraphs: bool,
     /// Whether `-pedantic` was given, which is what turns a use of an extension from silence
     /// into a diagnostic. It is not the same knob as the dialect: `-std=c17 -pedantic` warns
     /// about a construct that `-std=c17` alone accepts without a word.
@@ -2732,6 +2735,7 @@ impl Options {
             error_limit: 20,
             std: Std::default(),
             gnu_extensions: true,
+            trigraphs: false,
             pedantic: false,
             permissive: false,
             gnu89_inline: false,

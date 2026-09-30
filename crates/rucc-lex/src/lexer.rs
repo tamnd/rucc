@@ -20,11 +20,11 @@ use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Options {
-    /// Replace trigraphs, which `-trigraphs` turns on.
+    /// Replace trigraphs, which the ISO modes before C23 and `-trigraphs` turn on.
     ///
-    /// Off by default because C23 removed them, and because leaving them on means `??!`
-    /// inside a string literal silently becomes `|`, which has caught out every project that
-    /// ever wrote a question mark next to a punctuator.
+    /// Off by default because C23 removed them and the GNU modes never had them, and because
+    /// leaving them on means `??!` inside a string literal silently becomes `|`, which has caught
+    /// out every project that ever wrote a question mark next to a punctuator.
     pub trigraphs: bool,
     /// Whether `//` starts a comment, which C99 took from C++ and which gcc offers in gnu89 as
     /// an extension. Off means the two slashes are two punctuators, which is what `-std=c89`
@@ -52,10 +52,15 @@ impl Options {
     }
 
     /// What a dialect implies, which is the form the driver wants.
+    ///
+    /// Trigraphs are gcc's rule measured against gcc 16: on in `-std=c89`, `-ansi`, `c99`, `c11`
+    /// and `c17`, since those standards have them in translation phase 1, and off in every GNU
+    /// mode and from `c23` on, where the standard took them out. `-trigraphs` turns them on in
+    /// any mode, which is what `forced` is.
     #[must_use]
-    pub fn for_dialect(std: Std, gnu: bool) -> Options {
+    pub fn for_dialect(std: Std, gnu: bool, forced: bool) -> Options {
         Options {
-            trigraphs: false,
+            trigraphs: forced || (!gnu && std < Std::C23),
             line_comments: std >= Std::C99 || gnu,
             digit_separators: std >= Std::C23,
             assembly: false,

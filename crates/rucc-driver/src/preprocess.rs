@@ -95,7 +95,7 @@ pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSyste
     let mut pp = Preprocessor::with_prefix_map(opts.prefix_map.macros.clone());
     let predef = Predef { assembler: assembly, ..Predef::for_options(opts) };
     let mut cx = Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
-    let lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+    let lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions, opts.trigraphs);
     cx.lex = if assembly { lex.for_assembly() } else { lex };
     cx.pedantic = opts.pedantic;
     if pp.predefine(&sess.target, &predef, &mut cx).is_err() {

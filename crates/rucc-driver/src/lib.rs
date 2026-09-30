@@ -248,7 +248,7 @@ options:
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
-  -std=<dialect>         c89 through c2y, and the gnu spellings
+  -std=<dialect>, -trigraphs   c89 through c2y and the gnu spellings, trigraphs in any of them
   -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
   -x <lang>              treat later inputs as <lang>, or none to stop
   -O<level>              optimize: 0, 1, 2, 3, s, z, fast
@@ -1014,6 +1014,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.gnu_extensions = false;
                 std_given = true;
             }
+            // Replaces trigraphs in any mode. gcc has no flag to turn them off in a mode that
+            // has them, and neither does this.
+            "-trigraphs" => opts.trigraphs = true,
             // `-Wpedantic` is the same flag under the name the `-W` family gives it, which is
             // the spelling a build system that groups its warning flags tends to write.
             "-pedantic" | "-Wpedantic" => opts.pedantic = true,
@@ -6184,6 +6187,10 @@ mod tests {
         let (opts, _) = compile(&["-ansi", "a.c"]);
         assert_eq!(opts.std, Std::C89);
         assert!(!opts.gnu_extensions);
+        assert!(!opts.trigraphs, "the dialect turns them on, not the flag");
+
+        let (opts, _) = compile(&["-std=gnu17", "-trigraphs", "a.c"]);
+        assert!(opts.trigraphs);
 
         let (opts, _) = compile(&["-std=gnu2y", "a.c"]);
         assert_eq!(opts.std, Std::C2y);

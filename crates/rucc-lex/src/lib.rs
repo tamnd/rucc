@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn a_line_comment_is_refused_in_the_one_dialect_that_has_no_such_thing() {
         let mut interner = Interner::new();
-        let opts = Options::for_dialect(Std::C89, false);
+        let opts = Options::for_dialect(Std::C89, false, false);
         let (tokens, errors) = tokenize(b"// gone\nint x;", 0, opts, &mut interner);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("C++ style comments"));
@@ -332,9 +332,31 @@ mod tests {
         assert_eq!(errors.len(), 1);
         // And in gnu89 there is nothing to say.
         let mut interner = Interner::new();
-        let opts = Options::for_dialect(Std::C89, true);
+        let opts = Options::for_dialect(Std::C89, true, false);
         let (_, errors) = tokenize(b"// gone\nint x;", 0, opts, &mut interner);
         assert!(errors.is_empty());
+    }
+
+    /// Trigraphs follow the dialect the way gcc 16 has them: replaced in the ISO modes before
+    /// C23, left alone in the GNU modes and from C23 on, and replaced anywhere under
+    /// `-trigraphs`.
+    #[test]
+    fn trigraphs_are_replaced_in_the_iso_modes_before_c23_and_where_asked_for() {
+        let spelled = |std: Std, gnu: bool, forced: bool| {
+            let mut interner = Interner::new();
+            let opts = Options::for_dialect(std, gnu, forced);
+            let (tokens, _) = tokenize(b"\"??=??!\"", 0, opts, &mut interner);
+            let token = &tokens[0];
+            assert_eq!(token.kind, PpTokenKind::StringLit);
+            interner.resolve(token.value.unwrap()).to_owned()
+        };
+        assert_eq!(spelled(Std::C89, false, false), "\"#|\"");
+        assert_eq!(spelled(Std::C17, false, false), "\"#|\"");
+        assert_eq!(spelled(Std::C23, false, false), "\"??=??!\"");
+        assert_eq!(spelled(Std::C17, true, false), "\"??=??!\"");
+        assert_eq!(spelled(Std::C89, true, false), "\"??=??!\"");
+        assert_eq!(spelled(Std::C17, true, true), "\"#|\"");
+        assert_eq!(spelled(Std::C23, false, true), "\"#|\"");
     }
 
     /// The digit separator is C23 and is not a GNU extension, so `1'000'000` is one number in
@@ -343,13 +365,13 @@ mod tests {
     #[test]
     fn a_digit_separator_is_part_of_the_number_only_in_c23() {
         let mut interner = Interner::new();
-        let opts = Options::for_dialect(Std::C23, false);
+        let opts = Options::for_dialect(Std::C23, false, false);
         let (tokens, _) = tokenize(b"1'000'000", 0, opts, &mut interner);
         assert_eq!(tokens[0].kind, PpTokenKind::Number);
         assert_eq!(interner.resolve(tokens[0].value.unwrap()), "1'000'000");
 
         let mut interner = Interner::new();
-        let opts = Options::for_dialect(Std::C17, true);
+        let opts = Options::for_dialect(Std::C17, true, false);
         let (tokens, _) = tokenize(b"1'000'000", 0, opts, &mut interner);
         assert_eq!(tokens[0].kind, PpTokenKind::Number);
         assert_eq!(interner.resolve(tokens[0].value.unwrap()), "1");

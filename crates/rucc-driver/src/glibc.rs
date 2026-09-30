@@ -134,7 +134,7 @@ fn release_in(target: Triple, dirs: &[PathBuf], fs: &dyn FileSystem) -> Option<V
     let predef = Predef::for_options(&opts);
     let tokens = {
         let mut cx = Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
-        cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions);
+        cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions, opts.trigraphs);
         pp.predefine(&sess.target, &predef, &mut cx).ok()?;
         pp.run(main, &mut cx)
     };
