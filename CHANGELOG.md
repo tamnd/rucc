@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.3
+
+A patch release on the way to building the Linux kernel. The KVM units for VMX and SVM and the four lib/raid6 x86 files now compile: asm flag outputs, a second memory operand in a kept template, more AVX and AVX-512 rows in the assembler, and constant division folded so `BUILD_BUG_ON` in `reverse_cpuid.h` goes away. i686 objects, a dead store pass, frame slot sharing and `sccp` also land here.
+
 ### Added
 
 - Flag outputs, `"=@cc<cond>"`, on x86-64 and AArch64. The template leaves the condition in the flags and a `set<cond>` or `cset` written after it puts the answer in the output's register, which is what gcc does. `__GCC_ASM_FLAG_OUTPUTS__` is now defined on both machines, as gcc defines it, so the kernel's `CC_SET` and `CC_OUT` take this path. The assembler also writes `bt` on memory now, which is how the kernel's `test_bit` asks about a bit whose number is not a constant. See tamnd/rucc-kernel#6.
