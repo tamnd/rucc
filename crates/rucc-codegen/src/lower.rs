@@ -2843,6 +2843,14 @@ impl<'a> Lowering<'a> {
     /// movq  __imp_GetCurrentProcessId(%rip), %rax
     /// movq  .refptr.environ(%rip), %rax
     /// ```
+    ///
+    /// AArch64 has no load relative to the instruction pointer that reaches that far, so it is the
+    /// page of the pointer and a load from the low twelve bits of it, which is what clang writes.
+    ///
+    /// ```text
+    /// adrp  x8, __imp_GetCurrentProcessId
+    /// ldr   x8, [x8, :lo12:__imp_GetCurrentProcessId]
+    /// ```
     fn through_slot(
         &mut self,
         inst: Inst,
@@ -2850,20 +2858,21 @@ impl<'a> Lowering<'a> {
         symbol: Symbol,
         reg: mir::Reg,
     ) -> Result<(), Unsupported> {
-        let Reach::Mode(name) = self.selector.symbols.far else {
-            return Err(self.unsupported(inst));
-        };
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let pointer = slot.name(self.names.resolve(symbol));
         let pointer = self.names.intern(&pointer);
-        let opcode = self.named(name);
-        self.out
-            .build(block, opcode)
-            .at(span)
-            .def(reg, self.gpr)
-            .mem(mir::Mem::of(pointer))
-            .finish();
+        match self.selector.symbols.slot {
+            Reach::Mode(name) => {
+                let opcode = self.named(name);
+                let mem = mir::Mem::of(pointer);
+                self.out.build(block, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
+            }
+            Reach::Own(name) => {
+                let opcode = self.named(name);
+                self.out.build(block, opcode).at(span).def(reg, self.gpr).symbol(pointer).finish();
+            }
+        }
         Ok(())
     }
 

@@ -143,7 +143,7 @@ fn slow(name: &str) -> Option<Timing> {
         "fsqrt" => (if wide { 17 } else { 10 }, Unit::FloatDiv),
         // The address of a symbol through the global offset table is a page and a load, and the
         // offset of one from the thread pointer is the pointer and two additions.
-        "got" => (1 + LOAD, Unit::Load),
+        "got" | "slot" => (1 + LOAD, Unit::Load),
         "tls" => (3, Unit::Int),
         // The copy of the stack pointer and the mask, one behind the other.
         "align" => (2, Unit::Int),

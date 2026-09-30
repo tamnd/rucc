@@ -86,6 +86,9 @@ pub struct Symbols {
     pub near: Reach,
     /// A symbol another image may define, whose address is read out of the global offset table.
     pub far: Reach,
+    /// A pointer this image holds, read where the name it points to is reached through it, which
+    /// is how COFF reaches a name in a DLL or one another object may define.
+    pub slot: Reach,
     /// How far a thread-local variable is from the thread pointer, which is read out of the global
     /// offset table too, from a slot the link fills in with that distance.
     pub thread: Reach,
