@@ -97,7 +97,9 @@ is about to go. At the very end, after the epilogue is written and the blocks ar
 nothing in between touching a register the call names, removes the call and turns the `ret` into a
 `jmp` to the callee. The `ret` is changed in place rather than replaced so the unwind rows the
 epilogue hung on it stay right. It runs at `-O2`, `-O3`, `-Os` and `-Oz`, which is where gcc turns
-`-foptimize-sibling-calls` on, and only on x86-64 for now.
+`-foptimize-sibling-calls` on, on x86-64 as a `jmp` and on AArch64 as a `b`.
+
+A function whose every call became a jump is laid out as a leaf. It leaves no return address below its frame, so it owes nobody an aligned stack pointer, and on AArch64 it has no link register to save, so `int f(int a) { return g(a + 1); }` is an add and a jump with no frame at all, which is what gcc writes. The frame is settled long before `tail::jumps` runs, so the layout counts on every such call becoming a jump, and the pipeline stops with an internal error if one does not rather than make a call from a frame that was never aligned for it.
 
 The escape rule is stricter than the paragraph above asks for, because document 08.4's analysis is
 not there to ask. The only addresses into a frame the IR has are the ones an `alloca` makes, so a

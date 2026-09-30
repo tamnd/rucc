@@ -503,6 +503,11 @@ pub struct Recording<'a> {
 /// The same as [`compile`]. A function that was refused contributes nothing to any of them, since
 /// a function that did not compile is not evidence about what a rule set or a frame would have
 /// done.
+///
+/// # Panics
+///
+/// When a function laid out as a leaf because its only calls were tail calls is left with one of
+/// them still a call, which is a bug in this crate rather than anything the program did.
 pub fn compile_recording(
     source: &mut ir::Func,
     names: &mut Interner,
@@ -643,6 +648,9 @@ pub fn compile_recording(
         Some(_) => flags.profile,
         None => Profile::No,
     };
+    // A tail call is a call on a machine with no instruction to jump away with, and the frame is
+    // worked out as though it stays one.
+    stack.kept |= machine.insts.away.is_none() && !stack.tails.is_empty();
     let base = stack.layout(Layout::new(machine.conv, machine.file));
     let layout = Layout {
         // The later hook reads the frame pointer to find out who called this function, so a
@@ -928,7 +936,15 @@ pub fn compile_recording(
     // After everything that edits instructions, because a call is the one instruction all of them
     // leave alone and a jump out of the function is one some of them would not know about. Nothing
     // before this sees anything but a call, a return and an epilogue, which is right on its own.
-    tail::jumps(&mut func, &stack.tails, machine.insts, names);
+    //
+    // A frame with no call left in it but these was laid out as a leaf, so each of them has to go:
+    // one left a call would be made with the stack pointer wherever the leaf left it and with the
+    // return address of a function that never saved its own.
+    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, names);
+    assert!(
+        stack.kept || jumped == stack.tails.len(),
+        "a leaf whose tail calls did not all become jumps"
+    );
 
     // After the tail jumps, because a `ret` that became a jump to a callee is a direct jump and no
     // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
