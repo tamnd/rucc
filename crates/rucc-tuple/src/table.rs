@@ -292,10 +292,10 @@ pub const TARGETS: &[TargetEntry] = &[
     // Windows.
     TargetEntry {
         tuple: "x86_64-windows-gnu",
-        tier: Tier::InProgress,
+        tier: Tier::SupportedWithEvidence,
         planned: Tier::Supported,
         host: Host::Yes,
-        note: "mingw-w64, and the default env for Windows because it is the one we can ship",
+        note: "mingw-w64 and UCRT, the default env for Windows, with rung 1 run under Wine",
     },
     TargetEntry {
         tuple: "x86_64-windows-msvc",
