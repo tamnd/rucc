@@ -31,6 +31,8 @@
 
 use std::fmt;
 
+mod neon;
+
 /// How much of a general purpose register an instruction reads or writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
@@ -87,16 +89,57 @@ impl Scalar {
 }
 
 /// How the lanes of a whole vector register are laid out.
-///
-/// Only the three that the instructions here take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arrangement {
     /// Eight bytes in the low half, `v0.8b`.
     B8,
     /// Sixteen bytes, `v0.16b`.
     B16,
+    /// Four two byte lanes in the low half, `v0.4h`.
+    H4,
+    /// Eight two byte lanes, `v0.8h`.
+    H8,
+    /// Two four byte lanes in the low half, `v0.2s`.
+    S2,
+    /// Four four byte lanes, `v0.4s`.
+    S4,
+    /// One eight byte lane, `v0.1d`, which only the loads and stores of lists take.
+    D1,
     /// Two eight byte lanes, `v0.2d`.
     D2,
+}
+
+impl Arrangement {
+    /// The arrangement a register is written with after its dot, `16b` or `2d`.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Arrangement> {
+        Some(match name {
+            "8b" => Arrangement::B8,
+            "16b" => Arrangement::B16,
+            "4h" => Arrangement::H4,
+            "8h" => Arrangement::H8,
+            "2s" => Arrangement::S2,
+            "4s" => Arrangement::S4,
+            "1d" => Arrangement::D1,
+            "2d" => Arrangement::D2,
+            _ => return None,
+        })
+    }
+
+    /// How it is written after the dot.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Arrangement::B8 => "8b",
+            Arrangement::B16 => "16b",
+            Arrangement::H4 => "4h",
+            Arrangement::H8 => "8h",
+            Arrangement::S2 => "2s",
+            Arrangement::S4 => "4s",
+            Arrangement::D1 => "1d",
+            Arrangement::D2 => "2d",
+        }
+    }
 }
 
 /// How a register operand is shifted before it is used.
@@ -329,6 +372,12 @@ pub enum Value {
     Fp(Scalar, u8),
     /// A whole vector register with its lanes, `v0.16b`.
     Vector(Arrangement, u8),
+    /// One lane of a vector register, `v0.s[1]`: the lane size, the register, and the index.
+    Element(Scalar, u8, u8),
+    /// A list of registers of one arrangement that follow each other, `{v0.16b, v1.16b}`: the
+    /// arrangement, the first register, and how many there are. The one after thirty one is
+    /// zero.
+    List(Arrangement, u8, u8),
     /// A number.
     Imm(i64),
     /// A floating point number, which only `fmov` and the comparisons with zero take.
@@ -671,6 +720,9 @@ impl At<'_> {
 
     fn encode(self, values: &[Value]) -> Result<Word, Error> {
         let m = self.mnemonic;
+        if neon::wanted(m, values) {
+            return self.neon(values).map(|word| (word, None));
+        }
         if let Some(cond) = m.strip_prefix("b.") {
             let cond = Cond::named(cond).ok_or_else(|| self.unwritten())?;
             return match values {
@@ -1058,11 +1110,6 @@ impl At<'_> {
                 }
                 _ => return Err(self.unwritten()),
             },
-            "movi" => match values {
-                [Value::Fp(Scalar::D, d), Value::Imm(0)] => 0x2f00_e400 | u32::from(*d),
-                [Value::Vector(Arrangement::D2, d), Value::Imm(0)] => 0x6f00_e400 | u32::from(*d),
-                _ => return Err(self.unwritten()),
-            },
             _ => return self.memory(values),
         };
         Ok((word, None))
@@ -1201,11 +1248,6 @@ impl At<'_> {
                 }
                 let (n, immr, imms) = bitmask(value, width).ok_or_else(|| self.immediate(*imm))?;
                 width.sf() << 31 | 0x3200_0000 | n << 22 | immr << 16 | imms << 10 | 31 << 5 | rd
-            }
-            [Value::Vector(a, d), Value::Vector(b, n)] if a == b && *a != Arrangement::D2 => {
-                let q = u32::from(*a == Arrangement::B16);
-                let (d, n) = (u32::from(*d), u32::from(*n));
-                q << 30 | 0x0ea0_1c00 | n << 16 | n << 5 | d
             }
             _ => return Err(self.unwritten()),
         };

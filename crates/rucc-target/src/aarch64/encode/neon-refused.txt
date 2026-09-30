@@ -1,0 +1,336 @@
+# Advanced SIMD lines GNU as 2.42 refuses for aarch64-linux-gnu, which rucc has to refuse too.
+mul v0.2d, v1.2d, v2.2d
+mul d3, d4, d5
+mla v0.2d, v1.2d, v2.2d
+mla d3, d4, d5
+mls v0.2d, v1.2d, v2.2d
+mls d3, d4, d5
+pmul v0.4h, v1.4h, v2.4h
+pmul v0.8h, v1.8h, v2.8h
+pmul v0.2s, v1.2s, v2.2s
+pmul v0.4s, v1.4s, v2.4s
+pmul v0.2d, v1.2d, v2.2d
+pmul d3, d4, d5
+smax v0.2d, v1.2d, v2.2d
+smax d3, d4, d5
+smin v0.2d, v1.2d, v2.2d
+smin d3, d4, d5
+umax v0.2d, v1.2d, v2.2d
+umax d3, d4, d5
+umin v0.2d, v1.2d, v2.2d
+umin d3, d4, d5
+smaxp v0.2d, v1.2d, v2.2d
+smaxp d3, d4, d5
+sminp v0.2d, v1.2d, v2.2d
+sminp d3, d4, d5
+umaxp v0.2d, v1.2d, v2.2d
+umaxp d3, d4, d5
+uminp v0.2d, v1.2d, v2.2d
+uminp d3, d4, d5
+addp d3, d4, d5
+shadd v0.2d, v1.2d, v2.2d
+shadd d3, d4, d5
+uhadd v0.2d, v1.2d, v2.2d
+uhadd d3, d4, d5
+srhadd v0.2d, v1.2d, v2.2d
+srhadd d3, d4, d5
+urhadd v0.2d, v1.2d, v2.2d
+urhadd d3, d4, d5
+sabd v0.2d, v1.2d, v2.2d
+sabd d3, d4, d5
+uabd v0.2d, v1.2d, v2.2d
+uabd d3, d4, d5
+saba v0.2d, v1.2d, v2.2d
+saba d3, d4, d5
+uaba v0.2d, v1.2d, v2.2d
+uaba d3, d4, d5
+sqdmulh v0.8b, v1.8b, v2.8b
+sqdmulh v0.16b, v1.16b, v2.16b
+sqdmulh v0.2d, v1.2d, v2.2d
+sqdmulh d3, d4, d5
+and v3.4s, v4.4s, v5.4s
+bic v3.4s, v4.4s, v5.4s
+orr v3.4s, v4.4s, v5.4s
+orn v3.4s, v4.4s, v5.4s
+eor v3.4s, v4.4s, v5.4s
+bsl v3.4s, v4.4s, v5.4s
+bit v3.4s, v4.4s, v5.4s
+bif v3.4s, v4.4s, v5.4s
+mov v1.4s, v2.4s
+fadd v6.8b, v7.8b, v8.8b
+fsub v6.8b, v7.8b, v8.8b
+fmul v6.8b, v7.8b, v8.8b
+fdiv v6.8b, v7.8b, v8.8b
+fmla v6.8b, v7.8b, v8.8b
+fmls v6.8b, v7.8b, v8.8b
+fmax v6.8b, v7.8b, v8.8b
+fmin v6.8b, v7.8b, v8.8b
+fmaxnm v6.8b, v7.8b, v8.8b
+fminnm v6.8b, v7.8b, v8.8b
+fcmeq v6.8b, v7.8b, v8.8b
+fcmge v6.8b, v7.8b, v8.8b
+fcmgt v6.8b, v7.8b, v8.8b
+facge v6.8b, v7.8b, v8.8b
+facgt v6.8b, v7.8b, v8.8b
+fabd v6.8b, v7.8b, v8.8b
+faddp v6.8b, v7.8b, v8.8b
+fmaxp v6.8b, v7.8b, v8.8b
+fminp v6.8b, v7.8b, v8.8b
+fmaxnmp v6.8b, v7.8b, v8.8b
+fminnmp v6.8b, v7.8b, v8.8b
+fmulx v6.8b, v7.8b, v8.8b
+frecps v6.8b, v7.8b, v8.8b
+frsqrts v6.8b, v7.8b, v8.8b
+rev64 v9.2d, v10.2d
+rev64 d1, d2
+rev32 v9.2s, v10.2s
+rev32 v9.4s, v10.4s
+rev32 v9.2d, v10.2d
+rev32 d1, d2
+rev16 v9.4h, v10.4h
+rev16 v9.8h, v10.8h
+rev16 v9.2s, v10.2s
+rev16 v9.4s, v10.4s
+rev16 v9.2d, v10.2d
+rev16 d1, d2
+cls v9.2d, v10.2d
+cls d1, d2
+clz v9.2d, v10.2d
+clz d1, d2
+cnt v9.4h, v10.4h
+cnt v9.8h, v10.8h
+cnt v9.2s, v10.2s
+cnt v9.4s, v10.4s
+cnt v9.2d, v10.2d
+cnt d1, d2
+not v9.4h, v10.4h
+not v9.8h, v10.8h
+not v9.2s, v10.2s
+not v9.4s, v10.4s
+not v9.2d, v10.2d
+not d1, d2
+mvn v9.4h, v10.4h
+mvn v9.8h, v10.8h
+mvn v9.2s, v10.2s
+mvn v9.4s, v10.4s
+mvn v9.2d, v10.2d
+mvn d1, d2
+rbit v9.4h, v10.4h
+rbit v9.8h, v10.8h
+rbit v9.2s, v10.2s
+rbit v9.4s, v10.4s
+rbit v9.2d, v10.2d
+rbit d1, d2
+fabs v11.8h, v12.8h
+fneg v11.8h, v12.8h
+fsqrt v11.8h, v12.8h
+frintn v11.8h, v12.8h
+frintm v11.8h, v12.8h
+frintp v11.8h, v12.8h
+frintz v11.8h, v12.8h
+frinta v11.8h, v12.8h
+frintx v11.8h, v12.8h
+frinti v11.8h, v12.8h
+fcvtns v11.8h, v12.8h
+fcvtnu v11.8h, v12.8h
+fcvtms v11.8h, v12.8h
+fcvtmu v11.8h, v12.8h
+fcvtps v11.8h, v12.8h
+fcvtpu v11.8h, v12.8h
+fcvtzs v11.8h, v12.8h
+fcvtzu v11.8h, v12.8h
+fcvtas v11.8h, v12.8h
+fcvtau v11.8h, v12.8h
+scvtf v11.8h, v12.8h
+ucvtf v11.8h, v12.8h
+frecpe v11.8h, v12.8h
+frsqrte v11.8h, v12.8h
+xtn v1.16b, v2.8h
+sqxtn v1.16b, v2.8h
+uqxtn v1.16b, v2.8h
+sqxtun v1.16b, v2.8h
+fcvtl2 v1.2d, v2.2s
+sshr v1.8b, v2.8b, #0
+sshr v1.16b, v2.16b, #0
+sshr v1.4h, v2.4h, #0
+sshr v1.8h, v2.8h, #0
+sshr v1.2s, v2.2s, #0
+sshr v1.4s, v2.4s, #0
+sshr v1.2d, v2.2d, #0
+ushr v1.8b, v2.8b, #0
+ushr v1.16b, v2.16b, #0
+ushr v1.4h, v2.4h, #0
+ushr v1.8h, v2.8h, #0
+ushr v1.2s, v2.2s, #0
+ushr v1.4s, v2.4s, #0
+ushr v1.2d, v2.2d, #0
+ssra v1.8b, v2.8b, #0
+ssra v1.16b, v2.16b, #0
+ssra v1.4h, v2.4h, #0
+ssra v1.8h, v2.8h, #0
+ssra v1.2s, v2.2s, #0
+ssra v1.4s, v2.4s, #0
+ssra v1.2d, v2.2d, #0
+usra v1.8b, v2.8b, #0
+usra v1.16b, v2.16b, #0
+usra v1.4h, v2.4h, #0
+usra v1.8h, v2.8h, #0
+usra v1.2s, v2.2s, #0
+usra v1.4s, v2.4s, #0
+usra v1.2d, v2.2d, #0
+srshr v1.8b, v2.8b, #0
+srshr v1.16b, v2.16b, #0
+srshr v1.4h, v2.4h, #0
+srshr v1.8h, v2.8h, #0
+srshr v1.2s, v2.2s, #0
+srshr v1.4s, v2.4s, #0
+srshr v1.2d, v2.2d, #0
+urshr v1.8b, v2.8b, #0
+urshr v1.16b, v2.16b, #0
+urshr v1.4h, v2.4h, #0
+urshr v1.8h, v2.8h, #0
+urshr v1.2s, v2.2s, #0
+urshr v1.4s, v2.4s, #0
+urshr v1.2d, v2.2d, #0
+srsra v1.8b, v2.8b, #0
+srsra v1.16b, v2.16b, #0
+srsra v1.4h, v2.4h, #0
+srsra v1.8h, v2.8h, #0
+srsra v1.2s, v2.2s, #0
+srsra v1.4s, v2.4s, #0
+srsra v1.2d, v2.2d, #0
+ursra v1.8b, v2.8b, #0
+ursra v1.16b, v2.16b, #0
+ursra v1.4h, v2.4h, #0
+ursra v1.8h, v2.8h, #0
+ursra v1.2s, v2.2s, #0
+ursra v1.4s, v2.4s, #0
+ursra v1.2d, v2.2d, #0
+shl v1.8b, v2.8b, #8
+shl v1.16b, v2.16b, #8
+shl v1.4h, v2.4h, #16
+shl v1.8h, v2.8h, #16
+shl v1.2s, v2.2s, #32
+shl v1.4s, v2.4s, #32
+shl v1.2d, v2.2d, #64
+sli v1.8b, v2.8b, #8
+sli v1.16b, v2.16b, #8
+sli v1.4h, v2.4h, #16
+sli v1.8h, v2.8h, #16
+sli v1.2s, v2.2s, #32
+sli v1.4s, v2.4s, #32
+sli v1.2d, v2.2d, #64
+sri v1.8b, v2.8b, #0
+sri v1.16b, v2.16b, #0
+sri v1.4h, v2.4h, #0
+sri v1.8h, v2.8h, #0
+sri v1.2s, v2.2s, #0
+sri v1.4s, v2.4s, #0
+sri v1.2d, v2.2d, #0
+sqshl v1.8b, v2.8b, #8
+sqshl v1.16b, v2.16b, #8
+sqshl v1.4h, v2.4h, #16
+sqshl v1.8h, v2.8h, #16
+sqshl v1.2s, v2.2s, #32
+sqshl v1.4s, v2.4s, #32
+sqshl v1.2d, v2.2d, #64
+uqshl v1.8b, v2.8b, #8
+uqshl v1.16b, v2.16b, #8
+uqshl v1.4h, v2.4h, #16
+uqshl v1.8h, v2.8h, #16
+uqshl v1.2s, v2.2s, #32
+uqshl v1.4s, v2.4s, #32
+uqshl v1.2d, v2.2d, #64
+sqshlu v1.8b, v2.8b, #8
+sqshlu v1.16b, v2.16b, #8
+sqshlu v1.4h, v2.4h, #16
+sqshlu v1.8h, v2.8h, #16
+sqshlu v1.2s, v2.2s, #32
+sqshlu v1.4s, v2.4s, #32
+sqshlu v1.2d, v2.2d, #64
+sshll v1.8h, v2.8b, #8
+sshll v1.4s, v2.4h, #16
+sshll v1.2d, v2.2s, #32
+ushll v1.8h, v2.8b, #8
+ushll v1.4s, v2.4h, #16
+ushll v1.2d, v2.2s, #32
+sqdmlal v1.8h, v2.8b, v3.8b
+sqdmlal2 v1.8h, v2.16b, v3.16b
+sqdmlsl v1.8h, v2.8b, v3.8b
+sqdmlsl2 v1.8h, v2.16b, v3.16b
+sqdmull v1.8h, v2.8b, v3.8b
+sqdmull2 v1.8h, v2.16b, v3.16b
+ext v1.8b, v2.8b, v3.8b, #8
+saddlv d1, v2.2s
+uaddlv d1, v2.2s
+smaxv s1, v2.2s
+umaxv s1, v2.2s
+sminv s1, v2.2s
+uminv s1, v2.2s
+addv s1, v2.2s
+fmaxnmv s1, v2.2s
+fmaxv s1, v2.2s
+fminnmv s1, v2.2s
+fminv s1, v2.2s
+movi v1.2s, #5, lsl #4
+movi v1.4s, #5, lsl #4
+movi v1.2d, 0x1234
+movi d1, 0x1234
+fmov v1.2s, 3.3
+fmov v1.4s, 3.3
+fmov v1.2d, 3.3
+dup v1.1d, v2.d[0]
+dup v1.1d, v2.d[1]
+dup v1.2d, w3
+dup v1.4s, x3
+mov w0, v1.b[1]
+umov x0, v1.b[1]
+ins v1.b[16], w3
+mov w0, v1.h[1]
+umov x0, v1.h[1]
+ins v1.h[8], w3
+smov w0, v1.s[1]
+umov x0, v1.s[1]
+ins v1.s[4], w3
+smov w0, v1.d[1]
+smov x0, v1.d[1]
+ins v1.d[2], x3
+fmov x1, v2.d[0]
+fmla v1.2d, v2.2d, v3.d[2]
+fmls v1.2d, v2.2d, v3.d[2]
+fmul v1.2d, v2.2d, v3.d[2]
+fmulx v1.2d, v2.2d, v3.d[2]
+mul v1.8h, v2.8h, v16.h[2]
+mul v1.16b, v2.16b, v3.b[1]
+mla v1.8h, v2.8h, v16.h[2]
+mla v1.16b, v2.16b, v3.b[1]
+mls v1.8h, v2.8h, v16.h[2]
+mls v1.16b, v2.16b, v3.b[1]
+sqdmulh v1.8h, v2.8h, v16.h[2]
+sqdmulh v1.16b, v2.16b, v3.b[1]
+sqrdmulh v1.8h, v2.8h, v16.h[2]
+sqrdmulh v1.16b, v2.16b, v3.b[1]
+ld2 {v30.1d, v31.1d}, [x0]
+ld2 {v30.1d, v31.1d}, [sp], #16
+ld2 {v30.1d, v31.1d}, [x2], x3
+ld2 {v30.1d, v31.1d}, [x2], 16
+st2 {v30.1d, v31.1d}, [x0]
+st2 {v30.1d, v31.1d}, [sp], #16
+st2 {v30.1d, v31.1d}, [x2], x3
+st2 {v30.1d, v31.1d}, [x2], 16
+ld3 {v30.1d, v31.1d, v0.1d}, [x0]
+ld3 {v30.1d, v31.1d, v0.1d}, [sp], #24
+ld3 {v30.1d, v31.1d, v0.1d}, [x2], x3
+ld3 {v30.1d, v31.1d, v0.1d}, [x2], 24
+st3 {v30.1d, v31.1d, v0.1d}, [x0]
+st3 {v30.1d, v31.1d, v0.1d}, [sp], #24
+st3 {v30.1d, v31.1d, v0.1d}, [x2], x3
+st3 {v30.1d, v31.1d, v0.1d}, [x2], 24
+ld4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x0]
+ld4 {v30.1d, v31.1d, v0.1d, v1.1d}, [sp], #32
+ld4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x2], x3
+ld4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x2], 32
+st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x0]
+st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [sp], #32
+st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x2], x3
+st4 {v30.1d, v31.1d, v0.1d, v1.1d}, [x2], 32
