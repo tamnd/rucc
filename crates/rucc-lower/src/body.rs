@@ -8101,10 +8101,10 @@ impl<'u> Body<'_, 'u> {
     /// What moves is a representation rather than a value, so a width the machine reaches goes
     /// through an integer of that width whatever the object's type says. `_Atomic` raises the
     /// alignment of an object to its size wherever the size is a power of two up to sixteen, which
-    /// `atomic_layout` in `rucc-types` does and gcc does, so a size of one, two, four or eight here
-    /// is aligned to itself and the instruction really is indivisible. That has to be the same rule
-    /// `__atomic_is_lock_free` answers by, and it is: a program told yes and then given a lock has
-    /// been lied to about the one thing the name exists to say.
+    /// `atomic_layout` in `rucc-types` does and gcc does, so through the operators a size of one,
+    /// two, four or eight here is aligned to itself. A generic builtin can hand over an object with
+    /// no qualifier on it, and that takes the instruction too, because gcc decides by the size
+    /// alone. [`Self::representation`] says more.
     ///
     /// The ordering is the strongest, because only the operators reach this. A builtin handed a
     /// pointer to one of these objects is the generic call with the program's own buffers on both
@@ -8138,8 +8138,9 @@ impl<'u> Body<'_, 'u> {
     /// and into another, which is what `__atomic_exchange` over a structure or a union asks for.
     ///
     /// The rule for which of the two ways it goes is the one [`Self::ordered_read`] goes by, and
-    /// for the same reason: an object an instruction reaches, which here means one `_Atomic` has
-    /// raised to its own size, is swapped as the integer its bytes spell, and every other one is
+    /// for the same reason: an object an instruction reaches, which is one of one, two, four or
+    /// eight bytes whatever it is aligned to, is swapped as the integer its bytes spell, and every
+    /// other one is
     /// the runtime's generic routine, which is the call gcc makes for a size it has no instruction
     /// for. What moves either way is a representation and not a value, so the members are never
     /// named and the padding travels with them, which is also what the routine does.
@@ -8217,9 +8218,18 @@ impl<'u> Body<'_, 'u> {
         exchanged
     }
 
-    /// What the atomic object itself is aligned to, which is what the qualifier raised it to.
+    /// What the access to the atomic object itself is told the object is aligned to, which is its
+    /// size, and only ever asked about an object [`Self::representation`] found an integer for.
+    ///
+    /// On an `_Atomic` object that is what the qualifier raised it to. On one a generic builtin
+    /// reached without the qualifier it can be more than the type promises, and saying the size is
+    /// what gets the one instruction out of the back end, which otherwise leaves an access wider
+    /// than its alignment alone as not atomic. gcc emits the same instruction for that object, so
+    /// this asks the machine for exactly what gcc asks it for: on x86-64 the locked instructions
+    /// are indivisible at any alignment.
     fn object_align(&self, ty: TypeId) -> u32 {
-        repr::align_of(self.types(), self.target(), ty)
+        let size = repr::size_of(self.types(), self.target(), ty);
+        u32::try_from(size).expect("an object one instruction reaches is at most eight bytes")
     }
 
     /// What the buffer on the other end of the copy is aligned to, which is the type's own
@@ -8239,23 +8249,23 @@ impl<'u> Body<'_, 'u> {
     /// The integer an object of that type is moved as, and [`None`] for one an instruction does
     /// not reach.
     ///
-    /// The alignment is asked about here and is not asked about on the value paths, and the reason
-    /// is that an object with no value can be short of it while a scalar cannot: a `long` is
-    /// aligned to eight everywhere in the matrix, and a structure of two `int`s is aligned to four
-    /// until something raises it. `_Atomic` raises it, so an object that has the qualifier on it
-    /// takes the instruction, and one the program reached through a builtin without it takes the
-    /// call. That is the rule `__atomic_is_lock_free` answers by, and the two have to say the same
-    /// thing: a program told yes and then given a lock has been lied to about the one thing the
-    /// name exists to say.
+    /// The size decides and nothing else, which is how gcc resolves the four generic builtins: an
+    /// object of one, two, four or eight bytes is the sized operation on the integer its bytes
+    /// spell, whatever its type is aligned to. A structure of two `int`s is aligned to four until
+    /// something raises it, and gcc 16 still swaps one with `xchgq` and compares and exchanges it
+    /// with `lock cmpxchgq` at -O0 and at -O2 rather than calling the generic `__atomic_exchange`
+    /// or `__atomic_compare_exchange` in libatomic. Asking about the alignment here, as this once
+    /// did, sent such an object to those routines, and a program gcc links without `-latomic`
+    /// then failed to link here. `_Atomic` raises the alignment to the size anyway, so an object
+    /// with the qualifier on it goes the way it always went.
+    ///
+    /// `__atomic_is_lock_free` answers by the same rule, yes for those sizes whatever the pointer
+    /// it is handed points at, so a program told yes is given the instruction.
     fn representation(&mut self, ty: TypeId) -> Option<Type> {
         if !self.in_one_instruction(ty) {
             return None;
         }
         let size = repr::size_of(self.types(), self.target(), ty);
-        let align = u64::from(repr::align_of(self.types(), self.target(), ty));
-        if align < size {
-            return None;
-        }
         let bits = u32::try_from(size * 8).expect("eight bytes of object is a width");
         Some(Type::int(bits))
     }

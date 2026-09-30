@@ -63,6 +63,28 @@ const OPTIONS: &[(&str, &str)] = &[
     ("W0334", "expansion-to-defined"),
 ];
 
+/// The options gcc raises through what it calls a pedwarn, which is the diagnostic the standard
+/// requires, and so the only ones `-pedantic-errors` turns into errors. Sorted, and checked
+/// against gcc 16.2.0 with `-pedantic-errors` one option at a time.
+///
+/// Everything else in [`OPTIONS`] is an ordinary warning that happens to be on by default, and
+/// gcc leaves it a warning under `-pedantic-errors`: a call to a deprecated function, a result
+/// thrown away, a `#warning`, a shift count out of range, a reserved constructor priority. The
+/// list is of the ones that are promoted rather than the ones that are not, so that a warning
+/// added to the table later stays a warning under `-pedantic-errors` until somebody checks.
+const PEDWARNS: &[&str] = &[
+    "compare-distinct-pointer-types",
+    "discarded-qualifiers",
+    "expansion-to-defined",
+    "implicit-int",
+    "incompatible-pointer-types",
+    "int-conversion",
+    "pedantic",
+    "pointer-arith",
+    "pointer-sign",
+    "return-type",
+];
+
 /// The gcc option that controls the warning with this code, if it has one.
 pub fn option_of(code: &str) -> Option<&'static str> {
     OPTIONS.binary_search_by(|&(known, _)| known.cmp(code)).ok().map(|at| OPTIONS[at].1)
@@ -78,6 +100,7 @@ pub fn option_of(code: &str) -> Option<&'static str> {
 pub struct Named {
     off: BTreeSet<String>,
     errors: BTreeMap<String, bool>,
+    pedantic_errors: bool,
 }
 
 impl Named {
@@ -96,6 +119,16 @@ impl Named {
         }
     }
 
+    /// Records `-pedantic-errors`, which promotes the warnings the standard requires and no
+    /// others.
+    ///
+    /// It is not `-Werror` with `-pedantic` on top, which is what it used to be taken for here: a
+    /// program calling a function marked `[[deprecated]]` is one gcc builds under
+    /// `-std=c23 -pedantic-errors` with a warning, and one that `-Werror` stops.
+    pub fn pedantic_errors(&mut self) {
+        self.pedantic_errors = true;
+    }
+
     /// Whether this is a warning the command line turned off by name.
     pub fn silenced(&self, diag: &Diagnostic) -> bool {
         diag.severity == Severity::Warning
@@ -103,13 +136,22 @@ impl Named {
     }
 
     /// Whether this is a warning to report as an error, given whether `-Werror` was passed.
+    ///
+    /// Under `-pedantic-errors` a warning is promoted when its option is one of the [`PEDWARNS`],
+    /// and also when it answers to no option at all, since the warnings with no bracket after
+    /// them are the pedantic ones this compiler raises without naming.
     pub fn promoted(&self, diag: &Diagnostic, warnings_are_errors: bool) -> bool {
         if diag.severity != Severity::Warning {
             return false;
         }
-        match self.name(diag).and_then(|name| self.errors.get(name)) {
+        let name = self.name(diag);
+        match name.and_then(|name| self.errors.get(name)) {
             Some(&error) => error,
-            None => warnings_are_errors,
+            None => {
+                warnings_are_errors
+                    || (self.pedantic_errors
+                        && name.is_none_or(|name| PEDWARNS.binary_search(&name).is_ok()))
+            }
         }
     }
 
@@ -126,6 +168,28 @@ mod tests {
     fn warning(code: &'static str) -> Diagnostic {
         Diagnostic::warning("pointer targets differ in signedness".to_owned(), Span::DUMMY)
             .with_code(code)
+    }
+
+    /// `-pedantic-errors` stops a build over what the standard requires and nothing else, so a
+    /// deprecated call and a thrown-away result stay warnings while a pointer mixed with an
+    /// integer does not. `-Werror=` of a name still wins over both.
+    #[test]
+    fn pedantic_errors_promotes_only_what_gcc_raises_as_a_pedwarn() {
+        let mut named = Named::default();
+        named.pedantic_errors();
+        assert!(named.promoted(&warning("E0513"), false));
+        assert!(named.promoted(&warning("E0408"), false));
+        assert!(named.promoted(&warning("E0999"), false));
+        assert!(!named.promoted(&warning("E0770"), false));
+        assert!(!named.promoted(&warning("E0771"), false));
+        assert!(!named.promoted(&warning("W0331"), false));
+        assert!(named.promoted(&warning("E0770"), true));
+        named.flag("error=deprecated-declarations");
+        assert!(named.promoted(&warning("E0770"), false));
+        named.flag("no-error=int-conversion");
+        assert!(!named.promoted(&warning("E0513"), false));
+        assert!(PEDWARNS.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(PEDWARNS.iter().all(|name| OPTIONS.iter().any(|&(_, known)| known == *name)));
     }
 
     #[test]
