@@ -1754,7 +1754,7 @@ mod tests {
         // it: the body's own instructions keep the spans they arrived with, which here is none.
         let ends: Vec<Span> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .map(|inst| func.span(inst))
             .filter(|span| !span.is_dummy())
             .collect();

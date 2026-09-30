@@ -62,8 +62,7 @@ pub fn divisions(func: &mut Func, goal: Goal) {
     if matches!(goal, Goal::Size) {
         return;
     }
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         let Some(division) = division(func, inst) else { continue };
         let Some(program) = program(division) else { continue };

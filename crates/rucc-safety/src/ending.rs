@@ -102,7 +102,7 @@ pub fn checks(module: &mut Module, names: &Interner) -> usize {
 fn one(func: &mut Func, names: &Interner, defined: &Set<&str>) -> usize {
     let ending: Vec<(Inst, Value)> = func
         .blocks()
-        .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+        .flat_map(|block| func.insts(block))
         .filter_map(|inst| handed(func, names, defined, inst).map(|value| (inst, value)))
         .collect();
     if ending.is_empty() {
@@ -218,7 +218,7 @@ mod tests {
             .map(|id| &module[id])
             .flat_map(|func| {
                 func.blocks()
-                    .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                    .flat_map(|block| func.insts(block))
                     .filter(|&inst| func[inst].opcode == Opcode::CheckFree)
                     .collect::<Vec<_>>()
             })
@@ -290,13 +290,13 @@ mod tests {
         let func = &module[id];
         let made: Vec<_> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::CapOf)
             .collect();
         assert_eq!(made.len(), 1, "one producer for the one pointer");
         let check = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::CheckFree)
             .expect("the check went in");
         let cap = func[made[0]].results().next().expect("a cap_of produces one value");

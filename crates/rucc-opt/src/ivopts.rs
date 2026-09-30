@@ -2784,7 +2784,7 @@ mod tests {
     /// How many `select`s the function has, which is how many clamps were written.
     fn selects(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::Select)
             .count()
     }

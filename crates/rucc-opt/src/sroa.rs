@@ -977,7 +977,7 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
 
     fn count_of(func: &Func, opcode: Opcode) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == opcode)
             .count()
     }

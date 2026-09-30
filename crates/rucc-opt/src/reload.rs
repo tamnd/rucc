@@ -454,7 +454,7 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     /// How many instructions with that opcode the function has left.
     fn count_of(func: &Func, opcode: Opcode) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == opcode)
             .count()
     }
@@ -497,13 +497,13 @@ block2:
         // What the function returns is now the constant the store wrote.
         let ret = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::Return)
             .expect("a return");
         let returned = func[func[ret].args][0];
         let seven = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::IConst)
             .expect("the constant");
         assert_eq!(returned, func[seven].results().next().expect("a result"));
@@ -912,12 +912,12 @@ block3(%5: i32):
         assert_eq!(count_of(func, Opcode::IConst), 2);
         let ret = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::Return)
             .expect("a return");
         let seven = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::IConst)
             .expect("the first constant, which is the one stored before the copy");
         assert_eq!(func[func[ret].args][0], func[seven].results().next().expect("a result"));

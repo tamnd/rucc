@@ -1923,7 +1923,7 @@ mod tests {
         assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
         let table = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .find(|&inst| func[inst].opcode == Opcode::Switch)
             .expect("a table");
         for call in func.successors(table).skip(1) {

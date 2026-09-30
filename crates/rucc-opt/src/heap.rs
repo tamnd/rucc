@@ -120,7 +120,7 @@ pub fn annotate(module: &mut Module, names: &Interner) -> usize {
         let func = &module[id];
         let marks: Vec<_> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::Call)
             .filter(|&inst| !func[inst].flags.contains(Flags::HEAP))
             .filter(|&inst| {

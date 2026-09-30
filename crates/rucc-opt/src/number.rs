@@ -477,7 +477,7 @@ mod tests {
     /// How many instructions of that opcode are left in the function.
     fn count(func: &Func, opcode: Opcode) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == opcode)
             .count()
     }

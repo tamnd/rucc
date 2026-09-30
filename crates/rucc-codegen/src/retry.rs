@@ -81,7 +81,7 @@ use rucc_ir::{
 pub fn loops(func: &mut Func) {
     let found: Vec<Inst> = func
         .blocks()
-        .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+        .flat_map(|block| func.insts(block))
         .filter(|&inst| wanted(func, inst))
         .collect();
     for inst in found {
@@ -265,7 +265,7 @@ mod tests {
     fn only(func: &Func, opcode: Opcode) -> Inst {
         let found: Vec<Inst> = func
             .blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == opcode)
             .collect();
         assert_eq!(found.len(), 1, "expected one {opcode:?}");

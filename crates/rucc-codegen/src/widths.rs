@@ -124,8 +124,7 @@ pub fn integers(func: &mut Func) -> bool {
         return false;
     }
 
-    let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     if !insts.iter().all(|&inst| touches_nothing_it_does_not_understand(func, &narrow, inst)) {
         return false;
     }

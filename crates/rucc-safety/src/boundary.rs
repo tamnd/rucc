@@ -196,8 +196,7 @@ fn entering(func: &mut Func, callee: Symbol) -> usize {
 
 /// Witnesses the result of every call in a function that leaves this build.
 fn returning(func: &mut Func, names: &Interner, callee: Symbol, defined: &[Symbol]) -> usize {
-    let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
 
     let mut count = 0;
     for inst in insts {
@@ -243,8 +242,7 @@ fn returning(func: &mut Func, names: &Interner, callee: Symbol, defined: &[Symbo
 /// this is a place a plane could not be maintained, so adding these to that number would be adding
 /// up two different things.
 fn handing(func: &mut Func, names: &Interner, callee: Symbol, defined: &[Symbol]) {
-    let insts: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
 
     for inst in insts {
         if func[inst].opcode != Opcode::Call {

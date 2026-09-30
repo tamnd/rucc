@@ -92,8 +92,7 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
             continue;
         }
         let func = &mut module[id];
-        let insts: Vec<Inst> =
-            func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         for inst in insts {
             // Two facts about one check and neither implies the other. A global holds every byte
             // an access reads and still leaves it starting a byte in, and an access one byte into
@@ -338,7 +337,7 @@ mod tests {
             .map(|id| {
                 let func = &module[id];
                 func.blocks()
-                    .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                    .flat_map(|block| func.insts(block))
                     .filter(|&inst| func[inst].flags.contains(Flags::STATIC))
                     .count()
             })
@@ -369,7 +368,7 @@ mod tests {
             .map(|id| {
                 let func = &module[id];
                 func.blocks()
-                    .flat_map(|block| func.insts(block).collect::<Vec<_>>())
+                    .flat_map(|block| func.insts(block))
                     .filter(|&inst| func[inst].flags.contains(Flags::ALIGNED))
                     .count()
             })

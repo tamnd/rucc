@@ -363,8 +363,7 @@ pub fn annotate(module: &mut Module, names: &Interner, pic: Pic) -> usize {
             continue;
         }
         let func = &mut module[id];
-        let insts: Vec<Inst> =
-            func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+        let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         for inst in insts {
             // A tail call as well as a call. Nothing after a tail call needs the fact, but the
             // flag says what the call reaches rather than what happens after it, and a call that

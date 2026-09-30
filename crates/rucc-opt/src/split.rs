@@ -566,7 +566,7 @@ fn sweep(
     let body = loops.blocks(id).to_vec();
     let checks: Vec<Inst> = body
         .iter()
-        .flat_map(|&block| func.insts(block).collect::<Vec<Inst>>())
+        .flat_map(|&block| func.insts(block))
         .filter(|&inst| {
             matches!(
                 func[inst].opcode,
@@ -3265,7 +3265,7 @@ mod tests {
     /// Every instruction in the function with this opcode, and the block it is in.
     fn all(func: &Func, opcode: Opcode) -> Vec<(Block, Inst)> {
         func.blocks()
-            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)).collect::<Vec<_>>())
+            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
             .filter(|&(_, inst)| func[inst].opcode == opcode)
             .collect()
     }

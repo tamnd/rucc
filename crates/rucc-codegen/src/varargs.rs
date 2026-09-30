@@ -220,8 +220,7 @@ impl Area {
 pub fn lists(func: &mut Func, conv: &CallRegs) {
     let area = Area::of(conv);
     let word = u64::from(conv.word);
-    let found: Vec<Inst> =
-        func.blocks().flat_map(|block| func.insts(block).collect::<Vec<_>>()).collect();
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match (func[inst].opcode, conv.list) {
             (Opcode::VaArg, VaList::SysV) => next(func, inst, area),

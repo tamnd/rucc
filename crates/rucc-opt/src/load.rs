@@ -359,7 +359,7 @@ mod tests {
     /// How many loads are left in the function.
     fn loads(func: &Func) -> usize {
         func.blocks()
-            .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
+            .flat_map(|block| func.insts(block))
             .filter(|&inst| func[inst].opcode == Opcode::Load)
             .count()
     }
