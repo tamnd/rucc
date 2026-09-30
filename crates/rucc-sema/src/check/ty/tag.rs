@@ -395,6 +395,24 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether a member gives the record a name to reach, which an anonymous `struct` or `union`
+    /// does when it has one of its own. The kernel's `struct mm_struct` is an anonymous `struct`
+    /// followed by a flexible array member, and gcc takes it.
+    fn names_a_member(&self, decl: &FieldDecl) -> bool {
+        if decl.name.is_some() {
+            return true;
+        }
+        if decl.bits.is_some() {
+            return false;
+        }
+        let TypeKind::Record(id) = self.types.kind(self.types.canonical(decl.ty)) else {
+            return false;
+        };
+        self.types.record_info(id).fields.iter().any(|field| {
+            field.name.is_some() || self.names_a_member(&FieldDecl::new(None, field.ty))
+        })
+    }
+
     /// The width of a bit-field, folded and measured against the type it was declared in.
     fn bit_width(&mut self, ty: TypeId, width: ast::ExprId, subject: Subject) -> Option<u32> {
         let who = self.member_named(subject.name);
@@ -486,7 +504,7 @@ impl Checker<'_> {
             let named = fields
                 .iter()
                 .enumerate()
-                .any(|(other, (decl, _))| other != index && decl.name.is_some());
+                .any(|(other, (decl, _))| other != index && self.names_a_member(decl));
             let microsoft = self.cx.ms_extensions;
             let wrong = if kind == RecordKind::Union {
                 (!microsoft).then_some(("flexible array member in union", "E0552"))

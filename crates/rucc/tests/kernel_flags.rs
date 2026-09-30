@@ -109,3 +109,41 @@ fn short_wchar_changes_what_a_wide_string_is() {
     assert!(text.contains(".long\t6"), "{text}");
     assert!(text.contains(".long\t1"), "{text}");
 }
+
+/// `__is_constexpr` from `include/linux/compiler.h`, which measures a `void` through a `void *` it
+/// dereferences when its argument is not a constant. gcc says nothing about either, and a word
+/// here is an error in every build with `CONFIG_WERROR`, which `allmodconfig` turns on.
+#[test]
+fn the_kernel_s_constant_test_compiles_quietly_under_werror() {
+    let source = "#define __is_constexpr(x) \\\n\
+        (sizeof(int) == sizeof(*(8 ? ((void *)((long)(x) * 0l)) : (int *)8)))\n\
+        unsigned long f(unsigned long n) { return __is_constexpr(n - 1); }\n\
+        int g(void) { return __is_constexpr(3); }\n\
+        typeof(*(void *)0) *h(void) { return 0; }\n";
+    let out =
+        run(&["--target=x86_64-unknown-linux-gnu", "-Werror", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    let pedantic =
+        run(&["--target=x86_64-unknown-linux-gnu", "-pedantic", "-c", "-o", "/dev/null"], source);
+    assert!(String::from_utf8_lossy(&pedantic.stderr).contains("to a void type"));
+}
+
+/// Two more things in the headers every kernel unit includes that gcc takes without a word:
+/// `struct mm_struct`, whose only members before its flexible array are inside an anonymous
+/// `struct`, and `check_copy_size`, which keeps what `__builtin_object_size` answers in an `int`.
+#[test]
+fn the_kernel_s_headers_compile_quietly_under_werror() {
+    let source = "struct mm { struct { int users; long flags; }; unsigned long cpu_bitmap[]; };\n\
+        unsigned long first(struct mm *mm) { return mm->cpu_bitmap[0] + mm->users; }\n\
+        int check(const void *addr, unsigned long bytes) {\n\
+            int sz = __builtin_object_size(addr, 0);\n\
+            return sz >= 0 && sz < bytes;\n\
+        }\n";
+    let out = run(
+        &["--target=x86_64-unknown-linux-gnu", "-O2", "-Werror", "-c", "-o", "/dev/null"],
+        source,
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+}

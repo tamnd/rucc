@@ -212,7 +212,9 @@ impl Checker<'_> {
             }
             None => 0,
         };
-        Some(self.constant(Const::Int(answer), ty, span))
+        let answer = self.constant(Const::Int(answer), ty, span);
+        self.answered_late.insert(answer);
+        Some(answer)
     }
 
     /// The second argument as one of the four kinds, or nothing with the complaint already made.

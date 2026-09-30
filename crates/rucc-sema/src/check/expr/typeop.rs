@@ -338,7 +338,9 @@ impl Checker<'_> {
         // decay, and a function does not decay under it either. The operand is still checked,
         // because `sizeof (1/0)` is a diagnostic about the division whether or not the value
         // is ever wanted.
+        self.unevaluated += 1;
         let operand = self.expr(operand);
+        self.unevaluated -= 1;
         if self.is_poisoned(operand) {
             return self.poison(span);
         }
@@ -402,7 +404,8 @@ impl Checker<'_> {
             Ok(layout) => what.of(layout),
             // GNU C gives `void` and a function type the value one so that `p + 1` on a `void *`
             // and on a function pointer means what everyone who writes it means. ISO C has no
-            // answer at all, which is why this is a warning rather than silence.
+            // answer at all, which is why `-pedantic` warns. gcc says so only under that or
+            // `-Wpointer-arith`, and the kernel's `__is_constexpr` measures a `void` on purpose.
             Err(LayoutError::Incomplete) if is_void(&self.types, ty) => {
                 self.measure_warning(what, "a void type", span);
                 1
@@ -453,6 +456,9 @@ impl Checker<'_> {
 
     /// The warning for a type that has no size and is measured all the same.
     fn measure_warning(&mut self, what: Measure, subject: &str, span: Span) {
+        if !self.cx.pedantic {
+            return;
+        }
         self.report(
             Diagnostic::warning(
                 format!("invalid application of '{}' to {subject}", what.as_str()),
@@ -1748,14 +1754,21 @@ mod tests {
         let function = f.type_name(specs, &[call]);
         let of_function = measure_of(&mut f, function, Measure::Size);
 
-        let mut c = f.checker();
-        let void_size = c.check_expr(size);
-        let function_size = c.check_expr(of_function);
+        let mut quiet = f.checker();
+        let void_size = quiet.check_expr(size);
+        let function_size = quiet.check_expr(of_function);
 
         // GNU C gives both the value one, so that `p + 1` on a `void *` and on a function
-        // pointer means what everyone who writes it means.
-        assert_eq!(folded(&c, void_size), 1);
-        assert_eq!(folded(&c, function_size), 1);
+        // pointer means what everyone who writes it means. gcc only says it is wrong under
+        // `-pedantic` or `-Wpointer-arith`, and the kernel measures a `void` on purpose.
+        assert_eq!(folded(&quiet, void_size), 1);
+        assert_eq!(folded(&quiet, function_size), 1);
+        assert!(messages(&quiet).is_empty());
+
+        let mut c = f.checker();
+        c.cx.pedantic = true;
+        c.check_expr(size);
+        c.check_expr(of_function);
         assert_eq!(
             messages(&c),
             [
@@ -2439,6 +2452,7 @@ mod tests {
         let size = f.expr(ast::Expr::SizeofExpr(use_f));
 
         let mut c = f.checker();
+        c.cx.pedantic = true;
         let int = c.types.int(IntKind::Int);
         let signature = FunctionType {
             ret: int,
