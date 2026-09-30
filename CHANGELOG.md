@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler takes a label with spaces before its colon, `0 :`, and a macro called with its argument in brackets right after the name, `STACK_FRAME_NON_STANDARD(clear_bhb_loop)`, both of which the kernel's entry_64.S writes and gas reads.
 - The assembler reads `.code32` and `.code64`, and in thirty two bit code writes `movl` to and from a control or debug register and the far jump or call to a segment and an offset written out, `ljmpl $0x10, $1f`. The kernel's la57toggle.S uses all three to leave long mode and come back, and the object now matches GNU as byte for byte.
 - A member name that is also reached through an anonymous `struct` or `union` in the same record is reported as a duplicate member, as gcc reports it, in either order and at any depth. Before only two members written directly in the record were compared.
 - The assembler reads `% rip` with a space after the percent sign, which is what the kernel's `_ASM_RIP()` comes to once preprocessed, and a conditional can compare two registers, as `UNWIND_HINT_REGS` does with `.if \base == %rsp`.

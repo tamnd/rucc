@@ -514,9 +514,9 @@ impl Reader {
     fn statement(&mut self, mut text: &str) -> Result<(), Trouble> {
         loop {
             text = text.trim_start();
-            let Some(name) = labelled(text) else { break };
+            let Some((name, length)) = labelled(text) else { break };
             self.label(&name)?;
-            text = &text[name.len() + 1..];
+            text = &text[length..];
         }
         let text = text.trim();
         if text.is_empty() {
@@ -4106,17 +4106,21 @@ fn escape(rest: &str) -> Result<(u8, usize), String> {
 /// numbered local label and is a place rather than a name: it may be written as many times in a file
 /// as the file likes and what refers to it is `1b` for the last one above and `1f` for the next one
 /// below.
-fn labelled(text: &str) -> Option<String> {
+///
+/// gas takes spaces between the name and the colon too, and the kernel's entry_64.S writes `0 :`.
+/// The length that comes back with the name is how much of the text the label took, colon and all.
+fn labelled(text: &str) -> Option<(String, usize)> {
     let bytes = text.as_bytes();
     if bytes.is_empty() || !(starts(bytes[0]) || bytes[0].is_ascii_digit()) {
         return None;
     }
     let end = text.find(|ch: char| !carries_on(ch as u8))?;
+    let colon = end + text[end..].find(|ch: char| ch != ' ' && ch != '\t')?;
     // Not `::`, which is a different thing in gas, and not a bare name with nothing after it.
-    if bytes.get(end) != Some(&b':') || bytes.get(end + 1) == Some(&b':') {
+    if bytes.get(colon) != Some(&b':') || bytes.get(colon + 1) == Some(&b':') {
         return None;
     }
-    Some(text[..end].to_owned())
+    Some((text[..end].to_owned(), colon + 1))
 }
 
 /// `name = value`, as the name and the value, when the statement is one.

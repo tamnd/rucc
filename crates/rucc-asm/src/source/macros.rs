@@ -167,8 +167,8 @@ struct Parts<'a> {
 fn parts(text: &str) -> Parts<'_> {
     let mut labels = Vec::new();
     let mut text = text.trim_start();
-    while let Some(name) = labelled(text) {
-        text = text[name.len() + 1..].trim_start();
+    while let Some((name, length)) = labelled(text) {
+        text = text[length..].trim_start();
         labels.push(name);
     }
     let (word, rest) = match text.find(char::is_whitespace) {
@@ -247,6 +247,15 @@ impl Reader {
         } else {
             self.macros.defined.get(&word.to_ascii_lowercase()).cloned()
         };
+        // gas ends the name of a macro at a bracket, so `NAME(arg)` calls it with `(arg)`. The
+        // kernel's entry_64.S says `STACK_FRAME_NON_STANDARD(clear_bhb_loop)` that way.
+        if let (None, Some(bracket)) = (&called, word.find('(')) {
+            let known = bracket > 0 && !control;
+            if known && self.macros.defined.contains_key(&word[..bracket].to_ascii_lowercase()) {
+                let at = word.as_ptr() as usize - text.as_ptr() as usize + bracket;
+                return self.take(&format!("{} {}", &text[..at], &text[at..]));
+            }
+        }
         if !control && called.is_none() {
             return self.statement(text);
         }
@@ -1260,6 +1269,16 @@ PFX_REX b b
             ".if (1 < 2) == -1\n.byte 1\n.endif\n.if !(1 == 2) && 2 >= 2\n.byte 2\n.endif",
             ".byte 1, 2",
         );
+    }
+
+    #[test]
+    fn a_macro_name_ends_at_a_bracket() {
+        same(".macro skip func\n.byte \\func\n.endm\nskip(3)\nx: skip (4)", ".byte 3\nx: .byte 4");
+    }
+
+    #[test]
+    fn a_label_may_have_spaces_before_its_colon() {
+        same("0 :\n.byte 1\nfoo\t:\tnop\njmp 0b", "0:\n.byte 1\nfoo: nop\njmp 0b");
     }
 
     #[test]
