@@ -56,8 +56,6 @@ const A64: Arch = Arch::Aarch64;
 
 const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
                      at an offset from sp_el0 is part of that work";
-const THUNKS: &str = "a branch goes through a thunk the program links in, which is thunk-extern, \
-                      and no thunk body is written into the unit";
 const VECTOR: &str = "only the general registers are cleared on return, and this choice clears \
                       the vector registers as well";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
@@ -164,11 +162,6 @@ pub(crate) const TABLE: &[Row] = &[
     // Debug information.
     // x86-64.
     only(A64, refused("-mstack-protector-guard*", GUARD, Some(2279))),
-    // The thunk spellings nothing here writes. `keep` and `thunk-extern` have their own arms.
-    only(X86, refused("-mindirect-branch=thunk", THUNKS, None)),
-    only(X86, refused("-mindirect-branch=thunk-inline", THUNKS, None)),
-    only(X86, refused("-mfunction-return=thunk", THUNKS, None)),
-    only(X86, refused("-mfunction-return=thunk-inline", THUNKS, None)),
     only(
         X86,
         same(

@@ -284,14 +284,15 @@ impl CodeModel {
 /// Design: `spec/04-driver-and-cli.md` section 4.12.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Speculation {
-    /// `-mindirect-branch=thunk-extern`: a call or jump through a register goes to the thunk for
-    /// that register instead, `call __x86_indirect_thunk_rax` for `call *%rax`.
-    pub indirect: bool,
+    /// `-mindirect-branch=`: where a call or jump through a register goes instead, which for
+    /// `thunk-extern` is `call __x86_indirect_thunk_rax` for `call *%rax`.
+    pub indirect: Thunk,
     /// `-mindirect-branch-cs-prefix`: a call or jump to the thunk for `r8` to `r15` has a code
     /// segment override in front of it.
     pub padded: bool,
-    /// `-mfunction-return=thunk-extern`: a return is `jmp __x86_return_thunk` instead.
-    pub returns: bool,
+    /// `-mfunction-return=`: where a return goes instead, which for `thunk-extern` is
+    /// `jmp __x86_return_thunk`.
+    pub returns: Thunk,
     /// `-mharden-sls=return` or `all`: an `int3` after every return.
     pub after_return: bool,
     /// `-mharden-sls=indirect-jmp` or `all`: an `int3` after every jump through a register, and
@@ -303,7 +304,43 @@ impl Speculation {
     /// Whether anything at all is asked for.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.indirect || self.returns || self.after_return || self.after_jump
+        self.indirect.taken() || self.returns.taken() || self.after_return || self.after_jump
+    }
+}
+
+/// The four answers gcc takes for `-mindirect-branch=` and `-mfunction-return=`.
+///
+/// The three that are not `keep` all send the branch through the same few instructions, a call
+/// that pushes a return address, a loop that catches a processor guessing where the return goes,
+/// and a return to the real address. What differs is where those instructions are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Thunk {
+    /// `keep`: the branch is left alone.
+    #[default]
+    Keep,
+    /// `thunk-extern`: the branch goes to a thunk the program links in from somewhere else,
+    /// which is how the kernel builds.
+    Extern,
+    /// `thunk`: the branch goes to the same thunk, and the unit carries its own copy of it in a
+    /// COMDAT group, so the linker keeps one.
+    Comdat,
+    /// `thunk-inline`: the thunk's instructions are written where the branch was, which is how
+    /// the kernel builds its vDSO.
+    Inline,
+}
+
+impl Thunk {
+    /// Whether the branch is rewritten at all.
+    #[must_use]
+    pub const fn taken(self) -> bool {
+        !matches!(self, Self::Keep)
+    }
+
+    /// Whether the branch goes to a thunk by name, which is every answer but `keep` and
+    /// `thunk-inline`.
+    #[must_use]
+    pub const fn named(self) -> bool {
+        matches!(self, Self::Extern | Self::Comdat)
     }
 }
 

@@ -1133,6 +1133,15 @@ fn generate(
         EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable => {
             let mut globals =
                 rucc_asm::globals(module, names, target.object_format).map_err(refused)?;
+            // The thunks `-mindirect-branch=thunk` and `-mfunction-return=thunk` have the unit carry,
+            // which are text at file scope for the reason an `asm` there is: each is in a section
+            // and a group of its own. See `rucc_codegen::thunks::bodies`.
+            globals.file_asm.extend(rucc_codegen::thunks::bodies(
+                &funcs,
+                machine.insts,
+                flags.speculation,
+                names,
+            ));
             // The pointer each variable this file reads and only declares is reached through on
             // COFF, which is a variable of this file's all the same. Asked for after the loop
             // rather than before it, because the loop is what optimized the functions, and a read

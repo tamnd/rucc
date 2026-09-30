@@ -329,15 +329,15 @@ fn joined_or_next(
 /// an instruction may start, and the flag asks for the target's minimum rather than for none.
 const MIN_FUNC_ALIGN: u32 = 8;
 
-/// Whether `-mindirect-branch=` or `-mfunction-return=` asks for the branch to go through a thunk
-/// the program links in, which is `thunk-extern`, or to be left alone, which is `keep`.
-///
-/// `thunk` and `thunk-inline` are gcc's other two answers, and the kbuild table refuses them before
-/// this is reached, since both ask for a thunk body written into the unit and none is written here.
-fn thunked(arg: &str, flag: &str) -> Result<bool, CliError> {
+/// Where `-mindirect-branch=` or `-mfunction-return=` sends the branch, which is one of gcc's four
+/// answers: left alone, a thunk linked in, a thunk the unit carries a copy of, or the thunk's
+/// instructions written in place.
+fn thunked(arg: &str, flag: &str) -> Result<rucc_target::Thunk, CliError> {
     match &arg[flag.len()..] {
-        "keep" => Ok(false),
-        "thunk-extern" => Ok(true),
+        "keep" => Ok(rucc_target::Thunk::Keep),
+        "thunk-extern" => Ok(rucc_target::Thunk::Extern),
+        "thunk" => Ok(rucc_target::Thunk::Comdat),
+        "thunk-inline" => Ok(rucc_target::Thunk::Inline),
         other => Err(err(format!(
             "`{other}` is not a way to write the branch, which is keep, thunk, thunk-inline or \
              thunk-extern"
@@ -2272,9 +2272,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fconserve-stack" => opts.conserve_stack = true,
             "-fno-conserve-stack" => opts.conserve_stack = false,
             // The speculation hardening the kernel builds with when its mitigations are
-            // configured, x86-64 only as in gcc. Each is last one wins, and the spellings of a
-            // thunk this compiler does not write, `thunk` and `thunk-inline`, are refused by the
-            // kbuild table before this. See `rucc_codegen::thunks` and tamnd/rucc#2280.
+            // configured, x86-64 only as in gcc. Each is last one wins. See `rucc_codegen::thunks`,
+            // tamnd/rucc#2280 and tamnd/rucc#2326.
             _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mindirect-branch=") => {
                 opts.speculation.indirect = thunked(arg, "-mindirect-branch=")?;
             }
@@ -8280,9 +8279,9 @@ mod tests {
             "-fno-jump-tables",
         ]);
         let all = rucc_target::Speculation {
-            indirect: true,
+            indirect: rucc_target::Thunk::Extern,
             padded: true,
-            returns: true,
+            returns: rucc_target::Thunk::Extern,
             after_return: true,
             after_jump: true,
         };
@@ -8309,6 +8308,12 @@ mod tests {
         assert!(jumps.after_jump && !jumps.after_return);
         let bad = refused(&[KERNEL_X86, "-mharden-sls=jmp", "-c", "a.c"]);
         assert!(bad.contains("none, return, indirect-jmp or all"), "{bad}");
+        // gcc's other two answers, which the vDSO and a program that carries its own thunks ask for.
+        let own = asked(&["-mindirect-branch=thunk", "-mfunction-return=thunk-inline"]).speculation;
+        assert_eq!(
+            (own.indirect, own.returns),
+            (rucc_target::Thunk::Comdat, rucc_target::Thunk::Inline)
+        );
         let bad = refused(&[KERNEL_X86, "-mindirect-branch=extern", "-c", "a.c"]);
         assert!(bad.contains("keep, thunk, thunk-inline or thunk-extern"), "{bad}");
         // A jump table is a question every target answers.
@@ -8469,12 +8474,7 @@ mod tests {
             assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
         }
         // Refused with no issue, because nothing is planned for them, and still with the reason.
-        for flag in [
-            "-fstack-check",
-            "-fno-zero-initialized-in-bss",
-            "-mindirect-branch=thunk",
-            "-mfunction-return=thunk-inline",
-        ] {
+        for flag in ["-fstack-check", "-fno-zero-initialized-in-bss"] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(&format!("{flag}: ")) && !failed.contains('#'), "{failed}");
         }

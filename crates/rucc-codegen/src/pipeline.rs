@@ -557,8 +557,12 @@ pub fn compile_recording(
     let naked = source.attrs.set.contains(ir::AttrSet::NAKED);
     // The branches a function said to leave plain, which the thunks pass at the end is told of.
     let mut speculation = flags.speculation;
-    speculation.returns &= !source.attrs.set.contains(ir::AttrSet::RETURN_KEEP);
-    speculation.indirect &= !source.attrs.set.contains(ir::AttrSet::INDIRECT_KEEP);
+    if source.attrs.set.contains(ir::AttrSet::RETURN_KEEP) {
+        speculation.returns = rucc_target::Thunk::Keep;
+    }
+    if source.attrs.set.contains(ir::AttrSet::INDIRECT_KEEP) {
+        speculation.indirect = rucc_target::Thunk::Keep;
+    }
     let zeroing = zeroing(flags.zero, source.attrs.set);
     // Last thing before selection, because a `tail_call` ends its block and every lowering above
     // is written against blocks that end the way the middle end left them. Only on a machine that

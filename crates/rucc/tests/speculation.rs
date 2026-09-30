@@ -201,3 +201,70 @@ int plain(int (*p)(int)) { return p(1) + 1; }
     assert_eq!(body("keepind").last(), Some(&"jmp\t__x86_return_thunk"), "{text}");
     assert!(body("plain").contains(&"call\t__x86_indirect_thunk_rax"), "{text}");
 }
+
+/// The object the compiler writes for this C under these flags, at `-O2`.
+fn object(flags: &[&str], source: &str, what: &str) -> Vec<u8> {
+    let dir = std::env::temp_dir().join(format!("rucc-thunks-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    std::fs::write(dir.join("one.c"), source).expect("the input can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .env("LC_ALL", "C")
+        .args([TARGET, "-O2", "-c", "-o"])
+        .arg(dir.join("one.o"))
+        .args(flags)
+        .arg(dir.join("one.c"))
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let bytes = std::fs::read(dir.join("one.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
+}
+
+/// Whether `bytes` has `run` in it somewhere.
+fn holds(bytes: &[u8], run: &[u8]) -> bool {
+    bytes.windows(run.len()).any(|window| window == run)
+}
+
+/// `pause; lfence`, the loop a retpoline catches a guessed return in.
+const CAUGHT: &[u8] = &[0xf3, 0x90, 0x0f, 0xae, 0xe8];
+
+#[test]
+fn an_inline_thunk_is_written_where_the_branch_was() {
+    let text = asm(&["-mindirect-branch=thunk-inline", "-mfunction-return=thunk-inline"], CALLS);
+    let lines = insts(&text);
+    assert!(!lines.iter().any(|line| line.starts_with("call\t*")), "{text}");
+    assert!(!text.contains("__x86_indirect_thunk") && !text.contains("__x86_return_thunk"));
+    // The three registers the pointers are kept in, each written over the pushed return address.
+    for reg in ["%rbx", "%r12", "%r13"] {
+        assert!(lines.contains(&format!("mov {reg}, (%rsp)").as_str()), "{reg}: {text}");
+    }
+    // One return in each of the six calls, and every other one is the return thunk's, which takes
+    // the pushed address back off first.
+    let rets = lines.iter().filter(|line| **line == "ret").count();
+    let backs = lines.iter().filter(|line| **line == "lea 8(%rsp), %rsp").count();
+    assert_eq!(rets, 6 + backs, "{text}");
+    assert!(backs > 0, "{text}");
+    // The object writer reads the same text, labels and all.
+    let bytes = object(&["-mindirect-branch=thunk-inline"], CALLS, "inline");
+    assert!(holds(&bytes, CAUGHT), "no pause and lfence in the object");
+}
+
+#[test]
+fn a_unit_built_with_thunk_carries_each_thunk_it_calls() {
+    let text = asm(&["-mindirect-branch=thunk", "-mfunction-return=thunk"], CALLS);
+    let lines = insts(&text);
+    assert!(lines.contains(&"call\t__x86_indirect_thunk_r12"), "{text}");
+    assert!(lines.contains(&"jmp\t__x86_return_thunk"), "{text}");
+    for name in ["__x86_indirect_thunk_rbx", "__x86_indirect_thunk_r12", "__x86_return_thunk"] {
+        let section = format!(".section .text.{name},\"axG\",@progbits,{name},comdat");
+        assert!(text.contains(&section), "{name}: {text}");
+        assert!(text.contains(&format!(".hidden {name}")), "{name}: {text}");
+        assert_eq!(text.matches(&format!("\n{name}:")).count(), 1, "{name}: {text}");
+    }
+    // Only the ones something here calls.
+    assert!(!text.contains("__x86_indirect_thunk_rax:"), "{text}");
+    let bytes = object(&["-mindirect-branch=thunk"], CALLS, "comdat");
+    assert!(holds(&bytes, b".text.__x86_indirect_thunk_r12\0"), "no section for the thunk");
+    assert!(holds(&bytes, CAUGHT), "no pause and lfence in the object");
+}

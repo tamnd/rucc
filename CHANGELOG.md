@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The assembler writes the AVX and AVX2 integer instructions, AES-NI, carry-less multiplication, `vzeroupper`, `vzeroall`, `rorx` and `andn`, which is most of what the kernel's x86 crypto code is written in. A VEX instruction takes its length from the registers it names, and a move between two vector registers is written in its store form when that is what lets the prefix be two bytes, which is what gas does. 41 of the 48 x86-64 crypto files in a 6.12 allmodconfig now assemble, and each object has the same bytes and relocations as the one gas writes. What stops the other seven is AVX-512 and GFNI, and `vpblendvb`, whose fourth register goes in the immediate. See tamnd/rucc-kernel#6.
+- `-mindirect-branch=thunk-inline` and `-mfunction-return=thunk-inline` are honored, which is what the kernel's vDSO is built with. The thunk's instructions, `call`, a `pause; lfence` loop and a `ret` to the real address, are written where the branch was, and a call jumps over its own copy and calls it, as gcc does. `thunk` is honored for both flags too: calls go to the named thunk as under `thunk-extern`, and the unit carries a hidden copy of each thunk it calls in a COMDAT group about its name, so a link keeps one. The bytes of each thunk are the same as gcc 13's (#2326).
 
 ## 0.18.2
 
