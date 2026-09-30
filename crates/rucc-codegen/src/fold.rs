@@ -125,7 +125,7 @@
 use std::collections::HashMap;
 
 use rucc_base::Interner;
-use rucc_base::hash::Set;
+use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
 use rucc_target::{FrameInsts, MachineInsts, Role};
 
@@ -181,6 +181,34 @@ impl Pending<'_> {
         }
     }
 
+    /// Makes every move a pass has made at once, as [`Pending::moved`] would have one at a time.
+    ///
+    /// A move whose readers were moved on again later follows them to where they ended up, so the
+    /// lists come out as the moves made one at a time would have left them. It is one walk over the
+    /// lists rather than a search of them for each move, which on a function with a lot of locals
+    /// is a walk over every local per fold.
+    pub(crate) fn moved_all(&mut self, moves: &Map<mir::Inst, Vec<mir::Inst>>) {
+        if moves.is_empty() {
+            return;
+        }
+        let mut into = Vec::new();
+        for (inst, what) in std::mem::take(self.addresses) {
+            into.clear();
+            follow(moves, inst, &mut into);
+            self.addresses.extend(into.iter().map(|&at| (at, what)));
+        }
+        for (inst, what) in std::mem::take(self.arguments) {
+            into.clear();
+            follow(moves, inst, &mut into);
+            self.arguments.extend(into.iter().map(|&at| (at, what)));
+        }
+        for inst in std::mem::take(self.dynamic) {
+            into.clear();
+            follow(moves, inst, &mut into);
+            self.dynamic.extend_from_slice(&into);
+        }
+    }
+
     /// Whether these two instructions are waiting on the same thing.
     ///
     /// Asked by a pass that has found two addressing modes that read alike and is about to treat
@@ -231,6 +259,14 @@ impl Pending<'_> {
 /// its only reader, so the address goes and the read costs nothing more than it did.
 const FRAME_READERS: usize = 3;
 
+/// Where an entry on an instruction ends up once every move in `moves` has been made.
+fn follow(moves: &Map<mir::Inst, Vec<mir::Inst>>, inst: mir::Inst, into: &mut Vec<mir::Inst>) {
+    match moves.get(&inst) {
+        Some(took) => took.iter().for_each(|&next| follow(moves, next, into)),
+        None => into.push(inst),
+    }
+}
+
 /// The half of [`Pending::moved`] that does not care what the entry says.
 fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: &[mir::Inst]) {
     let Some(at) = list.iter().position(|&(inst, _)| inst == from) else { return };
@@ -267,6 +303,9 @@ pub fn addresses(
     let sum = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sum)));
     let mut reads = Reads::of(func);
     let mut held = pending.held();
+    // The moves are kept here and made once at the end, since nothing reads the lists before then
+    // but the question `held` answers.
+    let mut moves = Map::default();
     let mut folded = 0;
     for block in func.blocks().collect::<Vec<_>>() {
         // One `lea` per register it wrote, along with the folds its readers so far have agreed to.
@@ -292,9 +331,9 @@ pub fn addresses(
                 if set.commit(func, &mut reads, names, machine).is_ok() {
                     folded += ready.folds.len();
                     let took: Vec<mir::Inst> = ready.folds.iter().map(|fold| fold.into).collect();
-                    pending.moved(ready.from, &took);
                     if held.remove(&ready.from) {
                         held.extend(took.iter().copied());
+                        moves.insert(ready.from, took.clone());
                     }
                     // Anything still open that was going to fold into the instruction just removed
                     // is holding a plan for an instruction that is not there any more. That is a
@@ -337,6 +376,7 @@ pub fn addresses(
             }
         }
     }
+    pending.moved_all(&moves);
     folded
 }
 
