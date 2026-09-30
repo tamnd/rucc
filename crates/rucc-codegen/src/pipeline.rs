@@ -662,9 +662,11 @@ pub fn compile_recording(
     // Nothing at all on a target with no hook to call, which is the same answer the protector gives
     // on a target with nowhere to keep its word, and the driver refuses the command line over it
     // before any of this runs.
+    // A function that said `no_instrument_function` gets none either, as with gcc, which is how the
+    // kernel's `notrace` keeps the tracer out of itself.
     let profile = match machine.conv.trace {
-        Some(_) => flags.profile,
-        None => Profile::No,
+        Some(_) if !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT) => flags.profile,
+        _ => Profile::No,
     };
     // A tail call is a call on a machine with no instruction to jump away with, and the frame is
     // worked out as though it stays one.

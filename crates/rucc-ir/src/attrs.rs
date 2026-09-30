@@ -160,6 +160,9 @@ impl AttrSet {
     /// Indirect calls and jumps stay as they are whatever `-mindirect-branch=` asked for.
     /// `__attribute__((indirect_branch("keep")))`.
     pub const INDIRECT_KEEP: Self = Self(1 << 19);
+    /// `__attribute__((no_instrument_function))`. No profiling hook goes in this function under
+    /// `-pg`, which is how the kernel's `notrace` keeps the tracer out of itself.
+    pub const NO_INSTRUMENT: Self = Self(1 << 20);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -267,6 +270,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::INLINE_ONLY, "inline_only"),
     (AttrSet::RETURN_KEEP, "return_keep"),
     (AttrSet::INDIRECT_KEEP, "indirect_keep"),
+    (AttrSet::NO_INSTRUMENT, "no_instrument"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

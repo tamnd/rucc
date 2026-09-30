@@ -789,6 +789,7 @@ impl Unit<'_> {
         let (ty, linkage, body, align) = (node.ty, node.linkage, node.body, node.alignment);
         let noreturn = node.flags.contains(DeclFlags::NORETURN);
         let naked = node.flags.contains(DeclFlags::NAKED);
+        let untraced = node.flags.contains(DeclFlags::NO_INSTRUMENT);
         let twice = node.flags.contains(DeclFlags::RETURNS_TWICE);
         let effects = node.effects;
         let startup = node.startup;
@@ -846,6 +847,11 @@ impl Unit<'_> {
         // same places. See [`rucc_codegen`] for what reads it, which is the frame.
         if naked {
             func.attrs.set |= AttrSet::NAKED;
+        }
+        // Also a fact about the body, read by the frame when `-pg` asks for a hook in every
+        // function but this one.
+        if untraced {
+            func.attrs.set |= AttrSet::NO_INSTRUMENT;
         }
         // A claim about what a call to it does, like `noreturn`, and it has to travel for the same
         // reason: `sigsetjmp` is only ever declared here, and the frame of whoever calls it is

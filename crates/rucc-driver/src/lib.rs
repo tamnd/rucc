@@ -2710,6 +2710,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             ));
         }
     }
+    // The nop is written where a direct call would be, and a position independent call to the hook
+    // goes through the procedure linkage table, so gcc refuses the pair, with or without `-pg`, and
+    // so does this, in its words.
+    if opts.nop_mcount && opts.pic != Pic::Absolute {
+        return Err(err("'-mnop-mcount' is not implemented for '-fPIC'".to_owned()));
+    }
     opts.code_model = cmodel;
     // The canary's place, when a flag moved it or the code model did, once both it and the
     // position independence are settled. gcc reads it through `%gs`
