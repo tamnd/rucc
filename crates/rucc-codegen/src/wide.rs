@@ -490,7 +490,7 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
         if scalars.wide_integer_drains {
             places.drain_integers();
         }
-        let Where::Stack(at) = places.on_stack(width.bytes(), width.bytes()) else { return None };
+        let Where::Stack(at) = places.scalar(width.bytes()) else { return None };
         meant.push((Slot::Low(index), word, Where::Stack(at)));
         meant.push((Slot::High(index), word, Where::Stack(at + step)));
         moved = true;

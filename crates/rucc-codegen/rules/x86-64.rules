@@ -175,6 +175,18 @@
       (x64.imul_high_64 x y)
       (spec (= (extract 127 64 (bvmul (sign_extend 64 128 x) (sign_extend 64 128 y))) (result))))
 
+;; The same at thirty two bits, which is what i386 divides with. Nothing here asks for it, since a
+;; thirty two bit division on this machine multiplies at sixty four, but a term with a name is a
+;; term every rule file answers.
+
+(rule (lower (umulh.i32 (value.i32 x) (value.i32 y)))
+      (x64.mul_high_32 x y)
+      (spec (= (extract 63 32 (bvmul (zero_extend 32 64 x) (zero_extend 32 64 y))) (result))))
+
+(rule (lower (smulh.i32 (value.i32 x) (value.i32 y)))
+      (x64.imul_high_32 x y)
+      (spec (= (extract 63 32 (bvmul (sign_extend 32 64 x) (sign_extend 32 64 y))) (result))))
+
 ;; Arithmetic, register with immediate. At sixty four bits the machine holds the immediate
 ;; in thirty two and sign extends it, so the guard on those rules is the constant saying it
 ;; is one of the constants that survives that, which is a thing to test and not a range to

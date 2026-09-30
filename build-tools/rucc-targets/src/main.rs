@@ -368,6 +368,8 @@ fn rules(described: &'static AbiDescription) {
         match described.return_pointer {
             rucc_abi::ReturnPointer::FirstArgument =>
                 "a hidden first argument, spending a register",
+            rucc_abi::ReturnPointer::FirstArgumentPopped =>
+                "a hidden first argument on the stack, which the callee takes off as it returns",
             rucc_abi::ReturnPointer::Dedicated => "a register outside the argument bank",
         }
     );

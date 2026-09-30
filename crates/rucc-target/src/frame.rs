@@ -171,6 +171,9 @@ pub struct FrameInsts {
     pub sum: &'static str,
     /// Returns to the caller.
     pub ret: &'static str,
+    /// Returns to the caller and takes the immediate's count of bytes of arguments off the stack
+    /// as it goes, which is `ret $4` on i386. Whether a function uses it is up to the ABI, which says whether the callee or the caller pops.
+    pub ret_pop: Option<&'static str>,
     /// Compares two general purpose registers and writes whether they differ into a third.
     ///
     /// The stack protector's check is the only thing that asks for this, and it is here rather

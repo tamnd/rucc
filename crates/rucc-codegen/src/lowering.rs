@@ -305,11 +305,11 @@ impl Step {
             Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func),
-            Self::Divisions => divide::divisions(func, goal),
+            Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func),
             Self::Counts => expand::counts(func),
             Self::Quads => quad::calls(func, names, conv.abi),
-            Self::Floats => expand::floats(func),
+            Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned),
             Self::Rounds => expand::rounds(func, conv.stack_align),
             Self::Varargs => varargs::lists(func, conv),
@@ -515,6 +515,7 @@ pub fn group(
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
+    expand::offsets(func, conv.word);
     ran
 }
 

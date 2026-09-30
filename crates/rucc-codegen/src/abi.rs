@@ -211,6 +211,16 @@ pub fn back_on_x87(returns: &[Type]) -> bool {
     matches!(returns.len(), 1 | 2) && returns.iter().all(|&ty| on_the_stack(ty))
 }
 
+/// Whether a `float` or a `double` a function gives back is left on the x87 stack, which is what a
+/// convention with no vector register to return one in says. That is i386, where the psABI puts it
+/// in `st(0)` the way it does a `long double`.
+#[must_use]
+pub fn float_on_x87(returns: &[Type], conv: &CallRegs) -> bool {
+    conv.sse_returns.is_empty()
+        && !conv.x87_returns.is_empty()
+        && matches!(returns, [ty] if ty.is_float() && ty.is_scalar() && matches!(ty.bits(), 32 | 64))
+}
+
 /// How much room one takes in the argument area, as a size and an alignment.
 pub(crate) const X87_AREA: (u32, u32) = (16, 16);
 
@@ -510,10 +520,17 @@ pub static X86_64: Insts = Insts {
 
 /// The same instructions for i386, where an address is computed with `leal`.
 ///
-/// Only the address differs so far. An argument and a result are named by the same pseudo
-/// instructions, and where cdecl puts them, which is on the stack and in `edx:eax`, is the call
-/// lowering's to say once it is written.
-pub static X86: Insts = Insts { lea: "x64.lea_32", ..X86_64 };
+/// An argument and a result are named by the same pseudo instructions, with an address at thirty
+/// two bits, since that is how wide one is here and a `movq` of a pointer is not an instruction
+/// this machine has.
+pub static X86: Insts = Insts {
+    arg: |ty| head_at(ty, 32),
+    load: |ty| load_at(ty, 32),
+    store: |ty| store_at(ty, 32),
+    ret: |ty, at| ret_at(ty, at, 32),
+    lea: "x64.lea_32",
+    ..X86_64
+};
 
 /// What the instruction that calls a name is called.
 ///
@@ -763,9 +780,13 @@ pub fn call(
     // the call gives back no register at all: what takes the value off that stack is the `fstp`
     // [`crate::lower`] writes straight after the call, which is the same shape every other use of
     // the x87 stack is written in. A complex one is the same with its imaginary half in `st(1)`,
-    // and a second `fstp` takes that one off.
-    let comes_back =
-        if back_on_x87(returns) { Vec::new() } else { places_back(returns, conv, insts)? };
+    // and a second `fstp` takes that one off. A `float` or a `double` on i386 comes back the same
+    // way, per [`float_on_x87`].
+    let comes_back = if back_on_x87(returns) || float_on_x87(returns, conv) {
+        Vec::new()
+    } else {
+        places_back(returns, conv, insts)?
+    };
 
     // A variadic callee on SysV reads how many vector registers the call passed arguments in and
     // skips saving them when the answer is none, which is what makes `printf` with no floating
@@ -1049,9 +1070,10 @@ fn places_back(
 /// one. What the convention needs is narrower: a name for the register an argument arrives in, and
 /// that name says a width because a listing is easier to read when it does.
 ///
-/// An address travels at sixty four bits, because the pseudos these name are x86-64's.
-fn place(ty: Type) -> Option<usize> {
-    if crate::term::is_bit(ty) { Some(0) } else { crate::term::slot(ty, 64) }
+/// An address travels at the width the target gives it, which is sixty four bits for the pseudos
+/// [`X86_64`] names and thirty two for the ones [`X86`] names.
+fn place(ty: Type, address: u32) -> Option<usize> {
+    if crate::term::is_bit(ty) { Some(0) } else { crate::term::slot(ty, address) }
 }
 
 /// What the pseudo for an argument of that type is called.
@@ -1067,6 +1089,12 @@ fn place(ty: Type) -> Option<usize> {
 /// answers from drifting, and an address is what they used to disagree about.
 #[must_use]
 pub fn head_of(ty: Type) -> Option<&'static str> {
+    head_at(ty, 64)
+}
+
+/// [`head_of`] for a target whose address is that many bits wide.
+#[must_use]
+pub fn head_at(ty: Type, address: u32) -> Option<&'static str> {
     // The format that fills a whole vector register, which travels in one of them: the psABI
     // classifies it SSE and SSEUP, and those two eightbytes are the one register the pair names
     // rather than two registers.
@@ -1084,7 +1112,7 @@ pub fn head_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.arg_val_f32", "x64.arg_val_f64"][at]);
     }
     let names = ["x64.arg_val_8", "x64.arg_val_16", "x64.arg_val_32", "x64.arg_val_64"];
-    Some(names[place(ty)?])
+    Some(names[place(ty, address)?])
 }
 
 /// What the instruction that reads an argument of that type out of memory is called.
@@ -1101,6 +1129,12 @@ pub fn head_of(ty: Type) -> Option<&'static str> {
 /// and says nothing at all about the rest of it.
 #[must_use]
 pub fn load_of(ty: Type) -> Option<&'static str> {
+    load_at(ty, 64)
+}
+
+/// [`load_of`] for a target whose address is that many bits wide.
+#[must_use]
+pub fn load_at(ty: Type, address: u32) -> Option<&'static str> {
     // Sixteen bytes, which is the whole register and is also the whole value, so the instruction
     // a spill uses and the instruction an argument uses are the same one here. They are two
     // different instructions at the two narrower formats because there the value is part of the
@@ -1117,7 +1151,7 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.movss_rm", "x64.movsd_rm"][at]);
     }
     let names = ["x64.mov_rm_8", "x64.mov_rm_16", "x64.mov_rm_32", "x64.mov_rm_64"];
-    Some(names[place(ty)?])
+    Some(names[place(ty, address)?])
 }
 
 /// What the instruction that writes an argument of that type into memory is called.
@@ -1133,6 +1167,12 @@ pub fn load_of(ty: Type) -> Option<&'static str> {
 /// agree about the rest.
 #[must_use]
 pub fn store_of(ty: Type) -> Option<&'static str> {
+    store_at(ty, 64)
+}
+
+/// [`store_of`] for a target whose address is that many bits wide.
+#[must_use]
+pub fn store_at(ty: Type, address: u32) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
         return Some("x64.movaps_mr");
     }
@@ -1154,7 +1194,7 @@ pub fn store_of(ty: Type) -> Option<&'static str> {
         return Some(["x64.movss_mr", "x64.movsd_mr"][at]);
     }
     let names = ["x64.mov_mr_8", "x64.mov_mr_16", "x64.mov_mr_32", "x64.mov_mr_64"];
-    Some(names[place(ty)?])
+    Some(names[place(ty, address)?])
 }
 
 /// What the instruction that leaves a returned value in its register is called, for the value at
@@ -1171,6 +1211,12 @@ pub fn store_of(ty: Type) -> Option<&'static str> {
 /// there is none, which is what the `None` at the end is about.
 #[must_use]
 pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
+    ret_at(ty, at, 64)
+}
+
+/// [`ret_of`] for a target whose address is that many bits wide.
+#[must_use]
+pub fn ret_at(ty: Type, at: usize, address: u32) -> Option<&'static str> {
     if crate::term::is_quad(ty) {
         return Some(*["x64.ret_val_f128", "x64.ret_val2_f128"].get(at)?);
     }
@@ -1186,7 +1232,7 @@ pub fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
         ["x64.ret_val_8", "x64.ret_val_16", "x64.ret_val_32", "x64.ret_val_64"],
         ["x64.ret_val2_8", "x64.ret_val2_16", "x64.ret_val2_32", "x64.ret_val2_64"],
     ];
-    Some(names.get(at)?[place(ty)?])
+    Some(names.get(at)?[place(ty, address)?])
 }
 
 #[cfg(test)]

@@ -5,11 +5,9 @@
 //! bit one out of an i386 function is that no rule in the file names one and
 //! [`rucc_target::x86::MACHINE`] refuses any that something else proposes.
 //!
-//! Nothing reaches this table from a compile yet. `crate::Machine::for_target` hands i386 no
-//! machine until the cdecl call lowering is written, which is arguments on the stack and a sixty
-//! four bit result in `edx:eax`, and until two registers are set aside as scratch the way `r10`
-//! and `r11` are on x86-64. Until then the table is built, checked by the tests below and by
-//! `rucc-verify`, and matched against in tests.
+//! A compile for `i686-linux-gnu` reaches it through `crate::Machine::for_target`, which also sets
+//! `esi` and `edi` aside as the two scratch registers the way `r10` and `r11` are on x86-64. The
+//! table is checked by the tests below and by `rucc-verify` as well.
 
 // For the reason `super::x86_64` gives.
 #![allow(clippy::manual_range_contains)]
@@ -20,9 +18,8 @@ include!(concat!(env!("OUT_DIR"), "/i386.rs"));
 ///
 /// The x86-64 selector at thirty two bits: an address is computed with `leal` and read with
 /// `movl`, the thread pointer is the word at `%gs:0`, and a jump table's cell is already as wide
-/// as an address, so reading one is a plain load. The scratch registers are none until the
-/// machine is hooked up, since which two of eight to give up is a decision for the allocator and
-/// the frame together.
+/// as an address, so reading one is a plain load. The scratch registers are `esi` and `edi`, for
+/// the reason [`crate::pipeline::X86_SCRATCH`] gives.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
     shapes: &rucc_target::x86::MACHINE,
@@ -33,7 +30,7 @@ pub static SELECTOR: super::Selector = super::Selector {
     fence: "mfence",
     trap: "ud2",
     abi: &crate::abi::X86,
-    scratch: &[],
+    scratch: &crate::pipeline::X86_SCRATCH,
     symbols: &super::Symbols {
         near: super::Reach::Mode("lea_32"),
         far: super::Reach::Mode("mov_rm_32"),

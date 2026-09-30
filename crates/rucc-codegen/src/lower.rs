@@ -215,6 +215,18 @@ const APPLY_BACK: u32 = 48;
 /// it where it is.
 const X87_CROSSING: u32 = 8;
 
+/// The `fstp` that takes a `float` or a `double` a call gave back off the x87 stack, and the load
+/// that reads it from there into a vector register.
+fn x87_float(ty: Type) -> (&'static str, &'static str) {
+    if ty.bits() == 32 { ("fstp_s", "movss_rm") } else { ("fstp_l", "movsd_rm") }
+}
+
+/// The store that writes a `float` or a `double` a function gives back out of its vector register,
+/// and the `fld` that puts it on the x87 stack from there.
+fn x87_float_back(ty: Type) -> (&'static str, &'static str) {
+    if ty.bits() == 32 { ("movss_mr", "fld_s") } else { ("movsd_mr", "fld_l") }
+}
+
 /// Where the rounding field of the x87 control word is and what it has to be set to for the unit
 /// to cut towards zero, which is the one rounding C asks for that the unit does not do by default.
 ///
@@ -1008,6 +1020,11 @@ pub struct Stack {
     /// below the arguments the caller left on the stack and makes the whole run one list of words
     /// a `char *` can walk. See `home` on [`rucc_target::CallRegs`].
     pub home: u32,
+    /// How many bytes of its arguments the function takes off the stack as it returns, which is
+    /// the four of the address a result goes back through where the ABI has the callee pop it,
+    /// as i386 System V does, and nothing anywhere else. See
+    /// [`rucc_abi::ReturnPointer::FirstArgumentPopped`].
+    pub popped: u32,
 }
 
 impl Stack {
@@ -1030,6 +1047,7 @@ impl Stack {
             locals: &self.locals,
             grows: self.grown_at.is_some(),
             home: self.home,
+            popped: self.popped,
             ..base
         }
     }
@@ -1330,6 +1348,11 @@ impl<'a> Lowering<'a> {
     }
 
     fn run(mut self) -> Result<Lowered, Unsupported> {
+        // A function that returns through a hidden address takes that address off the stack on
+        // its way out where the convention says so, which is `ret $4` on i386.
+        if self.sret().is_some() {
+            self.stack.popped = self.conv.return_pointer_popped();
+        }
         for value in self.source.values() {
             for start in self.source.value_starts(value) {
                 let Some((block, after)) = self.source.start_place(start) else { continue };
@@ -1894,6 +1917,7 @@ impl<'a> Lowering<'a> {
         // convention's answer, which is why the whole list goes to the same place the arguments do
         // rather than to a rule.
         let returns: Vec<Type> = signature.return_types().collect();
+        let returned_through = matches!(named.first(), Some(Abi::Sret { .. }));
 
         let mut args = Vec::with_capacity(values.len());
         // The address each argument that is one was just written by, which goes down to where it
@@ -1950,6 +1974,21 @@ impl<'a> Lowering<'a> {
             self.unwinding.insert(inst, call);
         }
         self.stack.call(made.outgoing);
+        // A callee that took the address its result went through off the stack left the stack
+        // pointer that much higher than the outgoing area this frame keeps under it, so it goes
+        // back down before anything else reads from or writes to that area.
+        let popped = if returned_through { conv.return_pointer_popped() } else { 0 };
+        if popped > 0 {
+            let sub = self.named(self.selector.frame.sub);
+            let class = self.conv.int_class;
+            let sp = mir::Reg::physical(self.conv.stack_pointer);
+            self.out
+                .build(block, sub)
+                .def(sp, class)
+                .uses(sp, class)
+                .imm(i64::from(popped))
+                .finish();
+        }
         // An eighty bit value came back on the x87 stack, and the one thing that has to happen
         // before anything else touches that stack is taking it off. So the `fstp` goes here, in
         // front of everything the block does next, and after it the value is in its slot and is
@@ -1964,6 +2003,21 @@ impl<'a> Lowering<'a> {
                 let into = self.through(into);
                 self.x87_at("fstp_t", span, into);
             }
+            return Ok(made.outgoing);
+        }
+        // A `float` or a `double` on i386, which is on the same stack, and which is taken off it
+        // through the crossing bytes into the vector register the rest of the function reads it in.
+        if let (true, [result]) = (abi::float_on_x87(&types, conv), results.as_slice()) {
+            let (put, get) = x87_float(types[0]);
+            let span = self.source.span(inst);
+            let across = self.x87_crossing();
+            let across = self.through(across);
+            self.x87_at(put, span, across);
+            let block = self.at.expect("a block is being filled");
+            let reg = self.new_reg(*result);
+            let load = self.named(get);
+            let sse = self.conv.sse_class;
+            self.out.build(block, load).at(span).def(reg, sse).mem(across).finish();
             return Ok(made.outgoing);
         }
         for (result, &reg) in results.into_iter().zip(&made.results) {
@@ -2078,7 +2132,7 @@ impl<'a> Lowering<'a> {
     /// Whether those values go back on the x87 stack, per [`abi::back_on_x87`].
     fn x87_values(&self, values: &[Value]) -> bool {
         let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
-        abi::back_on_x87(&types)
+        abi::back_on_x87(&types) || abi::float_on_x87(&types, self.conv)
     }
 
     fn returned(&mut self, inst: Inst, values: Vec<Value>) -> Result<(), Unsupported> {
@@ -2091,13 +2145,31 @@ impl<'a> Lowering<'a> {
         // for. What comes after is the epilogue, which gives the frame back and touches nothing in
         // the unit. A complex one loads its imaginary half first so that the real half ends up on
         // top of it, in `st(0)`, with the imaginary half under it in `st(1)`.
-        if self.x87_values(&values) && self.sret().is_none() {
+        let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
+        if abi::back_on_x87(&types) && self.sret().is_none() {
             let span = self.source.span(inst);
             for &value in values.iter().rev() {
                 let from = self.x87_slot(value);
                 let from = self.through(from);
                 self.x87_at("fld_t", span, from);
             }
+            return Ok(());
+        }
+        // A `float` or a `double` on i386 goes back on the same stack, written to the crossing
+        // bytes from the vector register it is in and loaded from there at its own format.
+        if let (true, None, [value]) =
+            (abi::float_on_x87(&types, self.conv), self.sret(), values.as_slice())
+        {
+            let (put, get) = x87_float_back(types[0]);
+            let span = self.source.span(inst);
+            let reg = self.reg_of(*value)?;
+            let across = self.x87_crossing();
+            let across = self.through(across);
+            let block = self.at.expect("a block is being filled");
+            let store = self.named(put);
+            let sse = self.conv.sse_class;
+            self.out.build(block, store).at(span).uses(reg, sse).mem(across).finish();
+            self.x87_at(get, span, across);
             return Ok(());
         }
         // What the signature says about the bits above a narrow one, which on an ABI that extends
@@ -3002,7 +3074,7 @@ impl<'a> Lowering<'a> {
     /// Writes an address into a pointer field of a list.
     fn store_word(&mut self, list: mir::Reg, at: i64, held: mir::Reg, span: Span) {
         let block = self.at.expect("a block is being filled");
-        let head = (self.selector.abi.store)(Type::int(64)).expect("a store of an address");
+        let head = (self.selector.abi.store)(Type::PTR).expect("a store of an address");
         let store = mir::Opcode::new(self.names.intern(head));
         let mem = self.field(list, at);
         self.out.build(block, store).at(span).uses(held, self.gpr).mem(mem).finish();
@@ -6584,7 +6656,10 @@ impl<'a> Lowering<'a> {
         if homes {
             self.stack.home = self.conv.home;
         }
-        let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory;
+        // And a convention with no argument registers at all, which is i386, has nothing to save
+        // either, and its list is the address of the first word past the named arguments too.
+        let registerless = conv.int_args.is_empty() && conv.sse_args.is_empty();
+        let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory || registerless;
         let applies = self.saves_arguments();
         let area = (variadic && !in_memory || applies).then(|| varargs::Area::of(&conv));
         let arrived =
@@ -6749,7 +6824,7 @@ impl<'a> Lowering<'a> {
         self.applied = Some(applied);
         let base = self.frame_address(out, applied);
         let overflow = self.overflow(out, 0, Span::DUMMY);
-        let head = (self.selector.abi.store)(Type::int(64)).expect("a store of an address");
+        let head = (self.selector.abi.store)(Type::PTR).expect("a store of an address");
         let store = mir::Opcode::new(self.names.intern(head));
         let mem = mir::Mem::at(mir::Operand::read(base, self.gpr));
         self.out.build(out, store).uses(overflow, self.gpr).mem(mem).finish();

@@ -192,6 +192,11 @@ pub enum ReturnPointer {
     /// register fewer than the same function returning `int`, and classifying the arguments
     /// first gives the wrong answer for the last one of them.
     FirstArgument,
+    /// A hidden first argument that the callee takes off the stack as it returns, with a `ret $4`,
+    /// so the caller finds the stack one word higher than it left it.
+    ///
+    /// i386 SysV. It spends an argument slot the way [`ReturnPointer::FirstArgument`] does.
+    FirstArgumentPopped,
     /// A register outside the argument bank, which spends nothing.
     ///
     /// AAPCS64's x8. A function returning a large structure still has all eight argument

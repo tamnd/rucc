@@ -106,6 +106,8 @@
 (semantics (urem.i16 l r) (bvurem l r))
 (semantics (urem.i32 l r) (bvurem l r))
 (semantics (urem.i64 l r) (bvurem l r))
+(semantics (umulh.i32 l r) (extract 63 32 (bvmul (zero_extend 32 64 l) (zero_extend 32 64 r))))
+(semantics (smulh.i32 l r) (extract 63 32 (bvmul (sign_extend 32 64 l) (sign_extend 32 64 r))))
 (semantics (umulh.i64 l r) (extract 127 64 (bvmul (zero_extend 64 128 l) (zero_extend 64 128 r))))
 (semantics (smulh.i64 l r) (extract 127 64 (bvmul (sign_extend 64 128 l) (sign_extend 64 128 r))))
 

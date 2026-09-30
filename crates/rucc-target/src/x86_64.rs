@@ -219,6 +219,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     lea: "lea_64",
     sum: "add_rr_64",
     ret: "ret",
+    ret_pop: None,
     differ: "cmp_set_ne_64",
     above: "cmp_set_a_64",
     away: Some("jmp_away"),
@@ -819,6 +820,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::Landing
             | Form::Swap
             | Form::SwapHalves
+            | Form::Exchange
             | Form::Prefetch
             | Form::StrMove
             | Form::StrMoveRep

@@ -217,6 +217,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     lea: "lea_64",
     sum: "add_rr_64",
     ret: "ret",
+    ret_pop: None,
     differ: "cmp_set_ne_64",
     above: "cmp_set_hi_64",
     away: Some("b_away"),

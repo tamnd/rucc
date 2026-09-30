@@ -53,7 +53,7 @@ fn head_of(ty: Type) -> Option<&'static str> {
         return Some(["a64.arg_val_f32", "a64.arg_val_f64"][at]);
     }
     let names = ["a64.arg_val_32", "a64.arg_val_32", "a64.arg_val_32", "a64.arg_val_64"];
-    Some(names[place(ty)?])
+    Some(names[place(ty, 64)?])
 }
 
 /// What the instruction that reads an argument of that type out of memory is called.
@@ -71,7 +71,7 @@ fn load_of(ty: Type) -> Option<&'static str> {
         return Some(["a64.ldr_f32", "a64.ldr_f64"][at]);
     }
     let names = ["a64.ldr_8", "a64.ldr_16", "a64.ldr_32", "a64.ldr_64"];
-    Some(names[place(ty)?])
+    Some(names[place(ty, 64)?])
 }
 
 /// What the instruction that writes an argument of that type into memory is called.
@@ -86,7 +86,7 @@ fn store_of(ty: Type) -> Option<&'static str> {
         return Some(["a64.str_f32", "a64.str_f64"][at]);
     }
     let names = ["a64.str_8", "a64.str_16", "a64.str_32", "a64.str_64"];
-    Some(names[place(ty)?])
+    Some(names[place(ty, 64)?])
 }
 
 /// What the pseudo that leaves a returned value in its register is called, for the value at that
@@ -119,7 +119,7 @@ fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
         ["a64.ret_val_32", "a64.ret_val_32", "a64.ret_val_32", "a64.ret_val_64"],
         ["a64.ret_val2_32", "a64.ret_val2_32", "a64.ret_val2_32", "a64.ret_val2_64"],
     ];
-    Some(names.get(at)?[place(ty)?])
+    Some(names.get(at)?[place(ty, 64)?])
 }
 
 #[cfg(test)]

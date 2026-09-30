@@ -235,6 +235,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     lea: "lea_32",
     sum: "add_rr_32",
     ret: "ret",
+    ret_pop: Some("ret_pop"),
     differ: "cmp_set_ne_32",
     above: "cmp_set_a_32",
     away: Some("jmp_away"),
@@ -439,6 +440,13 @@ mod tests {
         assert_eq!((SYSV.word, SYSV.push, SYSV.return_address), (4, 4, 4));
         assert_eq!((SYSV.red_zone, SYSV.shadow, SYSV.vector_count), (0, 0, None));
         assert!(std::ptr::eq(SYSV.abi, &rucc_abi::abis::I386_SYSV));
+    }
+
+    #[test]
+    fn only_an_abi_whose_callee_pops_the_return_address_slot_says_so() {
+        assert_eq!(SYSV.return_pointer_popped(), 4);
+        let callers_pop = CallRegs { abi: &rucc_abi::abis::WIN64, ..SYSV };
+        assert_eq!(callers_pop.return_pointer_popped(), 0, "a plain ret where the caller pops");
     }
 
     #[test]

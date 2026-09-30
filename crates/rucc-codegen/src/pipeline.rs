@@ -31,11 +31,12 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
     BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, MachineInsts, PhysReg,
-    RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86_64,
+    RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86, x86_64,
 };
 use rucc_tuple::Arch;
 
 use crate::bits;
+use crate::bytes;
 use crate::choice;
 use crate::combine;
 use crate::compare;
@@ -123,6 +124,15 @@ pub(crate) const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 /// The scratch registers held back from the allocator on AArch64. See [`Machine::aarch64`].
 pub(crate) const AARCH64_SCRATCH: [PhysReg; 2] = [aarch64::X16, aarch64::X17];
 
+/// The scratch registers held back from the allocator on i386.
+///
+/// Neither of the two that x86-64 uses exists here, and every register a call may destroy is one
+/// an instruction insists on: `eax` and `edx` are the result and the two halves of a division, and
+/// `ecx` is the count of a shift. So the two held back are `esi` and `edi`, which a call preserves
+/// and which [`crate::frame`] saves when a reload writes one. That leaves `eax`, `ecx`, `edx` and
+/// `ebx` to the allocator, which is also every register with a byte form on this machine.
+pub(crate) const X86_SCRATCH: [PhysReg; 2] = [x86::ESI, x86::EDI];
+
 /// How many of each class are held back.
 const SCRATCH_COUNT: usize = SCRATCH.len();
 
@@ -205,6 +215,54 @@ impl Machine {
         }
     }
 
+    /// The machine for i386 under that convention.
+    ///
+    /// x86-64's tables for everything the two machines share, and the i386 ones for the frame, the
+    /// branches, the shapes and the selector, which are what keep a sixty four bit instruction out.
+    /// The vector registers are all caller saved, so two of them are held back the way they are on
+    /// x86-64.
+    #[must_use]
+    pub fn x86(conv: &'static CallRegs) -> Self {
+        let order: Vec<PhysReg> =
+            conv.int_order.iter().copied().filter(|reg| !X86_SCRATCH.contains(reg)).collect();
+        let (sse_order, sse_scratch) = held_back(conv);
+        Self {
+            conv,
+            file: x86::REGS,
+            insts: &x86::FRAME,
+            branch: &x86::BRANCH,
+            bits: &x86_64::BITS,
+            flags: &x86_64::FLAGS,
+            shapes: &x86::MACHINE,
+            timing: &x86_64::TIMING,
+            short: &x86_64::SHORT,
+            selector: &select::x86::SELECTOR,
+            env: Env::new().with(x86::GPR, &order, &X86_SCRATCH).with(
+                x86::XMM,
+                &sse_order,
+                &sse_scratch,
+            ),
+        }
+    }
+
+    /// The two registers the stack protector's canary goes through, the first on the way in and
+    /// both in the check on the way out.
+    ///
+    /// The scratch registers, which hold nothing at a return, on every machine but i386. There the
+    /// scratch registers are `esi` and `edi`, which have no low byte for the check's `setne` and
+    /// which a call preserves, and the registers a call does not preserve are the answer in `eax`
+    /// and `edx`. So the canary goes in through `esi`, which the prologue saves for it, and the
+    /// check reads the guard into `ecx`, which holds nothing at a return and has a low byte. `edx`
+    /// is never one of them, since it holds the top half of a `long long` answer.
+    #[must_use]
+    pub fn guarded(&self) -> [PhysReg; 2] {
+        if std::ptr::eq(self.selector, &select::x86::SELECTOR) {
+            return [x86::ESI, x86::ECX];
+        }
+        let scratch = self.env.scratch(self.conv.int_class);
+        [scratch[0], scratch[1]]
+    }
+
     /// The same machine for a function written in another calling convention, which is what an
     /// `__attribute__((ms_abi))` function on Linux or an `__attribute__((sysv_abi))` one on
     /// Windows is compiled against. `None` when the platform has no such convention.
@@ -225,6 +283,8 @@ impl Machine {
         }
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Some(Self::aarch64(conv))
+        } else if std::ptr::eq(self.selector, &select::x86::SELECTOR) {
+            Some(Self::x86(conv))
         } else {
             Some(Self::x86_64(conv))
         }
@@ -242,6 +302,7 @@ impl Machine {
         match target.tuple.arch() {
             Arch::X86_64 => Some(Self::x86_64(conv)),
             Arch::Aarch64 => Some(Self::aarch64(conv)),
+            Arch::X86 => Some(Self::x86(conv)),
             _ => None,
         }
     }
@@ -686,6 +747,7 @@ pub fn compile_recording(
     // worked out as though it stays one.
     stack.kept |= machine.insts.away.is_none() && !stack.tails.is_empty();
     let base = stack.layout(Layout::new(machine.conv, machine.file));
+    let guarded = machine.guarded();
     let layout = Layout {
         // The later hook reads the frame pointer to find out who called this function, so a
         // function that calls it is given one whether or not anything else asked. A function that
@@ -711,6 +773,7 @@ pub fn compile_recording(
         // AArch64, and one at a time on x86-64, which has none.
         pairs: machine.insts.pair.is_some(),
         protect: guard.is_some(),
+        guarded: &guarded,
         naked,
         // A protected function calls the one that does not come back, on the arm where the check
         // failed, so it is not a leaf however few calls the program wrote in it. That is what
@@ -866,11 +929,7 @@ pub fn compile_recording(
     func.sharing = framed.iter().map(|&(decl, _, _)| decl).collect();
 
     let scratch = machine.env.scratch(machine.conv.int_class);
-    let protect = guard.map(|guard| Protect {
-        guard,
-        branch: machine.branch,
-        scratch: [scratch[0], scratch[1]],
-    });
+    let protect = guard.map(|guard| Protect { guard, branch: machine.branch, scratch: guarded });
     // A target with no instruction that touches a page without changing it does nothing about the
     // flag, which is the same answer the protector gives on a target with nowhere to keep its word.
     // Every target this crate has a back end for has one.
@@ -960,6 +1019,13 @@ pub fn compile_recording(
     // are allowed. Nothing here moves an instruction or changes a block, so being behind the
     // layout's freeze costs it nothing.
     shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names, flags.goal);
+
+    // After every pass that writes or rewrites an instruction over the registers it was given, so
+    // that the byte an instruction names is the one it ends up with. i386 only: see
+    // [`crate::bytes`].
+    if std::ptr::eq(machine.selector, &select::x86::SELECTOR) {
+        bytes::reach(&mut func, machine.insts.prefix, machine.conv.int_class, names);
+    }
 
     // Once the blocks will not move again, since a head is a block a jump runs backwards to and
     // which way a jump runs is the layout's answer. Nothing below adds or takes out a block.
