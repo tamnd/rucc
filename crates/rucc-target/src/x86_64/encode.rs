@@ -3791,6 +3791,27 @@ static ENCODINGS: &[Encoding] = &[
     avx("vmovapd", &VV, Word, Map::Escape, &[0x28], None, pair(0, 1)),
     avx("vmovapd", &MV, Word, Map::Escape, &[0x28], None, pair(0, 1)),
     avx("vmovapd", &VM, Word, Map::Escape, &[0x29], None, pair(1, 0)),
+    avx("vmovaps", &VV, Long, Map::Escape, &[0x28], None, pair(0, 1)),
+    avx("vmovaps", &MV, Long, Map::Escape, &[0x28], None, pair(0, 1)),
+    avx("vmovaps", &VM, Long, Map::Escape, &[0x29], None, pair(1, 0)),
+    avx("vmovupd", &VV, Word, Map::Escape, &[0x10], None, pair(0, 1)),
+    avx("vmovupd", &MV, Word, Map::Escape, &[0x10], None, pair(0, 1)),
+    avx("vmovupd", &VM, Word, Map::Escape, &[0x11], None, pair(1, 0)),
+    // The same four moves EVEX encoded, which is only taken when the operands need it, a `zmm` or
+    // a register numbered sixteen or above, or a mask. They sit after the VEX rows so those win
+    // otherwise, and the VEX rows keep the store form swap gas does between two registers.
+    evex("vmovups", &VV, Long, &[0x10], pair(0, 1), Evex::new(Map::Escape, false)),
+    evex("vmovups", &MV, Long, &[0x10], pair(0, 1), Evex::new(Map::Escape, false)),
+    evex("vmovups", &VM, Long, &[0x11], pair(1, 0), Evex::new(Map::Escape, false)),
+    evex("vmovapd", &VV, Word, &[0x28], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovapd", &MV, Word, &[0x28], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovapd", &VM, Word, &[0x29], pair(1, 0), Evex::new(Map::Escape, true)),
+    evex("vmovaps", &VV, Long, &[0x28], pair(0, 1), Evex::new(Map::Escape, false)),
+    evex("vmovaps", &MV, Long, &[0x28], pair(0, 1), Evex::new(Map::Escape, false)),
+    evex("vmovaps", &VM, Long, &[0x29], pair(1, 0), Evex::new(Map::Escape, false)),
+    evex("vmovupd", &VV, Word, &[0x10], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovupd", &MV, Word, &[0x10], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovupd", &VM, Word, &[0x11], pair(1, 0), Evex::new(Map::Escape, true)),
     avx("vmovd", &RV, Word, Map::Escape, &[0x6E], None, pair(0, 1)),
     avx("vmovd", &MV, Word, Map::Escape, &[0x6E], None, pair(0, 1)),
     avx("vmovd", &VR, Word, Map::Escape, &[0x7E], None, pair(1, 0)),
@@ -4356,6 +4377,7 @@ pub fn encode_masked_in(
             Error::Unwritten { mnemonic: mnemonic.to_owned(), args }
         });
     };
+    let row = widened(mode, row, values, mask).unwrap_or(row);
     let row = flipped(mode, row, values).unwrap_or(row);
     if mask != Opmask::default() && row.evex.is_none() {
         return Err(Error::Mask { mnemonic: mnemonic.to_owned() });
@@ -4381,6 +4403,29 @@ pub fn encode_masked_in(
         writer.measure()?;
     }
     writer.write(out, imm, mask)
+}
+
+/// The EVEX row of an instruction whose VEX row was found first, when the operands need EVEX.
+///
+/// A `zmm`, a register numbered sixteen or above, or a mask can only be said with an EVEX prefix,
+/// and an instruction that has both forms lists the VEX one first so it is taken otherwise.
+fn widened(
+    mode: Mode,
+    row: &Encoding,
+    values: &[Value],
+    mask: Opmask,
+) -> Option<&'static Encoding> {
+    if row.evex.is_some() || row.vex.is_none() {
+        return None;
+    }
+    let wide = values.iter().any(|value| {
+        matches!(*value, Value::Vector(number, length) if number >= 16 || length == Length::Zmm)
+    });
+    if !wide && mask == Opmask::default() {
+        return None;
+    }
+    let args: Vec<Kind> = values.iter().map(|value| value.kind()).collect();
+    rows_in(mode, row.mnemonic, &args).find(|other| other.evex.is_some())
 }
 
 /// The store form of a VEX move between two vector registers, when gas would write that one.
@@ -5004,6 +5049,11 @@ mod tests {
         for (at, row) in ENCODINGS.iter().enumerate() {
             for other in &ENCODINGS[at + 1..] {
                 if other.mnemonic != row.mnemonic || other.args != row.args {
+                    continue;
+                }
+                // An EVEX row behind a VEX one is reached by what the operands are, not by the
+                // immediate, so it is not dead.
+                if row.evex.is_none() && other.evex.is_some() {
                     continue;
                 }
                 for imm in PROBES {
@@ -6056,6 +6106,24 @@ mod tests {
         assert_eq!(hex("kmovq", &[quad(R13), Value::Mask(7)]), "c4 c1 fb 92 fd");
         assert_eq!(hex("kmovq", &[Value::Mask(1), quad(RAX)]), "c4 e1 fb 93 c1");
         assert_eq!(hex("kmovq", &[Value::Mask(3), quad(R9)]), "c4 61 fb 93 cb");
+    }
+
+    /// lib/raid6/recov_avx512.c moves whole `zmm` registers with the floating point moves, which
+    /// gas writes EVEX encoded only when VEX cannot name the operands.
+    #[test]
+    fn a_floating_point_move_is_evex_encoded_only_when_vex_cannot_say_it() {
+        assert_eq!(hex("vmovapd", &[z(0), z(13)]), "62 71 fd 48 28 e8");
+        assert_eq!(hex("vmovapd", &[z(13), z(0)]), "62 d1 fd 48 28 c5");
+        assert_eq!(hex("vmovapd", &[at(RAX, 0), z(9)]), "62 71 fd 48 28 08");
+        assert_eq!(hex("vmovapd", &[z(9), at(RAX, 64)]), "62 71 fd 48 29 48 01");
+        assert_eq!(hex("vmovapd", &[y(17), y(0)]), "62 b1 fd 28 28 c1");
+        assert_eq!(hex("vmovapd", &[y(13), y(0)]), "c5 7d 29 e8");
+        assert_eq!(hex("vmovaps", &[z(1), z(2)]), "62 f1 7c 48 28 d1");
+        assert_eq!(hex("vmovaps", &[y(13), y(0)]), "c5 7c 29 e8");
+        assert_eq!(hex("vmovaps", &[at(RCX, 0), x(3)]), "c5 f8 28 19");
+        assert_eq!(hex("vmovups", &[z(20), at(RDX, 0)]), "62 e1 7c 48 11 22");
+        assert_eq!(hex("vmovupd", &[at(RAX, 128), z(5)]), "62 f1 fd 48 10 68 02");
+        assert_eq!(hex("vmovupd", &[x(1), x(2)]), "c5 f9 10 d1");
     }
 
     /// What lib/raid6 writes to work out its parity: stores that go around the cache, the shift
