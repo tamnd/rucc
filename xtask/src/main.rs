@@ -67,6 +67,7 @@ tasks:
   abi-signatures    regenerate tests/abi-signatures, or check it with --check
   link-lines        regenerate tests/link-lines from rucc-sysroot, or check it with --check
   provenance        regenerate PROVENANCE from the tables, or check it with --check
+  features          regenerate docs/FEATURES.md from the GNU matrix, or check it with --check
   abi-differential  compile the signature corpus with both compilers in both directions and run it,
                     for this machine, for --target x86_64-windows-gnu against MinGW GCC, or for
                     --target x86_64-windows-msvc against cl.exe
@@ -129,6 +130,7 @@ fn main() -> ExitCode {
         Some("abi-corpus") => abi_corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("link-lines") => link_lines(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("provenance") => provenance(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("features") => features(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-signatures") => abi_signatures(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("abi-differential") => {
             differential::differential(&std::env::args().skip(2).collect::<Vec<_>>())
@@ -1674,6 +1676,27 @@ fn provenance(args: &[String]) -> Result<()> {
     Err(Error::Failed {
         task: "provenance",
         problems: vec!["PROVENANCE does not match the tables it is generated from".to_owned()],
+    })
+}
+
+/// Regenerates `docs/FEATURES.md`, or checks it.
+///
+/// The same shape as [`provenance`]: the counts come from `rucc_gnu::features()`, which is the
+/// table the compiler answers `__has_*` from, and `xtask` has no dependencies, so the work is in
+/// `rucc-targets` and this is the name people type.
+fn features(args: &[String]) -> Result<()> {
+    let mode = if args.iter().any(|a| a == "--check") { "--check" } else { "--write" };
+    let status = Command::new("cargo")
+        .args(["run", "-q", "-p", "rucc-targets", "--", "features", mode])
+        .current_dir(root())
+        .status()
+        .map_err(|e| Error::Io(format!("could not run cargo: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::Failed {
+        task: "features",
+        problems: vec!["docs/FEATURES.md does not match crates/rucc-gnu/features.toml".to_owned()],
     })
 }
 

@@ -17,6 +17,7 @@
 
 mod corpus;
 mod docs;
+mod features;
 mod lines;
 mod provenance;
 mod rng;
@@ -54,6 +55,8 @@ commands:
   link-lines --check   check that tests/link-lines matches what would be written
   provenance --write   write PROVENANCE, which is what a release brings per target
   provenance --check   check that PROVENANCE matches the tables it comes from
+  features --write     write docs/FEATURES.md, the GNU compatibility matrix counted
+  features --check     check that docs/FEATURES.md matches the matrix
   help
 ";
 
@@ -117,6 +120,8 @@ fn main() -> ExitCode {
         },
         ["provenance", "--write"] => provenance::run(&root(), provenance::Mode::Write),
         ["provenance", "--check"] => provenance::run(&root(), provenance::Mode::Check),
+        ["features", "--write"] => features::run(&root(), features::Mode::Write),
+        ["features", "--check"] => features::run(&root(), features::Mode::Check),
         ["info", tuple] => run(tuple, info),
         ["abi", tuple] => run(tuple, abi),
         ["sysroot", tuple] => run(tuple, sysroot),

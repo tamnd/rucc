@@ -201,27 +201,27 @@ notes = "An assembler name written after a declarator, which says what symbol th
 name = "statement_expressions"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = []
+tests = ["rucc-sema::a_statement_expression_has_the_type_of_its_last_statement", "tests/golden/gnu.c"]
 notes = "Every min, max and container_of variant in the kernel is one."
 
 [[feature]]
 name = "typeof"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = []
+tests = ["rucc-lex::typeof_is_a_gnu_extension_that_c23_made_standard", "rucc-sema::typeof_takes_the_type_of_an_expression_it_does_not_evaluate", "tests/accept/typeof.c"]
 notes = "C23 as `typeof`. `__typeof__` is the spelling that works in every mode."
 
 [[feature]]
 name = "labels_as_values"
 kind = "extension"
 gcc_version = "2.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["cpython", "lua", "linux"]
-tests = []
+tests = ["rucc-sema::a_computed_goto_wants_something_that_could_be_an_address", "tests/golden/gnu.c", "tests/accept/a-label-on-the-value-of-a-block.c"]
 notes = "Constrains the optimizer: a block whose address is taken cannot be deleted or merged."
 
 [[feature]]
@@ -375,10 +375,9 @@ notes = "The mirror of `ms_abi`: a function of the System V convention on Window
 name = "mode"
 kind = "attribute"
 gcc_version = "2.0"
-status = "unimplemented"
-answer = "error"
+status = "implemented"
 used_by = ["glibc"]
-tests = []
+tests = ["tests/accept/a-type-in-a-machine-mode.c", "tests/accept/a-vector-written-as-a-machine-mode.c", "tests/accept/a-machine-mode-that-does-not-exist.c", "tests/accept/a-machine-mode-of-the-wrong-class.c"]
 
 [[feature]]
 name = "transparent_union"
@@ -625,21 +624,19 @@ notes = "Runs the handler on every way out of the block the object was declared 
 name = "constructor"
 kind = "attribute"
 gcc_version = "2.0"
-status = "partial"
-answer = "error"
+status = "implemented"
 used_by = ["glibc", "systemd", "openssl"]
-tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
-notes = "The definition is kept rather than dropped as unreferenced. The `.init_array` entry that makes it run before `main` is not emitted yet, so the function is there and nothing calls it."
+tests = ["rucc::an_elf_file_gets_an_entry_in_each_of_the_two_arrays", "rucc::a_priority_goes_in_the_section_name_and_sorts_ahead_of_one_without", "rucc::a_windows_file_gets_an_entry_the_c_runtime_walks", "rucc::a_darwin_file_gets_an_entry_dyld_calls"]
+notes = "An ELF file gets an `.init_array` entry, sorted by priority when one is given, a Windows file gets one in `.CRT$XCU`, and a Darwin file one in `__mod_init_func`."
 
 [[feature]]
 name = "destructor"
 kind = "attribute"
 gcc_version = "2.0"
-status = "partial"
-answer = "error"
+status = "implemented"
 used_by = ["glibc", "openssl"]
-tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
-notes = "Kept the same way `constructor` is kept, and the `.fini_array` entry that makes it run after `main` returns is missing the same way."
+tests = ["rucc::an_elf_file_gets_an_entry_in_each_of_the_two_arrays", "rucc::a_windows_destructor_is_handed_to_atexit_from_a_constructor", "rucc::a_destructor_is_refused_on_darwin_which_has_nowhere_to_put_one"]
+notes = "An ELF file gets a `.fini_array` entry and a Windows one is registered with `atexit` from a constructor. Darwin refuses it with an error, since there is no section dyld walks at exit, rather than dropping it."
 
 [[feature]]
 name = "deprecated"

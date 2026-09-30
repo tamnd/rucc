@@ -398,6 +398,7 @@ version = "0.17.0"
 dependencies = [
  "rucc-abi",
  "rucc-base",
+ "rucc-gnu",
  "rucc-sysroot",
  "rucc-target",
  "rucc-tuple",
