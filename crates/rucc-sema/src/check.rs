@@ -366,6 +366,7 @@ impl<'a> Checker<'a> {
         // Copied out because it is a shared reference with the checker's own lifetime, so holding
         // it does not borrow the checker that each declaration is checked through.
         let ast = self.ast;
+        self.refuse_unimplemented_attributes();
         for &decl in ast.top_level() {
             self.check_decl(decl);
         }

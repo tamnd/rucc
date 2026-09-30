@@ -38,10 +38,10 @@
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
 
-use rucc_ast::{AlignSpec, AttrArg, AttrList, Attribute};
+use rucc_ast::{AlignSpec, AttrArg, AttrList, AttrSyntax, Attribute};
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
-use rucc_gnu::{Kind, Status};
+use rucc_gnu::{Answer, Kind, Status};
 use rucc_lex::Encoding;
 use rucc_target::{BitFieldStyle, Convention, Isa, Target, TargetInfo};
 use rucc_types::{
@@ -230,6 +230,44 @@ impl Checker<'_> {
         match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
             Some(row) if matches!(row.status, Status::Implemented | Status::Partial) => row.name,
             _ => "",
+        }
+    }
+
+    /// Refuses every GNU attribute in the unit that the table says would be wrong code to ignore.
+    ///
+    /// An attribute the checker does not read is dropped wherever it was written, which is right
+    /// for one that only asks for a warning or an optimization and wrong for one that changes
+    /// what the code does: an `interrupt` handler that returns with `ret`, or a
+    /// `no_caller_saved_registers` function that clobbers what its caller kept in a register,
+    /// links and runs and breaks the machine later. Those rows say `answer = "error"`, and this is
+    /// where that is kept. It is asked once of every attribute in the tree rather than by each
+    /// reader, because the point is to catch the ones no reader looks at, and an attribute on
+    /// something the checker never visits is still one the program relied on.
+    pub(in crate::check) fn refuse_unimplemented_attributes(&mut self) {
+        let ast = self.ast;
+        let mut refused: Vec<Span> = Vec::new();
+        for attr in ast.attributes() {
+            let gnu = match attr.namespace {
+                Some(ns) => self.text(ns) == "gnu",
+                None => attr.syntax == AttrSyntax::Gnu,
+            };
+            if !gnu || refused.contains(&attr.span) {
+                continue;
+            }
+            let Some(row) = rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) else {
+                continue;
+            };
+            if row.answer != Answer::Error
+                || matches!(row.status, Status::Implemented | Status::Partial)
+            {
+                continue;
+            }
+            refused.push(attr.span);
+            let what = format!("'{}' attribute is not supported", row.name);
+            let note = "ignoring it would change what the program does, so it is refused";
+            self.report(
+                Diagnostic::error(what, attr.span).with_code("E0753").note(note, attr.span),
+            );
         }
     }
 

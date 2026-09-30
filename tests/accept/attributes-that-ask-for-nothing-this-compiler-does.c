@@ -19,6 +19,8 @@ int sink(int);
 __attribute__((noclone, externally_visible, no_profile_instrument_function)) int counted(int x);
 int counted(int x) { return x + 1; }
 
+__attribute__((no_sanitize("address", "undefined"))) int unchecked(int *p) { return *p; }
+
 static int spare __attribute__((__unused__));
 MAYBE_UNUSED static int also_spare;
 static void helper(void) __attribute__((unused));
