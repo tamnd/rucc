@@ -517,6 +517,7 @@ impl Preprocessor {
             return;
         }
         let taken = std::mem::take(text);
+        self.expander.set_assembly(cx.lex.assembly);
         let expanded = self.expander.expand_toks(taken, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         // To GCC and clang the `__has_*` family are builtin macros rather than something the
@@ -2610,6 +2611,27 @@ mod tests {
         let out = run.go("#define N 3\n# a comment that says N\n#frobnicate N\n");
         assert!(run.messages().is_empty(), "{:?}", run.messages());
         assert_eq!(out, "# a comment that says 3 #frobnicate 3");
+    }
+
+    #[test]
+    fn in_assembly_a_paste_that_does_not_make_a_token_keeps_both_halves_quietly() {
+        // The kernel's linkage.h pastes a label prefix onto `\name` inside a `.macro`, and
+        // vmlinux.lds.S pastes `.init` onto a section name. gcc lets both through in assembly.
+        let mut run = Run::assembly();
+        let out = run.go("#define SIZE(n) L__sym_size_##n\n#define SEC(n) n##.init\nSIZE(\\name)\nSEC(initcall0)\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "L__sym_size_\\name initcall0.init");
+    }
+
+    #[test]
+    fn in_c_the_same_paste_is_still_an_error() {
+        let mut run = Run::new();
+        run.go("#define SEC(n) n##.init\nSEC(initcall0)\n");
+        assert!(
+            run.messages().iter().any(|m| m.contains("does not give a valid")),
+            "{:?}",
+            run.messages()
+        );
     }
 
     #[test]

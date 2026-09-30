@@ -60,6 +60,10 @@ pub struct Expander {
     /// useful one, since the person reading an error is at the machine the file is on and the
     /// string in the binary is going somewhere else.
     prefix_map: PrefixMap,
+    /// Whether the text being expanded is assembly, the way a `.S` is. A paste that does not
+    /// make one token is an error in C and not in assembly, where gcc leaves the two halves
+    /// next to each other and `L__sym_size_\name` in a `.macro` body relies on that.
+    assembly: bool,
 }
 
 impl Expander {
@@ -71,12 +75,18 @@ impl Expander {
             diagnostics: Vec::new(),
             counter: 0,
             prefix_map: PrefixMap::new(),
+            assembly: false,
         }
     }
 
     /// The same, with `__FILE__` rewritten by `map`.
     pub fn with_prefix_map(map: PrefixMap) -> Expander {
         Expander { prefix_map: map, ..Expander::new() }
+    }
+
+    /// Says whether what comes next is assembly rather than C.
+    pub fn set_assembly(&mut self, assembly: bool) {
+        self.assembly = assembly;
     }
 
     /// Everything reported so far.
@@ -163,6 +173,7 @@ impl Expander {
             sources,
             counter: &mut self.counter,
             prefix_map: &self.prefix_map,
+            assembly: self.assembly,
             condition,
             steps: 0,
         };
@@ -198,6 +209,8 @@ struct Run<'a> {
     diagnostics: &'a mut Vec<Diagnostic>,
     interner: &'a mut Interner,
     macros: &'a MacroTable,
+    /// Whether a paste that does not make one token is let through, which it is in assembly.
+    assembly: bool,
     /// Where a token is, which is what the builtin macros are answered from.
     sources: &'a SourceMap,
     /// `__VA_OPT__`, interned once rather than looked up per body token.
@@ -769,6 +782,9 @@ impl<'a> Run<'a> {
             && tokens[1].kind == PpTokenKind::Eof
             && tokens[0].span.lo == 0
             && tokens[0].span.hi as usize == text.len();
+        if !single && self.assembly {
+            return None;
+        }
         if !single {
             let d = Diagnostic::error(
                 format!(
