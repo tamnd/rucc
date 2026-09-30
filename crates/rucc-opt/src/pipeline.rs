@@ -42,9 +42,9 @@ use rucc_session::OptLevel;
 use rucc_target::{Isa, TargetInfo};
 
 use crate::{
-    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, extents,
-    heap, image, inline, ipasra, ipcp, libcall, load, modref, nofree, number, objsize, outside,
-    params, pass, purity, readonly, reload, sroa,
+    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, constant_p, dce, dse,
+    extents, heap, image, inline, ipasra, ipcp, libcall, load, modref, nofree, number, objsize,
+    outside, params, pass, purity, readonly, reload, sroa,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -75,7 +75,7 @@ const READS_SUMMARIES: &[&str] = &[
 /// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
-const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME];
+const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME, dse::NAME];
 
 /// Which passes ask what a call is allowed to do.
 ///
@@ -94,7 +94,7 @@ const READS_PURITY: &[&str] = &[dce::NAME, number::NAME];
 /// The two that move a load, which is the question section 34.6 says the per parameter answer is
 /// worth having for: whether the call in the middle of this loop can have written the array about
 /// to be reloaded. A list for the same reason as the three above it.
-const READS_MODREF: &[&str] = &[load::NAME, reload::NAME];
+const READS_MODREF: &[&str] = &[load::NAME, reload::NAME, dse::NAME];
 
 /// `-O0`. Two passes, and neither of them is an optimization. Section 9.1 gives this level SSA
 /// construction, which the lowering walk in `spec/08-ir.md` already does, and mem2reg for the
@@ -384,6 +384,7 @@ const O2: &[&str] = &[
     "number",
     "load-forward",
     "redundant-load",
+    "dse",
     "constant-p",
     "fold",
     "simplify",
@@ -432,6 +433,7 @@ const O3: &[&str] = &[
     "number",
     "load-forward",
     "redundant-load",
+    "dse",
     "constant-p",
     "fold",
     "simplify",
@@ -499,6 +501,7 @@ const OS: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "dse",
     "constant-p",
     "fold",
     "simplify",
@@ -537,6 +540,7 @@ const OZ: &[&str] = &[
     "simplify-cfg",
     "number",
     "load-forward",
+    "dse",
     "constant-p",
     "fold",
     "simplify",

@@ -112,6 +112,7 @@ pub mod dce;
 pub mod dead_plane;
 pub mod discharge;
 pub mod dom;
+pub mod dse;
 pub mod expect;
 pub mod extents;
 pub mod fold;

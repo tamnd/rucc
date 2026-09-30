@@ -675,6 +675,14 @@ pub const JUMP_TABLE_MIN_TARGETS_FOR_SIZE: u32 = 6;
 /// real program tolerates before it shows up in run time, and that is a corpus question.
 pub const ALLOCATOR_DEGRADATION_PERCENT: u32 = 10;
 
+/// How many instructions dead store elimination walks past from one store before it keeps the
+/// store rather than look further, per section 17.3.
+///
+/// GCC's `dse-max-alias-queries-per-store`, `Init(256)` in `gcc/params.opt`. A store whose
+/// overwriting store is further away than this is almost always one a call or a loop sits between,
+/// and the walk would end there anyway.
+pub const DSE_WALK_LIMIT: u32 = 256;
+
 /// Section 40.12's table, in its order, so a report can print it and a test can check it.
 ///
 /// The point of having the list as data is that "which of our heuristics are guesses" becomes a
@@ -1175,6 +1183,14 @@ pub const ALL: &[Constant] = &[
         document: "39.4",
         gcc: "",
         provenance: Provenance::Awaiting,
+    },
+    Constant {
+        name: "DSE_WALK_LIMIT",
+        value: 256,
+        unit: "instructions",
+        document: "17.3",
+        gcc: "dse-max-alias-queries-per-store",
+        provenance: Provenance::Gcc,
     },
 ];
 
