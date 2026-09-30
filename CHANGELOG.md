@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Sharing frame slots skips ahead through a cell's list of pieces rather than stepping one at a time when it asks whether a local or a spill slot clashes with it, which takes about 9% off an optimized build of jtckdint (#2502).
+
 ### Added
 
 - `--target=i686-linux-gnu` compiles small C programs that link with i686-linux-gnu-gcc and run. Calls follow cdecl, with 4-byte stack slots, `long long` and `double` 8 bytes at 4-byte alignment, and the stack 16-byte aligned at each call. A struct returned in memory has its address passed first and popped by the callee with `ret $4`. Values come back in `eax`, `edx:eax` or `st0`, and a `va_list` is a `char *`. `size_t`, `ptrdiff_t` and `intptr_t` are `unsigned int` and `int`. Division by a constant has a 32-bit form, the stack protector keeps its canary out of `edx`, and an instruction that names the low byte of `esi` or `edi` borrows a register that has one. (#2247)

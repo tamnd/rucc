@@ -113,7 +113,7 @@ use rucc_mir::{Func, Inst, Opcode, Reg};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::live::{Area, Live, Range};
-use rucc_regalloc::order::Order;
+use rucc_regalloc::order::{Order, Point};
 use rucc_regalloc::rewrite::At;
 use rucc_target::FrameInsts;
 
@@ -840,8 +840,10 @@ fn merged(pieces: impl IntoIterator<Item = Range>) -> Vec<Range> {
 /// Whether two stretches of a function are both wanted anywhere, which is what stops two things
 /// sharing a cell.
 ///
-/// Both lists are in order and neither is long, so this walks them together and stops at the first
-/// pair that touches rather than comparing every piece with every other.
+/// Both lists are in order and apart, so this walks them together and stops at the first pair that
+/// touches rather than comparing every piece with every other. A cell that many things went into
+/// has a long list, and a thing asking about it is often a few pieces far apart, so each step skips
+/// every piece that ends before the other list's piece starts rather than going one at a time.
 fn clashes(one: &[Range], two: &[Range]) -> bool {
     let (mut mine, mut theirs) = (0, 0);
     while mine < one.len() && theirs < two.len() {
@@ -849,12 +851,24 @@ fn clashes(one: &[Range], two: &[Range]) -> bool {
             return true;
         }
         if one[mine].end < two[theirs].end {
-            mine += 1;
+            mine += ending_before(&one[mine..], two[theirs].start);
         } else {
-            theirs += 1;
+            theirs += ending_before(&two[theirs..], one[mine].start);
         }
     }
     false
+}
+
+/// How many pieces at the front of a list end before a point. The answer is often one, so this
+/// doubles a step until it passes the point and searches only the last step.
+fn ending_before(pieces: &[Range], point: Point) -> usize {
+    let mut bound = 1;
+    while bound < pieces.len() && pieces[bound].end < point {
+        bound *= 2;
+    }
+    let low = bound / 2;
+    let high = pieces.len().min(bound + 1);
+    low + pieces[low..high].partition_point(|piece| piece.end < point)
 }
 
 #[cfg(test)]
@@ -1279,5 +1293,29 @@ mod tests {
         // One comparison puts the second beside the first and leaves nothing for the third.
         assert_eq!(fit(three(), 0, 3, 1).cells().len(), 2);
         assert_eq!(fit(three(), 0, 3, 0).cells().len(), 3);
+    }
+
+    #[test]
+    fn skipping_ahead_finds_every_clash_a_walk_one_piece_at_a_time_would() {
+        let piece = |start, end| Range { start, end };
+        // A cell many things went into, every other stretch of ten points.
+        let cell: Vec<Range> = (0..40).map(|at| piece(at * 20, at * 20 + 9)).collect();
+        let asked = [
+            vec![piece(10, 19)],
+            vec![piece(795, 900)],
+            vec![piece(10, 19), piece(330, 339), piece(509, 509)],
+            vec![piece(10, 19), piece(330, 339), piece(510, 519)],
+            vec![piece(0, 0)],
+            vec![piece(801, 802)],
+        ];
+        for area in &asked {
+            let walked = cell.iter().any(|one| area.iter().any(|two| one.overlaps(*two)));
+            assert_eq!(clashes(&cell, area), walked, "{area:?}");
+            assert_eq!(clashes(area, &cell), walked, "{area:?}");
+        }
+        assert_eq!(ending_before(&cell, 0), 0);
+        assert_eq!(ending_before(&cell, 10), 1);
+        assert_eq!(ending_before(&cell, 700), 35);
+        assert_eq!(ending_before(&cell, 5000), 40);
     }
 }
