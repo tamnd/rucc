@@ -419,6 +419,7 @@ fn rule_line(rule: &Rule) -> String {
         Test::FloatPair => "one or two members with a floating point member among them".to_string(),
         Test::X87Stack => "one x87 long double, or two if it is a _Complex".to_string(),
         Test::LoneFloat => "one float or one double and nothing else".to_string(),
+        Test::ComplexFloat => "a _Complex float and nothing else".to_string(),
         Test::Eightbytes { limit } => {
             format!("at most {limit} bytes that classify into eightbytes")
         }

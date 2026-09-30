@@ -467,6 +467,10 @@ pub static PAIR_LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FPToUI, "f32.i64", "__fixunssfdi"),
     (Opcode::FPToUI, "f64.i64", "__fixunsdfdi"),
     (Opcode::FPToUI, "f128.i64", "__fixunstfdi"),
+    (Opcode::SIToFP, "i64.f80", "__floatdixf"),
+    (Opcode::UIToFP, "i64.f80", "__floatundixf"),
+    (Opcode::FPToSI, "f80.i64", "__fixxfdi"),
+    (Opcode::FPToUI, "f80.i64", "__fixunsxfdi"),
 ];
 
 /// The runtime function this operation at this mode becomes on a target whose registers are

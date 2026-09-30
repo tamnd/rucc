@@ -328,7 +328,8 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
 ///
 /// Returning a small structure in edx:eax is a real convention and it is not this one. GCC calls
 /// it `-freg-struct-return`, Darwin and some BSDs default to it, and Linux does not, so the
-/// return list below says memory for every size. Getting that backwards is the failure this crate
+/// return list below says memory for every size but one. A `_Complex float` is not a structure, and
+/// it comes back in edx:eax, which is what libgcc's `__mulsc3` does too. Getting that backwards is the failure this crate
 /// exists to avoid, and it is why i686 Windows, where the small structure rule is the default,
 /// has [`I386_MINGW`] and [`I386_MSVC`] rather than this one.
 pub static I386_SYSV: AbiDescription = AbiDescription {
@@ -344,6 +345,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::ComplexFloat, Travel::AsIntegers),
         Rule::new(Test::Anything, Travel::ByReference),
     ],
     arguments: &[

@@ -348,6 +348,12 @@ pub enum Test {
     /// edx:eax. A second member of any kind, even another `float`, turns it back into an
     /// ordinary eight byte structure.
     LoneFloat,
+    /// A `_Complex float` and nothing else, which is not the same as a structure of two floats.
+    ///
+    /// The i386 SysV return rule gcc and libgcc follow. Every structure comes back in memory there,
+    /// and a `_Complex float` comes back in edx:eax as the eight bytes it is, which is also how
+    /// `__mulsc3` and `__divsc3` give their answer back.
+    ComplexFloat,
     /// The SysV eightbyte classification succeeds, and no eightbyte came out x87.
     ///
     /// The intricate one. The aggregate is cut into eight byte chunks, each chunk gets a class

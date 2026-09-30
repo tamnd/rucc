@@ -303,6 +303,7 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::UIToFP
             | Opcode::FPToSI
             | Opcode::FPToUI
+            | Opcode::Bitcast
             | Opcode::Trunc
             | Opcode::SExt
             | Opcode::ZExt
@@ -347,12 +348,24 @@ fn can_split(
     if data.opcode == Opcode::SExt && reads.iter().any(|&value| func[value].ty.bits() < 8) {
         return false;
     }
-    // The runtime has a conversion for a `float`, for a `double` and for a `_Float128`, and for
-    // nothing else, so every other format is refused here rather than turned into a call to a name
-    // nothing defines. An eighty bit float is the one a program reaches without asking for it, since
-    // `long double` is that type on this target, and it is tamnd/rucc#326 rather than an oversight.
+    // The runtime has a conversion for a `float`, for a `double` and for a `_Float128`, and at
+    // sixty four bits for the eighty bit float too, which is `long double` on i386. Every other
+    // format and width is refused here rather than turned into a call to a name nothing defines.
+    // An eighty bit float split at a hundred and twenty eight bits is tamnd/rucc#326.
+    // A reading of a float's bits as an integer, or of an integer's as a float, goes through a
+    // slot, and a slot is only somewhere a scalar float can be stored and loaded again. That is a
+    // `double` on a machine of thirty two bits, and a `__float128` is left alone.
+    if data.opcode == Opcode::Bitcast
+        && (width.half != 32
+            || !reads.iter().copied().chain(data.results()).any(|value| {
+                let ty = func[value].ty;
+                ty.is_float() && ty.is_scalar() && ty.bits() == 2 * width.half
+            }))
+    {
+        return false;
+    }
     if matches!(data.opcode, Opcode::SIToFP | Opcode::UIToFP | Opcode::FPToSI | Opcode::FPToUI)
-        && converted(func, inst).is_none()
+        && converted(func, inst).and_then(|format| conversion(width, data.opcode, format)).is_none()
     {
         return false;
     }
@@ -379,7 +392,7 @@ fn can_split(
     })
 }
 
-/// The format of the floating point side of a conversion, when the runtime has a routine for it.
+/// The format of the floating point side of a conversion, when it is one [`conversion`] knows.
 ///
 /// One float type is in such an instruction, the result of a conversion going up and the operand of
 /// one coming down, so both ends are looked at and the one is found. `None` means the function is
@@ -398,9 +411,25 @@ fn converted(func: &Func, inst: Inst) -> Option<Float> {
         return None;
     }
     match only.format() {
-        Some(format @ (Float::F32 | Float::F64 | Float::F128)) => Some(format),
+        Some(format @ (Float::F32 | Float::F64 | Float::F80 | Float::F128)) => Some(format),
         _ => None,
     }
+}
+
+/// The routine for a conversion of that kind between a split integer and a float of that format,
+/// when the runtime has one at this width.
+fn conversion(width: Width, opcode: Opcode, format: Float) -> Option<&'static str> {
+    let float = match format {
+        Float::F32 => "f32",
+        Float::F64 => "f64",
+        Float::F80 => "f80",
+        _ => "f128",
+    };
+    let mode = match opcode {
+        Opcode::SIToFP | Opcode::UIToFP => format!("{}.{float}", width.mode()),
+        _ => format!("{float}.{}", width.mode()),
+    };
+    width.libcall(opcode, &mode)
 }
 
 /// Everything an instruction reads: its own operands, and the arguments it passes along its edges.
@@ -564,7 +593,7 @@ fn place(places: &mut Places<'_>, param: Param, conv: &CallRegs) -> Where {
         crate::abi::drain(places, drains);
         at
     } else if crate::abi::on_the_stack(param.ty) {
-        let (size, align) = crate::abi::X87_AREA;
+        let (size, align) = crate::abi::x87_area(conv);
         places.on_stack(size, align)
     } else if param.ty.is_float() {
         places.float(crate::abi::float_bytes(param.ty))
@@ -693,6 +722,8 @@ fn rewrite(
         Opcode::FPToSI | Opcode::FPToUI if produces => {
             from_float(func, names, calls, halves, inst, data.opcode == Opcode::FPToSI);
         }
+        Opcode::Bitcast if produces => float_bits(func, width, halves, inst),
+        Opcode::Bitcast if takes => bits_float(func, width, halves, inst),
         Opcode::ICmp if takes => compare(func, width, halves, forward, inst),
         Opcode::Select if produces => choose(func, width, halves, inst),
         Opcode::Trunc if takes => truncate(func, width, halves, forward, inst),
@@ -718,6 +749,60 @@ fn constant(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let low = ahead_const(func, width, inst, low);
     let high = ahead_const(func, width, inst, high);
     replace(func, halves, inst, low, high);
+}
+
+/// The bits of a float as an integer, which is the float stored to a slot of its own and the two
+/// words of the slot read back.
+///
+/// A `double` is in a vector register and its halves would be in two general purpose ones, and
+/// memory is the one place both can reach. `fabs`, `copysign` and a union are what write these.
+fn float_bits(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
+    let Some(&value) = func[func[inst].args].first() else { return };
+    let slot = slot(func, width, inst);
+    let whole = own(width.step() * 2, width.step() * 2);
+    write(func, inst, value, slot, whole, Flags::NONE);
+    let low = read(func, width, inst, slot, word(width, whole, 0), Flags::NONE);
+    let up = stepped(func, width, inst, slot);
+    let high = read(func, width, inst, up, word(width, whole, width.step()), Flags::NONE);
+    replace(func, halves, inst, low, high);
+}
+
+/// An integer's bits as a float, which is [`float_bits`] the other way round: the two words
+/// written to a slot and the float loaded from it, in place of the instruction.
+fn bits_float(func: &mut Func, width: Width, halves: &Halves, inst: Inst) {
+    let Some(&value) = func[func[inst].args].first() else { return };
+    let Some(&(low, high)) = halves.get(&value) else { return };
+    let slot = slot(func, width, inst);
+    let whole = own(width.step() * 2, width.step() * 2);
+    write(func, inst, low, slot, word(width, whole, 0), Flags::NONE);
+    let up = stepped(func, width, inst, slot);
+    write(func, inst, high, up, word(width, whole, width.step()), Flags::NONE);
+    let extra = Extra::Mem(func.add_mem(whole));
+    let args = func.push_values(&[slot]);
+    let data = &mut func[inst];
+    data.opcode = Opcode::Load;
+    data.args = args;
+    data.extra = extra;
+    data.flags = Flags::NONE;
+}
+
+/// A slot in the frame as wide as a split value, written in front of an instruction.
+fn slot(func: &mut Func, width: Width, inst: Inst) -> Value {
+    let size = width.step() * 2;
+    let extra = Extra::Mem(func.add_mem(own(size, size)));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+}
+
+/// An access to a slot of this pass's own, which nothing else can see.
+fn own(size: u64, align: u64) -> MemInfo {
+    MemInfo {
+        size,
+        align: u32::try_from(align).unwrap_or(u32::MAX),
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    }
 }
 
 /// A read, as the two words of it with the low one first.
@@ -875,7 +960,8 @@ fn to_float(
     let (Some(result), Some(format)) = (func[inst].first_result, converted(func, inst)) else {
         return;
     };
-    let routine = going_up(calls.width, signed, format);
+    let opcode = if signed { Opcode::SIToFP } else { Opcode::UIToFP };
+    let routine = routine(calls.width, opcode, format);
     let args = [Operand::Split(low, high)];
     let made = runtime(func, names, calls, inst, routine, &args, &[func[result].ty]);
     if let [answer] = made[..] {
@@ -903,7 +989,8 @@ fn from_float(
 ) {
     let Some(&arg) = func[func[inst].args].first() else { return };
     let Some(format) = converted(func, inst) else { return };
-    let routine = coming_down(calls.width, signed, format);
+    let opcode = if signed { Opcode::FPToSI } else { Opcode::FPToUI };
+    let routine = routine(calls.width, opcode, format);
     let args = [Operand::Whole(arg)];
     let half = calls.width.half();
     let made = runtime(func, names, calls, inst, routine, &args, &[half, half]);
@@ -911,40 +998,10 @@ fn from_float(
     replace(func, halves, inst, low, high);
 }
 
-/// The routine that turns an integer this wide into a float of that format.
-///
-/// Three formats, since [`converted`] answers with no others, and the quad is the last arm rather
-/// than a named one so that a format added to that list arrives here as a routine that does not
-/// exist rather than as a name that is wrong.
-fn going_up(width: Width, signed: bool, format: Float) -> &'static str {
-    let to = match format {
-        Float::F32 => "f32",
-        Float::F64 => "f64",
-        _ => "f128",
-    };
-    let mode = format!("{}.{to}", width.mode());
-    routine(width, if signed { Opcode::SIToFP } else { Opcode::UIToFP }, &mode)
-}
-
-/// The routine that turns a float of that format into an integer this wide.
-fn coming_down(width: Width, signed: bool, format: Float) -> &'static str {
-    let from = match format {
-        Float::F32 => "f32",
-        Float::F64 => "f64",
-        _ => "f128",
-    };
-    let mode = format!("{from}.{}", width.mode());
-    routine(width, if signed { Opcode::FPToSI } else { Opcode::FPToUI }, &mode)
-}
-
-/// The routine the capability table names for this operation at this width.
-///
-/// Every mode this pass asks about is one this machine has no register wide enough for, so the
-/// table always has an answer and a missing one is the table and this pass having gone out of step.
-fn routine(width: Width, opcode: Opcode, mode: &str) -> &'static str {
-    width
-        .libcall(opcode, mode)
-        .unwrap_or_else(|| panic!("no routine for `{}` at `{mode}`", opcode.name()))
+/// The routine for that conversion, which [`can_split`] has already made sure there is.
+fn routine(width: Width, opcode: Opcode, format: Float) -> &'static str {
+    conversion(width, opcode, format)
+        .unwrap_or_else(|| panic!("no routine for `{}` at {format:?}", opcode.name()))
 }
 
 /// What shapes a call this pass writes to a routine in the runtime: the platform's ABI, which says
@@ -2574,7 +2631,10 @@ mod tests {
         let double = Type::float(Float::F64);
         let single = Type::float(Float::F32);
         let quad = Type::float(Float::F128);
+        let extended = Type::float(Float::F80);
         for (opcode, float, routine) in [
+            (Opcode::SIToFP, extended, "__floatdixf"),
+            (Opcode::UIToFP, extended, "__floatundixf"),
             (Opcode::SIToFP, double, "__floatdidf"),
             (Opcode::SIToFP, single, "__floatdisf"),
             (Opcode::UIToFP, double, "__floatundidf"),
@@ -2593,6 +2653,8 @@ mod tests {
             assert!(text.contains(&format!("@{routine}(%0, %1)")), "{routine}: {text}");
         }
         for (opcode, float, routine) in [
+            (Opcode::FPToSI, extended, "__fixxfdi"),
+            (Opcode::FPToUI, extended, "__fixunsxfdi"),
             (Opcode::FPToSI, double, "__fixdfdi"),
             (Opcode::FPToSI, single, "__fixsfdi"),
             (Opcode::FPToUI, double, "__fixunsdfdi"),
@@ -2611,6 +2673,23 @@ mod tests {
             assert!(text.contains(&format!("@{routine}(%0)")), "{routine}: {text}");
             assert!(text.contains("return %1, %2"), "two halves come back: {text}");
         }
+    }
+
+    #[test]
+    fn at_thirty_two_bits_the_bits_of_a_double_go_through_a_slot() {
+        let double = Type::float(Float::F64);
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[double], &[double]);
+        let mut build = Builder::new(&mut func, entry);
+        let bits = build.unary(Opcode::Bitcast, params[0], long());
+        let back = build.unary(Opcode::Bitcast, bits, double);
+        build.ret(&[back]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bitcast"), "no reading of bits is left: {text}");
+        assert_eq!(text.matches("alloca").count(), 2, "one slot each way: {text}");
+        assert!(text.contains("load.f64"), "the double comes back from its slot: {text}");
     }
 
     #[test]

@@ -2898,9 +2898,10 @@ impl<'a> Lowering<'a> {
     /// see it: whatever reads it will `fld` it out of the slot the way it reads any other one.
     ///
     /// Ten bytes in two goes, because the machine stores eight at a time and there is no store of
-    /// an immediate to memory, so each half is put in a register first. The six bytes above the ten
-    /// are left alone, since nothing reads them: they are the padding that makes the type sixteen
-    /// wide and they are unspecified in the psABI rather than zero.
+    /// an immediate to memory, so each half is put in a register first. Three goes on i386, whose
+    /// registers hold four. The bytes above the ten are left alone, since nothing reads them: they
+    /// are the padding that makes the type sixteen wide and they are unspecified in the psABI
+    /// rather than zero.
     ///
     /// The other way is a constant pool, an `fldt` of a symbol, and a relocation, which is what a
     /// compiler with somewhere to put a literal does. This back end has nowhere to put one yet, and
@@ -2912,13 +2913,21 @@ impl<'a> Lowering<'a> {
         let span = self.source.span(inst);
         let gpr = self.gpr;
         let slot = self.x87_slot(result);
-        let low = self.through(slot).plus(0);
-        let high = self.through(slot).plus(8);
+        let at = |to: i32| self.through(slot).plus(to);
+        let top = (((bits >> 64) & 0xffff) as i64, at(8), "16");
+        // A machine whose registers are four bytes puts the significand down in two of them.
+        let pieces = if self.conv.word == 4 {
+            vec![
+                (i64::from(bits as u32 as i32), at(0), "32"),
+                (i64::from((bits >> 32) as u32 as i32), at(4), "32"),
+                top,
+            ]
+        } else {
+            vec![(bits as u64 as i64, at(0), "64"), top]
+        };
 
         let block = self.at.expect("a block is being filled");
-        for (bytes, at, into) in
-            [(bits as u64 as i64, low, "64"), (((bits >> 64) & 0xffff) as i64, high, "16")]
-        {
+        for (bytes, at, into) in pieces {
             let held = self.out.new_vreg(gpr);
             let put = self.named(&format!("mov_ri_{into}"));
             self.out.build(block, put).at(span).def(held, gpr).imm(bytes).finish();
