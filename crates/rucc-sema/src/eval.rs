@@ -656,6 +656,21 @@ impl<'a> Eval<'a> {
                         };
                         self.complex_int_binary(expr, op, (a, b), (c, d), info)
                     }
+                    // An address that went through a cast to an integer as wide as it, moved by
+                    // a number. gcc keeps `(unsigned long)&stack + sizeof(stack)` as an
+                    // initializer, since it is still one relocation with an addend, and the
+                    // kernel writes its first top of stack that way. The cast only lets the
+                    // address through at full width, so the sum is at full width too.
+                    (Const::Address(address), Const::Int(count))
+                        if matches!(op, BinaryOp::Add | BinaryOp::Sub) =>
+                    {
+                        let count = Const::Int(count);
+                        let count = if matches!(op, BinaryOp::Sub) { negate(count) } else { count };
+                        self.offset_by(expr, Const::Address(address), count, 1)
+                    }
+                    (Const::Int(count), Const::Address(address)) if matches!(op, BinaryOp::Add) => {
+                        self.offset_by(expr, Const::Address(address), Const::Int(count), 1)
+                    }
                     // The two operands of an arithmetic operator have one type by the time they
                     // are here, so a mismatched pair is pointer arithmetic or a tree that did
                     // not check. Neither has a value to give.
@@ -2234,6 +2249,32 @@ mod tests {
             value(&mut c, narrow).is_err(),
             "an `int` does not, and half an address is not an address"
         );
+    }
+
+    #[test]
+    fn an_address_written_as_an_integer_moves_by_bytes() {
+        let mut f = Fixture::new();
+        let four = f.int(4, IntKind::Int);
+        let object = f.var(f.int_specs(), "a", &[array(four)]);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+        let wide = f.cast(f.builtin(BuiltinSet::LONG), &[], taken);
+        let sixteen = f.int(16, IntKind::Long);
+        let top = f.binary(BinaryOp::Add, wide, sixteen);
+        let a = f.use_name("a");
+        let taken = f.unary(UnaryOp::AddrOf, a);
+        let wide = f.cast(f.builtin(BuiltinSet::LONG), &[], taken);
+        let two = f.int(2, IntKind::Long);
+        let back = f.binary(BinaryOp::Sub, wide, two);
+
+        let mut c = f.checker();
+        c.check_decl(object);
+        assert_eq!(
+            address(value(&mut c, top)),
+            Some((0, 16)),
+            "`(long)&a + 16` is the object and sixteen bytes, which is how the kernel finds its top of stack"
+        );
+        assert_eq!(address(value(&mut c, back)), Some((0, -2)), "and it may go the other way");
     }
 
     #[test]
