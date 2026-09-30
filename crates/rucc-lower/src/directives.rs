@@ -55,8 +55,7 @@
 //! still records the alignment it asked for, so the linker puts whatever follows it at the same
 //! place either way, and every symbol in the file is at the same offset it would be.
 
-use std::collections::HashMap;
-
+use rucc_base::hash::Map;
 use rucc_ir::{Linkage, Visibility};
 
 /// What could not be done with a template, and which kind of answer that is.
@@ -309,16 +308,16 @@ struct Assembler<'a> {
     /// The one being filled in.
     open: Option<Open>,
     /// Where every label of this block is.
-    labels: HashMap<String, Value>,
+    labels: Map<String, Value>,
     /// Where the last local label of each number is, which is what a reference ending in `b`
     /// asks for.
-    locals: HashMap<i64, Value>,
+    locals: Map<i64, Value>,
     /// The names a directive exported, and how.
-    linkage: HashMap<String, Linkage>,
+    linkage: Map<String, Linkage>,
     /// The names a directive said how far they reach.
-    visibility: HashMap<String, Visibility>,
+    visibility: Map<String, Visibility>,
     /// What `.size` claimed each name is, to be held against what was written under it.
-    sizes: HashMap<String, i64>,
+    sizes: Map<String, i64>,
     /// What the last alignment directive asked for and nothing has been aligned to yet.
     pending: u32,
     /// Where the bytes of a file come from.
@@ -336,11 +335,11 @@ impl<'a> Assembler<'a> {
             starts: Vec::new(),
             sets: Vec::new(),
             open: None,
-            labels: HashMap::new(),
-            locals: HashMap::new(),
-            linkage: HashMap::new(),
-            visibility: HashMap::new(),
-            sizes: HashMap::new(),
+            labels: Map::default(),
+            locals: Map::default(),
+            linkage: Map::default(),
+            visibility: Map::default(),
+            sizes: Map::default(),
             pending: 1,
             read,
         }

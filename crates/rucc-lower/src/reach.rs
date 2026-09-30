@@ -41,10 +41,9 @@
 //! when something in this file names it, which is the question [`crate::unit`] has to ask before
 //! it puts a copy of the body out of line.
 
-use std::collections::HashSet;
-
 use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Interner;
+use rucc_base::hash::Set;
 use rucc_sema::{
     Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Eval, ExprId, ExprKind, InitList,
     Linkage, Stmt, StmtId, Tast,
@@ -59,9 +58,9 @@ use rucc_types::Types;
 /// with an initializer that names a function is how a reference reaches this from a place that is
 /// neither a body nor a file-scope image, so the two kinds travel the same worklist.
 #[must_use]
-pub(crate) fn reachable(decide: Decide<'_>) -> HashSet<DeclId> {
+pub(crate) fn reachable(decide: Decide<'_>) -> Set<DeclId> {
     let tast = decide.tast;
-    let mut walk = Reach { tast, decide, seen: HashSet::new(), work: Vec::new() };
+    let mut walk = Reach { tast, decide, seen: Set::default(), work: Vec::new() };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
         if is_root(&tast[decl]) {
@@ -96,7 +95,7 @@ fn is_root(node: &Decl) -> bool {
 struct Reach<'a> {
     tast: &'a Tast,
     decide: Decide<'a>,
-    seen: HashSet<DeclId>,
+    seen: Set<DeclId>,
     work: Vec<DeclId>,
 }
 

@@ -23,9 +23,8 @@
 //! There is one table per translation unit, so a [`TraceId`] from one is meaningless in
 //! another, the same rule the hide sets follow.
 
-use std::collections::HashMap;
-
 use rucc_base::Symbol;
+use rucc_base::hash::Map;
 use rucc_diag::Span;
 
 /// A pointer into a [`Traces`] table, or [`TraceId::NONE`] for a token the user wrote.
@@ -71,7 +70,7 @@ pub struct Traces {
     /// expansion without a placeholder entry that has to be built out of a `Symbol` nobody
     /// has yet.
     steps: Vec<Step>,
-    map: HashMap<Step, TraceId>,
+    map: Map<Step, TraceId>,
 }
 
 impl Traces {

@@ -69,9 +69,8 @@
 //! anybody can write, and a disambiguation that only appears when the two halves of a program are
 //! compiled separately is the kind of bug nobody finds.
 
-use std::collections::HashMap;
-
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_ir::{Meta, MetaNode, Module, TbaaNode};
 use rucc_types::{FloatKind, IntKind, TypeId, TypeKind, Types};
 
@@ -91,7 +90,7 @@ pub(crate) struct Tree {
     /// through types with no node has no metadata table at all.
     root: Option<Meta>,
     /// Everything under it.
-    nodes: HashMap<String, Meta>,
+    nodes: Map<String, Meta>,
 }
 
 impl Tree {

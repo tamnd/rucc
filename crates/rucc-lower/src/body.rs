@@ -23,11 +23,11 @@
 //! for a slot belongs in the entry block, and by the time the walk meets `&x` it is far too
 //! late to put one there.
 
-use std::collections::{HashMap, HashSet};
 use std::iter;
 
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::{Float as Real, Format};
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Symbol, dfp};
 use rucc_diag::Span;
 use rucc_ir::{
@@ -79,28 +79,28 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         func,
         ssa: Ssa::new(address),
         at: Some(entry),
-        vars: HashMap::new(),
-        labels: HashMap::new(),
+        vars: Map::default(),
+        labels: Map::default(),
         taken: Vec::new(),
         loops: Vec::new(),
         next_var: 0,
         address,
         ret: plan.ret.clone(),
         sret: None,
-        vlas: HashMap::new(),
+        vlas: Map::default(),
         shared: None,
         marks: Vec::new(),
         cleanups: Vec::new(),
         next_scope: 0,
-        pinned: HashSet::new(),
-        landings: HashMap::new(),
-        pads: HashMap::new(),
+        pinned: Set::default(),
+        landings: Map::default(),
+        pads: Map::default(),
         jumps: Vec::new(),
         grows: false,
         cleans: false,
         saves: false,
         hooked: false,
-        aligned: HashMap::new(),
+        aligned: Map::default(),
         restrict: Scopes::default(),
         brace: brace(tast, root, span),
     };
@@ -109,7 +109,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // What the whole function needs decided before any of it is walked.
     let mut scan = Scan {
         tast,
-        escaped: HashSet::new(),
+        escaped: Set::default(),
         locals: Vec::new(),
         statics: Vec::new(),
         taken: Vec::new(),
@@ -330,7 +330,7 @@ const fn order_of(order: MemOrder) -> i128 {
 /// The address taken case is what makes the middle one the one every distribution builds with. A
 /// local whose address escapes is one an overflow can reach through a pointer nothing here can
 /// follow, and the plain flag misses every single one of them.
-fn protects(body: &Body<'_, '_>, locals: &[DeclId], escaped: &HashSet<DeclId>) -> bool {
+fn protects(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> bool {
     let want = body.unit.protector;
     match want {
         Protector::None => return false,
@@ -388,7 +388,7 @@ fn holds_array(types: &Types, ty: TypeId) -> bool {
 /// second half is what makes `L: int a[n]; goto L;` give the array back: the label was passed
 /// before the array was made, so it is a place where the array does not exist, and jumping there
 /// leaves its scope even though the block is the same one.
-fn landing(from: &[Mark], to: &[Mark], pinned: &HashSet<u32>) -> Landing {
+fn landing(from: &[Mark], to: &[Mark], pinned: &Set<u32>) -> Landing {
     // A pinned scope never gives the stack back, so it is a scope that grew nothing as far as any
     // jump is concerned. Reading it that way on both sides is also what keeps the comparison
     // honest: the two paths were recorded at different points of the walk, and a scope that was
@@ -602,9 +602,9 @@ struct Body<'a, 'u> {
     ssa: Ssa,
     /// The block instructions are appended to, absent in unreachable code.
     at: Option<Block>,
-    vars: HashMap<DeclId, Local>,
+    vars: Map<DeclId, Local>,
     /// The block a labelled statement starts, for the labels met so far.
-    labels: HashMap<StmtId, Block>,
+    labels: Map<StmtId, Block>,
     /// The labelled statements the function takes the address of, in the order it takes them,
     /// which is where a `goto *p` can arrive. Collected before the walk starts, since the
     /// address of a label can be taken after the jump that uses it.
@@ -620,7 +620,7 @@ struct Body<'a, 'u> {
     /// What each variable length array met so far is long, keyed by the expression it was
     /// written as. C says that expression is evaluated where the declaration having it is
     /// reached and not again, so `int a[n]; n = 0;` leaves `sizeof a` what it was.
-    vlas: HashMap<ExprId, Value>,
+    vlas: Map<ExprId, Value>,
     /// The node a conditional's condition and its first arm are both written out of, and what it
     /// is worth. GNU's `a ?: b` evaluates `a` once, which the checking says by keeping one node
     /// for it, so meeting that node again while lowering the arm is meeting the same node and not
@@ -651,16 +651,16 @@ struct Body<'a, 'u> {
     /// function returns as well, since one restore gives back everything newer than it and there is
     /// no restore left to give back only part. That is more stack than the program needed and never
     /// less, which is the direction to be wrong in.
-    pinned: HashSet<u32>,
+    pinned: Set<u32>,
     /// What each label the walk has reached is inside, which is what a jump to it has to put the
     /// stack back to. Only collected for a function that grows the stack, since nothing else
     /// asks.
-    landings: HashMap<StmtId, Vec<Mark>>,
+    landings: Map<StmtId, Vec<Mark>>,
     /// The landing pads built so far, by what each one does: the slot and the handler of every
     /// call it makes, innermost first. A call whose open scopes owe exactly those calls goes to the
     /// same pad rather than a copy of it, which is what gcc does. Keyed by the slots rather than
     /// the declarations, so an object the walk gave a second slot gets a pad of its own.
-    pads: HashMap<Vec<(Value, DeclId)>, Block>,
+    pads: Map<Vec<(Value, DeclId)>, Block>,
     /// The jumps whose stack is not settled yet, which is all of them until the walk knows where
     /// every label is.
     jumps: Vec<Jump>,
@@ -694,7 +694,7 @@ struct Body<'a, 'u> {
     /// judgement J1 tests at run time rather than one this pass has to prove: a pointer that was
     /// cast from a narrower type and lost its low bits is row S7 of document 03, and the check is
     /// what finds it.
-    aligned: HashMap<Value, u32>,
+    aligned: Map<Value, u32>,
     /// The `restrict` pointers the function declares, which is what an access carries a clique
     /// and a base from. Empty for a function that declares none, which is nearly all of them.
     restrict: Scopes,
@@ -8600,7 +8600,7 @@ fn holds_a_label(tast: &Tast, id: StmtId, cases: bool) -> bool {
 struct Scan<'a> {
     tast: &'a Tast,
     /// The declarations something takes the address of.
-    escaped: HashSet<DeclId>,
+    escaped: Set<DeclId>,
     /// Every object with automatic storage the body declares, in the order it declares them.
     locals: Vec<DeclId>,
     /// Every object with static storage the body declares.

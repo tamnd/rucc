@@ -46,9 +46,8 @@
 //! gathered, and the parameters are where `restrict` is nearly always written: `memcpy`, `strcpy`
 //! and the numeric kernels all put it on parameters and all have two. tamnd/rucc#970.
 
-use std::collections::HashMap;
-
 use rucc_ast::{BinaryOp, UnaryOp};
+use rucc_base::hash::Map;
 use rucc_ir::Restrict;
 use rucc_sema::{Conversion, DeclId, ExprId, ExprKind, Tast};
 use rucc_types::{Qualifiers, TypeId, TypeKind, Types, is_pointer};
@@ -58,7 +57,7 @@ use rucc_types::{Qualifiers, TypeId, TypeKind, Types, is_pointer};
 pub(crate) struct Scopes {
     /// One entry per `restrict` pointer in scope. Empty for the overwhelming majority of
     /// functions, which declare none, and a linear map would do as well at these sizes.
-    of: HashMap<DeclId, Restrict>,
+    of: Map<DeclId, Restrict>,
 }
 
 impl Scopes {
@@ -69,7 +68,7 @@ impl Scopes {
     /// declares none gets no clique at all, so `next` is left alone and nothing in the function
     /// carries a number.
     pub(crate) fn of_params(tast: &Tast, types: &Types, params: &[DeclId], next: &mut u16) -> Self {
-        let mut of = HashMap::new();
+        let mut of = Map::default();
         let restricted: Vec<DeclId> =
             params.iter().copied().filter(|&decl| qualified(types, tast[decl].ty)).collect();
         if restricted.is_empty() {

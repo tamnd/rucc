@@ -14,9 +14,9 @@
 //! skipping looks at the directive name and nothing else, and only the seven conditional
 //! directives mean anything while it is going on.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
 use rucc_gnu::Kind;
@@ -135,7 +135,7 @@ pub struct Preprocessor {
     /// Files that do not need reading again, and why. Keyed by what the file system calls the
     /// file rather than by the name an include used, so that a header reached two ways is one
     /// entry here.
-    seen: HashMap<PathBuf, Guard>,
+    seen: Map<PathBuf, Guard>,
     /// Every file an `#include` found, in the order they were first reached.
     ///
     /// This is what the `-M` family reports. It is collected here rather than read off the
@@ -154,7 +154,7 @@ pub struct Preprocessor {
     /// are two prerequisites there and a header two other headers in the same directory reach
     /// by different relative paths is listed twice. Naming a file once is what the flag means,
     /// and a duplicate prerequisite means nothing to `make` either way.
-    dep_ids: HashSet<PathBuf>,
+    dep_ids: Set<PathBuf>,
 }
 
 impl Preprocessor {
