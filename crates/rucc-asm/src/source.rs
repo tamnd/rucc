@@ -1342,6 +1342,8 @@ impl Reader {
             "ascii" => self.text_bytes(&args, false)?,
             "asciz" | "string" => self.text_bytes(&args, true)?,
 
+            "incbin" => self.incbin(&args)?,
+
             "space" | "skip" | "zero" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.bad(&format!(".{word} wants a size and an optional fill")));
@@ -2123,6 +2125,44 @@ impl Reader {
             self.put(&bytes)?;
         }
         Ok(())
+    }
+
+    /// `.incbin "file"`, with an optional number of bytes to skip and then to take.
+    ///
+    /// The name is read from where the assembler runs, which is what gas does first. The kernel
+    /// uses it to put the real mode blob into `rmpiggy.S`, and kbuild runs every compile from the
+    /// top of the build tree, where that name leads.
+    fn incbin(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let Some(name) = args.first() else {
+            return Err(self.bad(".incbin with no file named"));
+        };
+        if args.len() > 3 {
+            return Err(self.bad(".incbin wants a file, and an optional skip and count"));
+        }
+        let name = String::from_utf8_lossy(&self.string(name.trim())?).into_owned();
+        let bytes = std::fs::read(&name)
+            .map_err(|e| self.bad(&format!(".incbin could not read {name}: {e}")))?;
+        let skip = match args.get(1) {
+            Some(arg) => self.size(arg)?,
+            None => 0,
+        };
+        let skip = usize::try_from(skip).unwrap_or(usize::MAX);
+        if skip > bytes.len() {
+            let what =
+                format!(".incbin skipping {skip} bytes of {name}, which has {}", bytes.len());
+            return Err(self.bad(&what));
+        }
+        let left = bytes.len() - skip;
+        let count = match args.get(2) {
+            Some(arg) => usize::try_from(self.size(arg)?).unwrap_or(usize::MAX),
+            None => left,
+        };
+        if count > left {
+            let what =
+                format!(".incbin of {count} bytes from {name}, which has {left} past the skip");
+            return Err(self.bad(&what));
+        }
+        self.put(&bytes[skip..skip + count])
     }
 
     /// `.align`, `.balign` and `.p2align`, which differ only in what the first number means.
@@ -4850,6 +4890,19 @@ _tls$tlv$init:
     fn the_three_kinds_of_string_differ_only_in_the_zero_on_the_end() {
         let out = assembled("\t.data\n\t.ascii \"ab\"\n\t.asciz \"cd\"\n\t.string \"e\\tf\"\n");
         assert_eq!(bytes(&out, ".data"), b"abcd\0e\tf\0".to_vec());
+    }
+
+    #[test]
+    fn incbin_puts_the_bytes_of_a_file_there() {
+        let path = std::env::temp_dir().join(format!("rucc-incbin-{}.bin", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let name = path.display();
+        let out =
+            assembled(&format!("\t.data\n\t.incbin \"{name}\"\n\t.incbin \"{name}\", 2, 3\n"));
+        let missing = read(&format!("\t.data\n\t.incbin \"{name}\", 7\n"), Arch::X86_64);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(bytes(&out, ".data"), b"abcdefcde".to_vec());
+        assert!(missing.is_err(), "a skip past the end of the file is refused");
     }
 
     #[test]
