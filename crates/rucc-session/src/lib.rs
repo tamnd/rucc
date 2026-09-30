@@ -1537,6 +1537,57 @@ impl FromStr for GnucVersion {
     }
 }
 
+/// The GNU assembler release claimed, which is the number at the end of what `-Wa,--version`
+/// prints.
+///
+/// This compiler has no separate assembler, but build systems ask for one's version all the same.
+/// The Linux kernel's `scripts/as-version.sh` runs `$(CC) -Wa,--version` and stops the build with
+/// "unknown assembler invoked" unless the first line starts with `GNU assembler` and ends with a
+/// version, which Kconfig then compares against the binutils release a feature needs. What does the
+/// assembling is `rucc-asm`, so the claim is about which gas this is meant to stand in for.
+///
+/// 2.46 by default, which is the binutils release that was current when GCC 16 came out, and GCC 16
+/// is what [`GnucVersion`] claims by default. A build that claims an older GCC with
+/// `-fgnuc-version=` will usually want an older assembler too, and `-fgnu-as-version=` says so.
+/// `spec/04-driver-and-cli.md` section 4.9 has the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GasVersion {
+    /// The major number, which is 2 for every binutils release a build is likely to ask about.
+    pub major: u32,
+    /// The minor number, which is what moves from one binutils release to the next.
+    pub minor: u32,
+    /// The point release, which binutils rarely has and prints only when it is not zero.
+    pub patch: u32,
+}
+
+impl Default for GasVersion {
+    fn default() -> GasVersion {
+        GasVersion { major: 2, minor: 46, patch: 0 }
+    }
+}
+
+impl FromStr for GasVersion {
+    type Err = String;
+
+    /// Reads `-fgnu-as-version=`, which is `2`, `2.44` or `2.44.1`, the same shapes
+    /// `-fgnuc-version=` takes.
+    fn from_str(text: &str) -> Result<GasVersion, String> {
+        let GnucVersion { major, minor, patch } = text.parse()?;
+        Ok(GasVersion { major, minor, patch })
+    }
+}
+
+impl fmt::Display for GasVersion {
+    /// The way gas prints its own: `2.44` for a release and `2.44.1` for a point release.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)?;
+        if self.patch != 0 {
+            write!(f, ".{}", self.patch)?;
+        }
+        Ok(())
+    }
+}
+
 /// The MSVC release an MSVC row claims, which is `_MSC_VER` and `_MSC_FULL_VER`.
 ///
 /// 19.40 is Visual Studio 2022 17.10, which is the release the design names and the one whose
@@ -2306,6 +2357,12 @@ pub struct Options {
     /// `-target x86_64-pc-windows-msvc`: the SDK headers take a path for `__GNUC__` that they
     /// were never tested on with the MSVC runtime. The flag is the way to ask, as it is in clang.
     pub gnuc_given: bool,
+    /// The GNU assembler release claimed, from `-fgnu-as-version=`, which is what
+    /// `-Wa,--version` prints.
+    pub gnu_as: GasVersion,
+    /// Whether `-Wa,--fatal-warnings` was given, which makes the assembler's one warning, the
+    /// `.warning` directive, an error the way it is in gas.
+    pub asm_fatal_warnings: bool,
     /// The MSVC release claimed on an MSVC row, from `-fms-compatibility-version=`.
     pub msc: MscVersion,
     /// Whether an MSVC row is built against the C runtime in a DLL, which is
@@ -2540,6 +2597,8 @@ impl Options {
             data_sections: false,
             gnuc: GnucVersion::default(),
             gnuc_given: false,
+            gnu_as: GasVersion::default(),
+            asm_fatal_warnings: false,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
             hosted: true,

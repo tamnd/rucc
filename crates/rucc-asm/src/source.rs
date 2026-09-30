@@ -92,6 +92,31 @@ pub fn read(text: &str, arch: Arch) -> Result<Assembled, Trouble> {
 ///
 /// As [`read`].
 pub fn read_as(text: &str, arch: Arch, format: ObjectFormat) -> Result<Assembled, Trouble> {
+    read_with(text, arch, format, Flags::default())
+}
+
+/// What a command line said to the assembler, which is the part of `-Wa,` that changes how a file
+/// is read.
+///
+/// Most of what a build hands gas that way either describes what this assembler does anyway or is
+/// refused by the driver, so this is short. `spec/04-driver-and-cli.md` section 4.9 has the list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flags {
+    /// `--fatal-warnings`, which makes a warning stop the file.
+    pub fatal_warnings: bool,
+}
+
+/// The same, with what the command line said to the assembler.
+///
+/// # Errors
+///
+/// As [`read`], and a `.warning` directive under [`Flags::fatal_warnings`].
+pub fn read_with(
+    text: &str,
+    arch: Arch,
+    format: ObjectFormat,
+    flags: Flags,
+) -> Result<Assembled, Trouble> {
     // Every branch starts out in its two byte form and the file is read again with the ones that
     // did not reach written long, until none is left over. A branch made long never goes back, so
     // each pass has more long ones than the last and there are only so many branches, which is how
@@ -101,7 +126,14 @@ pub fn read_as(text: &str, arch: Arch, format: ObjectFormat) -> Result<Assembled
         let aarch64 = arch == Arch::Aarch64;
         let macho = format == ObjectFormat::MachO;
         let coff = format == ObjectFormat::Coff;
-        let mut reader = Reader { long: long.clone(), aarch64, macho, coff, ..Reader::default() };
+        let mut reader = Reader {
+            long: long.clone(),
+            aarch64,
+            macho,
+            coff,
+            fatal_warnings: flags.fatal_warnings,
+            ..Reader::default()
+        };
         reader.run(text)?;
         match reader.finish()? {
             Ok(done) => return Ok(done),
@@ -289,6 +321,8 @@ struct Reader {
     /// Whether the file said `.subsections_via_symbols`, which tells the linker it may take the
     /// file apart at every name.
     subsections: bool,
+    /// Whether a warning stops the file, which is `-Wa,--fatal-warnings`.
+    fatal_warnings: bool,
     line: usize,
 }
 
@@ -1209,7 +1243,18 @@ impl Reader {
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
             "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "code64" | "att_syntax"
-            | "intel_syntax" | "warning" => {}
+            | "intel_syntax" => {}
+            // The one warning this assembler has. gas prints it and carries on, and nothing here has
+            // anywhere to print to, so it is passed over like the notes above. Under
+            // `--fatal-warnings` gas stops on it instead, and so does this, since a build that
+            // asked for warnings to be fatal and got an object has been told the file was clean.
+            "warning" if self.fatal_warnings => {
+                let what = unquoted(args.first().map_or("", |arg| arg.trim()));
+                return Err(self.bad(&format!(
+                    "the file warns, and --fatal-warnings makes that an error: {what}"
+                )));
+            }
+            "warning" => {}
             _ if word.starts_with("cfi_") => self.cfi(word, &args)?,
             _ if word.starts_with("seh_") && self.coff => self.seh(word, &args)?,
 
@@ -4346,6 +4391,22 @@ _tls$tlv$init:
     fn an_error_directive_is_the_file_saying_it_refuses_itself() {
         let why = refused("\t.error \"this is not the machine for it\"\n");
         assert!(why.why.contains("not the machine for it"), "{why}");
+    }
+
+    #[test]
+    fn a_warning_directive_stops_the_file_only_when_warnings_are_fatal() {
+        // gas prints the warning and writes the object, and under `--fatal-warnings` it writes
+        // nothing. The kernel's `as-instr` probes pass that flag, so a probe that meets a warning
+        // has to fail here too or the feature it probes for is switched on wrongly.
+        let text = "\t.warning \"old enough to complain about\"\n\tret\n";
+        read(text, Arch::X86_64).expect("a warning is not an error by itself");
+        let fatal = Flags { fatal_warnings: true };
+        let why = read_with(text, Arch::X86_64, ObjectFormat::Elf, fatal)
+            .expect_err("--fatal-warnings let a warning through");
+        assert!(why.why.contains("old enough to complain about"), "{why}");
+        assert!(why.why.contains("--fatal-warnings"), "{why}");
+        read_with("\tret\n", Arch::X86_64, ObjectFormat::Elf, fatal)
+            .expect("a file with no warning in it is still read");
     }
 
     #[test]

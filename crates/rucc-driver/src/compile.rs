@@ -1149,8 +1149,9 @@ fn generate(
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
                         .map_err(refused)?;
                 let arch = target.tuple.arch();
-                let read =
-                    rucc_asm::read_as(&listing, arch, target.object_format).map_err(|trouble| {
+                let flags = rucc_asm::Flags { fatal_warnings: opts.asm_fatal_warnings };
+                let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
+                    .map_err(|trouble| {
                         let what = if aarch64 {
                             "a unit for aarch64"
                         } else if globals.kept() {
