@@ -442,6 +442,43 @@ pub fn libcall(opcode: Opcode, mode: &str) -> Option<&'static str> {
         .map(|&(_, _, name)| name)
 }
 
+/// The routines [`crate::wide`] calls on a target whose registers are thirty two bits wide.
+///
+/// The same division and the same conversions as the `i128` rows of [`LIBCALLS`], one size down,
+/// because on such a target the integer no register holds is a `long long` and libgcc spells the
+/// routines for it with `di` in place of `ti`. They are a table of their own rather than rows of
+/// that one because that one is about this machine, where a division at `i64` is an instruction,
+/// and a row saying otherwise would be a false line in the report it is read into.
+/// `runtime/builtins/div.c`, `float.c`, `double.c` and `quad.c` define every name here.
+pub static PAIR_LIBCALLS: &[(Opcode, &str, &str)] = &[
+    (Opcode::UDiv, "i64", "__udivdi3"),
+    (Opcode::SDiv, "i64", "__divdi3"),
+    (Opcode::URem, "i64", "__umoddi3"),
+    (Opcode::SRem, "i64", "__moddi3"),
+    (Opcode::SIToFP, "i64.f32", "__floatdisf"),
+    (Opcode::SIToFP, "i64.f64", "__floatdidf"),
+    (Opcode::SIToFP, "i64.f128", "__floatditf"),
+    (Opcode::UIToFP, "i64.f32", "__floatundisf"),
+    (Opcode::UIToFP, "i64.f64", "__floatundidf"),
+    (Opcode::UIToFP, "i64.f128", "__floatunditf"),
+    (Opcode::FPToSI, "f32.i64", "__fixsfdi"),
+    (Opcode::FPToSI, "f64.i64", "__fixdfdi"),
+    (Opcode::FPToSI, "f128.i64", "__fixtfdi"),
+    (Opcode::FPToUI, "f32.i64", "__fixunssfdi"),
+    (Opcode::FPToUI, "f64.i64", "__fixunsdfdi"),
+    (Opcode::FPToUI, "f128.i64", "__fixunstfdi"),
+];
+
+/// The runtime function this operation at this mode becomes on a target whose registers are
+/// thirty two bits wide, or nothing where it is not a call there.
+#[must_use]
+pub fn pair_libcall(opcode: Opcode, mode: &str) -> Option<&'static str> {
+    PAIR_LIBCALLS
+        .iter()
+        .find(|&&(at, spelled, _)| at == opcode && spelled == mode)
+        .map(|&(_, _, name)| name)
+}
+
 /// What rewrites this opcode before selection, if anything does.
 ///
 /// The group is asked first and answers for itself, so the membership is not written down twice.

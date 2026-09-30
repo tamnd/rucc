@@ -39,6 +39,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- Splitting an integer wider than a register now splits at twice the target's register width instead of always splitting `__int128` into 64-bit halves. On a 32-bit target, which is where the i386 backend is heading, a `long long` becomes two 32-bit halves and its divisions and float conversions call `__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3` and the `__floatdi`/`__fixdi` family. 64-bit targets get the same output as before (#2247).
 - The optimizer's maps and sets hash with the shared hasher instead of SipHash (#2291).
 - The front end's maps and sets in lower, pp, sema and types hash with the shared hasher instead of SipHash (#2292).
 - The maps and sets in safety, asm, regalloc, ir and driver hash with the shared hasher instead of SipHash (#2293).

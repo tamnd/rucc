@@ -14,6 +14,16 @@
 //! rest of the back end stay written about widths the machine has. Nothing below this knows the
 //! type existed.
 //!
+//! # At what width
+//!
+//! Everything above and below is written about a sixty four bit machine, because that is every
+//! target that lowers today, and the numbers in it are that machine's. The pass itself asks the
+//! convention how wide a register is and splits at twice that, so on a thirty two bit target the
+//! integer no register holds is a `long long`, each half is thirty two bits, the high word is four
+//! bytes up, and a divide or a conversion calls libgcc's `di` routines where this machine calls
+//! the `ti` ones. Those are [`capability::PAIR_LIBCALLS`], and the runtime's `div.c`, `float.c`,
+//! `double.c` and `quad.c` define every one of them.
+//!
 //! # Why a pass and not a rule
 //!
 //! A rule matches a term and rewrites it into instructions of the machine, and the selector works a
@@ -98,26 +108,67 @@ use rucc_target::{AbiDescription, CallRegs, Convention, Places, Variadic, Where}
 use crate::capability;
 use crate::expand;
 
-/// The width this pass is about, which is the one width a C program writes that no register holds.
-const WIDE: u32 = 128;
-
-/// What the capability table calls that width, which is how the rule language spells one.
-const MODE: &str = "i128";
-
-/// The width each half is, which is a register on every target this pass runs for.
-const HALF: u32 = 64;
-
-/// How many bytes one half takes in memory, which is how far the high one sits above the low one.
-const STEP: u64 = 8;
-
-/// Whether a type is the width this pass splits.
-fn is_wide(ty: Type) -> bool {
-    ty.is_int() && ty.is_scalar() && ty.bits() == WIDE
+/// The width a register is on the target being compiled for, which is the width of each half and
+/// the one fact everything else this pass writes down follows from.
+///
+/// Sixty four bits on every target that lowers today, so the value split is an `__int128` and the
+/// routines called are the `ti` ones. Thirty two on i386, and on armv7 and riscv32 when they come,
+/// where the value split is a `long long` and the routines are the `di` ones, which is the same
+/// arithmetic one size down and is why the width is a value here rather than a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Width {
+    /// How many bits one half is.
+    half: u32,
 }
 
-/// The type each half has.
-fn half() -> Type {
-    Type::int(HALF)
+impl Width {
+    /// The width of a register under that convention, which is how many bytes one takes saved.
+    fn of(conv: &CallRegs) -> Self {
+        Self { half: conv.word * 8 }
+    }
+
+    /// How many bits the value this pass splits is, which is two registers.
+    fn wide(self) -> u32 {
+        self.half * 2
+    }
+
+    /// How many bytes the value this pass splits takes in memory.
+    fn bytes(self) -> u32 {
+        self.wide() / 8
+    }
+
+    /// How many bytes one half takes in memory, which is how far the high one sits above the low.
+    fn step(self) -> u64 {
+        u64::from(self.half / 8)
+    }
+
+    /// Whether a type is the width this pass splits.
+    fn is_wide(self, ty: Type) -> bool {
+        ty.is_int() && ty.is_scalar() && ty.bits() == self.wide()
+    }
+
+    /// The type each half has.
+    fn half(self) -> Type {
+        Type::int(self.half)
+    }
+
+    /// What the capability table calls the width split, which is how the rule language spells one.
+    fn mode(self) -> &'static str {
+        if self.half == 64 { "i128" } else { "i64" }
+    }
+
+    /// The runtime routine for this operation at this mode, from the table for this width.
+    ///
+    /// The capability table is about a machine whose registers are sixty four bits, where a
+    /// division at `i64` is an instruction and not a call, so the routines one size down are in a
+    /// table of their own that only a target splitting a `long long` reads.
+    fn libcall(self, opcode: Opcode, mode: &str) -> Option<&'static str> {
+        if self.half == 64 {
+            capability::libcall(opcode, mode)
+        } else {
+            capability::pair_libcall(opcode, mode)
+        }
+    }
 }
 
 /// Splits every integer the machine holds in two registers into the two halves it holds it in.
@@ -131,16 +182,24 @@ fn half() -> Type {
 /// refusal to the passes below, which name the construct they could not lower, rather than
 /// rewriting into something that guessed.
 pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
-    if !func.values().any(|value| is_wide(func[value].ty)) {
+    halves_at(func, names, conv, Width::of(conv))
+}
+
+/// The same, splitting at that width rather than at the one the convention's registers are.
+///
+/// What [`halves`] is once it has asked, and what a test drives directly to split at a register
+/// width no target that lowers today has.
+fn halves_at(func: &mut Func, names: &mut Interner, conv: &CallRegs, width: Width) -> bool {
+    if !func.values().any(|value| width.is_wide(func[value].ty)) {
         return false;
     }
     let insts: Vec<Inst> = walk(func).into_iter().flat_map(|block| func.insts(block)).collect();
     let order: Map<Inst, usize> = insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
-    if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, conv, &order, at, inst)) {
+    if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, conv, width, &order, at, inst)) {
         return false;
     }
-    let Some(arriving) = plan(func.signature(), conv) else { return false };
-    if !func.signatures().all(|signature| plan(signature, conv).is_some()) {
+    let Some(arriving) = plan(func.signature(), conv, width) else { return false };
+    if !func.signatures().all(|signature| plan(signature, conv, width).is_some()) {
         return false;
     }
 
@@ -149,16 +208,16 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
     let entry = func.entry();
     for block in func.blocks().collect::<Vec<_>>() {
         if Some(block) == entry {
-            arrive(func, block, &arriving, &mut halves, &mut forward);
+            arrive(func, width, block, &arriving, &mut halves, &mut forward);
         } else {
-            params(func, block, &mut halves, &mut forward);
+            params(func, width, block, &mut halves, &mut forward);
         }
     }
     for &inst in &insts {
-        rewrite(func, names, conv, &mut halves, &mut forward, inst);
+        rewrite(func, names, conv, width, &mut halves, &mut forward, inst);
     }
     substitute(func, &forward);
-    let signature = planned(func.signature(), &arriving);
+    let signature = planned(func.signature(), width, &arriving);
     func.set_signature(signature);
     true
 }
@@ -262,14 +321,15 @@ fn understood(opcode: Opcode) -> bool {
 fn can_split(
     func: &Func,
     conv: &CallRegs,
+    width: Width,
     order: &Map<Inst, usize>,
     at: usize,
     inst: Inst,
 ) -> bool {
     let data = func[inst];
     let reads = operands(func, inst);
-    let wide = |&value: &Value| is_wide(func[value].ty);
-    if !reads.iter().any(wide) && !data.results().any(|value| is_wide(func[value].ty)) {
+    let wide = |&value: &Value| width.is_wide(func[value].ty);
+    if !reads.iter().any(wide) && !data.results().any(|value| width.is_wide(func[value].ty)) {
         return true;
     }
     if !understood(data.opcode) {
@@ -306,7 +366,7 @@ fn can_split(
         let Some((site, variadic)) = site(func, inst) else { return false };
         let Some(conv) = conv.under(site.convention) else { return false };
         let in_memory = conv.abi.variadic == Variadic::AlwaysMemory;
-        if variadic && (conv.shared_positions || in_memory || plan(&site, conv).is_none()) {
+        if variadic && (conv.shared_positions || in_memory || plan(&site, conv, width).is_none()) {
             return false;
         }
     }
@@ -399,14 +459,15 @@ enum Slot {
 /// convention it names itself, found through it: a function of one convention calls functions of
 /// the other, and each call is laid out the way its callee reads it. A convention the platform
 /// does not have is no layout at all, and the function is left alone.
-fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
+fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot>> {
     let conv = conv.under(signature.convention)?;
-    let word = Param::new(half());
+    let word = Param::new(width.half());
+    let step = width.half / 8;
     let mut places = Places::new(conv);
     let mut meant: Vec<(Slot, Param, Where)> = Vec::new();
     let mut moved = false;
     for (index, &param) in signature.params.iter().enumerate() {
-        if !is_wide(param.ty) {
+        if !width.is_wide(param.ty) {
             meant.push((Slot::Whole(index), param, place(&mut places, param, conv)));
             continue;
         }
@@ -414,9 +475,9 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
         let mut ahead = places.clone();
         // AAPCS64 starts the pair at an even register, and a filler takes the odd one it skips.
         let skipped = (scalars.wide_integer_starts_even && ahead.integers() % 2 == 1)
-            .then(|| ahead.integer(HALF / 8));
+            .then(|| ahead.integer(step));
         if let (low @ Where::Reg(_), high @ Where::Reg(_)) =
-            (ahead.integer(HALF / 8), ahead.integer(HALF / 8))
+            (ahead.integer(step), ahead.integer(step))
         {
             places = ahead;
             if let Some(at) = skipped {
@@ -429,9 +490,9 @@ fn plan(signature: &Signature, conv: &CallRegs) -> Option<Vec<Slot>> {
         if scalars.wide_integer_drains {
             places.drain_integers();
         }
-        let Where::Stack(at) = places.on_stack(WIDE / 8, WIDE / 8) else { return None };
+        let Where::Stack(at) = places.on_stack(width.bytes(), width.bytes()) else { return None };
         meant.push((Slot::Low(index), word, Where::Stack(at)));
-        meant.push((Slot::High(index), word, Where::Stack(at + HALF / 8)));
+        meant.push((Slot::High(index), word, Where::Stack(at + step)));
         moved = true;
     }
     if !moved {
@@ -518,16 +579,16 @@ fn scalar(param: Param) -> bool {
 }
 
 /// A signature laid out the way [`plan`] said, with every wide return value as two halves.
-fn planned(signature: &Signature, slots: &[Slot]) -> Signature {
+fn planned(signature: &Signature, width: Width, slots: &[Slot]) -> Signature {
     let params = slots
         .iter()
         .map(|&slot| match slot {
             Slot::Whole(index) => signature.params[index],
-            Slot::Low(_) | Slot::High(_) => Param::new(half()),
+            Slot::Low(_) | Slot::High(_) => Param::new(width.half()),
             Slot::Filler(ty) => Param::new(ty),
         })
         .collect();
-    Signature { params, ..split_signature(signature) }
+    Signature { params, ..split_signature(signature, width) }
 }
 
 /// One block's parameters, with each wide one replaced by its two halves in the same position.
@@ -536,15 +597,21 @@ fn planned(signature: &Signature, slots: &[Slot]) -> Signature {
 /// parameter's position is its identity to the branches that feed it and appending is the only way
 /// to add one. The narrow ones are made again as themselves and pointed at the copy, which costs
 /// nothing once the substitution below has run.
-fn params(func: &mut Func, block: Block, halves: &mut Halves, forward: &mut Map<Value, Value>) {
+fn params(
+    func: &mut Func,
+    width: Width,
+    block: Block,
+    halves: &mut Halves,
+    forward: &mut Map<Value, Value>,
+) {
     let old: Vec<Value> = func[block].params.clone();
-    if !old.iter().any(|&value| is_wide(func[value].ty)) {
+    if !old.iter().any(|&value| width.is_wide(func[value].ty)) {
         return;
     }
     for &value in &old {
-        if is_wide(func[value].ty) {
-            let low = func.append_param(block, half());
-            let high = func.append_param(block, half());
+        if width.is_wide(func[value].ty) {
+            let low = func.append_param(block, width.half());
+            let high = func.append_param(block, width.half());
             halves.insert(value, (low, high));
         } else {
             let again = func.append_param(block, func[value].ty);
@@ -557,13 +624,14 @@ fn params(func: &mut Func, block: Block, halves: &mut Halves, forward: &mut Map<
 /// The entry block's parameters, laid out the way [`plan`] said the function's own are.
 fn arrive(
     func: &mut Func,
+    width: Width,
     block: Block,
     slots: &[Slot],
     halves: &mut Halves,
     forward: &mut Map<Value, Value>,
 ) {
     let old: Vec<Value> = func[block].params.clone();
-    if !old.iter().any(|&value| is_wide(func[value].ty)) {
+    if !old.iter().any(|&value| width.is_wide(func[value].ty)) {
         return;
     }
     let mut lows = Map::default();
@@ -574,10 +642,10 @@ fn arrive(
                 forward.insert(old[index], again);
             }
             Slot::Low(index) => {
-                lows.insert(index, func.append_param(block, half()));
+                lows.insert(index, func.append_param(block, width.half()));
             }
             Slot::High(index) => {
-                let high = func.append_param(block, half());
+                let high = func.append_param(block, width.half());
                 halves.insert(old[index], (lows[&index], high));
             }
             Slot::Filler(ty) => {
@@ -593,45 +661,46 @@ fn rewrite(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
+    width: Width,
     halves: &mut Halves,
     forward: &mut Map<Value, Value>,
     inst: Inst,
 ) {
     // The runtime's routines are ordinary functions of the platform, whatever convention the
     // function calling them was written in, so a call to one is shaped by the platform's own.
-    let abi = conv.under(Convention::Target).unwrap_or(conv).abi;
+    let calls = Calls { abi: conv.under(Convention::Target).unwrap_or(conv).abi, width };
     let data = func[inst];
-    let produces = data.results().any(|value| is_wide(func[value].ty));
-    let takes = func[data.args].iter().any(|&value| is_wide(func[value].ty));
+    let produces = data.results().any(|value| width.is_wide(func[value].ty));
+    let takes = func[data.args].iter().any(|&value| width.is_wide(func[value].ty));
     match data.opcode {
-        Opcode::IConst if produces => constant(func, halves, inst),
-        Opcode::Load if produces => load(func, halves, inst),
-        Opcode::Store if takes => store(func, halves, inst),
-        Opcode::Add | Opcode::Sub if produces => carried(func, halves, inst, data.opcode),
-        Opcode::Mul if produces => multiply(func, halves, inst),
+        Opcode::IConst if produces => constant(func, width, halves, inst),
+        Opcode::Load if produces => load(func, width, halves, inst),
+        Opcode::Store if takes => store(func, width, halves, inst),
+        Opcode::Add | Opcode::Sub if produces => carried(func, width, halves, inst, data.opcode),
+        Opcode::Mul if produces => multiply(func, width, halves, inst),
         Opcode::UDiv | Opcode::SDiv | Opcode::URem | Opcode::SRem if produces => {
-            divide(func, names, abi, halves, inst, data.opcode);
+            divide(func, names, calls, halves, inst, data.opcode);
         }
         Opcode::Shl | Opcode::LShr | Opcode::AShr if produces => {
-            shifted(func, halves, inst, data.opcode);
+            shifted(func, width, halves, inst, data.opcode);
         }
         Opcode::And | Opcode::Or | Opcode::Xor if produces => {
-            bitwise(func, halves, inst, data.opcode);
+            bitwise(func, width, halves, inst, data.opcode);
         }
         Opcode::SIToFP | Opcode::UIToFP if takes => {
-            to_float(func, names, abi, halves, forward, inst, data.opcode == Opcode::SIToFP);
+            to_float(func, names, calls, halves, forward, inst, data.opcode == Opcode::SIToFP);
         }
         Opcode::FPToSI | Opcode::FPToUI if produces => {
-            from_float(func, names, abi, halves, inst, data.opcode == Opcode::FPToSI);
+            from_float(func, names, calls, halves, inst, data.opcode == Opcode::FPToSI);
         }
-        Opcode::ICmp if takes => compare(func, halves, forward, inst),
-        Opcode::Select if produces => choose(func, halves, inst),
-        Opcode::Trunc if takes => truncate(func, halves, forward, inst),
+        Opcode::ICmp if takes => compare(func, width, halves, forward, inst),
+        Opcode::Select if produces => choose(func, width, halves, inst),
+        Opcode::Trunc if takes => truncate(func, width, halves, forward, inst),
         Opcode::SExt | Opcode::ZExt if produces => {
-            extend(func, halves, inst, data.opcode == Opcode::SExt);
+            extend(func, width, halves, inst, data.opcode == Opcode::SExt);
         }
         Opcode::Call | Opcode::CallIndirect if produces || takes => {
-            call(func, conv, halves, forward, inst);
+            call(func, width, conv, halves, forward, inst);
         }
         Opcode::Return if takes => flatten(func, halves, inst),
         Opcode::Jump | Opcode::BrIf => edges(func, halves, inst),
@@ -640,13 +709,14 @@ fn rewrite(
 }
 
 /// A constant, as the two halves of its bits with the low one first.
-fn constant(func: &mut Func, halves: &mut Halves, inst: Inst) {
+fn constant(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let Extra::Imm(imm) = func[inst].extra else { return };
     let bits = func[imm].unsigned();
-    #[expect(clippy::cast_possible_truncation, reason = "the halves are what this is taking")]
-    let (low, high) = (bits as u64, (bits >> HALF) as u64);
-    let low = ahead_const(func, inst, i128::from(low));
-    let high = ahead_const(func, inst, i128::from(high));
+    // Each constant is masked to a half as it is made, so the low half is the bits as they are.
+    #[expect(clippy::cast_possible_wrap, reason = "the halves are what this is taking")]
+    let (low, high) = (bits as i128, (bits >> width.half) as i128);
+    let low = ahead_const(func, width, inst, low);
+    let high = ahead_const(func, width, inst, high);
     replace(func, halves, inst, low, high);
 }
 
@@ -655,28 +725,28 @@ fn constant(func: &mut Func, halves: &mut Halves, inst: Inst) {
 /// Little endian is the order, which is what every target this back end has is. The high word knows
 /// less about its alignment than the low one when the low one knew more than a word, since a
 /// sixteen byte object aligned to sixteen has its high word aligned to eight.
-fn load(func: &mut Func, halves: &mut Halves, inst: Inst) {
+fn load(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let data = func[inst];
     let Extra::Mem(mem) = data.extra else { return };
     let info = func[mem];
     let Some(&from) = func[data.args].first() else { return };
-    let low = read(func, inst, from, word(info, 0), data.flags);
-    let up = stepped(func, inst, from);
-    let high = read(func, inst, up, word(info, STEP), data.flags);
+    let low = read(func, width, inst, from, word(width, info, 0), data.flags);
+    let up = stepped(func, width, inst, from);
+    let high = read(func, width, inst, up, word(width, info, width.step()), data.flags);
     replace(func, halves, inst, low, high);
 }
 
 /// A write, as the two words of it.
-fn store(func: &mut Func, halves: &mut Halves, inst: Inst) {
+fn store(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let data = func[inst];
     let Extra::Mem(mem) = data.extra else { return };
     let info = func[mem];
     let args = func[data.args].to_vec();
     let [value, into] = args[..] else { return };
     let Some(&(low, high)) = halves.get(&value) else { return };
-    write(func, inst, low, into, word(info, 0), data.flags);
-    let up = stepped(func, inst, into);
-    write(func, inst, high, up, word(info, STEP), data.flags);
+    write(func, inst, low, into, word(width, info, 0), data.flags);
+    let up = stepped(func, width, inst, into);
+    write(func, inst, high, up, word(width, info, width.step()), data.flags);
     func.remove_inst(inst);
 }
 
@@ -689,21 +759,21 @@ fn store(func: &mut Func, halves: &mut Halves, inst: Inst) {
 /// the machine's own carry flag stands for. Whether the pair is put back together into an `adc` and
 /// an `sbb` is a question for what reads flags rather than for this, and the answer here is correct
 /// either way.
-fn carried(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
+fn carried(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcode: Opcode) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    let low = ahead(func, inst, opcode, &[a_low, b_low]);
+    let low = ahead(func, width, inst, opcode, &[a_low, b_low]);
     let carried = if opcode == Opcode::Add {
         compared(func, inst, IntPred::Ult, low, a_low)
     } else {
         compared(func, inst, IntPred::Ult, a_low, b_low)
     };
-    let carry = ahead(func, inst, Opcode::ZExt, &[carried]);
-    let high = ahead(func, inst, opcode, &[a_high, b_high]);
-    let high = ahead(func, inst, opcode, &[high, carry]);
+    let carry = ahead(func, width, inst, Opcode::ZExt, &[carried]);
+    let high = ahead(func, width, inst, opcode, &[a_high, b_high]);
+    let high = ahead(func, width, inst, opcode, &[high, carry]);
     replace(func, halves, inst, low, high);
 }
 
@@ -726,18 +796,18 @@ fn carried(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
 /// it rather than keeping a second copy of the same arithmetic. It is the expensive part of a wide
 /// multiply by a long way, and `tamnd/rucc#309` is the rule that would make it one instruction for
 /// both callers at once.
-fn multiply(func: &mut Func, halves: &mut Halves, inst: Inst) {
+fn multiply(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    let low = ahead(func, inst, Opcode::Mul, &[a_low, b_low]);
-    let carried = expand::high_half(func, inst, a_low, b_low, false, half());
-    let cross = ahead(func, inst, Opcode::Mul, &[a_low, b_high]);
-    let other = ahead(func, inst, Opcode::Mul, &[a_high, b_low]);
-    let high = ahead(func, inst, Opcode::Add, &[carried, cross]);
-    let high = ahead(func, inst, Opcode::Add, &[high, other]);
+    let low = ahead(func, width, inst, Opcode::Mul, &[a_low, b_low]);
+    let carried = expand::high_half(func, inst, a_low, b_low, false, width.half());
+    let cross = ahead(func, width, inst, Opcode::Mul, &[a_low, b_high]);
+    let other = ahead(func, width, inst, Opcode::Mul, &[a_high, b_low]);
+    let high = ahead(func, width, inst, Opcode::Add, &[carried, cross]);
+    let high = ahead(func, width, inst, Opcode::Add, &[high, other]);
     replace(func, halves, inst, low, high);
 }
 
@@ -761,7 +831,7 @@ fn multiply(func: &mut Func, halves: &mut Halves, inst: Inst) {
 fn divide(
     func: &mut Func,
     names: &mut Interner,
-    abi: &'static AbiDescription,
+    calls: Calls,
     halves: &mut Halves,
     inst: Inst,
     opcode: Opcode,
@@ -774,9 +844,10 @@ fn divide(
     // The four that need the whole value at once, which is why they are calls rather than a pair
     // of half width instructions like everything else in this pass. Which call each one is, is in
     // the capability table, since a routine name is a fact about what this target cannot do.
-    let Some(routine) = capability::libcall(opcode, MODE) else { return };
+    let width = calls.width;
+    let Some(routine) = width.libcall(opcode, width.mode()) else { return };
     let args = [Operand::Split(a_low, a_high), Operand::Split(b_low, b_high)];
-    let made = runtime(func, names, abi, inst, routine, &args, &[half(), half()]);
+    let made = runtime(func, names, calls, inst, routine, &args, &[width.half(), width.half()]);
     let [low, high] = made[..] else { return };
     replace(func, halves, inst, low, high);
 }
@@ -793,7 +864,7 @@ fn divide(
 fn to_float(
     func: &mut Func,
     names: &mut Interner,
-    abi: &'static AbiDescription,
+    calls: Calls,
     halves: &Halves,
     forward: &mut Map<Value, Value>,
     inst: Inst,
@@ -804,9 +875,9 @@ fn to_float(
     let (Some(result), Some(format)) = (func[inst].first_result, converted(func, inst)) else {
         return;
     };
-    let routine = going_up(signed, format);
+    let routine = going_up(calls.width, signed, format);
     let args = [Operand::Split(low, high)];
-    let made = runtime(func, names, abi, inst, routine, &args, &[func[result].ty]);
+    let made = runtime(func, names, calls, inst, routine, &args, &[func[result].ty]);
     if let [answer] = made[..] {
         forward.insert(result, answer);
     }
@@ -825,16 +896,17 @@ fn to_float(
 fn from_float(
     func: &mut Func,
     names: &mut Interner,
-    abi: &'static AbiDescription,
+    calls: Calls,
     halves: &mut Halves,
     inst: Inst,
     signed: bool,
 ) {
     let Some(&arg) = func[func[inst].args].first() else { return };
     let Some(format) = converted(func, inst) else { return };
-    let routine = coming_down(signed, format);
+    let routine = coming_down(calls.width, signed, format);
     let args = [Operand::Whole(arg)];
-    let made = runtime(func, names, abi, inst, routine, &args, &[half(), half()]);
+    let half = calls.width.half();
+    let made = runtime(func, names, calls, inst, routine, &args, &[half, half]);
     let [low, high] = made[..] else { return };
     replace(func, halves, inst, low, high);
 }
@@ -844,32 +916,45 @@ fn from_float(
 /// Three formats, since [`converted`] answers with no others, and the quad is the last arm rather
 /// than a named one so that a format added to that list arrives here as a routine that does not
 /// exist rather than as a name that is wrong.
-fn going_up(signed: bool, format: Float) -> &'static str {
-    let mode = match format {
-        Float::F32 => "i128.f32",
-        Float::F64 => "i128.f64",
-        _ => "i128.f128",
+fn going_up(width: Width, signed: bool, format: Float) -> &'static str {
+    let to = match format {
+        Float::F32 => "f32",
+        Float::F64 => "f64",
+        _ => "f128",
     };
-    routine(if signed { Opcode::SIToFP } else { Opcode::UIToFP }, mode)
+    let mode = format!("{}.{to}", width.mode());
+    routine(width, if signed { Opcode::SIToFP } else { Opcode::UIToFP }, &mode)
 }
 
 /// The routine that turns a float of that format into an integer this wide.
-fn coming_down(signed: bool, format: Float) -> &'static str {
-    let mode = match format {
-        Float::F32 => "f32.i128",
-        Float::F64 => "f64.i128",
-        _ => "f128.i128",
+fn coming_down(width: Width, signed: bool, format: Float) -> &'static str {
+    let from = match format {
+        Float::F32 => "f32",
+        Float::F64 => "f64",
+        _ => "f128",
     };
-    routine(if signed { Opcode::FPToSI } else { Opcode::FPToUI }, mode)
+    let mode = format!("{from}.{}", width.mode());
+    routine(width, if signed { Opcode::FPToSI } else { Opcode::FPToUI }, &mode)
 }
 
 /// The routine the capability table names for this operation at this width.
 ///
 /// Every mode this pass asks about is one this machine has no register wide enough for, so the
 /// table always has an answer and a missing one is the table and this pass having gone out of step.
-fn routine(opcode: Opcode, mode: &str) -> &'static str {
-    capability::libcall(opcode, mode)
+fn routine(width: Width, opcode: Opcode, mode: &str) -> &'static str {
+    width
+        .libcall(opcode, mode)
         .unwrap_or_else(|| panic!("no routine for `{}` at `{mode}`", opcode.name()))
+}
+
+/// What shapes a call this pass writes to a routine in the runtime: the platform's ABI, which says
+/// how an operand and an answer travel, and the width, which says what a half is.
+#[derive(Clone, Copy)]
+struct Calls {
+    /// The ABI of the platform's own convention, which is the one every such routine is defined in.
+    abi: &'static AbiDescription,
+    /// The width the pass is splitting at.
+    width: Width,
 }
 
 /// One operand of a call to a runtime routine, as this pass has it in hand.
@@ -912,12 +997,13 @@ enum Operand {
 fn runtime(
     func: &mut Func,
     names: &mut Interner,
-    abi: &'static AbiDescription,
+    calls: Calls,
     inst: Inst,
     routine: &str,
     args: &[Operand],
     results: &[Type],
 ) -> Vec<Value> {
+    let Calls { abi, width } = calls;
     let mut params: Vec<Param> = Vec::new();
     let mut values: Vec<Value> = Vec::new();
     let mut answer = Answer::Registers;
@@ -931,15 +1017,15 @@ fn runtime(
             values.push(slot);
             answer = Answer::Slot(slot, ty);
         }
-        [low, high] if low == half() && high == half() => {
-            if let Some(format) = packed(abi) {
+        [low, high] if low == width.half() && high == width.half() => {
+            if let Some(format) = packed(abi, width) {
                 answer = Answer::Packed(format);
             }
         }
         _ => {}
     }
     for &arg in args {
-        handed(func, abi, inst, arg, &mut params, &mut values);
+        handed(func, calls, inst, arg, &mut params, &mut values);
     }
     let answers = match answer {
         Answer::Registers => results.to_vec(),
@@ -967,7 +1053,7 @@ fn runtime(
             let data = InstData { args, extra, ..InstData::new(Opcode::Load) };
             vec![written(func, inst, data, ty)]
         }
-        Answer::Packed(format) => unpacked(func, inst, made, format),
+        Answer::Packed(format) => unpacked(func, width, inst, made, format),
     }
 }
 
@@ -990,8 +1076,8 @@ enum Answer {
 /// [`None`] everywhere but Windows x64. The question is asked of the ABI rather than of the target
 /// name for the reason the rest of this pass asks it there: a second list of which targets do this
 /// is a list that can disagree with the one the classifier reads.
-fn packed(abi: &'static AbiDescription) -> Option<Float> {
-    let format = abi.wide_integer_returns_in(u64::from(WIDE / 8))?;
+fn packed(abi: &'static AbiDescription, width: Width) -> Option<Float> {
+    let format = abi.wide_integer_returns_in(u64::from(width.bytes()))?;
     Float::from_bits(format.width())
 }
 
@@ -1002,28 +1088,29 @@ fn packed(abi: &'static AbiDescription) -> Option<Float> {
 /// format and the halves wanted are integers, and the frame is the only place this compiler moves
 /// bits between the two files without saying something about them. It is what gcc writes for the
 /// same call.
-fn unpacked(func: &mut Func, inst: Inst, call: Inst, format: Float) -> Vec<Value> {
+fn unpacked(func: &mut Func, width: Width, inst: Inst, call: Inst, format: Float) -> Vec<Value> {
     let Some(value) = func[call].first_result else { return Vec::new() };
     let size = bytes(Type::float(format));
     let align = align(size);
     let slot = room(func, inst, size, align);
     let info = whole(size, align);
     write(func, inst, value, slot, info, Flags::NONE);
-    let low = read(func, inst, slot, word(info, 0), Flags::NONE);
-    let up = stepped(func, inst, slot);
-    let high = read(func, inst, up, word(info, STEP), Flags::NONE);
+    let low = read(func, width, inst, slot, word(width, info, 0), Flags::NONE);
+    let up = stepped(func, width, inst, slot);
+    let high = read(func, width, inst, up, word(width, info, width.step()), Flags::NONE);
     vec![low, high]
 }
 
 /// One operand of such a call, in the form the convention hands it over in.
 fn handed(
     func: &mut Func,
-    abi: &'static AbiDescription,
+    calls: Calls,
     inst: Inst,
     arg: Operand,
     params: &mut Vec<Param>,
     values: &mut Vec<Value>,
 ) {
+    let Calls { abi, width } = calls;
     match arg {
         Operand::Whole(value) => {
             let ty = func[value].ty;
@@ -1040,20 +1127,20 @@ fn handed(
             values.push(slot);
         }
         Operand::Split(low, high) => {
-            let size = u64::from(WIDE / 8);
+            let size = u64::from(width.bytes());
             if !abi.scalar_is_by_reference(size) {
-                params.push(Param::new(half()));
+                params.push(Param::new(width.half()));
                 values.push(low);
-                params.push(Param::new(half()));
+                params.push(Param::new(width.half()));
                 values.push(high);
                 return;
             }
             let align = align(size);
             let slot = room(func, inst, size, align);
             let info = whole(size, align);
-            write(func, inst, low, slot, word(info, 0), Flags::NONE);
-            let up = stepped(func, inst, slot);
-            write(func, inst, high, up, word(info, STEP), Flags::NONE);
+            write(func, inst, low, slot, word(width, info, 0), Flags::NONE);
+            let up = stepped(func, width, inst, slot);
+            write(func, inst, high, up, word(width, info, width.step()), Flags::NONE);
             params.push(Param::new(Type::PTR));
             values.push(slot);
         }
@@ -1107,45 +1194,45 @@ fn room(func: &mut Func, inst: Inst, size: u64, align: u32) -> Value {
 ///
 /// A count of a hundred and twenty eight or more is undefined in C and nothing here goes out of its
 /// way about it, the same as at every other width.
-fn shifted(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
+fn shifted(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcode: Opcode) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
     let (Some(&(a_low, a_high)), Some(&(count, _))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    let top = ahead_const(func, inst, i128::from(HALF - 1));
-    let places = ahead(func, inst, Opcode::And, &[count, top]);
-    let back = ahead(func, inst, Opcode::Sub, &[top, places]);
-    let one = ahead_const(func, inst, 1);
-    let zero = ahead_const(func, inst, 0);
-    let bit = ahead_const(func, inst, i128::from(HALF));
-    let reach = ahead(func, inst, Opcode::And, &[count, bit]);
+    let top = ahead_const(func, width, inst, i128::from(width.half - 1));
+    let places = ahead(func, width, inst, Opcode::And, &[count, top]);
+    let back = ahead(func, width, inst, Opcode::Sub, &[top, places]);
+    let one = ahead_const(func, width, inst, 1);
+    let zero = ahead_const(func, width, inst, 0);
+    let bit = ahead_const(func, width, inst, i128::from(width.half));
+    let reach = ahead(func, width, inst, Opcode::And, &[count, bit]);
     let whole = compared(func, inst, IntPred::Ne, reach, zero);
 
     let (low, high) = if opcode == Opcode::Shl {
-        let moved = ahead(func, inst, Opcode::Shl, &[a_low, places]);
-        let edge = ahead(func, inst, Opcode::LShr, &[a_low, one]);
-        let across = ahead(func, inst, Opcode::LShr, &[edge, back]);
-        let above = ahead(func, inst, Opcode::Shl, &[a_high, places]);
-        let joined = ahead(func, inst, Opcode::Or, &[above, across]);
-        let low = ahead(func, inst, Opcode::Select, &[whole, zero, moved]);
-        let high = ahead(func, inst, Opcode::Select, &[whole, moved, joined]);
+        let moved = ahead(func, width, inst, Opcode::Shl, &[a_low, places]);
+        let edge = ahead(func, width, inst, Opcode::LShr, &[a_low, one]);
+        let across = ahead(func, width, inst, Opcode::LShr, &[edge, back]);
+        let above = ahead(func, width, inst, Opcode::Shl, &[a_high, places]);
+        let joined = ahead(func, width, inst, Opcode::Or, &[above, across]);
+        let low = ahead(func, width, inst, Opcode::Select, &[whole, zero, moved]);
+        let high = ahead(func, width, inst, Opcode::Select, &[whole, moved, joined]);
         (low, high)
     } else {
-        let moved = ahead(func, inst, opcode, &[a_high, places]);
-        let edge = ahead(func, inst, Opcode::Shl, &[a_high, one]);
-        let across = ahead(func, inst, Opcode::Shl, &[edge, back]);
-        let below = ahead(func, inst, Opcode::LShr, &[a_low, places]);
-        let joined = ahead(func, inst, Opcode::Or, &[below, across]);
+        let moved = ahead(func, width, inst, opcode, &[a_high, places]);
+        let edge = ahead(func, width, inst, Opcode::Shl, &[a_high, one]);
+        let across = ahead(func, width, inst, Opcode::Shl, &[edge, back]);
+        let below = ahead(func, width, inst, Opcode::LShr, &[a_low, places]);
+        let joined = ahead(func, width, inst, Opcode::Or, &[below, across]);
         // What is left behind when the whole low half is gone: zeroes for a logical shift, and for
         // an arithmetic one the sign bit spread over the half it came from.
         let spent = if opcode == Opcode::AShr {
-            ahead(func, inst, Opcode::AShr, &[a_high, top])
+            ahead(func, width, inst, Opcode::AShr, &[a_high, top])
         } else {
             zero
         };
-        let low = ahead(func, inst, Opcode::Select, &[whole, moved, joined]);
-        let high = ahead(func, inst, Opcode::Select, &[whole, spent, moved]);
+        let low = ahead(func, width, inst, Opcode::Select, &[whole, moved, joined]);
+        let high = ahead(func, width, inst, Opcode::Select, &[whole, spent, moved]);
         (low, high)
     };
     replace(func, halves, inst, low, high);
@@ -1153,14 +1240,14 @@ fn shifted(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
 
 /// An `and`, an `or` or an `xor`, which is the same operation on each half and nothing between
 /// them.
-fn bitwise(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
+fn bitwise(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcode: Opcode) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    let low = ahead(func, inst, opcode, &[a_low, b_low]);
-    let high = ahead(func, inst, opcode, &[a_high, b_high]);
+    let low = ahead(func, width, inst, opcode, &[a_low, b_low]);
+    let high = ahead(func, width, inst, opcode, &[a_high, b_high]);
     replace(func, halves, inst, low, high);
 }
 
@@ -1178,7 +1265,13 @@ fn bitwise(func: &mut Func, halves: &mut Halves, inst: Inst, opcode: Opcode) {
 /// equal and `a.lo >= b.lo` unsigned. Asking `a.hi >= b.hi` instead makes every value with a high
 /// half of its own greater than or equal to every other, which is the shape of this that a
 /// differential run against GCC caught.
-fn compare(func: &mut Func, halves: &Halves, forward: &mut Map<Value, Value>, inst: Inst) {
+fn compare(
+    func: &mut Func,
+    width: Width,
+    halves: &Halves,
+    forward: &mut Map<Value, Value>,
+    inst: Inst,
+) {
     let Extra::IntPred(pred) = func[inst].extra else { return };
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
@@ -1186,10 +1279,10 @@ fn compare(func: &mut Func, halves: &Halves, forward: &mut Map<Value, Value>, in
         return;
     };
     let answer = if matches!(pred, IntPred::Eq | IntPred::Ne) {
-        let low = ahead(func, inst, Opcode::Xor, &[a_low, b_low]);
-        let high = ahead(func, inst, Opcode::Xor, &[a_high, b_high]);
-        let both = ahead(func, inst, Opcode::Or, &[low, high]);
-        let zero = ahead_const(func, inst, 0);
+        let low = ahead(func, width, inst, Opcode::Xor, &[a_low, b_low]);
+        let high = ahead(func, width, inst, Opcode::Xor, &[a_high, b_high]);
+        let both = ahead(func, width, inst, Opcode::Or, &[low, high]);
+        let zero = ahead_const(func, width, inst, 0);
         compared(func, inst, pred, both, zero)
     } else {
         let above = compared(func, inst, strict(pred), a_high, b_high);
@@ -1231,7 +1324,7 @@ fn unsigned(pred: IntPred) -> IntPred {
 /// Two of them rather than one, with the condition read twice. What that costs is one more
 /// conditional move, and what the alternative costs is a branch, which is the more expensive of the
 /// two on anything that predicts.
-fn choose(func: &mut Func, halves: &mut Halves, inst: Inst) {
+fn choose(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let args = func[func[inst].args].to_vec();
     let [cond, then, other] = args[..] else { return };
     let (Some(&(then_low, then_high)), Some(&(other_low, other_high))) =
@@ -1239,8 +1332,8 @@ fn choose(func: &mut Func, halves: &mut Halves, inst: Inst) {
     else {
         return;
     };
-    let low = ahead(func, inst, Opcode::Select, &[cond, then_low, other_low]);
-    let high = ahead(func, inst, Opcode::Select, &[cond, then_high, other_high]);
+    let low = ahead(func, width, inst, Opcode::Select, &[cond, then_low, other_low]);
+    let high = ahead(func, width, inst, Opcode::Select, &[cond, then_high, other_high]);
     replace(func, halves, inst, low, high);
 }
 
@@ -1249,11 +1342,17 @@ fn choose(func: &mut Func, halves: &mut Halves, inst: Inst) {
 /// Down to sixty four there is nothing left to do and the low half is the answer, so the truncation
 /// goes and its readers read the half. Down to anything narrower the machine's own truncation still
 /// happens, out of the half rather than out of the value that is no longer there.
-fn truncate(func: &mut Func, halves: &Halves, forward: &mut Map<Value, Value>, inst: Inst) {
+fn truncate(
+    func: &mut Func,
+    width: Width,
+    halves: &Halves,
+    forward: &mut Map<Value, Value>,
+    inst: Inst,
+) {
     let Some(&arg) = func[func[inst].args].first() else { return };
     let Some(&(low, _)) = halves.get(&arg) else { return };
     let Some(result) = func[inst].first_result else { return };
-    if func[result].ty.bits() == HALF {
+    if func[result].ty.bits() == width.half {
         forward.insert(result, low);
         func.remove_inst(inst);
         return;
@@ -1262,19 +1361,19 @@ fn truncate(func: &mut Func, halves: &Halves, forward: &mut Map<Value, Value>, i
 }
 
 /// Widening into a wide value, which is the value in the low half and its own sign or zero above.
-fn extend(func: &mut Func, halves: &mut Halves, inst: Inst, signed: bool) {
+fn extend(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, signed: bool) {
     let Some(&arg) = func[func[inst].args].first() else { return };
-    let low = if func[arg].ty.bits() == HALF {
+    let low = if func[arg].ty.bits() == width.half {
         arg
     } else {
         let opcode = if signed { Opcode::SExt } else { Opcode::ZExt };
-        ahead(func, inst, opcode, &[arg])
+        ahead(func, width, inst, opcode, &[arg])
     };
     let high = if signed {
-        let top = ahead_const(func, inst, i128::from(HALF - 1));
-        ahead(func, inst, Opcode::AShr, &[low, top])
+        let top = ahead_const(func, width, inst, i128::from(width.half - 1));
+        ahead(func, width, inst, Opcode::AShr, &[low, top])
     } else {
-        ahead_const(func, inst, 0)
+        ahead_const(func, width, inst, 0)
     };
     replace(func, halves, inst, low, high);
 }
@@ -1287,6 +1386,7 @@ fn extend(func: &mut Func, halves: &mut Halves, inst: Inst, signed: bool) {
 /// against and both ends are split the same way.
 fn call(
     func: &mut Func,
+    width: Width,
     conv: &CallRegs,
     halves: &mut Halves,
     forward: &mut Map<Value, Value>,
@@ -1299,7 +1399,7 @@ fn call(
     let old = func[data.args].to_vec();
     // An indirect call's first operand is the address it calls, and the arguments come after it.
     let skip = usize::from(data.opcode == Opcode::CallIndirect);
-    let Some(slots) = plan(&whole, conv) else { return };
+    let Some(slots) = plan(&whole, conv, width) else { return };
     let mut args = spread(&old[..skip], halves);
     for slot in slots.iter().copied() {
         let value = match slot {
@@ -1310,16 +1410,16 @@ fn call(
                 let extra = Extra::Imm(func.add_imm(Imm::from_bits(0)));
                 written(func, inst, InstData { extra, ..InstData::new(Opcode::FConst) }, ty)
             }
-            Slot::Filler(_) => ahead_const(func, inst, 0),
+            Slot::Filler(_) => ahead_const(func, width, inst, 0),
         };
         args.push(value);
     }
     let results: Vec<Type> = data
         .results()
         .map(|value| func[value].ty)
-        .flat_map(|ty| if is_wide(ty) { vec![half(), half()] } else { vec![ty] })
+        .flat_map(|ty| if width.is_wide(ty) { vec![width.half(), width.half()] } else { vec![ty] })
         .collect();
-    let signature = func.add_signature(planned(&Signature { variadic, ..whole }, &slots));
+    let signature = func.add_signature(planned(&Signature { variadic, ..whole }, width, &slots));
     // What the ABI asks of each argument past the `...` is on the parameter it became now, so the
     // call names none of them any more and the list it kept that in is empty.
     let varargs = if variadic { func.push_abis(&[]) } else { info.varargs };
@@ -1330,7 +1430,7 @@ fn call(
     func.insert_before(made, inst);
     let mut fresh = func[made].results();
     for old in data.results() {
-        if is_wide(func[old].ty) {
+        if width.is_wide(func[old].ty) {
             let (Some(low), Some(high)) = (fresh.next(), fresh.next()) else { return };
             halves.insert(old, (low, high));
         } else if let Some(again) = fresh.next() {
@@ -1405,13 +1505,13 @@ fn spread(args: &[Value], halves: &Halves) -> Vec<Value> {
 /// Each half is plain. What the ABI asks beyond a type is about the bits above a narrow value and
 /// about an object whose address travels, and a half is neither: it is exactly a register wide and
 /// it is the value itself.
-fn split_signature(signature: &Signature) -> Signature {
+fn split_signature(signature: &Signature, width: Width) -> Signature {
     let split = |params: &[Param]| -> Vec<Param> {
         params
             .iter()
             .flat_map(|param| {
-                if is_wide(param.ty) {
-                    vec![Param::new(half()), Param::new(half())]
+                if width.is_wide(param.ty) {
+                    vec![Param::new(width.half()), Param::new(width.half())]
                 } else {
                     vec![*param]
                 }
@@ -1456,24 +1556,32 @@ fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
 }
 
 /// The access one word of a wide access is, that many bytes into it.
-fn word(info: MemInfo, at: u64) -> MemInfo {
-    let align = if at == 0 { info.align } else { info.align.min(8) };
-    MemInfo { size: STEP, align, ..info }
+fn word(width: Width, info: MemInfo, at: u64) -> MemInfo {
+    let step = width.half / 8;
+    let align = if at == 0 { info.align } else { info.align.min(step) };
+    MemInfo { size: width.step(), align, ..info }
 }
 
 /// The address one word past another, written in front of an instruction.
-fn stepped(func: &mut Func, inst: Inst, from: Value) -> Value {
-    let step = ahead_const(func, inst, i128::from(STEP));
+fn stepped(func: &mut Func, width: Width, inst: Inst, from: Value) -> Value {
+    let step = ahead_const(func, width, inst, i128::from(width.step()));
     let args = func.push_values(&[from, step]);
     written(func, inst, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
 }
 
 /// A load put in front of an instruction, and the half it reads.
-fn read(func: &mut Func, inst: Inst, from: Value, info: MemInfo, flags: Flags) -> Value {
+fn read(
+    func: &mut Func,
+    width: Width,
+    inst: Inst,
+    from: Value,
+    info: MemInfo,
+    flags: Flags,
+) -> Value {
     let extra = Extra::Mem(func.add_mem(info));
     let args = func.push_values(&[from]);
     let data = InstData { args, flags, extra, ..InstData::new(Opcode::Load) };
-    written(func, inst, data, half())
+    written(func, inst, data, width.half())
 }
 
 /// A store put in front of an instruction, which produces nothing and is only its effect.
@@ -1501,15 +1609,15 @@ fn bit(func: &mut Func, inst: Inst, opcode: Opcode, lhs: Value, rhs: Value) -> V
 }
 
 /// An instruction over these operands put in front of another one, producing a half.
-fn ahead(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) -> Value {
+fn ahead(func: &mut Func, width: Width, inst: Inst, opcode: Opcode, args: &[Value]) -> Value {
     let args = func.push_values(args);
-    written(func, inst, InstData { args, ..InstData::new(opcode) }, half())
+    written(func, inst, InstData { args, ..InstData::new(opcode) }, width.half())
 }
 
 /// A constant half put in front of an instruction.
-fn ahead_const(func: &mut Func, inst: Inst, value: i128) -> Value {
-    let extra = Extra::Imm(func.add_imm(Imm::int(value, half())));
-    written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, half())
+fn ahead_const(func: &mut Func, width: Width, inst: Inst, value: i128) -> Value {
+    let extra = Extra::Imm(func.add_imm(Imm::int(value, width.half())));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::IConst) }, width.half())
 }
 
 /// Creates the instruction, puts it in front of another, and reads its value back out.
@@ -1539,11 +1647,14 @@ mod tests {
     use rucc_target::x86_64::{MINGW64, SYSV};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{Def, Extra, HALF, IntPred, MemInfo, Opcode, halves};
+    use super::{Def, Extra, IntPred, MemInfo, Opcode, halves};
 
-    /// The width the pass is about, as a type, which is what every test builds with.
+    /// The width of a register on the target every test here but the last few builds for.
+    const HALF: u32 = 64;
+
+    /// The width the pass is about there, as a type, which is what every test builds with.
     fn wide() -> Type {
-        Type::int(super::WIDE)
+        Type::int(2 * HALF)
     }
 
     fn target() -> TargetInfo {
@@ -2324,5 +2435,188 @@ mod tests {
         let text = printed(&func, &mut names);
         assert!(text.contains("@__divti3(%0, %1, %2, %3)"), "four halves over: {text}");
         assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
+    }
+
+    /// A register thirty two bits wide, which is what i386 has and what these last tests split at.
+    ///
+    /// No target with such registers lowers yet, so the pass is driven at the width directly, over
+    /// the System V registers standing in for a convention that puts both halves in two of them.
+    const NARROW: super::Width = super::Width { half: 32 };
+
+    /// Splits at thirty two bits, which is what the pass does on i386.
+    fn narrow(func: &mut Func, names: &mut Interner) -> bool {
+        super::halves_at(func, names, &SYSV, NARROW)
+    }
+
+    /// A `long long` on a thirty two bit target, which is the integer no register holds there.
+    fn long() -> Type {
+        Type::int(64)
+    }
+
+    #[test]
+    fn at_thirty_two_bits_a_long_long_is_the_value_split() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[long(), long()], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let sum = build.binary(Opcode::Add, params[0], params[1], Flags::NONE);
+        build.ret(&[sum]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i64"), "nothing that wide is left: {text}");
+        assert!(text.contains("block0(%0: i32, %1: i32, %2: i32, %3: i32)"), "four halves: {text}");
+        assert_eq!(text.matches(" = add ").count(), 3, "three adds: {text}");
+        assert_eq!(text.matches(" = zext.i32 ").count(), 1, "the carry as a number: {text}");
+        assert_eq!(
+            func.signature().return_types().collect::<Vec<_>>(),
+            [Type::int(32), Type::int(32)],
+            "two halves come back"
+        );
+    }
+
+    #[test]
+    fn at_thirty_two_bits_an_integer_twice_as_wide_again_is_not_touched() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide(), wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let sum = build.binary(Opcode::Add, params[0], params[1], Flags::NONE);
+        build.ret(&[sum]);
+
+        assert!(!narrow(&mut func, &mut names), "nothing is a long long");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_a_constant_is_split_at_bit_thirty_two() {
+        let mut names = Interner::new();
+        let (mut func, entry, _) = shell(&mut names, &[], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let value = build.iconst(long(), 0x0000_0007_ffff_fffe);
+        build.ret(&[value]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("iconst.i32 7"), "the high half: {text}");
+        let low = text.contains("iconst.i32 4294967294") || text.contains("iconst.i32 -2");
+        assert!(low, "the low half: {text}");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_the_high_word_is_four_bytes_up() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[Type::PTR], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let value = build.load(long(), params[0], info(8, 8), Flags::NONE);
+        build.ret(&[value]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches(" = load.i32 ").count(), 2, "two reads: {text}");
+        assert!(text.contains("iconst.i32 4") || text.contains("iconst.i64 4"), "{text}");
+        assert!(text.contains("align 8"), "the low word keeps what the object had: {text}");
+        assert!(text.contains("align 4"), "the high word knows less: {text}");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_a_shift_crosses_at_bit_thirty_two() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[long(), long()], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let moved = build.binary(Opcode::AShr, params[0], params[1], Flags::NONE);
+        build.ret(&[moved]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("iconst.i32 31"), "thirty one is the distance left: {text}");
+        assert!(text.contains("iconst.i32 32"), "and thirty two is a whole half: {text}");
+        assert_eq!(text.matches(" = select.i32 ").count(), 2, "one choice per half: {text}");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_a_multiply_is_three_multiplies_of_halves() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[long(), long()], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let product = build.binary(Opcode::Mul, params[0], params[1], Flags::NONE);
+        build.ret(&[product]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i64"), "nothing that wide is left: {text}");
+        assert!(!text.contains("call"), "no routine: {text}");
+        assert_eq!(text.matches(" = mul ").count(), 7, "three and the carry's four: {text}");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_each_division_calls_the_di_routine() {
+        for (opcode, routine) in [
+            (Opcode::UDiv, "__udivdi3"),
+            (Opcode::SDiv, "__divdi3"),
+            (Opcode::URem, "__umoddi3"),
+            (Opcode::SRem, "__moddi3"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[long(), long()], &[long()]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.binary(opcode, params[0], params[1], Flags::NONE);
+            build.ret(&[answer]);
+
+            assert!(narrow(&mut func, &mut names), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i64"), "nothing that wide is left: {text}");
+            let call = format!("@{routine}(%0, %1, %2, %3)");
+            assert!(text.contains(&call), "{routine} gets four halves: {text}");
+            assert!(text.contains("return %4, %5"), "and two come back: {text}");
+        }
+    }
+
+    #[test]
+    fn at_thirty_two_bits_each_conversion_calls_the_di_routine() {
+        let double = Type::float(Float::F64);
+        let single = Type::float(Float::F32);
+        let quad = Type::float(Float::F128);
+        for (opcode, float, routine) in [
+            (Opcode::SIToFP, double, "__floatdidf"),
+            (Opcode::SIToFP, single, "__floatdisf"),
+            (Opcode::UIToFP, double, "__floatundidf"),
+            (Opcode::UIToFP, single, "__floatundisf"),
+            (Opcode::SIToFP, quad, "__floatditf"),
+            (Opcode::UIToFP, quad, "__floatunditf"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[long()], &[float]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(opcode, params[0], float);
+            build.ret(&[answer]);
+
+            assert!(narrow(&mut func, &mut names), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("@{routine}(%0, %1)")), "{routine}: {text}");
+        }
+        for (opcode, float, routine) in [
+            (Opcode::FPToSI, double, "__fixdfdi"),
+            (Opcode::FPToSI, single, "__fixsfdi"),
+            (Opcode::FPToUI, double, "__fixunsdfdi"),
+            (Opcode::FPToUI, single, "__fixunssfdi"),
+            (Opcode::FPToSI, quad, "__fixtfdi"),
+            (Opcode::FPToUI, quad, "__fixunstfdi"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[float], &[long()]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(opcode, params[0], long());
+            build.ret(&[answer]);
+
+            assert!(narrow(&mut func, &mut names), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("@{routine}(%0)")), "{routine}: {text}");
+            assert!(text.contains("return %1, %2"), "two halves come back: {text}");
+        }
+    }
+
+    #[test]
+    fn at_sixty_four_bits_the_width_is_the_one_the_registers_say() {
+        assert_eq!(super::Width::of(&SYSV), super::Width { half: HALF });
+        assert_eq!(super::Width::of(&SYSV).mode(), "i128");
+        assert_eq!(NARROW.mode(), "i64");
     }
 }
