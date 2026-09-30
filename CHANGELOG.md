@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A member name that is also reached through an anonymous `struct` or `union` in the same record is reported as a duplicate member, as gcc reports it, in either order and at any depth. Before only two members written directly in the record were compared.
 - The assembler reads `% rip` with a space after the percent sign, which is what the kernel's `_ASM_RIP()` comes to once preprocessed, and a conditional can compare two registers, as `UNWIND_HINT_REGS` does with `.if \base == %rsp`.
 - `-E` keeps a line joined by a backslash on one line, as gcc does. In a `.S` file this matters beyond looks: the kernel writes `ALTERNATIVE_2` over three lines joined this way, and the assembler read each piece as its own statement and stopped at a data directive with nothing after it.
+- On Mach-O, a table holding the addresses of labels, `static void *t[] = { &&a, &&b }` for a computed goto, no longer names undefined symbols. The table was written as `_.Llbl.0` and the label in the function as `.Llbl.0`, so every entry became an undefined external and ld64 refused the link, which stopped Postgres's `ExecInterpExpr`. The label is now spelled the way the table spells it, and the object writer treats a `_.L` name like an `L` one, so the table's relocation names the function the label is in with the distance added and no symbol is left inside the function for the linker to cut it at (#2403).
 
 ## 0.18.3
 

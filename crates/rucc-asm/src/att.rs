@@ -394,9 +394,13 @@ impl Writer<'_> {
             // And the name an image knows the block by, as a second label on the same address. The
             // block's own label is written by this file and is a number, which is no good to a
             // relocation in another section: what that names is a symbol, and the name here is the
-            // one the front end minted for it when it lowered the image.
+            // one the front end minted for it when it lowered the image. Spelled with the prefix
+            // every other name in the listing gets, because the image and any instruction that
+            // takes the address write it that way, and on Mach-O a label without the underscore
+            // is a different name, which left `_.Llbl.0` undefined in every computed goto table.
             if let Some(label) = func.block_name(block) {
-                let _ = writeln!(self.out, "{}:", self.names.resolve(label));
+                let prefix = self.directives.symbol();
+                let _ = writeln!(self.out, "{prefix}{}:", self.names.resolve(label));
             }
             for inst in func.insts(block) {
                 // The other half of the room, which is named here rather than laid down here: the

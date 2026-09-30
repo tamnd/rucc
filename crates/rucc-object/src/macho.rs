@@ -99,7 +99,10 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
     for list in &mut atoms {
         list.sort_unstable();
     }
-    let target_of = |symbol: &str, addend: i64| -> (String, i64) {
+    // An instruction's field carries what is added in an `ARM64_RELOC_ADDEND`, which holds less
+    // than a section can be long. A temporary too far past the real name in front of it for that
+    // is kept as a symbol as well, rather than refused, since it is a name the file may keep.
+    let target_of = |symbol: &str, addend: i64, kind: Reference| -> (String, i64) {
         let Some(Held::In { part, offset }) = defined.get(symbol).map(|name| name.at) else {
             return (symbol.to_owned(), addend);
         };
@@ -111,7 +114,12 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
             0 => (symbol.to_owned(), addend),
             after => {
                 let (at, name) = list[after - 1];
-                (name.to_owned(), addend + (offset - at) as i64)
+                let moved = addend + (offset - at) as i64;
+                let field = matches!(kind, Reference::Field(_));
+                if field && !(-ADDEND..ADDEND).contains(&moved) {
+                    return (symbol.to_owned(), addend);
+                }
+                (name.to_owned(), moved)
             }
         }
     };
@@ -119,7 +127,7 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
         .parts
         .iter()
         .flat_map(|part| &part.relocs)
-        .map(|reloc| target_of(&reloc.symbol, reloc.addend).0)
+        .map(|reloc| target_of(&reloc.symbol, reloc.addend, reloc.kind).0)
         .filter(|name| temporary(name))
         .collect();
 
@@ -161,7 +169,7 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
 
     for (part, id) in input.parts.iter().zip(&made) {
         for reloc in &part.relocs {
-            let (name, addend) = target_of(&reloc.symbol, reloc.addend);
+            let (name, addend) = target_of(&reloc.symbol, reloc.addend, reloc.kind);
             let Some(&symbol) = symbols.get(name.as_str()) else {
                 let why = format!("'{name}' is named by a relocation and by nothing else");
                 return Err(Error::Refused { why });
@@ -431,9 +439,13 @@ pub(crate) fn kind(segment: &str, flags: u32) -> SectionKind {
 /// Whether a name is one only the assembler sees, which is what an `L` in front says on Mach-O.
 ///
 /// A name with a `\u{1}` in it is one the assembler made for a numbered label or a frame, which is
-/// the same kind of name under a spelling no program can write.
+/// the same kind of name under a spelling no program can write. A name that starts `_.L` is one
+/// the compiler made with the prefix ELF keeps out of the symbol table, a string or the label a
+/// computed goto jumps to, with the underscore every name in a Mach-O listing gets. No C name
+/// starts with a dot, so it is just as private here. A label inside a function has to be one of
+/// these: kept as a symbol of its own it is where the linker cuts the function in two.
 pub(crate) fn temporary(name: &str) -> bool {
-    name.starts_with('L') || name.contains('\u{1}')
+    name.starts_with('L') || name.starts_with("_.L") || name.contains('\u{1}')
 }
 
 /// The platform and the oldest version of it the file is for, which is `LC_BUILD_VERSION`.
@@ -537,6 +549,49 @@ mod tests {
         let object::RelocationTarget::Symbol(index) = reloc.target() else { panic!() };
         assert_eq!(file.symbol_by_index(index).unwrap().name(), Ok("_s"));
         assert_eq!(data.data().unwrap()[8], 3);
+    }
+
+    /// A computed goto table, which is the address of a label inside a function held in data. The
+    /// listing spells the label `_.Llbl.0`, the underscore every name gets and the prefix ELF keeps
+    /// out of the symbol table, and it has to be the function with the distance on here: kept as
+    /// a symbol it cuts the function in two, and it was once written as an undefined external
+    /// that no link could find (#2403).
+    #[test]
+    fn the_address_of_a_label_in_data_is_the_function_it_is_in() {
+        let text = part("__TEXT", "__text", vec![0; 16], 16);
+        let mut data = part("__DATA", "__const", vec![0; 16], 16);
+        let kind = Reference::Address { bytes: 8 };
+        for (at, label) in [(0, "_.Llbl.0"), (8, "_.Llbl.1")] {
+            data.relocs.push(Reloc { at, symbol: label.into(), kind, addend: 0, after: 0 });
+        }
+        let mut f = name("_f", 0, 0, Binding::Global);
+        f.sort = Sort::Func;
+        let input = Assembled {
+            parts: vec![text, data],
+            names: vec![
+                f,
+                name("_.Llbl.0", 0, 4, Binding::Local),
+                name("_.Llbl.1", 0, 12, Binding::Local),
+                name("_dispatch_table.0", 1, 0, Binding::Local),
+            ],
+            subsections: true,
+        };
+        let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        let bytes = write(&input, &target, &Info::default()).unwrap();
+        let file = object::File::parse(&bytes[..]).unwrap();
+        let names: Vec<_> = file.symbols().filter_map(|sym| sym.name().ok()).collect();
+        assert!(!names.iter().any(|name| name.contains(".L")), "{names:?}");
+        assert!(file.symbols().all(|sym| !sym.is_undefined()), "{names:?}");
+        let data = file.section_by_name("__const").unwrap();
+        let mut seen = Vec::new();
+        for (at, reloc) in data.relocations() {
+            let object::RelocationTarget::Symbol(index) = reloc.target() else { panic!() };
+            let symbol = file.symbol_by_index(index).unwrap();
+            assert_eq!(symbol.name(), Ok("_f"));
+            seen.push((at, data.data().unwrap()[at as usize]));
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, [(0, 4), (8, 12)]);
     }
 
     /// A distance an unwind record holds, which arm64 says as the place taken from the target:
