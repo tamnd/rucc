@@ -91,15 +91,16 @@ fn frame(usage: &str, function: &str) -> u32 {
 
 const TARGETS: [&str; 2] = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
 
-/// gcc 14 takes 336 bytes at `-O2`, and rucc took 1216, which is the four structures side by side.
-/// Now it is one structure and what the function needs besides, and in particular less than two.
+/// gcc 14 takes 336 bytes at `-O2`, and rucc took 1184 on both machines, which is the four
+/// structures side by side. Now it is one structure and what the function needs besides, 320 bytes
+/// on both, and no more than gcc's.
 #[test]
 fn four_structures_in_four_arms_are_one_structure_s_bytes() {
     for target in TARGETS {
         for args in [&["-O2"][..], &["-O1"], &["-O0", "-fstack-reuse=all"]] {
             let bytes = frame(&usage(target, SOURCE, args), "redo");
             assert!(
-                (ONE..=ONE + 112).contains(&bytes),
+                (ONE..=ONE + 48).contains(&bytes),
                 "{target} {args:?}: {bytes} bytes for redo, wanted one structure's worth"
             );
         }
@@ -167,12 +168,13 @@ int main(void)
 }
 "#;
 
-/// The two arrays are one array's bytes, on both machines.
+/// The two arrays are one array's bytes, on both machines: 448 on x86-64 and 464 on AArch64,
+/// where they were 848 and 864 with an array each.
 #[test]
 fn two_arrays_in_blocks_one_after_the_other_share_their_bytes() {
     for target in TARGETS {
         let bytes = frame(&usage(target, TWO, &["-O2"]), "both");
-        assert!((400..800).contains(&bytes), "{target}: {bytes} bytes for both");
+        assert!((400..=480).contains(&bytes), "{target}: {bytes} bytes for both");
     }
 }
 
