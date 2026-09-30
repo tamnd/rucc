@@ -13,6 +13,7 @@
 //! file refers to them through `super` and that is the whole of the contract between the two.
 
 pub mod aarch64;
+pub mod x86;
 pub mod x86_64;
 
 pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};

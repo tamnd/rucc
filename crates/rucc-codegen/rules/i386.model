@@ -1,0 +1,15 @@
+;; What the terms in the i386 rule set mean, in bitvectors.
+;;
+;; The instructions are x86-64's, and so is what they mean, so this file is that one read again
+;; with an address thirty two bits wide. That is the index of the memory a load and a store are
+;; asked about, and nothing else in `x86-64.model` depends on it: an entry for a load says which
+;; bytes it reads from an address, and says it at whatever width the address is.
+;;
+;; The one instruction here that x86-64's rules never ask for is `leal`, which is how an address
+;; is computed on a machine whose addresses are this wide.
+
+(address 32)
+
+(include crates/rucc-codegen/rules/x86-64.model)
+
+(semantics (x64.lea_32 address) address)

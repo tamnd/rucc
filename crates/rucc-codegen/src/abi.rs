@@ -508,6 +508,13 @@ pub static X86_64: Insts = Insts {
     extend: |_, _| None,
 };
 
+/// The same instructions for i386, where an address is computed with `leal`.
+///
+/// Only the address differs so far. An argument and a result are named by the same pseudo
+/// instructions, and where cdecl puts them, which is on the stack and in `edx:eax`, is the call
+/// lowering's to say once it is written.
+pub static X86: Insts = Insts { lea: "x64.lea_32", ..X86_64 };
+
 /// What the instruction that calls a name is called.
 ///
 /// Here rather than in a rule for the same reason the arguments are: a rule pattern sees one term

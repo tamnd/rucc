@@ -1,0 +1,1167 @@
+;; Lowering i386.
+;;
+;; These are the rules of `x86-64.rules` that mean something on a thirty two bit machine, and
+;; nothing else. The instructions are the same instructions and keep their `x64.` names, and
+;; `i386.model` says what they mean by including `x86-64.model` and saying that an address is
+;; thirty two bits wide.
+;;
+;; What is missing is everything at sixty four bits. A `long long` is two registers here and
+;; `rucc_codegen::wide` splits it before selection, so no pattern below names an `i64`. What is
+;; different is the address: a pointer is an `i32`, so the loads, the stores and the `lea` forms
+;; are written at thirty two bits where x86-64 writes them at sixty four.
+;;
+;; The order is the order of `x86-64.rules`, so the two files can be read side by side.
+
+;; Constants. A truth value is a byte holding a zero or a one, as it is on x86-64.
+
+(rule (lower (iconst.i8 k))
+      (x64.mov_ri_8 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i16 k))
+      (x64.mov_ri_16 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i32 k))
+      (x64.mov_ri_32 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i1 k))
+      (x64.mov_ri_8 k)
+      (spec (= k (result))))
+
+;; Arithmetic, register with register, at the three widths this machine has registers of, and
+;; the three bitwise operations at one bit.
+
+(rule (lower (add.i8 (value.i8 x) (value.i8 y)))
+      (x64.add_rr_8 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (add.i16 (value.i16 x) (value.i16 y)))
+      (x64.add_rr_16 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (value.i32 y)))
+      (x64.add_rr_32 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (sub.i8 (value.i8 x) (value.i8 y)))
+      (x64.sub_rr_8 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (sub.i16 (value.i16 x) (value.i16 y)))
+      (x64.sub_rr_16 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (value.i32 y)))
+      (x64.sub_rr_32 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (and.i8 (value.i8 x) (value.i8 y)))
+      (x64.and_rr_8 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (and.i16 (value.i16 x) (value.i16 y)))
+      (x64.and_rr_16 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (value.i32 y)))
+      (x64.and_rr_32 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (or.i8 (value.i8 x) (value.i8 y)))
+      (x64.or_rr_8 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (or.i16 (value.i16 x) (value.i16 y)))
+      (x64.or_rr_16 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (value.i32 y)))
+      (x64.or_rr_32 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (value.i8 y)))
+      (x64.xor_rr_8 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (value.i16 y)))
+      (x64.xor_rr_16 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (value.i32 y)))
+      (x64.xor_rr_32 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (and.i1 (value.i1 x) (value.i1 y)))
+      (x64.and_rr_8 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (or.i1 (value.i1 x) (value.i1 y)))
+      (x64.or_rr_8 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (xor.i1 (value.i1 x) (value.i1 y)))
+      (x64.xor_rr_8 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (mul.i8 (value.i8 x) (value.i8 y)))
+      (x64.imul_rr_8 x y)
+      (spec (= (bvmul x y) (result))))
+
+(rule (lower (mul.i16 (value.i16 x) (value.i16 y)))
+      (x64.imul_rr_16 x y)
+      (spec (= (bvmul x y) (result))))
+
+(rule (lower (mul.i32 (value.i32 x) (value.i32 y)))
+      (x64.imul_rr_32 x y)
+      (spec (= (bvmul x y) (result))))
+
+;; Arithmetic, register with immediate. Every width carries its whole immediate, so there is no
+;; guard: the one x86-64 needs is for sixty four bits, which is not a width here.
+
+(rule (lower (add.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.add_ri_8 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (add.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.add_ri_16 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (iconst.i32 k)))
+      (x64.add_ri_32 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (sub.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.sub_ri_8 x k)
+      (spec (= (bvsub x k) (result))))
+
+(rule (lower (sub.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.sub_ri_16 x k)
+      (spec (= (bvsub x k) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (iconst.i32 k)))
+      (x64.sub_ri_32 x k)
+      (spec (= (bvsub x k) (result))))
+
+(rule (lower (and.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.and_ri_8 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (and.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.and_ri_16 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (iconst.i32 k)))
+      (x64.and_ri_32 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (or.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.or_ri_8 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.or_ri_16 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (iconst.i32 k)))
+      (x64.or_ri_32 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (iconst.i8 k)))
+      (x64.xor_ri_8 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (iconst.i16 k)))
+      (x64.xor_ri_16 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (iconst.i32 k)))
+      (x64.xor_ri_32 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (mul.i32 (value.i32 x) (iconst.i32 k)))
+      (x64.imul_ri_32 x k)
+      (spec (= (bvmul x k) (result))))
+
+;; The address arithmetic `lea` does for free, at thirty two bits because that is how wide an
+;; address is. These are the rules x86-64 has at sixty four bits, with `leal` for `leaq`.
+
+(rule (lower (add.i32 (value.i32 x) (mul.i32 (value.i32 y) (iconst.i32 2))))
+      (x64.lea_32 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvmul y 2)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (mul.i32 (value.i32 y) (iconst.i32 4))))
+      (x64.lea_32 (amode_base_index_scale x y 4))
+      (spec (= (bvadd x (bvmul y 4)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (mul.i32 (value.i32 y) (iconst.i32 8))))
+      (x64.lea_32 (amode_base_index_scale x y 8))
+      (spec (= (bvadd x (bvmul y 8)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 1))))
+      (x64.lea_32 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvshl y 1)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 2))))
+      (x64.lea_32 (amode_base_index_scale x y 4))
+      (spec (= (bvadd x (bvshl y 2)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 3))))
+      (x64.lea_32 (amode_base_index_scale x y 8))
+      (spec (= (bvadd x (bvshl y 3)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (add.i32 (value.i32 y) (value.i32 y))))
+      (x64.lea_32 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvadd y y)) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 2)))
+      (x64.lea_32 (amode_index_scale y 2))
+      (spec (= (bvmul y 2) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 4)))
+      (x64.lea_32 (amode_index_scale y 4))
+      (spec (= (bvmul y 4) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 8)))
+      (x64.lea_32 (amode_index_scale y 8))
+      (spec (= (bvmul y 8) (result))))
+
+;; Negation and complement.
+
+(rule (lower (sub.i8 (iconst.i8 0) (value.i8 x)))
+      (x64.neg_r_8 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (sub.i16 (iconst.i16 0) (value.i16 x)))
+      (x64.neg_r_16 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (sub.i32 (iconst.i32 0) (value.i32 x)))
+      (x64.neg_r_32 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (iconst.i8 -1)))
+      (x64.not_r_8 x)
+      (spec (= (bvnot x) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (iconst.i16 -1)))
+      (x64.not_r_16 x)
+      (spec (= (bvnot x) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (iconst.i32 -1)))
+      (x64.not_r_32 x)
+      (spec (= (bvxor x -1) (result))))
+
+;; Division and remainder. A division at sixty four bits is a call to `__divdi3` and its
+;; relatives, which `crate::wide` writes before selection, so the widest one here is thirty two
+;; bits.
+
+(rule (lower (sdiv.i32 (value.i32 x) (value.i32 y)))
+      (x64.idiv_quo_32 x y)
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (srem.i32 (value.i32 x) (value.i32 y)))
+      (x64.idiv_rem_32 x y)
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (udiv.i32 (value.i32 x) (value.i32 y)))
+      (x64.div_quo_32 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (urem.i32 (value.i32 x) (value.i32 y)))
+      (x64.div_rem_32 x y)
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (udiv.i8 (value.i8 x) (value.i8 y)))
+      (x64.div_quo_8 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (udiv.i16 (value.i16 x) (value.i16 y)))
+      (x64.div_quo_16 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (urem.i8 (value.i8 x) (value.i8 y)))
+      (x64.div_rem_8 x y)
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (urem.i16 (value.i16 x) (value.i16 y)))
+      (x64.div_rem_16 x y)
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (sdiv.i8 (value.i8 x) (value.i8 y)))
+      (x64.idiv_quo_8 x y)
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (sdiv.i16 (value.i16 x) (value.i16 y)))
+      (x64.idiv_quo_16 x y)
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (srem.i8 (value.i8 x) (value.i8 y)))
+      (x64.idiv_rem_8 x y)
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (srem.i16 (value.i16 x) (value.i16 y)))
+      (x64.idiv_rem_16 x y)
+      (spec (= (bvsrem x y) (result))))
+
+;; Shifts by a constant, and by a register.
+
+(rule (lower (shl.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (x64.shl_ri_8 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (shl.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (x64.shl_ri_16 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (shl.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k 0) (< k 32)))
+      (x64.shl_ri_32 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (lshr.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (x64.shr_ri_8 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (lshr.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (x64.shr_ri_16 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k 0) (< k 32)))
+      (x64.shr_ri_32 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (ashr.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (x64.sar_ri_8 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (ashr.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (x64.sar_ri_16 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k 0) (< k 32)))
+      (x64.sar_ri_32 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (shl.i32 (value.i32 x) (value.i32 y)))
+      (x64.shl_rcl_32 x y)
+      (spec (= (bvshl x (bvand y 31)) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (value.i32 y)))
+      (x64.shr_rcl_32 x y)
+      (spec (= (bvlshr x (bvand y 31)) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (value.i32 y)))
+      (x64.sar_rcl_32 x y)
+      (spec (= (bvashr x (bvand y 31)) (result))))
+
+;; The choice between two values, and the comparisons: ten conditions at three widths against a
+;; register and against a constant.
+
+(rule (lower (select.i8 (value.i1 c) (value.i8 t) (value.i8 f)))
+      (x64.test_cmov_ne_8 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i16 (value.i1 c) (value.i16 t) (value.i16 f)))
+      (x64.test_cmov_ne_16 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i32 (value.i1 c) (value.i32 t) (value.i32 f)))
+      (x64.test_cmov_ne_32 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_e_8 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_e_16 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_e_32 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_ne_8 x y)
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_ne_16 x y)
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_ne_32 x y)
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_l_8 x y)
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_l_16 x y)
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_l_32 x y)
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_le_8 x y)
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_le_16 x y)
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_le_32 x y)
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_g_8 x y)
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_g_16 x y)
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_g_32 x y)
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_ge_8 x y)
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_ge_16 x y)
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_ge_32 x y)
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_b_8 x y)
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_b_16 x y)
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_b_32 x y)
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_be_8 x y)
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_be_16 x y)
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_be_32 x y)
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_a_8 x y)
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_a_16 x y)
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_a_32 x y)
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i8 x) (value.i8 y)))
+      (x64.cmp_set_ae_8 x y)
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i16 x) (value.i16 y)))
+      (x64.cmp_set_ae_16 x y)
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i32 x) (value.i32 y)))
+      (x64.cmp_set_ae_32 x y)
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_e_ri_8 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_e_ri_16 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_e_ri_32 x k)
+      (spec (= (ite (= x k) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_ne_ri_8 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_ne_ri_16 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_ne_ri_32 x k)
+      (spec (= (ite (not (= x k)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_l_ri_8 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_l_ri_16 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_l_ri_32 x k)
+      (spec (= (ite (bvslt x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_le_ri_8 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_le_ri_16 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_le_ri_32 x k)
+      (spec (= (ite (bvsle x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_g_ri_8 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_g_ri_16 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_g_ri_32 x k)
+      (spec (= (ite (bvsgt x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_ge_ri_8 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_ge_ri_16 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_ge_ri_32 x k)
+      (spec (= (ite (bvsge x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_b_ri_8 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_b_ri_16 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_b_ri_32 x k)
+      (spec (= (ite (bvult x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_be_ri_8 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_be_ri_16 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_be_ri_32 x k)
+      (spec (= (ite (bvule x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_a_ri_8 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_a_ri_16 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_a_ri_32 x k)
+      (spec (= (ite (bvugt x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i8 x) (iconst.i8 k)))
+      (x64.cmp_set_ae_ri_8 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i16 x) (iconst.i16 k)))
+      (x64.cmp_set_ae_ri_16 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i32 x) (iconst.i32 k)))
+      (x64.cmp_set_ae_ri_32 x k)
+      (spec (= (ite (bvuge x k) 1 0) (result))))
+
+;; Conversions between the widths this machine has. Anything to or from sixty four bits is a
+;; pair of registers by the time selection sees it.
+
+(rule (lower (sext.i8.i16 (value.i8 x)))
+      (x64.movsx_8_16 x)
+      (spec (= (sign_extend 8 16 x) (result))))
+
+(rule (lower (sext.i8.i32 (value.i8 x)))
+      (x64.movsx_8_32 x)
+      (spec (= (sign_extend 8 32 x) (result))))
+
+(rule (lower (sext.i16.i32 (value.i16 x)))
+      (x64.movsx_16_32 x)
+      (spec (= (sign_extend 16 32 x) (result))))
+
+(rule (lower (zext.i8.i16 (value.i8 x)))
+      (x64.movzx_8_16 x)
+      (spec (= (zero_extend 8 16 x) (result))))
+
+(rule (lower (zext.i8.i32 (value.i8 x)))
+      (x64.movzx_8_32 x)
+      (spec (= (zero_extend 8 32 x) (result))))
+
+(rule (lower (zext.i16.i32 (value.i16 x)))
+      (x64.movzx_16_32 x)
+      (spec (= (zero_extend 16 32 x) (result))))
+
+(rule (lower (zext.i1.i8 (value.i1 x)))
+      (x64.bit_to_8 x)
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (lower (zext.i1.i16 (value.i1 x)))
+      (x64.bit_to_16 x)
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (lower (zext.i1.i32 (value.i1 x)))
+      (x64.bit_to_32 x)
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (lower (trunc.i8.i1 (value.i8 x)))
+      (x64.bit_of_8 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i16.i1 (value.i16 x)))
+      (x64.bit_of_16 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i32.i1 (value.i32 x)))
+      (x64.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i16.i8 (value.i16 x)))
+      (x64.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i32.i8 (value.i32 x)))
+      (x64.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i32.i16 (value.i32 x)))
+      (x64.low_16 x)
+      (spec (= (extract 15 0 x) (result))))
+
+;; Reading memory. An address is thirty two bits, so the pattern for one is `(value.i32 a)`, and
+;; a constant added to it is always one the displacement holds, which is why these have no guard
+;; where x86-64's do.
+
+(rule (lower (load.i8 (value.i32 a)))
+      (x64.mov_rm_8 (amode_base a))
+      (spec (= (select (mem) a) (result))))
+
+(rule (lower (load.i1 (value.i32 a)))
+      (x64.mov_rm_bit (amode_base a))
+      (spec (= (extract 0 0 (select (mem) a)) (result))))
+
+(rule (lower (load.i16 (value.i32 a)))
+      (x64.mov_rm_16 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
+
+(rule (lower (load.i32 (value.i32 a)))
+      (x64.mov_rm_32 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a))
+               (result))))
+
+(rule (lower (load.i8 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_rm_8 (amode_base_offset a k))
+      (spec (= (select (mem) (bvadd a k)) (result))))
+
+(rule (lower (load.i1 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_rm_bit (amode_base_offset a k))
+      (spec (= (extract 0 0 (select (mem) (bvadd a k))) (result))))
+
+(rule (lower (load.i16 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_rm_16 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
+               (result))))
+
+(rule (lower (load.i32 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_rm_32 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))
+               (result))))
+
+;; Writing memory, with the value first and the address second the way the IR holds them.
+
+(rule (lower (store.i8 (value.i8 v) (value.i32 a)))
+      (x64.mov_mr_8 (amode_base a) v)
+      (spec (= (store (mem) a v) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (value.i32 a)))
+      (x64.mov_mr_bit (amode_base a) v)
+      (spec (= (store (mem) a (zero_extend 1 8 v)) (result))))
+
+(rule (lower (store.i16 (value.i16 v) (value.i32 a)))
+      (x64.mov_mr_16 (amode_base a) v)
+      (spec (= (store (store (mem) a (extract 7 0 v))
+                      (bvadd a 1) (extract 15 8 v))
+               (result))))
+
+(rule (lower (store.i32 (value.i32 v) (value.i32 a)))
+      (x64.mov_mr_32 (amode_base a) v)
+      (spec (= (store (store (store (store (mem) a (extract 7 0 v))
+                                    (bvadd a 1) (extract 15 8 v))
+                             (bvadd a 2) (extract 23 16 v))
+                      (bvadd a 3) (extract 31 24 v))
+               (result))))
+
+(rule (lower (store.i8 (value.i8 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mr_8 (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) v) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mr_bit (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 v)) (result))))
+
+(rule (lower (store.i16 (value.i16 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mr_16 (amode_base_offset a k) v)
+      (spec (= (store (store (mem) (bvadd a k) (extract 7 0 v))
+                      (bvadd (bvadd a k) 1) (extract 15 8 v))
+               (result))))
+
+(rule (lower (store.i32 (value.i32 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mr_32 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (mem) (bvadd a k) (extract 7 0 v))
+                                    (bvadd (bvadd a k) 1) (extract 15 8 v))
+                             (bvadd (bvadd a k) 2) (extract 23 16 v))
+                      (bvadd (bvadd a k) 3) (extract 31 24 v))
+               (result))))
+
+;; Giving a value back. Where it goes is the convention's business rather than this file's, so
+;; the head is the pseudo instruction x86-64 uses and the call lowering decides the register.
+
+(rule (lower (ret.i8 (value.i8 v)))
+      (x64.ret_val_8 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i1 (value.i1 v)))
+      (x64.ret_val_8 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i16 (value.i16 v)))
+      (x64.ret_val_16 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i32 (value.i32 v)))
+      (x64.ret_val_32 v)
+      (spec (= v (result))))
+
+;; Branching.
+
+(rule (lower (brif.i1 (value.i1 c)))
+      (x64.br_cond_8 c)
+      (spec (= c (result))))
+
+;; Floats, in the vector registers, which is where SSE2 does its arithmetic. What a float
+;; argument or result is in the cdecl convention is the call lowering's to say.
+
+(rule (lower (fadd.f32 (value.f32 x) (value.f32 y)))
+      (x64.addss_rr x y)
+      (spec (= (fp.add x y) (result))))
+
+(rule (lower (fadd.f64 (value.f64 x) (value.f64 y)))
+      (x64.addsd_rr x y)
+      (spec (= (fp.add x y) (result))))
+
+(rule (lower (fsub.f32 (value.f32 x) (value.f32 y)))
+      (x64.subss_rr x y)
+      (spec (= (fp.sub x y) (result))))
+
+(rule (lower (fsub.f64 (value.f64 x) (value.f64 y)))
+      (x64.subsd_rr x y)
+      (spec (= (fp.sub x y) (result))))
+
+(rule (lower (fmul.f32 (value.f32 x) (value.f32 y)))
+      (x64.mulss_rr x y)
+      (spec (= (fp.mul x y) (result))))
+
+(rule (lower (fmul.f64 (value.f64 x) (value.f64 y)))
+      (x64.mulsd_rr x y)
+      (spec (= (fp.mul x y) (result))))
+
+(rule (lower (fdiv.f32 (value.f32 x) (value.f32 y)))
+      (x64.divss_rr x y)
+      (spec (= (fp.div x y) (result))))
+
+(rule (lower (fdiv.f64 (value.f64 x) (value.f64 y)))
+      (x64.divsd_rr x y)
+      (spec (= (fp.div x y) (result))))
+
+(rule (lower (ret.f16 (value.f16 v)))
+      (x64.ret_val_f16 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f32 (value.f32 v)))
+      (x64.ret_val_f32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f64 (value.f64 v)))
+      (x64.ret_val_f64 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f128 (value.f128 v)))
+      (x64.ret_val_f128 v)
+      (spec (= v (result))))
+
+;; Reading a float out of memory and writing one back, at a thirty two bit address.
+
+(rule (lower (load.f32 (value.i32 a)))
+      (x64.movss_rm (amode_base a))
+      (spec (= (float_from_bits 32
+                       (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f64 (value.i32 a)))
+      (x64.movsd_rm (amode_base a))
+      (spec (= (float_from_bits 64
+                       (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                               (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                               (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f32 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.movss_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 32
+                       (concat (select (mem) (bvadd (bvadd a k) 3))
+                               (select (mem) (bvadd (bvadd a k) 2))
+                               (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
+
+(rule (lower (load.f64 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.movsd_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 64
+                       (concat (select (mem) (bvadd (bvadd a k) 7))
+                               (select (mem) (bvadd (bvadd a k) 6))
+                               (select (mem) (bvadd (bvadd a k) 5))
+                               (select (mem) (bvadd (bvadd a k) 4))
+                               (select (mem) (bvadd (bvadd a k) 3))
+                               (select (mem) (bvadd (bvadd a k) 2))
+                               (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
+
+(rule (lower (store.f32 (value.f32 v) (value.i32 a)))
+      (x64.movss_mr (amode_base a) v)
+      (spec (= (store (store (store (store (mem)
+                             a (extract 7 0 (bits_from_float 32 v)))
+                             (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                             (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                             (bvadd a 3) (extract 31 24 (bits_from_float 32 v)))
+               (result))))
+
+(rule (lower (store.f64 (value.f64 v) (value.i32 a)))
+      (x64.movsd_mr (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                             a (extract 7 0 (bits_from_float 64 v)))
+                             (bvadd a 1) (extract 15 8 (bits_from_float 64 v)))
+                             (bvadd a 2) (extract 23 16 (bits_from_float 64 v)))
+                             (bvadd a 3) (extract 31 24 (bits_from_float 64 v)))
+                             (bvadd a 4) (extract 39 32 (bits_from_float 64 v)))
+                             (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
+                             (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
+                             (bvadd a 7) (extract 63 56 (bits_from_float 64 v)))
+               (result))))
+
+(rule (lower (store.f32 (value.f32 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.movss_mr (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (mem)
+                             (bvadd a k) (extract 7 0 (bits_from_float 32 v)))
+                             (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 32 v)))
+                             (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 32 v)))
+                             (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 32 v)))
+               (result))))
+
+(rule (lower (store.f64 (value.f64 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.movsd_mr (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                             (bvadd a k) (extract 7 0 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 4) (extract 39 32 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 5) (extract 47 40 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 64 v)))
+                             (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 64 v)))
+               (result))))
+
+(rule (lower (load.f16 (value.i32 a)))
+      (x64.pinsrw_rm (amode_base a))
+      (spec (= (float_from_bits 16
+                       (concat (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f16 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.pinsrw_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 16
+                       (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
+
+(rule (lower (load.f128 (value.i32 a)))
+      (x64.movaps_rm (amode_base a))
+      (spec (= (float_from_bits 128
+                       (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
+                               (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
+                               (select (mem) (bvadd a 11)) (select (mem) (bvadd a 10))
+                               (select (mem) (bvadd a 9)) (select (mem) (bvadd a 8))
+                               (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                               (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                               (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                               (select (mem) (bvadd a 1)) (select (mem) a)))
+               (result))))
+
+(rule (lower (load.f128 (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.movaps_rm (amode_base_offset a k))
+      (spec (= (float_from_bits 128
+                       (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
+                               (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
+                               (select (mem) (bvadd (bvadd a k) 11)) (select (mem) (bvadd (bvadd a k) 10))
+                               (select (mem) (bvadd (bvadd a k) 9)) (select (mem) (bvadd (bvadd a k) 8))
+                               (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
+                               (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
+                               (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                               (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))))
+               (result))))
+
+(rule (lower (store.f128 (value.f128 v) (value.i32 a)))
+      (x64.movaps_mr (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                             a (extract 7 0 (bits_from_float 128 v)))
+                             (bvadd a 1) (extract 15 8 (bits_from_float 128 v)))
+                             (bvadd a 2) (extract 23 16 (bits_from_float 128 v)))
+                             (bvadd a 3) (extract 31 24 (bits_from_float 128 v)))
+                             (bvadd a 4) (extract 39 32 (bits_from_float 128 v)))
+                             (bvadd a 5) (extract 47 40 (bits_from_float 128 v)))
+                             (bvadd a 6) (extract 55 48 (bits_from_float 128 v)))
+                             (bvadd a 7) (extract 63 56 (bits_from_float 128 v)))
+                             (bvadd a 8) (extract 71 64 (bits_from_float 128 v)))
+                             (bvadd a 9) (extract 79 72 (bits_from_float 128 v)))
+                             (bvadd a 10) (extract 87 80 (bits_from_float 128 v)))
+                             (bvadd a 11) (extract 95 88 (bits_from_float 128 v)))
+                             (bvadd a 12) (extract 103 96 (bits_from_float 128 v)))
+                             (bvadd a 13) (extract 111 104 (bits_from_float 128 v)))
+                             (bvadd a 14) (extract 119 112 (bits_from_float 128 v)))
+                             (bvadd a 15) (extract 127 120 (bits_from_float 128 v)))
+               (result))))
+
+(rule (lower (store.f128 (value.f128 v) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.movaps_mr (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
+                             (bvadd a k) (extract 7 0 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 4) (extract 39 32 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 5) (extract 47 40 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 8) (extract 71 64 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 9) (extract 79 72 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 10) (extract 87 80 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 11) (extract 95 88 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 12) (extract 103 96 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 13) (extract 111 104 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 14) (extract 119 112 (bits_from_float 128 v)))
+                             (bvadd (bvadd a k) 15) (extract 127 120 (bits_from_float 128 v)))
+               (result))))
+
+;; Conversions between floats, and between a float and an integer of thirty two bits. The ones
+;; to and from sixty four bits call the runtime.
+
+(rule (lower (fpext.f32.f64 (value.f32 x)))
+      (x64.cvtss2sd x)
+      (spec (= (float_from_float 32 64 x) (result))))
+
+(rule (lower (fptrunc.f64.f32 (value.f64 x)))
+      (x64.cvtsd2ss x)
+      (spec (= (float_from_float 64 32 x) (result))))
+
+(rule (lower (fptosi.f32.i32 (value.f32 x)))
+      (x64.cvttss2si_32 x)
+      (spec (= (signed_from_float 32 32 x) (result))))
+
+(rule (lower (fptosi.f64.i32 (value.f64 x)))
+      (x64.cvttsd2si_32 x)
+      (spec (= (signed_from_float 64 32 x) (result))))
+
+(rule (lower (sitofp.i32.f32 (value.i32 x)))
+      (x64.cvtsi2ss_32 x)
+      (spec (= (float_from_signed 32 32 x) (result))))
+
+(rule (lower (sitofp.i32.f64 (value.i32 x)))
+      (x64.cvtsi2sd_32 x)
+      (spec (= (float_from_signed 32 64 x) (result))))
+
+;; Moving a register from one file to the other.
+
+(rule (lower (bitcast.i32.f32 (value.i32 x)))
+      (x64.movd_to_xmm x)
+      (spec (= (float_from_bits 32 x) (result))))
+
+(rule (lower (bitcast.f32.i32 (value.f32 x)))
+      (x64.movd_from_xmm x)
+      (spec (= (bits_from_float 32 x) (result))))
+
+(rule (lower (bitcast.i16.f16 (value.i16 x)))
+      (x64.pinsrw_rr x)
+      (spec (= (float_from_bits 16 x) (result))))
+
+(rule (lower (bitcast.f16.i16 (value.f16 x)))
+      (x64.pextrw_rr x)
+      (spec (= (bits_from_float 16 x) (result))))
+
+;; Comparing two floats.
+
+(rule (lower (fcmp_ogt.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_a x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ae x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_a y x)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ae y x)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_one.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ne x y)
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_np x y)
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_p x y)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_e x y)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_b x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_be x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_b y x)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_be y x)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_e_and_np x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f32.i1 (value.f32 x) (value.f32 y)))
+      (x64.ucomiss_set_ne_or_p x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ogt.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_a x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ae x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_a y x)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ae y x)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_one.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ne x y)
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_np x y)
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_p x y)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_e x y)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_b x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_be x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_b y x)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_be y x)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_e_and_np x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f64.i1 (value.f64 x) (value.f64 y)))
+      (x64.ucomisd_set_ne_or_p x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
