@@ -157,6 +157,7 @@ pub mod range;
 pub mod readonly;
 pub mod reload;
 pub mod rules;
+pub mod sccp;
 pub mod scev;
 pub mod short_circuit;
 pub mod simplify;

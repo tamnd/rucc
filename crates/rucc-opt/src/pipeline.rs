@@ -278,6 +278,7 @@ const O1: &[&str] = &[
     "sroa",
     "fold",
     "simplify",
+    "sccp",
     "narrow",
     "simplify",
     "short-circuit-free",
@@ -363,6 +364,7 @@ const O2: &[&str] = &[
     "sroa",
     "fold",
     "simplify",
+    "sccp",
     "narrow",
     "simplify",
     "switch-conv",
@@ -410,6 +412,7 @@ const O3: &[&str] = &[
     "sroa",
     "fold",
     "simplify",
+    "sccp",
     "narrow",
     "simplify",
     "switch-conv",
@@ -482,6 +485,7 @@ const OS: &[&str] = &[
     "sroa",
     "fold",
     "simplify",
+    "sccp",
     "narrow",
     "simplify",
     "switch-conv",
@@ -521,6 +525,7 @@ const OZ: &[&str] = &[
     "sroa",
     "fold",
     "simplify",
+    "sccp",
     "narrow",
     "simplify",
     "switch-conv",
@@ -1688,6 +1693,9 @@ mod tests {
         let (mut names, mut module) = two_functions();
         let mut opts = Options::for_level(OptLevel::O2);
         opts.gates.add(false, "fold=g").expect("g is a function and fold is a pass");
+        // `sccp` knows a sign extension of a constant too, and would do the work of the pass gated
+        // off, so it gets no fuel and what is left to compare is `fold` alone.
+        opts.fuel.insert("sccp".to_owned(), 0);
         let report = super::run(&mut module, &mut names, &opts);
         assert!(spoke_about(&report, "fold", "f", &names));
         assert!(!spoke_about(&report, "fold", "g", &names), "fold ran where it was gated off");
@@ -1748,7 +1756,7 @@ mod tests {
         // the count at the bottom would then be counting repeats rather than what it is asking.
         opts.gates.add(false, "narrow=2-4").expect("narrow is a pass");
         let text = super::print(&opts);
-        assert!(text.contains("7: narrow, "), "{text}");
+        assert!(text.contains("8: narrow, "), "{text}");
         assert!(text.contains("[off for 2-4]"), "{text}");
         assert_eq!(text.matches('[').count(), 1, "a pass no gate mentions says nothing extra");
     }
@@ -1801,6 +1809,7 @@ mod tests {
         }
         let mut opts = Options::for_level(OptLevel::O2);
         opts.fuel.insert("fold".to_owned(), 1);
+        opts.fuel.insert("sccp".to_owned(), 0);
         let report = super::run(&mut module, &mut names, &opts);
         // One fold across both functions, because fuel is per pass and per compilation. Dead
         // code elimination has its own and spends it on the constant the one fold orphaned.
@@ -1888,6 +1897,7 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.global_fuel = Some(9);
         opts.fuel.insert("fold".to_owned(), 0);
+        opts.fuel.insert("sccp".to_owned(), 0);
         let report = super::run(&mut over, &mut names, &opts);
         assert_eq!(spent(&report, "fold"), Some(0));
         assert_eq!(spent(&report, "dce"), Some(0), "nothing was orphaned for it to remove");
