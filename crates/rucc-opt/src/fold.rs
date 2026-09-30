@@ -31,10 +31,12 @@
 //!
 //! # What it does not fold
 //!
-//! Not the divides and the remainders. Both have two cases the language leaves undefined, a zero
-//! divisor and the most negative value divided by minus one, and both want guarding rather than
-//! evaluating. They belong with the strength reduction that turns a division by a constant into
-//! a multiply, which is where somebody looking for division arithmetic will look.
+//! Not a divide or a remainder in either of the two cases the language leaves undefined, a zero
+//! divisor and the most negative value divided by minus one. Those are left for the machine to
+//! trap on, as they would have been. Every other divide of two constants is folded, and has to be:
+//! `sizeof (a) / sizeof (a[0])` is a division the lowering writes as one, and the kernel's
+//! `BUILD_BUG_ON (i >= ARRAY_SIZE (table))` is a call to a function declared `error` that is only
+//! gone once that division is a number the comparison can be decided against.
 //!
 //! Not floating point arithmetic. Folding it means deciding what rounding mode to fold under and
 //! what to do about a signalling NaN, and `rucc_base::float` has the arithmetic but the decision
@@ -227,6 +229,11 @@ fn arithmetic(
             let (lhs, lhs_ty) = operand(*args.first()?)?;
             let (rhs, _) = operand(*args.get(1)?)?;
             binary(data.opcode, lhs, rhs, lhs_ty, ty, data.flags)
+        }
+        Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem => {
+            let (lhs, from) = operand(*args.first()?)?;
+            let (rhs, _) = operand(*args.get(1)?)?;
+            divide(data.opcode, lhs, rhs, from, ty)
         }
         Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop | Opcode::Bswap | Opcode::Bitreverse => {
             let (value, from) = operand(*args.first()?)?;
@@ -446,6 +453,29 @@ fn binary(opcode: Opcode, lhs: Imm, rhs: Imm, from: Type, to: Type, flags: Flags
         return None;
     }
     Some(Imm::int(exact, to))
+}
+
+/// What a divide or a remainder of two constants comes out as, or nothing for the two cases that
+/// are undefined. See the module documentation.
+fn divide(opcode: Opcode, lhs: Imm, rhs: Imm, from: Type, to: Type) -> Option<Imm> {
+    if rhs.unsigned() == 0 {
+        return None;
+    }
+    let answer = match opcode {
+        // An unsigned answer is no wider than the dividend, so it fits the type it came from and
+        // the cast only moves the bits across. [`Imm::int`] keeps the ones the type has.
+        Opcode::UDiv => (lhs.unsigned() / rhs.unsigned()) as i128,
+        Opcode::URem => (lhs.unsigned() % rhs.unsigned()) as i128,
+        _ => {
+            let (a, b) = (lhs.signed(from), rhs.signed(from));
+            let least = if from.bits() >= 128 { i128::MIN } else { -(1i128 << (from.bits() - 1)) };
+            if b == -1 && a == least {
+                return None;
+            }
+            if opcode == Opcode::SDiv { a / b } else { a % b }
+        }
+    };
+    Some(Imm::int(answer, to))
 }
 
 /// What a comparison of two constants comes out as.
@@ -1045,12 +1075,39 @@ mod tests {
     }
 
     #[test]
-    fn a_divide_is_not_folded_even_when_both_operands_are_constants() {
-        for opcode in [Opcode::SDiv, Opcode::UDiv, Opcode::SRem, Opcode::URem] {
+    fn a_divide_of_two_constants_is_folded() {
+        for (opcode, lhs, rhs, expected) in [
+            (Opcode::UDiv, 84, 12, 7),
+            (Opcode::URem, 85, 12, 1),
+            (Opcode::SDiv, -42, 5, -8),
+            (Opcode::SRem, -42, 5, -2),
+            (Opcode::UDiv, -1, 2, i128::from(u32::MAX / 2)),
+        ] {
             let (_, mut func, block) = blank();
             let mut build = Builder::new(&mut func, block);
-            let lhs = build.iconst(Type::int(64), 42);
-            let rhs = build.iconst(Type::int(64), 7);
+            let lhs = build.iconst(Type::int(32), lhs);
+            let rhs = build.iconst(Type::int(32), rhs);
+            let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+            build.ret(&[out]);
+            assert!(fold(&mut func), "{opcode:?}");
+            assert_eq!(value_of(&func, out, Type::int(32)), Some(expected), "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn a_divide_the_language_leaves_undefined_is_left_for_the_machine() {
+        for (opcode, lhs, rhs) in [
+            (Opcode::SDiv, 42, 0),
+            (Opcode::UDiv, 42, 0),
+            (Opcode::SRem, 42, 0),
+            (Opcode::URem, 42, 0),
+            (Opcode::SDiv, i128::from(i32::MIN), -1),
+            (Opcode::SRem, i128::from(i32::MIN), -1),
+        ] {
+            let (_, mut func, block) = blank();
+            let mut build = Builder::new(&mut func, block);
+            let lhs = build.iconst(Type::int(32), lhs);
+            let rhs = build.iconst(Type::int(32), rhs);
             let out = build.binary(opcode, lhs, rhs, Flags::NONE);
             build.ret(&[out]);
             assert!(!fold(&mut func), "{opcode:?}");

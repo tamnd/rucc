@@ -133,6 +133,15 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// before the pipeline rather than inside it is the alternative that does not work, and
 /// `crate::image` says at length why.
 ///
+/// It runs a second time after the `fold` that follows `constant-p`, with a `fold` of its own
+/// behind it, because an offset is not always a constant by the time of the first run. An index
+/// that comes out of a `switch` in an inline function, or out of a parameter an inline function
+/// reassigned, is a block parameter until `sccp`, the threading and `number` have between them
+/// seen that only one value reaches it. The kernel's KVM code is made of those:
+/// `reverse_cpuid[x86_leaf].function` is read in a `BUILD_BUG_ON`, the leaf comes out of the
+/// `switch` in `__feature_translate`, and the call to the function declared `error` is only gone
+/// once the load is a number.
+///
 /// The peephole runs on both sides of `narrow`, which is the one place in this list where a pass
 /// is named twice, so the reason is worth stating. The rewrite table is written at a width, and
 /// the widths below `int` are unreachable from C source: the integer promotions mean an addition
@@ -295,6 +304,8 @@ const O1: &[&str] = &[
     "load-forward",
     "constant-p",
     "fold",
+    "image",
+    "fold",
     "simplify",
     "simplify-cfg",
     "hoist",
@@ -387,6 +398,8 @@ const O2: &[&str] = &[
     "dse",
     "constant-p",
     "fold",
+    "image",
+    "fold",
     "simplify",
     "phiopt",
     "hoist",
@@ -435,6 +448,8 @@ const O3: &[&str] = &[
     "redundant-load",
     "dse",
     "constant-p",
+    "fold",
+    "image",
     "fold",
     "simplify",
     "phiopt",
@@ -504,6 +519,8 @@ const OS: &[&str] = &[
     "dse",
     "constant-p",
     "fold",
+    "image",
+    "fold",
     "simplify",
     "simplify-cfg",
     "discharge",
@@ -542,6 +559,8 @@ const OZ: &[&str] = &[
     "load-forward",
     "dse",
     "constant-p",
+    "fold",
+    "image",
     "fold",
     "simplify",
     "simplify-cfg",
@@ -1925,11 +1944,11 @@ mod tests {
         let mut opts = Options::for_level(OptLevel::O2);
         opts.dumps.add("after-fold").expect("a pass that exists");
         let report = super::run(&mut module, &mut names, &opts);
-        // The level folds four times, twice at the top on either side of `image`, once in front
-        // of the second `sroa` and once after the loop pipeline, and what a dump request names is
-        // a pass rather than a position, so every run is written out. The side is what this is
-        // about: not one of the four is a `before`.
-        assert_eq!(report.dumps.len(), 4, "every run of the pass, one dump each");
+        // The level folds five times, twice at the top on either side of `image`, once in front
+        // of the second `sroa`, once after the loop pipeline and once after the late `image`, and
+        // what a dump request names is a pass rather than a position, so every run is written
+        // out. The side is what this is about: not one of the five is a `before`.
+        assert_eq!(report.dumps.len(), 5, "every run of the pass, one dump each");
         assert!(
             report.dumps.iter().all(|dump| dump.name.ends_with("-after-fold")),
             "{:?}",
