@@ -41,6 +41,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Instruction selection hands the rule matcher one pair of stacks for every plan it tries on an instruction, rather than making a new pair per plan (#2337).
 - About fifty passes stop collecting each block's instructions into a vector of its own on the way to collecting the whole function's (#2349).
 - Scalar replacement keeps a list of the readers of each value and looks only at those, where before it walked the whole function for every local it planned and again for every local it rewrote. An optimized build of jtckdint goes from 243G instructions back down to 52G (#2360).
+- The register allocator's rewrite stops copying the moves in front of an instruction that borrowed no scratch register, and collects the function's instructions once rather than once a block (#2364).
 
 ### Fixed
 

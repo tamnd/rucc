@@ -99,11 +99,11 @@ pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<E
 
     let mut edits = Vec::new();
     let mut spare = Spare::default();
-    for &block in &blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
-            instruction(func, assignment, env, &mut spare, inst, &mut edits);
-        }
+    // Collected once for the whole function rather than once a block, since rewriting an
+    // instruction needs the function and the walk over the blocks would be borrowing it.
+    let insts: Vec<Inst> = blocks.iter().flat_map(|&block| func.insts(block)).collect();
+    for inst in insts {
+        instruction(func, assignment, env, &mut spare, inst, &mut edits);
     }
 
     let preds = preds(func, &blocks);
