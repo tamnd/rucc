@@ -40,9 +40,8 @@
 //! through. That is the same restraint every other check made with a recovered capability shows, and
 //! the boxes of tamnd/rucc#1241 that are still open are what move pointers out of that group.
 
-use std::collections::HashSet;
-
 use rucc_base::Interner;
+use rucc_base::hash::Set;
 use rucc_ir::{Extra, Func, FuncId, Inst, InstData, Module, Opcode, Value};
 
 use crate::origin;
@@ -72,7 +71,7 @@ const ENDS: &[(&str, usize)] = &[("free", 0), ("realloc", 0), ("reallocf", 0)];
 /// believes the library name and the other does not is a build with an inconsistent idea of what its
 /// own allocator is.
 pub fn checks(module: &mut Module, names: &Interner) -> usize {
-    let defined: HashSet<&str> = module
+    let defined: Set<&str> = module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
         .map(|id| names.resolve(module[id].name))
@@ -100,7 +99,7 @@ pub fn checks(module: &mut Module, names: &Interner) -> usize {
 /// because this pass put a check in front of a free. Seeding [`origin::Origins`] with it is what
 /// makes a free of a pointer some access already asked about read that access's answer rather than a
 /// second walk of the plane over the same object.
-fn one(func: &mut Func, names: &Interner, defined: &HashSet<&str>) -> usize {
+fn one(func: &mut Func, names: &Interner, defined: &Set<&str>) -> usize {
     let ending: Vec<(Inst, Value)> = func
         .blocks()
         .flat_map(|block| func.insts(block).collect::<Vec<Inst>>())
@@ -135,7 +134,7 @@ fn one(func: &mut Func, names: &Interner, defined: &HashSet<&str>) -> usize {
 /// look up, and a tail call is not a shape this pass meets: it is the optimizer that makes one and
 /// this runs before the optimizer. A tail call the optimizer makes out of a call that has already
 /// been given a check keeps the check, since the check is the instruction in front of it.
-fn handed(func: &Func, names: &Interner, defined: &HashSet<&str>, inst: Inst) -> Option<Value> {
+fn handed(func: &Func, names: &Interner, defined: &Set<&str>, inst: Inst) -> Option<Value> {
     if func[inst].opcode != Opcode::Call {
         return None;
     }

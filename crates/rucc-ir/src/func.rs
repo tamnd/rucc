@@ -26,9 +26,9 @@
 //! the useful question is whether it still does when the pass that was building it says it has
 //! finished.
 
-use std::collections::{HashMap, HashSet};
 use std::ops::{Index, IndexMut};
 
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Symbol};
 use rucc_diag::Span;
 use rucc_target::{Isa, Slot};
@@ -137,10 +137,10 @@ pub struct Func {
     value_starts: Vec<(Value, Start)>,
     /// The instructions some start in [`Func::value_starts`] is after, so that taking one out only
     /// has to remember where it was when it is one of them.
-    anchors: HashSet<Inst>,
+    anchors: Set<Inst>,
     /// The starts [`Func::remove_inst`] made out of the names on an instruction's results, by the
     /// instruction, so that putting the instruction back somewhere turns them back into names.
-    unplaced: HashMap<Inst, Vec<(Value, Start)>>,
+    unplaced: Map<Inst, Vec<(Value, Start)>>,
     /// How many of a call's arguments each C argument became, for the calls the lowering says.
     ///
     /// Not part of the IR's text and not something the verifier reads. It is there for one
@@ -148,10 +148,10 @@ pub struct Func {
     /// `always_inline` function into a call inside it and has to know which values were one
     /// structure, since the ABI puts all of a structure in registers or none of it. A module read
     /// back from text has none of these, and the inliner forwards less for it.
-    arg_groups: HashMap<Inst, Vec<u32>>,
+    arg_groups: Map<Inst, Vec<u32>>,
     /// Where each instruction some start is after was when a pass took it out, as the block and
     /// the instruction in front of it. See [`Func::start_place`].
-    gone: HashMap<Inst, (Block, Option<Inst>)>,
+    gone: Map<Inst, (Block, Option<Inst>)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -199,10 +199,10 @@ impl Func {
             mem_decls: Vec::new(),
             value_decls: Vec::new(),
             value_starts: Vec::new(),
-            anchors: HashSet::new(),
-            unplaced: HashMap::new(),
-            arg_groups: HashMap::new(),
-            gone: HashMap::new(),
+            anchors: Set::default(),
+            unplaced: Map::default(),
+            arg_groups: Map::default(),
+            gone: Map::default(),
             first_block: None,
             last_block: None,
         }

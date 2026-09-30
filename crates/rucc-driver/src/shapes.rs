@@ -53,8 +53,7 @@
 //! them says `size_type`. A record member is the same, from a list the type table keeps beside
 //! the records rather than from the tree, since a member is not a declaration there.
 
-use std::collections::{HashMap, HashSet};
-
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::{SourceMap, Span};
@@ -74,13 +73,13 @@ pub(crate) struct Meaning {
     /// Keyed by name rather than paired up by position, because what the back end ends up
     /// emitting is decided after this runs: a `static` function nothing calls is dropped, and the
     /// order the text section comes out in is not the order of the source.
-    pub funcs: HashMap<String, Known>,
+    pub funcs: Map<String, Known>,
     /// What is known about each file-scope variable, by the name it will have in the object file.
     ///
     /// Keyed by name for the same reason the functions are, and read the same way: the back end
     /// hands over the objects it actually laid out and each of them is looked up here. A `static`
     /// nothing reads is not among them and so is never asked for.
-    pub objects: HashMap<String, Held>,
+    pub objects: Map<String, Held>,
     /// What is known about each local the program declared, by the number the declaration has.
     ///
     /// Keyed by the number rather than by a name, because a name is not unique in a unit and is not
@@ -91,7 +90,7 @@ pub(crate) struct Meaning {
     /// Every declaration in the unit, whether or not the local it names ended up with a slot and
     /// whether or not the function it is in was emitted. Which of them get an entry is decided by
     /// the back end handing over the ones the frame placed, and the rest are never asked for.
-    pub locals: HashMap<u32, Named>,
+    pub locals: Map<u32, Named>,
     /// Every scope any local in the unit was declared in, each after the scope it is written inside.
     ///
     /// One table over the whole unit rather than one per function, because a local is looked up by
@@ -202,12 +201,12 @@ pub(crate) fn collect(
         target,
         names,
         out: Vec::new(),
-        memo: HashMap::new(),
-        tags: HashMap::new(),
-        spellings: HashMap::new(),
+        memo: Map::default(),
+        tags: Map::default(),
+        spellings: Map::default(),
         written: types.aliases().iter().map(|alias| (alias.name, alias.of)).collect(),
-        aliases: HashMap::new(),
-        through: HashMap::new(),
+        aliases: Map::default(),
+        through: Map::default(),
         members: types
             .member_spellings()
             .iter()
@@ -219,8 +218,8 @@ pub(crate) fn collect(
     for &(decl, name, of) in tast.spellings() {
         walk.spellings.entry(decl).or_insert((name, of));
     }
-    let mut funcs = HashMap::new();
-    let mut objects = HashMap::new();
+    let mut funcs = Map::default();
+    let mut objects = Map::default();
     for &id in tast.top_level() {
         let decl = &tast[id];
         let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
@@ -279,7 +278,7 @@ pub(crate) fn collect(
     // a declaration says nothing about the block it was written in, so the bodies are walked first
     // and what comes back is a lookup from a declaration to a scope.
     let nests = nesting(tast);
-    let mut locals = HashMap::new();
+    let mut locals = Map::default();
     for raw in 0..u32::try_from(tast.counts().decls).unwrap_or(u32::MAX) {
         let id = DeclId::new(raw);
         let decl = &tast[id];
@@ -315,7 +314,7 @@ pub(crate) fn collect(
 /// body, which is what C 6.8.5p5 says and is what stops the `i` of two loops in a row from being one
 /// name declared twice in the same place.
 fn nesting(tast: &Tast) -> Nests<'_> {
-    let mut nests = Nests { tast, out: Vec::new(), which: HashMap::new() };
+    let mut nests = Nests { tast, out: Vec::new(), which: Map::default() };
     for &id in tast.top_level() {
         let decl = &tast[id];
         if decl.kind != DeclKind::Function {
@@ -338,7 +337,7 @@ struct Nests<'a> {
     tast: &'a Tast,
     out: Vec<Scope>,
     /// Which scope each declaration is in, by the number the declaration has.
-    which: HashMap<u32, usize>,
+    which: Map<u32, usize>,
 }
 
 impl Nests<'_> {
@@ -424,7 +423,7 @@ struct Walk<'a> {
     /// qualifier chain are shared too: the `volatile int` inside `const volatile int` is a type
     /// with no identifier of its own unless the program also wrote it, and either way it is one
     /// entry.
-    memo: HashMap<Type, Option<usize>>,
+    memo: Map<Type, Option<usize>>,
     /// Which entry each record went in.
     ///
     /// Records are memoized a second way, by the declaration rather than by the type, and this is
@@ -432,23 +431,23 @@ struct Walk<'a> {
     /// to be the declaration because the pointer inside may be to a qualified version of it, which
     /// is a different type and the same record, and writing the members twice is what keying on
     /// the type alone would do.
-    tags: HashMap<RecordId, usize>,
+    tags: Map<RecordId, usize>,
     /// The typedef name each declaration named its type with, for the ones that did, and the type
     /// the name stood for.
-    spellings: HashMap<DeclId, (Symbol, TypeId)>,
+    spellings: Map<DeclId, (Symbol, TypeId)>,
     /// Every typedef name written at file scope and the type it stands for, which are the only
     /// names a declaration can point at, since those are the only ones that get an entry.
-    written: HashSet<(Symbol, TypeId)>,
+    written: Set<(Symbol, TypeId)>,
     /// Which entry each typedef name went in, once it has one.
-    aliases: HashMap<(Symbol, TypeId), Option<usize>>,
+    aliases: Map<(Symbol, TypeId), Option<usize>>,
     /// What each type built over a typedef name came out as, which is [`Walk::memo`] for the
     /// types a declaration reached through a name. The two cannot share a table, since one type
     /// is two entries: `size_type *` and `unsigned long *` are the same type and a debugger prints
     /// them differently.
-    through: HashMap<(Type, Symbol, TypeId), Option<usize>>,
+    through: Map<(Type, Symbol, TypeId), Option<usize>>,
     /// The typedef name each record member named its type with, for the ones that did, keyed by
     /// the record and the member's name.
-    members: HashMap<(RecordId, Symbol), (Symbol, TypeId)>,
+    members: Map<(RecordId, Symbol), (Symbol, TypeId)>,
 }
 
 impl Walk<'_> {

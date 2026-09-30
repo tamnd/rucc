@@ -16,8 +16,6 @@ readme.workspace = true
 workspace = true
 
 [dependencies]
+rucc-base.workspace = true
 rucc-mir.workspace = true
 rucc-target.workspace = true
-
-[dev-dependencies]
-rucc-base.workspace = true

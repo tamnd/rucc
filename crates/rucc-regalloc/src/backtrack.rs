@@ -76,8 +76,9 @@
 //! in is also the order that lets each answer follow its source.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 
+use rucc_base::hash::{Map, Set};
 use rucc_mir::{Func, Inst, Reg};
 use rucc_target::{PhysReg, RegClass};
 
@@ -152,7 +153,7 @@ pub fn cost(func: &Func, order: &Order, assignment: &Assignment) -> u128 {
             total += costs[index(reg)];
         }
     }
-    let mut weights = HashMap::new();
+    let mut weights = Map::default();
     for block in func.blocks() {
         let weight = u128::from(func[block].weight.raw().max(1));
         for inst in func.insts(block) {
@@ -166,7 +167,7 @@ pub fn cost(func: &Func, order: &Order, assignment: &Assignment) -> u128 {
             }
         }
     }
-    let commuted: HashSet<Inst> = assignment.commuted().iter().copied().collect();
+    let commuted: Set<Inst> = assignment.commuted().iter().copied().collect();
     for (number, reuse) in assign::reuses(func, order).iter().enumerate() {
         let Some(reuse) = reuse else { continue };
         let answer = Reg::virtual_reg(u32::try_from(number).expect("a register number"));

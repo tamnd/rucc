@@ -34,8 +34,6 @@
 //! written as single byte nops. A longer nop is fewer instructions to decode and the padding
 //! between two functions is never executed, so there is nothing to be gained by it.
 
-use std::collections::HashMap;
-
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
@@ -425,7 +423,7 @@ impl Assembler<'_> {
         }
         let end = self.func.cfi_end();
         self.sites.clear();
-        let pads: HashMap<Inst, Block> = self.func.landings.iter().copied().collect();
+        let pads: Map<Inst, Block> = self.func.landings.iter().copied().collect();
         for block in self.func.blocks() {
             // The head of a loop is padded the way the listing asks the assembler to pad it, with
             // instructions rather than single bytes, since the block in front of it may fall in.
