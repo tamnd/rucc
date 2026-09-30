@@ -36,6 +36,7 @@ pub mod dlltool;
 pub mod fetch;
 mod glibc;
 pub mod install;
+mod kbuild;
 pub mod library;
 pub mod link;
 mod map;
@@ -57,7 +58,7 @@ use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Compress, Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
+    Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
     SaveTemps, Session, Std, Wrapping, runtime,
 };
 use rucc_sysroot::{Manifest, Sysroot};
@@ -259,7 +260,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
-  -gz[=none|zlib|zlib-gnu|zstd] -gno-split-dwarf   compress debug sections, one file not two
+  -gz=none -gno-split-dwarf   debug sections left uncompressed and in one file, -gz is refused
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
   -fprofile-use[=<path>] -fprofile-dir=<dir>   read too, where -fprofile-generate is refused
   -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
@@ -366,7 +367,7 @@ fn function_alignment(text: &str) -> Option<Option<u32>> {
 ///
 /// `all` is deliberately absent. gcc takes it only in the negative, so it is handled where each of
 /// those two spellings is read rather than by being on this list.
-const SANITIZERS: [&str; 34] = [
+const SANITIZERS: [&str; 35] = [
     "address",
     "kernel-address",
     "hwaddress",
@@ -398,6 +399,8 @@ const SANITIZERS: [&str; 34] = [
     "vptr",
     "pointer-overflow",
     "builtin",
+    // AArch64's, which the arm64 kernel asks for with `CONFIG_SHADOW_CALL_STACK`.
+    "shadow-call-stack",
     "alias",
     "restrict",
     "memory",
@@ -715,12 +718,34 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // from so that a refusal can name both.
     let mut asm_words: Vec<(String, String)> = Vec::new();
 
+    // The architecture the kernel's flags are answered for, which is the last `--target=` on the
+    // line wherever it is written, so that `-mno-outline-atomics --target=aarch64-linux-gnu` is
+    // read for AArch64. A target that does not parse is left for the loop to refuse.
+    let arch = args
+        .iter()
+        .rev()
+        .find_map(|arg| arg.strip_prefix("--target="))
+        .and_then(|target| target.parse::<Triple>().ok())
+        .map_or(opts.target.arch, |target| target.arch);
+    // `-fmin-function-alignment=`, which is weighed after the loop against what
+    // `-falign-functions` said, in whichever order the two came.
+    let mut min_function_align: Option<u32> = None;
+
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
         i += 1;
         match arg {
             "-h" | "--help" => return Ok(Action::Help),
+            // The flags the kernel's build passes that nothing below answers, and a few that
+            // something below would answer without saying which issue is about them. First, so
+            // that the table's answer is the one given. See `kbuild`.
+            _ if kbuild::row(arg, arch).is_some() => {
+                let Some(row) = kbuild::row(arg, arch) else { continue };
+                if let kbuild::Answer::Refused(why, issue) = row.answer {
+                    return Err(err(kbuild::refusal(arg, why, issue)));
+                }
+            }
             "--version" => version = true,
             // The sysroot fetch, which is weighed after the loop rather than acted on here, because
             // `--offline` written after it has to be able to forbid it. Both spellings, since a
@@ -822,12 +847,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      see spec/11-debug-info.md"
                 )));
             }
-            // How the debug sections are compressed. There are none yet, so every answer produces
-            // the same bytes and taking the flag promises nothing that is not kept. The value is
-            // still checked, because a typo in a distribution's flags is worth finding when the
-            // compiler reads it rather than when somebody later wonders why nothing got smaller.
-            // Bare `-gz` means `zlib`, which the manual leaves for the reader to discover.
-            "-gz" => opts.compress = Compress::Zlib,
+            // How the debug sections are compressed. Nothing compresses them yet, so bare `-gz`,
+            // which means `zlib`, and every named method are refused in the table in `kbuild`
+            // rather than taken: the kernel probes the flag and would otherwise say its debug
+            // information is compressed when it is not. What reaches here is `none`, which is what
+            // happens, and a name that is not a method at all, which is refused as a typo.
             _ if arg.starts_with("-gz=") => {
                 let how = &arg["-gz=".len()..];
                 opts.compress = how.parse().map_err(|()| {
@@ -1215,19 +1239,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-asynchronous-unwind-tables" => opts.async_unwind_tables = false,
             "-funwind-tables" => opts.unwind_tables = true,
             "-fno-unwind-tables" => opts.unwind_tables = false,
-            // The other direction is a request, not a description, and it is one this compiler
-            // cannot grant, so it gets the treatment section 13.3 asks for rather than the unknown
-            // option error. Answering it by carrying on would be answering a different question:
-            // the code would still be position independent, which is correct everywhere an
-            // ordinary program runs and is wrong in a kernel, where the flag is written precisely
-            // because there is no loader to fill a global offset table in.
-            "-fno-pic" | "-fno-pie" => {
-                return Err(err(
-                    "position dependent code is not supported: an address that may be in another \
-                     object is loaded out of the global offset table, and nothing here emits the \
-                     absolute form this asks for. Use -no-pie if what you meant was how to link",
-                ));
-            }
+            // The other direction, `-fno-pic` and its spellings, is in the table in `kbuild`,
+            // refused with the issue that would add it.
             // A section per function and a section per variable, which is what makes
             // `--gc-sections` able to drop anything: a linker can leave out a section nothing
             // reaches and cannot leave out half of one. Both directions are taken, and the off
@@ -2047,6 +2060,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
                     })?;
             }
+            // A floor under every function that `-falign-functions` cannot lower, which is gcc's
+            // difference between the two: the kernel passes this one because ftrace and the call
+            // padding it writes need every function on the boundary, the cold ones included. It is
+            // put together with `-falign-functions` after the loop, since either may come last.
+            _ if arg.starts_with("-fmin-function-alignment=") => {
+                let text = &arg["-fmin-function-alignment=".len()..];
+                let bytes =
+                    function_alignment(text).filter(|_| !text.contains(':')).ok_or_else(|| {
+                        err(format!("{arg}: the alignment has to be a number of bytes"))
+                    })?;
+                min_function_align = bytes;
+            }
+            // `wchar_t` as a 16 bit unsigned type, which is what the kernel's EFI stub and its
+            // UCS-2 strings want and what Windows has anyway. It changes what `L""` holds, what
+            // `__WCHAR_TYPE__` says and so the ABI of any function that takes one, which is why
+            // it is a flag the whole program has to agree on, as it is in gcc.
+            "-fshort-wchar" => opts.short_wchar = true,
+            "-fno-short-wchar" => opts.short_wchar = false,
             // The head of every hot loop, which is padded when this is asked for so that a loop that
             // fits in a 64 byte line does not cross one. Both directions of the plain form are
             // answered. A number is taken and says nothing, because the boundary here is the
@@ -2324,6 +2355,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 return Err(err(format!("unknown option `{arg}`")));
             }
             _ => inputs.push(Input { path: arg.to_owned(), forced, role: Role::File }),
+        }
+    }
+
+    // The floor `-fmin-function-alignment=` put under every function, which `-falign-functions`
+    // may raise and not lower. With no `-falign-functions` the target's own boundary stands unless
+    // the floor is above it.
+    if let Some(floor) = min_function_align {
+        let have = opts.align_functions.unwrap_or(rucc_object::FUNC_ALIGN);
+        if floor > have {
+            opts.align_functions = Some(floor);
         }
     }
 
@@ -4093,7 +4134,8 @@ fn unlinkable(opts: &Options) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use rucc_session::{
-        Contract, GnucVersion, IncludeForm, LtoJobs, OptLevel, Partition, Patchable, Visibility,
+        Compress, Contract, GnucVersion, IncludeForm, LtoJobs, OptLevel, Partition, Patchable,
+        Visibility,
     };
 
     use super::*;
@@ -5067,12 +5109,19 @@ mod tests {
 
     #[test]
     fn asking_for_position_dependent_code_is_told_why_it_is_not_coming() {
-        for flag in ["-fno-pic", "-fno-pie"] {
+        for flag in ["-fno-pic", "-fno-pie", "-fno-PIC", "-fno-PIE"] {
             let e = parse_args(&args(&[flag, "a.c"])).unwrap_err();
             assert!(e.message.contains("global offset table"), "{flag}: {}", e.message);
             // The one it may have meant, since the two are a letter apart and one of them is
             // about linking and is taken.
             assert!(e.message.contains("-no-pie"), "{flag}: {}", e.message);
+        }
+        // The issue that adds it is a different one on each of the two kernels' architectures.
+        for (target, issue) in
+            [("x86_64-unknown-linux-gnu", "#2276"), ("aarch64-unknown-linux-gnu", "#2286")]
+        {
+            let failed = refused(&[&format!("--target={target}"), "-fno-PIE", "-c", "a.c"]);
+            assert!(failed.contains(issue), "{target}: {failed}");
         }
     }
 
@@ -6601,27 +6650,18 @@ mod tests {
     /// `-gz` and the two spellings of the split, which are the two questions about the shape of
     /// the debug output rather than about how much of it there is.
     ///
-    /// Both answers here are about what happens when there is debug information to shape, and
-    /// there is none yet, so what is being asserted is that the flags are read and remembered
-    /// rather than that anything changed in the output. That is the whole of what taking them
-    /// claims, and it is worth a test because the day `rucc-debug` writes a section this is where
-    /// it comes to find out what the command line said.
+    /// Nothing compresses the debug sections yet, so every spelling that asks for compression is
+    /// refused with the issue about it, and the one that asks for none is taken. The kernel probes
+    /// `-gz=zlib` for `DEBUG_INFO_COMPRESSED`, and a compiler that took it would configure a
+    /// kernel that says its debug information is compressed when it is not.
     #[test]
     fn the_shape_of_the_debug_output_is_recorded_even_where_there_is_none_of_it() {
         let (opts, _) = compile(&["-c", "a.c"]);
         assert_eq!(opts.compress, Compress::None, "uncompressed unless somebody asks");
-
-        // Bare `-gz` is `-gz=zlib`, measured against gcc 16 rather than read out of the manual,
-        // which describes the flag without ever saying which algorithm it picks.
-        assert_eq!(compile(&["-gz", "-c", "a.c"]).0.compress, Compress::Zlib);
-        for (spelling, want) in [
-            ("none", Compress::None),
-            ("zlib", Compress::Zlib),
-            ("zlib-gnu", Compress::ZlibGnu),
-            ("zstd", Compress::Zstd),
-        ] {
-            let (opts, _) = compile(&[&format!("-gz={spelling}"), "-c", "a.c"]);
-            assert_eq!(opts.compress, want, "{spelling}");
+        assert_eq!(compile(&["-gz=none", "-c", "a.c"]).0.compress, Compress::None);
+        for flag in ["-gz", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
+            let failed = refused(&[flag, "-c", "a.c"]);
+            assert!(failed.contains("uncompressed") && failed.contains("#2288"), "{failed}");
         }
 
         // A value nothing here has heard of is refused rather than rounded to the nearest one,
@@ -6930,7 +6970,11 @@ mod tests {
         let x86 = ["--target=x86_64-unknown-linux-gnu", "-c", "a.c"];
         let said = refused(&[&x86[..], &["-mavx2"]].concat());
         assert!(said.contains("no intrinsics for avx2"), "{said}");
+        // Turning the baseline off is what a kernel asks for, and the kernel's table answers it
+        // with the issue about keeping the vector registers out.
         let said = refused(&[&x86[..], &["-mno-sse2"]].concat());
+        assert!(said.contains("tamnd/rucc#2277"), "{said}");
+        let said = refused(&[&x86[..], &["-mno-fxsr"]].concat());
         assert!(said.contains("baseline"), "{said}");
         assert!(refused(&[&x86[..], &["-msse5"]].concat()).contains("unknown option"));
         // No other target has these, whichever side of the target the flag was written on.
@@ -7802,5 +7846,212 @@ mod tests {
         // and which a person building mingw-w64 with this compiler has to be able to find without
         // knowing it is there.
         assert!(USAGE.lines().count() < 74, "usage text has grown past one screen");
+    }
+
+    const KERNEL_X86: &str = "--target=x86_64-unknown-linux-gnu";
+    const KERNEL_ARM64: &str = "--target=aarch64-unknown-linux-gnu";
+
+    /// The flags kbuild passes whose request is already what this compiler does, on the target
+    /// each is for. Every one of them was an unknown option before, and a `cc-option` probe that
+    /// is refused drops the flag, so a kernel built with rucc was built with a different line.
+    #[test]
+    fn a_kernel_flag_that_asks_for_what_happens_is_taken() {
+        for flag in [
+            "-fverbose-asm",
+            "-fno-var-tracking",
+            "-fno-var-tracking-assignments",
+            "-fno-partial-inlining",
+            "-fmerge-constants",
+            "-fno-allow-store-data-races",
+            "-freg-struct-return",
+            "-fzero-init-padding-bits=all",
+            "-fno-stack-check",
+            "-fno-dwarf2-cfi-asm",
+            "-femit-struct-debug-baseonly",
+            "-fdiagnostics-show-context=2",
+            "-fjump-tables",
+            "-ftrivial-auto-var-init=uninitialized",
+            "-fzero-call-used-regs=skip",
+            "-gz=none",
+            "-mskip-rax-setup",
+            "-maccumulate-outgoing-args",
+            "-mno-apx-features=egpr",
+            "-mpreferred-stack-boundary=4",
+            "-mstack-protector-guard=tls",
+            "-mindirect-branch=keep",
+            "-mfunction-return=keep",
+            "-mharden-sls=none",
+        ] {
+            compile(&[KERNEL_X86, flag, "-c", "a.c"]);
+        }
+        for flag in [
+            "-mno-outline-atomics",
+            "-ffixed-x18",
+            "-mlittle-endian",
+            "-mbranch-protection=none",
+            "-mabi=lp64",
+        ] {
+            compile(&[KERNEL_ARM64, flag, "-c", "a.c"]);
+        }
+        // Read for the target the line ends up naming, wherever `--target=` was written.
+        compile(&["-mno-outline-atomics", KERNEL_ARM64, "-c", "a.c"]);
+    }
+
+    /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
+    /// that would add it, so that the person reading the error can find where the work is.
+    #[test]
+    fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
+        for (flag, issue) in [
+            ("-mcmodel=kernel", 2275),
+            ("-fno-PIE", 2276),
+            ("-mno-sse", 2277),
+            ("-mno-80387", 2277),
+            ("-mgeneral-regs-only", 2277),
+            ("-mpreferred-stack-boundary=3", 2278),
+            ("-mstack-protector-guard-reg=gs", 2279),
+            ("-mstack-protector-guard-symbol=__ref_stack_chk_guard", 2279),
+            ("-mindirect-branch=thunk-extern", 2280),
+            ("-mfunction-return=thunk-extern", 2280),
+            ("-mharden-sls=all", 2280),
+            ("-mindirect-branch-cs-prefix", 2280),
+            ("-fno-jump-tables", 2280),
+            ("-fzero-call-used-regs=used-gpr", 2281),
+            ("-ftrivial-auto-var-init=zero", 2282),
+            ("-mrecord-mcount", 2283),
+            ("-mnop-mcount", 2283),
+            ("-fconserve-stack", 2284),
+            ("-gdwarf-4", 2287),
+            ("-gz=zlib", 2288),
+        ] {
+            let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
+            assert!(failed.starts_with(flag), "the flag is named: {failed}");
+            assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
+        }
+        for (flag, issue) in [
+            ("-mbranch-protection=pac-ret+bti", 2286),
+            ("-msign-return-address=non-leaf", 2286),
+            ("-mgeneral-regs-only", 2277),
+            ("-mstack-protector-guard=sysreg", 2279),
+        ] {
+            let failed = refused(&[KERNEL_ARM64, flag, "-c", "a.c"]);
+            assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
+        }
+        // Refused with no issue, because nothing is planned for them, and still with the reason.
+        for flag in ["-fstack-check", "-fstrict-flex-arrays=3", "-fno-zero-initialized-in-bss"] {
+            let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
+            assert!(failed.starts_with(&format!("{flag}: ")) && !failed.contains('#'), "{failed}");
+        }
+        assert!(refused(&[KERNEL_ARM64, "-mstrict-align", "-c", "a.c"]).contains("unaligned"));
+        // A sanitizer rather than a typo, so it gets the refusal every sanitizer gets.
+        let failed = refused(&[KERNEL_ARM64, "-fsanitize=shadow-call-stack", "-c", "a.c"]);
+        assert!(failed.contains("no sanitizer instrumentation"), "{failed}");
+    }
+
+    /// A flag of one architecture is an unknown option on another, as it is to gcc, and not an
+    /// answer about a target that was not asked for.
+    #[test]
+    fn a_kernel_flag_of_the_other_architecture_is_unknown() {
+        for (target, flag) in [
+            (KERNEL_X86, "-mno-outline-atomics"),
+            (KERNEL_X86, "-ffixed-x18"),
+            (KERNEL_X86, "-mbranch-protection=none"),
+            (KERNEL_ARM64, "-mskip-rax-setup"),
+            (KERNEL_ARM64, "-mrecord-mcount"),
+        ] {
+            assert_eq!(refused(&[target, flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
+        }
+    }
+
+    /// `-fshort-wchar` is honored rather than dropped: it is the width and the signedness of
+    /// `wchar_t`, which the session puts into the target for everything that asks.
+    #[test]
+    fn short_wchar_is_carried_to_the_session() {
+        let (opts, _) = compile(&[KERNEL_X86, "-c", "a.c"]);
+        assert!(!opts.short_wchar);
+        let (opts, _) = compile(&[KERNEL_X86, "-fshort-wchar", "-c", "a.c"]);
+        let session = Session::new(*opts);
+        assert_eq!((session.target.wchar_width, session.target.wchar_is_signed), (16, false));
+        let (opts, _) = compile(&[KERNEL_X86, "-fshort-wchar", "-fno-short-wchar", "-c", "a.c"]);
+        assert!(!opts.short_wchar, "the last one wins");
+    }
+
+    /// `-fmin-function-alignment=` is a floor that `-falign-functions` may raise and not lower,
+    /// whichever of the two is written last. The kernel passes it with the boundary its call
+    /// padding needs.
+    #[test]
+    fn the_minimum_function_alignment_is_a_floor() {
+        let align = |flags: &[&str]| {
+            let mut line = flags.to_vec();
+            line.extend(["-c", "a.c"]);
+            compile(&line).0.align_functions
+        };
+        assert_eq!(align(&["-fmin-function-alignment=16"]), None, "the default is sixteen");
+        assert_eq!(align(&["-fmin-function-alignment=8"]), None, "and a lower floor is under it");
+        assert_eq!(align(&["-fmin-function-alignment=64"]), Some(64));
+        assert_eq!(align(&["-fmin-function-alignment=33"]), Some(64), "rounded up as gcc does");
+        assert_eq!(align(&["-fmin-function-alignment=32", "-falign-functions=8"]), Some(32));
+        assert_eq!(align(&["-falign-functions=8", "-fmin-function-alignment=32"]), Some(32));
+        assert_eq!(align(&["-fmin-function-alignment=16", "-falign-functions=64"]), Some(64));
+        assert_eq!(align(&["-fno-align-functions", "-fmin-function-alignment=16"]), Some(16));
+        let failed = refused(&["-fmin-function-alignment=big", "-c", "a.c"]);
+        assert!(failed.contains("number of bytes"), "{failed}");
+    }
+
+    /// Every `-W` flag the kernel's Makefiles pass for gcc is one gcc 16 knows, and so one this
+    /// compiler takes, and the ones they pass only for clang are refused the way gcc refuses them,
+    /// which is what makes `cc-option` and `cc-disable-warning` give gcc's answers.
+    #[test]
+    fn the_kernel_s_warning_flags_get_gcc_s_answers() {
+        for flag in [
+            "-Wall",
+            "-Wextra",
+            "-Wundef",
+            "-Wstrict-prototypes",
+            "-Wno-trigraphs",
+            "-Werror=implicit-function-declaration",
+            "-Werror=implicit-int",
+            "-Werror=return-type",
+            "-Werror=date-time",
+            "-Werror=incompatible-pointer-types",
+            "-Werror=designated-init",
+            "-Wno-format-security",
+            "-Wno-frame-address",
+            "-Wno-address-of-packed-member",
+            "-Wframe-larger-than=2048",
+            "-Wvla",
+            "-Wno-pointer-sign",
+            "-Wcast-function-type",
+            "-Wno-array-bounds",
+            "-Wno-alloc-size-larger-than",
+            "-Wimplicit-fallthrough=5",
+            "-Wenum-conversion",
+            "-Wno-dangling-pointer",
+            "-Wno-stringop-overflow",
+            "-Wno-stringop-truncation",
+            "-Wno-format-truncation",
+            "-Wno-override-init",
+            "-Wno-maybe-uninitialized",
+            "-Wmissing-declarations",
+            "-Wmissing-prototypes",
+            "-Wmissing-format-attribute",
+            "-Wmissing-include-dirs",
+            "-Wold-style-definition",
+            "-Wpacked-not-aligned",
+            "-Wlogical-op",
+            "-Wnested-externs",
+            "-Wunterminated-string-initialization",
+            "-Walloc-size-larger-than=18446744073709551615",
+            "-Wno-unaligned-access",
+            "-Wno-format-overflow-non-kprintf",
+        ] {
+            compile(&[flag, "-c", "a.c"]);
+        }
+        for flag in ["-Wthread-safety", "-Wdefault-const-init-unsafe"] {
+            assert_eq!(refused(&[flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
+        }
+        for name in ["unknown-warning-option", "option-ignored", "unused-command-line-argument"] {
+            let flag = format!("-Werror={name}");
+            assert_eq!(refused(&[&flag, "-c", "a.c"]), format!("`{flag}`: no option `-W{name}`"));
+        }
     }
 }

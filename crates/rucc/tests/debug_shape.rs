@@ -1,16 +1,16 @@
 //! What the two flags about the shape of the debug output do, which is nothing yet, and the
 //! difference between nothing and silence.
 //!
-//! Design: `spec/04-driver-and-cli.md` section 4.8.
+//! Design: `spec/04-driver-and-cli.md` sections 4.8 and 4.12.
 //!
 //! `-gz` says how the debug sections are compressed and `-gsplit-dwarf` says they go in a file of
 //! their own. There are debug sections now, and `crates/rucc-debug` says what is in them, but
-//! nothing compresses one and nothing writes a second file. Those two facts lead to opposite
-//! answers, and the point of this file is that the difference is deliberate: a flag that leaves
-//! the output as it was is taken, and a flag whose whole observable effect is that a file appears
-//! is refused, because the file would not appear.
+//! nothing compresses one and nothing writes a second file. So both are refused when they ask for
+//! something, and taken when they ask for what happens anyway: `-gz=none` and `-gno-split-dwarf`.
+//! The kernel's `DEBUG_INFO_COMPRESSED` probes with `-gz=zlib`, and a compiler that took it would
+//! have the kernel configured for sections that are not there.
 //!
-//! The compression case is asserted on bytes rather than on options, because the claim being made
+//! The case that is taken is asserted on bytes rather than on options, because the claim being made
 //! to a build that passes the flag is about the object, not about a field somewhere. It is asserted
 //! with `-g` on, so that what is being compared is two objects that have something to compress
 //! rather than two that have nothing.
@@ -55,22 +55,24 @@ fn run(dir: &Path, flags: &[&str], object: &str) -> (bool, String) {
 }
 
 #[test]
-fn asking_for_compressed_debug_sections_produces_the_same_object_as_not_asking() {
-    // The honest reading of taking a flag nothing acts on yet. Every value produces the bytes no
-    // value produces, so a build that passes `-gz` gets what it would have got anyway rather than
-    // a quietly different file. The day the sections are compressed, this test is the one that has
-    // to change, and it is written so that it fails rather than passes on that day.
+fn asking_for_compressed_debug_sections_is_refused_and_asking_for_none_is_not() {
+    // Asking for no compression is asking for what is written anyway, so it is taken and the
+    // object is the one no flag produces.
     let dir = fixture("same");
     let (ok, said) = run(&dir, &["-g"], "plain.o");
     assert!(ok, "{said}");
     let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
+    let (ok, said) = run(&dir, &["-g", "-gz=none"], "asked.o");
+    assert!(ok && said.is_empty(), "-gz=none: {said}");
+    let asked = std::fs::read(dir.join("asked.o")).expect("the object was written");
+    assert_eq!(asked, plain, "-gz=none changed the object");
 
-    for spelling in ["-gz", "-gz=none", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
-        let (ok, said) = run(&dir, &["-g", spelling], "asked.o");
-        assert!(ok, "{spelling}: {said}");
-        assert!(said.is_empty(), "{spelling} was taken without comment: {said}");
-        let asked = std::fs::read(dir.join("asked.o")).expect("the object was written");
-        assert_eq!(asked, plain, "{spelling} changed the object");
+    // Asking for compression is refused with the issue that will do it, because the sections would
+    // come out as they went in.
+    for spelling in ["-gz", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
+        let (ok, said) = run(&dir, &["-g", spelling], "never.o");
+        assert!(!ok, "{spelling} is refused");
+        assert!(said.contains("#2288"), "{spelling}: {said}");
     }
 
     // And a value nothing has heard of stops the compilation, so that a typo in a distribution's

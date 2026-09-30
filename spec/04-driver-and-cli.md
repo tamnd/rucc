@@ -10,7 +10,7 @@ Three rules that sound minor and are not:
 
 **A `-W` flag gets the answer gcc gives.** Autoconf and meson probe for warning flags by trying them and reading the exit status. A compiler that errors on `-Wno-format-truncation` fails configure scripts written for GCC 8, and a compiler that takes `-Wcast-function-type-strict`, which gcc refuses and only clang knows, ends up with a different command line from the gcc build. So a name gcc 16 knows is accepted and one it does not know is an error, and `-Wno-<anything>` is always accepted silently, matching GCC's rule that unknown *negative* warning flags are only diagnosed if some other error occurs. `-Werror=` and `-Wno-error=` of a name gcc does not know are errors, as they are in gcc.
 
-Until there are warning groups nothing is turned on by these names, so every `-W` argument gcc knows, other than the three that are not about warnings at all, is taken and does nothing. The names are in `crates/rucc-driver/src/warnings.rs`, taken from gcc 16's `--help` output across every class, including the C++ and Fortran names, which gcc takes on a C compile with a warning. `-w` is the exception, because it needs no group: it drops every warning at the one place each of them is rendered, and it drops it before the count, so `-w -Werror` compiles rather than failing on a warning nobody was going to read. Issue 485 is the groups.
+Until there are warning groups nothing is turned on by these names, so every `-W` argument gcc knows, other than the three that are not about warnings at all, is taken and does nothing. The names are in `crates/rucc-driver/data/gcc-warnings.txt`, with the command that printed them at the top, taken from gcc 16's `--help` output across every class, including the C++ and Fortran names, which gcc takes on a C compile with a warning. `-w` is the exception, because it needs no group: it drops every warning at the one place each of them is rendered, and it drops it before the count, so `-w -Werror` compiles rather than failing on a warning nobody was going to read. Issue 485 is the groups.
 
 `-Wsystem-headers` is the second exception and it needs no group either, because what it selects on is where the line is rather than what the warning is about. A warning whose position falls in a file that came with the machine is dropped, which is what gcc does and what `-Wsystem-headers` turns off, and the flag is off by default. The reason is that the person running the compiler did not write that file and cannot change it, so the warning is noise on its own and is a stopped build under `-Werror`: micropython defines `_DIRENT_HAVE_D_TYPE` in its own configuration header, glibc defines it again in `bits/dirent.h`, and a compiler without this rule fails the build on a line nobody in the project typed. A file counts as having come with the machine when the include search found it in a system directory, which is the `-isystem` chain and the compiler's own, and so does anything that file includes however the search reached that one, since a header glibc includes is glibc's. Errors are never dropped by either flag, whatever the file: a header that does not compile is a translation unit that does not compile. Where both flags are given `-w` wins, because a warning that was never raised cannot be asked for back.
 
@@ -251,11 +251,11 @@ Two things are deliberately not copied. gcc warns under `-Wmissing-profile` when
 
 ## 4.8 Debug info
 
-`-g`, `-g0` through `-g3`, `-gdwarf-4`, `-gdwarf-5` (the default), `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz` for compressed sections. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
+`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default), `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz=none`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission. `-gdwarf-4` and the compressing spellings of `-gz` are refused, as section 4.12 lists.
 
 The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` is refused rather than taken while document 11 writes DWARF 5 and nothing else, because a debugger handed version 5 when it was told version 4 is a worse outcome than a build that stopped.
 
-`-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. The answer is recorded on the session and a value outside that list is refused, because a build that asked for `zstd` and quietly got `zlib` would ship a file its reader may not understand and would have no way of finding out. Nothing acts on the answer while nothing compresses a section, so an object built with `-gz=zstd` is byte for byte an object built without the flag, and that is what makes taking it a description of what happens rather than a promise. Document 11 writes a line table now, so what this waits on is the compressor rather than something to compress. gcc also passes `--compress-debug-sections=` on to the linker, so that debug sections arriving from objects it did not compile are compressed too. This driver does not, and will not until it compresses a section of its own: the flag is the compiler's answer about its own output, and a link line that gained an option nobody wrote is a change to what is produced.
+`-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. Nothing compresses a section yet, so `-gz=none` is taken, since it asks for what is written anyway, and the bare spelling and the three compressing values are refused with tamnd/rucc#2288 named. Taking them would be a promise about the object that the object does not keep, and the kernel's `DEBUG_INFO_COMPRESSED` probe would then configure a build around sections that are not compressed. A value outside the list is refused as not a way to compress, with the list given. Document 11 writes a line table now, so what this waits on is the compressor rather than something to compress. gcc also passes `--compress-debug-sections=` on to the linker, so that debug sections arriving from objects it did not compile are compressed too. This driver will do the same when it compresses a section of its own.
 
 `-gsplit-dwarf` is refused. It writes the debug information into a `.dwo` file beside the object, and gcc writes that file whether or not it found anything to put in it, so a build system that declares it as an output or a make rule that depends on it gets a file from gcc and nothing from here. Section 4.1 takes a flag that changes nothing and refuses one that changes what is produced, and a file that never appears is the plainest case of the second there is. `-gno-split-dwarf` is taken, because writing it all into the object is what happens.
 
@@ -321,3 +321,85 @@ GCC has no `-Z`, which is what makes it the right prefix for the flags that are 
 `-Zlowering=FILE` writes what the pre-selection lowering group did. The group is `spec/optimizer/36-lowering-and-isel.md` section 36.1's, which is everything the selector cannot express: a `switch`, a variable argument list, an ordered access, an integer at a width the machine does not have, a bulk copy, and the rest of the list that module holds. The file holds one block per function the run lowered, in the order it lowered them, and inside a block one line per member of the group in the order they ran, saying what the function's instruction count was before and after and, for a member whose construct is an opcode, how many it found and how many it left. Every member is listed rather than only the ones that changed something, because a dump that lists only what fired cannot tell a member that found nothing from a member somebody forgot to put in the group, and that is half of what this is read for. The other half is a count that did not reach zero, which is either the machine turning out to have the construct after all or a refusal being handed to the selector to name, and the two are told apart by what the selector then says. Like the two listings above it changes nothing about the code that comes out and a file it could not write is an error rather than a warning.
 
 `-Zverify-each` runs the IR verifier after every pass that changed anything, rather than only where the pipeline would have run it. It is off by default in a release build and on by default in a debug one, because the cost is a walk of the function per pass and the thing it buys is that a pass which breaks the IR is reported by name instead of being found later as a strange failure in the back end. A verifier complaint under it is an internal compiler error and names the pass, which is the whole point of the flag.
+
+## 4.12 The flags the Linux kernel's build passes
+
+kbuild passes some gcc flags on every compile and probes others with `cc-option`, which compiles an empty file with the flag and keeps the flag if the compiler exits with zero. A refused flag does not stop the build, it is dropped, and the kernel is configured and compiled without it. A flag taken and ignored is worse, because the kernel is then configured as though the compiler did what the flag asked. So every flag the top Makefile, `arch/x86/Makefile`, `arch/arm64/Makefile` and `scripts/Makefile.*` of Linux 7.2 pass is in one of three places in the table below. It is honored, or it is taken because what it asks for is already what happens, with the reason written down, or it is refused with the reason and, where there is one, the issue that would make it honored. Nothing is taken and ignored.
+
+The flags that are taken or refused without doing anything are one table in `crates/rucc-driver/src/kbuild.rs`, read before any other arm of the parser, and a test checks that every flag in it is written in this section. A row can be for one architecture, and on any other the flag is left to the rest of the parser, which usually means an unknown option, as it is in gcc. A flag written with a `*` at the end covers every flag that starts with what comes before the `*` and that a more particular row does not answer, so `-mindirect-branch=*` is every value but `keep`.
+
+The `-W` flags the kernel passes are the rule in section 4.1: a name gcc 16 knows is taken and one it does not know is refused, from the list in `crates/rucc-driver/data/gcc-warnings.txt`. So the clang names kbuild probes for clang builds, `-Wthread-safety` and `-Werror=unknown-warning-option` among them, are refused the way gcc refuses them, and `cc-disable-warning` gets gcc's answers.
+
+Honored, by doing what gcc does:
+
+| Flag | What it does |
+|---|---|
+| `-fshort-wchar`, `-fno-short-wchar` | `wchar_t` is a 16 bit unsigned type, in `L""`, in `__WCHAR_TYPE__` and its neighbours and in the checker, because the session puts it into the target the way it puts `-funsigned-char` there. The negative form is the target's own `wchar_t`. |
+| `-fmin-function-alignment=N` | A floor under every function, rounded up to a power of two the way gcc rounds `-falign-functions=`. `-falign-functions` may raise it and cannot lower it, in whichever order the two are written. |
+| `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
+| `-ffixed-x18` (AArch64) | x18 is never given to a value on any AArch64 target, since Apple and Windows reserve it, so it is reserved on Linux too. |
+
+Taken because what they ask for is what happens:
+
+| Flag | Why nothing changes |
+|---|---|
+| `-fverbose-asm`, `-fno-verbose-asm` | Comments in assembly output. The instructions are the same. |
+| `-fvar-tracking`, `-fno-var-tracking`, `-fvar-tracking-assignments`, `-fno-var-tracking-assignments` | How hard gcc works at where a variable lives in the debug information. The code is the same. |
+| `-femit-struct-debug-baseonly` | Less type information in the debug sections of a unit that does not define the type. The size changes and nothing a debugger or the program sees does. |
+| `-fdwarf2-cfi-asm`, `-fno-dwarf2-cfi-asm` | Whether gcc hands the assembler `.cfi` directives or writes the unwind table itself. The object has the same `.eh_frame`. |
+| `-fdiagnostics-show-context`, `-fdiagnostics-show-context=*` | How much source a diagnostic quotes. |
+| `-fpartial-inlining`, `-fno-partial-inlining` | A gcc pass this compiler does not have. |
+| `-fmerge-constants`, `-fno-merge-constants` | Whether equal constants from different units share storage, which the standard leaves open. |
+| `-fno-allow-store-data-races`, `-fallow-store-data-races` | No pass writes memory on a path that did not write it. Loop invariant motion moves no store, and the one store phiopt merges is one both arms made. |
+| `-freg-struct-return` | The psABI of every target here already returns a small structure in registers. |
+| `-fzero-init-padding-bits=all`, `-fzero-init-padding-bits=unions`, `-fzero-init-padding-bits=standard` | An automatic object whose initializer does not cover every byte, padding and the rest of a union included, is zeroed whole before its members are stored. |
+| `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
+| `-fno-stack-check` | Nothing probes the stack unless something asked. |
+| `-fstrict-flex-arrays=0`, `-fno-strict-flex-arrays` | Every trailing array is treated as flexible, which is how `__builtin_object_size` treats one here. |
+| `-fjump-tables` | The default. |
+| `-ftrivial-auto-var-init=uninitialized` | The default. |
+| `-fzero-call-used-regs=skip` | The default. |
+| `-gz=none` | The debug sections are not compressed. |
+| `-mpreferred-stack-boundary=4` (x86-64) | The psABI's sixteen bytes, which every frame keeps. |
+| `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=fs`, `-mstack-protector-guard-offset=40` (x86-64) | Where the canary is read from already, `%fs:40`. |
+| `-mindirect-branch=keep`, `-mfunction-return=keep`, `-mno-indirect-branch-register` (x86-64), `-mharden-sls=none` | Branches and returns are left as they are. |
+| `-mno-record-mcount`, `-mno-nop-mcount` (x86-64) | The defaults. |
+| `-mskip-rax-setup`, `-mno-skip-rax-setup` (x86-64) | `%al` is set before every variadic call, which is always correct whether or not gcc would have skipped it. |
+| `-maccumulate-outgoing-args`, `-mno-accumulate-outgoing-args` (x86-64) | Whether gcc pushes a call's stack arguments or stores them. They end up in the same places. |
+| `-mno-apx-features=*` (x86-64) | Nothing here uses APX. |
+| `-mlittle-endian` (AArch64) | Every AArch64 target here is little endian. |
+| `-mbranch-protection=none`, `-msign-return-address=none` (AArch64) | No branch protection, which is what happens. |
+| `-mno-strict-align` (AArch64) | An access may be unaligned, which is what happens. |
+
+Refused, with the issue that would honor them:
+
+| Flag | Why | Issue |
+|---|---|---|
+| `-mcmodel=kernel` (x86-64) | Only the small code model is emitted. | #2275 |
+| `-fno-pic`, `-fno-pie`, `-fno-PIC`, `-fno-PIE` | Every address that may be in another object is loaded through the global offset table. | #2276 on x86-64, #2286 on AArch64 |
+| `-mno-sse`, `-mno-sse2`, `-mno-mmx`, `-mno-80387`, `-mno-fp-ret-in-387`, `-msoft-float`, `-mgeneral-regs-only` | Any function may use the vector registers, for copies, fills and the variadic save area as well as for floating point. On AArch64 it is `-mgeneral-regs-only` alone. | #2277 |
+| `-mpreferred-stack-boundary=*` (x86-64) | Every frame is kept on sixteen bytes. | #2278 |
+| `-mstack-protector-guard*` | The canary is read from where the C library keeps it. | #2279 |
+| `-mindirect-branch=*`, `-mfunction-return=*`, `-mindirect-branch-register`, `-mindirect-branch-cs-prefix`, `-mharden-sls=*` (x86-64), `-fno-jump-tables` | No thunks, no `int3` after a return and jump tables where a switch wants one. | #2280 |
+| `-fzero-call-used-regs=*` | Registers are left as they are on return. | #2281 |
+| `-ftrivial-auto-var-init=*` | An automatic variable with no initializer is left as it is. | #2282 |
+| `-mrecord-mcount`, `-mnop-mcount` (x86-64) | The `__fentry__` calls `-pg` writes are neither listed in `__mcount_loc` nor written as nops. | #2283 |
+| `-fconserve-stack` | Inlining does not weigh how much it grows the caller's frame. | #2284 |
+| `-mbranch-protection=*`, `-msign-return-address=*` (AArch64) | No return address is signed and no function starts with a `bti`. | #2286 |
+| `-gdwarf-4` | DWARF 5 is the only version written. | #2287 |
+| `-gz`, `-gz=zlib`, `-gz=zlib-gnu`, `-gz=zstd` | The debug sections are written uncompressed. The kernel probes `-gz=zlib` for `DEBUG_INFO_COMPRESSED`. | #2288 |
+
+Refused, with no issue, because nothing is planned for them:
+
+| Flag | Why |
+|---|---|
+| `-fno-zero-initialized-in-bss` | A variable whose initializer is all zeroes, `= {}` say, can still be put in `.bss`, which is the one thing the flag forbids. A variable with a zero written out, `= 0`, goes in `.data` already. |
+| `-fstack-check`, `-fstack-check=*` | gcc's old probing is not written. `-fstack-clash-protection` is the probing this compiler does. |
+| `-fstrict-flex-arrays*` | `__builtin_object_size` gives no size for a trailing array reached through a pointer at any level, so the bounds a build turns this on for would not be checked. |
+| `-fplugin=*`, `-fplugin-arg-*` | A gcc plugin is built against gcc's own internals. |
+| `-mharden-sls=*` (AArch64) | Nothing is put after a return to stop speculation past it. |
+| `-mregparm=*` (x86-64) | It is for 32 bit x86, which is not a target here. |
+| `-mbig-endian` (AArch64) | There is no big endian AArch64 target. |
+| `-mstrict-align` (AArch64) | A load or store may be unaligned, a packed member say, and nothing splits one. |
+
+Some of what the kernel passes was answered before the table and is not in it: `-fno-builtin-wcslen` is the `-fno-builtin-<name>` of document 13, `-falign-jumps=1` and `-falign-loops=1` are taken with the rest of the alignment family in section 4.3, `-fno-lto` is the negative of a flag this compiler reads, and `-fsanitize=shadow-call-stack` is refused as every sanitizer is in section 4.7. `-fms-anonymous-structs`, `-fdebug-info-for-profiling`, `-fno-integrated-as` and `--param=allow-store-data-races=0` are unknown options, and gcc 16 refuses each of them too. #2285, inlining a small constant `memcpy` and `memset`, has no flag and so has no row.
