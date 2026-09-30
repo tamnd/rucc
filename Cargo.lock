@@ -253,7 +253,6 @@ dependencies = [
  "rucc-ir",
  "rucc-sema",
  "rucc-target",
- "rucc-tuple",
  "rucc-types",
 ]
 

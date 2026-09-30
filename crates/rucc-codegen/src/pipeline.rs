@@ -629,6 +629,7 @@ pub fn compile_recording(
     // instruction pointer and only an address wanted as a value is written as a number.
     if flags.code_model == CodeModel::Kernel {
         fold::absolute(&mut func, machine.insts, names);
+        fold::tables(&mut func, machine.insts, names);
     }
 
     // Whether this function carries a canary is the front end's answer, because what

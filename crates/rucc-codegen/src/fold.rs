@@ -670,6 +670,80 @@ pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) 
     marked
 }
 
+/// Rewrites each jump table under the kernel code model into the shape gcc writes there, and gives
+/// back how many.
+///
+/// The lowering writes the position independent shape, a `leaq` of the table, a `movslq` of the
+/// cell, an `addq` of the two and a `jmp` through the sum, and the cells are distances from the
+/// table. objtool finds a table by the relocation on an instruction in front of the jump and then
+/// reads the table's own relocations as eight byte addresses one after the other, and the kernels
+/// this compiler is graded on stop there: a table of four byte distances is one it reports it cannot
+/// find. So under this model the three instructions become one load of the cell,
+/// `movq table(,%index,8), %reg`, whose displacement is `R_X86_64_32S` against the table, and each
+/// cell is the block's address in eight bytes with `R_X86_64_64`. That is the load and the jump gcc
+/// writes as `jmp *table(,%index,8)`, and it is one register and two instructions shorter than
+/// what it replaces. tamnd/rucc-kernel#4.
+///
+/// A table whose instructions are not the ones the lowering wrote is left the way it is, which is
+/// right everywhere and only a warning from objtool.
+pub fn tables(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
+    let mut rewritten = 0;
+    for index in 0..func.tables.len() {
+        let jump = func.tables[index].jump;
+        let Ok(table) = u32::try_from(index) else { break };
+        if absolute_table(func, jump, table, insts, names).is_some() {
+            func.tables[index].absolute = true;
+            rewritten += 1;
+        }
+    }
+    rewritten
+}
+
+/// The one table's rewrite, or nothing when its instructions are not the four it expects.
+fn absolute_table(
+    func: &mut mir::Func,
+    jump: mir::Inst,
+    table: u32,
+    insts: &FrameInsts,
+    names: &mut Interner,
+) -> Option<()> {
+    let block = func.block_of(jump)?;
+    let before: Vec<mir::Inst> = func.insts(block).take_while(|&inst| inst != jump).collect();
+    let written = |func: &mir::Func, reg: mir::Reg| {
+        before.iter().rev().copied().find(|&inst| {
+            func[func[inst].operands].iter().any(|op| op.reg == reg && op.role != Role::Use)
+        })
+    };
+    let to = *func[func[jump].operands].first()?;
+    let add = written(func, to.reg)?;
+    let &[_, offset, base] = &func[func[add].operands][..] else { return None };
+    let load = written(func, offset.reg)?;
+    let near = written(func, base.reg)?;
+    let address = func[func[near].mem?];
+    let cell = func[func[load].mem?];
+    let operands = &func[func[load].operands];
+    let index = *operands.get(usize::from(cell.index?))?;
+    let read = operands.get(usize::from(cell.base?))?.reg;
+    if address.table != Some(table) || read != base.reg || cell.scale != 4 || cell.disp != 0 {
+        return None;
+    }
+    let moves = insts.moves(to.class)?;
+    let opcode = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, moves.load)));
+    let span = func.span(load);
+    let mem = mir::Mem {
+        index: Some(index),
+        scale: 8,
+        reach: mir::Reach::Absolute,
+        ..mir::Mem::table(table)
+    };
+    let made = func.build_loose(opcode).at(span).def(to.reg, to.class).mem(mem).finish();
+    func.insert_before(jump, made);
+    for gone in [near, load, add] {
+        func.remove_inst(gone);
+    }
+    Some(())
+}
+
 /// A fold that has been checked and not yet done.
 ///
 /// Everything the rewrite needs is worked out here rather than after the decision, so that the

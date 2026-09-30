@@ -868,14 +868,6 @@ pub enum Ordering {
     AcqRel,
     /// Both, and one total order over every sequentially consistent operation in the program.
     SeqCst,
-    /// What gcc calls a full barrier, which is what every `__sync_` read modify write and compare
-    /// and exchange is documented to be. It is sequentially consistent and then some: no load or
-    /// store on either side moves across it, plain ones included, where a sequentially consistent
-    /// operation only promises that much to other sequentially consistent ones. PostgreSQL's
-    /// `pg_atomic_fetch_add_u32()` and its neighbours are built on these and promise their callers
-    /// the stronger one. Where the machine's own read modify write is already a full barrier, as
-    /// a locked instruction is on x86, the two are the same code.
-    Full,
 }
 
 impl Ordering {
@@ -888,7 +880,6 @@ impl Ordering {
             Ordering::Release => "release",
             Ordering::AcqRel => "acq_rel",
             Ordering::SeqCst => "seq_cst",
-            Ordering::Full => "full",
         }
     }
 }

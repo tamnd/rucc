@@ -194,7 +194,7 @@ impl<'a> Parser<'a, '_> {
             else {
                 return self.fail(format!("block{} has no jump to read a table", table.block));
             };
-            func.tables.push(Table { jump, cells: table.cells });
+            func.tables.push(Table { jump, cells: table.cells, absolute: false });
         }
         Ok(func)
     }

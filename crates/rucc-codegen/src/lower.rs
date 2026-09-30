@@ -3319,7 +3319,7 @@ impl<'a> Lowering<'a> {
         let jump = self.named(self.selector.branch.indirect);
         let jump =
             self.out.build(block, jump).at(span).operand(mir::Operand::read(to, gpr)).finish();
-        self.out.tables.push(mir::Table { jump, cells });
+        self.out.tables.push(mir::Table { jump, cells, absolute: false });
         Ok(())
     }
 

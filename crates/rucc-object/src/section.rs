@@ -284,6 +284,9 @@ pub struct Table {
     pub func: usize,
     /// Where each cell's block is, counted from [`Extent::start`] of that function.
     pub cells: Vec<usize>,
+    /// Whether each cell is the block's address in eight bytes rather than its distance from the
+    /// table in four, which is the table the kernel code model reads.
+    pub absolute: bool,
 }
 
 /// Where one function ended up.
