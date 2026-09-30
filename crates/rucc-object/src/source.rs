@@ -739,7 +739,13 @@ pub fn assembled_described(
     // them names another as often as it names a function.
     let mut named = Map::default();
     for chunk in &info.chunks {
-        let how = if flavour == Flavour::Elf { info.compress } else { Compress::None };
+        // An i386 file keeps each addend in the bytes of its section, which a compressed section
+        // no longer holds, so its debug sections are left as they are for now.
+        let how = if flavour == Flavour::Elf && obj.architecture() != Architecture::I386 {
+            info.compress
+        } else {
+            Compress::None
+        };
         let id = crate::zlib::debug_section(&mut obj, chunk, how);
         named.insert(chunk.name.as_str(), id);
     }

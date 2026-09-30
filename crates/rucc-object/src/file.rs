@@ -792,7 +792,13 @@ pub fn write(
     // file already has.
     let mut named = Map::default();
     for chunk in &info.chunks {
-        let how = if flavour == Flavour::Elf { info.compress } else { Compress::None };
+        // An i386 file keeps each addend in the bytes of its section, which a compressed section
+        // no longer holds, so its debug sections are left as they are for now.
+        let how = if flavour == Flavour::Elf && obj.architecture() != Architecture::I386 {
+            info.compress
+        } else {
+            Compress::None
+        };
         let id = crate::zlib::debug_section(&mut obj, chunk, how);
         named.insert(chunk.name.as_str(), id);
     }
@@ -3099,6 +3105,37 @@ mod tests {
         .flat_map(|word| word.to_le_bytes())
         .collect();
         assert_eq!(note.data().expect("the bytes"), &want[..]);
+    }
+
+    /// The debug sections of an i386 file are not compressed even when `-gz` asks, since the addend
+    /// of each relocation in them goes in the bytes and a compressed section does not hold those.
+    #[test]
+    fn an_i386_debug_section_keeps_its_addends_in_the_bytes_under_gz() {
+        let info = Info {
+            chunks: vec![Chunk {
+                name: ".debug_info".to_owned(),
+                bytes: vec![0; 64],
+                relocs: vec![Reloc {
+                    at: 8,
+                    symbol: "f".to_owned(),
+                    kind: Reference::Address { bytes: 4 },
+                    addend: 7,
+                    after: 0,
+                }],
+            }],
+            compress: Compress::Zlib,
+        };
+        let bytes =
+            write(&calling("puts"), &Data::default(), &[], &i386(), Output::default(), &info)
+                .expect("an object");
+        let file = object::read::elf::ElfFile32::<Endianness>::parse(&bytes[..]).expect("readable");
+        let section = file.section_by_name(".debug_info").expect("the debug section");
+        let packed =
+            SectionFlags::Elf { sh_type: elf::SHT_PROGBITS, sh_flags: elf::SHF_COMPRESSED };
+        assert_ne!(section.flags(), packed);
+        let data = section.data().expect("the bytes");
+        assert_eq!(data.len(), 64);
+        assert_eq!(&data[8..12], &7u32.to_le_bytes());
     }
 
     /// COFF for i386 is not written yet, and saying so is better than a file with x86-64
