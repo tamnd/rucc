@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A function declared with a parameter of an enumeration nobody has finished is taken, the way gcc takes it, as long as nothing calls it. The kernel's `irq.h` declares one, which stopped five units in an x86-64 tinyconfig build.
 - An `asm` operand that is a constant can be named with `%b`, `%w`, `%k` or `%q` again, which prints the constant the way gcc does. The kernel's `outb` with a known port was refused before.
 - The driver takes `-C` and `-CC`. Comments still come out of `-E` as spaces, which is enough for the kernel's vDSO linker script, the one place a build was seen asking for them.
 - Preprocessing a `.S` no longer stops on a `##` whose two sides do not make one token. gcc keeps both halves side by side in assembly, and the kernel relies on that in linkage.h (`L__sym_size_\name`) and in vmlinux.lds.S (`initcall0.init`). C still reports E0313.
