@@ -421,6 +421,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             exceptions: opts.exceptions,
                             non_call_exceptions: opts.exceptions && opts.non_call_exceptions,
                             common,
+                            builtins: opts.builtins && opts.hosted,
+                            no_builtin: &opts.no_builtin,
                             read: &mut read,
                         },
                     );
@@ -4953,16 +4955,18 @@ decl #0 x : int object external static defined
         assert!(text.matches("\tmovq\t").count() >= 4, "two words each way: {text}");
     }
 
-    /// A word is as wide as the object is aligned to and no wider, so a character array is copied
-    /// a byte at a time and a structure of longs eight bytes at a time.
+    /// x86-64 moves a word at any address, so a character array is copied eight bytes at a time
+    /// like a structure of longs, and a tail is one more word that overlaps the one before it.
     #[test]
-    fn how_wide_a_word_of_a_copy_is_follows_the_alignment() {
-        let decl = "struct bytes { char a[8]; };\n";
-        let body = "struct bytes p = *q; return p.a[0];";
-        let text = asm(&format!("{decl}int f(struct bytes *q) {{ {body} }}\n"));
+    fn a_copy_moves_words_whatever_the_alignment() {
+        let decl = "struct bytes { char a[13]; };\n";
+        let body = "*p = *q;";
+        let text = asm(&format!("{decl}void f(struct bytes *p, struct bytes *q) {{ {body} }}\n"));
 
-        // Eight bytes aligned to one is eight words, and each is a load and a store.
-        assert!(text.matches("\tmovb\t").count() >= 16, "a byte at a time: {text}");
+        // Thirteen bytes are a word at 0 and a word at 5, each a load and a store.
+        assert!(!text.contains("\tmovb\t"), "not a byte at a time: {text}");
+        assert_eq!(text.matches("\tmovq\t").count(), 4, "two words each way: {text}");
+        assert!(text.contains("5(%rsi)"), "the tail overlaps: {text}");
     }
 
     /// What an initialiser does not name is zero, which the front end writes as a fill and this
@@ -6467,7 +6471,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             rucc_session::Safety::Detect,
             "void *memcpy(void *, const void *, unsigned long);\n\
              int puts(const char *);\n\
-             void f(char *d, char *s) { memcpy(d, s, 4); puts(d); }\n",
+             void f(char *d, char *s, unsigned long n) { memcpy(d, s, n); puts(d); }\n",
         );
         assert!(text.contains("\"interposed\": 1"), "{text}");
         assert!(text.contains("\"puts\""), "{text}");
