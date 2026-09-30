@@ -35,8 +35,8 @@ use rucc_target::{Isa, Slot};
 
 use crate::inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Extra,
-    Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Sig, Signature, SlotList, SwitchInfo,
-    VaInfo, Value, ValueData, ValueList,
+    Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Shuffle, Sig, Signature, SlotList,
+    SwitchInfo, VaInfo, Value, ValueData, ValueList,
 };
 use crate::module::{Dll, Linkage, Visibility};
 use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
@@ -1559,6 +1559,42 @@ impl<'a> Builder<'a> {
         let ty = self.func[then].ty;
         let args = self.func.push_values(&[cond, then, other]);
         self.value(InstData { args, ..InstData::new(Opcode::Select) }, ty)
+    }
+
+    /// One lane of a vector.
+    pub fn extract_lane(&mut self, vector: Value, lane: u8) -> Value {
+        let ty = self.func[vector].ty.lane();
+        let args = self.func.push_values(&[vector]);
+        self.value(
+            InstData { args, extra: Extra::Lane(lane), ..InstData::new(Opcode::ExtractLane) },
+            ty,
+        )
+    }
+
+    /// The vector with one lane replaced by a value of the lane's type.
+    pub fn insert_lane(&mut self, vector: Value, value: Value, lane: u8) -> Value {
+        let ty = self.func[vector].ty;
+        let args = self.func.push_values(&[vector, value]);
+        self.value(
+            InstData { args, extra: Extra::Lane(lane), ..InstData::new(Opcode::InsertLane) },
+            ty,
+        )
+    }
+
+    /// A vector of the lanes of another in the order `picks` names them, as many as it names.
+    ///
+    /// # Panics
+    ///
+    /// Never, since a [`Shuffle`] has at most eight lanes.
+    pub fn shuffle(&mut self, vector: Value, picks: Shuffle) -> Value {
+        let from = self.func[vector].ty;
+        let lanes = u32::try_from(picks.len()).expect("a shuffle has at most eight lanes");
+        let ty = Type::vector(from.lane(), lanes);
+        let args = self.func.push_values(&[vector]);
+        self.value(
+            InstData { args, extra: Extra::Shuffle(picks), ..InstData::new(Opcode::Shuffle) },
+            ty,
+        )
     }
 
     /// A floating point comparison, which produces one `i1` per lane.

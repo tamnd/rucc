@@ -49,9 +49,9 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange, Jcc, Jmp, JmpAway,
     JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop,
     Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
-    Search, Set, ShiftCl, ShiftRi, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep,
-    StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves,
-    Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    Search, Set, ShiftCl, ShiftRi, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare,
+    StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap,
+    SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -769,6 +769,10 @@ pub enum Form {
     /// reuses the first source here too, because `addsd` writes its answer over one of the two it
     /// was given, exactly as `addq` does.
     AluVec,
+    /// The lanes of one vector register put in another in the order a constant says, which is
+    /// `pshufd`. [`Form::MoveVec`]'s two operands and a byte beside them, and not two-address:
+    /// the destination is written whole and the source is only read.
+    ShuffleVec,
     /// The value a function gives back, when it goes back in a vector register.
     ///
     /// [`Form::RetVal`] in the other class. It encodes to nothing for the same reason and exists
@@ -1271,6 +1275,7 @@ impl Form {
             LoadVec => &LOAD_VEC,
             StoreVec => &STORE_VEC,
             AluVec => &TWO_ADDRESS_VEC,
+            ShuffleVec => &VEC_TO_VEC,
             RetValVec => &RET_VAL_VEC,
             RetVal2Vec => &RET_VAL_2_VEC,
             ArgValVec => &ARG_VAL_VEC,
@@ -1302,6 +1307,7 @@ impl Form {
                 | TestRi
                 | StoreImm
                 | RetPop
+                | ShuffleVec
         )
     }
 
@@ -2384,6 +2390,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("pand_rr", AluVec),
     ("por_rr", AluVec),
     ("pxor_rr", AluVec),
+    // Lanes. The unpack puts the low half of the second register in the high half of the first,
+    // the two scalar moves put the low lane of the second in the low lane of
+    // the first and keep the rest, and the shuffle is any order of four lanes a byte can say.
+    ("punpcklqdq_rr", AluVec),
+    ("movss_rr", AluVec),
+    ("movsd_rr", AluVec),
+    ("pshufd_ri", ShuffleVec),
     // The conversions, which are the instructions that cross between the two register files and
     // the two float formats. Ten of them, which is one for each pair of things a C program is
     // allowed to convert between here: the two formats in both directions, and each format with a
@@ -2581,7 +2594,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 774);
+        assert_eq!(described, 778);
     }
 
     #[test]

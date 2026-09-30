@@ -837,6 +837,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::LoadVec
             | Form::StoreVec
             | Form::AluVec
+            | Form::ShuffleVec
             | Form::ConvertVec
             | Form::ConvertToVec
             | Form::ConvertFromVec

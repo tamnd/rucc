@@ -345,6 +345,12 @@ mod tests {
     /// carries beside the instruction.
     const HINT: &[&str] = &["prefetch_nta", "prefetch_t0", "prefetch_t1", "prefetch_t2"];
 
+    /// The instructions a lane is moved with.
+    ///
+    /// Written by name in `crate::lower` for the prefetch's reason: which lane is a number beside
+    /// the instruction, and a pattern matches on an opcode and a type.
+    const LANES: &[&str] = &["pshufd_ri", "punpcklqdq_rr", "movss_rr", "movsd_rr"];
+
     /// The instructions nothing but an `asm` statement asks for.
     ///
     /// One step further out again. A prefetch is a hint and is still something the compiler decides
@@ -1025,6 +1031,9 @@ mod tests {
                 continue;
             }
             if ATOMIC.contains(&opcode) || PAYLOAD.contains(&opcode) || HINT.contains(&opcode) {
+                continue;
+            }
+            if LANES.contains(&opcode) {
                 continue;
             }
             if CONDITIONAL.contains(&opcode) {
