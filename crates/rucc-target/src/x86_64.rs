@@ -1323,7 +1323,7 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     // gcc has emitted `%fs:40` for twenty years. There is no symbol for it: glibc keeps
     // `__stack_chk_guard` out of its dynamic symbol table on this target precisely so that a
     // protected function cannot be talked into reading somebody else's copy.
-    guard: Some(Guard { segment: Segment::Fs, at: 40, fail: "__stack_chk_fail" }),
+    guard: Some(Guard::in_segment(Segment::Fs, 40)),
     // The newer hook by default, which is what gcc has done on this platform for years and what
     // every kernel needs. `mcount` is the older one and it reads the frame pointer, so a function
     // that calls it is given one whatever the rest of the command line said.

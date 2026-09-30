@@ -54,8 +54,8 @@ const fn only(arch: Arch, row: Row) -> Row {
 const X86: Arch = Arch::X86_64;
 const A64: Arch = Arch::Aarch64;
 
-const GUARD: &str = "the canary is read from where the target's C library keeps it, %fs:40 on \
-                     x86-64, and nothing yet moves it";
+const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
+                     at an offset from sp_el0 is part of that work";
 const THUNKS: &str = "indirect branches and returns are written as they are, with no thunk, no \
                       int3 after them and jump tables where a switch wants one";
 const MCOUNT: &str = "the __fentry__ calls -pg writes are not listed in a __mcount_loc section and \
@@ -201,10 +201,7 @@ pub(crate) const TABLE: &[Row] = &[
     refused("-gz=zlib-gnu", "the debug sections are written uncompressed", Some(2288)),
     refused("-gz=zstd", "the debug sections are written uncompressed", Some(2288)),
     // x86-64.
-    only(X86, same("-mstack-protector-guard=tls", "the canary is the thread's own, the default")),
-    only(X86, same("-mstack-protector-guard-reg=fs", "the canary is read through %fs")),
-    only(X86, same("-mstack-protector-guard-offset=40", "the canary is read from %fs:40")),
-    refused("-mstack-protector-guard*", GUARD, Some(2279)),
+    only(A64, refused("-mstack-protector-guard*", GUARD, Some(2279))),
     only(X86, same("-mindirect-branch=keep", "indirect branches are left as they are")),
     only(X86, refused("-mindirect-branch=*", THUNKS, Some(2280))),
     only(X86, same("-mfunction-return=keep", "returns are left as they are")),
