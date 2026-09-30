@@ -675,6 +675,9 @@ pub struct Options {
     /// [`crate::inline`] compares it against a callee that has one. None at all is the default,
     /// which is the answer that inlines least: a callee built for anything more stays a call.
     pub isa: Isa,
+    /// Whether `-fconserve-stack` asked for gcc's tighter limits on how far inlining may grow a
+    /// frame. See [`inline::Growth`].
+    pub conserve_stack: bool,
 }
 
 impl Default for Options {
@@ -693,6 +696,7 @@ impl Default for Options {
             builtins: true,
             no_builtin: Vec::new(),
             isa: Isa::NONE,
+            conserve_stack: false,
         }
     }
 }
@@ -875,7 +879,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // so the toggle only ever means this and never adds or removes anything from the list.
     let once = opts.wants(inline::ONCE);
     let started = Instant::now();
-    let inlined = inline::run(module, names, limit, once, opts.isa);
+    let growth =
+        if opts.conserve_stack { inline::Growth::CONSERVE } else { inline::Growth::DEFAULT };
+    let inlined = inline::run(module, names, limit, once, opts.isa, growth);
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {
         if opts.verify {

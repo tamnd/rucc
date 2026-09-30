@@ -2216,6 +2216,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // it is a flag the whole program has to agree on, as it is in gcc.
             "-fshort-wchar" => opts.short_wchar = true,
             "-fno-short-wchar" => opts.short_wchar = false,
+            "-fconserve-stack" => opts.conserve_stack = true,
+            "-fno-conserve-stack" => opts.conserve_stack = false,
             // The speculation hardening the kernel builds with when its mitigations are
             // configured, x86-64 only as in gcc. Each is last one wins, and the spellings of a
             // thunk this compiler does not write, `thunk` and `thunk-inline`, are refused by the
@@ -8353,7 +8355,6 @@ mod tests {
         for (flag, issue) in [
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
-            ("-fconserve-stack", 2284),
             ("-gdwarf-4", 2287),
             ("-gz=zlib", 2288),
         ] {

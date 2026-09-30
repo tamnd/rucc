@@ -343,6 +343,16 @@ pub const INLINE_FRAME_GROWTH: u32 = 1000;
 /// a helper with a few, since eleven times nothing is nothing.
 pub const INLINE_LARGE_FRAME: u32 = 256;
 
+/// [`INLINE_FRAME_GROWTH`] under `-fconserve-stack`, per section 33.6.
+///
+/// gcc sets `large-stack-frame-growth` to 40 under that flag, which the Linux kernel builds with
+/// because its stacks are a few pages and a frame gcc keeps small has to stay small here too.
+pub const INLINE_FRAME_GROWTH_CONSERVE: u32 = 40;
+
+/// [`INLINE_LARGE_FRAME`] under `-fconserve-stack`, per section 33.6. gcc sets `large-stack-frame`
+/// to 100 under that flag.
+pub const INLINE_LARGE_FRAME_CONSERVE: u32 = 100;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -903,6 +913,22 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Gcc,
     },
     Constant {
+        name: "INLINE_FRAME_GROWTH_CONSERVE",
+        value: 40,
+        unit: "percent",
+        document: "33.6",
+        gcc: "large-stack-frame-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_LARGE_FRAME_CONSERVE",
+        value: 100,
+        unit: "bytes",
+        document: "33.6",
+        gcc: "large-stack-frame",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
         name: "HOT_BLOCK_FRACTION",
         value: 1000,
         unit: "one part in",
@@ -1157,8 +1183,9 @@ mod tests {
     use super::{
         ALL, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED, BRANCH_COST_FOR_SIZE,
         BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
-        IF_CONVERSION_BUDGET_UNPREDICTABLE, JUMP_TABLE_MIN_TARGETS,
-        JUMP_TABLE_MIN_TARGETS_FOR_SIZE, Provenance,
+        IF_CONVERSION_BUDGET_UNPREDICTABLE, INLINE_FRAME_GROWTH_CONSERVE,
+        INLINE_LARGE_FRAME_CONSERVE, JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
+        Provenance,
     };
     use crate::Cycles;
 
@@ -1174,6 +1201,11 @@ mod tests {
         assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SPEED"), i64::from(BLOCK_COPY_MOVES_FOR_SPEED));
         assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SIZE"), i64::from(BLOCK_COPY_MOVES_FOR_SIZE));
         assert_eq!(by_name("JUMP_TABLE_MIN_TARGETS"), i64::from(JUMP_TABLE_MIN_TARGETS));
+        assert_eq!(
+            by_name("INLINE_FRAME_GROWTH_CONSERVE"),
+            i64::from(INLINE_FRAME_GROWTH_CONSERVE)
+        );
+        assert_eq!(by_name("INLINE_LARGE_FRAME_CONSERVE"), i64::from(INLINE_LARGE_FRAME_CONSERVE));
         assert_eq!(
             by_name("JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
             i64::from(JUMP_TABLE_MIN_TARGETS_FOR_SIZE)

@@ -175,11 +175,6 @@ pub(crate) const TABLE: &[Row] = &[
         Some(2282),
     ),
     refused(
-        "-fconserve-stack",
-        "inlining here does not weigh how much it grows the caller's frame",
-        Some(2284),
-    ),
-    refused(
         "-fplugin=*",
         "a gcc plugin is a shared object built against gcc's own internals, which this compiler \
          cannot load",
