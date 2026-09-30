@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An `asm` output tied to an input that the recognized instruction only writes is now kept as text, so the tied value is in the destination when the instruction runs. `bsr` and `bsf` of zero leave the destination alone, and the kernel's `fls64` counts on `int bitpos = -1` coming out, so `get_order` of a small size was one and slab creation failed.
 - The `%a` modifier on a symbol now prints `sym+off(%rip)` on x86-64, as gcc does. The kernel's `static_cpu_has` writes `testb %[bitnum], %a[cap_byte]` in `.altinstr_aux`, and the absolute form read `boot_cpu_data` at an address that was not mapped yet.
 - `#pragma GCC visibility push(hidden)` and `pop` now set the visibility of the declarations and definitions between them, as gcc does. The kernel wraps its early startup code in it so that an `extern` is reached from the instruction pointer and not through the GOT, and without it `__startup_64` faulted before the kernel was relocated.
 - An octal constant with a digit separator straight after its leading zero, such as `0'17`, is octal, so it is fifteen as in gcc. It used to be read as decimal seventeen, because the zero followed by a separator did not look like the start of an octal constant.

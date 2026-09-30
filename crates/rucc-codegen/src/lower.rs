@@ -4579,6 +4579,21 @@ impl<'a> Lowering<'a> {
             || writes.iter().any(|&count| count > 1)
             || steps.iter().any(|step| !matches!(step, x86_64::Step::Line(_)));
 
+        // An output tied to an input that the instruction only writes, as far as its description
+        // says, is kept as text, unless the template is woven, which carries the tie itself. The
+        // tie says the input's value is where the output is, and an instruction that leaves its
+        // destination alone some of the time reads that value then: `bsr` and `bsf` of zero do,
+        // and the kernel's `fls64` is `int bitpos = -1` tied to the destination of a `bsrq` so
+        // that zero answers zero. Read as the opcode, the -1 was never put anywhere and the
+        // destination shared a register with the source.
+        let tied_unread = !woven
+            && (0..list.len()).any(|index| {
+                writes[index] > 0 && !reads[index] && operands.tied_to(index).is_some()
+            });
+        if tied_unread {
+            return self.kept(inst, &template, &list, &widths, &memory);
+        }
+
         // Where every operand is. Worked out in full before the first instruction is written, since
         // reading a value may be what puts it in a register in the first place, and that has to
         // happen in front of the assembly rather than in the middle of it.

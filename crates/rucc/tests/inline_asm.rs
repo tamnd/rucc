@@ -870,6 +870,32 @@ fn the_register_modifiers_the_kernel_uses_are_spelled_the_way_gcc_spells_them() 
     assert!(body(&text, "half").contains("addw $1, %"), "not a word:\n{text}");
 }
 
+/// A `+r` on the destination of a `bsr` is what the kernel's `fls64` leans on: the search of zero
+/// leaves the destination alone, so the -1 that went in comes out and the answer is zero. The
+/// source is computed in the function so that it is in a register the destination could take,
+/// which is how the -1 got lost: `get_order` of anything under a page came back as one.
+#[test]
+fn a_search_tied_to_its_starting_value_keeps_it_for_zero() {
+    let source = "int order(unsigned int size) { unsigned long x = size; x--; x >>= 12; \
+                  int bit = -1; asm (\"bsrq %1,%q0\" : \"+r\" (bit) : \"rm\" (x)); return bit + 1; }\n";
+    for level in ["-O1", "-O2", "-Os"] {
+        let (ok, text, said) = run_with("tied-search", source, &[level]);
+        assert!(ok, "the compiler refused the fixture:\n{said}");
+        let body = body(&text, "order");
+        let search = body.lines().find(|line| line.contains("bsrq")).expect("the search is there");
+        let dest = search.rsplit(',').next().expect("two operands").trim().to_string();
+        let src = search.split(',').next().expect("two operands").split_whitespace().last();
+        assert_ne!(src, Some(dest.as_str()), "the source took the destination at {level}:\n{body}");
+        // The -1 is in the destination when the search runs.
+        let wide = dest.replace("%r", "%e").replace("%ee", "%e");
+        let set = format!("movl\t$-1, {wide}");
+        assert!(
+            body.contains(&set) || body.contains(&format!("movq\t$-1, {dest}")),
+            "{level}:\n{body}"
+        );
+    }
+}
+
 #[test]
 fn a_constant_can_be_negated_and_a_memory_operand_read_eight_bytes_on() {
     let source = "long arr[2];\n\
