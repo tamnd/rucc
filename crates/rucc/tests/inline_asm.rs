@@ -916,6 +916,21 @@ fn a_global_in_memory_is_named_from_the_instruction_pointer() {
 }
 
 #[test]
+fn an_address_the_template_spells_as_a_name_is_not_built_as_well() {
+    let source = "struct ops { void (*a)(void); unsigned long (*b)(void); } pv;\n\
+                  unsigned long f(void) { unsigned long r; \
+                  asm volatile (\"call *%[p]\" : \"=a\" (r) : [p] \"m\" (pv.b) : \"memory\"); return r; }\n\
+                  long arr[4];\n\
+                  int has(void) { asm goto (\"testb $1, %a0\\n\\tjnz %l1\" : : \"i\" (&arr[1]) : : yes); \
+                  return 0; yes: return 1; }\n";
+    let flags = ["-O2", "-mcmodel=kernel", "-fno-PIE"];
+    let (ok, text, said) = run_with("unread-address", source, &flags);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(!body(&text, "f").contains("$pv"), "the address was built anyway:\n{text}");
+    assert!(!body(&text, "has").contains("$arr"), "the address was built anyway:\n{text}");
+}
+
+#[test]
 fn a_constant_can_be_negated_and_a_memory_operand_read_eight_bytes_on() {
     let source = "long arr[2];\n\
                   long less(long x) { asm (\"addq $%n1, %0\" : \"+r\" (x) : \"i\" (4)); return x; }\n\
