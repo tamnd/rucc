@@ -42,7 +42,8 @@
 //! nothing else: an enumerator is still `int` where the value fits in one, an enumeration the
 //! program wrote an underlying type for is still that type, and the size of an enumeration too
 //! wide for an `int` is unchanged. Measured against gcc 16 in both `-std=c17` and `-std=c23`,
-//! which agree with each other and with this.
+//! which agree with each other and with this. `packed` written on one enumeration does the same
+//! for that enumeration alone, whether it is written before the tag or after the closing brace.
 
 use rucc_ast::{self as ast, Member, TypeSpec};
 use rucc_base::Symbol;
@@ -591,6 +592,7 @@ impl Checker<'_> {
         id: EnumId,
         list: ast::EnumeratorList,
         fixed: Option<TypeId>,
+        short: bool,
         span: Span,
     ) {
         let ast = self.ast;
@@ -643,7 +645,7 @@ impl Checker<'_> {
 
         let underlying = match fixed {
             Some(ty) => ty,
-            None => self.enum_underlying(&values),
+            None => self.enum_underlying(&values, short),
         };
         // The list goes into the table as well as into the scope. The scope answers what one name
         // means and is what the rest of the checker asks, and the table answers what the whole
@@ -741,10 +743,11 @@ impl Checker<'_> {
     /// `-fshort-enums` starts them at a byte instead of at an `int`, and the last two entries are
     /// the same either way, which is why an enumeration too wide for an `int` is the same type
     /// under both and why the flag is invisible to a program whose enumerators are all large.
-    fn enum_underlying(&mut self, values: &[(Symbol, i128, Span)]) -> TypeId {
+    /// `short` is `packed` written on the enumeration, which asks for the same thing.
+    fn enum_underlying(&mut self, values: &[(Symbol, i128, Span)], short: bool) -> TypeId {
         let low = values.iter().map(|&(_, value, _)| value).min().unwrap_or(0);
         let high = values.iter().map(|&(_, value, _)| value).max().unwrap_or(0);
-        let candidates: &[IntKind] = match (low >= 0, self.cx.short_enums) {
+        let candidates: &[IntKind] = match (low >= 0, short || self.cx.short_enums) {
             (true, false) => &[IntKind::UInt, IntKind::ULong],
             (false, false) => &[IntKind::Int, IntKind::Long],
             (true, true) => &[IntKind::UChar, IntKind::UShort, IntKind::UInt, IntKind::ULong],

@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - Three headers every kernel unit includes did not compile under `CONFIG_WERROR`, which `allmodconfig` turns on. `__is_constexpr` dereferences a `void *` inside `sizeof` and measures a `void`, and rucc warned about both where gcc says nothing unless asked with `-Wpointer-arith` or `-pedantic`. `check_copy_size` keeps what `__builtin_object_size` answers in an `int`, and rucc warned that `(size_t) -1` does not fit, which gcc cannot see because it works that answer out in a later pass. And `struct mm_struct` was refused, since its flexible array member follows an anonymous `struct` and rucc did not count the members inside that one as named.
+- `packed` on an enumeration was read and then ignored, so `enum rw_hint` was the size of an `int` and the kernel's assertion that it is one byte failed. It now picks the smallest type that holds the values, the same as `-fshort-enums` does, whether it is written before the tag or after the closing brace.
 
 ## 0.18.2
 
