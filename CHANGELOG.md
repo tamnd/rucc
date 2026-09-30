@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `defconfig` kernel gets past `asm-offsets.c`: a `__seg_gs` pointer compares with `NULL`, `typeof_unqual` takes the address space off the elements of an array such as a percpu `cpumask_var_t`, and a constant converted in the arm of a conditional that a constant condition never takes is no longer warned about, which `ilog2` of a 64 bit constant in `mmzone.h` relied on.
 - Lowering no longer leaves the address of a name in a register when a kept `asm` template spells that operand as the name itself, so `call *%[op]` against `pv_ops.op` is no longer preceded by an unread `movq $pv_ops, %rax; addq $8, %rax`.
 - A jump table with a case for every value in its range no longer makes a block for the default's arguments that nothing jumps to. The kernel's `mas_find` came out with one, and objtool reported it as an unreachable instruction.
 - A branch on the `!` of a `_Bool` block parameter is now decided along each edge that carries a constant, so `thread` and `simplify-cfg` see through `xor`, `and` and `or` of one bit values. The kernel's `if (!user_access_begin(...))` left the failed check joining the path after `stac`, which objtool reported as a redundant UACCESS disable.

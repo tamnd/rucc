@@ -138,6 +138,22 @@ fn leaving_the_space_is_an_error() {
     assert!(err.contains("comparison of pointers to disjoint address spaces"), "{err}");
 }
 
+/// What the kernel's `this_cpu_ptr` and `percpu_counter_initialized` write, which gcc takes: a
+/// null pointer constant is in every space, and `typeof_unqual` takes the space off an array's
+/// elements the way it takes it off anything else.
+#[test]
+fn the_kernel_can_leave_the_space_the_way_it_does() {
+    listing(
+        "percpu",
+        "struct cpumask { unsigned long bits[1]; };\n\
+         typedef struct cpumask cpumask_var_t[1];\n\
+         extern __seg_gs cpumask_var_t m;\n\
+         struct cpumask *mask(void) { return *(__typeof_unqual__(*(&m)) *)(unsigned long)&m; }\n\
+         struct c { int __seg_gs *counters; };\n\
+         int set(struct c *p) { return p->counters != ((void *)0); }\n",
+    );
+}
+
 /// An object in a segment has to be one the linker places, so the automatic ones are refused, and
 /// so are a parameter and a member, which are parts of something else.
 #[test]

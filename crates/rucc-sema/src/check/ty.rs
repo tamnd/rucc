@@ -581,8 +581,15 @@ impl Checker<'_> {
         }
         // `typeof_unqual` takes off the qualifiers and `_Atomic` with them, which is the one
         // place the two spellings of `_Atomic` are told apart again.
-        let bare = match self.types.kind(self.types.canonical(ty)) {
+        let canonical = self.types.canonical(ty);
+        let bare = match self.types.kind(canonical) {
             TypeKind::Atomic(inner) => inner,
+            // The qualifiers of an array are those of what it holds, so they come off there. The
+            // kernel's `this_cpu_ptr` is `typeof_unqual` of a `__seg_gs` percpu variable, and a
+            // `cpumask_var_t` is an array of one.
+            TypeKind::Array { .. } if !self.types.object_quals(canonical).is_none() => {
+                return self.types.unqualified_object(canonical);
+            }
             _ => ty,
         };
         self.types.unqualified(bare)

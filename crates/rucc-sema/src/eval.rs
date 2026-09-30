@@ -1451,7 +1451,7 @@ pub(crate) fn int_shape(types: &Types, ty: TypeId, target: &TargetInfo) -> Optio
 ///
 /// A nan is true, because it is not equal to zero, and so is a negative zero's negation of
 /// itself: the test is `!= 0` and `-0.0 == 0.0`.
-fn truth(value: Const) -> Option<bool> {
+pub(crate) fn truth(value: Const) -> Option<bool> {
     Some(match value {
         Const::Int(value) => value != 0,
         Const::Float(value) => !value.is_zero(),

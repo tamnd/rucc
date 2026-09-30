@@ -148,6 +148,25 @@ fn the_kernel_s_headers_compile_quietly_under_werror() {
     assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// `ilog2` of a 64 bit constant, which `mmzone.h` sizes an array with under `defconfig`. The
+/// constant goes into `__ilog2_u32` in an arm the `sizeof` test never takes, and gcc says nothing
+/// about a conversion that never happens. The same one in a taken arm is still warned about.
+#[test]
+fn a_conversion_in_an_arm_that_is_never_taken_is_quiet() {
+    let source = "int __ilog2_u32(unsigned int n);\n\
+        int __ilog2_u64(unsigned long long n);\n\
+        #define ilog2(n) (sizeof(n) <= 4 ? __ilog2_u32(n) : __ilog2_u64(n))\n\
+        int f(void) { return ilog2(0x400000000ULL); }\n";
+    let flags = ["--target=x86_64-unknown-linux-gnu", "-O2", "-Werror", "-c", "-o", "/dev/null"];
+    let out = run(&flags, source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    let taken = "int __ilog2_u32(unsigned int n);\n\
+        int f(void) { return sizeof(long) > 4 ? __ilog2_u32(0x400000000ULL) : 0; }\n";
+    let out = run(&flags, taken);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("changes value"));
+}
+
 /// `packed` on an enumeration asks for the smallest type that holds it, the same as
 /// `-fshort-enums` does for all of them, and the kernel asserts that `enum rw_hint` is one byte.
 /// The sizes were measured against gcc 13, before and after the tag and past the width of an
