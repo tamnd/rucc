@@ -85,15 +85,41 @@ impl Flavour {
         }
     }
 
-    /// Which relocation this reference is, or `None` for one this format has none of.
+    /// Which relocation this reference is on this machine, or `None` for one this format has none
+    /// of there.
     ///
     /// `after` is how many bytes of the instruction come after the four the linker writes over,
     /// which ELF has already folded into the addend and COFF wants told apart. See [`crate::Reloc`].
-    pub(crate) fn reloc(self, reference: Reference, after: u8) -> Option<RelocationFlags> {
-        match self {
-            Flavour::Elf => elf::r_type(reference).map(|r_type| RelocationFlags::Elf { r_type }),
-            Flavour::Coff => coff::reloc(reference, after),
-            Flavour::MachO => crate::macho::reloc(reference, 0).ok(),
+    pub(crate) fn reloc(
+        self,
+        machine: Architecture,
+        reference: Reference,
+        after: u8,
+    ) -> Option<RelocationFlags> {
+        let flags = |r_type| RelocationFlags::Elf { r_type };
+        match (self, machine) {
+            (Flavour::Elf, Architecture::I386) => elf::r_type_i386(reference).map(flags),
+            (Flavour::Elf, Architecture::Aarch64) => elf::r_type_aarch64(reference).map(flags),
+            (Flavour::Elf, _) => elf::r_type(reference).map(flags),
+            (Flavour::Coff, Architecture::Aarch64) => {
+                coff::arm64(reference).map(|typ| RelocationFlags::Coff { typ })
+            }
+            (Flavour::Coff, _) => coff::reloc(reference, after),
+            (Flavour::MachO, _) => crate::macho::reloc(reference, 0).ok(),
+        }
+    }
+
+    /// The machine the writer underneath is asked for, for a target whose objects this writes in
+    /// this format, and nothing for one it does not.
+    ///
+    /// i386 is ELF only so far. COFF for it has relocations of its own and a symbol decoration the
+    /// other machines do not, and both are still to be written.
+    pub(crate) fn machine(self, arch: Arch) -> Option<Architecture> {
+        match (self, arch) {
+            (Flavour::Elf | Flavour::Coff, Arch::X86_64) => Some(Architecture::X86_64),
+            (Flavour::Elf | Flavour::Coff, Arch::Aarch64) => Some(Architecture::Aarch64),
+            (Flavour::Elf, Arch::X86) => Some(Architecture::I386),
+            _ => None,
         }
     }
 
@@ -239,7 +265,8 @@ impl Flavour {
         match self {
             Flavour::Elf => {
                 let note = obj.section_id(StandardSection::GnuProperty);
-                obj.append_section_data(note, &elf::record(property), 8);
+                let align = if obj.architecture() == Architecture::I386 { 4 } else { 8 };
+                obj.append_section_data(note, &elf::record(property, align), u64::from(align));
             }
             Flavour::Coff | Flavour::MachO => {}
         }
@@ -321,14 +348,15 @@ pub fn write(
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
     let Output { sections, property } = output;
-    let flavour = Flavour::of(target).filter(|_| target.tuple.arch() == Arch::X86_64);
-    let Some(flavour) = flavour else {
+    let Some((flavour, machine)) = written(target) else {
         return Err(Error::Format { triple: target.tuple.to_string() });
     };
     if flavour == Flavour::Coff {
         beyond(text, data)?;
     }
-    let mut obj = Writer::new(flavour.binary(), Architecture::X86_64, Endianness::Little);
+    let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
+    // How wide an address is, which is how wide the records of addresses below are written.
+    let pointer = if machine == Architecture::I386 { 4u8 } else { 8 };
     // The one that holds every function when they are not being split up. Asked for even when it
     // will stay empty, because it is the section the writer underneath starts a file with anyway
     // and gcc writes an empty `.text` under `-ffunction-sections` too.
@@ -388,16 +416,17 @@ pub fn write(
             let name = elf::PATCHABLE.as_bytes().to_vec();
             let id = obj.add_section(Vec::new(), name, SectionKind::Data);
             obj.section_mut(id).flags = elf::ordered();
-            obj.append_section_data(id, &[0; 8], 8);
+            obj.append_section_data(id, &vec![0; usize::from(pointer)], u64::from(pointer));
             let symbol = obj.section_symbol(section);
-            let flags = flavour.reloc(Reference::Address { bytes: 8 }, 0).ok_or_else(|| {
-                Error::Refused { why: "no relocation holds an address here".to_owned() }
-            })?;
-            obj.add_relocation(
+            let flags =
+                flavour.reloc(machine, Reference::Address { bytes: pointer }, 0).ok_or_else(
+                    || Error::Refused { why: "no relocation holds an address here".to_owned() },
+                )?;
+            relocate(
+                &mut obj,
                 id,
                 Relocation { offset: 0, symbol, addend: (patch.at - base) as i64, flags },
-            )
-            .map_err(|why| Error::Refused { why: why.to_string() })?;
+            )?;
             ordered.push(if sections.functions {
                 format!(".text.{}", func.name)
             } else {
@@ -463,9 +492,10 @@ pub fn write(
     if !text.mcount.is_empty() {
         let name = crate::section::MCOUNT_LOC.as_bytes().to_vec();
         let id = obj.add_section(Vec::new(), name, SectionKind::ReadOnlyData);
-        let flags = flavour.reloc(Reference::Address { bytes: 8 }, 0).ok_or_else(|| {
-            Error::Refused { why: "no relocation holds an address here".to_owned() }
-        })?;
+        let flags =
+            flavour.reloc(machine, Reference::Address { bytes: pointer }, 0).ok_or_else(|| {
+                Error::Refused { why: "no relocation holds an address here".to_owned() }
+            })?;
         for &call in &text.mcount {
             let after = text.funcs.partition_point(|func| func.start <= call);
             let Some(index) = after.checked_sub(1) else {
@@ -479,10 +509,10 @@ pub fn write(
             } else {
                 (whole, call)
             };
-            let offset = obj.append_section_data(id, &[0; 8], 8);
+            let offset =
+                obj.append_section_data(id, &vec![0; usize::from(pointer)], u64::from(pointer));
             let symbol = obj.section_symbol(section);
-            obj.add_relocation(id, Relocation { offset, symbol, addend: at as i64, flags })
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            relocate(&mut obj, id, Relocation { offset, symbol, addend: at as i64, flags })?;
         }
     }
 
@@ -647,13 +677,12 @@ pub fn write(
         // name of its own, the way gas writes a reference to a `.L` label: such a name is not
         // kept in the symbol table, so what the linker is told is the section and how far in.
         if let Some(&(table, offset)) = tables.get(&reloc.symbol) {
-            let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
-                why: format!("no relocation is {:?}", reloc.kind),
+            let flags = flavour.reloc(machine, reloc.kind, reloc.after).ok_or_else(|| {
+                Error::Refused { why: format!("no relocation is {:?}", reloc.kind) }
             })?;
             let symbol = obj.section_symbol(table);
             let addend = reloc.addend + offset as i64;
-            obj.add_relocation(section, Relocation { offset: at, symbol, addend, flags })
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            relocate(&mut obj, section, Relocation { offset: at, symbol, addend, flags })?;
             continue;
         }
         add(&mut obj, section, at, reloc, &symbols, flavour)?;
@@ -664,6 +693,9 @@ pub fn write(
     // table and builds the index the unwinder searches.
     if !text.unwind.bytes.is_empty() {
         let ((name, align), second) = flavour.tables();
+        // Four on a machine whose addresses are four bytes, which is what gas aligns the table to
+        // there.
+        let align = if machine == Architecture::I386 { 4 } else { align };
         let frames = obj.add_section(Vec::new(), name.into(), SectionKind::ReadOnlyData);
         obj.append_section_data(frames, &text.unwind.bytes, align);
         // What the rows point at, on the format that keeps the descriptions in a section of their
@@ -743,12 +775,11 @@ pub fn write(
                     (obj.section_symbol(section), reloc.addend + at as i64)
                 }
             };
-            let flags = flavour.reloc(reloc.kind, reloc.after).ok_or_else(|| Error::Refused {
-                why: format!("no relocation is {:?}", reloc.kind),
+            let flags = flavour.reloc(machine, reloc.kind, reloc.after).ok_or_else(|| {
+                Error::Refused { why: format!("no relocation is {:?}", reloc.kind) }
             })?;
             let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
-            obj.add_relocation(frames, record)
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            relocate(&mut obj, frames, record)?;
         }
     }
     // The debug information, if the build asked for any. One section per chunk under the name
@@ -761,7 +792,13 @@ pub fn write(
     // file already has.
     let mut named = Map::default();
     for chunk in &info.chunks {
-        let how = if flavour == Flavour::Elf { info.compress } else { Compress::None };
+        // An i386 file keeps each addend in the bytes of its section, which a compressed section
+        // no longer holds, so its debug sections are left as they are for now.
+        let how = if flavour == Flavour::Elf && obj.architecture() != Architecture::I386 {
+            info.compress
+        } else {
+            Compress::None
+        };
         let id = crate::zlib::debug_section(&mut obj, chunk, how);
         named.insert(chunk.name.as_str(), id);
     }
@@ -806,11 +843,10 @@ pub fn write(
             };
             let kind = flavour.debug(reloc.kind, named.contains_key(reloc.symbol.as_str()));
             let flags = flavour
-                .reloc(kind, reloc.after)
+                .reloc(machine, kind, reloc.after)
                 .ok_or_else(|| Error::Refused { why: format!("no relocation is {kind:?}") })?;
             let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
-            obj.add_relocation(section, record)
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            relocate(&mut obj, section, record)?;
         }
     }
     for (object, &(section, offset)) in data.objects.iter().zip(&placed) {
@@ -941,7 +977,7 @@ pub fn defines(
     aliases: &[Alias],
     target: &TargetInfo,
 ) -> Result<Vec<String>, Error> {
-    if target.tuple.arch() != Arch::X86_64 || Flavour::of(target).is_none() {
+    if written(target).is_none() {
         return Err(Error::Format { triple: target.tuple.to_string() });
     }
     let names = text
@@ -1067,9 +1103,12 @@ fn tables(
         let why = "a jump table outside the code is written on ELF only".to_owned();
         return Err(Error::Refused { why });
     }
-    let flags = flavour.reloc(Reference::Away, 0).ok_or_else(|| Error::Refused {
+    let machine = obj.architecture();
+    let flags = flavour.reloc(machine, Reference::Away, 0).ok_or_else(|| Error::Refused {
         why: "no relocation is a distance from where it is written".to_owned(),
     })?;
+    // How wide a cell that holds an address is, which is the width of an address.
+    let pointer = if machine == Architecture::I386 { 4u8 } else { 8 };
     for table in &text.tables {
         let func = text.funcs.get(table.func).ok_or_else(|| Error::Refused {
             why: format!("'{}' belongs to function {}, which is not here", table.name, table.func),
@@ -1080,13 +1119,14 @@ fn tables(
         } else {
             obj.section_id(StandardSection::ReadOnlyData)
         };
-        // Eight bytes of address a cell under the kernel code model, which is counted from the
-        // front of the code section alone rather than from the cell.
+        // An address a cell under the kernel code model, which is counted from the front of the
+        // code section alone rather than from the cell.
         let (width, flags) = if table.absolute {
-            let wide = flavour.reloc(Reference::Address { bytes: 8 }, 0).ok_or_else(|| {
-                Error::Refused { why: "no relocation is an address in eight bytes".to_owned() }
+            let reference = Reference::Address { bytes: pointer };
+            let wide = flavour.reloc(machine, reference, 0).ok_or_else(|| Error::Refused {
+                why: format!("no relocation is an address in {pointer} bytes"),
             })?;
-            (8, wide)
+            (usize::from(pointer), wide)
         } else {
             (4, flags)
         };
@@ -1099,8 +1139,7 @@ fn tables(
             let place = (width * index) as u64;
             let addend = at as i64 + cell as i64 + if table.absolute { 0 } else { place as i64 };
             let record = Relocation { offset: offset + place, symbol, addend, flags };
-            obj.add_relocation(section, record)
-                .map_err(|why| Error::Refused { why: why.to_string() })?;
+            relocate(obj, section, record)?;
         }
     }
     Ok(placed)
@@ -1175,13 +1214,73 @@ fn add(
     flavour: Flavour,
 ) -> Result<(), Error> {
     let flags = flavour
-        .reloc(reloc.kind, reloc.after)
+        .reloc(obj.architecture(), reloc.kind, reloc.after)
         .ok_or_else(|| Error::Refused { why: format!("no relocation is {:?}", reloc.kind) })?;
-    obj.add_relocation(
+    relocate(
+        obj,
         section,
         Relocation { offset: at, symbol: symbols[&reloc.symbol], addend: reloc.addend, flags },
     )
-    .map_err(|why| Error::Refused { why: why.to_string() })
+}
+
+/// Add one relocation, with its addend written into the bytes it covers on a machine whose
+/// relocations have nowhere else to keep one.
+///
+/// ELF for i386 uses `SHT_REL`, whose entries are an offset, a symbol and a type and nothing more:
+/// what is added to the symbol is whatever the bytes held before the linker got there, so a call
+/// carries its minus four in the four bytes of the call itself, the way gas writes it. The writer
+/// underneath does that for some of the types and refuses the rest, `R_386_GOT32X` among them, so
+/// it is done here for all of them, and the writer is handed a relocation whose addend is nothing.
+/// The bytes are overwritten rather than added to, because what is in them before the linker has
+/// been is nothing a program meant.
+///
+/// Every other machine this writes keeps the addend in the relocation, and its relocations go to
+/// the writer as they are.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for a relocation past the end of its section, an addend that does not fit in
+/// the bytes it goes in, and anything the writer underneath objected to.
+pub(crate) fn relocate(
+    obj: &mut Writer<'_>,
+    section: object::write::SectionId,
+    mut relocation: Relocation,
+) -> Result<(), Error> {
+    if let (Architecture::I386, RelocationFlags::Elf { r_type }) =
+        (obj.architecture(), relocation.flags)
+    {
+        let Some(width) = elf::width_i386(r_type) else {
+            let why = format!("relocation type {} has no width this writer knows", r_type.0);
+            return Err(Error::Refused { why });
+        };
+        let addend = relocation.addend;
+        let bits = 8 * width as u32;
+        if addend < -(1i64 << (bits - 1)) || addend >= 1i64 << bits {
+            let why =
+                format!("{addend} added to a name, and there are {width} bytes to keep it in");
+            return Err(Error::Refused { why });
+        }
+        let at = usize::try_from(relocation.offset).unwrap_or(usize::MAX);
+        let data = obj.section_mut(section).data_mut();
+        let Some(place) = data.get_mut(at..).and_then(|rest| rest.get_mut(..width)) else {
+            let why = format!("a relocation at {at} is past the end of its section");
+            return Err(Error::Refused { why });
+        };
+        place.copy_from_slice(&addend.to_le_bytes()[..width]);
+        relocation.addend = 0;
+    }
+    obj.add_relocation(section, relocation).map_err(|why| Error::Refused { why: why.to_string() })
+}
+
+/// The format and the machine a target's object is written in by [`write()`], and nothing for a
+/// target it does not write.
+///
+/// x86-64 on both formats and i386 on ELF. AArch64 reaches an object through a listing only, which
+/// [`crate::assembled`] writes.
+fn written(target: &TargetInfo) -> Option<(Flavour, Architecture)> {
+    let flavour = Flavour::of(target)?;
+    let machine = flavour.machine(target.tuple.arch())?;
+    (machine != Architecture::Aarch64).then_some((flavour, machine))
 }
 
 /// How far a name reaches, which is the one thing about a symbol ELF calls its binding.
@@ -1215,7 +1314,7 @@ mod tests {
     use crate::elf::PATCHABLE;
     use crate::section::{Chunk, Extent, Marker, Offer, Patch, Reloc};
 
-    /// A linux x86-64 target, which is the only one this writes.
+    /// A linux x86-64 target, which is the one most of these are written against.
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
     }
@@ -2913,5 +3012,145 @@ mod tests {
                 .expect_err("no writer");
             assert!(matches!(error, Error::Format { .. }), "{error:?}");
         }
+    }
+
+    /// A linux i386 target, which [`write()`] writes as a 32 bit ELF file with REL relocations.
+    fn i386() -> TargetInfo {
+        TargetInfo::new(Triple::new(Arch::X86, Os::Linux, Env::Gnu))
+    }
+
+    /// A compilation for i386 comes out as a 32 bit file whose addends are in the bytes, and the
+    /// records of addresses in it are four bytes each.
+    ///
+    /// The call is the shape every case here starts from, the variable holds the address of
+    /// something else, and the function has room in front of it for a patcher, which is a record
+    /// of one address whose section header has to be read back from where a 32 bit file keeps it.
+    #[test]
+    fn a_compilation_for_i386_is_32_bit_elf_with_rel_relocations() {
+        let mut text = calling("puts");
+        text.bytes.splice(0..0, [0x90, 0x90, 0x90]);
+        text.funcs[0].start = 3;
+        text.funcs[0].patch = Some(Patch { at: 0, before: 3 });
+        text.relocs[0].at = 4;
+        let data = Data {
+            objects: vec![Object {
+                name: "p".to_owned(),
+                bytes: vec![0; 4],
+                size: 4,
+                align: 4,
+                place: Place::Written,
+                binding: Binding::Global,
+                visibility: Visibility::Default,
+                relocs: vec![Reloc {
+                    at: 0,
+                    symbol: "x".to_owned(),
+                    kind: Reference::Address { bytes: 4 },
+                    addend: 12,
+                    after: 0,
+                }],
+            }],
+            ..Data::default()
+        };
+        let property = Property { features: Property::IBT | Property::SHSTK };
+        let output = Output { property, ..Output::default() };
+        let bytes = write(&text, &data, &[], &i386(), output, &Info::default()).expect("an object");
+        let file = object::read::elf::ElfFile32::<Endianness>::parse(&bytes[..]).expect("readable");
+        assert_eq!(file.architecture(), Architecture::I386);
+        assert_eq!(file.elf_header().e_machine.get(Endianness::Little), elf::EM_386);
+        assert!(file.section_by_name(".rela.text").is_none(), "i386 has no addend field");
+
+        // The call, with its minus four in the four bytes of the call.
+        let code = file.section_by_name(".text").expect("a text section");
+        let [(at, reloc)] = &code.relocations().collect::<Vec<_>>()[..] else {
+            panic!("one relocation in the text")
+        };
+        assert_eq!(*at, 4);
+        assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_386_PLT32 });
+        assert!(reloc.has_implicit_addend());
+        assert_eq!(&code.data().expect("the bytes")[4..8], &(-4i32).to_le_bytes());
+
+        // The address in the variable, with what is added to it where the address goes.
+        let variable = file.section_by_name(".data").expect("a data section");
+        let [(at, reloc)] = &variable.relocations().collect::<Vec<_>>()[..] else {
+            panic!("one relocation in the data")
+        };
+        assert_eq!(*at, 0);
+        assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_386_32 });
+        assert_eq!(variable.data().expect("the bytes"), &12u32.to_le_bytes());
+
+        // The patcher's record, one four byte address tied to the text it is about.
+        let record = file.section_by_name(PATCHABLE).expect("a record of the room");
+        assert_eq!(record.size(), 4);
+        assert_eq!(record.align(), 4);
+        let index = code.index().0;
+        assert_eq!(record.elf_section_header().sh_link.get(Endianness::Little) as usize, index);
+        let [(_, reloc)] = &record.relocations().collect::<Vec<_>>()[..] else {
+            panic!("one address in the record")
+        };
+        assert_eq!(reloc.flags(), RelocationFlags::Elf { r_type: elf::R_386_32 });
+
+        // The note, padded to four rather than to eight, which is what gcc -m32 writes.
+        let note = file.section_by_name(".note.gnu.property").expect("the note");
+        assert_eq!(note.align(), 4);
+        let want: Vec<u8> = [
+            4u32,
+            12,
+            5,
+            u32::from_le_bytes(*b"GNU\0"),
+            Property::X86_FEATURES,
+            4,
+            Property::IBT | Property::SHSTK,
+        ]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+        assert_eq!(note.data().expect("the bytes"), &want[..]);
+    }
+
+    /// The debug sections of an i386 file are not compressed even when `-gz` asks, since the addend
+    /// of each relocation in them goes in the bytes and a compressed section does not hold those.
+    #[test]
+    fn an_i386_debug_section_keeps_its_addends_in_the_bytes_under_gz() {
+        let info = Info {
+            chunks: vec![Chunk {
+                name: ".debug_info".to_owned(),
+                bytes: vec![0; 64],
+                relocs: vec![Reloc {
+                    at: 8,
+                    symbol: "f".to_owned(),
+                    kind: Reference::Address { bytes: 4 },
+                    addend: 7,
+                    after: 0,
+                }],
+            }],
+            compress: Compress::Zlib,
+        };
+        let bytes =
+            write(&calling("puts"), &Data::default(), &[], &i386(), Output::default(), &info)
+                .expect("an object");
+        let file = object::read::elf::ElfFile32::<Endianness>::parse(&bytes[..]).expect("readable");
+        let section = file.section_by_name(".debug_info").expect("the debug section");
+        let packed =
+            SectionFlags::Elf { sh_type: elf::SHT_PROGBITS, sh_flags: elf::SHF_COMPRESSED };
+        assert_ne!(section.flags(), packed);
+        let data = section.data().expect("the bytes");
+        assert_eq!(data.len(), 64);
+        assert_eq!(&data[8..12], &7u32.to_le_bytes());
+    }
+
+    /// COFF for i386 is not written yet, and saying so is better than a file with x86-64
+    /// relocation numbers in it.
+    #[test]
+    fn a_windows_i386_object_is_not_written_yet() {
+        let target = TargetInfo::new(Triple::new(Arch::X86, Os::Windows, Env::Gnu));
+        let written = write(
+            &calling("puts"),
+            &Data::default(),
+            &[],
+            &target,
+            Output::default(),
+            &Info::default(),
+        );
+        assert!(matches!(written, Err(Error::Format { .. })), "{written:?}");
     }
 }
