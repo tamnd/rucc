@@ -7243,6 +7243,20 @@ impl<'u> Body<'_, 'u> {
             }
             // The exchange beside it, with what was there written out rather than answered.
             AtomicOp::ExchangeInto => {
+                // A structure or a union, which is the shape `atomic_exchange` hands over for one
+                // and the reason `__atomic_exchange` takes everything through pointers. Both ends
+                // are already objects of the program's, so the bytes go from one to the object and
+                // from the object to the other without a value in between.
+                let written = self.tast()[args][1];
+                if !self.has_value(self.tast()[written].ty) {
+                    let held = self.pointee(self.tast()[object].ty);
+                    let from = self.place(written);
+                    let from = self.address_of(from, span);
+                    let place = self.tast()[args][2];
+                    let out = self.value(place);
+                    self.ordered_exchange(addr, (from, out), held, order, span);
+                    return None;
+                }
                 let old = self.modified(AtomicOp::Exchange, order, args, addr, span)?;
                 let place = self.tast()[args][2];
                 let object = self.pointee(self.tast()[place].ty);
@@ -7421,8 +7435,19 @@ impl<'u> Body<'_, 'u> {
         let put = self.tast()[args][2];
         let stored = self.tast()[put].ty;
         if !self.has_value(stored) {
-            self.unsupported("an atomic exchange of an object with no value of its own", span);
-            return None;
+            // Only `__atomic_compare_exchange` hands over one of these, since the older pair and
+            // the `_n` form take their operands as values and a structure is refused before it
+            // gets here as one of those. The value expected is already a pointer.
+            if op != AtomicOp::CompareExchange {
+                self.unsupported("an atomic exchange of an object with no value of its own", span);
+                return None;
+            }
+            let object = self.tast()[args][0];
+            let held = self.pointee(self.tast()[object].ty);
+            let place = self.value(wanted);
+            let desired = self.place(put);
+            let desired = self.address_of(desired, span);
+            return Some(self.ordered_compare(addr, (place, desired), held, order, span));
         }
         let plain = self.access(stored);
         let mut info = plain;
@@ -8070,6 +8095,89 @@ impl<'u> Body<'_, 'u> {
         let mut info = self.piece_info(self.object_align(ty), 0);
         info.order = order;
         self.build(span).atomic_store(held, addr, info, Flags::NONE);
+    }
+
+    /// An exchange of a whole object with no value of its own, out of one buffer of the caller's
+    /// and into another, which is what `__atomic_exchange` over a structure or a union asks for.
+    ///
+    /// The rule for which of the two ways it goes is the one [`Self::ordered_read`] goes by, and
+    /// for the same reason: an object an instruction reaches, which here means one `_Atomic` has
+    /// raised to its own size, is swapped as the integer its bytes spell, and every other one is
+    /// the runtime's generic routine, which is the call gcc makes for a size it has no instruction
+    /// for. What moves either way is a representation and not a value, so the members are never
+    /// named and the padding travels with them, which is also what the routine does.
+    fn ordered_exchange(
+        &mut self,
+        addr: Value,
+        (from, out): (Value, Value),
+        ty: TypeId,
+        order: MemOrder,
+        span: Span,
+    ) {
+        let Some(raw) = self.representation(ty) else {
+            let size = repr::size_of(self.types(), self.target(), ty);
+            let bytes = self.byte_count(size, span);
+            let order = self.order_number(order, span);
+            self.atomic_call("__atomic_exchange", &[bytes, addr, from, out, order], &[], span);
+            return;
+        };
+        let plain = self.piece_info(self.buffer_align(ty), 0);
+        let held = self.build(span).load(raw, from, plain, Flags::NONE);
+        let mut info = self.piece_info(self.object_align(ty), 0);
+        info.order = order;
+        let old = self.build(span).atomic_rmw(RmwOp::Xchg, addr, held, info, Flags::NONE);
+        self.build(span).store(old, out, plain, Flags::NONE);
+    }
+
+    /// A compare and exchange of a whole object with no value of its own, and whether it
+    /// exchanged, under the same rule as [`Self::ordered_exchange`].
+    ///
+    /// Both the value expected and the value to put there are buffers of the caller's. Against
+    /// the instruction the two are read as integers and what the object held is written back over
+    /// the expected one only when the exchange did not happen, for the reason
+    /// [`Self::exchanged`] gives. Against the routine the routine does that write itself, which is
+    /// why it takes the expected value by address. Comparing the bytes rather than the members is
+    /// what the standard asks for and what gcc does, so two structures that are equal member by
+    /// member and differ in their padding are not the same object here, which is the caveat in
+    /// the note to 7.17.7.4.
+    fn ordered_compare(
+        &mut self,
+        addr: Value,
+        (place, desired): (Value, Value),
+        ty: TypeId,
+        order: MemOrder,
+        span: Span,
+    ) -> Value {
+        let Some(raw) = self.representation(ty) else {
+            let size = repr::size_of(self.types(), self.target(), ty);
+            let bytes = self.byte_count(size, span);
+            let order = self.order_number(order, span);
+            let args = [bytes, addr, place, desired, order, order];
+            let inst = self.atomic_call("__atomic_compare_exchange", &args, &[Type::I1], span);
+            return self.func[inst]
+                .results()
+                .next()
+                .expect("a compare and exchange says whether it did");
+        };
+        let plain = self.piece_info(self.buffer_align(ty), 0);
+        let expected = self.build(span).load(raw, place, plain, Flags::NONE);
+        let new = self.build(span).load(raw, desired, plain, Flags::NONE);
+        let mut info = self.piece_info(self.object_align(ty), 0);
+        info.order = order;
+        let (old, exchanged) = self.build(span).cmpxchg(addr, expected, new, info, Flags::NONE);
+
+        let back = self.new_block();
+        let join = self.new_block();
+        self.br_if(exchanged, join, back, span);
+        self.ssa.seal(self.func, back);
+
+        self.at = Some(back);
+        self.build(span).store(old, place, plain, Flags::NONE);
+        self.jump(join, span);
+
+        self.ssa.seal(self.func, join);
+        self.at = Some(join);
+        exchanged
     }
 
     /// What the atomic object itself is aligned to, which is what the qualifier raised it to.
