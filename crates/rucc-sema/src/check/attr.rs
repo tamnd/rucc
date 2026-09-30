@@ -1028,8 +1028,8 @@ impl Checker<'_> {
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
-    /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`, `cold` and
-    /// `hot`, under the namespace test [`Self::never_returns`] is under and through the same
+    /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`, `cold`, `hot`,
+    /// `function_return("keep")` and `indirect_branch("keep")`, under the namespace test [`Self::never_returns`] is under and through the same
     /// unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
     /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
     /// declaration.
@@ -1048,6 +1048,14 @@ impl Checker<'_> {
                 "no_stack_protector" => flags |= DeclFlags::NO_STACK_PROTECTOR,
                 "cold" => flags |= DeclFlags::COLD,
                 "hot" => flags |= DeclFlags::HOT,
+                // Only `keep` changes anything. The other values ask for a thunk on a function
+                // the command line left alone, which the kernel never writes.
+                "function_return" if self.optimize_options(attr) == ["keep"] => {
+                    flags |= DeclFlags::RETURN_KEEP;
+                }
+                "indirect_branch" if self.optimize_options(attr) == ["keep"] => {
+                    flags |= DeclFlags::INDIRECT_KEEP;
+                }
                 "optimize"
                     if self.optimize_options(attr).iter().any(|option| {
                         option.trim_start_matches('-').trim_start_matches('f')

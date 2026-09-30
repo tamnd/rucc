@@ -178,3 +178,26 @@ fn nothing_changes_when_nothing_is_asked_for() {
     assert_eq!(plain, kept);
     assert!(insts(&plain).iter().any(|line| line.starts_with("call\t*%r12")), "{plain}");
 }
+
+/// The kernel writes these on code that runs before the thunks can, and gcc then leaves the branch
+/// plain. `-mharden-sls=` still puts `int3` after it, since that asks for something else.
+#[test]
+fn a_function_that_says_keep_is_left_as_it_was() {
+    let source = "\
+__attribute__((function_return(\"keep\"))) int keepret(int x) { return x + 1; }
+__attribute__((indirect_branch(\"keep\"))) int keepind(int (*p)(int)) { return p(1) + 1; }
+int plain(int (*p)(int)) { return p(1) + 1; }
+";
+    let flags = ["-mindirect-branch=thunk-extern", "-mfunction-return=thunk-extern"];
+    let text = asm(&[&flags[..], &["-mharden-sls=all"]].concat(), source);
+    let body = |name: &str| -> Vec<&str> {
+        let from = text.find(&format!("\n{name}:")).expect("the function is in the listing");
+        let rest = &text[from + 1..];
+        let to = rest.find(".size").unwrap_or(rest.len());
+        insts(&rest[..to])
+    };
+    assert_eq!(body("keepret")[body("keepret").len() - 2..], ["ret", "int3"], "{text}");
+    assert!(body("keepind").contains(&"call\t*%rax"), "{text}");
+    assert_eq!(body("keepind").last(), Some(&"jmp\t__x86_return_thunk"), "{text}");
+    assert!(body("plain").contains(&"call\t__x86_indirect_thunk_rax"), "{text}");
+}

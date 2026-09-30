@@ -550,6 +550,10 @@ pub fn compile_recording(
     // the frame below rather than being one more thing in it. Read here rather than beside the rest
     // of the layout because the refusal a few lines down is the earliest thing that asks.
     let naked = source.attrs.set.contains(ir::AttrSet::NAKED);
+    // The branches a function said to leave plain, which the thunks pass at the end is told of.
+    let mut speculation = flags.speculation;
+    speculation.returns &= !source.attrs.set.contains(ir::AttrSet::RETURN_KEEP);
+    speculation.indirect &= !source.attrs.set.contains(ir::AttrSet::INDIRECT_KEEP);
     // Last thing before selection, because a `tail_call` ends its block and every lowering above
     // is written against blocks that end the way the middle end left them. Only on a machine that
     // can jump to a name, since the call stays a call on one that cannot.
@@ -963,7 +967,7 @@ pub fn compile_recording(
     // After the tail jumps, because a `ret` that became a jump to a callee is a direct jump and no
     // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
     // branch goes to is named after the register the allocator gave it.
-    thunks::harden(&mut func, machine.insts, flags.speculation, names);
+    thunks::harden(&mut func, machine.insts, speculation, names);
 
     // Last of all, because a stretch is named by the instructions at either end of it and every
     // pass above is free to take an instruction out or move one. The frame is wanted here as well

@@ -893,6 +893,13 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
             func.attrs.set |= AttrSet::NO_STACK_PROTECTOR;
         }
+        // The speculation mitigations a function opted out of, which the code generator reads.
+        if node.flags.contains(DeclFlags::RETURN_KEEP) {
+            func.attrs.set |= AttrSet::RETURN_KEEP;
+        }
+        if node.flags.contains(DeclFlags::INDIRECT_KEEP) {
+            func.attrs.set |= AttrSet::INDIRECT_KEEP;
+        }
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
