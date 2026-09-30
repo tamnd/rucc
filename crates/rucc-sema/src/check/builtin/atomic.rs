@@ -354,7 +354,7 @@ impl Checker<'_> {
             return Some(match spelled {
                 LOCK_TEST_AND_SET => Ordering::Acquire,
                 LOCK_RELEASE => Ordering::Release,
-                _ => Ordering::SeqCst,
+                _ => Ordering::Full,
             });
         }
         if op == AtomicOp::CompareExchange {

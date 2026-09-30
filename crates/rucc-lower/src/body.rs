@@ -40,7 +40,7 @@ use rucc_sema::{
     ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Ordering, OverflowOp, Rmw, Sign,
     Stmt, StmtId, StorageDuration, Tast,
 };
-use rucc_target::{Pass, TargetInfo};
+use rucc_target::{Arch, Pass, TargetInfo};
 use rucc_types::{
     ArrayLen, Extent, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId,
     integer_info, pointee,
@@ -6843,6 +6843,7 @@ impl<'u> Body<'_, 'u> {
         ty: TypeId,
         span: Span,
     ) -> Option<Value> {
+        let full = order == Ordering::Full;
         let order = ordering(order);
         if op == AtomicOp::Fence {
             self.build(span).fence(order);
@@ -6912,10 +6913,14 @@ impl<'u> Body<'_, 'u> {
                 None
             }
             AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
-                self.exchanged(op, order, args, addr, span)
+                let answer = self.exchanged(op, order, args, addr, span);
+                self.fully(full, span);
+                answer
             }
             AtomicOp::Exchange | AtomicOp::Fetch(_) | AtomicOp::Update(_) => {
-                self.modified(op, order, args, addr, span)
+                let answer = self.modified(op, order, args, addr, span);
+                self.fully(full, span);
+                answer
             }
             // The exchange beside it, with what was there written out rather than answered.
             AtomicOp::ExchangeInto => {
@@ -6943,6 +6948,21 @@ impl<'u> Body<'_, 'u> {
                 Some(self.build(span).icmp(IntPred::Ne, old, none))
             }
             AtomicOp::Fence => None,
+        }
+    }
+
+    /// The barrier after a `__sync_` read modify write or compare and exchange that makes it the
+    /// full barrier gcc documents it as, on a machine whose own sequentially consistent one is not.
+    ///
+    /// On AArch64 the exclusive loop is an acquiring load and a releasing store, and a load after
+    /// the loop may still be answered before the store is seen by anybody else, which a full
+    /// barrier forbids. Store buffering over `__sync_fetch_and_add` and a plain load shows it on
+    /// real hardware. gcc puts a `dmb ish` after the loop for these names and not for the C11 ones,
+    /// and so does this. x86's locked instructions are full barriers already, so nothing is added
+    /// there, which is gcc's code as well.
+    fn fully(&mut self, full: bool, span: Span) {
+        if full && self.target().tuple.arch() == Arch::Aarch64 {
+            self.build(span).fence(MemOrder::SeqCst);
         }
     }
 
@@ -8548,7 +8568,9 @@ fn ordering(order: Ordering) -> MemOrder {
         Ordering::Acquire => MemOrder::Acquire,
         Ordering::Release => MemOrder::Release,
         Ordering::AcqRel => MemOrder::AcqRel,
-        Ordering::SeqCst => MemOrder::SeqCst,
+        // The IR has no stronger ordering to give it, and the part that makes it stronger is the
+        // barrier `Body::atomic` puts after it where the machine needs one.
+        Ordering::SeqCst | Ordering::Full => MemOrder::SeqCst,
     }
 }
 

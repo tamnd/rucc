@@ -162,7 +162,7 @@ decl #18 bits : int(int) function external defined
         decl #21 set : int object automatic defined
           init
             +0
-              atomic fetch_or seq_cst : int
+              atomic fetch_or full : int
                 unary & : int *
                   decl #0 counter : int lvalue
                 convert lvalue : int
@@ -171,7 +171,7 @@ decl #18 bits : int(int) function external defined
         decl #22 toggled : int object automatic defined
           init
             +0
-              atomic xor_fetch seq_cst : int
+              atomic xor_fetch full : int
                 unary & : int *
                   decl #0 counter : int lvalue
                 convert lvalue : int
@@ -287,7 +287,7 @@ decl #37 older : long(void) function external defined
         decl #38 fetched : long object automatic defined
           init
             +0
-              atomic fetch_add seq_cst : long
+              atomic fetch_add full : long
                 unary & : long *
                   decl #1 total : long lvalue
                 convert arithmetic : long
@@ -297,7 +297,7 @@ decl #37 older : long(void) function external defined
           init
             +0
               convert arithmetic : int
-                atomic swap_bool seq_cst : _Bool
+                atomic swap_bool full : _Bool
                   unary & : int *
                     decl #0 counter : int lvalue
                   const 1 : int
