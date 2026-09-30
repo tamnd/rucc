@@ -510,7 +510,7 @@ block0:
     return %5
 }
 
-func @opens(), linkage(internal) {
+func @opens(), linkage(internal), attrs(used) {
 block0:
     %0 = global_addr @ran
     %1 = iconst.i32 1
@@ -518,7 +518,7 @@ block0:
     return
 }
 
-func @closes(), linkage(internal) {
+func @closes(), linkage(internal), attrs(used) {
 block0:
     %0 = global_addr @ran
     %1 = iconst.i32 0
@@ -526,7 +526,7 @@ block0:
     return
 }
 
-func @both_ways(), linkage(internal) {
+func @both_ways(), linkage(internal), attrs(used) {
 block0:
     %0 = global_addr @ran
     %1 = global_addr @ran

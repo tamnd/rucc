@@ -978,6 +978,12 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::INDIRECT_KEEP) {
             func.attrs.set |= AttrSet::INDIRECT_KEEP;
         }
+        // `used`, and the other attributes that keep a definition nothing in the file calls, so
+        // that nothing after this takes the body away. The kernel's `asm-offsets.c` writes every
+        // offset from `static void __used common(void)`, which no one calls.
+        if node.flags.contains(DeclFlags::RETAINED) {
+            func.attrs.set |= AttrSet::USED;
+        }
         // What a function said about zeroing registers on the way out, which overrides the
         // command line for its body.
         for (said, kept) in [

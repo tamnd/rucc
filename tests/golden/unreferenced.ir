@@ -23,7 +23,7 @@ block0:
     return %0
 }
 
-func @kept_by_an_attribute() -> i32, linkage(internal) {
+func @kept_by_an_attribute() -> i32, linkage(internal), attrs(used) {
 block0:
     %0 = iconst.i32 5
     return %0
