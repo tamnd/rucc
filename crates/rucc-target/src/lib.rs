@@ -323,8 +323,8 @@ impl Triple {
     ///
     /// It returns `None` for most of the target table, and that is the honest answer rather than a
     /// gap to be papered over. `rucc-abi` describes the scalar layout of all forty two rows, and
-    /// this type holds three fields with three architectures in the first, so seventeen of those
-    /// rows have a [`TargetInfo`] and the other twenty five do not. Anything that needs to lay a
+    /// this type holds three fields with four architectures in the first, so only the rows on
+    /// those four have a [`TargetInfo`] and the rest do not. Anything that needs to lay a
     /// record out for `s390x-linux-gnu` needs that gap closed rather than an approximation of it.
     ///
     /// The environment of the answer is the narrowed one, so the triple this gives back is the
@@ -1268,11 +1268,10 @@ mod tests {
 
     #[test]
     fn from_tuple_says_no_rather_than_saying_something_near() {
-        // Twenty five of the forty two rows have no triple, and the answer is `None` rather than
+        // Most of the forty two rows have no triple, and the answer is `None` rather than
         // a neighbour. `rucc-abi` knows the scalar layout of every one of these and this type
         // cannot hold any of them, which is the gap the record layout engine inherits.
         for tuple in [
-            "i686-linux-gnu",
             "armv7-linux-gnueabihf",
             "s390x-linux-gnu",
             "powerpc64le-linux-gnu",
@@ -1286,6 +1285,10 @@ mod tests {
             let target = tuple.parse().unwrap();
             assert_eq!(Triple::from_tuple(target), None, "{tuple}");
         }
+        // i686 has a triple now, and it is the machine and not x86-64's.
+        let i686 = Triple::from_tuple("i686-linux-gnu".parse().unwrap()).unwrap();
+        assert_eq!(i686, Triple::new(Arch::X86, Os::Linux, Env::Gnu));
+        assert_eq!(i686.to_string(), "i686-unknown-linux-gnu");
     }
 
     #[test]
