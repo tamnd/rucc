@@ -514,10 +514,8 @@ impl FromStr for Visibility {
 /// that understands the flag unpacks it on the way in. A distribution that ships debug symbols for
 /// everything it builds saves more from this than from anything else it passes.
 ///
-/// Nothing here compresses one yet, so every answer produces the same bytes and an object built
-/// with `-gz=zstd` is identical to one built without the flag. There are sections to compress now,
-/// which makes this a flag waiting on a compressor rather than one waiting on a producer, and
-/// `crates/rucc-debug` is where that is written down.
+/// `crates/rucc-object` writes both zlib layouts on ELF. zstd is refused by the driver until there is
+/// a writer for it, and on the other formats every answer writes the sections as they are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Compress {
     /// `-gz=none`, and what a command line that says nothing gets. gcc's default is the same.

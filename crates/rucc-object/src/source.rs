@@ -38,7 +38,7 @@ use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
 use crate::file::{Error, Flavour};
-use crate::section::{Array, Binding, Info, Reloc, Visibility};
+use crate::section::{Array, Binding, Compress, Info, Reloc, Visibility};
 
 /// One section, as a file of assembly describes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -743,8 +743,8 @@ pub fn assembled_described(
     // them names another as often as it names a function.
     let mut named = Map::default();
     for chunk in &info.chunks {
-        let id = obj.add_section(Vec::new(), chunk.name.clone().into_bytes(), SectionKind::Debug);
-        obj.append_section_data(id, &chunk.bytes, 1);
+        let how = if flavour == Flavour::Elf { info.compress } else { Compress::None };
+        let id = crate::zlib::debug_section(&mut obj, chunk, how);
         named.insert(chunk.name.as_str(), id);
     }
     for chunk in &info.chunks {

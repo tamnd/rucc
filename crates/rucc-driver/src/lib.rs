@@ -260,7 +260,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
-  -gz=none -gno-split-dwarf   debug sections left uncompressed and in one file, -gz is refused
+  -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
   -fprofile-use[=<path>] -fprofile-dir=<dir>   read too, where -fprofile-generate is refused
   -f[no-]stack-protector[-strong|-all], -f[no-]stack-clash-protection, -fcf-protection=<edges>
@@ -893,11 +893,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      see spec/11-debug-info.md"
                 )));
             }
-            // How the debug sections are compressed. Nothing compresses them yet, so bare `-gz`,
-            // which means `zlib`, and every named method are refused in the table in `kbuild`
-            // rather than taken: the kernel probes the flag and would otherwise say its debug
-            // information is compressed when it is not. What reaches here is `none`, which is what
-            // happens, and a name that is not a method at all, which is refused as a typo.
+            // How the debug sections are compressed. Bare `-gz` means `zlib`, as it does in gcc.
+            // `zstd` is refused in the table in `kbuild`, since the kernel probes it and would
+            // otherwise say its debug information is compressed in a way it is not, and a name that
+            // is not a method at all is refused here as a typo.
+            "-gz" => {
+                opts.compress = rucc_session::Compress::Zlib;
+                link.compress = opts.compress;
+            }
             _ if arg.starts_with("-gz=") => {
                 let how = &arg["-gz=".len()..];
                 opts.compress = how.parse().map_err(|()| {
@@ -906,6 +909,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                          zlib-gnu or zstd"
                     ))
                 })?;
+                link.compress = opts.compress;
             }
             "-Werror" => opts.warnings_are_errors = true,
             // Nothing that is not fatal is said at all. Read at the one place a diagnostic goes
@@ -6951,19 +6955,20 @@ mod tests {
     /// `-gz` and the two spellings of the split, which are the two questions about the shape of
     /// the debug output rather than about how much of it there is.
     ///
-    /// Nothing compresses the debug sections yet, so every spelling that asks for compression is
-    /// refused with the issue about it, and the one that asks for none is taken. The kernel probes
-    /// `-gz=zlib` for `DEBUG_INFO_COMPRESSED`, and a compiler that took it would configure a
-    /// kernel that says its debug information is compressed when it is not.
+    /// zlib is written in both of its layouts and zstd is not written yet, so `-gz=zstd` is refused
+    /// with the issue about it. The kernel probes `-gz=zstd` for `DEBUG_INFO_COMPRESSED_ZSTD`, and
+    /// a compiler that took it would configure a kernel for sections it never gets.
     #[test]
     fn the_shape_of_the_debug_output_is_recorded_even_where_there_is_none_of_it() {
         let (opts, _) = compile(&["-c", "a.c"]);
         assert_eq!(opts.compress, Compress::None, "uncompressed unless somebody asks");
         assert_eq!(compile(&["-gz=none", "-c", "a.c"]).0.compress, Compress::None);
-        for flag in ["-gz", "-gz=zlib", "-gz=zlib-gnu", "-gz=zstd"] {
-            let failed = refused(&[flag, "-c", "a.c"]);
-            assert!(failed.contains("uncompressed") && failed.contains("#2288"), "{failed}");
-        }
+        assert_eq!(compile(&["-gz", "-c", "a.c"]).0.compress, Compress::Zlib);
+        assert_eq!(compile(&["-gz=zlib", "-c", "a.c"]).0.compress, Compress::Zlib);
+        assert_eq!(compile(&["-gz=zlib-gnu", "-c", "a.c"]).0.compress, Compress::ZlibGnu);
+        assert_eq!(compile(&["-gz=zlib", "-gz=none", "-c", "a.c"]).0.compress, Compress::None);
+        let failed = refused(&["-gz=zstd", "-c", "a.c"]);
+        assert!(failed.contains("zstd") && failed.contains("#2288"), "{failed}");
 
         // A value nothing here has heard of is refused rather than rounded to the nearest one,
         // because a build that asked for `zstd` and quietly got `zlib` would ship a file its
@@ -8364,7 +8369,7 @@ mod tests {
         for (flag, issue) in [
             ("-fzero-call-used-regs=used-gpr", 2281),
             ("-ftrivial-auto-var-init=zero", 2282),
-            ("-gz=zlib", 2288),
+            ("-gz=zstd", 2288),
         ] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(flag), "the flag is named: {failed}");
