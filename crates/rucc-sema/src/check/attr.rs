@@ -384,7 +384,11 @@ impl Checker<'_> {
                 Some(first) if first == style => {}
                 Some(_) => {
                     let what = format!("'{name}' incompatible attribute ignored");
-                    self.report(Diagnostic::warning(what, attr.span).with_code("E0746").in_group("attributes"));
+                    self.report(
+                        Diagnostic::warning(what, attr.span)
+                            .with_code("E0746")
+                            .in_group("attributes"),
+                    );
                 }
             }
         }
@@ -522,7 +526,8 @@ impl Checker<'_> {
             if kind != DeclKind::Function {
                 let what = format!("'{name}' attribute ignored");
                 let note = "only a function can be called before `main` or after it returns";
-                let dropped = Diagnostic::warning(what, attr.span).with_code("E0703").in_group("attributes");
+                let dropped =
+                    Diagnostic::warning(what, attr.span).with_code("E0703").in_group("attributes");
                 self.report(dropped.note(note, attr.span));
                 continue;
             }
@@ -578,7 +583,9 @@ impl Checker<'_> {
                 "{name} priorities from 0 to {RESERVED_PRIORITY} are reserved for the \
                  implementation"
             );
-            self.report(Diagnostic::warning(what, attr.span).with_code("E0703").in_group("prio-ctor-dtor"));
+            self.report(
+                Diagnostic::warning(what, attr.span).with_code("E0703").in_group("prio-ctor-dtor"),
+            );
         }
         Some(Priority::Numbered(number))
     }
@@ -780,7 +787,9 @@ impl Checker<'_> {
                 }
                 if kind != DeclKind::Function {
                     let what = "only a call to a function can be reported";
-                    let dropped = Diagnostic::warning(ignored, attr.span).with_code("E0751").in_group("attributes");
+                    let dropped = Diagnostic::warning(ignored, attr.span)
+                        .with_code("E0751")
+                        .in_group("attributes");
                     self.report(dropped.note(what, attr.span));
                     continue;
                 }
@@ -798,7 +807,9 @@ impl Checker<'_> {
                 };
                 let Some(message) = message else {
                     let what = "its argument has to be a string literal";
-                    let dropped = Diagnostic::warning(ignored, attr.span).with_code("E0751").in_group("attributes");
+                    let dropped = Diagnostic::warning(ignored, attr.span)
+                        .with_code("E0751")
+                        .in_group("attributes");
                     self.report(dropped.note(what, attr.span));
                     continue;
                 };
@@ -1311,7 +1322,9 @@ impl Checker<'_> {
                     let Some(convention) = Convention::asked(tuple, &name) else {
                         let what = format!("'{name}' attribute ignored");
                         let note = "only x86-64 has a second calling convention to pick";
-                        let dropped = Diagnostic::warning(what, attr.span).with_code("E0703").in_group("attributes");
+                        let dropped = Diagnostic::warning(what, attr.span)
+                            .with_code("E0703")
+                            .in_group("attributes");
                         self.report(dropped.note(note, attr.span));
                         continue;
                     };
@@ -1331,7 +1344,9 @@ impl Checker<'_> {
                     let what = format!("'{name}' attribute ignored");
                     let note = "the attribute names a calling convention of 32-bit x86, which \
                                 x86-64 outside Windows does not have";
-                    let dropped = Diagnostic::warning(what, attr.span).with_code("E0703").in_group("attributes");
+                    let dropped = Diagnostic::warning(what, attr.span)
+                        .with_code("E0703")
+                        .in_group("attributes");
                     self.report(dropped.note(note, attr.span));
                 }
                 _ => {}

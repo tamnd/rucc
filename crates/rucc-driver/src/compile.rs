@@ -3424,7 +3424,9 @@ decl #0 x : int object external static defined
         );
         assert_eq!(
             run(&options(), source).messages,
-            ["/main.c:1:35: warning: 'ms_struct' incompatible attribute ignored [E0746] [-Wattributes]"]
+            [
+                "/main.c:1:35: warning: 'ms_struct' incompatible attribute ignored [E0746] [-Wattributes]"
+            ]
         );
         let same = "struct __attribute__((ms_struct, ms_struct)) s { unsigned x : 3; char c; };\n";
         assert_eq!(run(&options(), same).messages, Vec::<String>::new());
