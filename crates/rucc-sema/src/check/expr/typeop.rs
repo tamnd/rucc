@@ -44,6 +44,7 @@ use rucc_types::{
 use crate::check::Checker;
 use crate::check::expr::{Callee, Target};
 use crate::decl::InitEntry;
+use crate::eval;
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
@@ -301,7 +302,11 @@ impl Checker<'_> {
         let pointer = u64::from(self.cx.target.pointer_width);
         let width = |ty| layout(&self.types, ty, self.cx.target).map(|l| l.size * 8).ok();
         let (message, code) = if is_pointer(&self.types, from) && is_integer(&self.types, target) {
-            if width(target) == Some(pointer) {
+            // A `_Bool` is the one integer the address does not have to fit in, since the cast
+            // asks whether the pointer is null rather than keeping its bits. gcc says nothing,
+            // and the kernel's kunit attributes cast a `void *` to `bool` under `-Werror`.
+            let boolean = matches!(eval::bare(&self.types, target), TypeKind::Bool);
+            if boolean || width(target) == Some(pointer) {
                 return;
             }
             ("cast from pointer to integer of different size", "E0567")
@@ -1663,6 +1668,9 @@ mod tests {
         let wide = f.expr(ast::Expr::Cast { ty: long, operand: again });
         let back = f.expr(ast::Expr::Cast { ty: to_pointer, operand: use_n });
         let constant = f.expr(ast::Expr::Cast { ty: also_pointer, operand: one });
+        let use_q = f.expr(ast::Expr::Name(p));
+        let boolean = named(&mut f, &[BuiltinSet::BOOL], &[]);
+        let truth = f.expr(ast::Expr::Cast { ty: boolean, operand: use_q });
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
@@ -1673,11 +1681,13 @@ mod tests {
         c.check_expr(wide);
         c.check_expr(back);
         c.check_expr(constant);
+        c.check_expr(truth);
 
         // The one that fits says nothing, which is the whole point of measuring rather than
         // warning about every cast that crosses between the two. Neither does the constant,
         // which is a number the program picked rather than an address that got truncated, and
-        // which is what every sentinel and every `NULL` in every header is.
+        // which is what every sentinel and every `NULL` in every header is. Nor does the cast to
+        // `_Bool`, which is a test against null rather than a truncation.
         assert_eq!(
             messages(&c),
             [
