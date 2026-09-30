@@ -130,7 +130,7 @@
 use std::collections::HashMap;
 
 use rucc_base::Symbol;
-use rucc_ir::{Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
+use rucc_ir::{Def, Doms, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
 use crate::frame::ARGS;
 use crate::{origin, slot};
@@ -286,6 +286,7 @@ fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
         from_the_frame(func, word);
     }
     let held = origin::existing(func);
+    let Some(doms) = func.entry().map(|_| Doms::new(func)) else { return 0 };
     let mut published = 0;
     for inst in all(func) {
         // A tail call is left alone for the reason the module doc gives, which is that the frame
@@ -295,7 +296,7 @@ fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
         }
         match wanted(func, inst, left) {
             Some(Frame::Checked) => {
-                if over(func, inst, &held) {
+                if over(func, inst, &held, &doms) {
                     published += 1;
                     from_the_call(func, inst);
                 }
@@ -304,7 +305,7 @@ fn one(func: &mut Func, left: &HashMap<Symbol, usize>, word: Type) -> usize {
             Some(Frame::Elided | Frame::Pointerless) | None => {}
         }
     }
-    giving_back(func, &held);
+    giving_back(func, &held, &doms);
     published
 }
 
@@ -393,7 +394,7 @@ fn from_the_call(func: &mut Func, inst: Inst) -> bool {
 /// Nothing is made here, as everywhere else in this pass: `held` holds the capabilities the function
 /// is paying for already, and a returned pointer that is not in it leaves the caller reading the
 /// bottom capability the publish wrote, which is the recovery the caller was doing anyway.
-fn giving_back(func: &mut Func, held: &HashMap<Value, Value>) -> usize {
+fn giving_back(func: &mut Func, held: &HashMap<Value, Value>, doms: &Doms) -> usize {
     let mut done = 0;
     for inst in all(func) {
         if func[inst].opcode != Opcode::Return {
@@ -403,7 +404,7 @@ fn giving_back(func: &mut Func, held: &HashMap<Value, Value>) -> usize {
         let Some(&pointer) = returned.iter().find(|&&value| func[value].ty.is_ptr()) else {
             continue;
         };
-        let Some(cap) = origin::already(func, held, pointer) else { continue };
+        let Some(cap) = seen(func, held, doms, pointer, inst) else { continue };
         let args = func.push_values(&[cap]);
         let data = InstData { args, ..InstData::new(Opcode::CapYield) };
         let made = func.create_inst(data, &[], func.span(inst));
@@ -429,10 +430,10 @@ fn behind(func: &Func, inst: Inst) -> Option<Inst> {
 /// clear instead, which is the same saving taken all the way and is what the verifier asks for
 /// anyway: a publish describing nothing is a clear spelled at length, and the two mean opposite
 /// things.
-fn over(func: &mut Func, inst: Inst, held: &HashMap<Value, Value>) -> bool {
+fn over(func: &mut Func, inst: Inst, held: &HashMap<Value, Value>, doms: &Doms) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
     let found: Vec<Option<Value>> =
-        carried.iter().map(|&value| origin::already(func, held, value)).collect();
+        carried.iter().map(|&value| seen(func, held, doms, value, inst)).collect();
     let Some(last) = found.iter().rposition(Option::is_some) else {
         empty(func, inst);
         return false;
@@ -450,6 +451,36 @@ fn over(func: &mut Func, inst: Inst, held: &HashMap<Value, Value>) -> bool {
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
     true
+}
+
+/// The capability [`origin::existing`] found for `pointer`, when it is one `inst` can read.
+///
+/// The table holds the first capability of each pointer in the order the blocks are laid out, and
+/// after the optimizer that need not be one the instruction can see. A parameter's `cap_of` goes at
+/// the top of the function, but sinking can move it into the blocks that check through the pointer,
+/// and a call in front of those would then publish a slot nothing has written yet. The callee reads
+/// whatever an earlier call left there. So a capability that does not dominate the instruction
+/// counts as none, which leaves the callee to recover, the same as for a pointer nothing checked.
+fn seen(
+    func: &Func,
+    held: &HashMap<Value, Value>,
+    doms: &Doms,
+    pointer: Value,
+    inst: Inst,
+) -> Option<Value> {
+    let cap = origin::already(func, held, pointer)?;
+    let block = func.block_of(inst)?;
+    let visible = match func[cap].def {
+        Def::Param { block: from, .. } => doms.dominates(from, block),
+        Def::Result { inst: made, .. } => match func.block_of(made) {
+            Some(from) if from == block => {
+                func.insts(block).take_while(|&at| at != inst).any(|at| at == made)
+            }
+            Some(from) => doms.dominates(from, block),
+            None => false,
+        },
+    };
+    visible.then_some(cap)
 }
 
 /// Puts a `cap_clear` in front of a call.
@@ -707,6 +738,39 @@ mod tests {
         // And what travels is the one the caller was handed itself, so a buffer passed down a chain
         // of functions asks the plane at the top of it and nowhere else.
         assert_eq!(caps[0], produced(func, Opcode::CapArg));
+    }
+
+    #[test]
+    fn a_capability_taken_only_after_the_call_is_not_handed_to_it() {
+        // The shape sinking leaves behind: the call comes first and the only `cap_of` of the
+        // pointer it passes is in the block after it. Publishing that one would copy a slot nothing
+        // has written yet, so the call says it has nothing, as it would for an unchecked pointer.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let mut func = Func::new(names.intern("f"), three());
+        let entry = func.create_block();
+        let later = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+        let q = func.append_param(entry, Type::PTR);
+        let sig = func.add_signature(three());
+        let varargs = func.push_abis(&[]);
+        let callee = Some(names.intern("g"));
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p, n, q]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.jump(later, &[]);
+        let mut b = Builder::new(&mut func, later);
+        checked(&mut b, p);
+        b.ret(&[]);
+        module.add_func(func);
+        module.add_func(caller(&mut names, "g", Some("h"), three(), true));
+        assert_eq!(arrange(&mut module), 0);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert_eq!(count(func, Opcode::CapPublish), 0);
+        assert_eq!(count(func, Opcode::CapClear), 1);
+        assert_eq!(count(func, Opcode::CapArg), 1);
     }
 
     #[test]

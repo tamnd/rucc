@@ -67,7 +67,7 @@ pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
 pub use parse::{ParseError, parse};
 pub use print::{Printer, print, print_func};
 pub use ty::{Float, Kind, Type};
-pub use verify::{VerifyError, verify, verify_func};
+pub use verify::{Doms, VerifyError, verify, verify_func};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";

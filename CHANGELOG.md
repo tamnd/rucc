@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The address of a local or of a name is written again where it is read, the way a constant already was, rather than worked out once and kept in a register or spilled to a slot of its own. A local's address is a `lea` off the stack pointer and is written at each use; a name's is written once in each block that reads it. An address passed to a call is written next to the store or the move that passes it, so a call with many string arguments no longer holds all of them in registers the call leaves alone. The two reduced programs in #2200 took 144 and 128 bytes of frame where gcc takes 80 (#2200).
+
+### Fixed
+
+- Under `-fsafety=detect`, a call hands its callee a pointer's capability only where that capability is worked out before the call. The optimizer can move a parameter's capability down into the blocks that check through it, and a call made before those blocks used to copy the capability's slot into the frame before anything had written it, so the callee read whatever an earlier call had left there. brotli and lua at `-O2` failed their bounds checks or crashed in `__rucc_cap_load` once the frame layout changed. Such a call now says it has no capability for that pointer, and the callee recovers one as it does for a pointer nothing checked.
+
 ## 0.17.0
 
 The W3 release, for UCRT, winpthreads and the real corpus on Windows. x86_64-windows-gnu is tier 2: SQLite's tests pass under Wine with nothing failing in rucc's build that passes in MinGW GCC's, a program imports only `KERNEL32.dll` and the `api-ms-win-crt-*` sets, six real projects pass under Wine and five natively, and the ABI differential against MinGW GCC is clean. The windows-gnu sysroots are built with import libraries from `rucc --dlltool`, byte for byte what llvm-dlltool writes. This release also carries most of the AArch64 Windows work for W5: the calling convention, unwind tables, `__chkstk`, x18 and thread-local storage.
