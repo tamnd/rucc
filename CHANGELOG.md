@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler writes `vandps`, `vandnps`, `vorps` and `vxorps` and their `pd` forms, which crypto/xor.c uses through xor_avx.h.
 - gcc's scheduler flags under `-fsched-` and `-fsched2-` are taken and ignored, like `-fschedule-insns`. crypto/serpent_generic.c asks for `-fsched-pressure`.
 - A comparison of the address of a function or object this unit defines against `NULL` is decided at `-O1` and above, and so is an equality test between two integer constants cast to pointers, so the kernel's `BUILD_BUG_ON (fn == NULL)` and its `ERR_PTR` sentinel checks in i915 build.
 - A cast between a pointer and an enum no longer warns about the widths, which gcc only does for a plain integer type. lib/kunit/attributes.c casts an enum to `void *` under `-Werror`.
