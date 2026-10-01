@@ -2116,6 +2116,7 @@ impl Unit<'_> {
         // `const char`, but because writing to one is undefined and every target puts them
         // somewhere read-only.
         global.constant = true;
+        global.literal = true;
         let range = self.module.push_bytes(&bytes);
         global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
         self.module.add_global(global);

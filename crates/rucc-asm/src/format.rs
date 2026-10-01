@@ -330,6 +330,11 @@ impl Directives {
             // gives this format a zeroed one.
             (Directives::Coff, Place::Thread { .. }) => out.push_str("\t.section\t.tls$,\"dw\"\n"),
             (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
+            // `M` and `S` with an entry a byte wide, which is the line gcc writes for its literals.
+            (Directives::Elf, Place::Strings { align }) => {
+                let name = Place::strings(*align);
+                let _ = writeln!(out, "\t.section\t{name},\"aMS\",@progbits,1");
+            }
             (Directives::Elf, Place::RelocReadOnly { local }) => {
                 let name = if *local { ".data.rel.ro.local" } else { ".data.rel.ro" };
                 let _ = writeln!(out, "\t.section\t{name},\"aw\",@progbits");
@@ -338,7 +343,10 @@ impl Directives {
             // whole rather than a symbol at a time, and the loader makes whatever pages it has to
             // write writable for as long as it is writing them and puts them back afterwards, so
             // an address in a read only section costs a base relocation and nothing else.
-            (Directives::Coff, Place::ReadOnly | Place::RelocReadOnly { .. }) => {
+            (
+                Directives::Coff,
+                Place::ReadOnly | Place::RelocReadOnly { .. } | Place::Strings { .. },
+            ) => {
                 out.push_str("\t.section\t.rdata,\"dr\"\n");
             }
             // The type is `@progbits` for almost every name a program writes, and the three it is

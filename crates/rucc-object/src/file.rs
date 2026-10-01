@@ -1086,6 +1086,11 @@ fn put(
             None => obj.section_id(StandardSection::ReadOnlyDataWithRel),
         },
         Place::Zero => obj.section_id(StandardSection::UninitializedData),
+        // The writer's kind for these is the one that flags the section for merging as strings a
+        // byte wide, and the name is ours, since the alignment is part of it.
+        Place::Strings { align } => {
+            made(obj, named, &Place::strings(*align), SectionKind::ReadOnlyString)
+        }
         Place::Thread { zero: false } => obj.section_id(StandardSection::Tls),
         Place::Thread { zero: true } => obj.section_id(StandardSection::UninitializedTls),
         Place::Merged => return (SymbolSection::Common, 0),
@@ -1235,6 +1240,7 @@ fn kind_of(place: &Place) -> SectionKind {
             SectionKind::ReadOnlyData
         }
         Place::RelocReadOnly { .. } => SectionKind::ReadOnlyDataWithRel,
+        Place::Strings { .. } => SectionKind::ReadOnlyString,
         Place::Zero | Place::Named(_, Holds::Zero) => SectionKind::UninitializedData,
         Place::Thread { zero: false } => SectionKind::Tls,
         Place::Thread { zero: true } => SectionKind::UninitializedTls,

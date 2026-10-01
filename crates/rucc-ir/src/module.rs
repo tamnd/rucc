@@ -418,6 +418,11 @@ pub struct Global {
     /// global, including the ones the compiler made itself, since nothing here knows what each of
     /// those is for. See `inline::drop_unreferenced` in `rucc-opt`.
     pub droppable: bool,
+    /// Whether it is a string literal, whose bytes the linker may share with any other literal of
+    /// the same bytes in any object, since a program cannot tell two of them apart by anything but
+    /// their addresses and has no right to compare those. What lets the object writer put it in a
+    /// section the linker merges, which is where gcc puts every literal it can.
+    pub literal: bool,
 }
 
 impl Global {
@@ -437,6 +442,7 @@ impl Global {
             retain: false,
             init: None,
             droppable: false,
+            literal: false,
         }
     }
 

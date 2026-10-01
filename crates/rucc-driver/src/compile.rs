@@ -1224,6 +1224,21 @@ fn generate(
                     }
                 }
             }
+            // gcc gives a literal of 31 bytes or more the alignment of a word on x86 unless it is
+            // optimizing for size, which is what sends the long ones to `.rodata.str1.8`, and the
+            // section a literal is in is one the kernel's section audit counts.
+            if matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86) && !opts.opt_level.is_size()
+            {
+                let word = u64::from(target.pointer_width / 8);
+                for var in &mut globals.vars {
+                    if let rucc_object::Place::Strings { align } = &mut var.place {
+                        if var.size >= 31 && *align < word {
+                            *align = word;
+                            var.align = word;
+                        }
+                    }
+                }
+            }
             if target.tuple.env() == rucc_tuple::Env::Msvc {
                 globals.keep_imported(
                     elsewhere
@@ -4412,6 +4427,23 @@ decl #0 x : int object external static defined
         opts.ident = false;
         let quiet = run(&opts, "int one(void) { return 1; }\n");
         assert!(!quiet.text().contains(".ident"), "{quiet:?}");
+    }
+
+    /// A string literal is in the section gcc puts it in, which is a byte aligned one unless it is
+    /// long enough for gcc to align it to a word, and that only when not optimizing for size.
+    #[test]
+    fn a_literal_is_in_the_section_of_strings_gcc_would_put_it_in() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let source = "const char *s(void) { return \"short\"; }\n\
+                      const char *l(void) { return \"a literal that is long enough to align\"; }\n";
+        let text = run(&opts, source).text().to_owned();
+        assert!(text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.str1.8,\"aMS\",@progbits,1\n"), "{text}");
+        opts.opt_level = rucc_session::OptLevel::Os;
+        let small = run(&opts, source).text().to_owned();
+        assert!(!small.contains(".rodata.str1.8"), "{small}");
     }
 
     /// tamnd/rucc#2277. With the vector registers taken away a function with a `double` in it is

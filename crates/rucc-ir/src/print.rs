@@ -231,6 +231,9 @@ impl<'a> Printer<'a> {
         if global.droppable {
             self.out.push_str(", droppable");
         }
+        if global.literal {
+            self.out.push_str(", literal");
+        }
         self.section(global.section);
         if global.retain {
             self.out.push_str(", retain");
