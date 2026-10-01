@@ -1952,7 +1952,9 @@ impl Unit<'_> {
         };
         let signature = self.types.signature(id);
         let ret = signature.ret;
-        let convention = signature.convention;
+        // Normalised against `-mregparm=`, which a variadic function does not follow. A function
+        // with no prototype is not variadic for this, which is how gcc has it.
+        let convention = self.target.convention_for(signature.convention, signature.variadic);
         // A function declared without a prototype takes what it is given, which is what a
         // signature with no parameters and no end to them says. C23 removed these and this is
         // what `int f();` means in every dialect before it.

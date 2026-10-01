@@ -974,10 +974,10 @@ name = "regparm"
 kind = "attribute"
 gcc_version = "2.95"
 status = "implemented"
-targets = ["x86-64"]
+targets = ["x86-64", "x86"]
 used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does, which is tamnd/rucc#2534."
+tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc::three_registers_carry_the_first_three_words", "rucc::asmlinkage_and_variadic_functions_take_the_stack", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "On 32-bit x86 outside Windows the first n words of the arguments go in `eax`, `edx` and `ecx` the way gcc puts them there, structures of up to n words and the address of a returned structure included, and a variadic function takes everything on the stack whatever it says. `-mregparm=` sets the count for the whole unit and the attribute changes it for one function, which is how the kernel has `asmlinkage` be `regparm(0)`. On x86-64 outside Windows it is dropped with gcc's warning, and on Windows it is dropped quietly, which on 32-bit Windows is still short of gcc and is tamnd/rucc#2534. `__has_attribute` answers yes on x86 and x86-64."
 
 [[feature]]
 name = "vectorcall"

@@ -198,8 +198,99 @@ pub static SYSV: CallRegs = CallRegs {
     // nothing asks for it without saying so.
     trace: Some(Trace { early: "__fentry__", late: "mcount", fentry: false }),
     chkstk: None,
-    conventions: Conventions::ONLY,
+    conventions: Conventions(&OWN_0),
 };
+
+// The registers gcc's `regparm(n)` passes the first `n` words in, in order.
+static REGPARM_1_ARGS: [PhysReg; 1] = [EAX];
+static REGPARM_2_ARGS: [PhysReg; 2] = [EAX, EDX];
+static REGPARM_3_ARGS: [PhysReg; 3] = [EAX, EDX, ECX];
+
+/// [`SYSV`] with the first `n` words of arguments in registers, which is gcc's `regparm(n)`, with
+/// the conventions a function of it may call.
+macro_rules! regparm {
+    (0, $conventions:ident) => {
+        CallRegs { conventions: Conventions(&$conventions), ..SYSV }
+    };
+    ($n:literal, $args:ident, $conventions:ident) => {
+        CallRegs {
+            abi: &rucc_abi::abis::I386_SYSV_REGPARM[$n - 1],
+            int_args: &$args,
+            conventions: Conventions(&$conventions),
+            ..SYSV
+        }
+    };
+}
+
+/// The four conventions `regparm` names, for a unit whose own is the one `-mregparm=` gave it.
+///
+/// One family for each default, because what a function means by the target's own convention is
+/// the unit's default, and a `regparm(0)` function in a unit built with `-mregparm=3` calls an
+/// ordinary function of that unit with three registers. The default's own list has no entry for
+/// [`Convention::Target`], so that it is the set the command line adjusted rather than the one
+/// written here; every other member's list leads back to it.
+macro_rules! family {
+    ($regs:ident, $own:ident, $foreign:ident, $default:expr) => {
+        static $own: [(Convention, &CallRegs); 4] = [
+            (Convention::Regparm(0), &$regs[0]),
+            (Convention::Regparm(1), &$regs[1]),
+            (Convention::Regparm(2), &$regs[2]),
+            (Convention::Regparm(3), &$regs[3]),
+        ];
+        static $foreign: [(Convention, &CallRegs); 5] = [
+            (Convention::Target, $default),
+            (Convention::Regparm(0), &$regs[0]),
+            (Convention::Regparm(1), &$regs[1]),
+            (Convention::Regparm(2), &$regs[2]),
+            (Convention::Regparm(3), &$regs[3]),
+        ];
+    };
+}
+
+/// The family of a unit with no `-mregparm=`, whose own convention is [`SYSV`].
+static REGPARM_0: [&CallRegs; 4] = [&SYSV, &REGPARM_0_1, &REGPARM_0_2, &REGPARM_0_3];
+static REGPARM_0_1: CallRegs = regparm!(1, REGPARM_1_ARGS, FOREIGN_0);
+static REGPARM_0_2: CallRegs = regparm!(2, REGPARM_2_ARGS, FOREIGN_0);
+static REGPARM_0_3: CallRegs = regparm!(3, REGPARM_3_ARGS, FOREIGN_0);
+family!(REGPARM_0, OWN_0, FOREIGN_0, &SYSV);
+
+/// The family of a unit built with `-mregparm=1`.
+static REGPARM_1: [&CallRegs; 4] = [&REGPARM_1_0, &REGPARM_1_1, &REGPARM_1_2, &REGPARM_1_3];
+static REGPARM_1_0: CallRegs = regparm!(0, FOREIGN_1);
+static REGPARM_1_1: CallRegs = regparm!(1, REGPARM_1_ARGS, OWN_1);
+static REGPARM_1_2: CallRegs = regparm!(2, REGPARM_2_ARGS, FOREIGN_1);
+static REGPARM_1_3: CallRegs = regparm!(3, REGPARM_3_ARGS, FOREIGN_1);
+family!(REGPARM_1, OWN_1, FOREIGN_1, &REGPARM_1_1);
+
+/// The family of a unit built with `-mregparm=2`.
+static REGPARM_2: [&CallRegs; 4] = [&REGPARM_2_0, &REGPARM_2_1, &REGPARM_2_2, &REGPARM_2_3];
+static REGPARM_2_0: CallRegs = regparm!(0, FOREIGN_2);
+static REGPARM_2_1: CallRegs = regparm!(1, REGPARM_1_ARGS, FOREIGN_2);
+static REGPARM_2_2: CallRegs = regparm!(2, REGPARM_2_ARGS, OWN_2);
+static REGPARM_2_3: CallRegs = regparm!(3, REGPARM_3_ARGS, FOREIGN_2);
+family!(REGPARM_2, OWN_2, FOREIGN_2, &REGPARM_2_2);
+
+/// The family of a unit built with `-mregparm=3`, which is every 32 bit x86 Linux kernel.
+static REGPARM_3: [&CallRegs; 4] = [&REGPARM_3_0, &REGPARM_3_1, &REGPARM_3_2, &REGPARM_3_3];
+static REGPARM_3_0: CallRegs = regparm!(0, FOREIGN_3);
+static REGPARM_3_1: CallRegs = regparm!(1, REGPARM_1_ARGS, FOREIGN_3);
+static REGPARM_3_2: CallRegs = regparm!(2, REGPARM_2_ARGS, FOREIGN_3);
+static REGPARM_3_3: CallRegs = regparm!(3, REGPARM_3_ARGS, OWN_3);
+family!(REGPARM_3, OWN_3, FOREIGN_3, &REGPARM_3_3);
+
+/// The convention of a unit on i386 System V built with `-mregparm=registers`, which is [`SYSV`]
+/// for none and [`None`] for more than three, which gcc refuses.
+#[must_use]
+pub fn regparm(registers: u8) -> Option<&'static CallRegs> {
+    let family = match registers {
+        0 => &REGPARM_0,
+        1 => &REGPARM_1,
+        2 => &REGPARM_2,
+        3 => &REGPARM_3,
+        _ => return None,
+    };
+    Some(family[usize::from(registers)])
+}
 
 /// The same convention in position independent code, where [`GOT_BASE`] is not the allocator's.
 ///
@@ -572,6 +663,23 @@ mod tests {
             assert_eq!(fastcall.chkstk, regs.chkstk);
         }
         assert!(SYSV.under(Convention::Stdcall).is_none(), "Linux ignores the attribute");
+    }
+
+    #[test]
+    fn each_regparm_count_finds_every_other_from_where_it_is() {
+        for own in 0..=3u8 {
+            let unit = regparm(own).expect("0 to 3 are counts");
+            assert_eq!(unit.int_args.len(), usize::from(own));
+            assert!(std::ptr::eq(unit.under(Convention::Target).expect("its own"), unit));
+            for other in (0..=3u8).filter(|&other| other != own) {
+                let there = unit.under(Convention::Regparm(other)).expect("every count");
+                assert_eq!(there.int_args, &[EAX, EDX, ECX][..usize::from(other)]);
+                // And a call back to an ordinary function from there is the unit's own again.
+                assert!(std::ptr::eq(there.under(Convention::Target).expect("own"), unit));
+            }
+        }
+        assert!(std::ptr::eq(regparm(0).expect("none"), &SYSV));
+        assert!(regparm(4).is_none());
     }
 
     #[test]

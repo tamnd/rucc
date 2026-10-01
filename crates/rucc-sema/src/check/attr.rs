@@ -1826,6 +1826,7 @@ impl Checker<'_> {
         // Where gcc says the 32-bit Windows conventions are ignored. On 32-bit x86 they mean
         // something and on Windows gcc accepts them without a word, and neither is this.
         let foreign_to_them = tuple.arch().as_str() == "x86_64" && !windows;
+        let regparm_here = tuple.arch().as_str() == "i686" && !windows;
         let mut asked: Option<(Convention, String, Span)> = None;
         for attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
@@ -1866,6 +1867,18 @@ impl Checker<'_> {
                         None => asked = Some((convention, name, attr.span)),
                     }
                 }
+                // How many words go in registers, which outside Windows is the only convention
+                // 32-bit x86 has a choice of. A count that is the unit's own is the target's
+                // convention, so the attribute written to match `-mregparm=` changes nothing.
+                "regparm" if regparm_here => {
+                    let Some(registers) = self.regparm_argument(&attr) else { continue };
+                    let convention = if registers == self.cx.target.regparm {
+                        Convention::Target
+                    } else {
+                        Convention::Regparm(registers)
+                    };
+                    asked = Some((convention, name, attr.span));
+                }
                 "stdcall" | "cdecl" | "fastcall" | "thiscall" | "regparm" | "vectorcall"
                     if foreign_to_them =>
                 {
@@ -1879,6 +1892,28 @@ impl Checker<'_> {
             }
         }
         asked
+    }
+
+    /// The count a `regparm` attribute gives, or nothing where gcc warns and drops it: an
+    /// argument that is not one integer constant, or one above three.
+    fn regparm_argument(&mut self, attr: &Attribute) -> Option<u8> {
+        let args = self.ast[attr.args].to_vec();
+        let number = match args.as_slice() {
+            [AttrArg::Expr(expr)] => {
+                let value = self.expr(*expr);
+                self.eval_integer(value).ok()
+            }
+            _ => None,
+        };
+        let what = match number {
+            None => "'regparm' attribute requires an integer constant argument".to_owned(),
+            Some(number) => match u8::try_from(number) {
+                Ok(registers) if registers <= 3 => return Some(registers),
+                _ => "argument to 'regparm' attribute larger than 3".to_owned(),
+            },
+        };
+        self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+        None
     }
 
     /// The type with its function, or the function it points at, given that convention.
@@ -1950,9 +1985,17 @@ impl Checker<'_> {
     /// A variadic function asked to be `stdcall` or `fastcall` stays the target's own, which is
     /// what gcc makes of it without a word: the callee cannot take off the stack what only the
     /// caller knows it pushed.
+    ///
+    /// A variadic function asked for `regparm` is the target's too, and that is as far as the type
+    /// goes: gcc passes every argument of one on the stack whatever the unit's `-mregparm=` says,
+    /// and that is worked out where the call is planned, see
+    /// `rucc_target::TargetInfo::convention_for`.
     fn function_under(&mut self, function: FunctionId, convention: Convention) -> TypeId {
         let current = self.types.signature(function);
-        let convention = if convention.callee_pops() && current.variadic {
+        let convention = if (convention.callee_pops()
+            || matches!(convention, Convention::Regparm(_)))
+            && current.variadic
+        {
             Convention::Target
         } else {
             convention

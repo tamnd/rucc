@@ -771,6 +771,12 @@ pub struct TargetInfo {
     /// Which registers the calling convention gives which job, or `None` while the
     /// architecture has no register file to name them out of.
     pub call_regs: Option<&'static CallRegs>,
+    /// How many words of arguments a function of this unit's own convention takes in registers,
+    /// which is what `-mregparm=` says on 32 bit x86 and is zero everywhere else.
+    ///
+    /// [`TargetInfo::call_regs`] is the registers that go with it, and
+    /// [`TargetInfo::convention_for`] is what a function type's convention comes to under it.
+    pub regparm: u8,
     /// How long this machine's instructions take, or `None` for an architecture with no backend.
     ///
     /// [`None`] rather than a model of a machine nobody measured, for the reason the two fields
@@ -1099,8 +1105,41 @@ impl TargetInfo {
             va_list: va_list(target),
             regs,
             call_regs,
+            regparm: 0,
             timing,
         }
+    }
+
+    /// The same target with the first `registers` words of every function's arguments in
+    /// registers, which is `-mregparm=`, and [`None`] where gcc has no such option or refuses
+    /// the number.
+    #[must_use]
+    pub fn with_regparm(mut self, registers: u8) -> Option<Self> {
+        if self.tuple.arch() != tuple::Arch::X86 || self.tuple.os() == tuple::Os::Windows {
+            return (registers == 0).then_some(self);
+        }
+        self.call_regs = Some(x86::regparm(registers)?);
+        self.regparm = registers;
+        Some(self)
+    }
+
+    /// The convention a function of this type is called with, given what its type says and
+    /// whether it is variadic.
+    ///
+    /// Only `regparm` changes anything. A function type that says nothing has the unit's own
+    /// count, one that says `regparm(n)` has `n`, and a variadic one has none whatever it says,
+    /// which is what gcc does. A count that is the unit's own is written [`Convention::Target`],
+    /// so a `regparm(3)` written in a unit built with `-mregparm=3` changes nothing.
+    #[must_use]
+    pub fn convention_for(&self, convention: Convention, variadic: bool) -> Convention {
+        let registers = match convention {
+            Convention::Target if self.regparm == 0 => return convention,
+            Convention::Target => self.regparm,
+            Convention::Regparm(registers) => registers,
+            other => return other,
+        };
+        let registers = if variadic { 0 } else { registers };
+        if registers == self.regparm { Convention::Target } else { Convention::Regparm(registers) }
     }
 
     /// The largest an object may be on this target, in bytes.
@@ -1642,6 +1681,25 @@ mod tests {
         let riscv = of("riscv64-unknown-linux-gnu");
         assert!(riscv.regs.is_empty());
         assert!(riscv.call_regs.is_none());
+    }
+
+    #[test]
+    fn regparm_is_the_unit_s_count_and_a_variadic_function_has_none() {
+        let target = |triple: &str| TargetInfo::new(triple.parse().expect("a triple"));
+        let unit = target("i686-unknown-linux-gnu").with_regparm(3).expect("i386 has the flag");
+        assert_eq!(unit.regparm, 3);
+        assert!(std::ptr::eq(unit.call_regs.expect("i386"), x86::regparm(3).expect("three")));
+        assert_eq!(unit.convention_for(Convention::Target, false), Convention::Target);
+        assert_eq!(unit.convention_for(Convention::Regparm(3), false), Convention::Target);
+        assert_eq!(unit.convention_for(Convention::Regparm(0), false), Convention::Regparm(0));
+        assert_eq!(unit.convention_for(Convention::Target, true), Convention::Regparm(0));
+        let plain = target("i686-unknown-linux-gnu");
+        assert_eq!(plain.convention_for(Convention::Target, true), Convention::Target);
+        assert_eq!(plain.convention_for(Convention::Regparm(2), true), Convention::Target);
+        assert_eq!(plain.convention_for(Convention::Regparm(2), false), Convention::Regparm(2));
+        assert!(plain.clone().with_regparm(4).is_none());
+        assert!(target("x86_64-unknown-linux-gnu").with_regparm(3).is_none());
+        assert!(target("x86_64-unknown-linux-gnu").with_regparm(0).is_some());
     }
 
     /// The two maps from a triple, held against each other.

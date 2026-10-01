@@ -378,6 +378,54 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     cleanup: Cleanup::Caller,
 };
 
+/// i386 System V with the first `n` words of arguments in eax, edx and ecx, which is gcc's
+/// `regparm(n)` and what `-mregparm=n` makes of every function in a unit. The Linux kernel is
+/// built with `-mregparm=3` on 32 bit x86, its boot and real mode code included, and `asmlinkage`
+/// there is `regparm(0)`, the plain convention, for the functions assembly calls.
+///
+/// gcc counts in words. An integer or pointer of a word or less takes the next register. A `long
+/// long` takes two when two are left and goes in the argument area when they are not, and the
+/// register it could not use goes with it, so nothing after it gets one. A structure is the same
+/// as its words: a twelve byte one fills all three registers and a thirteen byte one is on the
+/// stack with every register left spent. The one structure that is not is a lone `float` or
+/// `double`, which gcc gives the floating point mode of its member and so treats as that
+/// floating point value, on the stack and spending nothing, as every `float` and `double` is here.
+///
+/// The address a structure comes back through is the first argument, so it is in eax, and the
+/// callee leaves it where it was rather than taking it off the stack, since it is not there.
+/// Everything about the value that comes back is [`I386_SYSV`]'s.
+///
+/// gcc gives a variadic function none of this, and `rucc_target::TargetInfo::convention_for`
+/// makes the same choice, so these descriptions never see one.
+pub static I386_SYSV_REGPARM: [AbiDescription; 3] = [
+    regparm("i386 SysV regparm(1)", 1),
+    regparm("i386 SysV regparm(2)", 2),
+    regparm("i386 SysV regparm(3)", 3),
+];
+
+/// How a structure travels under [`I386_SYSV_REGPARM`].
+static REGPARM_ARGUMENTS: [Rule; 3] = [
+    Rule::new(Test::Empty, Travel::Ignore),
+    Rule::new(Test::LoneFloat, Travel::InMemory),
+    Rule::new(Test::Anything, Travel::AsIntegers).short(Short::MemoryAndDrain),
+];
+
+/// [`I386_SYSV_REGPARM`] with `registers` registers.
+const fn regparm(name: &'static str, registers: u32) -> AbiDescription {
+    AbiDescription {
+        name,
+        banks: Banks { integer: registers, ..I386_SYSV.banks },
+        scalars: Scalars {
+            wide_integer_is_all_or_nothing: true,
+            wide_integer_drains: true,
+            ..I386_SYSV.scalars
+        },
+        arguments: &REGPARM_ARGUMENTS,
+        return_pointer: ReturnPointer::FirstArgument,
+        ..I386_SYSV
+    }
+}
+
 /// i686 Windows as mingw-w64 has it, with gcc or clang.
 ///
 /// Arguments are what they are on i386 SysV: every one of them in the argument area, in source
@@ -524,6 +572,11 @@ pub enum Convention {
     Stdcall,
     /// `fastcall` on 32-bit Windows: `stdcall` with the first two small integers in ecx and edx.
     Fastcall,
+    /// gcc's `regparm(n)` on 32-bit x86 outside Windows, with the first `n` words of arguments in
+    /// eax, edx and ecx. `regparm(0)` is the plain convention, and is a convention of its own only
+    /// in a unit `-mregparm=` gave another default to, which is where the kernel's `asmlinkage`
+    /// uses it.
+    Regparm(u8),
 }
 
 impl Convention {
@@ -537,6 +590,10 @@ impl Convention {
             Self::Sysv => Some("sysv_abi"),
             Self::Stdcall => Some("stdcall"),
             Self::Fastcall => Some("fastcall"),
+            Self::Regparm(0) => Some("regparm(0)"),
+            Self::Regparm(1) => Some("regparm(1)"),
+            Self::Regparm(2) => Some("regparm(2)"),
+            Self::Regparm(_) => Some("regparm(3)"),
         }
     }
 
@@ -596,6 +653,10 @@ pub fn for_convention(
                 (_, true) => &I386_MSVC_FASTCALL,
             })
         }
+        (Convention::Regparm(0), Arch::X86) if target.os() != Os::Windows => Some(&I386_SYSV),
+        (Convention::Regparm(n @ 1..=3), Arch::X86) if target.os() != Os::Windows => {
+            Some(&I386_SYSV_REGPARM[usize::from(n) - 1])
+        }
         _ => None,
     }
 }
@@ -609,6 +670,9 @@ pub static DESCRIBED: &[&AbiDescription] = &[
     &WIN64,
     &RISCV_LP64D,
     &I386_SYSV,
+    &I386_SYSV_REGPARM[0],
+    &I386_SYSV_REGPARM[1],
+    &I386_SYSV_REGPARM[2],
     &I386_MINGW,
     &I386_MSVC,
     &I386_MINGW_STDCALL,

@@ -65,6 +65,11 @@ impl TargetInfo {
     /// in is the same shape whichever convention it asks about.
     #[must_use]
     pub fn call_under(&self, convention: Convention) -> Option<Call> {
+        // The unit's own convention is the platform's with `-mregparm=` applied.
+        let convention = match convention {
+            Convention::Target if self.regparm > 0 => Convention::Regparm(self.regparm),
+            other => other,
+        };
         abis::for_convention(self.tuple, convention).map(AbiDescription::call)
     }
 }
