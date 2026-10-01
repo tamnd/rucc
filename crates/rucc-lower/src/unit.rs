@@ -2372,6 +2372,9 @@ impl Unit<'_> {
         // somewhere read-only.
         global.constant = true;
         global.literal = true;
+        // And one the optimizer may take away once nothing names it, as a `static` object is,
+        // since the function or table that named it may itself have gone.
+        global.droppable = true;
         let range = self.module.push_bytes(&bytes);
         global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
         self.module.add_global(global);
@@ -2403,6 +2406,7 @@ impl Unit<'_> {
         let mut global = Global::new(symbol, size, align);
         global.linkage = IrLinkage::Internal;
         global.constant = true;
+        global.droppable = true;
         let range = self.module.push_bytes(&bytes);
         global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
         self.module.add_global(global);
