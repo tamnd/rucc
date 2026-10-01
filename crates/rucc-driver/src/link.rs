@@ -59,7 +59,9 @@
 //! accepted Microsoft's licence, and say which `--sysroot` to pass, so the tree is always one
 //! somebody named, and `msvc_sysroot` is the one place that says so. A mingw-w64 target links
 //! against the cache like every other cross target, because PE in that environment is written in
-//! the GNU style and the import libraries for it are ours.
+//! the GNU style and the import libraries for it are ours. With `--sysroot` it links against the
+//! tree named instead, MSYS2's `/ucrt64` or one laid out like it, through the same line, and
+//! `named_mingw` is where that is decided.
 //!
 //! Darwin has a line of its own, [`darwin_line`], and it is the same line on a Mac and anywhere
 //! else. Everything it links against is in the SDK, which is found the way the header search finds
@@ -454,7 +456,9 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         }
         return names;
     }
-    if distro_cross(target, opts).is_some() {
+    // A tree somebody named, which is MSYS2's own and was written for its own binutils, so GNU ld
+    // reads its import libraries as well as lld does and both are worth finding.
+    if named_mingw(target, opts).is_some() || distro_cross(target, opts).is_some() {
         return cross_order(target);
     }
     match target.os {
@@ -573,6 +577,34 @@ fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option
     }
     let cache = opts.cache.as_deref()?;
     Some(Sysroot::in_cache(cache, tuple))
+}
+
+/// A mingw-w64 tree somebody named with `--sysroot`, for a windows-gnu target.
+///
+/// The shape is MSYS2's `/ucrt64` or `/mingw64`, which is also the shape [`Sysroot::at`] gives
+/// a root: `crt2.o`, `libmingw32.a`, the import libraries and the rest of what
+/// [`rucc_sysroot::link::LinkLine::mingw`] names are all in `lib`, so the line that is built from
+/// the cache is built from this tree too, and the only thing it adds is gcc's runtime directory,
+/// which is [`mingw_gcc`]. A Linux target with a named tree takes the native line with the tree in
+/// front of every path, and that is not this: there is no native line for Windows to prefix.
+/// tamnd/rucc#2573.
+fn named_mingw(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    if (target.os, target.env) != (Os::Windows, Env::Gnu) {
+        return None;
+    }
+    let root = opts.sysroot.as_ref()?;
+    Some(Sysroot::at(root.clone(), target_tuple(target, opts)))
+}
+
+/// gcc's runtime directory in a named mingw-w64 tree, the newest version when there are several.
+///
+/// `lib/gcc/<arch>-w64-mingw32/<version>`, where MSYS2's gcc keeps `crtbegin.o`, `crtend.o` and
+/// `libgcc.a`. Nothing for a tree with no gcc in it, and nothing for one this compiler fetched,
+/// which never has one, so a line against the cache is the line it always was.
+fn mingw_gcc(target: Triple, opts: &LinkOptions, sysroot: &Sysroot) -> Option<PathBuf> {
+    named_mingw(target, opts)?;
+    let dir = sysroot.lib().join("gcc").join(format!("{}-w64-mingw32", target.arch.as_str()));
+    newest_first(&dir).into_iter().next()
 }
 
 /// A tree a distribution's cross packages installed for a Linux target that is not this machine.
@@ -743,6 +775,7 @@ fn cross_line(
             ),
         });
     }
+    let gcc = mingw_gcc(target, opts, sysroot);
     let invocation = argv::Invocation {
         inputs: &inputs,
         output: Some(&output),
@@ -757,6 +790,7 @@ fn cross_line(
         gui: opts.gui,
         unicode: opts.unicode,
         crt: opts.crt,
+        gcc: gcc.as_deref(),
     };
     argv::argv(target.tuple(), sysroot, &invocation)
         .map_err(|why| Error::Cross { why: why.to_string() })
@@ -790,7 +824,9 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     if is_msvc(target) {
         return msvc_preflight(target, opts);
     }
-    let Some(sysroot) = cross_sysroot(target, opts) else { return Ok(()) };
+    let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_mingw(target, opts)) else {
+        return Ok(());
+    };
     // Whether there is a line for this target and mode at all, asked with our own runtime left off
     // it. Otherwise a target nothing here can link and a machine where nobody built the runtime
     // report the same thing, and the archive is the smaller of the two problems by a long way.
@@ -1197,7 +1233,7 @@ fn line_for(
     if is_msvc(target) {
         return cross_line(target, opts, items, output, &msvc_sysroot(target, opts)?);
     }
-    if let Some(sysroot) = cross_sysroot(target, opts) {
+    if let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_mingw(target, opts)) {
         return cross_line(target, opts, items, output, &sysroot);
     }
     if target.os != Os::Linux {
@@ -1828,6 +1864,11 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
         if rucc_sysroot::link::libc(sysroot.target()) == rucc_sysroot::link::Libc::Stub {
             dirs.push(sysroot.stubs().to_path_buf());
         }
+        return dirs;
+    }
+    if let Some(sysroot) = named_mingw(target, link) {
+        dirs.push(sysroot.lib());
+        dirs.extend(mingw_gcc(target, link, &sysroot));
         return dirs;
     }
     if let Some(distro) = distro_cross(target, link) {
@@ -3143,5 +3184,66 @@ mod tests {
     fn a_runtime_directory_that_is_not_on_this_machine_is_not_offered() {
         let dirs = runtime_dirs(linux(), Some(Path::new("/definitely/not/a/sysroot")));
         assert!(dirs.is_empty(), "{dirs:?}");
+    }
+
+    #[test]
+    fn a_mingw_tree_named_with_sysroot_is_linked_the_way_the_fetched_one_is() {
+        // MSYS2's `/ucrt64`, as far as a link line reads it: the start file and the libraries in
+        // `lib`, and gcc's own runtime under a directory per version. tamnd/rucc#2573.
+        let tree = std::env::temp_dir().join(format!("rucc-link-ucrt64-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tree);
+        let lib = tree.join("lib");
+        let gcc = lib.join("gcc").join("x86_64-w64-mingw32");
+        for dir in [tree.join("include"), gcc.join("9.5.0"), gcc.join("14.2.0")] {
+            fs::create_dir_all(dir).expect("a scratch tree");
+        }
+        for file in ["crt2.o", "libmingw32.a", "libmsvcrt.a"] {
+            fs::write(lib.join(file), b"").expect("a file in lib");
+        }
+        for version in ["9.5.0", "14.2.0"] {
+            for file in ["crtbegin.o", "crtend.o", "libgcc.a"] {
+                fs::write(gcc.join(version).join(file), b"").expect("a file of gcc's");
+            }
+        }
+        let newest = gcc.join("14.2.0");
+        let shown = |path: PathBuf| path.display().to_string();
+
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        preflight(target, &opts).expect("the tree is one to link against");
+        let args = line(target, &opts, &one("a.o"), "a.exe").expect("a line for the named tree");
+        let at = |arg: &str| args.iter().position(|a| a == arg).unwrap_or_else(|| panic!("{arg}"));
+        assert_eq!(args[at("-m") + 1], "i386pep");
+        assert_eq!(args[at("--subsystem") + 1], "console");
+        assert!(args.contains(&format!("--sysroot={}", tree.display())), "{args:?}");
+        // The start file is the tree's, and gcc's `crtbegin.o` from its newest version follows it.
+        let crt2 = at(&shown(lib.join("crt2.o")));
+        assert_eq!(args[crt2 + 1], shown(newest.join("crtbegin.o")), "{args:?}");
+        assert!(crt2 < at("a.o"), "{args:?}");
+        // The tree's `lib` is searched, then gcc's directory, and nothing of the older gcc's.
+        assert!(at(&format!("-L{}", lib.display())) < at(&format!("-L{}", newest.display())));
+        assert!(!args.iter().any(|arg| arg.contains("9.5.0")), "{args:?}");
+        // The libraries are the ones the fetched tree's line names, out of this tree, after the
+        // objects, with ours last before `crtend.o` closes the line.
+        assert!(at("a.o") < at(&shown(lib.join("libmingw32.a"))), "{args:?}");
+        assert!(args.contains(&shown(lib.join("libmsvcrt.a"))), "{args:?}");
+        assert_eq!(args.last(), Some(&shown(newest.join("crtend.o"))), "{args:?}");
+        assert!(args[args.len() - 2].ends_with("librucc_builtins.a"), "{args:?}");
+        // GNU ld reads the import libraries MSYS2 built for it, so it is looked for as well.
+        assert!(order(target, &opts).contains(&"x86_64-w64-mingw32-ld".to_owned()));
+        assert_eq!(search_dirs(&opts, target), [lib.clone(), newest]);
+
+        // A tree with no gcc in it is the same line without gcc's two files.
+        fs::remove_dir_all(lib.join("gcc")).expect("the gcc directory goes");
+        let args = line(target, &opts, &one("a.o"), "a.exe").expect("a line without gcc");
+        assert!(!args.iter().any(|arg| arg.contains("crtbegin") || arg.contains("crtend")));
+        assert!(args.contains(&shown(lib.join("crt2.o"))), "{args:?}");
+
+        // And without `--sysroot` the line is the cache's, as it always was.
+        let fetched = cross_line(target, &cached(), &one("a.o"), "a.exe", &a_sysroot(target))
+            .expect("a line for the fetched tree");
+        assert!(!fetched.iter().any(|arg| arg.contains("crtbegin")), "{fetched:?}");
+        assert!(!fetched.iter().any(|arg| arg.starts_with(&shown(tree.clone()))), "{fetched:?}");
+        let _ = fs::remove_dir_all(&tree);
     }
 }

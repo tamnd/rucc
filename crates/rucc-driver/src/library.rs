@@ -77,7 +77,7 @@ pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
     match target.os {
         Os::Linux => linux(target, root),
         Os::Darwin => darwin(machine.sdk.as_deref().or(root)),
-        Os::Windows => windows(root, machine.include.as_deref()),
+        Os::Windows => windows(target.env, root, machine.include.as_deref()),
         // Freestanding. There is no library, so there are no headers of one, and the nine the
         // compiler ships are the whole of what a program may include.
         Os::None => Vec::new(),
@@ -132,8 +132,15 @@ fn darwin(sdk: Option<&Path>) -> Vec<PathBuf> {
 /// `crt/include` and the Windows SDK's under `sdk/include`, lowercase, with the version
 /// directories already resolved away. A copied Visual Studio installation is reached by setting
 /// `INCLUDE` instead, which is that platform's own spelling for it.
-fn windows(sysroot: Option<&Path>, include: Option<&str>) -> Vec<PathBuf> {
+///
+/// A named tree for a mingw-w64 target is the other shape, the one MSYS2 installs as `/ucrt64` or
+/// `/mingw64`: mingw-w64's headers in one `include` directory at the top, beside the `lib` the link
+/// line takes its files from. tamnd/rucc#2573.
+fn windows(env: Env, sysroot: Option<&Path>, include: Option<&str>) -> Vec<PathBuf> {
     if let Some(root) = sysroot {
+        if env == Env::Gnu {
+            return vec![root.join("include")];
+        }
         return ["crt/include", "sdk/include/ucrt", "sdk/include/shared", "sdk/include/um"]
             .into_iter()
             .chain(["sdk/include/winrt", "sdk/include/cppwinrt"])
@@ -565,6 +572,13 @@ mod tests {
                 under("sdk/include/cppwinrt"),
             ]
         );
+    }
+
+    #[test]
+    fn a_named_tree_for_a_mingw_target_is_laid_out_the_way_msys2_lays_out_ucrt64() {
+        let machine = Machine { sysroot: Some("/ucrt64".into()), ..on(Os::Linux) };
+        let dirs = candidates(triple(Os::Windows, Env::Gnu), &machine);
+        assert_eq!(dirs, [PathBuf::from("/ucrt64").join("include")]);
     }
 
     #[test]
