@@ -312,6 +312,15 @@ pub const INLINE_INSNS_SINGLE: u32 = 70;
 /// The same at `-O3`, per section 33.6, where GCC raises it to two hundred.
 pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
 
+/// How much a call may grow its caller and still be inlined whatever is known about how often it
+/// runs, per section 33.6.
+///
+/// GCC's `early-inlining-insns`. The early inliner runs before GCC has worked out that a function
+/// written `cold` is unlikely to run, so it takes a call that grows the caller by no more than this
+/// into a `cold` caller as readily as into any other. A callee that makes calls of its own is held
+/// to this for each of them and itself together.
+pub const INLINE_EARLY_INSNS: u32 = 6;
+
 /// The largest body a `static` function called from one place may have and still be inlined there,
 /// per section 33.1.
 ///
@@ -893,6 +902,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "33.6",
         gcc: "max-inline-insns-single",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_EARLY_INSNS",
+        value: 6,
+        unit: "instructions of growth",
+        document: "33.6",
+        gcc: "early-inlining-insns",
         provenance: Provenance::Gcc,
     },
     Constant {

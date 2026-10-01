@@ -89,8 +89,9 @@
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
-    INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_FRAME_GROWTH,
-    INLINE_FRAME_GROWTH_CONSERVE, INLINE_LARGE_FRAME, INLINE_LARGE_FRAME_CONSERVE,
+    INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_EARLY_INSNS,
+    INLINE_FRAME_GROWTH, INLINE_FRAME_GROWTH_CONSERVE, INLINE_LARGE_FRAME,
+    INLINE_LARGE_FRAME_CONSERVE,
 };
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
@@ -182,6 +183,10 @@ pub enum InlineFailure {
     /// The callee is built for x86-64 extensions the caller is not, so its body may use
     /// instructions the caller may not assume. gcc's words for it are the ones used.
     Target,
+    /// The caller or the callee is written `cold` and the program would come out larger with the
+    /// body copied in. Only a call that is not `always_inline` or to a function called once is
+    /// refused for this.
+    Unlikely,
 }
 
 impl InlineFailure {
@@ -204,6 +209,9 @@ impl InlineFailure {
             Self::Frame => "always_inline call not inlined: stack frame growth limit reached",
             Self::Unwinds => "always_inline call not inlined: call has a landing pad",
             Self::Target => "always_inline call not inlined: target specific option mismatch",
+            Self::Unlikely => {
+                "always_inline call not inlined: call is unlikely and code size would grow"
+            }
         }
     }
 
@@ -226,6 +234,7 @@ impl InlineFailure {
             Self::Frame => "inline call not inlined: stack frame growth limit reached",
             Self::Unwinds => "inline call not inlined: call has a landing pad",
             Self::Target => "inline call not inlined: target specific option mismatch",
+            Self::Unlikely => "inline call not inlined: call is unlikely and code size would grow",
         }
     }
 
@@ -261,6 +270,9 @@ impl InlineFailure {
             Self::Unwinds => "call to a function called once not inlined: call has a landing pad",
             Self::Target => {
                 "call to a function called once not inlined: target specific option mismatch"
+            }
+            Self::Unlikely => {
+                "call to a function called once not inlined: call is unlikely and code size would grow"
             }
         }
     }
@@ -324,7 +336,19 @@ pub fn run(
         let convention = Convention::of(module);
         let mut state = Map::default();
         let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
-        let how = How { wanted: &wanted, convention, limit, isa, names, growth, share };
+        let (calls, cold, elsewhere) = callers(module);
+        let how = How {
+            wanted: &wanted,
+            convention,
+            limit,
+            isa,
+            names,
+            growth,
+            share,
+            calls: &calls,
+            cold: &cold,
+            elsewhere: &elsewhere,
+        };
         for id in module.funcs().collect::<Vec<FuncId>>() {
             settle(module, id, &how, &mut state, &mut done);
         }
@@ -404,15 +428,27 @@ fn called_once(module: &Module) -> Set<Symbol> {
 
 /// How many direct calls the module makes to each name, and the names it reaches any other way.
 fn references(module: &Module) -> (Map<Symbol, usize>, Set<Symbol>) {
+    let (calls, _, elsewhere) = callers(module);
+    (calls, elsewhere)
+}
+
+/// What [`references`] answers, with how many of the calls are made from a function written
+/// `cold` as well.
+fn callers(module: &Module) -> (Map<Symbol, usize>, Map<Symbol, usize>, Set<Symbol>) {
     let mut calls: Map<Symbol, usize> = Map::default();
+    let mut cold: Map<Symbol, usize> = Map::default();
     let mut elsewhere = Set::default();
     for id in module.funcs() {
         let func = &module[id];
+        let unlikely = func.attrs.set.contains(AttrSet::COLD);
         for inst in func.blocks().flat_map(|block| func.insts(block)) {
             match func[inst].extra {
                 Extra::Call(info) if func[inst].opcode == Opcode::Call => {
                     if let Some(callee) = func[info].callee {
                         *calls.entry(callee).or_default() += 1;
+                        if unlikely {
+                            *cold.entry(callee).or_default() += 1;
+                        }
                     }
                 }
                 Extra::Call(info) => elsewhere.extend(func[info].callee),
@@ -435,7 +471,7 @@ fn references(module: &Module) -> (Map<Symbol, usize>, Set<Symbol>) {
     for id in module.aliases() {
         elsewhere.insert(module[id].target);
     }
-    (calls, elsewhere)
+    (calls, cold, elsewhere)
 }
 
 /// What stays the same for every function [`settle`] visits.
@@ -454,6 +490,12 @@ struct How<'a> {
     growth: Growth,
     /// Whether bodies spliced into the same caller may share their slots. See [`Pool`].
     share: bool,
+    /// How many direct calls the module makes to each name before anything is inlined.
+    calls: &'a Map<Symbol, usize>,
+    /// How many of those calls are made from a function written `cold`.
+    cold: &'a Map<Symbol, usize>,
+    /// The names the module reaches other than by a direct call.
+    elsewhere: &'a Set<Symbol>,
 }
 
 /// How far inlining may grow a caller's frame, gcc's `large-stack-frame-growth` and
@@ -503,6 +545,10 @@ fn settle(
     // one the callee's own settling already had its chance at. A function that asked not to be
     // optimized is left with its calls, except for the ones that are a promise.
     let optnone = module[id].attrs.set.contains(AttrSet::OPTNONE);
+    // A caller written `cold`, which in the kernel is every `__init` and `__exit` function, is one
+    // whose calls gcc never thinks of as hot, and it inlines a call that is not hot only when that
+    // does not make the program larger.
+    let cold = module[id].attrs.set.contains(AttrSet::COLD);
     let calls: Vec<(Block, Inst, FuncId, Kind)> = {
         let func = &module[id];
         func.blocks()
@@ -580,13 +626,36 @@ fn settle(
             Kind::Hinted | Kind::Asks => how.limit,
             Kind::Once => INLINE_CALLED_ONCE_INSNS as usize,
         };
-        let large = match kind {
-            Kind::Asks => answered_size(&module[callee]),
-            Kind::Hinted => folded_size(&module[callee], Set::default()),
+        let mut large = match kind {
+            Kind::Asks => {
+                answered_size(&module[callee], passed(&module[id], call, &module[callee]))
+            }
+            Kind::Hinted => folded_size(
+                &module[callee],
+                Set::default(),
+                passed(&module[id], call, &module[callee]),
+            ),
             Kind::Always | Kind::Once => size(&module[callee]),
         };
+        let cold_call = cold || module[callee].attrs.set.contains(AttrSet::COLD);
+        // The estimate above does not follow a constant through a block parameter or answer a
+        // `__builtin_constant_p` about anything but a parameter, so where it would refuse, the
+        // copy is made and cleaned up the way it would be once inlined, and that is measured.
+        if matches!(kind, Kind::Hinted | Kind::Asks)
+            && (large > most || cold_call && grows(&module[id], call, &module[callee], large, how))
+        {
+            let values = passed(&module[id], call, &module[callee]);
+            large = large.min(specialized_size(&module[callee], &values));
+        }
         if large > most {
             stats.missed(why(InlineFailure::TooLarge));
+            continue;
+        }
+        if matches!(kind, Kind::Hinted | Kind::Asks)
+            && cold_call
+            && grows(&module[id], call, &module[callee], large, how)
+        {
+            stats.missed(why(InlineFailure::Unlikely));
             continue;
         }
         if kind != Kind::Always
@@ -656,7 +725,7 @@ fn asked(func: &Func) -> Vec<usize> {
 /// such a call by. Without it the arithmetic a `BUILD_BUG_ON` checks the constant with counts
 /// against the body, and in the kernel that is most of a body that asks, so a function the size
 /// of a hinted one looks two or three times larger than it is.
-fn answered_size(func: &Func) -> usize {
+fn answered_size(func: &Func, values: Map<Value, (Imm, Type)>) -> usize {
     let Some(entry) = func.entry() else { return size(func) };
     let asked = asked(func);
     let known = func[entry]
@@ -666,7 +735,69 @@ fn answered_size(func: &Func) -> usize {
         .filter(|(at, _)| asked.contains(at))
         .map(|(_, &value)| value)
         .collect();
-    folded_size(func, known)
+    folded_size(func, known, values)
+}
+
+/// The callee's parameters this call passes a constant for, with the constant, which is what
+/// gcc's estimate of an inlined copy knows about the call it stands for. `kzalloc` called with a
+/// `sizeof` takes the one arm of `kmalloc` that picks a size class, and weighed without it the
+/// body is several times the limit.
+fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
+    let Some(entry) = callee.entry() else { return Map::default() };
+    let args = &func[func[call].args];
+    callee[entry]
+        .params
+        .iter()
+        .zip(args)
+        .filter_map(|(&param, &arg)| {
+            let found = crate::fold::evaluated(func, arg, ASKED_DEPTH)?;
+            Some((param, found))
+        })
+        .collect()
+}
+
+/// How many instructions a copy of a body has that are still work once the constants the call
+/// passes are in it and the passes that run right after inlining have folded it.
+///
+/// What gcc weighs a call by is the body as the early passes left it, with what the call site
+/// knows applied on top, and a `__builtin_constant_p` it cannot answer yet counts as the arm that
+/// is taken once the answer is no. `efi_enabled` asks it about a bit number and then about the
+/// address of a field, and only a real fold sees the second one come out true.
+fn specialized_size(callee: &Func, values: &Map<Value, (Imm, Type)>) -> usize {
+    use crate::Pass;
+    let mut copy = callee.clone();
+    let Some(first) = copy.entry().and_then(|entry| copy.insts(entry).next()) else {
+        return size(callee);
+    };
+    let mut forward = Map::default();
+    for (&param, &(value, ty)) in values {
+        let imm = copy.add_imm(value);
+        let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+        let span = copy.span(first);
+        let inst = copy.create_inst(data, &[ty], span);
+        copy.insert_before(inst, first);
+        if let Some(result) = copy[inst].results().next() {
+            forward.insert(param, result);
+        }
+    }
+    crate::uses::substitute(&mut copy, &forward);
+    let mut an = crate::Analyses::new(crate::machine::Machine::unknown());
+    let mut fuel = crate::Fuel::unlimited();
+    let passes: [&dyn Pass; 6] = [
+        &crate::fold::Fold,
+        &crate::simplify::Simplify,
+        &crate::constant_p::ConstantP,
+        &crate::sccp::Sccp,
+        &crate::simplify_cfg::SimplifyCfg,
+        &crate::dce::Dce,
+    ];
+    for _ in 0..2 {
+        for pass in passes {
+            pass.run(&mut copy, &mut an, &mut fuel);
+            an.clear();
+        }
+    }
+    folded_size(&copy, Set::default(), Map::default())
 }
 
 /// How many instructions a body has that are still work once what only depends on constants and
@@ -677,12 +808,81 @@ fn answered_size(func: &Func) -> usize {
 /// a load in each arm and a `do { } while (0)` around it when this pass sees it, and one load once
 /// the size is folded, so counting it as written made `alloc_pages_node` in the kernel three times
 /// the limit where gcc inlines it everywhere.
-fn folded_size(func: &Func, mut known: Set<Value>) -> usize {
+///
+/// What is known with its number in `values` goes further: a branch on it takes one arm, and the
+/// arms it does not take are not counted at all, as they are gone from the copy once it folds.
+fn folded_size(func: &Func, mut known: Set<Value>, mut values: Map<Value, (Imm, Type)>) -> usize {
+    known.extend(values.keys().copied());
+    // Who reads each value and as which operand, for what is part of the instruction reading it
+    // once there is code: an address a load or a store takes, the index it scales, and the
+    // comparison a branch tests.
+    let mut readers: Map<Value, Vec<(Opcode, usize)>> = Map::default();
+    for inst in func.blocks().flat_map(|block| func.insts(block)) {
+        for (at, &arg) in func[func[inst].args].iter().enumerate() {
+            readers.entry(arg).or_default().push((func[inst].opcode, at));
+        }
+        for call in func.successors(inst) {
+            for &arg in &func[call.args] {
+                readers.entry(arg).or_default().push((Opcode::Jump, usize::MAX));
+            }
+        }
+    }
+    let only = |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| {
+        value
+            .and_then(|value| readers.get(&value))
+            .is_some_and(|readers| readers.iter().all(|&(opcode, at)| fits(opcode, at)))
+    };
+    let address =
+        |opcode: Opcode, at: usize| matches!((opcode, at), (Opcode::Load, 0) | (Opcode::Store, 1));
+    let cfg = Cfg::new(func);
+    let mut live: Set<Block> = cfg.entry().into_iter().collect();
     let mut work = 0;
-    for block in func.blocks() {
+    for block in cfg.reverse_postorder() {
+        if !live.contains(&block) {
+            continue;
+        }
         for inst in func.insts(block) {
             let data = &func[inst];
             let args = &func[data.args];
+            let folds = args.iter().all(|arg| known.contains(arg));
+            if let (true, Some(result)) = (folds && data.results == 1, data.results().next()) {
+                let ty = func[result].ty;
+                let operand = |arg: Value| {
+                    values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg))
+                };
+                let found = if data.opcode == Opcode::IsConstant {
+                    Some(Imm::int(1, ty))
+                } else if ty.is_int() && ty.is_scalar() {
+                    crate::fold::arithmetic(data, args, ty, &operand)
+                } else {
+                    None
+                };
+                if let Some(found) = found {
+                    values.insert(result, (found, ty));
+                }
+            }
+            if func.is_terminator(inst) {
+                let decided =
+                    args.first().and_then(|arg| values.get(arg)).and_then(|&(value, _)| match data
+                        .extra
+                    {
+                        Extra::Targets(targets) if data.opcode == Opcode::BrIf => {
+                            func[targets].get(usize::from(value.bits() == 0)).copied()
+                        }
+                        Extra::Switch(at) if data.opcode == Opcode::Switch => {
+                            let info = func[at];
+                            let case = func[info.cases].iter().position(|it| *it == value);
+                            func[info.targets].get(case.map_or(0, |case| case + 1)).copied()
+                        }
+                        _ => None,
+                    });
+                match decided {
+                    Some(call) => {
+                        live.insert(call.block);
+                    }
+                    None => live.extend(func.successors(inst).map(|call| call.block)),
+                }
+            }
             let free = match data.opcode {
                 // A jump is gone once the blocks either side of it are one, and a hint that a
                 // block cannot be reached is no code at all. The address of a global is an
@@ -693,10 +893,7 @@ fn folded_size(func: &Func, mut known: Set<Value>) -> usize {
                 | Opcode::IsConstant
                 | Opcode::Jump
                 | Opcode::UnreachableHint => true,
-                Opcode::Trunc
-                | Opcode::SExt
-                | Opcode::ZExt
-                | Opcode::Shl
+                Opcode::Shl
                 | Opcode::LShr
                 | Opcode::AShr
                 | Opcode::Add
@@ -709,7 +906,7 @@ fn folded_size(func: &Func, mut known: Set<Value>) -> usize {
                 | Opcode::Cttz
                 | Opcode::Ctpop
                 | Opcode::ICmp
-                | Opcode::Select => args.iter().all(|arg| known.contains(arg)),
+                | Opcode::Select => folds,
                 Opcode::BrIf | Opcode::Switch => {
                     args.first().is_some_and(|arg| known.contains(arg))
                 }
@@ -717,7 +914,42 @@ fn folded_size(func: &Func, mut known: Set<Value>) -> usize {
             };
             if free {
                 known.extend(data.results());
-            } else {
+                continue;
+            }
+            // What costs nothing in the copy without being a constant: a conversion between
+            // registers, a constant offset the memory access takes as part of its address, a local
+            // of a fixed size, and the return, which becomes a jump to where the call was. gcc
+            // counts these as nothing too, the return as eliminated by inlining.
+            let costless = match data.opcode {
+                Opcode::Trunc
+                | Opcode::SExt
+                | Opcode::ZExt
+                | Opcode::PtrToInt
+                | Opcode::IntToPtr
+                | Opcode::Bitcast => {
+                    if folds {
+                        known.extend(data.results());
+                    }
+                    true
+                }
+                Opcode::PtrAdd => {
+                    args.get(1).is_some_and(|arg| known.contains(arg))
+                        || only(data.results().next(), &address)
+                }
+                Opcode::Mul | Opcode::Shl => {
+                    args.get(1).is_some_and(|arg| known.contains(arg))
+                        && only(data.results().next(), &|opcode, at| {
+                            opcode == Opcode::PtrAdd && at == 1
+                        })
+                }
+                Opcode::ICmp => only(data.results().next(), &|opcode, at| {
+                    matches!((opcode, at), (Opcode::BrIf, 0))
+                }),
+                Opcode::Alloca => args.is_empty(),
+                Opcode::Return | Opcode::LifetimeEnd => true,
+                _ => false,
+            };
+            if !costless {
                 work += 1;
             }
         }
@@ -832,6 +1064,40 @@ impl Pool {
             self.slots.push((inst, callee[mem].size, self.site));
         }
     }
+}
+
+/// Whether copying a body of `size` instructions in place of `call` makes the program larger by
+/// more than gcc lets a call that is not hot grow it.
+///
+/// The copy costs the body less the call it replaces, a call being one instruction and one more
+/// for each argument. gcc's early inliner takes a copy that grows the caller by no more than
+/// [`INLINE_EARLY_INSNS`] before it has worked out which functions are cold, holding a body that
+/// makes calls of its own to that for each of them and itself together. What it leaves, the later
+/// inliner takes into a caller that is not hot only when the program does not grow, which is
+/// `growth_positive_p`. A `static` body nothing reaches but its calls goes away once every call
+/// has its copy, so what it costs then is a copy for every call less the body it no longer needs.
+fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> bool {
+    let cost = 1 + func[func[call].args].len();
+    let growth = size.saturating_sub(cost);
+    let calls = callee
+        .blocks()
+        .flat_map(|block| callee.insts(block))
+        .filter(|&inst| {
+            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
+        })
+        .count();
+    if growth * (calls + 1) <= INLINE_EARLY_INSNS as usize {
+        return false;
+    }
+    let removable = callee.linkage == Linkage::Internal
+        && !callee.attrs.set.contains(AttrSet::USED)
+        && !how.elsewhere.contains(&callee.name);
+    // The calls from functions that are not cold are taken first and go in when they fit, so what
+    // the copy left out of line has to pay for is the calls from cold ones, unless the callee is
+    // cold itself and every call to it is weighed this way.
+    let sites = if callee.attrs.set.contains(AttrSet::COLD) { how.calls } else { how.cold };
+    let sites = sites.get(&callee.name).copied().unwrap_or(1).max(1);
+    !removable || growth * sites > size
 }
 
 /// How many instructions a body has, which is what the limit on a callee declared `inline` counts.
@@ -2172,13 +2438,13 @@ block0(%0: i32):
     /// One that is larger than the limit stays a call.
     #[test]
     fn a_function_declared_inline_over_the_limit_is_left_alone() {
-        let out = inlined_under(HINTED, Some(1));
+        let out = inlined_under(HINTED, Some(0));
         assert!(out.contains("call @bump"), "{out}");
     }
 
     /// What only works out a constant is not counted against it, since it folds away before gcc
     /// would have measured the body. This is the size switch a `this_cpu_read` comes to, with the
-    /// size already a constant, and it is two instructions of work, the load and the return, not ten.
+    /// size already a constant, and it is one instruction of work, the load, not ten.
     #[test]
     fn what_folds_away_is_not_counted_against_a_function_declared_inline() {
         let body = r#"
@@ -2208,11 +2474,51 @@ block0(%0: i32):
     return %1
 }
 "#;
-        let out = inlined_under(body, Some(1));
+        let out = inlined_under(body, Some(0));
         assert!(out.contains("call @node"), "{out}");
-        let out = inlined_under(body, Some(2));
+        let out = inlined_under(body, Some(1));
         let g = &out[out.find("func @g").expect("g is there")..];
         assert!(!g.contains("call @node"), "{out}");
+    }
+
+    /// A constant the call passes counts as one too, so the same switch over a parameter is one
+    /// instruction of work where the call passes the size and three where it does not.
+    #[test]
+    fn what_a_constant_argument_folds_away_is_not_counted_either() {
+        let body = |arg: &str| {
+            format!(
+                r#"
+func @node(i64, i32) -> i32, linkage(external), attrs(inline_hint) {{
+block0(%0: i64, %1: i32):
+    %2 = shl %0, %0
+    switch %2, block1, [4 => block2]
+
+block1:
+    jump block3(%1)
+
+block2:
+    %3 = global_addr @numa_node
+    %4 = load.i32 %3, align 4
+    jump block3(%4)
+
+block3(%5: i32):
+    return %5
+}}
+
+func @g(i64, i32) -> i32, linkage(external) {{
+block0(%0: i64, %1: i32):
+    %2 = iconst.i64 1
+    %3 = call @node({arg}, %1) : (i64, i32) -> i32
+    return %3
+}}
+"#
+            )
+        };
+        let out = inlined_under(&body("%2"), Some(1));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @node"), "{out}");
+        let out = inlined_under(&body("%0"), Some(1));
+        assert!(out.contains("call @node"), "{out}");
     }
 
     /// A `static` function nobody declared `inline`, called from one place.

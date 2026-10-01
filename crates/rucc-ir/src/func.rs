@@ -60,7 +60,7 @@ impl Notices {
 }
 
 /// One function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Func {
     /// The name it is called by, which is what a direct call to it names.
     pub name: Symbol,

@@ -176,6 +176,7 @@ pub mod switch_conv;
 mod testing;
 pub mod thread;
 pub(crate) mod trip;
+pub mod unlikely;
 pub mod unroll;
 pub mod uses;
 
