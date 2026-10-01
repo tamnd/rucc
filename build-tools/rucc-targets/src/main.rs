@@ -431,6 +431,9 @@ fn rule_line(rule: &Rule) -> String {
         Travel::AsOneInteger => "travels in one integer register of its exact size",
         Travel::ByReference => "travels as the address of a copy",
         Travel::InMemory => "travels in the argument area",
+        Travel::InMemoryAndDrain => {
+            "travels in the argument area and uses up the integer registers it did not take"
+        }
     };
     let short = match rule.short {
         Short::Unchanged => "",
