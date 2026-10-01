@@ -607,11 +607,14 @@ impl Checker<'_> {
                     }
                 }
             }
-            // `constructor(foo)` where `foo` is not an expression, which the parser keeps as an
-            // identifier because `format(printf, 1, 2)` does.
-            Some(AttrArg::Ident(_)) => {
-                self.report(Diagnostic::error(range, attr.span).with_code("E0703"));
-                return None;
+            // `constructor(P)` with `P` an enumerator, which the parser keeps as an identifier
+            // because `format(printf, 1, 2)` does.
+            Some(&AttrArg::Ident(name)) => {
+                let Some(value) = self.enumerator(name) else {
+                    self.report(Diagnostic::error(range, attr.span).with_code("E0703"));
+                    return None;
+                };
+                value
             }
         };
         let Ok(number) = u16::try_from(asked) else {
@@ -2179,6 +2182,19 @@ impl Checker<'_> {
         Some(self.types.vector(elem, lanes))
     }
 
+    /// The value of an enumerator an attribute's lone identifier names, and nothing when it
+    /// names anything else.
+    ///
+    /// The parser keeps a lone identifier as one rather than as an expression, since most of the
+    /// attributes that take one name a thing outside the ordinary scope. The ones that take a
+    /// number take an enumerator as well, and gcc finds it the way an expression would.
+    fn enumerator(&self, name: Symbol) -> Option<i128> {
+        match self.scopes.lookup(name)? {
+            Binding::Enumerator { value, .. } => Some(value),
+            Binding::Decl(_) | Binding::Typedef(_) => None,
+        }
+    }
+
     /// What one `aligned` asked for, which is a number or nothing when it was written bare.
     fn aligned_argument(&mut self, attr: Attribute) -> Option<u32> {
         let args = self.ast[attr.args].to_vec();
@@ -2198,12 +2214,16 @@ impl Checker<'_> {
                     }
                 }
             }
-            // `aligned(foo)` where `foo` is not an expression, which nothing writes and which
-            // the parser keeps as an identifier because `format(printf, 1, 2)` does.
-            Some(AttrArg::Ident(_)) => {
-                let what = "requested alignment is not an integer constant";
-                self.report(Diagnostic::error(what, attr.span).with_code("E0606"));
-                return None;
+            // `aligned(A)` with `A` an enumerator, which the parser keeps as an identifier
+            // because `format(printf, 1, 2)` does. The kernel's blake2s selftest aligns a
+            // buffer with an enumerator of its own block.
+            Some(&AttrArg::Ident(name)) => {
+                let Some(value) = self.enumerator(name) else {
+                    let what = "requested alignment is not an integer constant";
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0606"));
+                    return None;
+                };
+                value
             }
         };
         if requested <= 0 || requested & (requested - 1) != 0 {
