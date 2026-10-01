@@ -6,6 +6,8 @@
 //! none. Each shape below is one of those, reduced, and the object has to name none of them at
 //! any level that optimizes. `g` is the kernel's `min`, whose signedness check asks about
 //! `ret >= 0` after `ret < 0` has returned, which only the ranges answer. See tamnd/rucc#2265.
+//! `h` is lib/test_bitmap.c's `test_bitmap_const_eval`, which asks about `*bitmap` through
+//! `test_bit` after `bitmap_clear`, and gcc answers one there.
 
 use std::process::Command;
 
@@ -61,6 +63,27 @@ long f(long *p) { return rd(p, 8); }
         __compiletime_assert_1(); \
     (a) < (long)(b) ? (a) : (long)(b); })
 long g(int ret) { char buf[16]; if (ret < 0) return ret; return min(ret, sizeof(buf)); }
+static __always_inline void clear(unsigned long *map, unsigned n) {
+    if (__builtin_constant_p(n) && n <= 64) *map &= ~(~0UL >> (64 - n));
+    else __asm__ volatile("" : "+m"(*map) : : "memory");
+}
+static __always_inline int test7(const volatile unsigned long *addr) {
+    unsigned char c;
+    if (__builtin_constant_p((unsigned long)addr != 0) && (unsigned long)addr != 0
+        && __builtin_constant_p(*(const unsigned long *)addr))
+        return (*(const unsigned long *)addr >> 7) & 1;
+    __asm__ volatile("btq $7,%1; setc %0" : "=q"(c) : "m"(*addr) : "memory");
+    return c;
+}
+int h(void) {
+    unsigned long bm[1];
+    int res;
+    clear(bm, 64);
+    if (!test7(bm)) bm[0] |= 0x60;
+    res = __builtin_popcountl(bm[0] & 0xfffff);
+    BUILD_BUG_ON(!__builtin_constant_p(res));
+    return res;
+}
 "#;
 
 #[test]
@@ -85,6 +108,35 @@ fn no_call_a_constant_p_answer_rules_out_reaches_the_object() {
             bytes.windows(3).any(|at| at == b"ok\0"),
             "{level} took out the calls it should keep"
         );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The operand of `__builtin_constant_p` is never worked out at run time, at any level, so asking
+/// about `*p` reads nothing through `p`. The kernel asks about `*addr` behind a test that `addr` is
+/// not null, but the answer has to be safe without one, as it is in gcc.
+#[test]
+fn asking_about_what_a_pointer_points_at_reads_nothing_through_it() {
+    let dir = std::env::temp_dir().join(format!("rucc-constant-p-deref-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = "int f(int *p) { return __builtin_constant_p(*p); }\n";
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
+    for level in ["-O0", "-O1", "-O2"] {
+        let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=x86_64-unknown-linux-gnu", level, "-S", "-o", "-"])
+            .arg(dir.join("one.c"))
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let listing = String::from_utf8_lossy(&done.stdout);
+        assert!(done.status.success(), "{level}: {}", String::from_utf8_lossy(&done.stderr));
+        let through = listing
+            .lines()
+            .filter(|line| {
+                line.contains("(%r") && !line.contains("(%rbp)") && !line.contains("(%rsp)")
+            })
+            .collect::<Vec<_>>();
+        assert!(through.is_empty(), "{level} reads through the pointer: {through:?}\n{listing}");
+        assert!(listing.contains("xorl\t%eax, %eax"), "{level} answers zero:\n{listing}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -45,6 +45,7 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Value};
 
+use crate::load::LoadForward;
 use crate::prune::Prune;
 use crate::range::ops::Truth;
 use crate::range::query::Ranges;
@@ -126,9 +127,9 @@ fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
         round.merge(&choose(func));
         let known = known(func, an);
         round.record(Kind::Optimized, ANSWERED, count(known.len()));
-        for inst in known {
-            write(func, inst, 1);
-        }
+        let operands: Vec<Value> =
+            known.into_iter().filter_map(|inst| write(func, inst, 1)).collect();
+        bury(func, operands);
         // The ranges again, for the branches on the value a yes was about. The kernel's
         // `statically_true(x)` is `__builtin_constant_p(x) && (x)`, and the second `x` is a branch
         // of its own that only the ranges settle when they are what settled the first.
@@ -138,6 +139,15 @@ fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
         // The control flow pass leaves clearing the cache to the manager, and the next round is
         // before the manager gets the chance.
         an.clear();
+        // A store and a load of the same local that the blocks just merged put side by side. The
+        // kernel's `test_bit` asks about `*bitmap` right after `bitmap_clear`, whose other arms
+        // hand the bitmap to `asm`, so it stays in memory and is only zero once those arms are
+        // gone and the store reaches the load. Only once nothing else moves and only for a
+        // question that reads memory, since the pass is not cheap and most questions never do.
+        if !round.changed() && asked(func).into_iter().any(|inst| reads_memory(func, inst)) {
+            round.merge(&LoadForward.run(func, an, &mut fuel));
+            an.clear();
+        }
         if !round.changed() {
             // Nothing is going to become a constant now, so what is still asked is answered no,
             // and the next round follows those answers.
@@ -152,6 +162,22 @@ fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
     // Out of rounds, which the bound says should not happen. The questions still get their
     // answers, since nothing below this lowers one.
     stats.record(Kind::Optimized, ANSWERED, count(settle(func, Answering::Every)));
+}
+
+/// Whether the operand of a question is worked out from a load, a few steps back at most.
+fn reads_memory(func: &Func, inst: Inst) -> bool {
+    let mut work: Vec<(Value, usize)> =
+        func[func[inst].args].iter().map(|&value| (value, 0)).collect();
+    while let Some((value, depth)) = work.pop() {
+        let Def::Result { inst: from, .. } = func[value].def else { continue };
+        if func[from].opcode == Opcode::Load {
+            return true;
+        }
+        if depth < 8 {
+            work.extend(func[func[from].args].iter().map(|&arg| (arg, depth + 1)));
+        }
+    }
+    false
 }
 
 /// A number of answers as the count an event is kept in.
@@ -268,13 +294,46 @@ fn asked(func: &Func) -> Vec<Inst> {
 /// answered.
 fn settle(func: &mut Func, how: Answering) -> usize {
     let mut answered = 0;
+    let mut operands = Vec::new();
     for inst in asked(func) {
         let known = how != Answering::Zero
             && func[func[inst].args].first().is_some_and(|&value| is_constant(func, value));
-        write(func, inst, i128::from(known));
+        operands.extend(write(func, inst, i128::from(known)));
         answered += 1;
     }
+    bury(func, operands);
     answered
+}
+
+/// Takes out what was worked out only to be asked about, now that nothing reads it.
+///
+/// gcc never evaluates the operand of `__builtin_constant_p`, and the front end lets one through
+/// that follows a pointer for that reason, so the read is not something the program may make. The
+/// kernel guards `*(const unsigned long *)addr` with a test that `addr` is not null, but nothing
+/// says every caller does, and at `-O0` no pass behind this one would take the load out. So the
+/// operand goes with the question, and whatever it was computed from goes too once nothing else
+/// reads that. Only what has no effect or only reads memory, which is everything the front end
+/// lets through.
+fn bury(func: &mut Func, operands: Vec<Value>) {
+    if operands.is_empty() {
+        return;
+    }
+    let mut counts = uses::count(func);
+    let mut work = operands;
+    while let Some(value) = work.pop() {
+        let Def::Result { inst, .. } = func[value].def else { continue };
+        if func.block_of(inst).is_none()
+            || func[inst].results().any(|result| counts[result.index()] != 0)
+            || (func[inst].opcode.has_effects() && !crate::dce::reads_only(func, inst))
+        {
+            continue;
+        }
+        uses::operands(func, inst, |read| {
+            counts[read.index()] -= 1;
+            work.push(read);
+        });
+        func.remove_inst(inst);
+    }
 }
 
 /// Whether this value is a constant, an integer or a floating point one.
@@ -283,8 +342,9 @@ fn is_constant(func: &Func, value: Value) -> bool {
     matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst)
 }
 
-/// Puts the answer where the question was.
-fn write(func: &mut Func, inst: Inst, number: i128) {
+/// Puts the answer where the question was, and says what the question was about.
+fn write(func: &mut Func, inst: Inst, number: i128) -> Option<Value> {
+    let operand = func[func[inst].args].first().copied();
     let result = func[inst].results().next().expect("an answer is one value");
     let ty = func[result].ty;
     let span = func.span(inst);
@@ -296,6 +356,7 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
     let forward: Map<_, _> = [(result, value)].into_iter().collect();
     uses::substitute(func, &forward);
     func.remove_inst(inst);
+    operand
 }
 
 #[cfg(test)]

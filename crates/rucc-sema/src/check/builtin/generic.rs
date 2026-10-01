@@ -338,10 +338,15 @@ impl Checker<'_> {
     /// Whether this is an arithmetic value whose working out changes nothing and cannot fault,
     /// which is what lowering it for `__builtin_constant_p` needs, since gcc never evaluates it.
     ///
-    /// Reads of objects by name, constants, conversions and the arithmetic that cannot trap. No
-    /// call, assignment or increment, no read of anything `volatile`, and no pointer followed,
-    /// since `*p` with `p` null is a fault the program never asked for. Division and remainder
-    /// are left out for the same reason, since the divisor may be zero.
+    /// Reads of objects by name, constants, conversions, the arithmetic that cannot trap and a
+    /// pointer followed with `*`. No call, assignment or increment, and no read of anything
+    /// `volatile`. Division and remainder are left out, since the divisor may be zero and the
+    /// division is not something the optimizer takes back out.
+    ///
+    /// `*p` is let through even though `p` may be null, because the read is never made:
+    /// `rucc_opt::constant_p` takes the operand out with the question, whatever the answer. The
+    /// kernel's `test_bit` asks `__builtin_constant_p(*(const unsigned long *)addr)` of a bitmap
+    /// it has just cleared, and gcc answers one there.
     fn deferrable(&self, expr: ExprId) -> bool {
         let ty = self.tast[expr].ty;
         if self.types.quals(ty).has(Qualifiers::VOLATILE) || !is_real(&self.types, ty) {
@@ -364,8 +369,15 @@ impl Checker<'_> {
                     && self.quietly(base)
             }
             ExprKind::Unary { op, operand } => {
-                matches!(op, UnaryOp::Minus | UnaryOp::Plus | UnaryOp::Not | UnaryOp::BitNot)
-                    && self.quietly(operand)
+                matches!(
+                    op,
+                    UnaryOp::Minus
+                        | UnaryOp::Plus
+                        | UnaryOp::Not
+                        | UnaryOp::BitNot
+                        | UnaryOp::Deref
+                        | UnaryOp::AddrOf
+                ) && self.quietly(operand)
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 !matches!(op, BinaryOp::Div | BinaryOp::Rem)
