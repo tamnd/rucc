@@ -567,16 +567,22 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
         }
         slots.push(slot);
     }
+    // A filler goes in only while the parameter would not land where it was meant to. Where every
+    // argument takes a word of the area that is the same as filling up to it, and on Apple's arm64,
+    // which packs the area, a narrow argument leaves the area short of a word and the next one
+    // aligns itself up to where it was meant to go, which a word of filler would step past.
     for &&(slot, param, meant) in &stacked {
         let Where::Stack(up) = meant else { return None };
-        while places.size() < up {
-            if in_reg(&place(&mut places, word, conv)) {
+        loop {
+            let mut ahead = places.clone();
+            if place(&mut ahead, param, conv) == meant {
+                places = ahead;
+                break;
+            }
+            if places.size() >= up || in_reg(&place(&mut places, word, conv)) {
                 return None;
             }
             slots.push(Slot::Filler(word.ty));
-        }
-        if place(&mut places, param, conv) != meant {
-            return None;
         }
         slots.push(slot);
     }
@@ -2256,6 +2262,31 @@ mod tests {
         let (signature, low) = arrived(&params, 7);
         assert_eq!(types(&signature), vec![word; 10], "the seventh word, a filler, the halves");
         assert_eq!(low, 8, "the filler takes the word the alignment leaves empty");
+    }
+
+    /// Apple's arm64 packs the argument area, so a `char` past the registers takes one byte and a
+    /// `long` after it aligns itself to the next word. A wide parameter after both used to be left
+    /// whole, because laying the area out again put a word of filler after the `char` and the
+    /// `long` a word past where it goes, and the function was then refused for a width no register
+    /// holds (#1992).
+    #[test]
+    fn on_darwin_a_wide_parameter_after_a_packed_narrow_one_is_split() {
+        use rucc_target::aarch64::DARWIN;
+
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let byte = Type::int(8);
+        let mut params = vec![word; 8];
+        params.extend([byte, word, wide()]);
+        let (mut func, entry, values) = shell(&mut names, &params, &[word]);
+        let mut build = Builder::new(&mut func, entry);
+        let low = build.unary(Opcode::Trunc, values[10], word);
+        build.ret(&[low]);
+
+        assert!(halves(&mut func, &mut names, &DARWIN), "there is a width to split");
+        let mut split = vec![word; 8];
+        split.extend([byte, word, word, word]);
+        assert_eq!(types(func.signature()), split, "no filler anywhere");
     }
 
     /// The same layout on the calling side, with a constant in the place of the filler.

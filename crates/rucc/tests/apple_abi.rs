@@ -160,6 +160,29 @@ fn a_stack_argument_is_packed_to_its_own_alignment_on_darwin() {
     assert!(!stores_at(&call, "[sp, #2]"), "{asm}");
 }
 
+/// An `__int128` in the argument area after a packed `char` and a `long`, as the function and as
+/// a call. The `char` leaves the area a byte long and the `long` aligns itself to the next word,
+/// and laying the area out again must not put a word of filler in between, or the function is
+/// refused for a width no register holds (#1992).
+const WIDE: &str = "\
+long wq(long a1, long a2, long a3, long a4, long a5, long a6, long a7, long a8, char c, long l, __int128 q) {
+    return (long)(q >> 64) + l + c;
+}
+long callwq(__int128 q) { return wq(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, q); }
+";
+
+#[test]
+fn a_wide_argument_after_a_packed_one_is_where_clang_looks_on_darwin() {
+    for level in ["-O0", "-O2"] {
+        let asm = listing(&format!("wide{level}"), WIDE, DARWIN, level);
+        let call = body(&asm, "_callwq");
+        for place in ["[sp, #8]", "[sp, #16]"] {
+            let stored = call.iter().any(|line| line.starts_with("st") && line.contains(place));
+            assert!(stored, "{level} {place}\n{asm}");
+        }
+    }
+}
+
 /// Apple passes every argument a `...` stands for on the stack, eight bytes each, and its
 /// `va_list` is a plain pointer that walks them. clang's `va` never looks in `w1` or `d0`, so the
 /// `42` and the `3.0` have to be in memory before the call.
