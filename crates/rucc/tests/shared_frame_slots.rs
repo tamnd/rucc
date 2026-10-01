@@ -154,12 +154,15 @@ fn a_block_inside_another_does_not_share_with_it() {
 }
 
 #[test]
-fn locals_of_two_sizes_keep_slots_of_their_own() {
-    // The size of the slot is the size `__builtin_object_size` reads, so a slot for both would
-    // tell the smaller one it is as large as the larger.
+fn locals_of_two_sizes_share_only_in_the_frame() {
+    // The front end gives each its own local, since the size of the local is the size
+    // `__builtin_object_size` reads and one local for both would tell the smaller one it is as
+    // large as the larger. `rucc_opt::objsize` has answered that before the back end lays out the
+    // frame, so the slot allocator can still put the two in the same bytes, and the frame holds
+    // the larger of them rather than both.
     let usage = usage(&["-O2"]);
     let bytes = frame(&usage, "sizes");
-    assert!(bytes >= BUFFER + 200, "sizes takes {bytes} bytes\n{usage}");
+    assert!(bytes < BUFFER + 200, "sizes takes {bytes} bytes\n{usage}");
 }
 
 #[test]

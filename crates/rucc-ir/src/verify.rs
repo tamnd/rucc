@@ -1368,7 +1368,11 @@ impl<'a> Verifier<'a> {
             Opcode::Fence | Opcode::Unreachable | Opcode::UnreachableHint | Opcode::Trap => {
                 self.takes(opcode, arity, 0);
             }
-            Opcode::Prefetch | Opcode::StackRestore | Opcode::VaStart | Opcode::VaEnd => {
+            Opcode::Prefetch
+            | Opcode::StackRestore
+            | Opcode::LifetimeEnd
+            | Opcode::VaStart
+            | Opcode::VaEnd => {
                 if self.takes(opcode, arity, 1) {
                     self.pointer(opcode, arg(0), 0);
                 }

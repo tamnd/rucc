@@ -129,6 +129,8 @@ pub static HAND: &[(Opcode, &str)] = &[
     // as it closes, which is how the bytes are given back.
     (Opcode::StackSave, "`crate::lower`, as a move out of the stack pointer"),
     (Opcode::StackRestore, "`crate::lower`, the same move the other way round"),
+    // Where a local stops being wanted, which emits nothing and is only a note for the frame.
+    (Opcode::LifetimeEnd, "`crate::lower`, as a marker `crate::slots` reads and then takes out"),
     // A relocation, which is right because of what the linker does rather than because of what
     // any bitvector equals.
     (Opcode::GlobalAddr, "`crate::lower`, a `lea` off the instruction pointer with a name on it"),

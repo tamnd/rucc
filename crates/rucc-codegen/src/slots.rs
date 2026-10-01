@@ -43,6 +43,29 @@
 //! answered and the types are gone by here, but one whose bytes something can reach at a moment
 //! liveness does not know about.
 //!
+//! Unless the program said where the local stops. See the next section.
+//!
+//! # The end of a lifetime
+//!
+//! A block scoped object in C stops existing when its block is left, whoever still has its address,
+//! and a pointer to it is indeterminate from then on (C11 6.2.4). The front end says so with a
+//! `lifetime_end` of the object's slot on every way out of the block it can see, which the lowering
+//! turns into a marker in the code and an entry on [`crate::lower::Stack::ends`]. A local that has
+//! those can share even after its address went where this pass cannot follow it, because what
+//! happens to the bytes after the end is not the program's business any more.
+//!
+//! Such a local is not asked about the way the others are. The touches this pass can see are still
+//! where it starts, but it cannot be asked where the last touch is, because the call it was handed
+//! to may have kept the address and any later call may use it. So its area is every point that a
+//! touch reaches going forward without meeting an end on the way, see `ended`. That is exact for
+//! a straight run, and a loop comes out right too: the declaration is at the top of the body, the
+//! end is at the bottom, and the back edge carries nothing because the end stands in the way. What
+//! a declaration a `goto` jumps into or out of does is covered by the front end, which writes no
+//! end for a local whose scope it cannot see all the ways out of, and a local with no end is left
+//! out exactly as before. A value holding the address that is still live across an end is a copy
+//! the lowering made for its own use, and those count as touches, so they keep the bytes wanted
+//! over the end rather than being cut off by it.
+//!
 //! # Where a local is wanted is not where its address is live
 //!
 //! Knowing which instructions reach a local is only half of it. The address that reaches it is a
@@ -420,8 +443,17 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
     let mut touched = vec![vec![0u64; words]; blocks.len()];
     let mut inside: Vec<Vec<(usize, Range)>> = vec![Vec::new(); blocks.len()];
     let mut through: Vec<Vec<Range>> = vec![Vec::new(); count];
+    // The locals whose areas come from where they end, which are asked about on their own below and
+    // are kept out of the rows above so that nothing here mistakes them for the other kind.
+    let mut ending = vec![false; count];
+    let mut spots_of: Vec<Vec<Range>> = vec![Vec::new(); count];
     for local in 0..count {
         let Some(spots) = reach.touches(local, live, order) else { continue };
+        if reach.through[local].as_ref().is_some_and(|held| held.escapes) {
+            ending[local] = true;
+            spots_of[local] = spots;
+            continue;
+        }
         for spot in spots {
             let (first, last) = (holding(spot.start), holding(spot.end));
             for row in &mut touched[first..=last] {
@@ -476,13 +508,21 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
         }
     }
 
-    let written = spread(&behind, &touched, words, true);
-    let read = spread(&ahead, &touched, words, false);
+    let written = spread(&behind, &touched, None, words, true);
+    let read = spread(&ahead, &touched, None, words, false);
 
     let mut out = vec![None; count];
     for (local, pieces) in out.iter_mut().enumerate() {
-        if reach.shares(local) {
+        if reach.shares(local) && !ending[local] {
             *pieces = Some(std::mem::take(&mut through[local]));
+        }
+    }
+    if ending.contains(&true) {
+        let settled = ended(func, reach, &ending, spots_of, order, &place, &behind);
+        for (local, pieces) in settled.into_iter().enumerate() {
+            if ending[local] {
+                out[local] = Some(pieces);
+            }
         }
     }
     for (at, &block) in blocks.iter().enumerate() {
@@ -510,6 +550,119 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
         }
     }
     for pieces in out.iter_mut().flatten() {
+        *pieces = merged(std::mem::take(pieces));
+    }
+    out
+}
+
+/// Where each local that escapes and has ends is wanted, which is every point a touch of it can have
+/// happened before without an end of it in between.
+///
+/// `ending` says which locals those are and `spots_of` is where each of them is touched, which is
+/// everywhere a value holding its address is live and everywhere an instruction that swallowed the
+/// address stands. Every other local comes back with nothing, since [`areas`] asks about those its
+/// own way.
+///
+/// Only forwards. The other half of the question [`areas`] asks, whether a touch can still happen
+/// after a point, is no help here, because some of the touches of a local whose address got away
+/// are not instructions in this function at all: they are in whatever the address was handed to,
+/// and they can happen at any point the address can still be come by. What this function can say
+/// is where that stops, which is where the program said the lifetime ends. So the area starts at
+/// the first touch on every path and runs until the path meets an end.
+///
+/// A touch after an end starts the area again, which is a loop coming back round to the
+/// declaration, and a value holding the address that is live across an end keeps the local wanted
+/// over the whole of it. The second is what the lowering's habit of writing the address once per
+/// block needs, since two copies of one loop body unrolled into a block may read the address the
+/// first copy worked out.
+fn ended(
+    func: &Func,
+    reach: &Reach,
+    ending: &[bool],
+    spots_of: Vec<Vec<Range>>,
+    order: &Order,
+    place: &[usize],
+    behind: &[Vec<usize>],
+) -> Vec<Vec<Range>> {
+    let blocks = order.blocks();
+    let count = ending.len();
+    let words = count.div_ceil(64);
+    let starts: Vec<u32> = blocks.iter().map(|&block| order.start(block)).collect();
+    let holding = |point: u32| starts.partition_point(|&start| start <= point).saturating_sub(1);
+    let whole = |at: usize| Range { start: order.start(blocks[at]), end: order.end(blocks[at]) };
+
+    // Where each local ends in each block, and which locals get through each block without one.
+    let mut kills: Vec<Vec<(usize, u32)>> = vec![Vec::new(); blocks.len()];
+    let mut passing = vec![vec![!0u64; words]; blocks.len()];
+    for local in (0..count).filter(|&local| ending[local]) {
+        let Some(held) = reach.through[local].as_ref() else { continue };
+        for &inst in &held.ends {
+            let Some(block) = func.block_of(inst) else { continue };
+            let at = place[block.index()];
+            kills[at].push((local, order.early(inst)));
+            passing[at][local / 64] &= !(1 << (local % 64));
+        }
+    }
+    // The first end of a local in a block at or after a point, or the bottom of the block when
+    // there is none, which is how far a touch at that point keeps the local wanted.
+    let until = |at: usize, local: usize, point: u32| -> u32 {
+        kills[at]
+            .iter()
+            .filter(|&&(one, kill)| one == local && kill >= point)
+            .map(|&(_, kill)| kill)
+            .min()
+            .unwrap_or_else(|| whole(at).end)
+    };
+
+    // The touches, clipped to the blocks they start and stop in. A touch that runs through whole
+    // blocks between those two covers them top to bottom and reaches the bottom of each, whatever
+    // ends in them, so those are one piece of the answer straight away, as they are in [`areas`].
+    let mut out: Vec<Vec<Range>> = vec![Vec::new(); count];
+    let mut inside: Vec<Vec<(usize, Range)>> = vec![Vec::new(); blocks.len()];
+    let mut leaving = vec![vec![0u64; words]; blocks.len()];
+    for (local, spots) in spots_of.into_iter().enumerate() {
+        for spot in spots {
+            let (first, last) = (holding(spot.start), holding(spot.end));
+            for at in [first, last] {
+                let piece = Range {
+                    start: spot.start.max(whole(at).start),
+                    end: spot.end.min(whole(at).end),
+                };
+                inside[at].push((local, piece));
+            }
+            if last > first + 1 {
+                out[local].push(Range { start: whole(first + 1).start, end: whole(last - 1).end });
+                for row in &mut leaving[first + 1..last] {
+                    row[local / 64] |= 1 << (local % 64);
+                }
+            }
+        }
+    }
+    // A block a local leaves still wanted is one touching it after the last end of it in there.
+    for (at, row) in leaving.iter_mut().enumerate() {
+        for &(local, piece) in &inside[at] {
+            if until(at, local, piece.end) == whole(at).end {
+                row[local / 64] |= 1 << (local % 64);
+            }
+        }
+    }
+
+    let arriving = spread(behind, &leaving, Some(&passing), words, true);
+    for (at, row) in arriving.iter().enumerate() {
+        let top = whole(at).start;
+        for (word, &bits) in row.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let local = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                out[local].push(Range { start: top, end: until(at, local, top) });
+            }
+        }
+        for &(local, piece) in &inside[at] {
+            out[local].push(Range { start: piece.start, end: until(at, local, piece.end) });
+        }
+    }
+    for pieces in &mut out {
         *pieces = merged(std::mem::take(pieces));
     }
     out
@@ -546,6 +699,11 @@ fn joined(pieces: &mut Vec<Range>, piece: Range) {
 /// the rounds over its 16000 blocks took a thousand passes and five seconds to move the answer down
 /// it one block at a time.
 ///
+/// `passing`, where there is one, is which locals get through each block from top to bottom. A
+/// local reaching the start of a block it does not get through only goes on from there if the
+/// block touches it as well, which is what the end of a lifetime needs and nothing else does. See
+/// [`ended`].
+///
 /// A block is allowed to be its own neighbour, which is what a loop of one block is, and the row it
 /// is working on is a copy for that reason. Reading a block's own answer back is a no change either
 /// way, since the answer being built is the one being read, but what a block touches does come back
@@ -553,6 +711,7 @@ fn joined(pieces: &mut Vec<Range>, piece: Range) {
 fn spread(
     edges: &[Vec<usize>],
     touched: &[Vec<u64>],
+    passing: Option<&[Vec<u64>]>,
     words: usize,
     forward: bool,
 ) -> Vec<Vec<u64>> {
@@ -580,7 +739,8 @@ fn spread(
         for &from in &edges[at] {
             for word in 0..words {
                 let had = row[word];
-                row[word] |= out[from][word] | touched[from][word];
+                let passes = passing.map_or(!0, |passing| passing[from][word]);
+                row[word] |= (out[from][word] & passes) | touched[from][word];
                 grew |= row[word] != had;
             }
         }
@@ -639,13 +799,22 @@ struct Carried {
     /// The instructions that reach it with no value in between, which is what an address folded
     /// into its reader leaves behind.
     at: Vec<Inst>,
+    /// Where the program said the local's lifetime ends, which is what the front end's
+    /// `lifetime_end` became.
+    ends: Vec<Inst>,
+    /// Whether its address went somewhere [`follow`] could not see the end of. A local like that
+    /// shares only where it has ends, and then its area is worked out from them rather than from
+    /// the touches alone. See the note on the end of a lifetime in the module documentation.
+    escapes: bool,
 }
 
 /// Follows the address of every local of a function as far as it goes.
 ///
 /// `addresses` is the list [`crate::lower`] built and [`crate::fold`] rewrote, which says which
-/// instruction carries the address of which local. `count` is how many locals there are, since a
-/// local nothing on that list names is one this has no account of rather than one nothing touches.
+/// instruction carries the address of which local. `ends` is the other list the lowering built,
+/// which says where the lifetime of which local ends. `count` is how many locals there are, since a
+/// local nothing on the first list names is one this has no account of rather than one nothing
+/// touches.
 ///
 /// Run after the fold and before allocation. After the fold because an address that ended up inside
 /// its reader is an address no value holds and this has to see it that way. Before allocation
@@ -655,13 +824,20 @@ struct Carried {
 pub fn reach(
     func: &Func,
     addresses: &[(Inst, usize)],
+    ends: &[(Inst, usize)],
     count: usize,
     insts: &FrameInsts,
     names: &mut Interner,
 ) -> Reach {
     let lea = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
     let mut through: Vec<Option<Carried>> = vec![None; count];
+    // A local one of whose addresses this could not read at all, which stays out whatever the rest
+    // of the list says about it.
+    let mut lost = vec![false; count];
     for &(inst, local) in addresses {
+        if lost.get(local).is_none_or(|&lost| lost) {
+            continue;
+        }
         let Some(held) = through.get_mut(local) else { continue };
         let held = held.get_or_insert_with(Carried::default);
         // Either the `lea` the lowering wrote, whose result is the address and goes on from here,
@@ -673,6 +849,7 @@ pub fn reach(
                 Some(reg) => held.regs.push(reg),
                 None => {
                     through[local] = None;
+                    lost[local] = true;
                     continue;
                 }
             }
@@ -682,11 +859,23 @@ pub fn reach(
         held.at.push(inst);
     }
 
+    // Only an end something still stands at. A pass that took the marker out has taken the end
+    // with it, and a local with fewer ends is a local wanted over more of the function, never less.
+    for &(inst, local) in ends {
+        if func.block_of(inst).is_none() {
+            continue;
+        }
+        if let Some(Some(held)) = through.get_mut(local) {
+            held.ends.push(inst);
+        }
+    }
+
     let readers = readers(func);
     let crossing = crossing(func);
     for held in &mut through {
         if let Some(carried) = held.take() {
-            *held = follow(func, lea, &readers, &crossing, carried);
+            *held = follow(func, lea, &readers, &crossing, carried)
+                .filter(|carried| !carried.escapes || !carried.ends.is_empty());
         }
     }
     Reach { through }
@@ -694,10 +883,12 @@ pub fn reach(
 
 /// Follows every address a local is reached through to every value that address becomes.
 ///
-/// Gives back nothing for a local whose address is read some way this cannot account for, which is
-/// any way but as the base or the index of a memory operand. A call argument is one of those, a
-/// value stored into memory is another, and so is a value carried into a block as an argument,
-/// which is the one that is not an operand at all.
+/// Marks as escaping a local whose address is read some way this cannot account for, which is any
+/// way but as the base or the index of a memory operand. A call argument is one of those, a value
+/// stored into memory is another, and so is a value carried into a block as an argument, which is
+/// the one that is not an operand at all. The walk goes on past one of those rather than stopping,
+/// because an escaping local that has ends is still asked about, and what it is asked about then is
+/// every value holding its address that this can see.
 fn follow(
     func: &Func,
     lea: Opcode,
@@ -709,11 +900,12 @@ fn follow(
     let mut queue = held.regs.clone();
     while let Some(reg) = queue.pop() {
         if crossing.contains(&reg) {
-            return None;
+            held.escapes = true;
         }
         for &inst in readers.get(&reg).map(Vec::as_slice).unwrap_or_default() {
             if !addressed(func, inst, reg) {
-                return None;
+                held.escapes = true;
+                continue;
             }
             if func[inst].opcode == lea {
                 let next = def(func, inst)?;
@@ -888,7 +1080,9 @@ mod tests {
         func: Func,
         lea: Opcode,
         nop: Opcode,
+        end: Opcode,
         addresses: Vec<(Inst, usize)>,
+        ends: Vec<(Inst, usize)>,
     }
 
     impl Building {
@@ -898,7 +1092,9 @@ mod tests {
             let func = Func::new(names.intern("f"));
             let lea = Opcode::new(names.intern(&format!("{}{}", FRAME.prefix, FRAME.lea)));
             let nop = Opcode::new(names.intern("x64.nop"));
-            let mut building = Self { names, func, lea, nop, addresses: Vec::new() };
+            let end = Opcode::new(names.intern("x64.lifetime_end"));
+            let mut building =
+                Self { names, func, lea, nop, end, addresses: Vec::new(), ends: Vec::new() };
             let block = building.func.create_block();
             (building, block)
         }
@@ -926,6 +1122,12 @@ mod tests {
             self.func.build(block, self.nop).uses(reg, GPR).finish();
         }
 
+        /// The end of a local's lifetime, the way the lowering writes one.
+        fn end(&mut self, block: Block, which: usize) {
+            let inst = self.func.build(block, self.end).finish();
+            self.ends.push((inst, which));
+        }
+
         /// A value written and then read, which is one more thing wanting a register in between.
         fn value(&mut self, block: Block) -> Reg {
             let reg = self.func.new_vreg(GPR);
@@ -936,7 +1138,8 @@ mod tests {
         /// What this pass says about the function, and then what the allocator says, in that
         /// order because the first question is about values and the second takes them away.
         fn allocate(&mut self, locals: usize, registers: usize) -> (Reach, Allocation) {
-            let reach = reach(&self.func, &self.addresses, locals, &FRAME, &mut self.names);
+            let reach =
+                reach(&self.func, &self.addresses, &self.ends, locals, &FRAME, &mut self.names);
             let env =
                 Env::new().with(GPR, &SYSV.int_order[..registers], &SYSV.int_order[registers..]);
             let allocation = rucc_regalloc::run(&mut self.func, &env, "test", true);
@@ -1036,6 +1239,104 @@ mod tests {
         let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
         assert_eq!(plan.cells().len(), 2);
         assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    /// Two locals whose addresses are both handed to something, one after the other, the way two
+    /// structs declared in the two arms of an `if` and passed to a call by address are.
+    fn handed_one_after_the_other(ended: bool) -> (Building, Reach, Allocation) {
+        let (mut building, block) = Building::new();
+        let first = building.local(block, 0);
+        building.held(block, first);
+        if ended {
+            building.end(block, 0);
+        }
+        let second = building.local(block, 1);
+        building.held(block, second);
+        if ended {
+            building.end(block, 1);
+        }
+        let (reach, allocation) = building.allocate(2, 4);
+        (building, reach, allocation)
+    }
+
+    #[test]
+    fn two_locals_handed_to_something_share_when_each_ends_before_the_other_starts() {
+        let (building, reach, allocation) = handed_one_after_the_other(true);
+        assert!(reach.shares(0) && reach.shares(1));
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
+        assert_eq!(plan.cells().len(), 1, "one run of bytes for the two of them");
+        assert_eq!(plan.local(0), plan.local(1));
+
+        // The same two with nothing saying where they stop, which is every one of them before
+        // the front end wrote ends, and which stays apart.
+        let (building, reach, allocation) = handed_one_after_the_other(false);
+        assert!(!reach.shares(0) && !reach.shares(1));
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
+        assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    #[test]
+    fn a_local_handed_to_something_is_wanted_until_its_end_and_not_only_its_last_use() {
+        let (mut building, block) = Building::new();
+        let first = building.local(block, 0);
+        building.held(block, first);
+        // The second local comes in before the first one ends, and whatever the first was handed
+        // to may still be using it here, although nothing in this function mentions it.
+        let second = building.local(block, 1);
+        building.through(block, second);
+        building.end(block, 0);
+        let (reach, allocation) = building.allocate(2, 4);
+
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
+        assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    #[test]
+    fn an_address_still_held_after_the_end_keeps_the_local_wanted_until_it_is_let_go() {
+        let (mut building, block) = Building::new();
+        let first = building.local(block, 0);
+        building.held(block, first);
+        building.end(block, 0);
+        let second = building.local(block, 1);
+        building.through(block, second);
+        // The first address again, from the same value, which is what a copy of an address the
+        // lowering kept for the rest of the block looks like when the block goes on past an end.
+        building.held(block, first);
+        let (reach, allocation) = building.allocate(2, 4);
+
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
+        assert_ne!(plan.local(0), plan.local(1));
+    }
+
+    #[test]
+    fn a_local_that_ends_at_the_bottom_of_a_loop_body_is_not_wanted_around_the_back_edge() {
+        let (mut building, block) = Building::new();
+        let header = building.func.create_block();
+        let body = building.func.create_block();
+        let exit = building.func.create_block();
+        building.func.build(block, building.nop).finish();
+        building.func.succs_mut(block).push(BlockCall::to(header));
+        building.func.build(header, building.nop).finish();
+        building.func.succs_mut(header).push(BlockCall::to(body));
+        building.func.succs_mut(header).push(BlockCall::to(exit));
+
+        // Declared at the top of the body and ended at the bottom, every turn.
+        let addr = building.local(body, 0);
+        building.held(body, addr);
+        building.end(body, 0);
+        building.func.build(body, building.nop).finish();
+        building.func.succs_mut(body).push(BlockCall::to(header));
+
+        // Another local after the loop, which the first is never wanted beside.
+        let after = building.local(exit, 1);
+        building.through(exit, after);
+        let (reach, allocation) = building.allocate(2, 4);
+
+        let areas = areas(&building.func, &reach, &allocation.live, &allocation.order);
+        let (one, two) = (areas[0].as_ref().expect("ends"), areas[1].as_ref().expect("shares"));
+        assert!(!clashes(one, two), "wanted apart: {one:?} and {two:?}");
+        let plan = Slots::share(&building.func, Some(&reach), &allocation, &[WORD, WORD], &[]);
+        assert_eq!(plan.local(0), plan.local(1));
     }
 
     #[test]

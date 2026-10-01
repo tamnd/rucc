@@ -444,6 +444,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             instrument: opts.instrument_functions,
                             exceptions: opts.exceptions,
                             non_call_exceptions: opts.exceptions && opts.non_call_exceptions,
+                            // The same answer `reuse` below is given, since the markers are only
+                            // read where locals may share bytes.
+                            lifetimes: opts
+                                .stack_reuse
+                                .unwrap_or_else(|| opts.opt_level.runs_optimizer())
+                                && !opts.safety.instruments(),
                             common,
                             builtins: opts.builtins && opts.hosted,
                             no_builtin: &opts.no_builtin,

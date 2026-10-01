@@ -2180,8 +2180,9 @@ pub struct Options {
     /// which is that `-O2 -fstack-reuse=none` and `-O0` have to be different things.
     ///
     /// gcc's flag takes `all`, `named_vars` or `none`. The first two are the same answer here: what
-    /// rucc shares is a local whose address provably stays inside the function, which is narrower
-    /// than either of gcc's and is contained in both.
+    /// rucc shares is a local whose address provably stays inside the function, or one declared in a
+    /// block whose every way out the front end could see and mark, which is narrower than either of
+    /// gcc's and is contained in both. The second kind is tamnd/rucc#2201.
     pub stack_reuse: Option<bool>,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,

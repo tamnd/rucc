@@ -92,6 +92,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         shared: None,
         marks: Vec::new(),
         cleanups: Vec::new(),
+        ends: Vec::new(),
         next_scope: 0,
         pinned: Set::default(),
         landings: Map::default(),
@@ -651,6 +652,15 @@ struct Body<'a, 'u> {
     /// that was never made. The calls go in the reverse of this order, which is what gcc does and
     /// what a program that acquires two things in a row depends on.
     cleanups: Vec<Vec<Cleanup>>,
+    /// The locals in memory each open scope says the lifetime of has ended when control leaves
+    /// it, one entry per open scope and in step with the marks above.
+    ///
+    /// Built as the declarations are reached, for the reason the list above is, and here that
+    /// reason is the conservative direction as well: a local a jump went over has no marker, and a
+    /// local with no marker is one whose bytes are never handed to anything else. `None` is a
+    /// scope that ends nothing, which is the scope of a statement expression, whose value may be
+    /// one of its own objects and is read after the scope is closed.
+    ends: Vec<Option<Vec<Value>>>,
     /// How many scopes have been opened, which is what gives the next one a name of its own.
     next_scope: u32,
     /// The scopes an `__builtin_alloca` has taken out of the business of giving the stack back.
@@ -1195,6 +1205,18 @@ impl<'u> Body<'_, 'u> {
         self.next_scope += 1;
         self.marks.push(Mark { scope, saved: None });
         self.cleanups.push(Vec::new());
+        self.ends.push(Some(Vec::new()));
+    }
+
+    /// Opens a scope whose locals are never said to end, which is what a statement expression
+    /// needs. Its value is read after the scope is closed and may be an object declared in it,
+    /// `({ struct s s = f(); s; })`, so the bytes of that object are still wanted when the walk
+    /// leaves the scope.
+    fn open_keeping(&mut self) {
+        self.open();
+        if let Some(last) = self.ends.last_mut() {
+            *last = None;
+        }
     }
 
     /// Closes the innermost scope, running the handlers it owes and giving back what it grew the
@@ -1206,8 +1228,10 @@ impl<'u> Body<'_, 'u> {
         self.cover();
         let mark = self.marks.pop().expect("a scope is closed by whoever opened it");
         let owed = self.cleanups.pop().expect("a scope is closed by whoever opened it");
+        let ending = self.ends.pop().expect("a scope is closed by whoever opened it");
         let outer = self.owed_now();
         self.run_cleanups(&owed, &outer, span);
+        self.end_lifetimes(ending.as_deref().unwrap_or_default(), span);
         let saved = self.released(&mark);
         self.restore(saved, span);
     }
@@ -1308,9 +1332,58 @@ impl<'u> Body<'_, 'u> {
     /// stack pointer of them and restoring it takes back everything the inner ones did too.
     fn unwind(&mut self, depth: usize, span: Span) {
         self.unwind_cleanups(depth, span);
+        let ending: Vec<Value> = self
+            .ends
+            .get(depth..)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .flat_map(|scope| scope.iter().flatten().copied())
+            .collect();
+        self.end_lifetimes(&ending, span);
         let open = self.marks.get(depth..).unwrap_or_default().to_vec();
         let saved = open.iter().find_map(|mark| self.released(mark));
         self.restore(saved, span);
+    }
+
+    /// Notes that the local a declaration made lives in memory whose lifetime ends with the scope
+    /// the walk is in, if it does.
+    ///
+    /// Only a local of a fixed size in a slot of its own. One in a register has no bytes to share,
+    /// and a variable length array already gives its bytes back with the stack pointer. A local
+    /// declared twice in one scope, which a backward `goto` over the declaration does, is one
+    /// local and ends once.
+    fn lives(&mut self, decl: DeclId) {
+        if !self.unit.lifetimes {
+            return;
+        }
+        let Some(Local::Slot(slot)) = self.vars.get(&decl).copied() else { return };
+        let fixed = match self.func[slot].def {
+            Def::Result { inst, .. } => {
+                self.func[inst].opcode == Opcode::Alloca && self.func[inst].args.is_empty()
+            }
+            Def::Param { .. } => false,
+        };
+        if !fixed {
+            return;
+        }
+        let Some(Some(ending)) = self.ends.last_mut() else { return };
+        if !ending.contains(&slot) {
+            ending.push(slot);
+        }
+    }
+
+    /// One `lifetime_end` for each of these locals, the last declared first, if there is
+    /// somewhere to put them.
+    fn end_lifetimes(&mut self, slots: &[Value], span: Span) {
+        if self.at.is_none() {
+            return;
+        }
+        for &slot in slots.iter().rev() {
+            let mut build = self.build(span);
+            let args = build.func().push_values(&[slot]);
+            build.inst(InstData { args, ..InstData::new(Opcode::LifetimeEnd) }, &[]);
+        }
     }
 
     /// One `stackrestore`, if there is a pointer to restore and somewhere to put it.
@@ -1933,6 +2006,7 @@ impl<'u> Body<'_, 'u> {
                     if let Some(handler) = tast[decl].cleanup {
                         self.owes_cleanup(decl, handler);
                     }
+                    self.lives(decl);
                 }
             }
             Stmt::If { cond, then, otherwise } => self.if_stmt(cond, then, otherwise, span),
@@ -2092,7 +2166,7 @@ impl<'u> Body<'_, 'u> {
     /// the other unreachable blocks at the end.
     fn statements(&mut self, id: StmtId) -> Option<ExprId> {
         let tast = self.tast();
-        self.open();
+        self.open_keeping();
         let mut value = None;
         match tast[id] {
             Stmt::Block(list) => {

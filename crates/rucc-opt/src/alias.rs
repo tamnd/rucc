@@ -449,6 +449,8 @@ pub const fn keeps_address(opcode: Opcode, index: usize) -> bool {
         | (Opcode::AtomicRmw | Opcode::Cmpxchg, 0)
         | (Opcode::Memcpy | Opcode::Memmove, 0 | 1)
         | (Opcode::Memset | Opcode::Prefetch, 0) => true,
+        // The end of the object's lifetime, which names the object and does nothing else with it.
+        (Opcode::LifetimeEnd, 0) => true,
         // Copied, and the copy's own uses are walked in their turn, because the walk in
         // [`origin`] goes back through both of these.
         (Opcode::PtrAdd | Opcode::Bitcast, 0) => true,
@@ -629,6 +631,11 @@ impl<'a> Alias<'a> {
             Opcode::Store | Opcode::AtomicStore => (args[1], self.width(self.func[args[0]].ty)),
             Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => (args[0], self.bytes(inst, info?)),
             Opcode::AtomicRmw | Opcode::Cmpxchg => (args[0], self.width(self.func[args[1]].ty)),
+            // The end of a local's lifetime is written down as a write of the whole of it with
+            // nothing read back, since nothing may be. That is what keeps a load or a store of the
+            // local on the side of the marker the program put it on, and saying which object it is
+            // is what lets everything else in the function move past it as if it were not there.
+            Opcode::LifetimeEnd => (args[0], None),
             _ => return None,
         };
         Some(self.access(pointer, size, info, data.flags))
@@ -811,6 +818,15 @@ impl<'a> Alias<'a> {
         // forwarded over the marker to a load the jump was the whole reason for.
         if self.func[call].opcode.is_jump_marker() {
             return Answer::May;
+        }
+
+        // The end of a local's lifetime is not a call either, and it writes the one object it names
+        // and nothing else, so the question is the ordinary one between two accesses.
+        if self.func[call].opcode == Opcode::LifetimeEnd {
+            return match self.writes(call) {
+                Some(ended) => self.decide(reference, &ended),
+                None => Answer::May,
+            };
         }
 
         // Everything a call reaches, it reaches through an address, and an object whose address

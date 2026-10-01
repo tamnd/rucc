@@ -217,6 +217,16 @@ pub struct Context<'a> {
     /// an instruction with the same landing pad a call in the scope gets, so the `cleanup`
     /// handlers owed there run, and this asks the walk to do the same.
     pub non_call_exceptions: bool,
+    /// Whether the walk says where the lifetime of a local in memory ends, which is a
+    /// `lifetime_end` wherever control leaves the block the local was declared in by falling out
+    /// of it or by a `break` or a `continue`.
+    ///
+    /// Asked for by a build that lets two locals share bytes in the frame, which is what the
+    /// markers are for, and by nothing else. A build that does not share has nothing to read them
+    /// and every pass in between would only have one more instruction to walk past, and a build
+    /// with the safety instrumentation keeps every local in bytes of its own, since the checks it
+    /// puts in were written against a frame in which no two locals share any.
+    pub lifetimes: bool,
     /// Whether a tentative definition with external linkage is a common symbol, which is
     /// `-fcommon` and the default on Darwin, rather than a zeroed object in `.bss`.
     pub common: bool,
@@ -338,6 +348,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         instrument,
         exceptions,
         non_call_exceptions,
+        lifetimes,
         common,
         builtins,
         no_builtin,
@@ -364,6 +375,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         instrument,
         exceptions,
         non_call_exceptions,
+        lifetimes,
         common,
         builtins,
         no_builtin,
@@ -421,6 +433,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) exceptions: bool,
     /// Whether a trapping instruction may unwind. See [`Context::non_call_exceptions`].
     pub(crate) non_call_exceptions: bool,
+    /// Whether the end of a local's lifetime is written down. See [`Context::lifetimes`].
+    pub(crate) lifetimes: bool,
     /// Whether a tentative definition is a common symbol. See [`Context::common`].
     common: bool,
     /// Whether a plain library name means the library. See [`Context::builtins`].
