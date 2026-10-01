@@ -130,6 +130,31 @@ void errptr(void) {{ BUILD_BUG_ON(IS_ERR(PTR)); BUILD_BUG_ON(!IS_ERR((void *)-12
     }
 }
 
+/// Two places in one object are in the order of how far into it they are, which is what mm/ksm.c
+/// checks of a list head and the pointer inside it with `BUILD_BUG_ON`. The same goes for a local.
+#[test]
+fn a_build_bug_on_the_order_of_two_places_in_one_object_says_nothing() {
+    let source = format!(
+        "{KERNEL}struct list_head {{ struct list_head *next, *prev; }};
+static struct list_head migrate_nodes = {{ &migrate_nodes, &migrate_nodes }};
+#define DUP_HEAD ((struct list_head *)&migrate_nodes.prev)
+int ksm(void) {{
+	struct list_head here;
+	BUILD_BUG_ON(DUP_HEAD <= &migrate_nodes);
+	BUILD_BUG_ON(DUP_HEAD >= &migrate_nodes + 1);
+	BUILD_BUG_ON((unsigned long)&here.prev < (unsigned long)&here.next);
+	BUILD_BUG_ON(&here.prev == &here.next);
+	return migrate_nodes.next == &migrate_nodes;
+}}
+"
+    );
+    for level in ["-O1", "-O2", "-Os"] {
+        let (ok, _, said) = compile(&format!("one-object{level}"), &[level], &source);
+        assert!(ok, "{level}: {said}");
+        assert!(said.is_empty(), "{level}: {said}");
+    }
+}
+
 /// A call in a branch the optimizer took out is not in the program, at every level: gcc folds an
 /// `if (0)` at `-O0` as well, and so does this compiler.
 #[test]
