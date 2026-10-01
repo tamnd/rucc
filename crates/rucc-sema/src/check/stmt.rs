@@ -201,6 +201,12 @@ struct Labelled {
     defined: Option<Span>,
     /// Where the name was first met, which is what an undefined label is reported at.
     at: Span,
+    /// Whether `__label__` declared it, which is what lets a nested function jump to it.
+    ///
+    /// gcc only lets a nested function reach a label of the function around it when that label
+    /// was declared this way. An ordinary label is the function's own, so a `goto` to it from a
+    /// nested function names a label of the nested one, and that one was never defined.
+    declared: bool,
 }
 
 /// One `switch` being checked, and the case table it is collecting.
@@ -446,8 +452,9 @@ impl Checker<'_> {
     ///
     /// A nested function's labels are not reported when it closes, since one of them may be a
     /// label of a function around it that is defined further down. They go to the function it is
-    /// in, and that one reports each as a jump out of a nested function if it defines the label
-    /// and passes it on otherwise.
+    /// in, and that one reports each as a jump out of a nested function if it declared the label
+    /// with `__label__` and passes it on otherwise. A label the function around it has without
+    /// `__label__` is not one the nested function can reach, so that one is undefined.
     pub(in crate::check) fn close_body(&mut self, previous: Option<Body>) {
         let Some(mut body) = mem::replace(&mut self.body, previous) else {
             return;
@@ -460,7 +467,8 @@ impl Checker<'_> {
         for label in mem::take(&mut body.outer) {
             let name = self.tast[label.id].name;
             match body.labels.get(&name) {
-                Some(here) if here.defined.is_some() => self.nonlocal_goto(label),
+                Some(here) if here.declared && here.defined.is_some() => self.nonlocal_goto(label),
+                Some(here) if !here.declared => self.undefined_label(label),
                 _ => undefined.push(label),
             }
         }
@@ -476,11 +484,13 @@ impl Checker<'_> {
                     let known = self
                         .body
                         .as_ref()
-                        .is_some_and(|enclosing| enclosing.labels.contains_key(&name));
+                        .and_then(|enclosing| enclosing.labels.get(&name))
+                        .map(|here| here.declared);
                     match (known, &mut self.body) {
-                        (true, _) => self.nonlocal_goto(label),
-                        (false, Some(enclosing)) => enclosing.outer.push(label),
-                        (false, None) => {}
+                        (Some(true), _) => self.nonlocal_goto(label),
+                        (Some(false), _) => self.undefined_label(label),
+                        (None, Some(enclosing)) => enclosing.outer.push(label),
+                        (None, None) => {}
                     }
                 }
             }
@@ -933,7 +943,7 @@ impl Checker<'_> {
         let ast = self.ast;
         for &name in &ast[names] {
             let id = self.tast.add_label(Label { name, stmt: None });
-            let local = Labelled { id, defined: None, at: span };
+            let local = Labelled { id, defined: None, at: span, declared: true };
             if let Some(state) = self.body.as_mut() {
                 let previous = state.labels.insert(name, local);
                 state.shadowed.push((name, previous));
@@ -958,7 +968,7 @@ impl Checker<'_> {
         }
         let id = self.tast.add_label(Label { name, stmt: None });
         if let Some(state) = self.body.as_mut() {
-            state.labels.insert(name, Labelled { id, defined: None, at: span });
+            state.labels.insert(name, Labelled { id, defined: None, at: span, declared: false });
         }
         id
     }
