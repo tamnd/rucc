@@ -229,6 +229,15 @@ const STANDING: i64 = 0x1000_0000;
 ///
 /// `mode` is the machine the file was written for, which is thirty two bit mode for i386.
 pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
+    // `imul $3, %eax` is gas's short way of writing `imul $3, %eax, %eax`, the register both
+    // multiplied and written.
+    if word.starts_with("imul")
+        && let [number, register] = args
+        && number.trim().starts_with('$')
+        && register.trim().starts_with('%')
+    {
+        return one_in(word, &[number.clone(), register.clone(), register.clone()], mode);
+    }
     if mode == Mode::Bits32 {
         // Thirty two bit registers are the only ones an i386 address is made of, so there is no
         // prefix to add, and a sixty four bit one is a register the machine does not have.
@@ -310,7 +319,7 @@ fn wide(arg: &str) -> bool {
 }
 
 /// Whether the operand is an address with a register of that width in its brackets.
-fn addressed(arg: &str, width: Width) -> bool {
+pub(crate) fn addressed(arg: &str, width: Width) -> bool {
     let text = arg.trim();
     let Some(cut) = grouped(text) else { return false };
     text[cut + 1..text.len() - 1].split(',').take(2).any(|part| {
@@ -696,9 +705,10 @@ fn extends(bytes: &[u8], mode: Mode) -> bool {
 /// finds out and asks for the long form back when it does not.
 pub(crate) fn short(long: &Written) -> Option<Written> {
     let [hole] = long.holes.as_slice() else { return None };
+    // Two bytes of distance is the long form in sixteen bit code.
     if !matches!(hole.sort, Sort::Branch | Sort::Plain)
-        || hole.width != 4
-        || hole.at + 4 != long.bytes.len()
+        || !matches!(hole.width, 2 | 4)
+        || hole.at + usize::from(hole.width) != long.bytes.len()
     {
         return None;
     }
@@ -1899,6 +1909,7 @@ mod tests {
         assert_eq!(bytes("pushq $1000"), [0x68, 0xe8, 0x03, 0, 0]);
         assert_eq!(bytes("imull $-1640531535, (%rsi), %eax"), [0x69, 0x06, 0xb1, 0x79, 0x37, 0x9e]);
         assert_eq!(bytes("imulq $40, 8(%rsp), %rax"), [0x48, 0x6b, 0x44, 0x24, 0x08, 0x28]);
+        assert_eq!(bytes("imull $3, %ecx"), [0x6b, 0xc9, 0x03]);
     }
 
     /// A float comparison with its predicate in the name is the one with it as an immediate.

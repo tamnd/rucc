@@ -50,6 +50,7 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
         Reference::Address { bytes: 2 } => elf::R_X86_64_16,
         Reference::Address { bytes: 1 } => elf::R_X86_64_8,
+        Reference::Short => elf::R_X86_64_PC16,
         Reference::Signed => elf::R_X86_64_32S,
         Reference::Address { .. } | Reference::Image | Reference::Section | Reference::Field(_) => {
             return None;
@@ -108,6 +109,7 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Address { bytes: 4 } | Reference::Signed => elf::R_386_32,
         Reference::Address { bytes: 2 } => elf::R_386_16,
         Reference::Address { bytes: 1 } => elf::R_386_8,
+        Reference::Short => elf::R_386_PC16,
         Reference::Got
         | Reference::GotBare
         | Reference::GotKept
@@ -130,7 +132,7 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
 pub(crate) fn width_i386(r_type: elf::RelocationType) -> Option<usize> {
     match r_type {
         elf::R_386_8 => Some(1),
-        elf::R_386_16 => Some(2),
+        elf::R_386_16 | elf::R_386_PC16 => Some(2),
         elf::R_386_32
         | elf::R_386_PC32
         | elf::R_386_PLT32
