@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `#pragma GCC diagnostic` is honoured (`push`, `pop`, `ignored`, `warning` and `error`, also through `_Pragma`). A warning is decided by where it is, as in gcc 13, so a deprecated call between `push`, `ignored "-Wdeprecated-declarations"` and `pop` says nothing, `error` makes it an error, and `warning` keeps it a warning under `-Werror`. A line in a header holds for what follows its `#include`, and a `pop` with nothing pushed goes back to the command line. A line gcc cannot read gets gcc's `-Wpragmas` warning (E0798), and `ignored_attributes` is read and does nothing. Before, every one of these lines was dropped, so code that silenced a warning around one call still warned there.
 
+### Changed
+
+- A `static` function that only `cold` functions call now goes in `.text.unlikely` as well, the way gcc's `ipa_propagate_frequency` puts it there. In the kernel that is a helper only `__init` or `__exit` code calls, such as `snd_timer_free_all`. To match gcc on which helpers stay out of line, a call to an `inline` function from a `cold` function is left a call when inlining it would make the code larger, by gcc's `early-inlining-insns` test and its check on the out of line copy. An `inline` callee is now weighed with the constants the call passes and with its `__builtin_constant_p` arms folded, and an address, its scaled index and a compare a branch tests are counted as free, as gcc counts them. On the defconfig kernel the objects whose `.text.unlikely` differs from gcc's go from 55 to 47.
+
 ### Fixed
 
 - `strlen` and `strcmp` under their plain names fold when handed string literals, as their `__builtin_` spellings already did, so `.n = strlen("AB")` in a static initializer is a constant again. LTP's `TST_KCONFIG_INIT` is written that way, and libltp did not compile. `-fno-builtin` and `-fno-builtin-strlen` keep the call, and a `strlen` the program declared with another shape is left alone.

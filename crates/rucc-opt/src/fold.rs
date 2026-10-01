@@ -455,7 +455,7 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
 /// a constant and nothing more, while [`evaluated`] wants to go on looking underneath one that is
 /// not. Both of them want the arithmetic itself to be this one, so that the two cannot disagree
 /// about what an instruction answers.
-fn arithmetic(
+pub(crate) fn arithmetic(
     data: &InstData,
     args: &[Value],
     ty: Type,

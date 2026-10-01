@@ -1205,10 +1205,12 @@ fn generate(
     let elsewhere = Elsewhere::of(module, replaceable(target, opts), target.object_format, copies);
 
     // A function written `cold` goes in `.text.unlikely` with the cold parts of the others, which
-    // is gcc's `default_function_section`. Only on ELF, whose section names are the ones gcc
-    // writes, and only for a function the program did not put somewhere itself.
+    // is gcc's `default_function_section`, and so does a `static` function only those call. Only
+    // on ELF, whose section names are the ones gcc writes, and only for a function the program
+    // did not put somewhere itself.
     let heat = target.tuple.os().object_format() == Some(ObjectFormat::Elf)
         && opts.reorder_functions.unwrap_or_else(|| opts.opt_level.schedules());
+    let unlikely = if heat { rucc_opt::unlikely::functions(module) } else { Default::default() };
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
     for id in module.funcs() {
@@ -1216,7 +1218,7 @@ fn generate(
             continue;
         }
         let func = &mut module[id];
-        if heat && func.section.is_none() && func.attrs.set.contains(rucc_ir::AttrSet::COLD) {
+        if func.section.is_none() && unlikely.contains(&id) {
             let section = if opts.function_sections {
                 format!(".text.unlikely.{}", names.resolve(func.name))
             } else {
