@@ -9956,6 +9956,57 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(run(&opts, plain).messages.is_empty(), "and nothing to say in the dialects before");
     }
 
+    /// Five constraints gcc 16 refuses that were taken quietly, each with the words gcc uses.
+    ///
+    /// A parameter may have no storage class but `register`, the address of a `register` object
+    /// may not be taken, `typeof` may not name a bit-field, and a `constexpr` integer wants an
+    /// integer constant expression whose value fits. The last is the C23 old-style definition,
+    /// which is a pedwarn there and so an error under `-pedantic-errors`.
+    #[test]
+    fn the_constraints_gcc_refuses_are_refused_with_its_words() {
+        let mut opts = options();
+        opts.std = Std::C23;
+        let errors = |source: &str| -> Vec<String> {
+            let result = run(&opts, source);
+            result.messages.iter().filter(|m| m.contains(": error: ")).cloned().collect()
+        };
+        let said = errors("void f(static int x);\nvoid g(typedef int);\nvoid h(register int r);\n");
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].contains("storage class specified for parameter 'x'"), "{said:?}");
+        assert!(said[1].contains("storage class specified for unnamed parameter"), "{said:?}");
+
+        let said = errors(
+            "struct S { int a; };\nvoid f(register int p) { register struct S s; int *q = &s.a; \
+             q = &p; (void)q; }\n",
+        );
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].contains("address of register variable 's' requested"), "{said:?}");
+        assert!(said[1].contains("address of register variable 'p' requested"), "{said:?}");
+
+        let said = errors("struct B { int x : 3; } b;\ntypeof(b.x) y;\n");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("'typeof' applied to a bit-field"), "{said:?}");
+
+        let said = errors(
+            "int g;\nconstexpr int a = 1.0;\nconstexpr unsigned u = -1;\nconstexpr bool b = 2;\n\
+             constexpr int k = g;\nconstexpr bool t = 1;\nconstexpr char c = 'x';\n",
+        );
+        assert_eq!(said.len(), 4, "{said:?}");
+        let at = |line: usize, text: &str| {
+            said[line - 2].starts_with(&format!("/main.c:{line}:")) && said[line - 2].contains(text)
+        };
+        assert!(at(2, "'constexpr' integer initializer is not an integer constant"), "{said:?}");
+        assert!(at(3, "'constexpr' initializer not representable"), "{said:?}");
+        assert!(at(4, "'constexpr' initializer not representable"), "{said:?}");
+        assert!(at(5, "initializer element is not constant"), "{said:?}");
+
+        let mut strict = options();
+        strict.std = Std::C23;
+        strict.named_warnings.pedantic_errors();
+        let result = run(&strict, "int f(a)\nint a;\n{ return a; }\n");
+        assert_eq!(result.messages, ["/main.c:1:5: error: old-style function definition [E0412]"]);
+    }
+
     /// The two obsolete designators, which are silent until `-pedantic` asks about them.
     ///
     /// `[3] 7` is what GCC had for an array before C99 settled on `[3] = 7`, and `x: 7` is the

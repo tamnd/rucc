@@ -208,8 +208,13 @@ impl Checker<'_> {
             }
         }
         let mut declared = Vec::with_capacity(items.len());
+        let register =
+            self.ast[specs].storage == Some(StorageClass::Register) && !self.scopes.at_file_scope();
         for item in items {
             if let Some(id) = self.init_declarator(specs, item) {
+                if register {
+                    self.registers.insert(id);
+                }
                 declared.push(id);
             }
         }
