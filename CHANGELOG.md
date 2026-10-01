@@ -21,6 +21,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler keeps a section with the `o` flag apart for each name it goes with and writes `SHF_LINK_ORDER` and `sh_link` for it, the way gas does. Before, every `__patchable_function_entries` record in a file of assembly went into one plain section, and ld refused to link it beside the records rucc writes straight into an object.
 - A character constant that is a space or a comma, such as `' '` or `','`, is one macro argument and one directive operand in the assembler. The kernel's `relocate_kernel_64.S` passes `' '` to its `print_reg` macro.
 - The simplify pass no longer rewrites a subscript off a null pointer into an integer, which the verifier refused in lib/test_bitmap.c.
 - The assembler writes `loop`, `loope`, `loopz`, `loopne` and `loopnz`, which the kernel's `relocate_kernel_64.S` uses.

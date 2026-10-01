@@ -1583,6 +1583,7 @@ impl Reader {
             shape: of.shape,
             relocs: Vec::new(),
             group: of.group.clone(),
+            link: of.link.clone(),
         });
         self.named.insert(key, at);
         self.subs.insert(at, (parent, number));
@@ -1756,6 +1757,11 @@ impl Reader {
             shape.strings = strings;
             next += 1;
         }
+        let link = match linked.then(|| args.get(next)).flatten() {
+            Some(symbol) => Some(unquoted(symbol.trim())),
+            None if linked => return Err(self.bad("an 'o' section with no name it goes with")),
+            None => None,
+        };
         if linked {
             next += 1;
         }
@@ -1773,7 +1779,7 @@ impl Reader {
             None if grouped => return Err(self.bad("a section group with no name")),
             None => None,
         };
-        self.section_in(&name, shape, group);
+        self.section_in(&name, shape, group, link);
         self.declared.insert(self.here);
         Ok(())
     }
@@ -1811,7 +1817,7 @@ impl Reader {
             }
             (Some(_), None) => return Err(self.bad("a COMDAT section with no symbol")),
         };
-        self.section_in(name, shape, group);
+        self.section_in(name, shape, group, None);
         Ok(())
     }
 
@@ -1942,17 +1948,22 @@ impl Reader {
     /// `.text` says the same thing gas already worked out, and a file that really does contradict
     /// itself is one gas warns about and keeps the first answer for.
     fn section(&mut self, name: &str, shape: Shape) {
-        self.section_in(name, shape, None);
+        self.section_in(name, shape, None, None);
     }
 
     /// The same, for a section that may be a COFF COMDAT. Two COMDATs of one name about two
     /// different symbols are two sections, which is the point of them: every function gets a
     /// `.text` of its own that the linker may drop.
-    fn section_in(&mut self, name: &str, shape: Shape, group: Option<Group>) {
-        let key = match &group {
+    fn section_in(&mut self, name: &str, shape: Shape, group: Option<Group>, link: Option<String>) {
+        let mut key = match &group {
             Some(group) => format!("{name}\0{}", group.symbol),
             None => name.to_owned(),
         };
+        // One section for each name an `o` section goes with, as gas does, because each one is
+        // kept or dropped with its own text and one section cannot go with two.
+        if let Some(link) = &link {
+            key = format!("{key}\0\0{link}");
+        }
         if let Some(&at) = self.named.get(&key) {
             self.go(at);
             return;
@@ -1966,6 +1977,7 @@ impl Reader {
             shape,
             relocs: Vec::new(),
             group,
+            link,
         });
         self.named.insert(key, at);
         self.go(at);
@@ -2900,6 +2912,7 @@ impl Reader {
             shape,
             relocs: table.relocs,
             group: None,
+            link: None,
         });
     }
 
@@ -2962,6 +2975,7 @@ impl Reader {
             shape,
             relocs: Vec::new(),
             group: None,
+            link: None,
         });
         // Each description's name, which a row reaches it through, and a local one, as it is in
         // an object the compiler writes.
@@ -2979,6 +2993,7 @@ impl Reader {
             shape,
             relocs: table.relocs,
             group: None,
+            link: None,
         });
         Ok(())
     }
@@ -5093,6 +5108,28 @@ _tls$tlv$init:
         assert!(shape(".data.rel.ro.local").write, "a jump table the linker cannot fix up");
         assert!(shape(".text.hot").exec);
         assert!(!shape(".init.data").exec, "only `.init` itself is code");
+    }
+
+    /// What rucc writes in front of a function in a section of its own, under
+    /// `-fpatchable-function-entry`. Each record goes with its own function's text, so two of them
+    /// are two sections even though they share a name, and naming the first function again goes
+    /// back to the first one.
+    #[test]
+    fn a_section_that_goes_with_a_name_is_one_section_for_each_name() {
+        let out = assembled(
+            "\t.section .init.text,\"ax\",@progbits\nf:\tret\n\
+             \t.section __patchable_function_entries,\"awo\",@progbits,f\n\t.quad f\n\
+             \t.text\ng:\tret\n\
+             \t.section __patchable_function_entries,\"awo\",@progbits,g\n\t.quad g\n\
+             \t.section __patchable_function_entries,\"awo\",@progbits,f\n\t.quad f\n",
+        );
+        let records: Vec<_> =
+            out.parts.iter().filter(|part| part.name == "__patchable_function_entries").collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].link.as_deref(), Some("f"));
+        assert_eq!(records[0].bytes.len(), 16);
+        assert_eq!(records[1].link.as_deref(), Some("g"));
+        assert_eq!(records[1].bytes.len(), 8);
     }
 
     #[test]
