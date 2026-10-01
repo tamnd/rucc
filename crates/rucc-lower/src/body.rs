@@ -4252,6 +4252,9 @@ impl<'u> Body<'_, 'u> {
                 let counts = self.count_lane(rhs, lane);
                 let left = self.vector_addr(lhs, span);
                 let right = self.vector_addr(rhs, span);
+                if self.whole_vector(op, lane, lanes, counts, at, left, right, span) {
+                    return;
+                }
                 for index in 0..lanes {
                     let a = self.lane(left, index, stride, lane, span);
                     let b = self.shift_count(right, index, counts, lane, span);
@@ -4411,6 +4414,9 @@ impl<'u> Body<'_, 'u> {
         let stride = repr::size_of(self.types(), self.target(), lane);
         let counts = self.count_lane(rhs, lane);
         let right = self.vector_addr(rhs, span);
+        if self.whole_vector(op, lane, lanes, counts, target, target, right, span) {
+            return;
+        }
         for index in 0..lanes {
             let a = self.lane(target, index, stride, lane, span);
             let b = self.shift_count(right, index, counts, lane, span);
@@ -4418,6 +4424,51 @@ impl<'u> Body<'_, 'u> {
             let slot = self.lane_place(target, index, stride, lane, span);
             self.write(slot, value, span);
         }
+    }
+
+    /// A lanewise operator done on the whole vector at once, where the back end has one
+    /// instruction for it, and whether it was.
+    ///
+    /// The vectors that fill one sixteen byte register with `int` or `long` lanes, under an add, a
+    /// subtract or one of the three bitwise operators, on x86-64, which is where the rules for
+    /// them are so far (`tamnd/rucc#2320`). Both operands are read whole, the operator is one
+    /// instruction and the answer is written whole. The accesses name no type, because the lanes
+    /// around them are written through the lane's type and the two have to be seen to overlap.
+    #[allow(clippy::too_many_arguments)]
+    fn whole_vector(
+        &mut self,
+        op: BinaryOp,
+        lane: TypeId,
+        lanes: u64,
+        counts: TypeId,
+        at: Value,
+        left: Value,
+        right: Value,
+        span: Span,
+    ) -> bool {
+        let opcode = match op {
+            BinaryOp::Add => Opcode::Add,
+            BinaryOp::Sub => Opcode::Sub,
+            BinaryOp::BitAnd => Opcode::And,
+            BinaryOp::BitOr => Opcode::Or,
+            BinaryOp::BitXor => Opcode::Xor,
+            _ => return false,
+        };
+        if self.target().tuple.arch() != Arch::X86_64 || counts != lane {
+            return false;
+        }
+        let one = self.value_type(lane, span);
+        if !one.is_int() || !matches!((one.bits(), lanes), (32, 4) | (64, 2)) {
+            return false;
+        }
+        let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
+        let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        let mut build = self.build(span);
+        let a = build.load(whole, left, info, Flags::NONE);
+        let b = build.load(whole, right, info, Flags::NONE);
+        let value = build.binary(opcode, a, b, Flags::NONE);
+        build.store(value, at, info, Flags::NONE);
+        true
     }
 
     /// `++v`, `--v`, `v++` and `v--` performed lane by lane at the object `target` names.
