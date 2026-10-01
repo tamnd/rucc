@@ -40,7 +40,7 @@
 //! `__builtin_dynamic_object_size` sets a third bit on the kind, and where the walk finds no
 //! constant for one of those, an address that is an allocator's result with constant offsets on it
 //! is answered with the size the call asked for, multiplied out and less the offset in front of the
-//! question, as gcc 16 answers it from `-O1` up. See [`Walk::running`] for which shapes.
+//! question, as gcc 16 answers it from `-O1` up. See `Walk::running` for which shapes.
 //!
 //! The closest member, which is the low bit of the kind, is not something the IR remembers. The
 //! whole object is an answer no smaller than the member for the largest, so the first kind's answer

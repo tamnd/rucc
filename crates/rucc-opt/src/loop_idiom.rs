@@ -18,7 +18,7 @@
 //!
 //! One store, which every iteration reaches, to an address that walks up the loop by exactly the
 //! width of the store, so the bytes it writes are one range with no gaps and nothing written twice.
-//! The loop has to be one [`crate::hoist::shaped`] accepts, which is one way out, tested by every
+//! The loop has to be one `crate::hoist::shaped` accepts, which is one way out, tested by every
 //! iteration, no call and no loop inside it, and it has to be counted, so that how many bytes the
 //! range covers is a number or an expression the block after the loop can work out. It is the
 //! same work [`crate::sink`] does for a plane write, and the extent is the same one, so it is
