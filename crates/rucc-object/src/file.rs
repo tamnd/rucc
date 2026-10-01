@@ -383,6 +383,13 @@ pub fn write(
     // will stay empty, because it is the section the writer underneath starts a file with anyway
     // and gcc writes an empty `.text` under `-ffunction-sections` too.
     let whole = obj.section_id(StandardSection::Text);
+    // And `.data` and `.bss` next to it, empty or not, because gas makes all three before it reads
+    // a line and every ELF object gcc hands it comes out with them. The kernel's section checks
+    // compare the two compilers' objects by the sections they have.
+    if flavour == Flavour::Elf {
+        obj.section_id(StandardSection::Data);
+        obj.section_id(StandardSection::UninitializedData);
+    }
     if !sections.functions {
         obj.append_section_data(whole, &text.bytes, u64::from(text.align));
     }

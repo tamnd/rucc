@@ -107,6 +107,10 @@ pub fn read_as(text: &str, arch: Arch, format: ObjectFormat) -> Result<Assembled
 pub struct Flags {
     /// `--fatal-warnings`, which makes a warning stop the file.
     pub fatal_warnings: bool,
+    /// `--noexecstack`, which gives an ELF object the empty `.note.GNU-stack` that says its stack
+    /// is not executable when the file did not write one itself. Without it gas writes none, and
+    /// neither does this.
+    pub noexecstack: bool,
 }
 
 /// The same, with what the command line said to the assembler.
@@ -145,6 +149,7 @@ pub fn read_with(
             macho,
             coff,
             fatal_warnings: flags.fatal_warnings,
+            noexecstack: flags.noexecstack,
             ..Reader::default()
         };
         reader.run(text)?;
@@ -422,6 +427,8 @@ struct Reader {
     subsections: bool,
     /// Whether a warning stops the file, which is `-Wa,--fatal-warnings`.
     fatal_warnings: bool,
+    /// See [`Flags::noexecstack`].
+    noexecstack: bool,
     /// The macros defined so far and the conditionals and repetitions that are open.
     macros: macros::Macros,
     line: usize,
@@ -436,6 +443,15 @@ impl Reader {
             self.apple_section("__TEXT", "__text", None, &[])?;
         } else {
             self.section(".text", Shape::of(".text"));
+        }
+        // gas makes `.data` and `.bss` as well before it reads a line, and an ELF object it writes
+        // has all three whether the file put anything in them or not. Read back into `.text`
+        // after, which is where a file that names no section starts.
+        if self.elf() {
+            for name in [".data", ".bss"] {
+                self.section(name, Shape::of(name));
+            }
+            self.go(0);
         }
         let mut commenting = false;
         for (index, raw) in text.lines().enumerate() {
@@ -2024,6 +2040,11 @@ impl Reader {
         Ok(())
     }
 
+    /// Whether the object is ELF, which is neither of the other two formats a reader is told of.
+    fn elf(&self) -> bool {
+        !self.macho && !self.coff
+    }
+
     /// Go to a section that exists, remembering where this came from for `.previous`.
     fn go(&mut self, at: usize) {
         if at != self.here {
@@ -2782,9 +2803,14 @@ impl Reader {
         }
         self.resolve_fixups()?;
         self.leaders()?;
-        // A section the file only ever mentioned by its short name is dropped, and `.text` at the
-        // top is the common case of one. One an ELF `.section` named is kept however empty, as gas
-        // keeps it, since a linker script may keep it and take its address.
+        let marker = ".note.GNU-stack";
+        if self.noexecstack && self.elf() && !self.parts.iter().any(|part| part.name == marker) {
+            self.section(marker, Shape { bits: true, ..Shape::default() });
+            self.declared.insert(self.here);
+        }
+        // A section the file only ever mentioned by its short name is dropped. One an ELF
+        // `.section` named is kept however empty, as gas keeps it, since a linker script may keep
+        // it and take its address, and so are the three gas makes before it reads anything.
         let keep: Vec<bool> = self
             .parts
             .iter()
@@ -2792,6 +2818,7 @@ impl Reader {
             .map(|(at, part)| {
                 !self.subs.contains_key(&at)
                     && (part.size > 0
+                        || (self.elf() && at < 3)
                         || !part.relocs.is_empty()
                         || self.labelled.contains(&at)
                         || self.declared.contains(&at))
@@ -5015,7 +5042,7 @@ _tls$tlv$init:
         let out = assembled("\t.data\n\t.globl foo\n\t.long 0\nfoo:\n\t.byte 0\n");
         assert_eq!(bytes(&out, ".data"), vec![0, 0, 0, 0, 0]);
         let foo = name(&out, "foo");
-        assert_eq!(foo.at, Held::In { part: 0, offset: 4 });
+        assert_eq!(foo.at, Held::In { part: 1, offset: 4 });
         assert_eq!(foo.binding, Binding::Global);
     }
 
@@ -5084,7 +5111,7 @@ _tls$tlv$init:
         assert_eq!(data[0], 1);
         assert_eq!(data[8], 2);
         assert_eq!(data[16], 3);
-        assert_eq!(out.parts[0].align, 16, "the section has to start where the widest ask does");
+        assert_eq!(out.parts[1].align, 16, "the section has to start where the widest ask does");
     }
 
     #[test]
@@ -5107,7 +5134,7 @@ _tls$tlv$init:
     #[test]
     fn a_section_that_holds_no_bytes_counts_them_rather_than_carrying_them() {
         let out = assembled("\t.bss\n\t.globl room\nroom:\n\t.zero 4096\n");
-        let part = &out.parts[0];
+        let part = &out.parts[2];
         assert_eq!(part.name, ".bss");
         assert_eq!(part.size, 4096);
         assert!(part.bytes.is_empty(), "the zeroes were carried after all");
@@ -5243,6 +5270,21 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn the_stack_marker_is_added_only_when_asked_for() {
+        // gas writes no `.note.GNU-stack` of its own, and the kernel's `.S` files are assembled
+        // without `--noexecstack`, so its section checks find none in gcc's objects.
+        let marked = |text: &str, noexecstack: bool| {
+            let flags = Flags { noexecstack, ..Flags::default() };
+            let out = read_with(text, Arch::X86_64, ObjectFormat::Elf, flags).expect("a file");
+            out.parts.iter().filter(|part| part.name == ".note.GNU-stack").count()
+        };
+        assert_eq!(marked("\tret\n", false), 0);
+        assert_eq!(marked("\tret\n", true), 1);
+        let said = "\tret\n\t.section .note.GNU-stack,\"\",@progbits\n";
+        assert_eq!((marked(said, false), marked(said, true)), (1, 1));
+    }
+
+    #[test]
     fn a_name_set_to_a_function_is_a_function_of_the_same_size() {
         // How gcc writes `__attribute__((alias))`, and what objtool goes by: the kernel's syscall
         // stubs are aliases, and one that came out a bare label got no `__pfx_` in front of it.
@@ -5270,7 +5312,7 @@ _tls$tlv$init:
     #[test]
     fn a_pointer_to_something_else_is_a_relocation_for_the_whole_address() {
         let out = assembled("\t.data\n\t.quad message\n");
-        let reloc = &out.parts[0].relocs[0];
+        let reloc = &out.parts[1].relocs[0];
         assert_eq!(reloc.at, 0);
         assert_eq!(reloc.symbol, "message");
         assert_eq!(reloc.kind, Reference::Address { bytes: 8 });
@@ -5330,7 +5372,7 @@ _tls$tlv$init:
         // The other shape a reduced expression can have, and the one whose addend is not zero: the
         // four bytes sit at offset four, and a relocation counts from where it starts.
         let out = assembled("\t.data\n\t.quad 0\n\t.long message - .\n");
-        let reloc = &out.parts[0].relocs[0];
+        let reloc = &out.parts[1].relocs[0];
         assert_eq!(reloc.at, 8);
         assert_eq!(reloc.symbol, "message");
         assert_eq!(reloc.kind, Reference::Data);
@@ -5344,7 +5386,7 @@ _tls$tlv$init:
         // what was asked for is `symbol - start`, so the addend is how far these bytes are past
         // the label rather than how far the label is behind them.
         let out = assembled("\t.data\nstart:\n\t.quad 0\n\t.long message - start\n");
-        let reloc = &out.parts[0].relocs[0];
+        let reloc = &out.parts[1].relocs[0];
         assert_eq!(reloc.at, 8);
         assert_eq!(reloc.kind, Reference::Data);
         assert_eq!(reloc.addend, 8);
@@ -5353,7 +5395,7 @@ _tls$tlv$init:
     #[test]
     fn a_number_added_to_a_name_rides_along_in_the_addend() {
         let out = assembled("\t.data\n\t.quad message + 16\n");
-        assert_eq!(out.parts[0].relocs[0].addend, 16);
+        assert_eq!(out.parts[1].relocs[0].addend, 16);
     }
 
     #[test]
@@ -5501,7 +5543,7 @@ _tls$tlv$init:
              .section .rodata.cst8,\"aM\",@progbits,8\n\t.quad 1\n\t.section .rodata.x,\"aM\"\n\t.byte 1\n",
         );
         let shapes: Vec<_> =
-            out.parts.iter().map(|part| (part.shape.merge, part.shape.strings)).collect();
+            out.parts.iter().skip(3).map(|part| (part.shape.merge, part.shape.strings)).collect();
         assert_eq!(shapes, [(1, true), (8, false), (0, false)]);
     }
 
@@ -5640,12 +5682,18 @@ _tls$tlv$init:
     }
 
     #[test]
-    fn a_section_nothing_was_ever_put_in_is_dropped() {
-        // Every file starts in `.text` whether or not it says so, and a `.section` inside a macro
-        // that turned out to be unused should not leave a header behind either.
+    fn the_three_sections_gas_starts_with_are_there_however_empty() {
+        // gas makes `.text`, `.data` and `.bss` before it reads a line, and the kernel's section
+        // checks compare an object of this against one of gas's. A section only ever mentioned by
+        // its short name is still dropped on the other formats.
         let out = assembled("\t.data\n\t.byte 1\n");
-        assert_eq!(out.parts.len(), 1);
-        assert_eq!(out.parts[0].name, ".data");
+        let names: Vec<&str> = out.parts.iter().map(|part| part.name.as_str()).collect();
+        assert_eq!(names, [".text", ".data", ".bss"]);
+        let coff =
+            read_with("\t.data\n\t.byte 1\n", Arch::X86_64, ObjectFormat::Coff, Flags::default())
+                .expect("a file of one byte");
+        assert_eq!(coff.parts.len(), 1);
+        assert_eq!(coff.parts[0].name, ".data");
     }
 
     #[test]
@@ -5653,7 +5701,7 @@ _tls$tlv$init:
         // Because the name has to point somewhere, and dropping the section under it would leave a
         // symbol pointing at a section that is not there.
         let out = assembled("\t.text\n\t.globl marker\nmarker:\n");
-        assert_eq!(out.parts.len(), 1);
+        assert_eq!(out.parts[0].name, ".text");
         assert_eq!(name(&out, "marker").at, Held::In { part: 0, offset: 0 });
     }
 
@@ -5670,7 +5718,7 @@ _tls$tlv$init:
         // has to fail here too or the feature it probes for is switched on wrongly.
         let text = "\t.warning \"old enough to complain about\"\n\tret\n";
         read(text, Arch::X86_64).expect("a warning is not an error by itself");
-        let fatal = Flags { fatal_warnings: true };
+        let fatal = Flags { fatal_warnings: true, ..Flags::default() };
         let why = read_with(text, Arch::X86_64, ObjectFormat::Elf, fatal)
             .expect_err("--fatal-warnings let a warning through");
         assert!(why.why.contains("old enough to complain about"), "{why}");

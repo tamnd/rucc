@@ -1289,7 +1289,10 @@ fn generate(
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
                         .map_err(refused)?;
                 let arch = target.tuple.arch();
-                let flags = rucc_asm::Flags { fatal_warnings: opts.asm_fatal_warnings };
+                let flags = rucc_asm::Flags {
+                    fatal_warnings: opts.asm_fatal_warnings,
+                    noexecstack: opts.asm_noexecstack,
+                };
                 let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
                     .map_err(|trouble| {
                         let what = if aarch64 {
