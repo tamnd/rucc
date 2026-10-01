@@ -457,7 +457,7 @@ struct How<'a> {
 }
 
 /// How far inlining may grow a caller's frame, gcc's `large-stack-frame-growth` and
-/// `large-stack-frame`. See [`fits`].
+/// `large-stack-frame`. See `fits`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Growth {
     /// How much larger than the caller's own locals its frame may become, in percent.

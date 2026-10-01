@@ -160,7 +160,7 @@ fn a_weakref_is_refused_where_gcc_refuses_it() {
 
     let said = refused(
         TARGET,
-        "defined",
+        "redefined",
         "static int e(void) __attribute__((weakref(\"x\")));\nstatic int e(void) { return 0; }\n",
     );
     assert!(said.contains("redefinition of 'e'"), "{said}");
