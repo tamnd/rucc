@@ -109,7 +109,8 @@ pub struct Options {
     ///
     /// GCC's `ranger-logical-depth`, whose default at `gcc/params.opt:998` is also six.
     pub logical_depth: u32,
-    /// How many dominating edges one query walks before it stops narrowing.
+    /// How many dominating branches one query walks before it stops narrowing. A dominator that
+    /// ends in a plain jump is not counted, since it has nothing to say.
     ///
     /// GCC's `ranger-recompute-depth` at `gcc/params.opt:1003` bounds a related walk with the
     /// same default of five. The two are not the same walk, so the number is borrowed and the
@@ -679,8 +680,17 @@ impl<'a> Ranges<'a> {
                     range = range.intersect(fact);
                 }
             }
+            // Only a branch can say anything, so a block that just jumps on is free. Without
+            // this a chain of empty blocks that lowering leaves behind a statement expression
+            // uses up the depth before the walk reaches the test that matters.
+            if self
+                .func
+                .terminator(parent)
+                .is_some_and(|term| matches!(self.func[term].opcode, Opcode::BrIf | Opcode::Switch))
+            {
+                steps += 1;
+            }
             cursor = parent;
-            steps += 1;
         }
         range
     }
@@ -1194,6 +1204,25 @@ mod tests {
         let options = Options { logical_depth: 1, ..Options::default() };
         let mut ranges = asked.with(options);
         assert!(ranges.at(x, then).is_full(), "one step cannot reach past the comparison");
+    }
+
+    #[test]
+    fn blocks_that_only_jump_do_not_use_up_the_walk() {
+        // `if (x != 0)` and then eight blocks that only jump on, which is what lowering leaves
+        // behind the kernel's scoped seqlock macro. The test is still the one that dominates.
+        let (mut func, args, blocks) = shape(1, 11);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let zero = build.iconst(I32, 0);
+        let test = build.icmp(IntPred::Ne, args[0], zero);
+        build.br_if(test, blocks[1], &[], blocks[10], &[]);
+        for index in 1..9 {
+            Builder::new(&mut func, blocks[index]).jump(blocks[index + 1], &[]);
+        }
+        Builder::new(&mut func, blocks[9]).ret(&[]);
+        Builder::new(&mut func, blocks[10]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert!(!ranges.at(args[0], blocks[9]).contains(0));
     }
 
     /// `for (counter = start; counter < 100; counter += step)`, with the step's flags as given.
