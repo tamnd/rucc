@@ -534,7 +534,7 @@ impl CallGraph {
 /// an earlier object in the search order, which is what `Pic::replaceable` answers, and
 /// `-fno-semantic-interposition` and `-fvisibility=hidden` are the two ways a build says it will not
 /// happen.
-fn trusted(func: &Func, pic: Pic) -> bool {
+pub(crate) fn trusted(func: &Func, pic: Pic) -> bool {
     !matches!(func.linkage, Linkage::Weak | Linkage::Common)
         && !pic.replaceable(func.linkage, func.visibility)
 }

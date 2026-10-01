@@ -96,11 +96,12 @@ use rucc_cost::heuristics::{
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
     Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode,
-    Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
+    Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
 use rucc_target::{Isa, TargetInfo};
 
 use crate::Stats;
+use crate::callgraph::trusted;
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::Loops;
@@ -121,6 +122,8 @@ const ONCE_INLINED: &str = "call to a static function called once inlined";
 
 const ASKS_INLINED: &str = "call passing a constant __builtin_constant_p asks about inlined";
 
+const SMALL_INLINED: &str = "call to a function no larger than the call inlined";
+
 /// Which of the two reasons a function is inlined for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -139,6 +142,15 @@ enum Kind {
     /// `REG_FIELD_GET`, whose `BUILD_BUG_ON` only goes away once the mask is the constant each of
     /// its two callers passes.
     Asks,
+    /// A function whose body is no larger than a call to it, inlined wherever it is called
+    /// whatever its linkage, as long as the body is the one that runs.
+    ///
+    /// gcc's early inliner takes a call when the copy does not grow the caller, and it does that
+    /// for a function other files call as well, keeping the out of line copy for them. The kernel
+    /// relies on it: `mm/shmem.c` in 5.15 and 6.1 sets a field to a `BUILD_BUG` behind a call to
+    /// `shmem_is_huge`, which with transparent huge pages off is a non-`static` function returning
+    /// false, and the build only links when that call is folded away.
+    Small,
 }
 
 /// Why a call to an `always_inline` function was not inlined.
@@ -279,8 +291,9 @@ impl InlineFailure {
 }
 
 /// Inlines every call to an `always_inline` function that can be, and with a `limit` every call to
-/// a function declared `inline` whose body is no larger than that and, when `once` says so, the one
-/// call to a `static` function called once, and says what it did where.
+/// a function declared `inline` whose body is no larger than that, every call to a function whose
+/// body is no larger than the call and, when `once` says so, the one call to a `static` function
+/// called once, and says what it did where.
 ///
 /// Then turns every function still holding a `va_arg_pack` into a declaration. See the module
 /// documentation for why that is the right thing to do with one.
@@ -288,7 +301,9 @@ impl InlineFailure {
 /// `isa` is what the module is built for, which is what a function without a `target` attribute
 /// is built for. A callee built for more than its caller is never copied into it. `names` is
 /// what the names of the functions a body calls are read from, to find a call to `setjmp`.
-/// `growth` is how far a caller's frame may grow, which `-fconserve-stack` makes tighter.
+/// `growth` is how far a caller's frame may grow, which `-fconserve-stack` makes tighter. `pic` is
+/// what says whether the body of a function other files see is the one a call reaches.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     module: &mut Module,
     names: &Interner,
@@ -297,6 +312,7 @@ pub fn run(
     isa: Isa,
     growth: Growth,
     share: bool,
+    pic: Pic,
 ) -> Vec<(FuncId, Stats)> {
     let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
     let wanted: Map<Symbol, (FuncId, Kind)> = module
@@ -325,6 +341,8 @@ pub fn run(
                 && !asked(func).is_empty()
             {
                 Kind::Asks
+            } else if small(func) && trusted(func, pic) {
+                Kind::Small
             } else {
                 return None;
             };
@@ -358,7 +376,7 @@ pub fn run(
             let name = func.name;
             let gone = match kind {
                 Kind::Once => true,
-                Kind::Always | Kind::Hinted | Kind::Asks => {
+                Kind::Always | Kind::Hinted | Kind::Asks | Kind::Small => {
                     func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
                 }
             };
@@ -591,7 +609,7 @@ fn settle(
     for (_, call, callee, kind) in calls {
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
-            Kind::Hinted | Kind::Asks => failure.hint(),
+            Kind::Hinted | Kind::Asks | Kind::Small => failure.hint(),
             Kind::Once => failure.once(),
         };
         if callee == id || state.get(&callee) == Some(&State::Settling) {
@@ -625,6 +643,7 @@ fn settle(
             Kind::Always => usize::MAX,
             Kind::Hinted | Kind::Asks => how.limit,
             Kind::Once => INLINE_CALLED_ONCE_INSNS as usize,
+            Kind::Small => 2 + module[id][module[id][call].args].len(),
         };
         let mut large = match kind {
             Kind::Asks => {
@@ -635,7 +654,7 @@ fn settle(
                 Set::default(),
                 passed(&module[id], call, &module[callee]),
             ),
-            Kind::Always | Kind::Once => size(&module[callee]),
+            Kind::Always | Kind::Once | Kind::Small => size(&module[callee]),
         };
         let cold_call = cold || module[callee].attrs.set.contains(AttrSet::COLD);
         // The estimate above does not follow a constant through a block parameter or answer a
@@ -678,6 +697,7 @@ fn settle(
                     Kind::Hinted => HINT_INLINED,
                     Kind::Once => ONCE_INLINED,
                     Kind::Asks => ASKS_INLINED,
+                    Kind::Small => SMALL_INLINED,
                 });
             }
             Err(failure) => stats.missed(why(failure)),
@@ -1098,6 +1118,12 @@ fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> 
     let sites = if callee.attrs.set.contains(AttrSet::COLD) { how.calls } else { how.cold };
     let sites = sites.get(&callee.name).copied().unwrap_or(1).max(1);
     !removable || growth * sites > size
+}
+
+/// Whether a body could be no larger than a call to it, which is the call, one instruction for each
+/// argument and the use of what comes back. A body that returns a constant is two instructions.
+fn small(func: &Func) -> bool {
+    size(func) <= 2 + func.signature().params.len()
 }
 
 /// How many instructions a body has, which is what the limit on a callee declared `inline` counts.
@@ -2066,7 +2092,16 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
         let said = format!(
             "{:?}",
-            run(&mut module, &names, limit, once, Isa::baseline(), Growth::DEFAULT, false)
+            run(
+                &mut module,
+                &names,
+                limit,
+                once,
+                Isa::baseline(),
+                Growth::DEFAULT,
+                false,
+                Pic::Executable
+            )
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
@@ -2114,7 +2149,16 @@ block0(%0: i32):
             let mut names = Interner::new();
             let text = format!("{HEAD}{body}");
             let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-            run(&mut module, &names, None, false, Isa::baseline(), Growth::DEFAULT, share);
+            run(
+                &mut module,
+                &names,
+                None,
+                false,
+                Isa::baseline(),
+                Growth::DEFAULT,
+                share,
+                Pic::Executable,
+            );
             if let Err(errors) = rucc_ir::verify(&module, &names) {
                 panic!("the inliner left invalid IR, {errors:?}");
             }
@@ -2255,6 +2299,43 @@ block0:
         assert!(shared.contains("block0(%0: i32):\n    call @bad"), "{shared}");
     }
 
+    /// A function other files may call, whose body is no larger than a call to it, is inlined and
+    /// kept, the way `shmem_is_huge` has to be for the `BUILD_BUG` behind it to fold away. One that
+    /// is `weak` stays a call, since another file's body may be the one that runs, and so does one
+    /// that is larger than the call.
+    #[test]
+    fn a_function_no_larger_than_the_call_is_inlined_and_kept() {
+        let body = r#"
+func @huge(ptr, i64) -> i8, linkage(external) {
+block0(%0: ptr, %1: i64):
+    %2 = iconst.i8 0
+    return %2
+}
+
+func @g(ptr) -> i8, linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i64 0
+    %2 = call @huge(%0, %1) : (ptr, i64) -> i8
+    return %2
+}
+"#;
+        let out = inlined_under(body, Some(70));
+        assert!(!out.contains("call @huge"), "{out}");
+        assert!(out.contains("func @huge(ptr, i64) -> i8, linkage(external) {"), "{out}");
+        let weak = inlined_under(&body.replacen("linkage(external)", "linkage(weak)", 1), Some(70));
+        assert!(weak.contains("call @huge"), "{weak}");
+        let larger = body.replace(
+            "    %2 = iconst.i8 0\n    return %2\n}\n\nfunc @g",
+            "    %2 = iconst.i8 0\n    %3 = add.i8 %2, %2\n    %4 = add.i8 %3, %3\n    %5 = add.i8 %4, %4\n    return %5\n}\n\nfunc @g",
+        );
+        let larger = inlined_under(&larger, Some(70));
+        assert!(larger.contains("call @huge"), "{larger}");
+        assert!(
+            inlined_under(body, None).contains("call @huge"),
+            "-O0 inlines nothing it need not"
+        );
+    }
+
     /// An `i` operand the caller passed as arithmetic over constants is the constant once the call
     /// is inlined, at `-O0` too, the way `_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC` has to be.
     #[test]
@@ -2337,7 +2418,16 @@ block0(%0: i32):
                 respan(func, &[brace, brace, statement, statement, statement]);
             }
         }
-        run(&mut module, &names, None, true, Isa::baseline(), Growth::DEFAULT, false);
+        run(
+            &mut module,
+            &names,
+            None,
+            true,
+            Isa::baseline(),
+            Growth::DEFAULT,
+            false,
+            Pic::Executable,
+        );
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
         let mut seen = Vec::new();
@@ -2701,7 +2791,16 @@ block0(%0: i32):
             let mut names = Interner::new();
             let text = format!("{HEAD}{fixture}");
             let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-            run(&mut module, &names, Some(70), true, Isa::baseline(), Growth::CONSERVE, false);
+            run(
+                &mut module,
+                &names,
+                Some(70),
+                true,
+                Isa::baseline(),
+                Growth::CONSERVE,
+                false,
+                Pic::Executable,
+            );
             rucc_ir::print(&module, &names)
         };
         assert!(conserved(&framed(256, 0, "")).contains("call @scale"));

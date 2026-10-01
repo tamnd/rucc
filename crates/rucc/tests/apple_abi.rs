@@ -165,7 +165,7 @@ fn a_stack_argument_is_packed_to_its_own_alignment_on_darwin() {
 /// and laying the area out again must not put a word of filler in between, or the function is
 /// refused for a width no register holds (#1992).
 const WIDE: &str = "\
-long wq(long a1, long a2, long a3, long a4, long a5, long a6, long a7, long a8, char c, long l, __int128 q) {
+__attribute__((noinline)) long wq(long a1, long a2, long a3, long a4, long a5, long a6, long a7, long a8, char c, long l, __int128 q) {
     return (long)(q >> 64) + l + c;
 }
 long callwq(__int128 q) { return wq(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, q); }

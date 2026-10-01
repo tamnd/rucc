@@ -935,7 +935,16 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     let started = Instant::now();
     let growth =
         if opts.conserve_stack { inline::Growth::CONSERVE } else { inline::Growth::DEFAULT };
-    let inlined = inline::run(module, names, limit, once, opts.isa, growth, opts.stack_reuse);
+    let inlined = inline::run(
+        module,
+        names,
+        limit,
+        once,
+        opts.isa,
+        growth,
+        opts.stack_reuse,
+        opts.interposition,
+    );
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {
         if opts.verify {
