@@ -673,6 +673,78 @@ impl Builtin {
             _ => None,
         }
     }
+
+    /// The two keywords gcc names when this combination names no type, if it names two.
+    ///
+    /// gcc has two ways of saying a list of keywords is wrong. Two keywords that each name a type
+    /// on their own, like `int char`, are "two or more data types", and that is `None` here. A
+    /// keyword that only changes a type written next to one it cannot change, like `long char`,
+    /// is "both 'long' and 'char'", and that is the pair here, the changing keyword first
+    /// whichever order they were written in. So are the two pairs of changing keywords that
+    /// contradict each other, `long` with `short` and `signed` with `unsigned`. gcc puts
+    /// `__int128` first when `long` is the other half, and that order is kept too.
+    ///
+    /// When several pairs are wrong at once gcc names the one it met first in the source, which
+    /// this cannot see, so the pair here is the first of `long`, `short`, `signed` and
+    /// `unsigned` that does not fit.
+    #[must_use]
+    pub fn clash(self) -> Option<(&'static str, &'static str)> {
+        let set = self.set.without(BuiltinSet::COMPLEX.with(BuiltinSet::IMAGINARY));
+        let named: &[(BuiltinSet, &'static str)] = &[
+            (BuiltinSet::VOID, "void"),
+            (BuiltinSet::BOOL, "_Bool"),
+            (BuiltinSet::CHAR, "char"),
+            (BuiltinSet::INT, "int"),
+            (BuiltinSet::FLOAT, "float"),
+            (BuiltinSet::DOUBLE, "double"),
+            (BuiltinSet::INT128, "__int128"),
+            (BuiltinSet::BIT_INT, "_BitInt"),
+            (BuiltinSet::DECIMAL32, "_Decimal32"),
+            (BuiltinSet::DECIMAL64, "_Decimal64"),
+            (BuiltinSet::DECIMAL128, "_Decimal128"),
+            (BuiltinSet::FLOAT16, "_Float16"),
+            (BuiltinSet::FLOAT32, "_Float32"),
+            (BuiltinSet::FLOAT64, "_Float64"),
+            (BuiltinSet::FLOAT128, "_Float128"),
+            (BuiltinSet::FLOAT32X, "_Float32x"),
+            (BuiltinSet::FLOAT64X, "_Float64x"),
+            (BuiltinSet::FLOAT128X, "_Float128x"),
+            (BuiltinSet::FLOAT80, "__float80"),
+        ];
+        let mut written = named.iter().filter(|(word, _)| set.has(*word));
+        let ty = written.next();
+        if written.next().is_some() {
+            return None;
+        }
+        if set.has(BuiltinSet::SIGNED.with(BuiltinSet::UNSIGNED)) {
+            return Some(("signed", "unsigned"));
+        }
+        if set.has(BuiltinSet::LONG.with(BuiltinSet::SHORT)) {
+            return Some(("long", "short"));
+        }
+        let &(ty, spelled) = ty?;
+        // Which of the changing keywords each type takes. `int` takes all of them, and the
+        // integer types gcc added take a sign and nothing else.
+        let takes = match ty {
+            t if t == BuiltinSet::INT => return None,
+            t if t == BuiltinSet::CHAR || t == BuiltinSet::INT128 || t == BuiltinSet::BIT_INT => {
+                BuiltinSet::SIGNED.with(BuiltinSet::UNSIGNED)
+            }
+            t if t == BuiltinSet::DOUBLE && self.longs < 2 => BuiltinSet::LONG,
+            _ => BuiltinSet::NONE,
+        };
+        let changing = [
+            (BuiltinSet::LONG, "long"),
+            (BuiltinSet::SHORT, "short"),
+            (BuiltinSet::SIGNED, "signed"),
+            (BuiltinSet::UNSIGNED, "unsigned"),
+        ];
+        let &(_, word) = changing.iter().find(|(word, _)| set.has(*word) && !takes.has(*word))?;
+        if ty == BuiltinSet::INT128 {
+            return Some((spelled, word));
+        }
+        Some((word, spelled))
+    }
 }
 
 /// A built-in type, once the keywords have been read together.
@@ -779,6 +851,34 @@ mod tests {
             b = b.add(k).expect("keyword rejected");
         }
         b.resolve()
+    }
+
+    fn clash(keywords: &[BuiltinSet]) -> Option<(&'static str, &'static str)> {
+        let mut b = Builtin::NONE;
+        for &k in keywords {
+            b = b.add(k).expect("keyword rejected");
+        }
+        b.clash()
+    }
+
+    #[test]
+    fn a_keyword_that_changes_a_type_it_cannot_is_named_with_that_type() {
+        use BuiltinSet as K;
+        assert_eq!(clash(&[K::LONG, K::CHAR]), Some(("long", "char")));
+        assert_eq!(clash(&[K::CHAR, K::LONG]), Some(("long", "char")));
+        assert_eq!(clash(&[K::UNSIGNED, K::LONG, K::CHAR]), Some(("long", "char")));
+        assert_eq!(clash(&[K::SHORT, K::DOUBLE]), Some(("short", "double")));
+        assert_eq!(clash(&[K::SIGNED, K::DOUBLE]), Some(("signed", "double")));
+        assert_eq!(clash(&[K::UNSIGNED, K::FLOAT]), Some(("unsigned", "float")));
+        assert_eq!(clash(&[K::LONG, K::BOOL]), Some(("long", "_Bool")));
+        assert_eq!(clash(&[K::SHORT, K::VOID]), Some(("short", "void")));
+        assert_eq!(clash(&[K::LONG, K::INT128]), Some(("__int128", "long")));
+        assert_eq!(clash(&[K::UNSIGNED, K::DECIMAL32]), Some(("unsigned", "_Decimal32")));
+        assert_eq!(clash(&[K::SHORT, K::LONG, K::INT]), Some(("long", "short")));
+        assert_eq!(clash(&[K::UNSIGNED, K::SIGNED]), Some(("signed", "unsigned")));
+        assert_eq!(clash(&[K::INT, K::CHAR]), None, "two types are the other message");
+        assert_eq!(clash(&[K::LONG, K::INT, K::CHAR]), None);
+        assert_eq!(clash(&[K::FLOAT, K::DOUBLE]), None);
     }
 
     fn real(keywords: &[BuiltinSet]) -> Option<Scalar> {

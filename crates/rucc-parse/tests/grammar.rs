@@ -461,6 +461,26 @@ fn a_bit_int_written_twice_is_two_types() {
 }
 
 #[test]
+fn a_name_nobody_declared_in_front_of_another_is_an_unknown_type() {
+    // gcc's guess: a name that was never declared, followed by a name or a `*`, is a type with
+    // a typo in it, and the declaration goes on as an `int` one.
+    for src in
+        ["void f(void) { foo x; x = 1; }", "void f(void) { foo *p; }", "foo c;", "void h(foo d);"]
+    {
+        assert_eq!(complaints(src), ["unknown type name 'foo'"], "{src}");
+    }
+    // A name declared as anything is left to mean that, so this is still a multiplication.
+    assert!(complaints("void f(int a, int b) { a * b; }").is_empty());
+    // And a name nobody declared with anything else after it is not a type.
+    assert!(!complaints("void f(void) { foo; }").contains(&"unknown type name 'foo'".to_owned()));
+    let unknown = "unknown type name 'a'".to_owned();
+    assert!(
+        !complaints("int f(a, b) int a; { return a; }").contains(&unknown),
+        "an old-style list"
+    );
+}
+
+#[test]
 fn an_enumeration_may_name_its_underlying_type() {
     let out = parsed("enum e : unsigned char { a, b = 2 };");
     let Decl::Var { specs, .. } = only_decl(&out) else { panic!("expected one") };

@@ -284,7 +284,26 @@ impl Parser<'_> {
         {
             ahead += 1;
         }
-        self.starts_decl_specs(self.cursor.peek(ahead))
+        self.starts_decl_specs(self.cursor.peek(ahead)) || self.unknown_type_name(ahead)
+    }
+
+    /// Whether the token `ahead` of the cursor is a name nobody declared that is being used as a
+    /// type, which is gcc's guess and so this compiler's.
+    ///
+    /// `foo x;` with no `foo` in sight is a declaration with a typo or a missing header in it,
+    /// and reading it as the expression `foo` with a stray `x` after it gives a message about a
+    /// semicolon that helps nobody. gcc's `c_parser_next_tokens_start_typename` takes a name to
+    /// be a type when it has never been declared and a name or a `*` follows it, and it says
+    /// "unknown type name" there. The `*` makes `x * y;` a declaration when `x` was never
+    /// declared, which is the reading gcc gives it too, and a name that was declared as anything
+    /// at all is left alone, so `a * b;` with `a` an object is still a multiplication.
+    pub(crate) fn unknown_type_name(&self, ahead: usize) -> bool {
+        let Some(name) = self.cursor.peek(ahead).ident() else { return false };
+        if self.scopes.ident(name).is_some() {
+            return false;
+        }
+        let next = self.cursor.peek(ahead + 1);
+        next.ident().is_some() || next.punct() == Some(Punct::Star)
     }
 
     /// Whether the parser is looking at `[[`, which is C23's attribute syntax.
@@ -572,7 +591,19 @@ impl Parser<'_> {
                     }
                     let name = Symbol::from_raw(token.value);
                     if !self.scopes.is_typedef_name(name) {
-                        break;
+                        if !self.unknown_type_name(0) {
+                            break;
+                        }
+                        // Read as `int` from here on, which is what gcc does with the
+                        // declaration after it has said so, so that the rest of it is still
+                        // checked and the name it declares is there for the code after it.
+                        let spelled = self.cx.interner.resolve(name);
+                        let message = format!("unknown type name '{spelled}'");
+                        self.error("E0546", message, span);
+                        self.cursor.bump();
+                        builtin = Builtin::NONE.add(BuiltinSet::INT).unwrap_or(Builtin::NONE);
+                        named = true;
+                        continue;
                     }
                     self.cursor.bump();
                     specs.ty = TypeSpec::Typedef(name);

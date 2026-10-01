@@ -10031,6 +10031,38 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(result.messages, ["/main.c:1:5: error: old-style function definition [E0412]"]);
     }
 
+    /// Three messages that said something true in words gcc 16 does not use.
+    ///
+    /// A keyword that changes a type it cannot is named with that type, a name nobody declared
+    /// in front of another is an unknown type, and `nullptr` going to an integer is refused as
+    /// a value of its own type rather than warned about as a pointer.
+    #[test]
+    fn three_refusals_are_in_the_words_gcc_uses() {
+        let mut opts = options();
+        opts.std = Std::C23;
+        let errors = |source: &str| -> Vec<String> {
+            let result = run(&opts, source);
+            result.messages.iter().filter(|m| m.contains(": error: ")).cloned().collect()
+        };
+        let said = errors("int main(void) { long char c = 0; return c; }\n");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("both 'long' and 'char' in declaration specifiers"), "{said:?}");
+
+        let said = errors("int main(void) { foo x; x = 1; return x; }\n");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("unknown type name 'foo'"), "{said:?}");
+
+        let said = errors("int main(void) { int x = nullptr; x = nullptr; return x; }\n");
+        assert_eq!(said.len(), 2, "{said:?}");
+        let initializing = "incompatible types when initializing type 'int' using type \
+                            'typeof (nullptr)'";
+        assert!(said[0].contains(initializing), "{said:?}");
+        let assigning = "incompatible types when assigning to type 'int' from type \
+                         'typeof (nullptr)'";
+        assert!(said[1].contains(assigning), "{said:?}");
+        assert!(errors("int main(void) { bool b = nullptr; int *p = nullptr; }\n").is_empty());
+    }
+
     /// The two obsolete designators, which are silent until `-pedantic` asks about them.
     ///
     /// `[3] 7` is what GCC had for an array before C99 settled on `[3] = 7`, and `x: 7` is the

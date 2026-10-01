@@ -389,7 +389,9 @@ impl Parser<'_> {
         // An identifier that names no type starts an old-style list. Nothing else can: a
         // prototype's first token is a specifier, and a specifier is never an ordinary
         // identifier.
-        if self.cursor.current().ident().is_some() && !self.starts_decl_specs(self.cursor.current())
+        if self.cursor.current().ident().is_some()
+            && !self.starts_decl_specs(self.cursor.current())
+            && !self.unknown_type_name(0)
         {
             return self.identifier_list();
         }
