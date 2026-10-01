@@ -42,11 +42,17 @@
 //! wrapper around the C library's would be a miscompilation rather than a monitor. So a name the
 //! module defines is left alone everywhere in that module.
 //!
+//! Left alone means the backend too. It writes a small constant `memcpy` or `memset` as moves,
+//! which is right for the C library's, whose calls this module sends to a wrapper anyway, and wrong
+//! for the program's own: the moves skip the instrumented body, so the bytes they copy are never
+//! marked as written and the next read of them is reported. So where the module defines one of
+//! the names the backend takes apart, every function in it is marked `no_builtin`.
+//!
 //! That is the module's own definition and not the whole program's, which is the limit of what one
 //! file can know. Document 10 section 10.7's mixed link is where the rest of that question lives.
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{CallInfo, Extra, Inst, Module, Opcode};
+use rucc_ir::{AttrSet, CallInfo, Extra, Inst, Module, Opcode};
 
 /// What every wrapper's symbol starts with.
 ///
@@ -160,12 +166,19 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
         module.globals().filter(|&id| !module[id].is_declaration()).map(|id| module[id].name),
     );
 
+    let own_copies = ["memcpy", "memset", "memmove"]
+        .iter()
+        .any(|&name| names.find(name).is_some_and(|symbol| defined.contains(&symbol)));
+
     let mut moved = 0;
     for id in ids {
         if module[id].is_declaration() {
             continue;
         }
         let func = &mut module[id];
+        if own_copies {
+            func.attrs.set |= AttrSet::NO_BUILTIN;
+        }
         let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
         for inst in insts {
             // The address of one of these, written where a pointer was wanted. The name is right
@@ -317,6 +330,16 @@ mod tests {
 
         assert_eq!(redirect(&mut module, &mut names), 0);
         assert_eq!(callees(&module, &names), ["memcpy", "puts"]);
+        // And the backend is told not to write a call to it as moves, which would skip the body.
+        assert!(module.funcs().all(|id| module[id].attrs.set.contains(AttrSet::NO_BUILTIN)));
+    }
+
+    #[test]
+    fn a_program_without_its_own_copy_keeps_the_builtins() {
+        let mut names = Interner::new();
+        let (mut module, _) = calling(&mut names, "memcpy");
+        redirect(&mut module, &mut names);
+        assert!(module.funcs().all(|id| !module[id].attrs.set.contains(AttrSet::NO_BUILTIN)));
     }
 
     #[test]

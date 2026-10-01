@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- Under `-fsafety`, a program that defines its own `memcpy`, `memset` or `memmove` no longer has a small constant call to it written as moves. The moves skipped the instrumented body, so the bytes copied were never marked as written and the next read of them was reported as a violation. This was the `a-program-that-defines-memcpy-itself` case the release gate failed on since v0.18.1.
+
 ## 0.18.7
 
 A patch release on the way to building the Linux kernel with the same sections gcc gives it. It adds `-freorder-blocks-and-partition`, so a block that calls a `cold` function goes in `.text.unlikely` as `foo.cold` the way gcc picks it, and `-freorder-functions`, so a `cold` function goes there whole. A label only a static table points at gets `endbr64`, which takes the defconfig objtool warnings from 259 to 3, and a link failure on `__scoped_seqlock_bug` is fixed. A function declared `inline` is measured by what is left once constants fold, so `alloc_pages_node` is inlined as in gcc. It also has `target_clones`, `optimize ("wrapv")`, `optimize ("no-tree-loop-distribute-patterns")`, GNU nested functions and a faster spill choice.
