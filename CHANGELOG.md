@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `#pragma GCC diagnostic` is honoured (`push`, `pop`, `ignored`, `warning` and `error`, also through `_Pragma`). A warning is decided by where it is, as in gcc 13, so a deprecated call between `push`, `ignored "-Wdeprecated-declarations"` and `pop` says nothing, `error` makes it an error, and `warning` keeps it a warning under `-Werror`. A line in a header holds for what follows its `#include`, and a `pop` with nothing pushed goes back to the command line. A line gcc cannot read gets gcc's `-Wpragmas` warning (E0798), and `ignored_attributes` is read and does nothing. Before, every one of these lines was dropped, so code that silenced a warning around one call still warned there.
+
 ## 0.18.8
 
 A patch release that gets the release gate passing again, and the first one with i686 Windows. Under `-fsafety`, a program that defines its own `memcpy`, `memset` or `memmove` keeps its calls to them, so the bytes they copy are marked as written and are no longer reported as a violation. C now compiles to i386 COFF for `i686-w64-windows-gnu` and `i686-pc-windows-msvc`, with `__stdcall` and `__fastcall`, and dead store elimination no longer gives a 32-bit target a 64-bit offset.
@@ -12,7 +16,6 @@ A patch release that gets the release gate passing again, and the first one with
 
 - `--target=i686-w64-windows-gnu` and `--target=i686-pc-windows-msvc` compile C to i386 COFF objects that link with i686-w64-mingw32-gcc and run (#2247). Calls are cdecl, a C name gets the leading underscore, a structure of 1, 2, 4 or 8 bytes comes back in registers (a lone `float` or `double` one too under MSVC), a large frame calls `___chkstk_ms` or `__chkstk`, and the preprocessor defines `_X86_` and `_M_IX86` the way gcc and MSVC do. Test programs covering structure returns, varargs, `qsort`, `setjmp`, VLAs, 64-bit arithmetic and math print the same under wine as when built with mingw gcc, at -O0, -O1 and -O2.
 - `__stdcall` and `__fastcall` are implemented for `i686-w64-windows-gnu` and `i686-pc-windows-msvc` (#2247), so a program can call the Win32 API and hand it callbacks. The callee pops its arguments with `ret $N`, fastcall passes the first two integer arguments of 4 bytes or less in ecx and edx, and the names come out as `_f@N` and `@f@N`, as gcc writes them. `__attribute__((stdcall))`, `fastcall` and `cdecl` are read there, two different conventions on one function are an error, and a variadic function stays cdecl. A program with stdcall and fastcall functions and callbacks into kernel32 and user32 prints the same under wine as when built with mingw gcc, at -O0, -O1 and -O2.
-- `#pragma GCC diagnostic` is honoured (`push`, `pop`, `ignored`, `warning` and `error`, also through `_Pragma`). A warning is decided by where it is, as in gcc 13, so a deprecated call between `push`, `ignored "-Wdeprecated-declarations"` and `pop` says nothing, `error` makes it an error, and `warning` keeps it a warning under `-Werror`. A line in a header holds for what follows its `#include`, and a `pop` with nothing pushed goes back to the command line. A line gcc cannot read gets gcc's `-Wpragmas` warning (E0798), and `ignored_attributes` is read and does nothing. Before, every one of these lines was dropped, so code that silenced a warning around one call still warned there.
 
 ### Fixed
 
