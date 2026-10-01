@@ -74,7 +74,8 @@ use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
 use rucc_target::{
-    BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, Narrow, PhysReg, Probe, RegClass,
+    BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, PhysReg, Probe, RegClass,
+    SpillMove,
 };
 
 use crate::frame::Frame;
@@ -1669,7 +1670,7 @@ impl Writer<'_> {
 /// The load and the store that reach a spill slot narrower than its class, or `None` for a slot
 /// as wide as the class, which is reached with the class's own. [`Frame::slot_width`] only ever
 /// comes out narrower when the target has one of these for exactly that many bytes.
-fn narrow(moves: &ClassMoves, frame: &Frame, slot: u32) -> Option<Narrow> {
+fn narrow(moves: &ClassMoves, frame: &Frame, slot: u32) -> Option<SpillMove> {
     let bytes = frame.slot_width(slot)?;
     moves.narrow.iter().find(|narrow| narrow.bytes == bytes).copied()
 }

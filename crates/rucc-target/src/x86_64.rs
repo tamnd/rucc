@@ -59,7 +59,7 @@ pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-use crate::frame::{ClassMoves, FrameInsts, Narrow, Probe, Thunks};
+use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{
@@ -200,8 +200,8 @@ static X86_64_MOVES: [ClassMoves; 2] = [
         load: "movaps_rm",
         store: "movaps_mr",
         narrow: &[
-            Narrow { bytes: 4, load: "movss_rm", store: "movss_mr" },
-            Narrow { bytes: 8, load: "movsd_rm", store: "movsd_mr" },
+            SpillMove { bytes: 4, load: "movss_rm", store: "movss_mr" },
+            SpillMove { bytes: 8, load: "movsd_rm", store: "movsd_mr" },
         ],
     },
 ];

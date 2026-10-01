@@ -70,7 +70,7 @@ pub use crate::abi::{
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-pub use crate::frame::{ClassMoves, FrameInsts, Kept, Narrow, Pair, Probe, Thunks};
+pub use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe, SpillMove, Thunks};
 pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
 pub use crate::machine::{Address, MachineInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};

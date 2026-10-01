@@ -57,8 +57,8 @@ pub struct ClassMoves {
     /// A `double` in an x86-64 vector register is eight bytes of a sixteen byte register, and gcc
     /// spills it with `movsd` into a slot of eight. A slot as wide as the register would be twice
     /// the bytes for nothing, and a function that keeps a few of them over calls pays that many
-    /// times over. See [`Narrow`].
-    pub narrow: &'static [Narrow],
+    /// times over. See [`SpillMove`].
+    pub narrow: &'static [SpillMove],
 }
 
 /// A load and a store that move the bottom `bytes` of a register between it and the frame.
@@ -66,7 +66,7 @@ pub struct ClassMoves {
 /// What a spill slot narrower than its class is reached with. The load may write anything to the
 /// rest of the register, since the value never had anything there that it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Narrow {
+pub struct SpillMove {
     /// How many bytes the two of them move.
     pub bytes: u32,
     /// Writes the bottom of the register with what is in the frame.
