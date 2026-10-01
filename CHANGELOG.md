@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The backtracking register allocator keeps what it was told about each register for the value it is placing, since it asks about the same registers several times for one value, which takes about 1.6% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2631).
+
 ### Added
 
 - `-Wunknown-pragmas` is implemented and is on under `-Wall`, as in gcc 13 (E0745). A pragma gcc does not know is ignored with "ignoring `#pragma omp parallel`", named by its first two words the way gcc names it, and every `STDC` pragma but `FLOAT_CONST_DECIMAL64` is one, as there. The pragmas gcc knows and this compiler has nothing to do with yet, such as `GCC poison`, `GCC optimize`, `weak` and `region`, are taken without a word. Before, every unknown pragma was dropped without one under any flags. A malformed `#pragma GCC visibility` or `#pragma comment` line is now warned about as `-Wpragmas` (E0798), which is where gcc puts the first, rather than under the code `-Wunknown-pragmas` now answers to, so it is still said by default.
