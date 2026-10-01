@@ -319,8 +319,11 @@ impl Checker<'_> {
             // into the pointer, and a constant is a number the program chose rather than an
             // address it was given. `(void *) 0` is what `NULL` expands to, `(D) -1` is how
             // every library writes a sentinel, and neither lost anything.
+            // A `_Bool` going the other way, which kunit's `attr_is_init_get` hands back as a
+            // `void *`.
             if width(from) == Some(pointer)
                 || enumerated(from)
+                || matches!(eval::bare(&self.types, from), TypeKind::Bool)
                 || self.eval_integer(operand).is_ok()
             {
                 return;
@@ -1677,23 +1680,32 @@ mod tests {
         let use_q = f.expr(ast::Expr::Name(p));
         let boolean = named(&mut f, &[BuiltinSet::BOOL], &[]);
         let truth = f.expr(ast::Expr::Cast { ty: boolean, operand: use_q });
+        let b = f.name("b");
+        let use_b = f.expr(ast::Expr::Name(b));
+        let specs = f.keywords(&[BuiltinSet::INT]);
+        let from_bool = f.type_name(specs, &[pointer()]);
+        let answer = f.expr(ast::Expr::Cast { ty: from_bool, operand: use_b });
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
         let ty = c.types.pointer(int);
         c.declare_object(p, ty, Span::DUMMY);
         c.declare_object(n, int, Span::DUMMY);
+        let bool_ty = c.types.boolean();
+        c.declare_object(b, bool_ty, Span::DUMMY);
         c.check_expr(narrow);
         c.check_expr(wide);
         c.check_expr(back);
         c.check_expr(constant);
         c.check_expr(truth);
+        c.check_expr(answer);
 
         // The one that fits says nothing, which is the whole point of measuring rather than
         // warning about every cast that crosses between the two. Neither does the constant,
         // which is a number the program picked rather than an address that got truncated, and
         // which is what every sentinel and every `NULL` in every header is. Nor does the cast to
-        // `_Bool`, which is a test against null rather than a truncation.
+        // `_Bool`, which is a test against null rather than a truncation, or the `_Bool` cast
+        // back, which is a zero or a one.
         assert_eq!(
             messages(&c),
             [
