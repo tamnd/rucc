@@ -1420,7 +1420,8 @@ impl<'a> Lowering<'a> {
             None => self.out.insts(at).next(),
         };
         let Some(first) = first else { return };
-        let built: Vec<mir::Inst> = self.out.insts(at).skip_while(|&one| one != first).collect();
+        let built: Vec<mir::Inst> =
+            std::iter::successors(Some(first), |&one| self.out.next_inst(one)).collect();
         self.effectless.push(built);
     }
 
@@ -1439,18 +1440,25 @@ impl<'a> Lowering<'a> {
             return;
         }
         loop {
-            let mut reads: Map<mir::Reg, usize> = Map::default();
+            // By number, because the registers here are virtual ones numbered from zero and only
+            // a virtual one is ever asked about below.
+            let mut reads = vec![0usize; self.out.vregs()];
+            let mut read = |reg: mir::Reg| {
+                if let Some(number) = reg.number() {
+                    reads[number as usize] += 1;
+                }
+            };
             for block in self.out.blocks().collect::<Vec<mir::Block>>() {
                 for inst in self.out.insts(block) {
                     for operand in &self.out[self.out[inst].operands] {
                         if operand.role == Role::Use {
-                            *reads.entry(operand.reg).or_default() += 1;
+                            read(operand.reg);
                         }
                     }
                 }
                 for call in &self.out[block].succs {
                     for &reg in &call.args {
-                        *reads.entry(reg).or_default() += 1;
+                        read(reg);
                     }
                 }
             }
@@ -1481,9 +1489,9 @@ impl<'a> Lowering<'a> {
                 let dead = built.iter().all(|&inst| {
                     self.out[self.out[inst].operands].iter().filter(|it| it.role != Role::Use).all(
                         |it| {
-                            it.reg.is_virtual()
-                                && reads.get(&it.reg).copied().unwrap_or(0)
-                                    == own.get(&it.reg).copied().unwrap_or(0)
+                            it.reg.number().is_some_and(|number| {
+                                reads[number as usize] == own.get(&it.reg).copied().unwrap_or(0)
+                            })
                         },
                     )
                 });
@@ -1849,7 +1857,7 @@ impl<'a> Lowering<'a> {
                 // could name one.
                 Opcode::PtrToInt | Opcode::IntToPtr => {
                     let started = self.at;
-                    let before = self.at.and_then(|at| self.out.insts(at).last());
+                    let before = self.at.and_then(|at| self.out.terminator(at));
                     self.rename(inst)?;
                     self.effectless_since(inst, started, before);
                     continue;
@@ -1942,7 +1950,7 @@ impl<'a> Lowering<'a> {
             }
             let matched = matched.ok_or_else(|| self.unsupported(inst))?;
             let started = self.at;
-            let before = self.at.and_then(|at| self.out.insts(at).last());
+            let before = self.at.and_then(|at| self.out.terminator(at));
             self.emit(inst, &matched)?;
             self.effectless_since(inst, started, before);
             // A load, a store or a division with an unwind edge, which `-fnon-call-exceptions`
@@ -1958,7 +1966,7 @@ impl<'a> Lowering<'a> {
                     Some(before) => self.out.next_inst(before),
                     None => self.out.insts(at).next(),
                 };
-                let last = self.out.insts(at).last();
+                let last = self.out.terminator(at);
                 let access = if self.source[inst].opcode == Opcode::Load { first } else { last };
                 if let Some(access) = access {
                     self.unwinding.insert(inst, access);
@@ -2099,7 +2107,7 @@ impl<'a> Lowering<'a> {
         self.crossed += 1;
         self.passed_late(&late);
         if self.source.unwinds_to_pad(inst) {
-            let call = self.out.insts(block).last().expect("the call just built");
+            let call = self.out.terminator(block).expect("the call just built");
             self.unwinding.insert(inst, call);
         }
         self.stack.call(made.outgoing);
@@ -2167,7 +2175,7 @@ impl<'a> Lowering<'a> {
         let kept = self.stack.kept;
         let outgoing = self.called(inst)?;
         let block = self.at.expect("a block is being filled");
-        let call = self.out.insts(block).last().expect("the call just built");
+        let call = self.out.terminator(block).expect("the call just built");
         if self.out[call].symbol.is_none() {
             self.through_scratch(call);
         }
@@ -2175,7 +2183,9 @@ impl<'a> Lowering<'a> {
         let x87 = self.x87_values(&values);
         self.returned(inst, values)?;
         if outgoing == 0 && !x87 && self.sret().is_none() {
-            let returns = self.out.insts(block).skip_while(|&at| at != call).skip(1).collect();
+            let returns =
+                std::iter::successors(self.out.next_inst(call), |&at| self.out.next_inst(at))
+                    .collect();
             self.stack.tails.push(crate::tail::Tail { call, returns });
             self.stack.kept = kept;
         }
