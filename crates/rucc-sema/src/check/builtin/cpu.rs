@@ -386,7 +386,7 @@ impl Checker<'_> {
 ///
 /// The first thirty two features are the last word of `__cpu_model`, and every one after that is
 /// in `__cpu_features2`, thirty two to a word, starting again from its first.
-fn feature_word(feature: u8) -> (CpuObject, u8, u8) {
+pub(in crate::check) fn feature_word(feature: u8) -> (CpuObject, u8, u8) {
     if feature < 32 {
         (CpuObject::Model, 3, feature)
     } else {

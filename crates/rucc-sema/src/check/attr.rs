@@ -224,7 +224,7 @@ impl Checker<'_> {
     /// table has no row for, come back empty and match nothing, which is what the preprocessor
     /// answering no has already told the program. `__packed__` is read as `packed`, and an
     /// attribute in some namespace other than `gnu` is not GCC's and is not read.
-    fn gnu_name(&self, attr: &Attribute) -> &'static str {
+    pub(in crate::check) fn gnu_name(&self, attr: &Attribute) -> &'static str {
         if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
             return "";
         }

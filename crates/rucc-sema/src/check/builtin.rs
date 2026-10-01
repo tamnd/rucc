@@ -65,7 +65,7 @@ mod classify;
 mod complex;
 mod constant;
 mod count;
-mod cpu;
+pub(in crate::check) mod cpu;
 mod entry;
 mod expect;
 mod frame;

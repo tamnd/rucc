@@ -112,6 +112,9 @@ pub enum Place {
     Aarch64,
     /// Windows, on any architecture.
     Windows,
+    /// 64-bit x86 with ELF objects, which is every operating system but Windows and macOS, and
+    /// the one place indirect functions are built.
+    X86_64Elf,
 }
 
 /// The target a question is asked on, as far as the matrix cares, which is which of the places
@@ -134,6 +137,7 @@ impl Target {
             (Place::X86, arch == "i686"),
             (Place::Aarch64, arch == "aarch64"),
             (Place::Windows, os == "windows"),
+            (Place::X86_64Elf, arch == "x86_64" && !matches!(os, "windows" | "macos")),
         ] {
             if holds {
                 target.places |= 1 << place as u8;
@@ -325,7 +329,7 @@ mod tests {
         assert_eq!(keys, sorted);
     }
 
-    const LINUX: Target = Target { places: 1 << Place::X86_64 as u8 };
+    const LINUX: Target = Target { places: 1 << Place::X86_64 as u8 | 1 << Place::X86_64Elf as u8 };
 
     #[test]
     fn every_row_is_findable_by_its_own_name() {

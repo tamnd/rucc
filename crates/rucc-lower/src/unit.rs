@@ -40,7 +40,7 @@ use rucc_ir::{
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
     Eval, ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration,
-    StrId, Tast, Visibility,
+    StrId, Tast, Version, Visibility,
 };
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
@@ -1143,6 +1143,20 @@ impl Unit<'_> {
         // rely on it: every one of their inline definitions would otherwise be a second definition
         // of a name the library already defines. Unless this unit is one of the callers, which is
         // the case [`Self::out_of_line`] is about.
+        // A function `target_clones` asked to have built more than once, which is a body for each
+        // version and the name an indirect function choosing between them. An inline copy made for
+        // this unit's own calls is built once, as the inliner wants it.
+        if let Some(versions) = tast.versions(decl).filter(|_| body.is_some() && !copied) {
+            if node.inline.emits() {
+                self.clones(decl, &func, versions, &plan);
+                for (before, priority) in [(true, startup.before), (false, startup.after)] {
+                    if let Some(priority) = priority {
+                        self.starts.push(Start { func: name, before, priority, span });
+                    }
+                }
+                return;
+            }
+        }
         if body.is_some() && (node.inline.emits() || copied) {
             // `optimize ("no-strict-aliasing")` on the function, which has to be kept in the IR
             // rather than on the command line because the inliner may copy this body into a
@@ -1223,6 +1237,110 @@ impl Unit<'_> {
         let mut declared = Func::new(stub, Signature::new());
         declared.linkage = IrLinkage::Internal;
         self.place_func(declared);
+    }
+
+    /// The versions of a function `target_clones` asked for, the resolver that picks one when the
+    /// program is loaded and the indirect function under the function's own name that calls it,
+    /// which is what gcc 16 builds on an x86-64 ELF target.
+    ///
+    /// Each version is a local function named the function's name, a dot and the version's
+    /// suffix, with everything the function said about itself and the extensions of its version,
+    /// less `always_inline`, which the checker warned was dropped. The body is lowered once for
+    /// each, and a `static` in it is one object all of them share, since the symbol a local static
+    /// is given is kept per declaration.
+    ///
+    /// The resolver asks libgcc to fill in `__cpu_model` and `__cpu_features2`, then tests the
+    /// versions' bits from the last to the first, each one that is set taking the place of the
+    /// answer so far, so the first version the processor can run is the answer and `default` is
+    /// the answer when it can run none. gcc tests them first to last and returns at the first; the
+    /// address that comes back is the same. Like gcc's it is weak for a function another unit can
+    /// call, so that two units cloning one inline definition keep one, and local for a `static`.
+    fn clones(&mut self, decl: DeclId, func: &Func, versions: &[Version], plan: &Plan) {
+        let called = self.names.resolve(func.name).to_owned();
+        let mut built = Vec::with_capacity(versions.len());
+        for version in versions {
+            let name = self.names.intern(&format!("{called}.{}", version.suffix));
+            let mut clone = Func::new(name, plan.signature.clone());
+            clone.declared = func.declared;
+            clone.named = func.named;
+            clone.align = func.align;
+            clone.attrs = func.attrs;
+            clone.attrs.set = clone.attrs.set.without(AttrSet::ALWAYS_INLINE);
+            clone.section = func.section;
+            clone.notices = func.notices.clone();
+            clone.linkage = IrLinkage::Internal;
+            clone.target = version.isa;
+            let strict = self.aliasing;
+            self.aliasing &= !self.tast[decl].flags.contains(DeclFlags::NO_STRICT_ALIASING);
+            body::lower(self, decl, &mut clone, plan);
+            self.aliasing = strict;
+            self.place_func(clone);
+            let test = version.test.map(|(object, word, bit)| {
+                (self.libgcc_object(object.symbol(), object.size()), word, bit)
+            });
+            built.push((name, test));
+        }
+        let linkage = self.told(decl, self.tast[decl].linkage);
+        let resolver = self.names.intern(&format!("{called}.resolver"));
+        let mut chooser = Func::new(resolver, Signature::new().with_returns(&[Type::PTR]));
+        chooser.linkage = match linkage {
+            IrLinkage::Internal => IrLinkage::Internal,
+            _ => IrLinkage::LinkOnce,
+        };
+        chooser.declared = func.declared;
+        chooser.named = func.named;
+        let entry = chooser.create_block();
+        let sig = chooser.add_signature(Signature::new());
+        let init = self.names.intern("__cpu_indicator_init");
+        let address = |build: &mut Builder<'_>, symbol: Symbol| {
+            let data =
+                InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) };
+            build.value(data, Type::PTR)
+        };
+        let mut build = Builder::new(&mut chooser, entry);
+        build.call(init, sig, &[]);
+        let mut chosen = None;
+        for &(name, test) in built.iter().rev() {
+            let here = address(&mut build, name);
+            let Some((object, word, bit)) = test else {
+                chosen = Some(here);
+                continue;
+            };
+            let base = address(&mut build, object);
+            let amount = build.iconst(Type::int(64), i128::from(word) * 4);
+            let args = build.func().push_values(&[base, amount]);
+            let at = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+            let int = Type::int(32);
+            let loaded = build.load(int, at, body::untyped(4), rucc_ir::Flags::NONE);
+            let mask = build.iconst(int, i128::from(1u32 << bit));
+            let masked = build.binary(Opcode::And, loaded, mask, rucc_ir::Flags::NONE);
+            let zero = build.iconst(int, 0);
+            let set = build.icmp(rucc_ir::IntPred::Ne, masked, zero);
+            chosen = Some(match chosen {
+                Some(so_far) => build.select(set, here, so_far),
+                None => here,
+            });
+        }
+        let chosen = chosen.expect("a cloned function has a default version");
+        build.ret(&[chosen]);
+        self.place_func(chooser);
+        let name = func.name;
+        let alias = Alias {
+            name,
+            target: resolver,
+            kind: AliasKind::IFunc,
+            linkage,
+            visibility: func.visibility,
+        };
+        match self.module.lookup(name) {
+            None => {
+                self.module.add_alias(alias);
+            }
+            Some(SymbolRef::Func(id)) if self.module[id].is_declaration() => {
+                self.module.add_alias_over(alias);
+            }
+            Some(_) => {}
+        }
     }
 
     /// Puts a function in the module under a name something may already be under.
