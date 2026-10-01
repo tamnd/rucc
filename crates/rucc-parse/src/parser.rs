@@ -102,6 +102,14 @@ pub struct Parser<'a> {
     pub(crate) comments: Vec<crate::Comment>,
     /// The `#pragma GCC diagnostic` lines read so far, which is in `diagnostic.rs`.
     pub(crate) diagnostic_pragmas: Vec<(BytePos, DiagnosticPragma)>,
+    /// How many `__extension__` keywords are in effect where the cursor is.
+    ///
+    /// gcc reads the keyword as a promise that what follows uses an extension on purpose, and
+    /// while it is in effect `-pedantic` says nothing about what the dialect lacks. That matters
+    /// for `long long` more than for anything else: glibc writes `__extension__` in front of every
+    /// declaration of its headers that uses it, so that `-std=c89 -pedantic` is quiet about them.
+    /// A count rather than a flag because the expression form nests.
+    pub(crate) extension: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -124,6 +132,7 @@ impl<'a> Parser<'a> {
             packs: crate::pack::Packs::default(),
             comments: Vec::new(),
             diagnostic_pragmas: Vec::new(),
+            extension: 0,
         }
     }
 
@@ -152,6 +161,23 @@ impl<'a> Parser<'a> {
     pub(crate) fn pedantic(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
         if self.cx.pedantic {
             self.warn(code, message, span);
+        }
+    }
+
+    /// Reports something C90 does not have and C99 does, under `-pedantic` in a C90 dialect and
+    /// with no `__extension__` in effect, which is when gcc's `pedwarn_c90` speaks.
+    ///
+    /// The GNU dialect is no exception. `-std=gnu89 -pedantic` says the same thing about `long
+    /// long` that `-std=c89 -pedantic` does, because the warning is about the standard the code
+    /// is being held to rather than about what gcc will build.
+    pub(crate) fn pedantic_c90(
+        &mut self,
+        code: &'static str,
+        message: impl Into<String>,
+        span: Span,
+    ) {
+        if self.cx.std < Std::C99 && self.extension == 0 {
+            self.pedantic(code, message, span);
         }
     }
 

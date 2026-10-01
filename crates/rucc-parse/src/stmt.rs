@@ -64,10 +64,22 @@ impl Parser<'_> {
     }
 
     /// The items of a block, up to the `}` that closes it.
+    ///
+    /// C90 has the declarations of a block first and its statements after them, and a
+    /// declaration after a statement is something C99 brought in. gcc says so under `-pedantic`
+    /// once per declaration that follows a statement, and a run of declarations after one
+    /// statement is one complaint, at the first of them, which is what this does.
     fn block_items(&mut self) -> StmtList {
         let mut items = Vec::new();
+        let mut after_statement = false;
         while !self.cursor.at_punct(Punct::RBrace) && !self.cursor.is_eof() && !self.stopped() {
             let before = self.cursor.index();
+            let is_decl = !self.at_any_label() && self.starts_declaration();
+            if is_decl && after_statement {
+                let span = self.cursor.span();
+                self.pedantic_c90("E0809", "ISO C90 forbids mixed declarations and code", span);
+            }
+            after_statement = !is_decl;
             let item = self.block_item();
             items.push(item);
             if self.cursor.index() == before {
@@ -280,7 +292,7 @@ impl Parser<'_> {
             if self.cx.std < Std::C99 {
                 self.error(
                     "E0674",
-                    "`for` loop initial declarations are only allowed in C99 or C11 mode"
+                    "'for' loop initial declarations are only allowed in C99 or C11 mode"
                         .to_string(),
                     keyword,
                 );

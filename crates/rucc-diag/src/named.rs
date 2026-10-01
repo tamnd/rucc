@@ -67,6 +67,8 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0790", "designated-init"),
     ("E0794", "attributes"),
     ("E0798", "pragmas"),
+    ("E0808", "long-long"),
+    ("E0809", "declaration-after-statement"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -83,11 +85,13 @@ const OPTIONS: &[(&str, &str)] = &[
 /// added to the table later stays a warning under `-pedantic-errors` until somebody checks.
 const PEDWARNS: &[&str] = &[
     "compare-distinct-pointer-types",
+    "declaration-after-statement",
     "discarded-qualifiers",
     "expansion-to-defined",
     "implicit-int",
     "incompatible-pointer-types",
     "int-conversion",
+    "long-long",
     "pedantic",
     "pointer-arith",
     "pointer-sign",
