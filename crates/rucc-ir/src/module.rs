@@ -406,6 +406,11 @@ pub struct Global {
     pub section: Option<Symbol>,
     /// Its initial image, or `None` if it is only declared here.
     pub init: Option<DataList>,
+    /// Whether the optimizer may take it away once nothing in the module names it, which is a
+    /// `static` object the program wrote and asked nothing about keeping. False for every other
+    /// global, including the ones the compiler made itself, since nothing here knows what each of
+    /// those is for. See `inline::drop_unreferenced` in `rucc-opt`.
+    pub droppable: bool,
 }
 
 impl Global {
@@ -423,6 +428,7 @@ impl Global {
             constant: false,
             section: None,
             init: None,
+            droppable: false,
         }
     }
 

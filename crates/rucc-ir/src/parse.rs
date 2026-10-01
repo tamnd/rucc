@@ -336,6 +336,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                         Some(self.parenthesised(TlsModel::from_name, "a thread-local model")?);
                 }
                 "constant" => global.constant = true,
+                "droppable" => global.droppable = true,
                 "section" => global.section = Some(self.symbol_from_string()?),
                 other => return self.fail(format!("a global has no `{other}`")),
             }

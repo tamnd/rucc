@@ -184,6 +184,29 @@ fn a_static_function_marked_used_stays_with_no_caller() {
     }
 }
 
+/// A `static` table nothing names once the optimizer is done is not emitted either, and nor are
+/// the functions only it pointed at. The kernel's device mapper hands `&dm_dax_ops` to an
+/// `alloc_dax` that is an empty inline stub without DAX, and the functions in the table call a
+/// `dax_get_private` that such a kernel does not define. A table marked `used` stays, and one the
+/// code still reads stays too.
+#[test]
+fn a_static_table_nothing_names_any_more_is_not_emitted() {
+    let source = "struct ops { long (*f)(void *); };\nvoid *get_private(void *);\n\
+                  static long dead(void *d) { return (long)get_private(d); }\n\
+                  static const struct ops my_ops = { .f = dead };\n\
+                  static inline void *alloc(void *p, const struct ops *o) { return (void *)-95L; }\n\
+                  void *keep(void *md) { return alloc(md, &my_ops); }\n\
+                  static int a __attribute__((used)) = 1;\nstatic int b = 2;\n\
+                  int read_b(void) { return b; }\n";
+    for level in &LEVELS[1..] {
+        let asm = emit_of(level, "asm", "table-gone", source);
+        assert!(!asm.contains("get_private"), "the dead table reached {level}:\n{asm}");
+        assert!(!asm.contains("my_ops"), "{level}:\n{asm}");
+        assert!(asm.contains("a:"), "the used one went at {level}:\n{asm}");
+        assert!(asm.contains("b:"), "the read one went at {level}:\n{asm}");
+    }
+}
+
 /// A flag that is only a constant once the caller has been folded still reaches the callee, when
 /// the callee is too large to inline. This is the kernel's `fpu__restore_sig`, whose flag goes
 /// false through `ia32_frame &= 0`, and a call left in the arm it guards is a function a kernel
