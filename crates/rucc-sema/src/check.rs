@@ -333,6 +333,15 @@ pub struct Checker<'a> {
     /// the number does not fit. The kernel's `check_copy_size` puts that answer in an `int` on
     /// purpose, and a warning there is an error under `CONFIG_WERROR`.
     pub(in crate::check) answered_late: rucc_base::hash::Set<ExprId>,
+    /// The declarations with linkage that were made in a block, by name, for as long as no
+    /// declaration at file scope has taken them over.
+    ///
+    /// 6.2.2p2 makes every declaration of a name with external linkage the same function or
+    /// object, and a block going out of scope does not change that. `int tree();` in `main` and
+    /// `int tree(void) { ... }` below it are one function, and the call in `main` has to be
+    /// made to the one the definition settled on, so the name is found here once the block
+    /// that declared it is gone.
+    pub(in crate::check) out_of_sight: rucc_base::hash::Map<Symbol, DeclId>,
 }
 
 impl<'a> Checker<'a> {
@@ -358,6 +367,7 @@ impl<'a> Checker<'a> {
             unevaluated: 0,
             not_taken: 0,
             answered_late: rucc_base::hash::Set::default(),
+            out_of_sight: rucc_base::hash::Map::default(),
         };
         checker.declare_type_names();
         checker
