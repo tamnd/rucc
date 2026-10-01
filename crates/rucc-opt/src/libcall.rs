@@ -2436,6 +2436,7 @@ fn object(
     let mut global = Global::new(symbol, image.len() as u64, 1);
     global.linkage = Linkage::Internal;
     global.constant = true;
+    global.literal = true;
     let range = module.push_bytes(&image);
     global.init = Some(module.push_data(&[Datum::Bytes(range)]));
     module.add_global(global);

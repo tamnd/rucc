@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A string literal on ELF now goes in `.rodata.str1.1`, flagged for the linker to merge, rather than in `.rodata`, which is where gcc puts one. On x86 a literal of 31 bytes or more is aligned to a word and goes in `.rodata.str1.8` (`.rodata.str1.4` on i386) unless optimizing for size, as gcc aligns it. A wide literal and one with a zero inside it stay in `.rodata`.
 - An ELF object now says what made it in `.comment`, as gcc's does, and a listing ends with the `.ident` that puts it there. `-fno-ident` leaves it out, where it used to be taken and ignored. The assembler writes `.ident` into `.comment` the way gas does rather than passing over it.
 - An ELF object now always has `.text`, `.data` and `.bss`, empty or not, as gas makes all three. A file of assembly gets a `.note.GNU-stack` only when it wrote one or `-Wa,--noexecstack` asked, which is also what gas does. Both showed in the kernel's section comparison against gcc.
 - Under `-fno-pic` a constant that holds an address now goes in `.rodata`, as gcc puts it, rather than `.data.rel.ro`. Nothing loads such a file somewhere it does not already know, so there is no loader write for the relro segment to protect.

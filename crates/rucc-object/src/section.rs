@@ -579,6 +579,19 @@ pub enum Place {
     /// it once the DLL the variable turns out to be in is loaded, which is why the section is not
     /// merely read only: the runtime unprotects the page for that one write.
     Pointer,
+    /// A string literal, in the section of them the linker keeps one copy of each string in,
+    /// whichever objects it came from. `.rodata.str1.` and the alignment, which is where gcc puts
+    /// one, flagged `SHF_MERGE` and `SHF_STRINGS` with entries a byte wide.
+    ///
+    /// Only for a literal of one byte characters whose first zero is its last byte. The linker
+    /// reads the section as a run of strings each ended by a zero, so one with a zero inside it
+    /// would be cut in two, and a wide one is entries of a different width, which goes in a
+    /// section of its own name that nothing here writes yet.
+    Strings {
+        /// What it is aligned to, which is in the name because two literals aligned differently
+        /// cannot be in one run the linker merges.
+        align: u64,
+    },
 }
 
 /// What a variable in a section the program named holds, which is the one thing about the section
@@ -626,6 +639,8 @@ impl Place {
     /// Two kinds of variable are left alone. A merged one is a request to the linker for that much
     /// zeroed space rather than an image, so there is no section to split, and one the program put
     /// a name on already has the answer the source gave, which this must not overrule.
+    /// A string literal is left alone too, as gcc leaves it: the linker merges the strings of the
+    /// section they share, and a section per literal would give it nothing to merge them with.
     ///
     /// Here rather than beside either output path, so that the listing `-S` writes and the object
     /// `-c` writes cannot come to disagree about where a variable went.
@@ -646,8 +661,16 @@ impl Place {
             Place::Zero => ".bss",
             Place::Thread { zero: false } => ".tdata",
             Place::Thread { zero: true } => ".tbss",
-            Place::Merged | Place::Named(..) | Place::Pointer => return None,
+            Place::Merged | Place::Named(..) | Place::Pointer | Place::Strings { .. } => {
+                return None;
+            }
         })
+    }
+
+    /// The section a string literal of that alignment goes in.
+    #[must_use]
+    pub fn strings(align: u64) -> String {
+        format!(".rodata.str1.{align}")
     }
 }
 

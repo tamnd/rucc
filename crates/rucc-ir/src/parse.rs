@@ -337,6 +337,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 }
                 "constant" => global.constant = true,
                 "droppable" => global.droppable = true,
+                "literal" => global.literal = true,
                 "section" => global.section = Some(self.symbol_from_string()?),
                 "retain" => global.retain = true,
                 other => return self.fail(format!("a global has no `{other}`")),

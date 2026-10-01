@@ -506,6 +506,11 @@ fn variable(
         // A Windows image has no zeroed half of its thread-local template. Every thread gets a copy
         // of the one `.tls` section, zeros included, which is what gcc writes there too.
         Place::Thread { .. } if format == ObjectFormat::Coff => Place::Thread { zero: false },
+        // A literal the linker can merge with every other copy of the same string, on the one
+        // format that has a section for it. See [`Place::Strings`].
+        Place::ReadOnly if format == ObjectFormat::Elf && global.literal && one_string(&pieces) => {
+            Place::Strings { align: u64::from(global.align) }
+        }
         place => place,
     };
     let size = global.size.max(written);
@@ -514,6 +519,16 @@ fn variable(
     let retain = global.retain && format == ObjectFormat::Elf;
     let align = u64::from(global.align);
     Ok(Variable { name, size, align, place, binding, visibility, retain, pieces })
+}
+
+/// Whether an image is one string of bytes and nothing after it, which is a run of bytes whose
+/// first zero is its last byte. A linker merging strings reads up to the first zero, so one with a
+/// zero inside it would be two strings to the linker and half of it would be lost.
+fn one_string(pieces: &[Piece]) -> bool {
+    match pieces {
+        [Piece::Bytes(bytes)] => bytes.iter().position(|&byte| byte == 0) == Some(bytes.len() - 1),
+        _ => false,
+    }
 }
 
 /// What the linker is told about a name, from the linkage the module gave it.
@@ -693,6 +708,35 @@ mod tests {
         // The low byte first, which is what this machine reads and is a fact about the module
         // rather than about the variable.
         assert_eq!(vars[0].pieces[0].size(), 4);
+    }
+
+    #[test]
+    fn a_literal_goes_where_the_linker_merges_strings_when_it_is_one_string() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut literal = |module: &mut Module, name: &str, bytes: &[u8]| {
+            let range = module.push_bytes(bytes);
+            let id = defined(module, &mut names, name, &[Datum::Bytes(range)]);
+            module[id].size = bytes.len() as u64;
+            module[id].align = 1;
+            module[id].constant = true;
+            module[id].literal = true;
+        };
+        literal(&mut module, "hi", b"hi\0");
+        literal(&mut module, "two", b"a\0b\0");
+        literal(&mut module, "wide", &[b'a', 0, 0, 0, 0, 0, 0, 0]);
+        let places = |format| -> Vec<Place> {
+            let vars = globals(&module, &names, format).expect("three literals").vars;
+            vars.into_iter().map(|var| var.place).collect()
+        };
+        assert_eq!(
+            places(ObjectFormat::Elf),
+            [Place::Strings { align: 1 }, Place::ReadOnly, Place::ReadOnly]
+        );
+        assert_eq!(
+            places(ObjectFormat::MachO),
+            [Place::ReadOnly, Place::ReadOnly, Place::ReadOnly]
+        );
     }
 
     #[test]
