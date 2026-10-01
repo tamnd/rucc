@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- `__func__`, `__FUNCTION__` and `__PRETTY_FUNCTION__` are now a local object `__func__.N` in `.rodata`, as gcc emits them, rather than a string literal in the mergeable `.rodata.str1.1`. On x86-64 the object is aligned as gcc aligns an array of its size. On the defconfig kernel the objects with a `.rodata` under gcc and none under rucc go from 145 to 30.
 - A `static` function that only `cold` functions call now goes in `.text.unlikely` as well, the way gcc's `ipa_propagate_frequency` puts it there. In the kernel that is a helper only `__init` or `__exit` code calls, such as `snd_timer_free_all`. To match gcc on which helpers stay out of line, a call to an `inline` function from a `cold` function is left a call when inlining it would make the code larger, by gcc's `early-inlining-insns` test and its check on the out of line copy. An `inline` callee is now weighed with the constants the call passes and with its `__builtin_constant_p` arms folded, and an address, its scaled index and a compare a branch tests are counted as free, as gcc counts them. On the defconfig kernel the objects whose `.text.unlikely` differs from gcc's go from 55 to 47.
 
 ### Fixed

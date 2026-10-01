@@ -416,6 +416,7 @@ impl Checker<'_> {
         let literal =
             StringLiteral { elements, encoding: Encoding::Plain, remarks: Remarks::default() };
         let id = self.tast.add_string(literal);
+        self.tast.record_function_name(id);
         if let Some(body) = &mut self.body {
             body.func_name[which] = Some(id);
         }

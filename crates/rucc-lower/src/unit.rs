@@ -2360,6 +2360,9 @@ impl Unit<'_> {
         let literal = &self.tast[id];
         let bytes = literal.bytes(self.target);
         let align = literal.encoding.element_width(self.target) / 8;
+        if self.tast.is_function_name(id) {
+            return self.function_name(id, bytes, align);
+        }
         let symbol = self.names.intern(&format!(".Lstr.{}", self.strings.len()));
 
         let mut global = Global::new(symbol, bytes.len() as u64, align.max(1));
@@ -2369,6 +2372,37 @@ impl Unit<'_> {
         // somewhere read-only.
         global.constant = true;
         global.literal = true;
+        let range = self.module.push_bytes(&bytes);
+        global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
+        self.module.add_global(global);
+        self.strings.insert(id, symbol);
+        symbol
+    }
+
+    /// The object `__func__` stands for in one function, which is `static const char __func__[]`
+    /// and not a literal.
+    ///
+    /// gcc emits it as a local `__func__.N` in `.rodata`, so it is never merged with a literal
+    /// spelled the same and is aligned the way gcc aligns any array of its size on x86-64 when
+    /// optimizing: eight bytes for one of at least eight, sixteen for one of at least sixteen, and
+    /// thirty two for one of at least thirty two. The kernel names `__func__` in nearly every
+    /// warning, and its objects have a `.rodata` under gcc for that alone.
+    fn function_name(&mut self, id: StrId, bytes: Vec<u8>, align: u32) -> Symbol {
+        let symbol = self.names.intern(&format!("__func__.{}", self.strings.len()));
+        let size = bytes.len() as u64;
+        let align = if self.target.tuple.arch() == rucc_tuple::Arch::X86_64 {
+            match size {
+                32.. => 32,
+                16.. => 16,
+                8.. => 8,
+                _ => align.max(1),
+            }
+        } else {
+            align.max(1)
+        };
+        let mut global = Global::new(symbol, size, align);
+        global.linkage = IrLinkage::Internal;
+        global.constant = true;
         let range = self.module.push_bytes(&bytes);
         global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
         self.module.add_global(global);
