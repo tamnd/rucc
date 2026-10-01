@@ -25,7 +25,7 @@
 //! assignment, which can still evict and spill after this the way it did before.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use rucc_mir::{Func, Reg};
 use rucc_target::RegClass;
@@ -33,6 +33,7 @@ use rucc_target::RegClass;
 use crate::assign;
 use crate::backtrack;
 use crate::live::{Area, Live};
+use crate::order::Point;
 use crate::pressure::Pressure;
 
 /// One value that could go to memory.
@@ -77,43 +78,56 @@ pub fn choose(func: &Func, live: &Live, pressure: &Pressure) -> Vec<Reg> {
     for (class, mut candidates) in classes {
         candidates.sort_by_key(|candidate| candidate.area.hull().start);
         let over: Vec<_> = pressure.over(class).collect();
-        // The values whose hull has begun by the point being looked at, and which have not gone.
-        let mut open: Vec<usize> = Vec::new();
-        // The values already sent to memory, which the next walk over `open` takes out of it.
+        // The values live at the point being looked at, lightest first, which is the order they
+        // go in. A value goes in when one of its pieces starts and comes out when the piece ends,
+        // so each piece is looked at twice however many points it is live over. This used to ask
+        // every value whose hull had begun whether it covered the point, at every point, and on a
+        // function with many long lived values that was most values at most points.
+        let mut here: BTreeSet<(u128, Reverse<u32>, usize)> = BTreeSet::new();
+        // When each value next goes in or comes out, one at a time, so a value's own changes are
+        // always taken in order.
+        let mut changes: BinaryHeap<Reverse<(Point, usize)>> = (candidates.iter().enumerate())
+            .map(|(one, candidate)| Reverse((candidate.area.hull().start, one)))
+            .collect();
+        // Which piece each value is at, and whether it is in `here` for it yet.
+        let mut at = vec![(0, false); candidates.len()];
+        // The values already sent to memory, which never go back in.
         let mut gone = vec![false; candidates.len()];
-        let mut next = 0;
         for point in over {
-            while next < candidates.len() && candidates[next].area.hull().start <= point {
-                open.push(next);
-                next += 1;
-            }
-            // Values sent to memory earlier often bring a point back under, and then nothing here
-            // reads the list. Clearing out the values that have gone only when something will
-            // read it saves a walk over every open value at every one of those points.
+            // Values sent to memory earlier often bring a point back under, and then the changes
+            // up to it can wait for the next point that is still over.
             if pressure.excess(class, point) == 0 {
                 continue;
             }
-            // The values live here are found once, in the same walk that clears out the ones that
-            // have gone. Sending one to memory changes no other value's area, so the next to go is
-            // always the lightest of those left in this list, and the list is short next to `open`.
-            let mut here = Vec::new();
-            open.retain(|&one| {
+            while let Some(&Reverse((when, one))) = changes.peek() {
+                if when > point {
+                    break;
+                }
+                changes.pop();
+                if gone[one] {
+                    continue;
+                }
                 let candidate = &candidates[one];
-                if gone[one] || candidate.area.hull().end < point {
-                    return false;
+                let key = (candidate.weight, Reverse(candidate.size), one);
+                let (piece, inside) = &mut at[one];
+                let range = candidate.area.piece(*piece);
+                if *inside {
+                    here.remove(&key);
+                    *inside = false;
+                    *piece += 1;
+                    if *piece < candidate.area.count() {
+                        changes.push(Reverse((candidate.area.piece(*piece).start, one)));
+                    }
+                } else {
+                    here.insert(key);
+                    *inside = true;
+                    if let Some(after) = range.end.checked_add(1) {
+                        changes.push(Reverse((after, one)));
+                    }
                 }
-                if candidate.area.covers(point) {
-                    here.push(one);
-                }
-                true
-            });
+            }
             while pressure.excess(class, point) > 0 {
-                let lightest = (0..here.len()).min_by_key(|&at| {
-                    let one = here[at];
-                    (candidates[one].weight, Reverse(candidates[one].size), one)
-                });
-                let Some(at) = lightest else { break };
-                let one = here.swap_remove(at);
+                let Some((_, _, one)) = here.pop_first() else { break };
                 gone[one] = true;
                 pressure.lift(class, candidates[one].area);
                 chosen.push(candidates[one].reg);

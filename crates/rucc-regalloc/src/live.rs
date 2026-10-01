@@ -168,9 +168,14 @@ impl<'a> Area<'a> {
         (0..self.pieces.len()).map(move |piece| self.piece(piece))
     }
 
+    /// How many pieces there are.
+    pub(crate) fn count(self) -> usize {
+        self.pieces.len()
+    }
+
     /// One piece, stretched down over the extra point when that point is the one just in front of
     /// it.
-    fn piece(self, index: usize) -> Range {
+    pub(crate) fn piece(self, index: usize) -> Range {
         let piece = self.pieces[index];
         match self.also {
             Some(also) if also + 1 == piece.start => Range { start: also, end: piece.end },
