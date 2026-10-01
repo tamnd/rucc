@@ -26,7 +26,7 @@
 
 use object::RelocationFlags;
 use object::pe;
-use object::write::Object as Writer;
+use object::write::{Object as Writer, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection};
 use rucc_target::aarch64::Fixup;
 
 use crate::section::Reference;
@@ -278,8 +278,36 @@ pub(crate) const FUNCTIONS: (&str, u64) = (".pdata", 4);
 /// about.
 pub(crate) const CODES: (&str, u64) = (".xdata", 4);
 
-/// Nothing, which is what this format says about the stack being executable.
+/// Nothing about the stack, and on i386 the `@feat.00` that says the file is safe for SafeSEH.
 ///
 /// A PE image says whether its stack may be run from in the header of the image rather than in a
 /// note in every input, so there is no marker for an object to carry and no linker looking for one.
-pub(crate) fn marker(_obj: &mut Writer<'_>) {}
+///
+/// A 32 bit image linked with `/SAFESEH` carries a table of every exception handler in it, and the
+/// linker builds that table from each input's `.sxdata`. It only trusts an input to have told it
+/// about all of its handlers when the input says so, which is bit 0 of the absolute symbol
+/// `@feat.00`, and without it `lld-link /safeseh` and Microsoft's linker refuse the file. Nothing
+/// rucc writes installs a handler, so the list is empty and the claim is true for every file.
+/// clang and MSVC write the same symbol with the same bit. A file that already has one, from an
+/// assembly file that wrote it, keeps its own.
+pub(crate) fn marker(obj: &mut Writer<'_>) {
+    if obj.architecture() != object::Architecture::I386 || obj.symbol_id(FEAT_00).is_some() {
+        return;
+    }
+    obj.add_symbol(Symbol {
+        name: FEAT_00.to_vec(),
+        value: SAFE_SEH,
+        size: 0,
+        kind: SymbolKind::Data,
+        scope: SymbolScope::Compilation,
+        weak: false,
+        section: SymbolSection::Absolute,
+        flags: SymbolFlags::Coff { typ: pe::SymbolType(0), storage_class: pe::IMAGE_SYM_CLASS_STATIC },
+    });
+}
+
+/// The name of the symbol whose value is the list of features a Microsoft object says it has.
+pub(crate) const FEAT_00: &[u8] = b"@feat.00";
+
+/// The bit of `@feat.00` that says every exception handler in the file is listed in `.sxdata`.
+pub(crate) const SAFE_SEH: u64 = 1;
