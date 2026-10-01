@@ -739,8 +739,7 @@ impl Builtin {
             (BuiltinSet::SIGNED, "signed"),
             (BuiltinSet::UNSIGNED, "unsigned"),
         ];
-        let &(_, word) =
-            changing.iter().find(|(word, _)| set.has(*word) && !takes.has(*word))?;
+        let &(_, word) = changing.iter().find(|(word, _)| set.has(*word) && !takes.has(*word))?;
         if ty == BuiltinSet::INT128 {
             return Some((spelled, word));
         }
