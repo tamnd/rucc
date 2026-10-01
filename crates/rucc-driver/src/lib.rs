@@ -3344,6 +3344,12 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         // GCC plugin, so the answer is the bare word, which is what GCC prints for a file it does
         // not have, and nothing a search directory holds is allowed to change that.
         Query::FileName(name) if name == "plugin" => name.clone(),
+        // GCC answers `include` with the directory its own `<stdarg.h>` and the rest are in, and a
+        // kernel before 5.15 passes that to `-isystem` after `-nostdinc`. Ours are in the binary,
+        // so they are written out to the cache for this, and the bare word is the answer only
+        // when the cache cannot be written, as GCC's is for a file it does not have.
+        Query::FileName(name) if name == "include" => runtime::materialized(&cache::dir())
+            .map_or_else(|_| name.clone(), |dir| dir.display().to_string()),
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
