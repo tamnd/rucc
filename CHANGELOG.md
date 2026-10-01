@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.8
+
+A patch release that gets the release gate passing again, and the first one with i686 Windows. Under `-fsafety`, a program that defines its own `memcpy`, `memset` or `memmove` keeps its calls to them, so the bytes they copy are marked as written and are no longer reported as a violation. C now compiles to i386 COFF for `i686-w64-windows-gnu` and `i686-pc-windows-msvc`, with `__stdcall` and `__fastcall`, and dead store elimination no longer gives a 32-bit target a 64-bit offset.
+
 ### Added
 
 - `--target=i686-w64-windows-gnu` and `--target=i686-pc-windows-msvc` compile C to i386 COFF objects that link with i686-w64-mingw32-gcc and run (#2247). Calls are cdecl, a C name gets the leading underscore, a structure of 1, 2, 4 or 8 bytes comes back in registers (a lone `float` or `double` one too under MSVC), a large frame calls `___chkstk_ms` or `__chkstk`, and the preprocessor defines `_X86_` and `_M_IX86` the way gcc and MSVC do. Test programs covering structure returns, varargs, `qsort`, `setjmp`, VLAs, 64-bit arithmetic and math print the same under wine as when built with mingw gcc, at -O0, -O1 and -O2.
