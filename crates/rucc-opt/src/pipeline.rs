@@ -42,7 +42,9 @@ use rucc_session::OptLevel;
 use rucc_target::{Isa, TargetInfo};
 
 use crate::{
-    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse, extents, heap, image, inline, ipasra, ipcp, libcall, load, loop_idiom, modref, nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa,
+    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse,
+    extents, heap, image, inline, ipasra, ipcp, libcall, load, loop_idiom, modref, nofree, number,
+    objsize, outside, params, pass, purity, readonly, reload, sroa,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
