@@ -326,6 +326,14 @@ pub fn pads(
             }
         }
     }
+    // And every label an image points at, such as the kernel's BPF interpreter's table of
+    // `&&label` in a static array, which a `goto *` arrives at without any instruction in the
+    // function naming it.
+    for &(named, _) in &func.labels {
+        if !addressed.contains(&named) {
+            addressed.push(named);
+        }
+    }
     for &block in &addressed {
         let inst = func.build_loose(opcode).finish();
         func.prepend_inst(block, inst);
@@ -670,6 +678,22 @@ mod tests {
         // where the address goes.
         assert_eq!(pads(&mut func, &FRAME, FRAME.landing, &mut names), 1);
         assert_eq!(opens(&func, &names), ["x64.lea_64", "x64.endbr64"]);
+    }
+
+    #[test]
+    fn a_label_only_an_image_points_at_gets_a_landing_pad() {
+        let (mut names, mut func) = computed(1, 0);
+        let (head, label) = {
+            let mut blocks = func.blocks();
+            (blocks.next().expect("a head"), blocks.next().expect("a label"))
+        };
+        // The image names the head too, which no instruction does, and the label once more, which
+        // is still one pad.
+        let name = names.intern("f.label");
+        func.labels.push((head, name));
+        func.labels.push((label, name));
+        assert_eq!(pads(&mut func, &FRAME, FRAME.landing, &mut names), 2);
+        assert_eq!(opens(&func, &names), ["x64.endbr64", "x64.endbr64"]);
     }
 
     #[test]

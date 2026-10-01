@@ -13,6 +13,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Choosing which values go to memory before registers are handed out sweeps the pieces of the values once rather than asking every value in flight whether it covers each point where pressure is too high, which takes about 1.5% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2579).
 
+### Fixed
+
+- With `-fcf-protection=branch`, a label whose address only a static table holds now starts with `endbr64`, as in gcc. The kernel's BPF interpreter jumps through such a table, and objtool warned about each of its 253 entries. The defconfig build is down from 259 objtool warnings to 3.
+
 ## 0.18.6
 
 A patch release on the way to building the Linux kernel. It adds gcov coverage: `-fprofile-arcs` counts the arcs of every function and `-ftest-coverage` writes the `.gcno` file gcov 13 and later read, which is what the kernel's `GCOV_PROFILE` builds kernel/trace with in `allmodconfig`. The reports gcov gives for a program built with rucc match gcc's line for line on the programs it was checked with. It also has the rest of the fixes from the `allmodconfig` sweep, `.comment` and `.ident` written as gas writes them, and string literals put where the linker merges strings.
