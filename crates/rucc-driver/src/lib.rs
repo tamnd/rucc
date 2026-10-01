@@ -2817,6 +2817,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // the last `--target=`.
     let assembler = assembler_words(&asm_words, opts.target)?;
     opts.asm_fatal_warnings = assembler.fatal_warnings;
+    opts.asm_noexecstack = assembler.noexecstack;
     // gcc's `finish_options`, read as a table. An executable is what nothing at all means, and
     // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
     // independent. A library needs `-fpic` and no `-fpie` after it, and anything else that said
@@ -4377,6 +4378,8 @@ struct Assembler {
     version: bool,
     /// `--fatal-warnings`, which makes the assembler's one warning an error.
     fatal_warnings: bool,
+    /// `--noexecstack`, which marks the stack of a file of assembly as not executable.
+    noexecstack: bool,
 }
 
 /// The words of every `-Wa,` and `-Xassembler`, each one honored, taken because it describes what
@@ -4399,11 +4402,10 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
         match word.as_str() {
             "--version" => out.version = true,
             "--fatal-warnings" => out.fatal_warnings = true,
-            // Every ELF object this compiler writes, from C or from assembly, carries an empty
-            // `.note.GNU-stack` with no flags on it, which is the marker that says the stack is not
-            // executable. Mach-O and COFF have no marker and a stack that is not executable unless
-            // the link says otherwise, so on those it is true as well.
-            "--noexecstack" => {}
+            // The marker that says the stack is not executable, for a file of assembly that did not
+            // write one. An object compiled from C has it anyway. Mach-O and COFF have no marker
+            // and a stack that is not executable unless the link says otherwise.
+            "--noexecstack" => out.noexecstack = true,
             // The note gas writes on x86 with the instruction sets and features a file used. This
             // compiler never writes it, so asking for it not to be written asks for what happens.
             "-mx86-used-note=no" if x86 => {}

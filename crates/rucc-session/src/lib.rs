@@ -2503,6 +2503,9 @@ pub struct Options {
     /// Whether `-Wa,--fatal-warnings` was given, which makes the assembler's one warning, the
     /// `.warning` directive, an error the way it is in gas.
     pub asm_fatal_warnings: bool,
+    /// Whether `-Wa,--noexecstack` was given, which gives a file of assembly the marker that says
+    /// its stack is not executable when it did not write one itself.
+    pub asm_noexecstack: bool,
     /// The MSVC release claimed on an MSVC row, from `-fms-compatibility-version=`.
     pub msc: MscVersion,
     /// Whether an MSVC row is built against the C runtime in a DLL, which is
@@ -2758,6 +2761,7 @@ impl Options {
             gnuc_given: false,
             gnu_as: GasVersion::default(),
             asm_fatal_warnings: false,
+            asm_noexecstack: false,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
             hosted: true,

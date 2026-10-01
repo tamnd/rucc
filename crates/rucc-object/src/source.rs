@@ -792,13 +792,8 @@ pub fn assembled_described(
         }
     }
 
-    // The same marker every other object this compiler writes gets, and for the same reason: a
-    // linker that does not find it in every input marks the stack executable. Not a second one if
-    // the file already said it, which a file written by hand for a linker that cares often does,
-    // and nothing at all on a format whose answer to the question is in the finished image.
-    if !input.parts.iter().any(|part| part.name == ".note.GNU-stack") {
-        flavour.marker(&mut obj);
-    }
+    // No marker of its own. A file of assembly has the stack it says it has, which is the
+    // `.note.GNU-stack` it wrote or the one `--noexecstack` had the reader add, as with gas.
 
     let mut bytes = obj.write().map_err(|why| Error::Refused { why: why.to_string() })?;
     if flavour == Flavour::Elf {
@@ -1299,9 +1294,9 @@ mod tests {
     }
 
     #[test]
-    fn the_stack_is_marked_once_whoever_asked_for_it() {
-        // A linker that does not find this marker in every input marks the stack executable, and a
-        // file written by hand for one that cares often says it itself.
+    fn the_stack_is_marked_only_by_the_file_and_only_once() {
+        // gas adds no marker the file did not write unless `--noexecstack` asks, and that is the
+        // reader's to do, so a file of parts gets exactly the ones it has.
         let bare = Assembled {
             parts: vec![part(".text", vec![0x90])],
             names: Vec::new(),
@@ -1309,7 +1304,7 @@ mod tests {
         };
         let bytes = assembled(&bare, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
-        assert!(file.section_by_name(".note.GNU-stack").is_some(), "the marker was left out");
+        assert!(file.section_by_name(".note.GNU-stack").is_none(), "a marker nobody wrote");
 
         let said = Assembled {
             parts: vec![part(".text", vec![0x90]), part(".note.GNU-stack", Vec::new())],
