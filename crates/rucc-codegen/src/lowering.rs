@@ -308,7 +308,7 @@ impl Step {
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func, conv),
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
-            Self::Bytes => expand::bytes(func),
+            Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func),
             Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func, conv.word),
@@ -545,7 +545,7 @@ mod tests {
         Builder, Extra, Flags, Float, Func, InstData, MemInfo, MemOrder, Opcode, Restrict,
         Signature, Type, Value,
     };
-    use rucc_target::x86_64;
+    use rucc_target::{aarch64, x86_64};
 
     use super::{Goal, Lowerings, Ran, Step, group};
 
@@ -644,17 +644,36 @@ mod tests {
 
     /// `unsigned b(unsigned x) { return __builtin_bswap32(x); }`, which is one of the constructs
     /// in the list and therefore one the group owes an answer for.
+    ///
+    /// On AArch64, which has no rule for one yet, so the group builds it out of shifts and masks.
     #[test]
     fn a_byte_reversal_does_not_survive_the_group() {
         let (mut names, mut func) = one(&[i32()], &[i32()], |build, args| {
             let swapped = build.unary(Opcode::Bswap, args[0], i32());
             build.ret(&[swapped]);
         });
-        let ran = run(&mut func, &mut names);
+        let ran = group(&mut func, &mut names, &aarch64::AAPCS64, (Goal::Speed, None, true), true);
         let did = ran.of(Step::Bytes);
         assert_eq!(did.found, 1);
         assert_eq!(did.left, 0);
         assert!(did.after > did.before, "one instruction became several");
+    }
+
+    /// The same function on x86-64, where a byte reversal at every width is one instruction a rule
+    /// selects, so the group leaves it for the rule and the function is the size it was.
+    #[test]
+    fn a_byte_reversal_the_machine_has_is_left_for_its_rule() {
+        for bits in [16, 32, 64] {
+            let ty = Type::int(bits);
+            let (mut names, mut func) = one(&[ty], &[ty], |build, args| {
+                let swapped = build.unary(Opcode::Bswap, args[0], ty);
+                build.ret(&[swapped]);
+            });
+            let ran = run(&mut func, &mut names);
+            let did = ran.of(Step::Bytes);
+            assert_eq!((did.found, did.left), (1, 1), "at {bits} bits");
+            assert_eq!(did.after, did.before, "at {bits} bits");
+        }
     }
 
     /// `int c(unsigned x) { return __builtin_popcount(x); }`.
@@ -715,7 +734,13 @@ mod tests {
             let Some((mut names, mut func)) = holding(*step) else {
                 continue;
             };
-            let ran = run(&mut func, &mut names);
+            // A byte reversal is the one construct here x86-64 has an instruction for, so it is
+            // asked of a machine that does not.
+            let ran = if *step == Step::Bytes {
+                group(&mut func, &mut names, &aarch64::AAPCS64, (Goal::Speed, None, true), true)
+            } else {
+                run(&mut func, &mut names)
+            };
             let did = ran.of(*step);
             assert_eq!(did.found, 1, "{}: the construct was not built", step.name());
             assert_eq!(did.left, 0, "{}: the construct survived the group", step.name());
@@ -798,22 +823,22 @@ mod tests {
     #[test]
     fn a_run_that_did_not_ask_for_the_dump_still_lowers_and_counts_nothing() {
         let build = |build: &mut Builder<'_>, args: &[Value]| {
-            let swapped = build.unary(Opcode::Bswap, args[0], i32());
-            build.ret(&[swapped]);
+            let ones = build.unary(Opcode::Ctpop, args[0], i32());
+            build.ret(&[ones]);
         };
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
         let quiet = group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true), false);
         assert!(quiet.did.is_empty(), "nothing was counted");
-        assert_eq!(super::tally(&func, Step::Bytes), (super::tally(&func, Step::Bytes).0, 0));
+        assert_eq!(super::tally(&func, Step::Counts), (super::tally(&func, Step::Counts).0, 0));
 
         // The same function through the counting path comes out the same size, so what the flag
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
         let loud = group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true), true);
-        assert_eq!(loud.of(Step::Bytes).left, 0);
+        assert_eq!(loud.of(Step::Counts).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,
-            super::tally(&func, Step::Bytes).0
+            super::tally(&func, Step::Counts).0
         );
     }
 
@@ -834,8 +859,8 @@ mod tests {
         // A dump listing only the steps that fired cannot tell a step that found nothing from a
         // step somebody forgot to put in the group, which is the one thing it is read for.
         let (mut names, mut func) = one(&[i32()], &[i32()], |build, args| {
-            let swapped = build.unary(Opcode::Bswap, args[0], i32());
-            build.ret(&[swapped]);
+            let ones = build.unary(Opcode::Ctpop, args[0], i32());
+            build.ret(&[ones]);
         });
         let ran = run(&mut func, &mut names);
         let text = ran.render("f");

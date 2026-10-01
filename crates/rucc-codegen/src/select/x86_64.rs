@@ -389,7 +389,6 @@ mod tests {
     /// its test of `"m"` operands do.
     const TEMPLATED: &[&str] = &[
         "rol_ri_8",
-        "rol_ri_16",
         "rol_ri_32",
         "rol_ri_64",
         "rol_rcl_8",
@@ -529,25 +528,18 @@ mod tests {
         "tzcnt_32", "tzcnt_64",
     ];
 
-    /// The instruction that turns a register round, which a template asks for and nothing else does.
+    /// The byte reversal a template asks for and nothing else does.
     ///
-    /// The list above, one step simpler. A search is unselected because what it does with a source
-    /// of zero is not the same on every processor, so a rule that chose one would depend on what ran
-    /// it. A byte reversal has no such case: it means exactly one thing everywhere. What keeps it
-    /// off the rule set is a choice made once, in [`crate::expand`], which builds a reversal out of
-    /// shifts and masks so that the answer is the same on every target this compiler has rather than
-    /// good on the one that happens to have the instruction. tamnd/rucc#310 is where that trade is
-    /// written down, and the day a target grows its own reversal is the day to reopen it.
+    /// The two `bswap` forms used to be here too, when a reversal was built out of shifts and masks
+    /// on every target so the answer was the same everywhere. They are selected now, and a sixteen
+    /// bit reversal is a rotate by eight, which is what gcc writes and leaves this one to templates.
     ///
-    /// So the only thing that reaches one is a program that wrote the name in a template, which is
-    /// what libgmp does in `gmp-impl.h` to put a limb the other way round.
-    ///
-    /// The third is the same thing at a width `bswap` does not reach. Turning a sixteen bit number
-    /// round is exchanging its two bytes with each other, and this machine says that by naming the
-    /// high byte of a register, which only the first four registers have. femtolisp writes one in
+    /// It is the same thing at a width `bswap` does not reach. Turning a sixteen bit number round is
+    /// exchanging its two bytes with each other, and this machine says that by naming the high byte
+    /// of a register, which only the first four registers have. femtolisp writes one in
     /// `llt/utils.h`, which is how a C library older than `__builtin_bswap16` said it, and that
     /// header is the one every other file of the library includes.
-    const SWAP: &[&str] = &["bswap_32", "bswap_64", "xchg_high_16"];
+    const SWAP: &[&str] = &["xchg_high_16"];
 
     /// The jump out of the function a template may end with, which a template asks for and nothing
     /// else could.
@@ -1200,7 +1192,11 @@ mod tests {
         }
         for &(opcode, form) in x86_64::INSTS {
             if matches!(form, x86_64::Form::Swap | x86_64::Form::SwapHalves) {
-                assert!(SWAP.contains(&opcode), "{opcode} is a reversal and is not on the list");
+                let selected = written.contains(&format!("{PREFIX}{opcode}").as_str());
+                assert!(
+                    SWAP.contains(&opcode) || selected,
+                    "{opcode} is a reversal no rule selects and is not on the list"
+                );
             }
         }
     }

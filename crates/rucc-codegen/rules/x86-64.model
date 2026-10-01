@@ -180,6 +180,16 @@
 (semantics (x64.not_r_32 v) (bvnot v))
 (semantics (x64.not_r_64 v) (bvnot v))
 
+;; The byte reversals. `bswap` has a thirty two and a sixty four bit form and no sixteen bit
+;; one, and a sixteen bit number turned round is the same as one rotated by eight, which is
+;; what gcc writes. A rotate masks its count to five bits and then takes it modulo the width,
+;; and a shift by the whole width is zero, so a count of zero is the value itself.
+(semantics (x64.bswap_32 v) (concat (extract 7 0 v) (concat (extract 15 8 v) (concat (extract 23 16 v) (extract 31 24 v)))))
+(semantics (x64.bswap_64 v) (concat (extract 7 0 v) (concat (extract 15 8 v) (concat (extract 23 16 v) (concat (extract 31 24 v) (concat (extract 39 32 v) (concat (extract 47 40 v) (concat (extract 55 48 v) (extract 63 56 v)))))))))
+(semantics (x64.rol_ri_16 l r)
+           (bvor (bvshl l (bvurem (bvand r 31) 16))
+                 (bvlshr l (bvsub 16 (bvurem (bvand r 31) 16)))))
+
 ;; Division. Both quotient and remainder come out of one instruction, and which of the two
 ;; a rule wants is which register it reads afterwards, so they are two heads here.
 (semantics (x64.idiv_quo_8 l r) (bvsdiv l r))

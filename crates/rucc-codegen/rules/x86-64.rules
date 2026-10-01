@@ -387,6 +387,20 @@
       (x64.not_r_64 x)
       (spec (= (bvxor x -1) (result))))
 
+;; Byte reversals. Two widths are `bswap` and the sixteen bit one is a rotate by eight, which
+;; is the same answer and the instruction gcc writes for it.
+(rule (lower (bswap.i16 (value.i16 x)))
+      (x64.rol_ri_16 x 8)
+      (spec (= (concat (extract 7 0 x) (extract 15 8 x)) (result))))
+
+(rule (lower (bswap.i32 (value.i32 x)))
+      (x64.bswap_32 x)
+      (spec (= (concat (extract 7 0 x) (concat (extract 15 8 x) (concat (extract 23 16 x) (extract 31 24 x)))) (result))))
+
+(rule (lower (bswap.i64 (value.i64 x)))
+      (x64.bswap_64 x)
+      (spec (= (concat (extract 7 0 x) (concat (extract 15 8 x) (concat (extract 23 16 x) (concat (extract 31 24 x) (concat (extract 39 32 x) (concat (extract 47 40 x) (concat (extract 55 48 x) (extract 63 56 x)))))))) (result))))
+
 ;; Division and remainder.
 
 (rule (lower (sdiv.i32 (value.i32 x) (value.i32 y)))

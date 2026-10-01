@@ -205,6 +205,13 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
     ("sub.i64x2", "the same", "tamnd/rucc#2320"),
     ("xor.i32x4", "the same", "tamnd/rucc#2320"),
     ("xor.i64x2", "the same", "tamnd/rucc#2320"),
+    (
+        "bswap.i16",
+        "a byte swap, which `expand::bytes` writes out as shifts and masks before selection",
+        "tamnd/rucc#307",
+    ),
+    ("bswap.i32", "the same", "tamnd/rucc#307"),
+    ("bswap.i64", "the same", "tamnd/rucc#307"),
 ];
 
 /// [`NAMES`] for `i386.rules`.
@@ -223,6 +230,7 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ),
     ("and.i64", "the same", "tamnd/rucc#2247"),
     ("ashr.i64", "the same", "tamnd/rucc#2247"),
+    ("bswap.i64", "the same", "tamnd/rucc#2247"),
     ("fptosi.f32.i64", "the same", "tamnd/rucc#2247"),
     ("fptosi.f64.i64", "the same", "tamnd/rucc#2247"),
     ("iconst.i64", "the same", "tamnd/rucc#2247"),
