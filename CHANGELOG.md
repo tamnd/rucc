@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An object of no bytes, such as an empty struct or a zero length array, now goes in `.bss` as with gcc rather than in `.data`. The kernel's `static struct lock_class_key __key` is one with lockdep off, and in `.data` it shared an address with `smp_ops`, so modpost reported section mismatches against `__key`.
 - A function that is only declared but marked hidden or protected, including under `#pragma GCC visibility push(hidden)`, is now reached directly under `-fPIE` rather than through the global offset table. The kernel's compressed loader asserts it has no `.got` and failed to link.
 
 ## 0.18.5
