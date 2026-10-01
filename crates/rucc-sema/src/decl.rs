@@ -451,6 +451,11 @@ impl DeclFlags {
     /// Merged the way [`Self::NO_STRICT_ALIASING`] is.
     pub const OPTIMIZE_NONE: Self = Self(1 << 30);
 
+    /// `__attribute__((no_profile_instrument_function))` was written, which keeps the arc counters
+    /// of `-fprofile-arcs` out of the function. The kernel's `noinstr` says it on code that runs
+    /// before the counters can be written to. Merged the way [`Self::NO_INSTRUMENT`] is.
+    pub const NO_PROFILE: Self = Self(1 << 31);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

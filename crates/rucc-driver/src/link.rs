@@ -90,6 +90,9 @@ use rucc_tuple::TargetTuple;
 /// on a `-c` line is a note rather than an error.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LinkOptions {
+    /// Whether gcc's `libgcov` goes on the line, from `-fprofile-arcs`, for the `__gcov_init` the
+    /// objects built with it call.
+    pub gcov: bool,
     /// `-fuse-ld=<name>`, which names a linker rather than a path to one.
     pub use_ld: Option<String>,
     /// `-L<dir>`, in order, because the linker takes the first library it finds.
@@ -1620,6 +1623,9 @@ fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -
             args.push(path.display().to_string());
         }
         if has_gcc {
+            if opts.gcov && find_file(runtime, "libgcov.a").is_some() {
+                args.push("-lgcov".to_owned());
+            }
             args.push("-lgcc".to_owned());
             if opts.is_static {
                 args.push("-lgcc_eh".to_owned());

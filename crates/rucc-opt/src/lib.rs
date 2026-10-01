@@ -108,6 +108,7 @@ pub mod cfg;
 pub mod coalesce;
 pub mod constant_p;
 pub(crate) mod copy;
+pub mod coverage;
 pub mod dce;
 pub mod dead_plane;
 pub mod discharge;

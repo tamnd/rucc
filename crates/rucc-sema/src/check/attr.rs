@@ -1487,6 +1487,7 @@ impl Checker<'_> {
                 "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
                 "noinline" => flags |= DeclFlags::NOINLINE,
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
+                "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
                 "uninitialized" => flags |= DeclFlags::UNINITIALIZED,

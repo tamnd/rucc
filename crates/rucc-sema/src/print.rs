@@ -193,6 +193,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_INSTRUMENT) {
             head.push_str(" no_instrument_function");
         }
+        if node.flags.contains(DeclFlags::NO_PROFILE) {
+            head.push_str(" no_profile_instrument_function");
+        }
         if node.flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
             head.push_str(" no_stack_protector");
         }

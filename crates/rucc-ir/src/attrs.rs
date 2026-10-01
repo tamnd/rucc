@@ -224,6 +224,9 @@ impl AttrSet {
     /// goes in a section of its own marked `SHF_GNU_RETAIN`, which `--gc-sections` does not take
     /// away. Only ELF has the flag, so nothing else reads this.
     pub const RETAIN: Self = Self(1 << 28);
+    /// No arc counters go in the function under `-fprofile-arcs`, from
+    /// `__attribute__((no_profile_instrument_function))`.
+    pub const NO_PROFILE: Self = Self(1 << 29);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -340,6 +343,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::INTERRUPT, "interrupt"),
     (AttrSet::SAVES_ALL, "saves_all"),
     (AttrSet::RETAIN, "retain"),
+    (AttrSet::NO_PROFILE, "no_profile"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

@@ -329,6 +329,11 @@ pub struct Job {
     /// working directory, and `a.c` linked into `out/prog` writes `out/prog-a.su`. The rest of the
     /// rules are on `aux_base` in this file.
     pub stack_usage: Option<String>,
+    /// Where the instrumented program writes its arc counts, from `-fprofile-arcs`, or `None`.
+    ///
+    /// The same auxiliary base as `stack_usage` with `.gcda` on the end, as the path is written
+    /// into the object; the driver makes it absolute before the compile sees it.
+    pub counts: Option<String>,
 }
 
 impl Job {
@@ -735,6 +740,7 @@ impl Plan {
                     output: Output::File(input.path.clone()),
                     aux_base: None,
                     stack_usage: None,
+                    counts: None,
                 });
                 continue;
             }
@@ -757,6 +763,7 @@ impl Plan {
                     output: Output::File(input.path.clone()),
                     aux_base: None,
                     stack_usage: None,
+                    counts: None,
                 });
                 continue;
             };
@@ -843,6 +850,15 @@ impl Plan {
                 let named = output.filter(|o| *o != "-");
                 format!("{}.su", aux_base(opts, &input.path, named, collecting || syntax, alone))
             });
+            let counts = (opts.profile_data.arcs
+                && backed
+                && !syntax
+                && kind != InputKind::Ir
+                && phases.contains(&Phase::Compile))
+            .then(|| {
+                let named = output.filter(|o| *o != "-");
+                format!("{}.gcda", aux_base(opts, &input.path, named, collecting, alone))
+            });
             jobs.push(Job {
                 input: input.path.clone(),
                 kind,
@@ -850,6 +866,7 @@ impl Plan {
                 output: out,
                 aux_base: aux,
                 stack_usage,
+                counts,
             });
         }
 

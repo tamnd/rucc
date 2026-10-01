@@ -61,11 +61,11 @@ const TAKEN: [&str; 20] = [
 ];
 
 /// Every spelling that is refused, with the word the refusal has to contain. The first five ask
-/// for an instrumented program and the last writes a file beside the object.
-const REFUSED: [(&str, &str); 7] = [
+/// for an instrumented program and the last writes a file beside the object. `-fprofile-arcs` is
+/// not here because it is done, see `arc_counters.rs`.
+const REFUSED: [(&str, &str); 6] = [
     ("-fprofile-generate", "instrument"),
     ("-fprofile-generate=counts", "instrument"),
-    ("-fprofile-arcs", "instrument"),
     ("--coverage", "instrument"),
     ("-fcondition-coverage", "instrument"),
     ("-fpath-coverage", "instrument"),

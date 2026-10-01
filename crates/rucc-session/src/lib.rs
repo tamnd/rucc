@@ -726,11 +726,10 @@ pub struct Lto {
 /// two rather than being taken or refused as a whole. The half recorded here is the half that only
 /// costs speed when it is ignored: a build that asks to read a profile and is not read one gets the
 /// program it would have got anyway, which is what section 4.1 means by a hint about speed. The
-/// other half writes files, and that half is refused by the driver rather than landing here, on the
-/// same reading `-gsplit-dwarf` gets: a program instrumented by `-fprofile-generate` writes a
-/// `.gcda` when it runs and `-ftest-coverage` writes a `.gcno` beside the object, and ignoring
-/// either means a build waits for a file that never arrives and then quietly optimizes against no
-/// counts at all.
+/// other half writes files. `-fprofile-arcs` is done, as [`Profile::arcs`], and the rest of that half
+/// is refused by the driver rather than landing here, on the same reading `-gsplit-dwarf` gets:
+/// `-ftest-coverage` writes a `.gcno` beside the object, and ignoring it means a build waits for a
+/// file that never arrives.
 ///
 /// gcc's own measurement is the argument for the split. `-fprofile-use` on a file with no counts
 /// beside it produces an object byte for byte identical to the one no flag produces, and warns; the
@@ -760,6 +759,12 @@ pub struct Profile {
     /// Whether the parts of the program the training run never reached are optimized as if they
     /// were cold rather than as if nothing were known about them, from `-fprofile-partial-training`.
     pub partial_training: bool,
+    /// Whether every function gets arc counters and the unit a record registering them, from
+    /// `-fprofile-arcs`. See `rucc_opt::coverage`.
+    pub arcs: bool,
+    /// The `.gcda` file the counters of this unit are written to, which the driver fills in for
+    /// each job from the object's name, the working directory and `-fprofile-dir=`.
+    pub counts: Option<String>,
 }
 
 /// Which functions get a stack protector, which is what the `-fstack-protector` family asks.
