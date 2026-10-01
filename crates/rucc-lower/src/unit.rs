@@ -252,6 +252,14 @@ pub struct Context<'a> {
     /// is decided here, as one `alloca` for all of them, which is a thing every pass after it
     /// already reads correctly. The rules are on `Body::declare`.
     pub share: bool,
+    /// Whether a structure passed by value in the argument area may be used where the caller left
+    /// it rather than copied into a slot of its own, which is everywhere but a build with the
+    /// safety instrumentation.
+    ///
+    /// The instrumentation knows an object by the memory the function or its caller made for it,
+    /// and the bytes the caller put in the argument area are not an object it made, so a build
+    /// with it keeps the copy and checks the slot the body works on. See `Body::in_place`.
+    pub in_place: bool,
     /// Whether `x18` is kept for something else on AArch64, which is `-ffixed-x18`.
     ///
     /// The kernel keeps its shadow call stack there. Nothing here ever hands `x18` to a value, so
@@ -289,6 +297,7 @@ impl fmt::Debug for Context<'_> {
             .field("no_builtin", &self.no_builtin)
             .field("auto_init", &self.auto_init)
             .field("share", &self.share)
+            .field("in_place", &self.in_place)
             .field("fixed_x18", &self.fixed_x18)
             .finish_non_exhaustive()
     }
@@ -363,6 +372,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         no_builtin,
         auto_init,
         share,
+        in_place,
         fixed_x18,
         read,
     } = cx;
@@ -391,6 +401,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         no_builtin,
         auto_init,
         share,
+        in_place,
         fixed_x18,
         read,
         module,
@@ -457,6 +468,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) auto_init: AutoInit,
     /// Whether locals in blocks that never overlap may share a slot. See [`Context::share`].
     pub(crate) share: bool,
+    /// Whether a parameter may be used where the caller left it. See [`Context::in_place`].
+    pub(crate) in_place: bool,
     /// Whether `x18` is kept for something else. See [`Context::fixed_x18`].
     fixed_x18: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].

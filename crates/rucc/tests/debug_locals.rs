@@ -318,3 +318,36 @@ fn a_block_with_nothing_declared_in_it_is_not_written_down() {
     assert!(holds(&object, ".debug_str", b"plain"), "the function went with them");
     assert!(holds(&object, ".debug_str", b"total"), "a local of the body went with them");
 }
+
+/// A structure the caller passed in the argument area, which the function reads where it arrived.
+///
+/// It has no slot of its own for the frame layout to place, so where it is comes from how far up
+/// the caller's argument area its bytes are. It is the only parameter that went there, so that is
+/// the bottom of the area, which is the call frame address and an offset of nothing from it.
+const PASSED: &str = "\
+typedef struct Spec { long first, second, third, fourth; } Spec;
+long ends(Spec spec) {
+    return spec.first + spec.fourth;
+}
+";
+
+/// The same `DW_OP_fbreg` as [`FBREG`] with the offset written out, which is zero.
+const AT_THE_FRAME_BASE: [u8; 3] = [0x02, 0x91, 0x00];
+
+/// A structure passed by value that is used where the caller left it is still named and placed.
+///
+/// tamnd/rucc#2209 took the copy into a slot of its own away, and the slot was what the debugging
+/// information said the parameter was. Without this a debugger would know the name and not where
+/// to find it.
+#[test]
+fn a_structure_used_where_the_caller_left_it_is_placed_in_the_argument_area() {
+    let dir = fixture("passed", PASSED);
+    let object = build(&dir, &["-g"], "passed.o");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(holds(&object, ".debug_str", b"spec"), "the parameter is not named");
+    assert!(
+        holds(&object, ".debug_info", &AT_THE_FRAME_BASE),
+        "the parameter is not placed at the bottom of the argument area"
+    );
+}

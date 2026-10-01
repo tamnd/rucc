@@ -159,6 +159,7 @@ pub struct Func {
     labels: Vec<(Block, Symbol)>,
     mem_decls: Vec<(Idx<MemInfo>, u32)>,
     value_decls: Vec<(Value, u32)>,
+    param_decls: Vec<(Value, u32)>,
     value_starts: Vec<(Value, Start)>,
     /// The instructions some start in [`Func::value_starts`] is after, so that taking one out only
     /// has to remember where it was when it is one of them.
@@ -224,6 +225,7 @@ impl Func {
             labels: Vec::new(),
             mem_decls: Vec::new(),
             value_decls: Vec::new(),
+            param_decls: Vec::new(),
             value_starts: Vec::new(),
             anchors: Set::default(),
             unplaced: Map::default(),
@@ -1063,6 +1065,34 @@ impl Func {
         self.value_decls[at..]
             .iter()
             .take_while(move |&&(held, _)| held == value)
+            .map(|&(_, decl)| decl)
+    }
+
+    /// Says which declaration in the source lives in the bytes a parameter points at, for a
+    /// parameter that is the address of an object the caller left in the argument area.
+    ///
+    /// The third way a declaration can be somewhere, next to [`Func::declare_mem`] and
+    /// [`Func::declare_value`]. A structure passed by value whose bytes are already in this
+    /// function's argument area is used where it arrived rather than copied into a slot of its
+    /// own, so there is no memory of this function's to put the number on, and the value the
+    /// parameter is would be the wrong thing to name: it is the address of the declaration and
+    /// not the declaration. The back end knows how far up the argument area the bytes are and
+    /// turns the pair into a place in the frame.
+    pub fn declare_param(&mut self, param: Value, decl: u32) {
+        let key = (param.raw(), decl);
+        let found = self.param_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
+        if let Err(at) = found {
+            self.param_decls.insert(at, (param, decl));
+        }
+    }
+
+    /// Every declaration that lives in the bytes a parameter points at, which is none for every
+    /// parameter but the ones [`Func::declare_param`] was told about.
+    pub fn param_decls(&self, param: Value) -> impl Iterator<Item = u32> + '_ {
+        let at = self.param_decls.partition_point(|&(held, _)| held.raw() < param.raw());
+        self.param_decls[at..]
+            .iter()
+            .take_while(move |&&(held, _)| held == param)
             .map(|&(_, decl)| decl)
     }
 
@@ -2258,6 +2288,24 @@ mod tests {
         assert_eq!(of(third), [7]);
         // Memory no declaration asked for, which is what every temporary is.
         assert_eq!(of(second), []);
+    }
+
+    /// A parameter says which declaration lives in the bytes it points at, apart from what it is
+    /// the value of, because the two are different questions about the same value.
+    #[test]
+    fn a_parameter_says_which_declaration_its_bytes_are() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let first = func.append_param(block, Type::PTR);
+        let second = func.append_param(block, Type::PTR);
+
+        func.declare_param(second, 4);
+        func.declare_param(second, 4);
+        func.declare_param(first, 3);
+
+        assert_eq!(func.param_decls(first).collect::<Vec<u32>>(), [3]);
+        assert_eq!(func.param_decls(second).collect::<Vec<u32>>(), [4]);
+        assert_eq!(func.value_decls(second).count(), 0, "the address is not the declaration");
     }
 
     /// A value says which declarations it is the value of, and a rename carries them over.

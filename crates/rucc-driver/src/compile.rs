@@ -459,6 +459,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Some(_) => rucc_lower::AutoInit::Pattern,
                             },
                             share: shares_slots(opts),
+                            in_place: !opts.safety.instruments(),
                             fixed_x18: opts.fixed_x18,
                             read: &mut read,
                         },

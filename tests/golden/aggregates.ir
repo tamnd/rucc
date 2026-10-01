@@ -86,8 +86,6 @@ block0(%0: i64):
 func @round_trip_big(ptr sret(64, align 8), ptr byval(64, align 8)), linkage(external) {
 block0(%0: ptr, %1: ptr):
     %2 = alloca, size 64, align 8
-    %3 = alloca, size 64, align 16
-    memcpy %3, %1, size 64, align 8
     call @make_big(%2) : (ptr sret(64, align 8))
     memcpy %0, %2, size 64, align 8
     return

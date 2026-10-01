@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A structure passed by value in the argument area is now used where the caller left it rather than copied into a slot of its own first (#2209). The bytes are the callee's to read and write until it returns, so a function that hands one on to another call copies it once, straight into the outgoing area, and its frame loses the slot. The reduced `create_default` from the issue goes from 80 bytes to 48 at `-O0` and `-O2` (gcc 14 takes 8, because it also makes the call a jump, which is #2205). A structure passed as the address of a copy, as the other ABIs pass a large one, and one whose declaration asks for more alignment than the argument area gives, still get the slot. With `-g` the parameter is placed in the argument area, at its distance from the call frame address.
 - Choosing which values go to memory before registers are handed out sweeps the pieces of the values once rather than asking every value in flight whether it covers each point where pressure is too high, which takes about 1.5% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2579).
 
 ### Fixed

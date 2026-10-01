@@ -107,6 +107,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         restrict: Scopes::default(),
         brace: brace(tast, root, span),
         nests: Nests::default(),
+        in_place: Set::default(),
         env: Env::default(),
     };
     body.ssa.seal(body.func, entry);
@@ -173,6 +174,13 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // function with a body gets it: there is nothing to fuse in a declaration, and an attribute
     // saying what may be done to code that is not here would be a claim about somebody else's file.
     body.func.attrs.fp_contract = body.unit.contract;
+    // Which parameters are used where the caller left them, before any slot is made, because a
+    // parameter that is gets none.
+    for (&param, travel) in params.iter().zip(&plan.args) {
+        if body.in_place(param, travel) {
+            body.in_place.insert(param);
+        }
+    }
     for &param in &params {
         body.declare(param, escaped.contains(&param));
     }
@@ -768,6 +776,9 @@ struct Body<'a, 'u> {
     brace: Span,
     /// The blocks of the function, and the slots locals in blocks that never overlap share.
     nests: Nests,
+    /// The parameters the body works on where the caller left their bytes, which get no slot of
+    /// their own. See [`Body::in_place`].
+    in_place: Set<DeclId>,
     /// Where the things a nested function reaches are, for a function in a tree of nested ones.
     /// See [`crate::nest`].
     env: Env,
@@ -1116,6 +1127,11 @@ impl<'u> Body<'_, 'u> {
             // the number on and this one has none, because nothing asked for any.
             self.ssa.stands_for(var, decl.raw());
             self.vars.insert(decl, Local::Value(var));
+            return;
+        }
+        // A parameter whose bytes are already in the argument area, which is where the body reads
+        // and writes it. [`Body::parameter`] says so once the address has arrived.
+        if self.in_place.contains(&decl) {
             return;
         }
         let span = self.brace;
@@ -1719,7 +1735,8 @@ impl<'u> Body<'_, 'u> {
             }
             // The caller passed the address of a copy, or of the bytes it put in the argument
             // area. Either way the object the body works on is the parameter's own slot, so
-            // what arrives is copied into it and nothing else in the walk has to know.
+            // what arrives is copied into it and nothing else in the walk has to know. Except
+            // where [`Body::in_place`] said the bytes the address points at are the slot.
             Pass::Reference | Pass::Memory => {
                 let addr = self.func.append_param(entry, Type::PTR);
                 match local {
@@ -1741,10 +1758,48 @@ impl<'u> Body<'_, 'u> {
                             self.memcpy(slot, addr, travel.size, travel.align, span);
                         }
                     }
+                    None if self.in_place.contains(&decl) => {
+                        self.func.declare_param(addr, decl.raw());
+                        self.vars.insert(decl, Local::Slot(addr));
+                    }
                     None => {}
                 }
             }
         }
+    }
+
+    /// Whether a parameter is used where the caller left its bytes rather than copied into a slot.
+    ///
+    /// A structure the ABI passes in memory arrives as the address of bytes the caller put in the
+    /// argument area for this call, and those bytes belong to this function until it returns: the
+    /// caller made them for it and reads nothing back out of them, and the same is true of the copy
+    /// the inliner makes in front of a body it copies. So the body may read and write them where
+    /// they are, which is what gcc does, and a copy into a slot of its own is as many bytes of frame
+    /// again and a copy for nothing. tamnd/rucc#2209 has a function that hands a 32 byte structure
+    /// straight on to another call and took 80 bytes of frame for it where gcc takes 8.
+    ///
+    /// Only the argument area. A copy the caller made and passed the address of, which is how the
+    /// other ABIs pass a large structure, is this function's to write as well, but its address is
+    /// in a register and nothing the debugging information can say places a variable at the far
+    /// end of one, so a parameter like that keeps its slot. And only where the bytes are aligned as
+    /// well as the declaration asks: the argument area is aligned for the type, and an `alignas` on
+    /// the parameter can ask for more.
+    ///
+    /// And not in a build with the safety instrumentation, which checks an access against the
+    /// object the memory was made for, and the argument area is not one it knows about.
+    fn in_place(&self, decl: DeclId, travel: &Travel) -> bool {
+        let tast = self.tast();
+        let ty = tast[decl].ty;
+        if !self.unit.in_place
+            || !matches!(travel.pass, Pass::Memory)
+            || repr::is_variable_length(self.types(), ty)
+        {
+            return false;
+        }
+        let size = repr::size_of(self.types(), self.target(), ty);
+        let align =
+            tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
+        size == travel.size && align <= travel.align
     }
 
     /// A scalar put back together out of the registers it travelled in.

@@ -266,6 +266,14 @@ pub struct Arrived {
     /// have been handed all of them in registers. The distance is from the bottom of the caller's
     /// argument area, which is somewhere [`crate::finish`] works out and this cannot.
     pub stack: Vec<(mir::Inst, u32)>,
+    /// The parameters whose bytes arrived in the caller's argument area, as the position of each
+    /// and how far up that area its bytes start.
+    ///
+    /// The same distance [`Arrived::stack`] has for the `lea` of each, kept by position as well so
+    /// that a parameter the front end used where it arrived can be placed by the debugging
+    /// information. The bottom of the argument area is the call frame address, so the distance is
+    /// where the bytes are from there, whatever the frame turns out to be.
+    pub bytes: Vec<(usize, u32)>,
     /// How many general purpose argument registers the parameters took, and how many vector ones.
     ///
     /// Nothing about an ordinary function needs this. A variadic one does: the first argument its
@@ -414,7 +422,10 @@ pub fn entry(
         // [`crate::finish`] fills in, because where the caller's argument area is is the same
         // question for both.
         let name = match abi {
-            Abi::ByVal { .. } => insts.lea,
+            Abi::ByVal { .. } => {
+                arrived.bytes.push((index, up));
+                insts.lea
+            }
             _ => (insts.load)(ty).ok_or((index, Missing::Width))?,
         };
         let opcode = mir::Opcode::new(names.intern(name));
