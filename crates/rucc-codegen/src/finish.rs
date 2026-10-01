@@ -73,7 +73,9 @@ use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch,
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
-use rucc_target::{BranchInsts, CallRegs, Chkstk, FrameInsts, Guard, PhysReg, Probe, RegClass};
+use rucc_target::{
+    BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, Narrow, PhysReg, Probe, RegClass,
+};
 
 use crate::frame::Frame;
 use crate::lower::Stack;
@@ -1449,11 +1451,17 @@ impl Writer<'_> {
             }
             (Place::Reg(to), Place::Slot(slot)) => {
                 let at = self.slot(frame, slot);
-                self.load(edit.class, to, at)
+                match narrow(&moves, frame, slot) {
+                    Some(narrow) => self.load_as(narrow.load, edit.class, to, at),
+                    None => self.load(edit.class, to, at),
+                }
             }
             (Place::Slot(slot), Place::Reg(from)) => {
                 let at = self.slot(frame, slot);
-                self.store(edit.class, from, at)
+                match narrow(&moves, frame, slot) {
+                    Some(narrow) => self.store_as(narrow.store, edit.class, from, at),
+                    None => self.store(edit.class, from, at),
+                }
             }
             // The allocator expands this into two moves through a register of its own, because a
             // machine that could do it in one is not a machine any of this is written for.
@@ -1656,6 +1664,14 @@ impl Writer<'_> {
     fn opcode(&mut self, name: &str) -> Opcode {
         Opcode::new(self.names.intern(&format!("{}{name}", self.insts.prefix)))
     }
+}
+
+/// The load and the store that reach a spill slot narrower than its class, or `None` for a slot
+/// as wide as the class, which is reached with the class's own. [`Frame::slot_width`] only ever
+/// comes out narrower when the target has one of these for exactly that many bytes.
+fn narrow(moves: &ClassMoves, frame: &Frame, slot: u32) -> Option<Narrow> {
+    let bytes = frame.slot_width(slot)?;
+    moves.narrow.iter().find(|narrow| narrow.bytes == bytes).copied()
 }
 
 /// A distance in a frame, as the signed number every offset is.

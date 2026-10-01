@@ -818,7 +818,8 @@ pub fn compile_recording(
     // A tail call is a call on a machine with no instruction to jump away with, and the frame is
     // worked out as though it stays one.
     stack.kept |= machine.insts.away.is_none() && !stack.tails.is_empty();
-    let base = stack.layout(Layout::new(machine.conv, machine.file));
+    let base = Layout { moves: machine.insts.classes, ..Layout::new(machine.conv, machine.file) };
+    let base = stack.layout(base);
     let guarded = machine.guarded();
     let layout = Layout {
         // The later hook reads the frame pointer to find out who called this function, so a
@@ -947,7 +948,7 @@ pub fn compile_recording(
     // After allocation, because the largest area in most frames is the spill slots and nothing
     // knows how many of those there are until the allocator has finished running out of registers,
     // and because a spill slot cannot be shared with a local until it is known there is one.
-    let widths = frame::widths(&layout, &allocation);
+    let widths = frame::widths(&layout, &func, &allocation);
     // Nothing shares in a function that can be come back into, since the second arrival reads
     // bytes the liveness says nobody wants. See [`tail::comes_back`].
     let share = if alone {

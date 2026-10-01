@@ -2958,6 +2958,13 @@ mod tests {
         assert_eq!(form(xmm.mov), Some(MoveVec));
         assert_eq!(form(xmm.load), Some(LoadVec));
         assert_eq!(form(xmm.store), Some(StoreVec));
+        // And the narrow ones a `float` or a `double` is spilled with, which are vector moves too.
+        assert_eq!(xmm.narrow.iter().map(|narrow| narrow.bytes).collect::<Vec<_>>(), [4, 8]);
+        for narrow in xmm.narrow {
+            assert_eq!(form(narrow.load), Some(LoadVec));
+            assert_eq!(form(narrow.store), Some(StoreVec));
+        }
+        assert!(gpr.narrow.is_empty());
         assert_eq!(MoveVec.operands()[0].class, XMM);
         assert_eq!(Move.operands()[0].class, GPR);
     }

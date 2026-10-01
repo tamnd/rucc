@@ -118,7 +118,7 @@
 use rucc_mir::{Constraint, Func};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
-use rucc_target::{CallRegs, PhysReg, RegClass, RegFile};
+use rucc_target::{CallRegs, ClassMoves, PhysReg, RegClass, RegFile};
 
 use crate::slots::{Cell, Slots};
 
@@ -181,6 +181,11 @@ pub struct Layout<'a> {
     pub conv: &'a CallRegs,
     /// The registers the target has, which is what says how wide a spill slot of a class is.
     pub file: RegFile,
+    /// How the target spills each class, one for each class of the file in the order it numbers
+    /// them, which is what says whether a value narrower than its register can have a narrower
+    /// slot. Empty is a target that spills every value with its whole register, and is what
+    /// [`Layout::new`] starts with.
+    pub moves: &'a [ClassMoves],
     /// The memory the function asked for itself, in the order it wants it reported back.
     pub locals: &'a [Local],
     /// How many bytes the widest call in the function needs for arguments it passes on the stack.
@@ -285,6 +290,7 @@ impl<'a> Layout<'a> {
         Self {
             conv,
             file,
+            moves: &[],
             locals: &[],
             outgoing: 0,
             leaf: true,
@@ -312,6 +318,7 @@ pub struct Frame {
     saved_int: Vec<PhysReg>,
     saved_sse: Vec<Save>,
     slots: Vec<i32>,
+    widths: Vec<u32>,
     locals: Vec<i32>,
     canary: Option<i32>,
     outgoing: u32,
@@ -374,11 +381,12 @@ impl Frame {
         // two lists are placed one after the other. See [`crate::slots`]. A layout that was handed
         // no plan gets the one where nothing shares anything, which is the frame there was before
         // that pass existed.
+        let slot_widths = widths(layout, func, allocation);
         let apart;
         let plan = match layout.share {
             Some(plan) => plan,
             None => {
-                apart = Slots::apart(layout.locals, &widths(layout, allocation));
+                apart = Slots::apart(layout.locals, &slot_widths);
                 &apart
             }
         };
@@ -559,6 +567,7 @@ impl Frame {
             saved_int,
             saved_sse,
             slots,
+            widths: slot_widths,
             locals,
             canary,
             outgoing,
@@ -618,6 +627,14 @@ impl Frame {
     #[must_use]
     pub fn slot(&self, slot: u32) -> Option<i32> {
         self.slots.get(usize::try_from(slot).ok()?).copied()
+    }
+
+    /// How many bytes a spill slot is, which is fewer than its class is wide when every value in it
+    /// takes only the bottom of its register and the target has a load and a store that move only
+    /// that much. See [`widths`].
+    #[must_use]
+    pub fn slot_width(&self, slot: u32) -> Option<u32> {
+        self.widths.get(usize::try_from(slot).ok()?).copied()
     }
 
     /// Where a local is, from the stack pointer in the body of the function.
@@ -945,9 +962,44 @@ fn width(layout: &Layout<'_>, class: RegClass) -> u32 {
 /// The same question the width of one register class is, asked of a whole allocation at once, and
 /// public because [`crate::slots`] needs it to say how big a cell holding a spilled value has to
 /// be, which it has to know before there is a frame to ask.
+///
+/// Narrower than the class when every value in the slot is narrower than its register and the
+/// target has a load and a store for that much, which is a `double` in an x86-64 vector register
+/// getting eight bytes and a `movsd` rather than sixteen and a `movaps`. A slot with nothing in it
+/// that the function says how wide it is keeps the whole register, and that is every slot the
+/// allocator borrows a register through, since the register can be holding anything at all.
 #[must_use]
-pub fn widths(layout: &Layout<'_>, allocation: &Allocation) -> Vec<u32> {
-    allocation.assignment.slots().iter().map(|&class| width(layout, class)).collect()
+pub fn widths(layout: &Layout<'_>, func: &Func, allocation: &Allocation) -> Vec<u32> {
+    let classes = allocation.assignment.slots();
+    // The widest value in each slot, or `None` once a slot has something in it whose width is the
+    // whole register. `Some(0)` is a slot nothing has been found in yet.
+    let mut held: Vec<Option<u32>> = vec![Some(0); classes.len()];
+    for (reg, place) in allocation.assignment.placed() {
+        let Place::Slot(slot) = place else { continue };
+        let Some(at) = usize::try_from(slot).ok().and_then(|slot| held.get_mut(slot)) else {
+            continue;
+        };
+        *at = match (*at, func.width(reg)) {
+            (Some(widest), Some(bytes)) => Some(widest.max(u32::from(bytes))),
+            _ => None,
+        };
+    }
+    classes
+        .iter()
+        .zip(held)
+        .map(|(&class, held)| {
+            let whole = width(layout, class);
+            let Some(bytes) = held.filter(|&bytes| bytes > 0) else { return whole };
+            narrow(layout, class, bytes).map_or(whole, |narrow| narrow.min(whole))
+        })
+        .collect()
+}
+
+/// The narrowest of the target's narrow spills of that class that holds that many bytes, as the
+/// number of bytes it moves, or `None` when it has none that does.
+fn narrow(layout: &Layout<'_>, class: RegClass, bytes: u32) -> Option<u32> {
+    let moves = layout.moves.get(usize::from(class.number()))?;
+    moves.narrow.iter().map(|narrow| narrow.bytes).filter(|&narrow| narrow >= bytes).min()
 }
 
 /// How many pushes put that many general purpose registers on the stack.
@@ -1349,6 +1401,48 @@ mod tests {
         // A long double is eighty bits and takes sixteen bytes, because an address has to be a
         // multiple of the size of what is at it.
         assert_eq!(width(&base, REGS.class_named("x87").expect("a class")), 16);
+    }
+
+    /// A `double`, a `float` and a whole vector spilled out of the vector registers, with only one
+    /// of those to hand out. The first two get slots of their own size where the target has a
+    /// narrow load and store for them, and the vector, which nothing says is narrower than its
+    /// register, keeps sixteen bytes.
+    #[test]
+    fn a_spilled_scalar_takes_a_slot_of_its_own_size_and_a_vector_the_whole_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let wide = [Some(8), Some(4), None, Some(8)];
+        let regs: Vec<Reg> = wide.iter().map(|_| func.new_vreg(XMM)).collect();
+        for (&reg, bytes) in regs.iter().zip(wide) {
+            func.set_width(reg, bytes.unwrap_or(0));
+            func.build(block, opcode).def(reg, XMM).finish();
+        }
+        for &reg in &regs {
+            func.build(block, opcode).uses(reg, XMM).finish();
+        }
+        let order = SYSV.sse_order;
+        let env = Env::new().with(XMM, &order[..1], &order[1..]);
+        let allocation = rucc_regalloc::run(&mut func, &env, "test", true);
+        assert!(allocation.assignment.spilled() >= 3, "three of the four have to go somewhere");
+
+        let base = Layout::new(&SYSV, REGS);
+        let narrow = Layout { moves: rucc_target::x86_64::FRAME.classes, ..base };
+        let whole = Frame::of(&func, &allocation, &base);
+        let frame = Frame::of(&func, &allocation, &narrow);
+        let mut checked = 0;
+        for (reg, place) in allocation.assignment.placed() {
+            let Place::Slot(slot) = place else { continue };
+            let Some(at) = regs.iter().position(|&one| one == reg) else { continue };
+            checked += 1;
+            assert_eq!(frame.slot_width(slot), Some(wide[at].unwrap_or(16)), "value {at}");
+            assert_eq!(whole.slot_width(slot), Some(16), "value {at} with no narrow moves");
+            let offset = frame.slot(slot).expect("a placed slot");
+            assert_eq!(offset % i32::try_from(wide[at].unwrap_or(16)).unwrap(), 0);
+        }
+        assert!(checked >= 3, "three of the four are in slots of their own");
+        assert!(frame.size() < whole.size(), "{frame:?} against {whole:?}");
     }
 
     /// A pair of saved registers that are not next to each other gets the one between, so every

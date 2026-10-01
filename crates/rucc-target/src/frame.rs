@@ -50,6 +50,29 @@ pub struct ClassMoves {
     pub load: &'static str,
     /// Writes the frame with what is in the register.
     pub store: &'static str,
+    /// Loads and stores that move only the bottom of a register, narrowest first, for a value that
+    /// takes only that much of one. Empty where the class has none or where spilling the whole
+    /// register is all the target does.
+    ///
+    /// A `double` in an x86-64 vector register is eight bytes of a sixteen byte register, and gcc
+    /// spills it with `movsd` into a slot of eight. A slot as wide as the register would be twice
+    /// the bytes for nothing, and a function that keeps a few of them over calls pays that many
+    /// times over. See [`Narrow`].
+    pub narrow: &'static [Narrow],
+}
+
+/// A load and a store that move the bottom `bytes` of a register between it and the frame.
+///
+/// What a spill slot narrower than its class is reached with. The load may write anything to the
+/// rest of the register, since the value never had anything there that it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Narrow {
+    /// How many bytes the two of them move.
+    pub bytes: u32,
+    /// Writes the bottom of the register with what is in the frame.
+    pub load: &'static str,
+    /// Writes the frame with the bottom of the register.
+    pub store: &'static str,
 }
 
 /// How a prologue touches the stack as it takes a frame, on a target that can.
