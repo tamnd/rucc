@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `.symver` with an empty version, as in `sctp_connectx@`, is taken in a file-scope `asm`, and the assembler reads `.symver` in a `.S` file the way gas 2.42 does: `@` and `@@` add a copy with the type, size and binding of the name, and `@@@`, or any spelling of a name the file only refers to, renames it, relocations included. LTP's sctp library writes the empty version, and before this its whole `utils` directory stopped building.
 - A GNU cast to a union, like `(union semun) &buf`, is taken in a static initializer. Lowering only knew a compound literal through the read of it, and the literal a union cast builds is already a value, so it was refused with E0519. LTP's `semctl01` writes one, and its failure stopped every later directory under `syscalls`.
 - `strlen` and `strcmp` under their plain names fold when handed string literals, as their `__builtin_` spellings already did, so `.n = strlen("AB")` in a static initializer is a constant again. LTP's `TST_KCONFIG_INIT` is written that way, and libltp did not compile. `-fno-builtin` and `-fno-builtin-strlen` keep the call, and a `strlen` the program declared with another shape is left alone.
 - A printing option such as `--version` or `--help` whose reader closes the pipe early, as kbuild's `$(CC) --version | head -n 1` does, no longer panics with a backtrace on stderr. The rest of the output is dropped and rucc exits 0.

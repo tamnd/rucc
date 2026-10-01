@@ -544,12 +544,16 @@ impl<'a> Assembler<'a> {
             ));
         };
         let (name, versioned) = (name.trim(), versioned.trim());
-        let (bare, version) = versioned.split_once('@').unwrap_or((versioned, ""));
+        let Some((bare, version)) = versioned.split_once('@') else {
+            return Err(unsupported(format!("a '.symver' of '{name}' to '{versioned}'")));
+        };
         let (at, node) = match version.strip_prefix("@@").or_else(|| version.strip_prefix('@')) {
             Some(node) => ("@@", node),
             None => ("@", version),
         };
-        if !is_a_name(name) || !is_a_name(bare) || !is_a_name(node) {
+        // The version may be empty. `sctp_connectx@` is how LTP's sctp library names the copy a
+        // version script is to give the base version, and gas writes it out as it is spelled.
+        if !is_a_name(name) || !is_a_name(bare) || !(node.is_empty() || is_a_name(node)) {
             return Err(unsupported(format!("a '.symver' of '{name}' to '{versioned}'")));
         }
         self.sets.push((format!("{bare}{at}{node}"), name.to_owned(), true));
@@ -1586,20 +1590,27 @@ gSize:
         }
     }
 
-    /// `.symver` is a second name spelled with its version, and `@@@` is written as `@@`.
+    /// `.symver` is a second name spelled with its version, and `@@@` is written as `@@`. An empty
+    /// version is a spelling gas takes, and a name with no `@` at all is not.
     #[test]
     fn a_symver_is_a_second_name_with_the_version_in_its_spelling() {
-        let template = ".symver f_522, f@XZ_5.2.2\n.symver f_52, f@@XZ_5.2\n.symver g, g@@@V1\n";
+        let template = concat!(
+            ".symver f_522, f@XZ_5.2.2\n.symver f_52, f@@XZ_5.2\n.symver g, g@@@V1\n",
+            ".symver h_0, h@\n",
+        );
         let sets = all_of(template).expect("read").sets;
         let names: Vec<_> =
             sets.iter().map(|set| (set.name.as_str(), set.target.as_str())).collect();
-        assert_eq!(names, [("f@XZ_5.2.2", "f_522"), ("f@@XZ_5.2", "f_52"), ("g@@V1", "g")]);
+        assert_eq!(
+            names,
+            [("f@XZ_5.2.2", "f_522"), ("f@@XZ_5.2", "f_52"), ("g@@V1", "g"), ("h@", "h_0")]
+        );
         assert!(sets.iter().all(|set| set.versioned));
 
         for (template, want) in [
             (".symver f\n", "a '.symver' that is not a name and a versioned name"),
             (".symver f, g@V, local\n", "a '.symver' that is not a name and a versioned name"),
-            (".symver f, g@\n", "a '.symver' of 'f' to 'g@'"),
+            (".symver f, g\n", "a '.symver' of 'f' to 'g'"),
             (".symver f, 1@V\n", "a '.symver' of 'f' to '1@V'"),
         ] {
             let failed = read(template).expect_err(template);
