@@ -17,7 +17,7 @@ use std::fmt;
 use std::ops::Index;
 
 use rucc_base::float::Float;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
@@ -207,6 +207,7 @@ pub struct Tast {
     targets: Vec<(DeclId, Isa)>,
     versions: Vec<(DeclId, Vec<Version>)>,
     sections: Map<DeclId, StrId>,
+    function_names: Set<StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
@@ -470,6 +471,22 @@ impl Tast {
     /// another, and the caller is what warns about that.
     pub fn record_section(&mut self, decl: DeclId, section: StrId) {
         self.sections.entry(decl).or_insert(section);
+    }
+
+    /// Records that a string is what `__func__` stands for in some function rather than a literal
+    /// the program wrote.
+    ///
+    /// The standard declares it as `static const char __func__[]`, an object of its own, and gcc
+    /// gives it one: a local `__func__.N` in `.rodata`, never merged with a literal that has the
+    /// same characters. The kernel's section lists see the difference.
+    pub fn record_function_name(&mut self, id: StrId) {
+        self.function_names.insert(id);
+    }
+
+    /// Whether a string is what `__func__` stands for. See [`Tast::record_function_name`].
+    #[must_use]
+    pub fn is_function_name(&self, id: StrId) -> bool {
+        self.function_names.contains(&id)
     }
 
     /// Records which arguments `__attribute__((alloc_size(...)))` said are the size of what the

@@ -5559,6 +5559,17 @@ decl #0 x : int object external static defined
         assert!(!text.contains(&format!(".globl\t{}", label.trim_end_matches(':'))), "{text}");
     }
 
+    /// `__func__` is an object of its own, as gcc emits it: a local `__func__.N` in `.rodata` and
+    /// not a literal the linker may merge, aligned as gcc aligns an array of its size.
+    #[test]
+    fn func_is_a_local_object_in_rodata_and_not_a_literal() {
+        let text = asm("const char *list_bdev_fs_names(void) { return __func__; }\n");
+        assert!(text.contains("\t.section\t.rodata\n\t.p2align\t4\n"), "{text}");
+        assert!(text.contains("\n__func__.0:\n\t.ascii\t\"list_bdev_fs_names\\000\"\n"), "{text}");
+        assert!(!text.contains(".rodata.str1.1"), "{text}");
+        assert!(!text.contains(".globl\t__func__"), "{text}");
+    }
+
     /// A variable holding the address of another one, which is the only hole an image has in it.
     #[test]
     fn an_address_in_an_initializer_is_left_to_the_linker() {
