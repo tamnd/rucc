@@ -66,6 +66,7 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
     build_version(&mut obj, target);
 
     let mut made = Vec::with_capacity(input.parts.len());
+    let mut layout = Vec::with_capacity(input.parts.len());
     for part in &input.parts {
         let (segment, section) = split(&part.name).map_err(refused)?;
         let kind = kind(segment, part.shape.mach);
@@ -78,6 +79,8 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
         } else {
             obj.append_section_bss(id, part.size, align);
         }
+        let size = if part.shape.bits { part.bytes.len() as u64 } else { part.size };
+        layout.push(Placed { id, bss: kind.is_bss(), align, size });
         made.push(id);
     }
 
@@ -179,8 +182,37 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
             obj.add_relocation(*id, record).map_err(|why| refused(why.to_string()))?;
         }
     }
-    described(&mut obj, &symbols, info).map_err(refused)?;
+    described(&mut obj, &symbols, info, layout).map_err(refused)?;
     obj.write().map_err(|why| refused(why.to_string()))
+}
+
+/// A section as the writer underneath lays it out: whether it is zero filled, its alignment and
+/// how many bytes it covers.
+struct Placed {
+    id: object::write::SectionId,
+    bss: bool,
+    align: u64,
+    size: u64,
+}
+
+/// Where each section starts in the one segment of an object file, which is the address a symbol
+/// in it has.
+///
+/// The writer underneath puts every section with bytes first, in the order they were made, each at
+/// its alignment, and the zero filled ones after all of those, so a `__bss` is past the debug
+/// sections as well. This is the same walk, since it does not say what it chose until the file is
+/// written.
+fn addresses(layout: &[Placed]) -> Map<object::write::SectionId, u64> {
+    let mut at = Map::default();
+    let mut address = 0u64;
+    for bss in [false, true] {
+        for placed in layout.iter().filter(|placed| placed.bss == bss) {
+            address = address.next_multiple_of(placed.align.max(1));
+            at.insert(placed.id, address);
+            address += placed.size;
+        }
+    }
+    at
 }
 
 /// The debug sections, in `__DWARF`, which is the segment the linker leaves out of the image.
@@ -192,15 +224,29 @@ pub(crate) fn write(input: &Assembled, target: &TargetInfo, info: &Info) -> Resu
 /// which is what clang does. What names a function or a variable is an address and keeps its
 /// relocation, since that is how the map is matched to the object. The debug information knows
 /// those by their C names, and the symbol is the same name with the underscore in front.
+///
+/// Such a relocation names the section the function or variable is in rather than its symbol, and
+/// the bytes at the place hold the address it has in this object file with the addend on, which
+/// is how clang writes them. `dsymutil` looks the address up in the map to learn where the linker
+/// put that name, and a debugger reading the object takes the bytes as they are. Against the
+/// symbol, with only the addend in the bytes, `dsymutil` put every function in a file at the
+/// address of the first one, and `atos` and `lldb` named the wrong function for all the rest.
 fn described(
     obj: &mut Writer<'_>,
     symbols: &Map<&str, object::write::SymbolId>,
     info: &Info,
+    mut layout: Vec<Placed>,
 ) -> Result<(), String> {
     let debug = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect::<Set<_>>();
+    let mut made = Vec::with_capacity(info.chunks.len());
     for chunk in &info.chunks {
         let section = debug_section(&chunk.name)?;
         let id = obj.add_section(b"__DWARF".to_vec(), section.into_bytes(), SectionKind::Debug);
+        layout.push(Placed { id, bss: false, align: 1, size: chunk.bytes.len() as u64 });
+        made.push(id);
+    }
+    let at = addresses(&layout);
+    for (chunk, &id) in info.chunks.iter().zip(&made) {
         // An ordinary section, which is a type of zero, holding debug information.
         let flags = macho::S_ATTR_DEBUG;
         obj.section_mut(id).flags = SectionFlags::MachO { flags, reserved2: 0 };
@@ -223,7 +269,15 @@ fn described(
                 return Err(format!("'{name}' is named by the debug information and not defined"));
             };
             let flags = self::reloc(reloc.kind, reloc.addend)?;
-            let addend = reloc.addend;
+            let (place, value) = (obj.symbol(symbol).section, obj.symbol(symbol).value);
+            let (symbol, addend) = match place {
+                SymbolSection::Section(section) => {
+                    let start = at.get(&section).copied().unwrap_or(0);
+                    let address = reloc.addend + (start + value) as i64;
+                    (obj.section_symbol(section), address)
+                }
+                _ => (symbol, reloc.addend),
+            };
             relocs.push(Relocation { offset: reloc.at as u64, symbol, addend, flags });
         }
         obj.append_section_data(id, &bytes, 1);
@@ -629,8 +683,8 @@ mod tests {
     }
 
     /// A place in one debug section that names another is written as the offset it is, since no
-    /// linker moves either, and an address keeps its relocation, against the function's symbol
-    /// with the underscore the debug information leaves off.
+    /// linker moves either, and an address keeps its relocation, against the section the function
+    /// is in, found through its symbol with the underscore the debug information leaves off.
     #[test]
     fn debug_information_goes_in_the_dwarf_segment_with_only_its_addresses_relocated() {
         use crate::section::Chunk;
@@ -667,9 +721,68 @@ mod tests {
         assert_eq!(data[12..20], 4u64.to_le_bytes());
         let relocs: Vec<_> = unit.relocations().collect();
         let [(12, reloc)] = relocs.as_slice() else { panic!("{relocs:?}") };
-        let object::RelocationTarget::Symbol(index) = reloc.target() else { panic!() };
-        assert_eq!(file.symbol_by_index(index).unwrap().name(), Ok("_f"));
+        let object::RelocationTarget::Section(index) = reloc.target() else { panic!("{reloc:?}") };
+        assert_eq!(file.section_by_index(index).unwrap().name(), Ok("__text"));
         assert!(file.section_by_name("__debug_str_offs").is_some());
+    }
+
+    /// What an address in the debug information holds is where the name is in this file with the
+    /// addend on, the way clang writes it, because that is what `dsymutil` moves by the distance the
+    /// linker moved the name. A function after the first one, a variable in `__data` and one in
+    /// `__bss`, which the writer underneath puts after the debug sections, each read back as the
+    /// address their own symbol has (#1992).
+    #[test]
+    fn an_address_in_the_debug_information_is_where_the_name_is_in_the_file() {
+        use crate::section::Chunk;
+
+        let text = part("__TEXT", "__text", vec![0; 32], 32);
+        let data = part("__DATA", "__data", vec![0; 16], 16);
+        let bss = part("__DATA", "__bss", Vec::new(), 64);
+        let mut f = name("_f", 0, 0, Binding::Global);
+        f.sort = Sort::Func;
+        let mut g = name("_g", 0, 16, Binding::Local);
+        g.sort = Sort::Func;
+        let names = vec![f, g, name("_v", 1, 8, Binding::Global), name("_z", 2, 8, Binding::Local)];
+        let input = Assembled { parts: vec![text, data, bss], names, subsections: true };
+        let reloc = |at, symbol: &str, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Address { bytes: 8 },
+            addend,
+            after: 0,
+        };
+        let relocs = vec![reloc(0, "g", 0), reloc(8, "v", 0), reloc(16, "z", 4), reloc(24, "f", 2)];
+        let unit = Chunk { name: ".debug_info".to_owned(), bytes: vec![0; 40], relocs };
+        let info = Info { chunks: vec![unit], ..Info::default() };
+        let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
+        let bytes = write(&input, &target, &info).unwrap();
+        let file = object::File::parse(&bytes[..]).unwrap();
+        let address =
+            |wanted: &str| file.symbols().find(|sym| sym.name() == Ok(wanted)).unwrap().address();
+        let unit = file.section_by_name("__debug_info").unwrap();
+        let data = unit.data().unwrap();
+        let held = |at: usize| u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
+        // Each against the section its name is in, which is what makes `dsymutil` read the bytes
+        // as the address to look up.
+        let mut against: Vec<_> = unit
+            .relocations()
+            .map(|(at, reloc)| {
+                let object::RelocationTarget::Section(index) = reloc.target() else {
+                    panic!("{reloc:?}")
+                };
+                (at, file.section_by_index(index).unwrap().name().unwrap())
+            })
+            .collect();
+        against.sort_unstable();
+        assert_eq!(against, [(0, "__text"), (8, "__data"), (16, "__bss"), (24, "__text")]);
+        assert_eq!(held(0), address("_g"));
+        assert_eq!(held(8), address("_v"));
+        assert_eq!(held(16), address("_z") + 4);
+        assert_eq!(held(24), 2);
+        // The three would all have read as their addend if the layout were not counted.
+        assert_eq!(address("_g"), 16);
+        assert_eq!(address("_v"), 40);
+        assert!(address("_z") > address("_v"), "{}", address("_z"));
     }
 
     #[test]
