@@ -324,6 +324,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
     let comments = parsed.comments;
+    let diagnostic_pragmas = parsed.diagnostic_pragmas;
 
     let mut artifact = Artifact::Nothing;
     // Zero when nothing instruments, which is the truthful summary of a file built without
@@ -589,6 +590,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         remarks.push_str(&lowerings.remarks(name));
     }
 
+    // What `#pragma GCC diagnostic` made of the command line's warnings, line by line, which is
+    // looked up by where each warning is now that they are all in.
+    let scoped = rucc_diag::Scoped::new(&opts.named_warnings, &diagnostic_pragmas, &sess.sources);
     let mut messages = Vec::with_capacity(diagnostics.len());
     let mut errors = 0;
     for diag in &diagnostics {
@@ -598,13 +602,15 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // header that came with the machine goes the same way for the same reason, unless
         // `-Wsystem-headers` asked for it.
         // A warning turned off by name goes the same way, and one turned into an error by name,
-        // or kept a warning under `-Werror` by name, is counted and labelled by that.
+        // or kept a warning under `-Werror` by name, is counted and labelled by that, whether the
+        // name was given on the command line or by a `#pragma GCC diagnostic` above it.
+        let named = scoped.at(diag.span.lo);
         if rucc_diag::dropped(diag, &sess.sources, opts.warnings, opts.system_header_warnings)
-            || opts.named_warnings.silenced(diag)
+            || named.silenced(diag)
         {
             continue;
         }
-        let promoted = opts.named_warnings.promoted(diag, opts.warnings_are_errors);
+        let promoted = named.promoted(diag, opts.warnings_are_errors);
         if diag.severity.is_fatal() || promoted {
             errors += 1;
         }

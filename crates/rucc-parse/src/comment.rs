@@ -69,7 +69,7 @@ impl Parser<'_> {
     }
 
     /// The string after the comma, which has to be a plain one.
-    fn comment_text(&self, rest: &mut &[Token]) -> Option<String> {
+    pub(crate) fn comment_text(&self, rest: &mut &[Token]) -> Option<String> {
         let token = rest.first()?;
         if token.kind != TokenKind::Str {
             return None;

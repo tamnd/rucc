@@ -9,7 +9,7 @@
 
 use rucc_ast::{Ast, Decl, DeclId, Expr, ExprId, Stmt, StmtId, StrId};
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Span};
+use rucc_diag::{BytePos, DEFAULT_ERROR_LIMIT, Diagnostic, DiagnosticPragma, Errors, Span};
 use rucc_lex::{Keyword, Punct, Token, TokenKind, Tokens};
 use rucc_session::Std;
 
@@ -70,6 +70,8 @@ pub struct Parsed {
     /// What the unit's `#pragma comment` lines ask the linker for, in the order they were
     /// written.
     pub comments: Vec<crate::Comment>,
+    /// The unit's `#pragma GCC diagnostic` lines, each with where it was written, in order.
+    pub diagnostic_pragmas: Vec<(BytePos, DiagnosticPragma)>,
 }
 
 impl Parsed {
@@ -98,6 +100,8 @@ pub struct Parser<'a> {
     pub(crate) packs: crate::pack::Packs,
     /// What the `#pragma comment` lines read so far ask for.
     pub(crate) comments: Vec<crate::Comment>,
+    /// The `#pragma GCC diagnostic` lines read so far, which is in `diagnostic.rs`.
+    pub(crate) diagnostic_pragmas: Vec<(BytePos, DiagnosticPragma)>,
 }
 
 impl<'a> Parser<'a> {
@@ -119,13 +123,19 @@ impl<'a> Parser<'a> {
             too_deep: false,
             packs: crate::pack::Packs::default(),
             comments: Vec::new(),
+            diagnostic_pragmas: Vec::new(),
         }
     }
 
     /// The tree and the diagnostics, once the parse is over.
     #[must_use]
     pub fn finish(self) -> Parsed {
-        Parsed { ast: self.ast, diagnostics: self.errors.finish(), comments: self.comments }
+        Parsed {
+            ast: self.ast,
+            diagnostics: self.errors.finish(),
+            comments: self.comments,
+            diagnostic_pragmas: self.diagnostic_pragmas,
+        }
     }
 
     /// Reports an error at `span`.

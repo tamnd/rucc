@@ -71,6 +71,7 @@ pub mod scope;
 mod comment;
 mod decl;
 mod declarator;
+mod diagnostic;
 mod expr;
 mod init;
 mod pack;
