@@ -174,6 +174,10 @@ fn coverage_writes_the_note_beside_the_object_and_test_coverage_alone_counts_not
     for name in [&b"f\0"[..], b"a.c\0"] {
         assert!(note.windows(name.len()).any(|w| w == name), "the note names {name:?}");
     }
+    // It starts at the name, line 1 column 5, and ends at the closing brace on line 3, as gcc
+    // says.
+    let place: Vec<u8> = [1_u32, 5, 3, 1].iter().flat_map(|w| w.to_ne_bytes()).collect();
+    assert!(note.windows(16).any(|w| w == place), "the function is not placed from 1:5 to 3:1");
     // The stamp is the one the record in the object holds, which is how gcov pairs them.
     let object = std::fs::read(dir.join("out/x.o")).expect("the object was written");
     assert!(object.windows(4).any(|w| w == head[2].to_ne_bytes()), "the stamps differ");

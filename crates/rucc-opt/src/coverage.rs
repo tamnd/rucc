@@ -179,6 +179,8 @@ pub struct Graph {
     pub spans: Vec<(u32, Vec<Span>)>,
     /// Where the function's name is written, which is where gcov says it starts.
     pub named: Span,
+    /// The body, braces and all, whose last byte is the closing brace gcov says it ends at.
+    pub body: Span,
 }
 
 /// One arc of a [`Graph`].
@@ -345,6 +347,7 @@ fn instrument(func: &mut Func, array: Symbol, bumps: bool) -> (u32, u32, Graph) 
         arcs,
         spans,
         named: func.named,
+        body: func.declared,
     };
     let mut count = 0_u32;
     for (i, edge) in edges.iter().enumerate() {
@@ -643,17 +646,25 @@ pub fn note(
         let graph = &function.graph;
         let start = place(graph.named);
         let (file, line, column) = start.clone().unwrap_or_default();
-        // gcc's end is the closing brace, and the last place anything in the body came from is
-        // the nearest this has to it.
-        let end = graph
-            .spans
-            .iter()
-            .flat_map(|(_, spans)| spans)
-            .filter_map(|&span| place(span))
+        // gcc's end is the closing brace, which is the last byte of the body. A body that is not
+        // in the file the name is in, which only a macro can arrange, ends where the last thing
+        // in it came from instead.
+        let brace = (!graph.body.is_dummy() && graph.body.hi > graph.body.lo)
+            .then(|| place(Span::new(graph.body.hi - 1, graph.body.hi)))
+            .flatten()
             .filter(|(at, _, _)| *at == file)
-            .map(|(_, line, column)| (line, column))
-            .max()
-            .unwrap_or((line, column));
+            .map(|(_, line, column)| (line, column));
+        let end = brace.unwrap_or_else(|| {
+            graph
+                .spans
+                .iter()
+                .flat_map(|(_, spans)| spans)
+                .filter_map(|&span| place(span))
+                .filter(|(at, _, _)| *at == file)
+                .map(|(_, line, column)| (line, column))
+                .max()
+                .unwrap_or((line, column))
+        });
         out.record(0x0100_0000, |out| {
             out.word(function.ident);
             out.word(function.lineno_checksum);
