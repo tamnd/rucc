@@ -697,6 +697,64 @@ fn skippable(func: &Func, block: Block) -> bool {
     func.insts(block).all(|inst| func.is_terminator(inst) || !func[inst].opcode.has_effects())
 }
 
+/// Whether some way into `block` from a block `from` allows decides the branch it ends in for the
+/// arm that goes to `arm`, looking back through blocks that do nothing but jump on.
+///
+/// This is the question gcc's threader answers before any of its limits, asked without making the
+/// copy. gcc threads paths this pass does not, and later than the point where it works out which
+/// blocks never run. Code that wants to read the function the way gcc's last passes see it, like
+/// the code generator choosing which blocks are cold, asks this.
+///
+/// A way in from a block that only jumps, passing on parameters of its own, is looked through to
+/// the ways into that block, which is how `ret = -ENOMEM` set on one path and merged with another
+/// on the way down reaches the test of it. Four such blocks deep is as far as it looks.
+pub fn decided_towards(
+    func: &Func,
+    block: Block,
+    arm: Block,
+    from: impl Fn(Block) -> bool,
+) -> bool {
+    let Some(term) = func.terminator(block) else { return false };
+    if !matches!(func[term].opcode, Opcode::BrIf | Opcode::Switch)
+        || func[block].params.is_empty()
+        || taken(func, term, &Bindings::default()).is_some()
+    {
+        return false;
+    }
+    let edges = incoming(func);
+    let Some(ways) = edges.get(&block) else { return false };
+    ways.iter().any(|&(before, at)| {
+        before != block
+            && from(before)
+            && goes(func, &edges, term, bind(func, block, at), before, arm, 4)
+    })
+}
+
+/// Whether `term` goes to `arm` under `subst`, or under it as some way into `from` carries on.
+fn goes(
+    func: &Func,
+    edges: &Edges,
+    term: Inst,
+    subst: Bindings,
+    from: Block,
+    arm: Block,
+    depth: u32,
+) -> bool {
+    if let Some(call) = taken(func, term, &subst) {
+        return call.block == arm;
+    }
+    let only_jumps = func.insts(from).all(|inst| func[inst].opcode == Opcode::Jump);
+    if depth == 0 || !only_jumps || func[from].params.is_empty() {
+        return false;
+    }
+    let Some(ways) = edges.get(&from) else { return false };
+    ways.iter().any(|&(before, at)| {
+        let inner = bind(func, from, at);
+        let next = subst.iter().map(|(&param, &v)| (param, inner.get(&v).copied().unwrap_or(v)));
+        before != from && goes(func, edges, term, next.collect(), before, arm, depth - 1)
+    })
+}
+
 /// Every block that defines a value read from somewhere other than itself.
 ///
 /// The other half of what section 23.1's copy is for, and the half an argument list does not show.
@@ -874,6 +932,57 @@ mod tests {
     /// Each edge decides the branch through the `xor`, and the kernel's `user_access_begin` needs
     /// both threaded so that the edge where the check failed does not join the one after `stac`.
     #[test]
+    fn a_join_a_way_into_which_decides_its_test_says_which_arm() {
+        let (func, _) = diamond(1, 2);
+        let join = Block::from_usize(3);
+        assert!(super::decided_towards(&func, join, Block::from_usize(4), |_| true));
+        assert!(super::decided_towards(&func, join, Block::from_usize(5), |_| true));
+        // Only the arm carrying 2 goes to block 5, so leaving it out leaves nothing that does.
+        let not_two = |from: Block| from.index() != 2;
+        assert!(!super::decided_towards(&func, join, Block::from_usize(5), not_two));
+        // The entry tests a constant it was not given, so there is nothing to look at it through.
+        assert!(!super::decided_towards(&func, Block::from_usize(0), join, |_| true));
+    }
+
+    /// `ret` set to a constant on two paths, merged in a block that only jumps on, and then
+    /// tested. Both arms are decided once the merge is looked through.
+    #[test]
+    fn a_way_in_through_a_block_that_only_jumps_on_is_looked_through() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let merge = func.create_block();
+        let carried = func.append_param(merge, Type::int(32));
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([0, -12]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(32), value);
+            build.jump(merge, &[it]);
+        }
+        let mut build = Builder::new(&mut func, merge);
+        build.jump(join, &[carried]);
+        let mut build = Builder::new(&mut func, join);
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Ne, param, zero);
+        build.br_if(test, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        assert!(super::decided_towards(&func, join, yes, |_| true));
+        assert!(super::decided_towards(&func, join, no, |_| true));
+    }
+
+    #[test]
     fn a_join_that_tests_the_not_of_a_bit_it_was_given_is_threaded() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"), Signature::new());
@@ -935,6 +1044,7 @@ mod tests {
             build.ret(&[]);
         }
 
+        assert!(!super::decided_towards(&func, join, yes, |_| true));
         let stats = thread(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 0);
         assert_eq!(goes_to(&func, 0), vec![1]);

@@ -302,6 +302,92 @@ struct Writer<'a> {
     crc: bool,
 }
 
+/// What the frame is at one place in a function, as the unwind rows say it: the register the
+/// frame is measured from, how far above it the frame ends, and where each saved register is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Frame {
+    cfa: (u16, i32),
+    saved: std::collections::BTreeMap<u16, i32>,
+}
+
+impl Frame {
+    /// Where every x86-64 record starts, which is what the header the unwind writer gives every
+    /// record says: the frame ends a word above the stack pointer, and the return address is the
+    /// word below the end. See `crate::unwind`.
+    fn called() -> Self {
+        Self { cfa: (7, 8), saved: std::iter::once((16, -8)).collect() }
+    }
+
+    /// The state after one row.
+    fn apply(&mut self, op: CfiOp, stack: &mut Vec<Self>) {
+        match op {
+            CfiOp::DefCfa { reg, offset } => self.cfa = (reg, offset),
+            CfiOp::DefCfaOffset(offset) => self.cfa.1 = offset,
+            CfiOp::DefCfaRegister(reg) => self.cfa.0 = reg,
+            CfiOp::Offset { reg, offset } => {
+                self.saved.insert(reg, offset);
+            }
+            CfiOp::Restore(reg) => match Self::called().saved.get(&reg) {
+                Some(&offset) => {
+                    self.saved.insert(reg, offset);
+                }
+                None => {
+                    self.saved.remove(&reg);
+                }
+            },
+            CfiOp::RememberState => stack.push(self.clone()),
+            CfiOp::RestoreState => {
+                if let Some(state) = stack.pop() {
+                    *self = state;
+                }
+            }
+        }
+    }
+
+    /// The rows that take this state to that one.
+    fn towards(&self, to: &Self, rows: &mut Vec<CfiOp>) {
+        match (self.cfa.0 == to.cfa.0, self.cfa.1 == to.cfa.1) {
+            (true, true) => {}
+            (true, false) => rows.push(CfiOp::DefCfaOffset(to.cfa.1)),
+            (false, true) => rows.push(CfiOp::DefCfaRegister(to.cfa.0)),
+            (false, false) => rows.push(CfiOp::DefCfa { reg: to.cfa.0, offset: to.cfa.1 }),
+        }
+        for (&reg, &offset) in &to.saved {
+            if self.saved.get(&reg) != Some(&offset) {
+                rows.push(CfiOp::Offset { reg, offset });
+            }
+        }
+        for &reg in self.saved.keys() {
+            if !to.saved.contains_key(&reg) {
+                rows.push(CfiOp::Restore(reg));
+            }
+        }
+    }
+}
+
+/// The rows the cold part of a split function opens with, which take a fresh record to the state
+/// the first part ended in, each remembered state on the way. See [`Writer::cold_part`].
+fn cold_rows(func: &Func, cold: Block) -> Vec<CfiOp> {
+    let mut now = Frame::called();
+    let mut stack = Vec::new();
+    for block in func.blocks().take_while(|&block| block != cold) {
+        for inst in func.insts(block) {
+            for op in func.cfi_after(inst) {
+                now.apply(op, &mut stack);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    let mut said = Frame::called();
+    for state in &stack {
+        said.towards(state, &mut rows);
+        rows.push(CfiOp::RememberState);
+        said = state.clone();
+    }
+    said.towards(&now, &mut rows);
+    rows
+}
+
 /// Whether a set of extensions has AArch64's CRC32 one.
 fn crc(isa: Isa) -> bool {
     Feature::aarch64("crc").is_some_and(|crc| isa.has(crc))
@@ -431,7 +517,19 @@ impl Writer<'_> {
             &mut crate::bytes::Known::default(),
         )
         .unwrap_or_default();
+        // A function split in two has its first part end at the last instruction in front of the
+        // cold part, and the rows after that one are said at the top of the cold part instead.
+        let split = func.cold.filter(|_| self.directives == Directives::Elf);
+        let hot_end = split.and_then(|cold| {
+            func.blocks()
+                .take_while(|&block| block != cold)
+                .flat_map(|block| func.insts(block))
+                .last()
+        });
         for (index, block) in func.blocks().enumerate() {
+            if Some(block) == split {
+                self.cold_part(func, block, &name);
+            }
             let size = loops.get(block.index()).copied().unwrap_or(0);
             if let Some(most) = crate::loop_room(size) {
                 let _ = writeln!(self.out, "\t.p2align\t6,,{most}");
@@ -492,7 +590,7 @@ impl Writer<'_> {
                     let _ = writeln!(self.out, "{local}EHE{at}_{name}:");
                     sites.push(pad);
                 }
-                if unwind && Some(inst) != end {
+                if unwind && Some(inst) != end && Some(inst) != hot_end {
                     for op in func.cfi_after(inst) {
                         self.cfi(op);
                     }
@@ -510,6 +608,28 @@ impl Writer<'_> {
         }
         if let Some(which) = self.marks {
             let _ = writeln!(self.out, "{}rucc_end{which}:", self.directives.local());
+        }
+        if split.is_some() {
+            // The cold part ends the function, and what comes after it goes back to where the
+            // first part is, which is what the next function expects to find itself in unless it
+            // says otherwise. A split function is never one the program placed.
+            if unwind {
+                let _ = writeln!(self.out, "\t.cfi_endproc");
+            }
+            self.directives.close(&mut self.out, &format!("{name}.cold"));
+            if self.sections.functions {
+                self.directives.code(&mut self.out, &name, self.sections);
+            } else {
+                let _ = writeln!(self.out, "{}", self.directives.text());
+            }
+            self.tables(func, &name);
+            if switched {
+                self.extension(self.crc);
+            }
+            if let Some(which) = &mut self.marks {
+                *which += 1;
+            }
+            return Ok(());
         }
         self.tables(func, &name);
         if seh.is_some() || arm.is_some() {
@@ -529,6 +649,34 @@ impl Writer<'_> {
             *which += 1;
         }
         Ok(())
+    }
+
+    /// Ends the first part of a function split in two and starts the second, which is the
+    /// function's name with `.cold` after it in `.text.unlikely`, the way gcc writes one.
+    ///
+    /// The second part is a function of its own as far as the unwind tables go, so it opens a
+    /// record of its own, and that record starts where every record starts, which is the state a
+    /// call leaves behind. The rows here take it from there to the state the first part was in
+    /// where it ended, the remembered states included, so that a `.cfi_restore_state` in the cold
+    /// part finds what it would have found in the first part.
+    fn cold_part(&mut self, func: &Func, cold: Block, name: &str) {
+        if self.unwind {
+            let _ = writeln!(self.out, "\t.cfi_endproc");
+        }
+        self.directives.close(&mut self.out, name);
+        if self.sections.functions {
+            let _ = writeln!(self.out, "\t.section\t.text.unlikely.{name},\"ax\",@progbits");
+        } else {
+            let _ = writeln!(self.out, "\t.section\t.text.unlikely,\"ax\",@progbits");
+        }
+        if self.unwind {
+            let _ = writeln!(self.out, "\t.cfi_startproc");
+            for op in cold_rows(func, cold) {
+                self.cfi(op);
+            }
+        }
+        let _ = writeln!(self.out, "\t.type\t{name}.cold, @function");
+        let _ = writeln!(self.out, "{name}.cold:");
     }
 
     /// Tells the assembler that the CRC32 extension is on from here, or off.

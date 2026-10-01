@@ -422,6 +422,14 @@ pub struct Func {
     /// and by the object writer, which are the two that know where an instruction lands. Empty
     /// in a build that did not ask for it with `-falign-loops`.
     pub heads: Vec<Block>,
+    /// The first block of the part of the function that is not expected to run, or `None` in a
+    /// function that is in one piece.
+    ///
+    /// Every block from this one to the end of the layout is cold, and the listing writes them in
+    /// `.text.unlikely` under a name of their own, the function's name with `.cold` after it, the
+    /// way gcc splits a function. Written by the layout, which is what puts the cold blocks last,
+    /// and only on a target whose listing knows how to write the second part.
+    pub cold: Option<Block>,
 
     insts: Vec<InstData>,
     inst_layout: Vec<InstLayout>,
@@ -468,6 +476,7 @@ impl Func {
             kept: Vec::new(),
             tables: Vec::new(),
             heads: Vec::new(),
+            cold: None,
             insts: Vec::new(),
             inst_layout: Vec::new(),
             inst_spans: Vec::new(),
@@ -657,6 +666,11 @@ impl Func {
     /// Says control never leaves a block. See [`BlockData::dead_end`].
     pub fn set_dead_end(&mut self, block: Block) {
         self.blocks[block.index()].dead_end = true;
+    }
+
+    /// Says a block is not expected to run. See [`BlockData::cold`].
+    pub fn set_cold(&mut self, block: Block) {
+        self.blocks[block.index()].cold = true;
     }
 
     // Instructions.

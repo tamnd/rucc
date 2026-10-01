@@ -39,6 +39,7 @@ use crate::abi;
 use crate::bits;
 use crate::bytes;
 use crate::choice;
+use crate::cold;
 use crate::combine;
 use crate::compare;
 use crate::copies;
@@ -417,6 +418,10 @@ pub struct Flags {
     /// shape of the graph says, which `-freorder-blocks` asks for and every level above `-O0`
     /// turns on. See [`crate::layout`].
     pub reorder: bool,
+    /// Whether the blocks that are not expected to run are put in a part of the function of their
+    /// own, which `-freorder-blocks-and-partition` asks for. See [`crate::cold`]. Only a target
+    /// whose listing can write the second part asks for it, which is x86-64 ELF.
+    pub partition: bool,
     /// Whether two locals that are never both wanted may be the same bytes, which
     /// `-fstack-reuse=none` turns off and `-O0` does not ask for. Spill slots share whatever this
     /// says, since a spill slot is not a variable and nothing can ask a debugger for one. See
@@ -503,6 +508,7 @@ impl Default for Flags {
             mcount: Mcount::default(),
             patch: Room::default(),
             reorder: false,
+            partition: false,
             reuse: false,
             schedule: false,
             align_loops: false,
@@ -701,6 +707,10 @@ pub fn compile_recording(
     // there is. See `crate::weights`.
     if flags.reorder {
         weights::carry(source, &blocks, &mut func);
+    }
+    // At the same moment and for the same reason, and read by the same pass. See `crate::cold`.
+    if flags.reorder && flags.partition {
+        cold::mark(source, &blocks, &mut func, elsewhere);
     }
     // What the refusal before selection missed, which would be a rule that reaches for a vector
     // register on its own to do something that is not about a float at all. None does now, and
