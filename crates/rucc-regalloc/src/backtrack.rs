@@ -243,6 +243,7 @@ fn placed(
         commuted: vec![None; count],
         work: 0,
         budget,
+        asked: (None, Vec::new()),
     };
     let mut assignment = Assignment::empty(count);
     let mut lost = vec![0u32; count];
@@ -346,6 +347,11 @@ struct State<'a, 'v> {
     commuted: Vec<Option<Inst>>,
     work: u64,
     budget: u64,
+    /// What [`Blocks::insists`] said about each register for the value it was last asked about, by
+    /// the register's number, allowed and then clear. Placing one value asks about the same
+    /// registers more than once, for its hints, for its partners' registers and then for every
+    /// register in order, and the answer does not change in between.
+    asked: (Option<Reg>, Vec<[Option<bool>; 2]>),
 }
 
 impl<'a> State<'a, '_> {
@@ -433,8 +439,36 @@ impl<'a> State<'a, '_> {
     }
 
     fn free(&mut self, value: Value<'_>, at: PhysReg, want: Want) -> bool {
-        !self.blocked.insists(value.reg, value.class, value.area, value.range, at, want)
-            && self.clashes(value, at).is_empty()
+        !self.insists(value, at, want) && self.clashes(value, at).is_empty()
+    }
+
+    /// Whether an instruction insists on `at` where `value` would be in its way, from what was
+    /// worked out the last time this was asked if it was asked about this value already. A
+    /// register clear for a value is allowed for it too, and one not allowed is not clear either.
+    fn insists(&mut self, value: Value<'_>, at: PhysReg, want: Want) -> bool {
+        let (asked, answers) = &mut self.asked;
+        if *asked != Some(value.reg) {
+            *asked = Some(value.reg);
+            answers.fill([None; 2]);
+        }
+        let number = usize::from(at.number());
+        if answers.len() <= number {
+            answers.resize(number + 1, [None; 2]);
+        }
+        let slot = usize::from(want == Want::Clear);
+        if let Some(answer) = answers[number][slot] {
+            return answer;
+        }
+        let answer =
+            self.blocked.insists(value.reg, value.class, value.area, value.range, at, want);
+        let known = &mut answers[number];
+        known[slot] = Some(answer);
+        match (want, answer) {
+            (Want::Clear, false) => known[0] = Some(false),
+            (Want::Allowed, true) => known[1] = Some(true),
+            _ => {}
+        }
+        answer
     }
 
     /// The first register of `wanted` that is free for `value`.
@@ -537,14 +571,7 @@ impl<'a> State<'a, '_> {
     fn cheapest(&mut self, value: Value<'_>, order: &[PhysReg]) -> Option<PhysReg> {
         let mut best: Option<(u128, u128, PhysReg)> = None;
         for &at in order {
-            if self.blocked.insists(
-                value.reg,
-                value.class,
-                value.area,
-                value.range,
-                at,
-                Want::Allowed,
-            ) {
+            if self.insists(value, at, Want::Allowed) {
                 continue;
             }
             let clashes = self.clashes(value, at);
