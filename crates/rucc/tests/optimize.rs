@@ -1,4 +1,4 @@
-//! What `__attribute__((optimize ("O0")))` does to the IR of the one function it is written on.
+//! What `__attribute__((optimize (...)))` does to the IR of the one function it is written on.
 //!
 //! gcc reads the level off the function rather than off the unit, so a function that asks for
 //! `-O0` in a unit built at `-O2` is compiled the way `-O0` compiles it: nothing is inlined into
@@ -90,4 +90,56 @@ int caller (int x) { return kept (x); }
     }
     assert!(body(&text, "asked").iter().any(|line| line.ends_with("iconst.i32 0")), "{text}");
     assert!(body(&text, "answered").iter().any(|line| line.ends_with("iconst.i32 1")), "{text}");
+}
+
+/// A function that asks for `wrapv` is compiled as if the unit had `-fwrapv`: its signed additions
+/// do not say they cannot wrap, where the same line in a function under the rule does. A body that
+/// wraps still wraps once it is inlined into one that does not, which is why the answer is carried
+/// on the instructions rather than on the function.
+#[test]
+fn a_function_that_asks_for_wrapv_wraps() {
+    let text = ir(
+        "wrapv",
+        r#"
+__attribute__((optimize ("wrapv"))) int wraps (int x) { return x + 1 > x; }
+__attribute__((optimize ("-fwrapv"))) int dashed (int x) { return x + 1 > x; }
+int plain (int x) { return x + 1 > x; }
+static inline __attribute__((optimize ("wrapv"))) int inner (int x) { return x + 1 > x; }
+int outer (int x) { return inner (x); }
+"#,
+    );
+    for name in ["wraps", "dashed", "outer"] {
+        let lines = body(&text, name);
+        assert!(lines.iter().any(|line| line.contains("= add ")), "{name}: {text}");
+        assert!(!lines.iter().any(|line| line.contains("add.nsw")), "{name}: {text}");
+        assert!(!lines.iter().any(|line| line.contains("call")), "{name}: {text}");
+    }
+    assert!(body(&text, "plain").iter().any(|line| line.contains("add.nsw")), "{text}");
+}
+
+/// A function that asks for `no-tree-loop-distribute-patterns` keeps the loop that clears a range,
+/// which `-O2` turns into a `memset` everywhere else. It is what a freestanding `memset`
+/// written under another name says so that it is not compiled into a call to itself, and a caller
+/// the body is inlined into keeps the loop as well.
+#[test]
+fn a_function_that_asks_for_its_loops_keeps_them() {
+    let text = ir(
+        "loops",
+        r#"
+__attribute__((optimize ("no-tree-loop-distribute-patterns")))
+void clear (char *p, int n) { for (int i = 0; i < n; i++) p[i] = 0; }
+void plain (char *p, int n) { for (int i = 0; i < n; i++) p[i] = 0; }
+static inline __attribute__((optimize ("-fno-tree-loop-distribute-patterns")))
+void inner (char *p, int n) { for (int i = 0; i < n; i++) p[i] = 0; }
+void outer (char *p, int n) { inner (p, n); }
+"#,
+    );
+    for name in ["clear", "outer"] {
+        assert!(head(&text, name).contains("no_loop_idiom"), "{name}: {text}");
+        assert!(
+            !body(&text, name).iter().any(|line| line.starts_with("memset ")),
+            "{name}: {text}"
+        );
+    }
+    assert!(body(&text, "plain").iter().any(|line| line.starts_with("memset ")), "{text}");
 }

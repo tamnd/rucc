@@ -93,8 +93,8 @@ struct Declared {
     twice: bool,
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
-    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`],
-    /// [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
+    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`], [`DeclFlags::WRAPV`],
+    /// [`DeclFlags::NO_LOOP_IDIOM`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
     /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
     /// [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
     inlining: DeclFlags,
@@ -1431,6 +1431,8 @@ impl Checker<'_> {
                 DeclFlags::NOINLINE,
                 DeclFlags::NO_STRICT_ALIASING,
                 DeclFlags::OPTIMIZE_NONE,
+                DeclFlags::WRAPV,
+                DeclFlags::NO_LOOP_IDIOM,
                 DeclFlags::NO_INSTRUMENT,
                 DeclFlags::NO_PROFILE,
                 DeclFlags::COLD,

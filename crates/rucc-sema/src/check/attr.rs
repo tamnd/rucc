@@ -1521,6 +1521,14 @@ impl Checker<'_> {
                             // higher level than the unit's would mean running passes the unit
                             // never asked for, and those levels are accepted and ignored.
                             "O0" => flags |= DeclFlags::OPTIMIZE_NONE,
+                            // The two options the kernel writes on a function that change what the
+                            // body is allowed to become rather than how fast it is. `wrapv` is
+                            // `-fwrapv` for the one body, and the other is what keeps a
+                            // freestanding `memset` from being compiled into a call to itself.
+                            "wrapv" => flags |= DeclFlags::WRAPV,
+                            "no-tree-loop-distribute-patterns" => {
+                                flags |= DeclFlags::NO_LOOP_IDIOM;
+                            }
                             _ => {}
                         }
                     }

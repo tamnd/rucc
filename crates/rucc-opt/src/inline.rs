@@ -597,6 +597,12 @@ fn settle(
         match splice(module, id, call, callee, how.convention, kind, &mut pool) {
             Ok(()) => {
                 spliced = true;
+                // A loop the callee said must stay a loop is in the caller now, and the pass that
+                // would make it a call only knows functions. The whole caller keeps its loops,
+                // which costs it the calls it would have had and never makes the wrong one.
+                if module[callee].attrs.set.contains(AttrSet::NO_LOOP_IDIOM) {
+                    module[id].attrs.set |= AttrSet::NO_LOOP_IDIOM;
+                }
                 stats.optimized(match kind {
                     Kind::Always => INLINED,
                     Kind::Hinted => HINT_INLINED,

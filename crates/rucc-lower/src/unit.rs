@@ -1040,6 +1040,9 @@ impl Unit<'_> {
         {
             func.attrs.set |= AttrSet::OPTNONE;
         }
+        if node.flags.contains(DeclFlags::NO_LOOP_IDIOM) {
+            func.attrs.set |= AttrSet::NO_LOOP_IDIOM;
+        }
         if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
             func.attrs.set |= AttrSet::ALWAYS_INLINE;
         } else if node.flags.contains(DeclFlags::NOINLINE) {
@@ -1144,10 +1147,20 @@ impl Unit<'_> {
             // `optimize ("no-strict-aliasing")` on the function, which has to be kept in the IR
             // rather than on the command line because the inliner may copy this body into a
             // function that is under the rule.
+            //
+            // `optimize ("wrapv")` is kept the same way and for the same reason, as instructions
+            // that do not say they cannot wrap. It is the other answer to the question `-ftrapv`
+            // answers, so it turns that off for the body as the command line's `-fwrapv` does.
             let strict = self.aliasing;
+            let wrapping = self.wrapping;
             self.aliasing &= !node.flags.contains(DeclFlags::NO_STRICT_ALIASING);
+            if node.flags.contains(DeclFlags::WRAPV) {
+                self.wrapping.signed = true;
+                self.wrapping.trap = false;
+            }
             body::lower(self, decl, &mut func, &plan);
             self.aliasing = strict;
+            self.wrapping = wrapping;
             // Only for a definition, because an entry is an address and a declaration of something
             // another file defines has none to put there. gcc reads the attribute off whichever
             // declaration carried it and then waits for the definition in the same way, which is
