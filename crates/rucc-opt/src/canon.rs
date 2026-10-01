@@ -473,16 +473,30 @@ fn covered(dom: &Dominators, at: &[Block], block: Block) -> bool {
     false
 }
 
-/// The name the value goes by at the end of this block, which is the nearest parameter above it.
-fn reaching(dom: &Dominators, param: &Map<Block, Value>, value: Value, block: Block) -> Value {
-    let mut here = Some(block);
-    while let Some(now) = here {
-        if let Some(&had) = param.get(&now) {
-            return had;
+/// The name the value goes by at the end of every block that has one other than the value itself,
+/// which is the nearest parameter above the block.
+///
+/// One walk down the dominator tree from the definition, carrying the name along. Only blocks the
+/// definition dominates are under it and every placement is one of those, so every other block
+/// still calls the value by its own name. Asking each block for its nearest parameter by climbing
+/// the tree was a walk the depth of the tree per block, and a kunit test body is a long straight
+/// line of blocks: lib/overflow_kunit.c spent ten minutes here.
+fn reaching(
+    dom: &Dominators,
+    param: &Map<Block, Value>,
+    value: Value,
+    from: Block,
+) -> Map<Block, Value> {
+    let mut names = Map::default();
+    let mut stack = vec![(from, value)];
+    while let Some((block, outer)) = stack.pop() {
+        let name = param.get(&block).copied().unwrap_or(outer);
+        if name != value {
+            names.insert(block, name);
         }
-        here = dom.immediate_dominator(now);
+        stack.extend(dom.children(block).map(|child| (child, name)));
     }
-    value
+    names
 }
 
 /// Adds the parameters, passes the value on every edge in, and points the uses outside at them.
@@ -495,11 +509,16 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
     let ty = func[job.value].ty;
     let param: Map<Block, Value> =
         job.at.iter().map(|&block| (block, func.append_param(block, ty))).collect();
+    let names = match defining(func, job.value) {
+        Some(from) => reaching(dom, &param, job.value, from),
+        None => Map::default(),
+    };
+    let name = |block: Block| names.get(&block).copied().unwrap_or(job.value);
     // Each edge in hands over whatever the value is called at the end of the block it leaves, which
     // is the value itself on the way out of the loop and a parameter written above on the joins.
     for term in terminators(func) {
         let Some(from) = func.block_of(term) else { continue };
-        let hand = reaching(dom, &param, job.value, from);
+        let hand = name(from);
         for at in func.target_list(term).iter() {
             let call = func[at];
             if !param.contains_key(&call.block) {
@@ -509,12 +528,8 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
             func.set_block_call(at, BlockCall { args, ..call });
         }
     }
-    for block in func.blocks().collect::<Vec<_>>() {
+    for (&block, &hand) in &names {
         if loops.contains(job.id, block) {
-            continue;
-        }
-        let hand = reaching(dom, &param, job.value, block);
-        if hand == job.value {
             continue;
         }
         for inst in func.insts(block).collect::<Vec<_>>() {
