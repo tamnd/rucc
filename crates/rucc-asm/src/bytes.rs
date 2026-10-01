@@ -930,7 +930,6 @@ pub(crate) fn slot(bytes: &[u8], mode: Mode) -> Reference {
     }
 }
 
-
 /// The value a register an instruction names outright is, which is `ah` unless it is one of the
 /// registers only AVX-512 has. See [`Arg::Named`].
 fn named(name: &str) -> Value {

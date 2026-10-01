@@ -1044,9 +1044,7 @@ fn generate(
         vector: opts.vector,
         x87: opts.x87,
         x87_return: opts.x87_return,
-        zero: opts
-            .zero_regs
-            .map(|(all, arg, wide)| rucc_codegen::zero::Zeroing { all, arg, wide }),
+        zero: opts.zero_regs.map(|(all, arg, wide)| rucc_codegen::zero::Zeroing { all, arg, wide }),
         zero_extension: zero_extension(opts.isa),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),

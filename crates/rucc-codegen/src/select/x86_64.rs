@@ -1042,7 +1042,8 @@ mod tests {
             if AWAY.contains(&opcode) || MEMORY.contains(&opcode) || STRING.contains(&opcode) {
                 continue;
             }
-            if TEMPLATED.contains(&opcode) || THUNKS.contains(&opcode) || ZEROING.contains(&opcode) {
+            if TEMPLATED.contains(&opcode) || THUNKS.contains(&opcode) || ZEROING.contains(&opcode)
+            {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {
