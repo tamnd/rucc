@@ -428,6 +428,12 @@ struct Reader {
     /// The names set to exactly another name, with that name's entry. gas gives one the other's
     /// type and size, so `.set alias, real` on a function is a second function and not a bare label.
     copies: Vec<(usize, String)>,
+    /// `.symver name, name2@VERS`, as the name, the versioned name and the line. Worked out at the
+    /// end, once the name has a place, by [`Reader::versions`].
+    symvers: Vec<(String, String, usize)>,
+    /// The names [`Reader::versions`] renamed, with the name each now has, which the relocations
+    /// written against the old name are given at the end.
+    renamed: Map<String, String>,
     /// Which entry a name that has been set means from here on. A file may set one name as many
     /// times as it likes, and each use means the value it had where the use was written, so a
     /// second setting is a second entry and this says which one is current.
@@ -1580,6 +1586,16 @@ impl Reader {
                 self.assign(&name, &what)?;
             }
             "comm" | "lcomm" => self.common(&args, word == "lcomm")?,
+            "symver" if self.elf() => {
+                let [name, versioned] = self.two(&args, ".symver")?;
+                let versioned = versioned.trim();
+                if !versioned.contains('@') {
+                    let what = format!("'{versioned}' has no '@' to say which version it is");
+                    return Err(self.bad(&what));
+                }
+                let name = self.current.get(name.trim()).cloned().unwrap_or(name);
+                self.symvers.push((name.trim().to_owned(), versioned.to_owned(), self.line));
+            }
 
             // Two directives under one name. `.file "foo.c"` says what this was assembled from and
             // becomes a symbol, and `.file 1 "foo.c"` is a line table entry which says the same
@@ -2888,12 +2904,18 @@ impl Reader {
         }
         self.resolve_sizes()?;
         self.copy_attributes();
+        self.versions()?;
         let grow = self.too_far()?;
         if !grow.is_empty() || !held {
             let line = self.guessed.first().map_or(self.line, |(_, _, line)| *line);
             return Ok(Err(Again { grow, places: self.places(), line }));
         }
         self.resolve_fixups()?;
+        for reloc in self.parts.iter_mut().flat_map(|part| part.relocs.iter_mut()) {
+            if let Some(renamed) = self.renamed.get(&reloc.symbol) {
+                reloc.symbol.clone_from(renamed);
+            }
+        }
         self.leaders()?;
         let marker = ".note.GNU-stack";
         if self.noexecstack && self.elf() && !self.parts.iter().any(|part| part.name == marker) {
@@ -3217,6 +3239,41 @@ impl Reader {
                 alias.size = size;
             }
         }
+    }
+
+    /// The versioned names `.symver` asked for, measured against gas 2.42.
+    ///
+    /// `name2@VERS` and `name2@@VERS` are a second symbol at the place the first one is, with its
+    /// type, size, binding and visibility, and the first one stays. `name2@@@VERS` renames the
+    /// first one to `name2@@VERS`, so nothing is left under the old name. A name this file only
+    /// refers to is renamed whichever spelling was used, since what is asked for then is a
+    /// reference to that version and there is no place to put a copy. A name that turns up
+    /// nowhere at all, which is what is left of a `static` function the compiler threw away, gets
+    /// nothing, as in gas.
+    ///
+    /// The linker reads the `@` itself. LTP's sctp library versions `sctp_connectx` this way, and
+    /// a static link takes the `@@` one as the plain name.
+    fn versions(&mut self) -> Result<(), Trouble> {
+        for (name, versioned, line) in std::mem::take(&mut self.symvers) {
+            let Some(&first) = self.known.get(&name) else { continue };
+            let renamed = versioned.replacen("@@@", "@@", 1);
+            if self.known.contains_key(&renamed) {
+                let why = format!("'{renamed}' is defined twice");
+                return Err(Trouble { line, why });
+            }
+            if versioned.contains("@@@") || self.syms[first].at == Held::Undefined {
+                // The old name stays in the map, since what was written against it is resolved
+                // after this and has to find the entry that now carries the new name.
+                self.known.insert(renamed.clone(), first);
+                self.renamed.insert(name, renamed.clone());
+                self.syms[first].name = renamed;
+                continue;
+            }
+            let copy = Sym { name: renamed.clone(), numbered: false, ..self.syms[first].clone() };
+            self.known.insert(renamed, self.syms.len());
+            self.syms.push(copy);
+        }
+        Ok(())
     }
 
     /// The places whose bytes name something.
@@ -4701,6 +4758,37 @@ mod tests {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
+    }
+
+    /// `.symver` as gas 2.42 writes it. `@` and `@@` are a copy at the same place that keeps the
+    /// type, size and binding, `@@@` renames the name it is about, and so does any spelling of a
+    /// name the file only refers to, with the relocations against it following the new name.
+    #[test]
+    fn a_symver_is_a_copy_or_a_rename_as_in_gas() {
+        let file = assembled(concat!(
+            ".text\n.globl real\n.type real, @function\nreal: ret\n.size real, .-real\n",
+            ".symver real, real@VERS_1\n.symver real, real_d@@VERS_2\n.symver real, real_e@\n",
+            ".globl ren\n.type ren, @function\nren: ret\n.symver ren, ren@@@VERS_3\n",
+            ".symver ext, ext@GLIBC_2.2.5\ncall ext\ncall ren\n.symver nothing, nothing@V\n",
+        ));
+        let names: Vec<&str> = file.names.iter().map(|name| name.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["real", "ren@@VERS_3", "ext@GLIBC_2.2.5", "real@VERS_1", "real_d@@VERS_2", "real_e@"]
+        );
+        let real = &file.names[0];
+        for copy in &file.names[3..] {
+            assert_eq!((copy.at, copy.size, copy.sort), (real.at, real.size, real.sort));
+            assert_eq!(copy.binding, real.binding);
+        }
+        let called: Vec<&str> =
+            file.parts[0].relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
+        assert_eq!(called, ["ext@GLIBC_2.2.5", "ren@@VERS_3"]);
+
+        let twice = read(".text\na: b:\n.symver a, x@V\n.symver b, x@V\n", Arch::X86_64);
+        assert!(twice.unwrap_err().why.contains("defined twice"));
+        let bare = read(".text\na:\n.symver a, x\n", Arch::X86_64);
+        assert!(bare.unwrap_err().why.contains("no '@'"));
     }
 
     /// The shape of the kernel's la57toggle.S, which drops to thirty two bits in the middle of
