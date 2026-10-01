@@ -414,9 +414,9 @@ pub struct Global {
     /// Its initial image, or `None` if it is only declared here.
     pub init: Option<DataList>,
     /// Whether the optimizer may take it away once nothing in the module names it, which is a
-    /// `static` object the program wrote and asked nothing about keeping. False for every other
-    /// global, including the ones the compiler made itself, since nothing here knows what each of
-    /// those is for. See `inline::drop_unreferenced` in `rucc-opt`.
+    /// `static` object the program wrote and asked nothing about keeping, a string literal, or the
+    /// object `__func__` stands for. False for every other global the compiler made itself, since
+    /// nothing here knows what each of those is for. See `inline::drop_unreferenced` in `rucc-opt`.
     pub droppable: bool,
     /// Whether it is a string literal, whose bytes the linker may share with any other literal of
     /// the same bytes in any object, since a program cannot tell two of them apart by anything but

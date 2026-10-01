@@ -5570,6 +5570,26 @@ decl #0 x : int object external static defined
         assert!(!text.contains(".globl\t__func__"), "{text}");
     }
 
+    /// A literal only a table nothing reads or a function inlined everywhere named is not emitted,
+    /// and neither is the `__func__` of that function, which is gcc's answer too. The kernel has
+    /// the file name of every header with a `WARN` in an inline function in an object for that.
+    #[test]
+    fn a_literal_nothing_left_names_is_not_emitted() {
+        let source = "static const char *const names[] = {\"alpha\", \"beta\"};\n\
+                      static inline int check(int x) {\n\
+                      if (x > 5) { __builtin_printf(\"include/linux/x.h %s\\n\", __func__); return 1; }\n\
+                      return 0; }\n\
+                      int f(void) { return check(1); }\n";
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let text = run(&opts, source).text().to_owned();
+        assert!(!text.contains(".rodata"), "{text}");
+        assert!(!text.contains("alpha"), "{text}");
+        // At `-O0` nothing is taken away, and the table is still there.
+        assert!(asm(source).contains("alpha"));
+    }
+
     /// A variable holding the address of another one, which is the only hole an image has in it.
     #[test]
     fn an_address_in_an_initializer_is_left_to_the_linker() {
