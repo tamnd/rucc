@@ -5051,7 +5051,7 @@ impl<'a> Lowering<'a> {
                 let spelled = operand.result.is_none()
                     && operand.tied.is_none()
                     && operand.immediate
-                    && match (self.number(value), operand.range) {
+                    && match (self.bare_number(value), operand.range) {
                         (Some(number), range) => a64 || in_range(range, number),
                         // The two thirty two bit letters take an address too, which fits under the
                         // code models gcc takes them in.
@@ -5373,7 +5373,7 @@ impl<'a> Lowering<'a> {
                     // The constant negated and bare, for the other half of an `add` written
                     // as a `sub`. A name has no negative, so only a number is taken.
                     Some('n') => {
-                        let number = self.number(value).ok_or_else(refused)?;
+                        let number = self.bare_number(value).ok_or_else(refused)?;
                         text.push_str(&number.wrapping_neg().to_string());
                         continue;
                     }
@@ -5393,7 +5393,7 @@ impl<'a> Lowering<'a> {
                 if !bare && !a64 {
                     text.push('$');
                 }
-                if let Some(number) = self.number(value) {
+                if let Some(number) = self.bare_number(value) {
                     text.push_str(&number.to_string());
                 } else if let Some((symbol, offset)) = self.named_address(value) {
                     text.push_str(&template_name(self.names.resolve(symbol)));
@@ -6532,6 +6532,16 @@ impl<'a> Lowering<'a> {
             }
         };
         Ok(mir::Mem { base, scale: 1, disp, segment, ..mir::Mem::default() })
+    }
+
+    /// The constant an `asm` operand spells, which is [`Self::number`] except for a one bit value.
+    ///
+    /// That is a C `_Bool`, and gcc prints a true one as `1`. Read as a signed one bit number it is
+    /// `-1`, and the kernel's `arch_static_branch` writes `.quad %c0 + %c1 - .` with the branch as
+    /// a `bool`, so every likely branch pointed its jump table entry one byte before its key.
+    fn bare_number(&self, value: Value) -> Option<i128> {
+        let number = self.number(value)?;
+        Some(if self.source[value].ty.bits() == 1 { number & 1 } else { number })
     }
 
     /// The number in that value, for one an `iconst` defined, read at the width of its own type.
