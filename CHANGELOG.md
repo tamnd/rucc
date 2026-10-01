@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A function that may not use the vector registers, under `-mno-sse` or `-mgeneral-regs-only`, no longer saves the ones its convention keeps. An `ms_abi` function that called a plain one saved `xmm6` to `xmm15`, which put ten `movaps` in the kernel's EFI stub.
 - Comparing two addresses a constant distance into the same object, such as `&x.prev <= &x`, now folds to a constant, so mm/ksm.c's `BUILD_BUG_ON` on its list head builds.
 - A name set to exactly another name with `.set` now takes that name's type and size, the way gas does. A function alias such as the kernel's syscall stubs came out as an untyped label of size zero, so objtool gave it no `__pfx_` symbol.
 - `rucc --fetch` installs the kernel header tree on macOS and on Windows. The uapi headers have pairs whose names differ only in case, like `xt_CONNMARK.h` and `xt_connmark.h`, and a filesystem that does not tell case apart keeps one file for both, which the manifest check took for a broken archive. A pair that kept one of its two files now passes, and the fetch names the headers an include can no longer reach.
