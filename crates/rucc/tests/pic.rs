@@ -247,6 +247,19 @@ fn position_dependent_code_reaches_every_name_directly() {
     assert!(executable.contains("maybe@GOTPCREL(%rip)"), "{executable}");
 }
 
+/// A constant holding an address goes in `.rodata` under `-fno-pic`, as gcc puts it, and in
+/// `.data.rel.ro` otherwise. Without the loader moving the file there is no write for the relro
+/// segment to protect, and the kernel's section checks compare against gcc's names.
+#[test]
+fn a_constant_holding_an_address_is_read_only_data_without_pic() {
+    let source = "extern int x;\nconst int *const p[] = { &x };\n";
+    let absolute = asm("rodata-absolute", &["-fno-pic"], source);
+    assert!(!absolute.contains(".data.rel.ro"), "{absolute}");
+    assert!(absolute.contains("\t.section\t.rodata"), "{absolute}");
+    let executable = asm("rodata-pie", &["-fPIE"], source);
+    assert!(executable.contains(".data.rel.ro"), "{executable}");
+}
+
 /// A no speaks only for its own family, the way gcc reads the two, so a library asked for is still
 /// a library after `-fno-pie`, and an executable asked for is still one after `-fno-pic`.
 #[test]

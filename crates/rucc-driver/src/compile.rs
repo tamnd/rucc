@@ -1214,6 +1214,16 @@ fn generate(
                 let target = names.resolve(name).to_owned();
                 (Slot::Referred.name(&target), target)
             }));
+            // Under `-fno-pic` nothing loads the file at an address it does not already know, so
+            // a constant holding an address has nobody to write it but the linker and goes in
+            // `.rodata`, which is where gcc puts it. `.data.rel.ro` is for the loader's one write.
+            if replaceable(target, opts) == IrPic::Absolute {
+                for var in &mut globals.vars {
+                    if let rucc_object::Place::RelocReadOnly { .. } = var.place {
+                        var.place = rucc_object::Place::ReadOnly;
+                    }
+                }
+            }
             if target.tuple.env() == rucc_tuple::Env::Msvc {
                 globals.keep_imported(
                     elsewhere
