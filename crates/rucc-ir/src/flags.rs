@@ -167,6 +167,10 @@ impl Flags {
     /// The same for `%gs` and `__seg_gs`, which is the one the Linux percpu accessors use.
     pub const SEG_GS: Self = Self(1 << 17);
 
+    /// The `asm` was written `asm inline`, so the inliner weighs it as one instruction whatever
+    /// its template says, which is what the qualifier is for.
+    pub const INLINE: Self = Self(1 << 18);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -252,8 +256,9 @@ impl Flags {
             Opcode::AtomicLoad | Opcode::AtomicStore | Opcode::Cmpxchg | Opcode::AtomicRmw => {
                 Self::KEEP
             }
-            // The address space on an `asm` is the one its operands in memory are in.
-            Opcode::InlineAsm => Self::KEEP,
+            // The address space on an `asm` is the one its operands in memory are in, and `inline` is
+            // the qualifier it was written with.
+            Opcode::InlineAsm => Self::KEEP.union(Self::INLINE),
             // On all three spellings of a call, including the indirect one. Nothing works out
             // `nofree` for a call through an address today, and the flag is legal there because
             // what it says is about the functions the call reaches rather than about how the call
@@ -342,6 +347,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::ALIGNED, "aligned"),
     (Flags::SEG_FS, "seg_fs"),
     (Flags::SEG_GS, "seg_gs"),
+    (Flags::INLINE, "inline"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.

@@ -932,6 +932,12 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // `-fno-inline-functions-called-once` turns the called once half off alone. It is not a pass,
     // so the toggle only ever means this and never adds or removes anything from the list.
     let once = opts.wants(inline::ONCE);
+    // `-finline-small-functions`, which gcc turns on from `-O2` and not for size.
+    let auto = opts
+        .toggles
+        .iter()
+        .rfind(|(it, _)| it == inline::SMALL)
+        .map_or(matches!(opts.level, OptLevel::O2 | OptLevel::O3), |&(_, on)| on);
     let started = Instant::now();
     let growth =
         if opts.conserve_stack { inline::Growth::CONSERVE } else { inline::Growth::DEFAULT };
@@ -944,6 +950,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         growth,
         opts.stack_reuse,
         opts.interposition,
+        auto,
     );
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {

@@ -24,9 +24,10 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 /// One function calling another, both of them exported, which is the whole of the question.
 ///
 /// `helper` frees nothing, so a compilation that may believe its body writes `nofree` onto the call
-/// in `caller` and one that may not does not.
+/// in `caller` and one that may not does not. Its body is larger than the call to it, so the call
+/// stays a call to read the belief off.
 const PAIR: &str = "\
-int helper(int x) { return x + 1; }
+int helper(int x) { return x * 3 + x / 7; }
 int caller(int x) { return helper(x) + 1; }
 ";
 
@@ -108,7 +109,7 @@ fn a_library_believes_a_body_nothing_outside_it_can_name() {
         "quiet",
         &["-fPIC"],
         "\
-static int helper(int x) { return x + 1; }
+static int helper(int x) { return x * 3 + x / 7; }
 int caller(int x) { return helper(x) + helper(x + 1); }
 ",
     );
