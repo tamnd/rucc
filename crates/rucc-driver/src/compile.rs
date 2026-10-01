@@ -1098,6 +1098,16 @@ fn generate(
         // the blocks come out in the order they were written and a person stepping through the
         // code walks down the screen.
         reorder: opts.reorder_blocks.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
+        // On at `-O2` and `-O3`, which is where gcc splits a function for x86, and not when the
+        // goal is size, which gcc's gate on the pass says. Only x86-64 ELF, which is the one
+        // target whose listing writes the second part, and not under `-g`, whose line and range
+        // tables are written for a function in one piece. See `rucc_codegen::cold`.
+        partition: target.tuple.arch() == Arch::X86_64
+            && target.tuple.os().object_format() == Some(ObjectFormat::Elf)
+            && !opts.debug_info
+            && opts
+                .partition_blocks
+                .unwrap_or_else(|| opts.opt_level.schedules() && !opts.opt_level.is_size()),
         // On at every level above `-O0`, for the reason the line above is off at it. Sharing one
         // run of bytes between two locals is a smaller frame and a worse debugger: a variable that
         // is out of scope reads as whatever took its place, which is what `-O0` exists not to do.
@@ -1327,9 +1337,12 @@ fn generate(
             // does one written `retain`, which is given a section of its own. The object writer
             // lays the code out as one run of bytes, and the listing is where a function's
             // section is already said, so it is the one place the answer has to be right rather
-            // than two.
+            // than two. A function split in two is placed code as well, since its cold part is in
+            // `.text.unlikely`.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
-            let placed_code = funcs.iter().any(|func| func.section.is_some() || func.retain);
+            let placed_code = funcs
+                .iter()
+                .any(|func| func.section.is_some() || func.retain || func.cold.is_some());
             if aarch64 || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and
@@ -4503,6 +4516,45 @@ decl #0 x : int object external static defined
         assert!(!small.contains(".rodata.str1.8"), "{small}");
     }
 
+    /// gcc's hot and cold split. A path that calls a function written `cold` goes in
+    /// `.text.unlikely` under the function's name with `.cold` after it, its unwind record opens
+    /// in the state the first part was in, and the object has both parts. Not at `-Os`, and not
+    /// when the command line said no.
+    #[test]
+    fn a_path_to_a_cold_call_is_split_off_into_text_unlikely() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let source = "__attribute__((cold)) void oops(int);\n\
+                      int work(int);\n\
+                      int f(int x) { int y = work(x); if (y < 0) { oops(y); return -1; } \
+                      return work(y); }\n";
+        let text = run(&opts, source).text().to_owned();
+        assert!(text.contains("\t.section\t.text.unlikely,\"ax\",@progbits\n"), "{text}");
+        assert!(text.contains("\t.type\tf.cold, @function\nf.cold:\n"), "{text}");
+        assert!(text.contains("\t.size\tf, .-f\n"), "{text}");
+        assert!(text.contains("\t.size\tf.cold, .-f.cold\n"), "{text}");
+        let cold = &text[text.find("f.cold:").expect("a cold part")..];
+        assert!(cold.contains("call\toops"), "{text}");
+        let start = text.find(".text.unlikely").expect("a cold section");
+        assert!(text[start..].contains("\t.cfi_startproc\n\t.cfi_def_cfa_offset 16\n"), "{text}");
+        opts.emit = EmitKind::Object;
+        let object = run(&opts, source);
+        let has = |name: &[u8]| object.artifact.bytes().windows(name.len()).any(|at| at == name);
+        assert!(has(b".text.unlikely\0") && has(b"f.cold\0"));
+        opts.emit = EmitKind::Asm;
+        for (level, asked) in [
+            (rucc_session::OptLevel::Os, None),
+            (rucc_session::OptLevel::O1, None),
+            (rucc_session::OptLevel::O2, Some(false)),
+        ] {
+            opts.opt_level = level;
+            opts.partition_blocks = asked;
+            let whole = run(&opts, source).text().to_owned();
+            assert!(!whole.contains(".cold"), "{whole}");
+        }
+    }
+
     /// tamnd/rucc#2277. With the vector registers taken away a function with a `double` in it is
     /// refused, as gcc refuses it, and one without is compiled with no vector register in it,
     /// the register save area of a variadic function included.
@@ -5440,7 +5492,7 @@ decl #0 x : int object external static defined
     fn a_string_literal_is_a_variable_with_a_name_no_program_could_write() {
         let text = asm("const char *f(void) { return \"hi\"; }\n");
         assert!(text.contains("\t.ascii\t\"hi\\000\"\n"), "{text}");
-        assert!(text.contains("\t.section\t.rodata\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"), "{text}");
         let label = text
             .lines()
             .find(|line| line.starts_with(".Lstr"))

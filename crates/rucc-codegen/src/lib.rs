@@ -159,6 +159,7 @@ pub mod bytes;
 pub mod capability;
 pub mod changes;
 pub mod choice;
+pub mod cold;
 pub mod combine;
 pub mod compare;
 pub mod copies;

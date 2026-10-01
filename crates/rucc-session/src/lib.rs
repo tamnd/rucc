@@ -2128,6 +2128,11 @@ pub struct Options {
     /// than a `bool` because `-O2 -fno-reorder-blocks` and `-O0` have to be different things and
     /// a `bool` set from the level could not tell them apart.
     pub reorder_blocks: Option<bool>,
+    /// Whether the blocks that are not expected to run go in a part of the function of their own
+    /// in `.text.unlikely`, from `-freorder-blocks-and-partition` and its `-fno-` form. `None` is
+    /// a command line that said neither, and then it is on at `-O2` and `-O3`, which is where gcc
+    /// turns it on for x86.
+    pub partition_blocks: Option<bool>,
     /// Whether the instructions of a block are put in the order the machine finishes soonest, from
     /// `-fschedule-insns2` and `-fno-schedule-insns2`.
     ///
@@ -2718,6 +2723,7 @@ impl Options {
                 Arch::Aarch64 | Arch::Riscv64 | Arch::X86 => Isa::NONE,
             },
             reorder_blocks: None,
+            partition_blocks: None,
             schedule_insns: None,
             sibling_calls: None,
             align_loops: None,

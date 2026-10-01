@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-freorder-blocks-and-partition` is implemented for x86-64 ELF and is on at `-O2` and `-O3`, as in gcc. A block that calls a function written `cold`, and the blocks only it leads to or only lead to it, go in `.text.unlikely` as `foo.cold` with an unwind record of its own that opens in the state the hot part was in. The cold blocks are picked the way gcc's `determine_unlikely_bbs` picks them. A function with a section of its own, a landing pad, or debug information is left whole. This is where 1092 of the 1132 kernel objects with a `.text.unlikely` got it under gcc.
+
 ### Changed
 
 - Choosing which values go to memory before registers are handed out sweeps the pieces of the values once rather than asking every value in flight whether it covers each point where pressure is too high, which takes about 1.5% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2579).

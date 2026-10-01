@@ -129,17 +129,66 @@ pub fn blocks(
 ) {
     let table = table(insts, names);
     let mut order = if reorder { traces(func) } else { order(func) };
+    let mut split = partition(func, &mut order);
     let mut writer = Writer { func, insts, names, table, fusable };
     let mut at = 0;
     while at < order.len() {
+        // The last block of the first part falls into nothing, since what is after it in the
+        // listing is in another section.
+        let next = if Some(at + 1) == split { None } else { order.get(at + 1).copied() };
         // A branch that can fall into neither arm asks for a block to put the second jump in, and
         // that block goes immediately after it, which is where the loop reaches it next.
-        if let Some(bridge) = writer.edges(order[at], order.get(at + 1).copied()) {
+        if let Some(bridge) = writer.edges(order[at], next) {
             order.insert(at + 1, bridge);
+            match split {
+                Some(first) if at < first => split = Some(first + 1),
+                Some(_) => writer.func.set_cold(bridge),
+                None => {}
+            }
         }
         at += 1;
     }
     func.set_block_order(&order);
+    func.cold = split.map(|first| order[first]);
+}
+
+/// Moves the cold blocks to the end of the order, keeping the order each part was in, and gives
+/// back where the cold part starts, or nothing when no block is cold. See [`crate::cold`].
+///
+/// [`crate::cold::mark`] said which of the blocks selection made are cold, and the passes since
+/// have made more, mostly to split an edge. A block nothing marked is cold here when every way
+/// into it is from a cold block, which is where such a block came from. The entry block is never
+/// cold, so the first part is never empty.
+fn partition(func: &mut mir::Func, order: &mut Vec<mir::Block>) -> Option<usize> {
+    let entry = func.entry()?;
+    if func[entry].cold || !order.iter().any(|&block| func[block].cold) {
+        return None;
+    }
+    let mut preds = vec![Vec::new(); func.block_count()];
+    for &block in order.iter() {
+        for succ in &func[block].succs {
+            preds[succ.block.index()].push(block);
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &block in order.iter() {
+            let ways = &preds[block.index()];
+            if block == entry || func[block].cold || ways.is_empty() {
+                continue;
+            }
+            if ways.iter().all(|&pred| func[pred].cold) {
+                func.set_cold(block);
+                changed = true;
+            }
+        }
+    }
+    let (hot, cold): (Vec<_>, Vec<_>) = order.iter().partition(|&&block| !func[block].cold);
+    let first = hot.len();
+    *order = hot;
+    order.extend(cold);
+    Some(first)
 }
 
 /// The heads of the loops, which are the blocks a jump inside a loop runs backwards to, in the order

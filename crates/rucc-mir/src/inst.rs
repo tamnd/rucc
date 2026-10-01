@@ -683,6 +683,11 @@ pub struct BlockData {
     /// tells the two apart: one that returns gets an epilogue and a `ret`, and this one gets
     /// nothing, because nothing reaches its end.
     pub dead_end: bool,
+    /// Whether the block is one the program is not expected to run, which is a block on the way to
+    /// a call of a function written `cold` and nowhere else. The layout puts these after the rest
+    /// of the function, in a part of their own the listing writes in `.text.unlikely`. See
+    /// [`crate::Func::cold`].
+    pub cold: bool,
     pub(crate) first_inst: Option<Inst>,
     pub(crate) last_inst: Option<Inst>,
     pub(crate) prev: Option<Block>,

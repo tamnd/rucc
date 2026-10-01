@@ -76,6 +76,7 @@ pub struct Elsewhere {
     names: Set<Symbol>,
     threads: Set<Symbol>,
     twice: Set<Symbol>,
+    cold: Set<Symbol>,
     described: bool,
     indexed: bool,
     imported: Set<Symbol>,
@@ -138,12 +139,18 @@ impl Elsewhere {
             .filter(|&id| module[id].attrs.set.contains(AttrSet::RETURNS_TWICE))
             .map(|id| module[id].name)
             .collect();
+        let cold = module
+            .funcs()
+            .filter(|&id| module[id].attrs.set.contains(AttrSet::COLD))
+            .map(|id| module[id].name)
+            .collect();
         let described = format == ObjectFormat::MachO;
         let indexed = format == ObjectFormat::Coff;
         let (imported, referred) = Self::pointers(module, format);
         Self {
             threads,
             twice,
+            cold,
             described,
             indexed,
             imported,
@@ -360,6 +367,13 @@ impl Elsewhere {
         self.twice.contains(&name)
     }
 
+    /// Whether a declaration of that name said `cold`, which is a promise that a call to it is
+    /// rarely made. The same kind of fact as [`Self::twice`], and read by [`crate::cold`].
+    #[must_use]
+    pub fn cold(&self, name: Symbol) -> bool {
+        self.cold.contains(&name)
+    }
+
     /// Whether a thread-local variable is reached by calling through its descriptor, which is how
     /// Mach-O does it on both architectures.
     ///
@@ -396,6 +410,13 @@ impl Elsewhere {
     #[must_use]
     pub fn with_threads<T: IntoIterator<Item = Symbol>>(mut self, threads: T) -> Self {
         self.threads = threads.into_iter().collect();
+        self
+    }
+
+    /// The same set with those names said to be `cold`, for a test that lowers one function.
+    #[must_use]
+    pub fn with_cold<T: IntoIterator<Item = Symbol>>(mut self, cold: T) -> Self {
+        self.cold = cold.into_iter().collect();
         self
     }
 
