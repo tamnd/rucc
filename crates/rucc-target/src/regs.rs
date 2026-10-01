@@ -699,7 +699,7 @@ impl CallRegs {
     /// rather than on [`CallRegs::stack_align`], which is what `-mpreferred-stack-boundary=` asks
     /// for.
     ///
-    /// The answer is made once for each convention and boundary and kept, see [`made`].
+    /// The answer is made once for each convention and boundary and kept, see `made`.
     ///
     /// # Panics
     ///
@@ -725,7 +725,7 @@ impl CallRegs {
     /// was interrupted may have been using the bytes below its stack pointer when it was stopped,
     /// since nothing told it a push was coming, so there is no red zone to keep locals in.
     ///
-    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see [`made`].
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see `made`.
     #[must_use]
     pub fn interrupted(&'static self, code: bool) -> &'static CallRegs {
         let return_address = self.return_address + if code { self.word } else { 0 };
@@ -741,7 +741,7 @@ impl CallRegs {
     /// of the vector ones, and that is the area gcc lays out for the same flags. A variadic call
     /// says no vector register carries anything, which is true.
     ///
-    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see [`made`].
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see `made`.
     #[must_use]
     pub fn without_vectors(&'static self) -> &'static CallRegs {
         if self.sse_args.is_empty() {
@@ -753,7 +753,7 @@ impl CallRegs {
     /// The same convention with the stack protector's word somewhere else, which is what the
     /// `-mstack-protector-guard` flags ask for.
     ///
-    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see [`made`].
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see `made`.
     #[must_use]
     pub fn guarded_by(&'static self, guard: Guard) -> &'static CallRegs {
         if self.guard == Some(guard) {

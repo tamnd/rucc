@@ -5440,7 +5440,7 @@ decl #0 x : int object external static defined
     fn a_string_literal_is_a_variable_with_a_name_no_program_could_write() {
         let text = asm("const char *f(void) { return \"hi\"; }\n");
         assert!(text.contains("\t.ascii\t\"hi\\000\"\n"), "{text}");
-        assert!(text.contains("\t.section\t.rodata\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"), "{text}");
         let label = text
             .lines()
             .find(|line| line.starts_with(".Lstr"))
