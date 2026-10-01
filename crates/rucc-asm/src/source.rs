@@ -5544,6 +5544,23 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn a_call_through_a_name_with_no_registers_is_through_that_address() {
+        // The kernel's paravirt calls before 6.5 are `call *pv_ops+16`, a call through the slot
+        // at that address, and gas writes the address sign extended as it does for a `movq`.
+        let out = assembled("\t.text\nf:\n\tcall *pv_ops+16\n\tjmp *pv_ops+8\n");
+        let text = out.parts.iter().find(|part| part.name == ".text").unwrap();
+        let kinds: Vec<_> = text
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.as_str(), reloc.kind, reloc.addend))
+            .collect();
+        assert_eq!(
+            kinds,
+            [(3, "pv_ops", Reference::Signed, 16), (10, "pv_ops", Reference::Signed, 8)]
+        );
+    }
+
+    #[test]
     fn a_name_in_one_or_two_bytes_is_an_address_that_narrow_on_elf_and_refused_on_windows() {
         // gas writes `R_X86_64_16` and `R_X86_64_8` for these and leaves the linker to check the
         // address fits. A Windows object has no relocation that narrow.
