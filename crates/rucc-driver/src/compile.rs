@@ -1231,12 +1231,13 @@ fn generate(
             // the encoder's own tables, so reading it back is the encoder run over the same values,
             // and it is one path to get right rather than two.
             //
-            // A function the program put in a section of its own comes this way as well. The
-            // object writer lays the code out as one run of bytes, and the listing is where a
-            // function's section is already said, so it is the one place the answer has to be
-            // right rather than two.
+            // A function the program put in a section of its own comes this way as well, and so
+            // does one written `retain`, which is given a section of its own. The object writer
+            // lays the code out as one run of bytes, and the listing is where a function's
+            // section is already said, so it is the one place the answer has to be right rather
+            // than two.
             let aarch64 = target.tuple.arch() == Arch::Aarch64;
-            let placed_code = funcs.iter().any(|func| func.section.is_some());
+            let placed_code = funcs.iter().any(|func| func.section.is_some() || func.retain);
             if aarch64 || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and

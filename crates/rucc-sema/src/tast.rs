@@ -46,6 +46,16 @@ pub struct Notices {
     pub warning: Option<StrId>,
 }
 
+/// The arguments `__attribute__((alloc_size(...)))` names, counted from one as the attribute
+/// counts them: the size, and the count it is multiplied by in `calloc`'s shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocSize {
+    /// The argument that is the size in bytes, or of one element when there is a count.
+    pub size: u8,
+    /// The argument that is how many elements there are, if one is.
+    pub count: Option<u8>,
+}
+
 /// A label, in the label table.
 pub type LabelId = Idx<Label>;
 
@@ -174,6 +184,7 @@ pub struct Tast {
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     targets: Vec<(DeclId, Isa)>,
     sections: Map<DeclId, StrId>,
+    alloc_sizes: Map<DeclId, AllocSize>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
@@ -416,6 +427,24 @@ impl Tast {
     /// another, and the caller is what warns about that.
     pub fn record_section(&mut self, decl: DeclId, section: StrId) {
         self.sections.entry(decl).or_insert(section);
+    }
+
+    /// Records which arguments `__attribute__((alloc_size(...)))` said are the size of what the
+    /// function returns.
+    ///
+    /// A map beside the tree for the reason [`Tast::record_section`] is one: the allocators of a
+    /// program and of its libraries carry it and nothing else does. A later declaration replaces
+    /// what an earlier one said, which is what gcc does, since the attribute is read off the type
+    /// of the declaration in sight at the call.
+    pub fn record_alloc_size(&mut self, decl: DeclId, alloc: AllocSize) {
+        self.alloc_sizes.insert(decl, alloc);
+    }
+
+    /// The arguments an `alloc_size` attribute named on this function, and nothing for almost
+    /// every function.
+    #[must_use]
+    pub fn alloc_size(&self, decl: DeclId) -> Option<AllocSize> {
+        self.alloc_sizes.get(&decl).copied()
     }
 
     /// The section a `section` attribute put this declaration in, and nothing when no declaration

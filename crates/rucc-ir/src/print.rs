@@ -232,6 +232,9 @@ impl<'a> Printer<'a> {
             self.out.push_str(", droppable");
         }
         self.section(global.section);
+        if global.retain {
+            self.out.push_str(", retain");
+        }
         self.out.push('\n');
     }
 
@@ -994,7 +997,8 @@ mod tests {
             names.intern("sum"),
             Signature::new().with_params(&[i32_]).with_returns(&[i32_]),
         );
-        func.attrs = Attrs { set: AttrSet::NOUNWIND, fp_contract: FpContract::On };
+        func.attrs =
+            Attrs { set: AttrSet::NOUNWIND, fp_contract: FpContract::On, alloc_size: None };
         let entry = func.create_block();
         let n = func.append_param(entry, i32_);
         let header = func.create_block();

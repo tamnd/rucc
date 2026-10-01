@@ -57,7 +57,7 @@ use crate::decl::{
 use crate::eval;
 use crate::expr::ExprKind;
 use crate::scope::Binding;
-use crate::tast::StrId;
+use crate::tast::{AllocSize, StrId};
 
 /// What the layout engine takes from an attribute list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1041,6 +1041,155 @@ impl Checker<'_> {
         Some(handler)
     }
 
+    /// The declaration a `copy(name)` in one of the lists names, with where the attribute was
+    /// written, for [`Checker::copy_onto`] to take the attributes of.
+    ///
+    /// The kernel writes this on the aliases `module_init` and `module_exit` make, through
+    /// `__copy(initfn)`, so that the second name for an init function carries the section and
+    /// the `cold` of the first. glibc writes it the same way on its own aliases. The argument is
+    /// an identifier, kept as one the way `cleanup(free)` is, and it is looked up in the scope the
+    /// declaration is in, so it names something declared above. The first list that has one is
+    /// the one read, which is what a list is read as everywhere else here.
+    ///
+    /// What is refused is refused in gcc's words where gcc has words for it: the wrong number of
+    /// arguments, a name nothing is declared as, and something that is not a name at all. gcc
+    /// also takes an expression and copies the attributes of its type, which nothing anybody
+    /// writes does and which this does not, so an expression is refused with the rest.
+    pub(in crate::check) fn copied(&mut self, lists: &[AttrList]) -> Option<(DeclId, Span)> {
+        for &attrs in lists {
+            let written = self.ast[attrs].to_vec();
+            for attr in written {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                    continue;
+                }
+                if self.gnu_name(&attr) != "copy" {
+                    continue;
+                }
+                let args = self.ast[attr.args].to_vec();
+                if args.len() != 1 {
+                    let what = "wrong number of arguments specified for 'copy' attribute";
+                    let note = format!("expected 1, found {}", args.len());
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0793");
+                    self.report(refused.note(note, attr.span));
+                    return None;
+                }
+                let AttrArg::Ident(name) = args[0] else {
+                    let what = "'copy' attribute argument is not the name of a declaration";
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0793"));
+                    return None;
+                };
+                let Some(Binding::Decl(source)) = self.scopes.lookup(name) else {
+                    let what = format!("'{}' undeclared here", self.text(name));
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0793"));
+                    return None;
+                };
+                return Some((source, attr.span));
+            }
+        }
+        None
+    }
+
+    /// Reads `alloc_size(n)` and `alloc_size(n, m)` off the lists a declaration was written with
+    /// and keeps the argument numbers against the declaration, for `rucc_opt::objsize` to read
+    /// off a call to it.
+    ///
+    /// glibc writes it on `malloc`, `calloc`, `realloc` and their friends through `__wur
+    /// __attribute_alloc_size__`, and the kernel on `kmalloc` and every allocator under it, and
+    /// that is what lets `_FORTIFY_SOURCE` check a copy into what one of them gave back. Every
+    /// number is checked the way gcc 16 checks it and a list with a bad one is dropped with gcc's
+    /// warning: zero, a number past the parameters, a parameter that is not an integer, and the
+    /// attribute on something that is not a function returning a pointer. The wrong number of
+    /// arguments is an error, as it is in gcc. The lists are read in order and a later one stands.
+    pub(in crate::check) fn record_alloc_size(
+        &mut self,
+        decl: DeclId,
+        lists: &[AttrList],
+        kind: DeclKind,
+        ty: TypeId,
+    ) {
+        for &attrs in lists {
+            let written = self.ast[attrs].to_vec();
+            for attr in written {
+                if self.gnu_name(&attr) != "alloc_size" {
+                    continue;
+                }
+                if let Some(alloc) = self.alloc_size_argument(attr, kind, ty) {
+                    self.tast.record_alloc_size(decl, alloc);
+                }
+            }
+        }
+    }
+
+    /// The argument numbers one `alloc_size` names, or nothing where gcc drops or refuses it.
+    fn alloc_size_argument(
+        &mut self,
+        attr: Attribute,
+        kind: DeclKind,
+        ty: TypeId,
+    ) -> Option<AllocSize> {
+        let args = self.ast[attr.args].to_vec();
+        if args.is_empty() || args.len() > 2 {
+            let what = "wrong number of arguments specified for 'alloc_size' attribute";
+            let note = format!("expected between 1 and 2, found {}", args.len());
+            let refused = Diagnostic::error(what, attr.span).with_code("E0794");
+            self.report(refused.note(note, attr.span));
+            return None;
+        }
+        let ignored = |checker: &mut Self, what: String| {
+            checker.report(Diagnostic::warning(what, attr.span).with_code("E0794"));
+            None
+        };
+        let function = match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Function(id) if kind == DeclKind::Function => id,
+            _ => {
+                return ignored(
+                    self,
+                    "'alloc_size' attribute only applies to function types".into(),
+                );
+            }
+        };
+        let signature = self.types.signature(function).clone();
+        if !matches!(self.types.kind(self.types.canonical(signature.ret)), TypeKind::Pointer(_)) {
+            let what =
+                "'alloc_size' attribute ignored on a function that does not return a pointer";
+            return ignored(self, what.into());
+        }
+        let mut numbers = Vec::with_capacity(args.len());
+        for arg in args {
+            let AttrArg::Expr(expr) = arg else {
+                return ignored(self, "'alloc_size' attribute argument is invalid".into());
+            };
+            let value = self.expr(expr);
+            let Ok(number) = self.eval_integer(value) else {
+                return ignored(self, "'alloc_size' attribute argument is invalid".into());
+            };
+            let params = signature.params.len();
+            let Some(index) = usize::try_from(number).ok().and_then(|n| n.checked_sub(1)) else {
+                let what = format!(
+                    "'alloc_size' attribute argument value '{number}' does not refer to a function \
+                     parameter"
+                );
+                return ignored(self, what);
+            };
+            let Some(&param) = signature.params.get(index) else {
+                let what = format!(
+                    "'alloc_size' attribute argument value '{number}' exceeds the number of \
+                     function parameters {params}"
+                );
+                return ignored(self, what);
+            };
+            if !rucc_types::is_integer(&self.types, self.types.canonical(param)) {
+                let what = format!(
+                    "'alloc_size' attribute argument value '{number}' refers to a parameter that \
+                     is not an integer"
+                );
+                return ignored(self, what);
+            }
+            numbers.push(u8::try_from(number).ok()?);
+        }
+        Some(AllocSize { size: numbers[0], count: numbers.get(1).copied() })
+    }
+
     /// How far outside a shared library an attribute list says the name reaches.
     ///
     /// `__attribute__((visibility("hidden")))` and its three other strings. The armour and the
@@ -1321,9 +1470,9 @@ impl Checker<'_> {
     /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
     /// `zero_call_used_regs`, and the `optimize` options that stand for two of them, and
-    /// `uninitialized` and `nocommon`, which are about an object and not a function but are read
-    /// in the same two places, under the namespace test [`Self::never_returns`] is under and through the same
-    /// unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
+    /// `uninitialized`, `nocommon` and `retain`, which are not about inlining but are read in the
+    /// same two places, under the namespace test [`Self::never_returns`] is under and through the
+    /// same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
     /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
     /// declaration.
     pub(in crate::check) fn inlining(&mut self, attrs: AttrList) -> DeclFlags {
@@ -1342,6 +1491,7 @@ impl Checker<'_> {
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
                 "uninitialized" => flags |= DeclFlags::UNINITIALIZED,
                 "nocommon" => flags |= DeclFlags::NO_COMMON,
+                "retain" => flags |= DeclFlags::RETAIN,
                 "cold" => flags |= DeclFlags::COLD,
                 "hot" => flags |= DeclFlags::HOT,
                 // Only `keep` changes anything. The other values ask for a thunk on a function

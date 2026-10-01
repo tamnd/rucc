@@ -250,9 +250,13 @@ impl Directives {
                 // section is that the file carries none of them. The rest of the flags are what
                 // gcc 16 writes, which is a shorter spelling than the one it uses elsewhere: no
                 // `@progbits`, since that is what a section is when nothing says otherwise.
+                // A thread-local one keeps the `T` that makes it the template every thread copies,
+                // which a split that dropped it would turn into one variable for the program.
                 let flags = match place {
                     Place::Zero => "\"aw\",@nobits",
                     Place::ReadOnly => "\"a\"",
+                    Place::Thread { zero: false } => "\"awT\",@progbits",
+                    Place::Thread { zero: true } => "\"awT\",@nobits",
                     _ => "\"aw\"",
                 };
                 let _ = writeln!(out, "\t.section\t{named},{flags}");
@@ -270,6 +274,25 @@ impl Directives {
             Directives::MachO => return false,
         }
         true
+    }
+
+    /// The directive that opens the section a variable written `retain` goes in, which is the
+    /// section it would have gone in with `-fdata-sections` and an `R` in its flags, or the
+    /// section the program named with one. That is how gcc 16 writes it, and the `R` is
+    /// `SHF_GNU_RETAIN`, which a link with `--gc-sections` does not take away. The section is the
+    /// variable's own because the flag keeps the whole section, so anything sharing it would be
+    /// kept too.
+    ///
+    /// The flags are the ones [`Self::section`] writes for the same place, so a retained variable
+    /// is never in a page that is writable or not when it otherwise would not be.
+    fn retained(self, out: &mut String, var: &Variable) {
+        let mut line = String::new();
+        self.section(&mut line, &var.place, &var.name, Sections { functions: false, data: true });
+        match line.find(",\"").and_then(|open| Some(open + 2 + line[open + 2..].find('"')?)) {
+            Some(close) => line.insert(close, 'R'),
+            None => debug_assert!(false, "no flags to add to in {line:?}"),
+        }
+        out.push_str(&line);
     }
 
     /// The directive that opens the section a variable goes in.
@@ -421,7 +444,11 @@ impl Directives {
             }
             _ => {}
         }
-        self.section(out, &var.place, &var.name, sections);
+        if var.retain {
+            self.retained(out, var);
+        } else {
+            self.section(out, &var.place, &var.name, sections);
+        }
         self.bind(out, &var.name, var.binding);
         self.seen(out, &var.name, var.binding, var.visibility);
         let _ = writeln!(out, "\t.p2align\t{align}");
@@ -655,6 +682,7 @@ mod tests {
             place: Place::Merged,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            retain: false,
             pieces: Vec::new(),
         };
         let mut apple = String::new();

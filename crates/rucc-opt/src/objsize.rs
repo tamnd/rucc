@@ -23,7 +23,8 @@
 //!
 //! A fixed `alloca` is its size and a dynamic one of a constant count is that count. A global is
 //! its size where `extents::vouched` says the definition in the module is the one that
-//! will run. A `ptr_add` of a constant count takes it off what is left, down to nothing past the
+//! will run. What a call returns is the product of the arguments its callee's `alloc_size` names,
+//! where each of them is a constant, which is how `p = malloc(10)` has ten bytes behind it. A `ptr_add` of a constant count takes it off what is left, down to nothing past the
 //! end, and one going backwards is not followed. A block parameter is every argument every branch
 //! to its block passes and a `select` is both of its arms. Anything else is not known.
 //!
@@ -36,13 +37,19 @@
 //! same holds where the pointer comes round unchanged, and one moved forward each time round may
 //! leave as little as anything, so there the smallest is not known.
 //!
+//! `__builtin_dynamic_object_size` sets a third bit on the kind, and where the walk finds no
+//! constant for one of those, an address that is an allocator's result with constant offsets on it
+//! is answered with the size the call asked for, multiplied out and less the offset in front of the
+//! question, as gcc 16 answers it from `-O1` up. See [`Walk::running`] for which shapes.
+//!
 //! The closest member, which is the low bit of the kind, is not something the IR remembers. The
 //! whole object is an answer no smaller than the member for the largest, so the first kind's answer
 //! stands for the second. For the smallest it could be too big, so the fourth kind is not known
 //! here and only the checker ever answers it.
 
 use rucc_ir::{
-    Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Pic, SymbolRef, Value,
+    AllocSize, Def, Extra, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode, Pic,
+    SymbolRef, Type, Value,
 };
 
 use crate::Cfg;
@@ -65,30 +72,69 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
         if asked.is_empty() {
             continue;
         }
-        let answers: Vec<(Inst, i128)> = {
+        let answers: Vec<(Inst, Answer)> = {
             let func = &module[id];
             let walk = Walk { module, func, cfg: &Cfg::new(func), pic };
             asked
                 .iter()
                 .map(|&inst| {
-                    let Extra::Question(kind) = func[inst].extra else { return (inst, 0) };
+                    let Extra::Question(asked) = func[inst].extra else {
+                        return (inst, Answer::Known(0));
+                    };
                     let address = func[func[inst].args][0];
+                    let (kind, dynamic) = (asked & 3, asked & DYNAMIC != 0);
                     let largest = kind & 2 == 0;
                     let known = match (look, kind) {
                         (false, _) | (_, 3) => None,
                         _ => walk.left(address, largest, DEPTH, &mut Vec::new()).ok().flatten(),
                     };
-                    (inst, known.map_or(if largest { -1 } else { 0 }, i128::from))
+                    let unknown = if largest { -1 } else { 0 };
+                    let answer = match known {
+                        Some(known) => Answer::Known(i128::from(known)),
+                        // Only the dynamic spelling may be answered with something worked out
+                        // while the program runs, and only where the walk found no constant.
+                        None if look && dynamic && kind != 3 => func[inst]
+                            .results()
+                            .next()
+                            .and_then(|result| walk.running(address, func[result].ty, DEPTH))
+                            .map_or(Answer::Known(unknown), Answer::Running),
+                        None => Answer::Known(unknown),
+                    };
+                    (inst, answer)
                 })
                 .collect()
         };
         let func = &mut module[id];
-        for (inst, number) in answers {
-            write(func, inst, number);
+        for (inst, answer) in answers {
+            match answer {
+                Answer::Known(number) => write(func, inst, number),
+                Answer::Running(running) => build(func, inst, running),
+            }
             answered += 1;
         }
     }
     answered
+}
+
+/// The bit above the two of the kind that says the question was asked with
+/// `__builtin_dynamic_object_size`, which may be answered with a value worked out at run time.
+const DYNAMIC: u8 = 4;
+
+/// What one question is answered with.
+enum Answer {
+    /// A constant, which is every answer the walk finds and every answer that says nothing.
+    Known(i128),
+    /// The size an allocator was asked for, worked out where the question is.
+    Running(Running),
+}
+
+/// An address that is what an allocator gave back with a constant number of bytes added, as
+/// [`Walk::running`] found it.
+struct Running {
+    /// The arguments that multiply to the size, one or two of them.
+    factors: Vec<Value>,
+    /// How far into the object the address is.
+    offset: u64,
 }
 
 /// Every `object_size` in the function.
@@ -110,6 +156,44 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
     func.insert_before(made, inst);
     let value = func[made].results().next().expect("a constant is one value");
     let forward: rucc_base::hash::Map<_, _> = [(result, value)].into_iter().collect();
+    crate::uses::substitute(func, &forward);
+    func.remove_inst(inst);
+}
+
+/// Puts the size an allocator was asked for in place of the question, less how far in the address
+/// is and never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size(p + 2, 0)`
+/// with for a `p` that came out of `malloc(n)`.
+fn build(func: &mut Func, inst: Inst, running: Running) {
+    let result = func[inst].results().next().expect("an object size is one value");
+    let ty = func[result].ty;
+    let span = func.span(inst);
+    let made = |func: &mut Func, data: InstData, ty: Type| {
+        let at = func.create_inst(data, &[ty], span);
+        func.insert_before(at, inst);
+        func[at].results().next().expect("one result was asked for")
+    };
+    let mut size = running.factors[0];
+    for &factor in &running.factors[1..] {
+        let args = func.push_values(&[size, factor]);
+        size = made(func, InstData { args, ..InstData::new(Opcode::Mul) }, ty);
+    }
+    if running.offset != 0 {
+        let imm = func.add_imm(Imm::int(i128::from(running.offset), ty.lane()));
+        let offset =
+            made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
+        let imm = func.add_imm(Imm::int(0, ty.lane()));
+        let zero =
+            made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
+        let args = func.push_values(&[size, offset]);
+        let test =
+            InstData { args, extra: Extra::IntPred(IntPred::Ugt), ..InstData::new(Opcode::ICmp) };
+        let room = made(func, test, ty.with_lane(Type::I1));
+        let args = func.push_values(&[size, offset]);
+        let left = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
+        let args = func.push_values(&[room, left, zero]);
+        size = made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty);
+    }
+    let forward: rucc_base::hash::Map<_, _> = [(result, size)].into_iter().collect();
     crate::uses::substitute(func, &forward);
     func.remove_inst(inst);
 }
@@ -203,11 +287,79 @@ impl Walk<'_> {
                         }
                         Ok(Some(global.size))
                     }
+                    // What an allocator gave back, where the attribute on it says which arguments
+                    // are the size and each of them is a constant here.
+                    Opcode::Call => {
+                        let (alloc, args) = self.allocation(inst).ok_or(())?;
+                        let mut size: u64 = 1;
+                        for factor in factors(alloc, args).ok_or(())? {
+                            let (imm, ty) =
+                                crate::fold::evaluated(self.func, factor, 4).ok_or(())?;
+                            let factor = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
+                            size = size.checked_mul(factor).ok_or(())?;
+                        }
+                        Ok(Some(size))
+                    }
                     _ => Err(()),
                 }
             }
         }
     }
+
+    /// The `alloc_size` of the function a call names, with the arguments of the call, for a direct
+    /// call to a function the module has and that carries one.
+    fn allocation(&self, call: Inst) -> Option<(AllocSize, &[Value])> {
+        let data = &self.func[call];
+        let Extra::Call(info) = data.extra else { return None };
+        let name = self.func[info].callee?;
+        let Some(SymbolRef::Func(callee)) = self.module.lookup(name) else { return None };
+        let alloc = self.module[callee].attrs.alloc_size?;
+        Some((alloc, &self.func[data.args]))
+    }
+
+    /// The address as what an allocator gave back with a constant number of bytes added, for an
+    /// answer worked out at run time from the arguments of the call.
+    ///
+    /// Only a straight line back to the call is followed, with no choice in it, since a choice
+    /// would need the answer built on every path into it. The arguments have to be as wide as the
+    /// answer already, which `size_t` is in `malloc` and `kmalloc` and every allocator written
+    /// in its terms. A narrower one has a signedness the IR does not remember, and widening it
+    /// the wrong way would give a size that is not the one the program asked for, so that is
+    /// answered as not known instead.
+    fn running(&self, value: Value, size: Type, depth: u32) -> Option<Running> {
+        let depth = depth.checked_sub(1)?;
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        let data = &self.func[inst];
+        match data.opcode {
+            Opcode::PtrAdd => {
+                let args = &self.func[data.args];
+                let (imm, ty) = crate::fold::evaluated(self.func, *args.get(1)?, 4)?;
+                let step = u64::try_from(imm.signed(ty)).ok()?;
+                let mut running = self.running(args[0], size, depth)?;
+                running.offset = running.offset.checked_add(step)?;
+                Some(running)
+            }
+            Opcode::Call => {
+                let (alloc, args) = self.allocation(inst)?;
+                let factors = factors(alloc, args)?;
+                if factors.iter().any(|&factor| self.func[factor].ty != size) {
+                    return None;
+                }
+                Some(Running { factors, offset: 0 })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The arguments of a call that `alloc_size` says multiply to the size of what it returns, and
+/// nothing for a call that has fewer arguments than the attribute counts.
+fn factors(alloc: AllocSize, args: &[Value]) -> Option<Vec<Value>> {
+    let mut factors = Vec::with_capacity(2);
+    for number in [Some(alloc.size), alloc.count].into_iter().flatten() {
+        factors.push(*args.get(usize::from(number).checked_sub(1)?)?);
+    }
+    Some(factors)
 }
 
 /// Two answers for one choice, as the kind asks for them to be put together.
@@ -261,6 +413,56 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
             }
         }
         found
+    }
+
+    /// What an allocator gave back is the product of the arguments its `alloc_size` names where
+    /// they are constants, for both spellings. Where they are not, the dynamic spelling is
+    /// answered with the arguments as they are when the program runs, less what was added to the
+    /// address, and the other is not known. The numbers are what gcc 16 answers at `-O2`.
+    #[test]
+    fn what_an_allocator_gave_back_is_what_its_alloc_size_says() {
+        let body = "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+func @my2(i64, i64) -> ptr, linkage(external), attrs(alloc_size=1, alloc_count=2);
+func @plain(i64) -> ptr, linkage(external);
+
+func @f(i64), linkage(external) {
+block0(%0: i64):
+    %1 = iconst.i64 10
+    %2 = call @my(%1) : (i64) -> ptr
+    %3 = object_size.i64 %2, kind 0
+    call @use(%3) : (i64)
+    %4 = iconst.i64 4
+    %5 = ptr_add %2, %4
+    %6 = object_size.i64 %5, kind 2
+    call @use(%6) : (i64)
+    %7 = iconst.i64 3
+    %8 = iconst.i64 5
+    %9 = call @my2(%7, %8) : (i64, i64) -> ptr
+    %10 = object_size.i64 %9, kind 4
+    call @use(%10) : (i64)
+    %11 = call @plain(%1) : (i64) -> ptr
+    %12 = object_size.i64 %11, kind 0
+    call @use(%12) : (i64)
+    %13 = call @my(%0) : (i64) -> ptr
+    %14 = object_size.i64 %13, kind 0
+    call @use(%14) : (i64)
+    %15 = ptr_add %13, %4
+    %16 = object_size.i64 %15, kind 4
+    call @use(%16) : (i64)
+    return
+}
+";
+        // Every call with one constant argument is read back, so the two calls given ten are
+        // among them. The last question is not a constant when looked at, so it is not.
+        assert_eq!(answers(body, true), [10, 10, 6, 15, 10, -1, -1]);
+        assert_eq!(answers(body, false), [10, -1, 0, -1, 10, -1, -1, -1]);
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
+        answer(&mut module, Pic::Executable, true);
+        let text = rucc_ir::print(&module, &names);
+        assert!(text.contains("icmp ugt %0, "), "{text}");
+        assert!(text.contains("= sub %0, "), "{text}");
     }
 
     /// A pointer chosen by a branch between a local and a global has the larger of what the two

@@ -65,6 +65,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0788", "format-zero-length"),
     ("E0789", "format"),
     ("E0790", "designated-init"),
+    ("E0794", "attributes"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),

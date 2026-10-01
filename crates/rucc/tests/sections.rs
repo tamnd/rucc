@@ -287,3 +287,122 @@ fn an_attribute_after_a_tag_with_no_body_is_the_declarations() {
         assert!(at < label, "{name} after {section}:\n{text}");
     }
 }
+
+/// What `__attribute__((retain))` asks for, which is a section of its own with `SHF_GNU_RETAIN` on
+/// it so that `--gc-sections` keeps it. Checked against what gcc 16 writes for the same source with
+/// `-fPIC`: the section a definition would have gone in under `-ffunction-sections` or
+/// `-fdata-sections`, with an `R` in the flags, or the program's own section with one.
+const RETAINED: &str = "\
+__attribute__((retain)) int a = 1;
+__attribute__((retain)) int e;
+__attribute__((retain)) const int d = 4;
+__attribute__((retain)) static const char *const p = \"x\";
+__attribute__((retain)) __thread int t1 = 1;
+__attribute__((retain)) __thread int t2;
+__attribute__((retain, section(\".mine\"))) int m = 3;
+__attribute__((retain)) static int f(void) { return 1; }
+__attribute__((retain, section(\".kept.text\"))) int g(void) { return 2; }
+int plain = 5;
+int h(void) { return plain; }
+";
+
+/// `SHF_GNU_RETAIN`, which is in the range ELF leaves to the operating system.
+const SHF_GNU_RETAIN: usize = 0x20_0000;
+const SHF_TLS: usize = 0x400;
+
+#[test]
+fn a_retained_definition_is_in_a_section_of_its_own_marked_r() {
+    let dir = fixture("retain-s", RETAINED);
+    let text = run(&dir, LINUX, &["-S", "-fPIC"], "one.s");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8(text).expect("a listing is text");
+    for line in [
+        "\t.section\t.data.a,\"awR\"\n",
+        "\t.section\t.bss.e,\"awR\",@nobits\n",
+        "\t.section\t.rodata.d,\"aR\"\n",
+        "\t.section\t.data.rel.ro.local.p,\"awR\"\n",
+        "\t.section\t.tdata.t1,\"awTR\",@progbits\n",
+        "\t.section\t.tbss.t2,\"awTR\",@nobits\n",
+        "\t.section\t.mine,\"awR\",@progbits\n",
+        "\t.section\t.text.f,\"axR\",@progbits\n",
+        "\t.section\t.kept.text,\"axR\",@progbits\n",
+    ] {
+        assert!(text.contains(line), "{line:?} in\n{text}");
+    }
+    // What was not asked to be kept is where it always goes.
+    assert!(!text.contains(".data.plain"), "{text}");
+    assert!(!text.contains(".text.h"), "{text}");
+    assert!(!text.contains(".comm"), "{text}");
+}
+
+#[test]
+fn a_retained_section_has_the_flag_in_the_object() {
+    for level in ["-O0", "-O2"] {
+        let bytes = object(&format!("retain-c{level}"), level, RETAINED);
+        let headers = headers(&bytes);
+        let find = |name: &str| {
+            headers
+                .iter()
+                .find(|header| header.name == name)
+                .unwrap_or_else(|| panic!("{name} at {level}: {headers:?}"))
+        };
+        let kept = SHF_GNU_RETAIN | SHF_ALLOC;
+        for (name, kind, flags) in [
+            (".data.a", SHT_PROGBITS, kept | SHF_WRITE),
+            (".bss.e", SHT_NOBITS, kept | SHF_WRITE),
+            (".rodata.d", SHT_PROGBITS, kept),
+            (".tdata.t1", SHT_PROGBITS, kept | SHF_WRITE | SHF_TLS),
+            (".tbss.t2", SHT_NOBITS, kept | SHF_WRITE | SHF_TLS),
+            (".mine", SHT_PROGBITS, kept | SHF_WRITE),
+            (".text.f", SHT_PROGBITS, kept | SHF_EXECINSTR),
+            (".kept.text", SHT_PROGBITS, kept | SHF_EXECINSTR),
+        ] {
+            let header = find(name);
+            assert_eq!((header.kind, header.flags), (kind, flags), "{name} at {level}");
+        }
+        assert_eq!(find(".data").flags & SHF_GNU_RETAIN, 0, "{level}");
+        assert_eq!(find(".text").flags & SHF_GNU_RETAIN, 0, "{level}");
+    }
+}
+
+/// The text from the last section directive in front of a label up to the label, which is where
+/// the listing says what section the symbol is in and what is done to it there.
+fn leading<'a>(text: &'a str, label: &str) -> &'a str {
+    let at = text.find(&format!("\n{label}:\n")).unwrap_or_else(|| panic!("{label} in\n{text}"));
+    let start = text[..at].rfind("\t.section").unwrap_or_else(|| panic!("{label} in\n{text}"));
+    &text[start..at]
+}
+
+/// `copy(name)` takes what gcc 16 takes from the declaration it names, which is the section, the
+/// alignment and `used`, and leaves what gcc leaves, which is whatever is about the name rather
+/// than the thing: `weak` and `visibility` here. Checked against the listing gcc 16 writes for the
+/// same source. The last two lines are the shape the kernel's `module_init` makes.
+#[test]
+fn a_copy_takes_the_section_alignment_and_used_and_not_the_linkage() {
+    let text = listing(
+        "copy",
+        LINUX,
+        "\
+__attribute__((section(\".s1\"), aligned(32), cold, weak, visibility(\"hidden\"))) void a(void) {}
+__attribute__((copy(a))) void b(void) {}
+__attribute__((section(\".s2\"), aligned(64), used)) int x = 1;
+__attribute__((copy(x))) int y = 2;
+__attribute__((copy(x))) static int z = 3;
+__attribute__((section(\".init.text\"))) static int initfn(void) { return 0; }
+int init_module(void) __attribute__((copy(initfn), alias(\"initfn\")));
+",
+    );
+    let b = leading(&text, "b");
+    assert!(b.starts_with("\t.section\t.s1,"), "{b}");
+    assert!(b.contains("\t.p2align\t5"), "{b}");
+    let y = leading(&text, "y");
+    assert!(y.starts_with("\t.section\t.s2,"), "{y}");
+    assert!(y.contains("\t.p2align\t6"), "{y}");
+    // A static nothing refers to is dropped unless something keeps it, and the `used` it took
+    // from `x` is what does.
+    let z = leading(&text, "z");
+    assert!(z.starts_with("\t.section\t.s2,"), "{z}");
+    assert!(!text.contains(".weak\tb"), "{text}");
+    assert!(!text.contains(".hidden\tb"), "{text}");
+    assert!(text.contains("init_module"), "{text}");
+}

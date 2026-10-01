@@ -306,7 +306,7 @@ impl Checker<'_> {
         // alias on one, and the reader says so in gcc's words, which is all it does here: told
         // the name has a value, it answers with nothing.
         self.weak_reference([specs.attrs, AttrList::EMPTY], None, linkage, true, name, span);
-        let declared = Declared {
+        let mut declared = Declared {
             name,
             ty,
             kind: DeclKind::Function,
@@ -390,6 +390,11 @@ impl Checker<'_> {
         let section = self
             .sectioned(specs.attrs, duration)
             .or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)));
+        // The specifiers only, for the reason `noreturn` above reads them only.
+        let section = match self.copied(&[specs.attrs]) {
+            Some((source, at)) => self.copy_onto(source, at, &mut declared, section),
+            None => section,
+        };
         let id = self.merge(declared);
         self.record_section(id, section);
         // The return type's name, kept for the debug information the way an object's is below.
@@ -409,6 +414,8 @@ impl Checker<'_> {
         self.handler_registers(self.tast[id].flags, ty, isa, x87, span);
         // The specifiers only, for the reason `noreturn` above reads them only.
         self.record_notices(id, &[specs.attrs], DeclKind::Function);
+        let merged = self.tast[id].ty;
+        self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
         self.annotate_decl(id, &[specs.attrs]);
         self.read_advice(id, &[specs.attrs]);
         if nested {
@@ -826,6 +833,12 @@ impl Checker<'_> {
         };
         let section =
             section.or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)));
+        // Both places, for the reason `retained` above reads both. The kernel writes `__copy` after
+        // the declarator, between the parameter list and the `alias` it goes with.
+        let section = match self.copied(&[specs.attrs, item.attrs]) {
+            Some((source, at)) => self.copy_onto(source, at, &mut declared, section),
+            None => section,
+        };
         let id = self.merge(declared);
         self.record_section(id, section);
         // Kept for the debug information, which names the typedef where the program did.
@@ -842,6 +855,10 @@ impl Checker<'_> {
         // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
         // declarator of a function declared inside the block that calls it.
         self.record_notices(id, &[specs.attrs, item.attrs], kind);
+        // Both places, for the reason `noreturn` above reads both. glibc writes it after the
+        // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`.
+        let merged = self.tast[id].ty;
+        self.record_alloc_size(id, &[specs.attrs, item.attrs], kind, merged);
         self.annotate_decl(id, &[specs.attrs, item.attrs]);
         self.read_advice(id, &[specs.attrs, item.attrs]);
         // An initializer that did not work out leaves the object without a size, and saying so
@@ -1369,6 +1386,59 @@ impl Checker<'_> {
             return None;
         }
         u32::try_from(requested).ok()
+    }
+
+    /// Takes onto a declaration the attributes of the one its `copy(name)` named, as found by
+    /// [`Checker::copied`], and gives back the section to record when it wrote none of its own.
+    ///
+    /// What is taken is what gcc 16 takes, measured one attribute at a time: the section, the
+    /// alignment, `used` and `retain`, `noreturn` and `returns_twice`, and the attributes about
+    /// inlining and code generation that are kept as flags, such as `noinline`, `cold` and `hot`.
+    /// What gcc leaves behind is left behind here as well, which is everything about the name
+    /// rather than about the thing: `weak`, `visibility`, `alias`, `deprecated`, `always_inline`
+    /// and `gnu_inline`. Those say how a name is linked or warned about, and a second name for a
+    /// function wants its own answer to that.
+    ///
+    /// What a declaration writes itself is added to rather than replaced. A section written on it
+    /// stands over the copied one, and an alignment is the larger of the two, which is how two
+    /// declarations of one name already combine. The attributes that only mean something on a
+    /// function are taken only from a function onto a function, since `noreturn` on an object is
+    /// a thing gcc refuses wherever it is written.
+    fn copy_onto(
+        &self,
+        source: DeclId,
+        at: Span,
+        declared: &mut Declared,
+        section: Option<(StrId, Span)>,
+    ) -> Option<(StrId, Span)> {
+        let from = &self.tast[source];
+        declared.alignment = declared.alignment.max(from.alignment);
+        declared.retained |= from.flags.contains(DeclFlags::RETAINED);
+        // `retain` and `nocommon` are kept with the inlining flags because the two places that
+        // read those read them, and they are about the object as much as about a function.
+        let mut taken = [DeclFlags::RETAIN, DeclFlags::NO_COMMON].as_slice();
+        if from.kind == DeclKind::Function && declared.kind == DeclKind::Function {
+            declared.noreturn |= from.flags.contains(DeclFlags::NORETURN);
+            declared.twice |= from.flags.contains(DeclFlags::RETURNS_TWICE);
+            taken = &[
+                DeclFlags::RETAIN,
+                DeclFlags::NOINLINE,
+                DeclFlags::NO_STRICT_ALIASING,
+                DeclFlags::NO_INSTRUMENT,
+                DeclFlags::COLD,
+                DeclFlags::HOT,
+                DeclFlags::NO_STACK_PROTECTOR,
+                DeclFlags::STACK_PROTECT,
+                DeclFlags::RETURN_KEEP,
+                DeclFlags::INDIRECT_KEEP,
+            ];
+        }
+        for &flag in taken {
+            if from.flags.contains(flag) {
+                declared.inlining |= flag;
+            }
+        }
+        section.or_else(|| self.tast.section(source).map(|name| (name, at)))
     }
 
     /// The declaration this one names, which may be one that was already made.

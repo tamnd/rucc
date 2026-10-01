@@ -404,6 +404,13 @@ pub struct Global {
     /// The section to put it in, from `__attribute__((section(...)))`, or `None` to let the
     /// object writer choose from the other fields.
     pub section: Option<Symbol>,
+    /// Whether the linker has to keep it as well as the compiler, from `__attribute__((retain))`.
+    ///
+    /// What that takes is a section of its own marked `SHF_GNU_RETAIN`, which `--gc-sections`
+    /// does not take away even when nothing refers to it. The section is the program's when it
+    /// named one and otherwise the one the variable would have gone in with its name after it,
+    /// which is how gcc writes it. Only ELF has the flag, so nothing else reads this.
+    pub retain: bool,
     /// Its initial image, or `None` if it is only declared here.
     pub init: Option<DataList>,
     /// Whether the optimizer may take it away once nothing in the module names it, which is a
@@ -427,6 +434,7 @@ impl Global {
             tls: None,
             constant: false,
             section: None,
+            retain: false,
             init: None,
             droppable: false,
         }

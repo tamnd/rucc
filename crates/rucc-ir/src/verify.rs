@@ -259,6 +259,18 @@ impl<'a> Verifier<'a> {
         if let Some((one, other)) = func.attrs.conflict() {
             self.error(format!("`{one}` and `{other}` cannot both be true of a function"));
         }
+        // The arguments `alloc_size` names are read off every call to the function, so one past
+        // the parameters is an index the optimizer would take out of a call that does not have it.
+        if let Some(alloc) = func.attrs.alloc_size {
+            let params = func.signature().params.len();
+            for number in [Some(alloc.size), alloc.count].into_iter().flatten() {
+                if number == 0 || usize::from(number) > params {
+                    self.error(format!(
+                        "`alloc_size` names argument {number} of a function that takes {params}"
+                    ));
+                }
+            }
+        }
         if func.is_declaration() {
             self.func = None;
             return;
@@ -684,8 +696,8 @@ impl<'a> Verifier<'a> {
                 return;
             }
             Extra::Question(kind) => {
-                if kind > 3 {
-                    self.error(format!("an object size question is 0 to 3 and this is {kind}"));
+                if kind > 7 {
+                    self.error(format!("an object size question is 0 to 7 and this is {kind}"));
                 }
                 return;
             }

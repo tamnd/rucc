@@ -105,6 +105,7 @@ impl Globals {
                 place: Place::Pointer,
                 binding: Binding::Global,
                 visibility: Visibility::Default,
+                retain: false,
                 pieces: vec![Piece::Addr { symbol: target, addend: 0, bytes: 8 }],
             });
         }
@@ -129,10 +130,14 @@ impl Globals {
     }
 
     /// Whether anything here has to be read by the assembler, which today is an `asm` at file
-    /// scope with an instruction in it.
+    /// scope with an instruction in it, or a variable written `retain`.
+    ///
+    /// The second is for the reason a function given a section of its own goes that way: the
+    /// listing is where the section and its flags are already said, so it is the one place the
+    /// `R` has to be written rather than two.
     #[must_use]
     pub fn kept(&self) -> bool {
-        !self.file_asm.is_empty()
+        !self.file_asm.is_empty() || self.vars.iter().any(|var| var.retain)
     }
 }
 
@@ -153,6 +158,10 @@ pub struct Variable {
     pub binding: Binding,
     /// How far outside a shared library holding it the name reaches.
     pub visibility: Visibility,
+    /// Whether the linker has to keep it, from `__attribute__((retain))`, which puts it in a
+    /// section of its own marked `SHF_GNU_RETAIN`. Never set for anything but ELF, which is the
+    /// only format with the flag.
+    pub retain: bool,
     /// Its image, in order.
     pub pieces: Vec<Piece>,
 }
@@ -502,7 +511,9 @@ fn variable(
     let size = global.size.max(written);
     let binding = binding(global.linkage);
     let visibility = visibility(global.visibility);
-    Ok(Variable { name, size, align: u64::from(global.align), place, binding, visibility, pieces })
+    let retain = global.retain && format == ObjectFormat::Elf;
+    let align = u64::from(global.align);
+    Ok(Variable { name, size, align, place, binding, visibility, retain, pieces })
 }
 
 /// What the linker is told about a name, from the linkage the module gave it.
