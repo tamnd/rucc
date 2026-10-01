@@ -10493,6 +10493,33 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_function_declared_in_a_block_is_the_one_defined_below_it() {
+        // Every declaration of a name with external linkage is one function, and the block that
+        // declared it closing does not change that. The block's `int tree();` was forgotten when
+        // `main` ended, so the definition below was a second declaration, and the call went out
+        // with the signature the block had while the function had the definition's, which the
+        // verifier refused with E0652. LTP's `inode01` and `inode02` declare their helpers this
+        // way.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.std = Std::C17;
+        let result = run(
+            &opts,
+            concat!(
+                "int main(void) { int tree(), gen(); return tree() + gen(\"ab\", 2); }\n",
+                "int tree(void) { return 1; }\n",
+                "int gen(char *s, int n) { return s[0] + n; }\n",
+                "int other(void) { extern int x; return x; }\n",
+                "int x = 3;\n",
+            ),
+        );
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert_eq!(text.matches("func @tree(").count(), 1, "{text}");
+        assert!(text.contains("global @x : i32 = 3"), "{text}");
+    }
+
+    #[test]
     fn the_address_of_a_compound_literal_asks_for_the_object_it_points_at() {
         // Nothing declares a compound literal, so the reference is the only thing that can ask
         // for it to be emitted. The image named `.Lanon.0` and the module defined no such

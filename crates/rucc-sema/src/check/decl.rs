@@ -1482,6 +1482,22 @@ impl Checker<'_> {
             }
             None => None,
         };
+        // A declaration with linkage in a block whose block has closed is still the name's, and
+        // what finds it is the table of them. One at file scope takes it over from there, which
+        // is what puts the function or object among the top level declarations it was never in.
+        let binding = match binding {
+            None if declared.linkage == Linkage::External => {
+                let found = self.out_of_sight.get(&declared.name).copied();
+                if found.is_some() && self.scopes.at_file_scope() {
+                    self.out_of_sight.remove(&declared.name);
+                    if let Some(id) = found {
+                        self.tast.add_top_level(id);
+                    }
+                }
+                found.map(Binding::Decl)
+            }
+            binding => binding,
+        };
         let previous = match binding {
             Some(Binding::Decl(id)) => id,
             Some(Binding::Typedef(_)) => {
@@ -1893,6 +1909,8 @@ impl Checker<'_> {
         self.scopes.declare(declared.name, Binding::Decl(id));
         if self.scopes.at_file_scope() {
             self.tast.add_top_level(id);
+        } else if declared.linkage == Linkage::External {
+            self.out_of_sight.insert(declared.name, id);
         }
         id
     }
