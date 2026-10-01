@@ -821,6 +821,26 @@ impl Module {
         (0..self.globals.len()).map(Idx::from_usize)
     }
 
+    /// Turns around the order of the globals from `from` on, which is the order they are laid out
+    /// in.
+    ///
+    /// gcc writes the variables of a unit it optimizes newest first, since it walks its symbol
+    /// table from the head and adds to the head. Where that is seen is a section several objects
+    /// share: the strings the kernel's `MODULE_LICENSE` and `MODULE_DESCRIPTION` put in `.modinfo`
+    /// are in the reverse of the order the source wrote them. The ones before `from` keep their
+    /// order, which is for what a file scope `asm` defined as one run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `from` is past the last global.
+    pub fn reverse_globals(&mut self, from: usize) {
+        self.globals[from..].reverse();
+        for index in from..self.globals.len() {
+            let name = self.globals[index].name;
+            self.symbols.insert(name, SymbolRef::Global(Idx::from_usize(index)));
+        }
+    }
+
     /// Every alias, in the order they were added.
     pub fn aliases(&self) -> impl Iterator<Item = AliasId> + use<> {
         (0..self.aliases.len()).map(Idx::from_usize)

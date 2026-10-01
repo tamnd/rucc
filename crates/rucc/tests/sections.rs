@@ -166,9 +166,14 @@ fn an_elf_object_has_the_sections_gcc_writes_for_the_same_source() {
         assert_eq!((code.kind, code.flags), (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR), "{level}");
         let mine = find(".mine");
         assert_eq!((mine.kind, mine.flags), (SHT_PROGBITS, SHF_ALLOC | SHF_WRITE), "{level}");
-        // g, z, y and the static inside `reads`, in that order, with the zeros written out.
+        // g, z, y and the static inside `reads`, with the zeros written out. In that order at
+        // `-O0` and the other way round when optimizing, which is how gcc lays them out.
         let contents = &bytes[mine.offset..mine.offset + mine.size];
-        assert_eq!(contents, [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0], "{level}");
+        let expected = match level {
+            "-O0" => [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0],
+            _ => [5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0],
+        };
+        assert_eq!(contents, expected, "{level}");
         let table = find(".initcall");
         assert_eq!((table.kind, table.flags), (SHT_PROGBITS, SHF_ALLOC | SHF_WRITE), "{level}");
         assert_eq!(table.size, 8, "{level}");

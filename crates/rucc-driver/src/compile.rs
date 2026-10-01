@@ -462,6 +462,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             share: shares_slots(opts),
                             in_place: !opts.safety.instruments(),
                             fixed_x18: opts.fixed_x18,
+                            // gcc keeps the order the source wrote at `-O0`, and Mach-O is
+                            // clang's, which keeps it always.
+                            reorder: opts.opt_level.runs_optimizer()
+                                && sess.target.object_format != rucc_target::ObjectFormat::MachO,
                             read: &mut read,
                         },
                     );
@@ -5568,6 +5572,26 @@ decl #0 x : int object external static defined
         assert!(text.contains("\n__func__.0:\n\t.ascii\t\"list_bdev_fs_names\\000\"\n"), "{text}");
         assert!(!text.contains(".rodata.str1.1"), "{text}");
         assert!(!text.contains(".globl\t__func__"), "{text}");
+    }
+
+    /// When optimizing, the objects are laid out newest first, as gcc lays them out, and at `-O0`
+    /// in the order the source wrote them. The kernel's `MODULE_DESCRIPTION` and `MODULE_LICENSE`
+    /// are where it shows, as the order of the strings in `.modinfo`.
+    #[test]
+    fn objects_are_laid_out_newest_first_when_optimizing() {
+        let source = "static const char a[] __attribute__((section(\".modinfo\"), used)) = \"description=x\";\n\
+                      static const char b[] __attribute__((section(\".modinfo\"), used)) = \"license=GPL\";\n";
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        for (level, first, second) in [
+            (rucc_session::OptLevel::O0, "\na:", "\nb:"),
+            (rucc_session::OptLevel::O2, "\nb:", "\na:"),
+        ] {
+            opts.opt_level = level;
+            let text = run(&opts, source).text().to_owned();
+            let at = |label: &str| text.find(label).unwrap_or_else(|| panic!("{label} in\n{text}"));
+            assert!(at(first) < at(second), "{text}");
+        }
     }
 
     /// A literal only a table nothing reads or a function inlined everywhere named is not emitted,
