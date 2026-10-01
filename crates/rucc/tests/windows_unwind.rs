@@ -115,3 +115,66 @@ fn the_listing_assembles_to_the_same_unwind_table() {
         assert_eq!(direct.section(".pdata").map(<[u8]>::len), Some(pdata.len()), "{opt}");
     }
 }
+
+/// A function with `__builtin_setjmp` in it keeps every register Windows x64 asks a function to
+/// keep, which is RSI and RDI as well as the ones SysV keeps, and XMM6 to XMM15, and tells the
+/// unwinder where each went. The restore puts back only the stack pointer and the frame pointer,
+/// so it is this function's own epilogue that hands its caller the rest back after control comes
+/// back to it. Postgres builds its error handling on the pair on MinGW64, through a buffer of five
+/// `intptr_t`. tamnd/rucc#1993.
+#[test]
+fn a_function_that_saves_a_place_keeps_every_register_windows_asks_it_to() {
+    let source = "\
+typedef long long sigjmp_buf[5];
+sigjmp_buf *stack;
+int f(void) { return __builtin_setjmp(*stack); }
+void g(void) { __builtin_longjmp(*stack, 1); }
+";
+    for opt in ["-O0", "-O2"] {
+        let dir = dir(&format!("setjmp{opt}"));
+        let c = dir.join("one.c");
+        std::fs::write(&c, source).expect("the fixture can be written");
+        let listing = compile(&c, &[opt, "-S"]);
+        let direct = Coff { bytes: compile(&c, &[opt, "-c"]) };
+        let s = dir.join("one.s");
+        std::fs::write(&s, &listing).expect("the listing can be written");
+        let read = Coff { bytes: compile(&s, &["-c"]) };
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8(listing).expect("a listing is text");
+        let f = text.split_once("\t.seh_proc\tf\n").expect("f is wrapped").1;
+        let f = f.split_once(".seh_endproc").expect("and the wrapping ends").0;
+        for reg in ["%rbx", "%rsi", "%rdi", "%r12", "%r13", "%r14", "%r15"] {
+            assert!(f.contains(&format!("\t.seh_pushreg\t{reg}\n")), "{opt} {reg}:\n{text}");
+            assert!(f.contains(&format!("\tpopq\t{reg}\n")), "{opt} {reg}:\n{text}");
+        }
+        for n in 6..=15 {
+            let reg = format!("%xmm{n}");
+            assert!(f.contains(&format!("\t.seh_savexmm\t{reg}, ")), "{opt} {reg}:\n{text}");
+            let restored = f.lines().any(|line| {
+                line.starts_with("\tmov")
+                    && line.contains("(%r")
+                    && line.ends_with(&format!(", {reg}"))
+            });
+            assert!(restored, "{opt} {reg} is put back:\n{text}");
+        }
+        // The two words the restore puts back, out of the buffer the save wrote them into.
+        assert!(f.contains("\tmovq\t%rbp, ("), "{opt}:\n{text}");
+        assert!(f.contains("\tmovq\t%rsp, 16("), "{opt}:\n{text}");
+        let g = text.split_once("\t.seh_proc\tg\n").expect("g is wrapped").1;
+        let jump = g.find("\tjmp\t*%").unwrap_or_else(|| panic!("{opt} an indirect jump:\n{text}"));
+        // A register copied into each, which is neither the prologue's `movq %rsp, %rbp` nor the
+        // epilogue's `movq %rbp, %rsp`, ahead of the jump.
+        let back = |into: &str, not: &str| {
+            g[..jump].lines().any(|line| {
+                line.starts_with("\tmovq\t%")
+                    && line.ends_with(&format!(", {into}"))
+                    && !line.starts_with(&format!("\tmovq\t{not},"))
+            })
+        };
+        assert!(back("%rsp", "%rbp"), "{opt} the stack goes back first:\n{text}");
+        assert!(back("%rbp", "%rsp"), "{opt} and so does the frame:\n{text}");
+        // And what the listing tells the unwinder is what the object says.
+        let xdata = direct.section(".xdata").expect("a direct object has descriptions");
+        assert_eq!(read.section(".xdata"), Some(xdata), "{opt}");
+    }
+}
