@@ -254,6 +254,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::WEAKREF) {
             head.push_str(" weakref");
         }
+        if node.flags.contains(DeclFlags::RETAIN) {
+            head.push_str(" retain");
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not

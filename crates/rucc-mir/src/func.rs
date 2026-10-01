@@ -258,6 +258,11 @@ pub struct Func {
     /// Carried for the reason [`Func::binding`] is: the assembler and the object writer are handed
     /// functions and nothing else.
     pub section: Option<Symbol>,
+    /// Whether the linker has to keep it, from `__attribute__((retain))` on the IR function it was
+    /// lowered from, which puts it in a section of its own marked `SHF_GNU_RETAIN`.
+    ///
+    /// Carried for the reason [`Func::section`] is.
+    pub retain: bool,
     /// What its first instruction has to be aligned to, from the IR function it was lowered
     /// from, or `None` for the alignment every function gets anyway.
     pub align: Option<u32>,
@@ -444,6 +449,7 @@ impl Func {
         Self {
             name,
             section: None,
+            retain: false,
             align: None,
             binding: Binding::Global,
             visibility: Visibility::Default,

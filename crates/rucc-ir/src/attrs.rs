@@ -31,16 +31,37 @@ pub struct Attrs {
     pub set: AttrSet,
     /// How far the code generator may fuse a multiply and an addition.
     pub fp_contract: FpContract,
+    /// Which arguments say how big the object the function returns is, from
+    /// `__attribute__((alloc_size(1)))` and `((alloc_size(1, 2)))`.
+    pub alloc_size: Option<AllocSize>,
+}
+
+/// The arguments of a call whose product is the size of what the call returns.
+///
+/// Counted from one, the way the attribute counts them, so that the textual IR reads the same as
+/// the C it came from. `size` alone is `malloc`'s shape and `size` with `count` is `calloc`'s,
+/// where the object is the two multiplied. `rucc_opt::objsize` reads this off the callee of a
+/// call an address came out of, which is how `__builtin_object_size` knows what `kmalloc(64)`
+/// gave back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AllocSize {
+    /// The argument that is the size, or the size of one element when there is a count.
+    pub size: u8,
+    /// The argument that is how many elements there are, if one is.
+    pub count: Option<u8>,
 }
 
 impl Attrs {
     /// Nothing promised.
-    pub const NONE: Self = Self { set: AttrSet::NONE, fp_contract: FpContract::Off };
+    pub const NONE: Self =
+        Self { set: AttrSet::NONE, fp_contract: FpContract::Off, alloc_size: None };
 
     /// Whether nothing has been promised, which is when the printer writes nothing at all.
     #[must_use]
     pub const fn is_default(self) -> bool {
-        self.set.is_empty() && matches!(self.fp_contract, FpContract::Off)
+        self.set.is_empty()
+            && matches!(self.fp_contract, FpContract::Off)
+            && self.alloc_size.is_none()
     }
 
     /// Two attributes that are set and contradict each other, if there are any.
@@ -78,6 +99,18 @@ impl fmt::Display for Attrs {
                 f.write_str(", ")?;
             }
             write!(f, "fp_contract={}", self.fp_contract.name())?;
+            first = false;
+        }
+        // Two keys rather than one with a pair in it, so that each is a word the way every other
+        // value here is.
+        if let Some(alloc) = self.alloc_size {
+            if !first {
+                f.write_str(", ")?;
+            }
+            write!(f, "alloc_size={}", alloc.size)?;
+            if let Some(count) = alloc.count {
+                write!(f, ", alloc_count={count}")?;
+            }
         }
         f.write_str(")")
     }
@@ -187,6 +220,10 @@ impl AttrSet {
     /// function writes is put back, the ones a call may destroy included, except the ones its value
     /// comes back in.
     pub const SAVES_ALL: Self = Self(1 << 27);
+    /// The linker keeps the function as well as the compiler, from `__attribute__((retain))`: it
+    /// goes in a section of its own marked `SHF_GNU_RETAIN`, which `--gc-sections` does not take
+    /// away. Only ELF has the flag, so nothing else reads this.
+    pub const RETAIN: Self = Self(1 << 28);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -302,6 +339,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::ZERO_ARG, "zero_arg"),
     (AttrSet::INTERRUPT, "interrupt"),
     (AttrSet::SAVES_ALL, "saves_all"),
+    (AttrSet::RETAIN, "retain"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
@@ -387,7 +425,7 @@ mod tests {
 
     #[test]
     fn the_spec_example_prints_the_way_the_spec_writes_it() {
-        let attrs = Attrs { set: AttrSet::NOUNWIND, fp_contract: FpContract::On };
+        let attrs = Attrs { set: AttrSet::NOUNWIND, fp_contract: FpContract::On, alloc_size: None };
         assert_eq!(attrs.to_string(), "attrs(nounwind, fp_contract=on)");
     }
 

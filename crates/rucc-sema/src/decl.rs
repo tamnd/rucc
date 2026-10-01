@@ -439,6 +439,12 @@ impl DeclFlags {
     /// way [`Self::INTERRUPT`] is.
     pub const SAVES_ALL: Self = Self(1 << 28);
 
+    /// `__attribute__((retain))` was written, which asks the linker as well as the compiler to
+    /// keep the definition: the section it goes in is marked `SHF_GNU_RETAIN`, so a link with
+    /// `--gc-sections` keeps it even when nothing refers to it. Always set with
+    /// [`Self::RETAINED`], which is the half the compiler reads, and merged the way that one is.
+    pub const RETAIN: Self = Self(1 << 29);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

@@ -1318,6 +1318,7 @@ impl<'a> Lowering<'a> {
         let mut out = mir::Func::new(name);
         out.align = source.align;
         out.section = source.section;
+        out.retain = source.attrs.set.contains(AttrSet::RETAIN);
         // Carried rather than worked out here, because where a function was declared is a fact
         // about the source and this is a long way past it. What wants it is the line table.
         out.declared = source.declared;

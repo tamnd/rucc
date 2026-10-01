@@ -3364,9 +3364,17 @@ mod tests {
         // a path that then fails to compile, and a no for one it honours sends it down a worse
         // path than it had to take.
         assert_eq!(clean("#if __has_attribute(packed)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_attribute(alloc_size)\nyes\n#endif\n"), "");
+        assert_eq!(clean("#if __has_attribute(alloc_size)\nyes\n#endif\n"), "yes");
         assert_eq!(clean("#if __has_attribute(no_such_attribute)\nyes\n#endif\n"), "");
-        assert_eq!(clean("#if !__has_attribute(alloc_size)\nno\n#endif\n"), "no");
+        assert_eq!(clean("#if !__has_attribute(no_such_attribute)\nno\n#endif\n"), "no");
+        // A row the table has and marks as not done is a no as well, whichever row that is today.
+        let undone = rucc_gnu::features()
+            .iter()
+            .find(|row| row.kind == Kind::Attribute && !row.status.is_available());
+        if let Some(row) = undone {
+            let asked = format!("#if __has_attribute({})\nyes\n#endif\n", row.name);
+            assert_eq!(clean(&asked), "", "{}", row.name);
+        }
     }
 
     #[test]

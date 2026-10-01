@@ -92,6 +92,10 @@ use crate::tast::Const;
 /// constant satisfies both, so both are answered here and the same way.
 const FAMILY: &[&str] = &["__builtin_object_size", "__builtin_dynamic_object_size"];
 
+/// The bit [`ExprKind::ObjectSize`] carries above the two of the kind when the question was asked
+/// with `__builtin_dynamic_object_size`.
+const DYNAMIC: u8 = 4;
+
 /// The code the second argument reports under.
 const CODE: &str = "E0709";
 
@@ -197,7 +201,11 @@ impl Checker<'_> {
         // a global or a parameter came from somewhere the IR cannot see either, so it is answered
         // here and now, which is what lets a `_chk` call over one be the plain call at `-O0`.
         if answer.is_none() && self.body.is_some() && self.quiet(address) && self.local(address) {
-            let kind = u8::try_from(kind).ok()?;
+            // The dynamic spelling is carried down as a third bit, because the IR is where an
+            // answer computed while the program runs can be built, and only that spelling may
+            // have one. See `rucc_opt::objsize`.
+            let dynamic = if spelled == FAMILY[1] { DYNAMIC } else { 0 };
+            let kind = u8::try_from(kind).ok()? | dynamic;
             let node = ExprKind::ObjectSize { address, kind };
             return Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span));
         }

@@ -310,9 +310,23 @@ fn crc(isa: Isa) -> bool {
 impl Writer<'_> {
     /// The directive that goes back to the section the program put this function in, and
     /// nothing for a function it said nothing about.
+    ///
+    /// A function written `retain` has a section of its own whether or not it named one, since
+    /// the flag that keeps it is on the section and every other function in a shared one would
+    /// be kept with it. It is `.text.` and the function's name, which is what gcc 16 calls it.
+    /// Only ELF has the flag, and gcc refuses the attribute everywhere else.
     fn home(&self, func: &Func) -> Option<String> {
-        let section = func.section?;
-        Some(self.directives.named_code(self.names.resolve(section)))
+        let retain = func.retain && self.directives == Directives::Elf;
+        let section = match func.section {
+            Some(section) => self.names.resolve(section).to_owned(),
+            None if retain => format!(".text.{}", self.names.resolve(func.name)),
+            None => return None,
+        };
+        let mut directive = self.directives.named_code(&section);
+        if retain {
+            directive = directive.replacen("\"ax\"", "\"axR\"", 1);
+        }
+        Some(directive)
     }
 
     /// One function: what the assembler is told about it, then its blocks.
@@ -1334,6 +1348,7 @@ mod tests {
             place,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            retain: false,
             pieces,
         }
     }

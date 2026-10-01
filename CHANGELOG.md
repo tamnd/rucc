@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `__attribute__((retain))` is implemented (#2483). The definition goes in a section of its own marked `SHF_GNU_RETAIN`, written as the `R` flag the way gcc 16 writes it (`.text.f,"axR"`, `.data.a,"awR"`, `.bss.e,"awR",@nobits`, `.rodata.d,"aR"`, and `"awTR"` for thread-local data), so a link with `--gc-sections` keeps it even when nothing refers to it. A section the program named keeps its name and gains the flag, and a tentative definition under `retain` is never a common symbol.
+- `__attribute__((copy(name)))` is implemented (#2498). It copies what gcc 16 copies from the declaration it names: the section, the alignment, `used`, `retain` and `nocommon`, and between functions `noreturn`, `returns_twice`, `noinline`, `cold`, `hot` and the other code generation flags. The linkage, the visibility, `weak` and `deprecated` stay behind, as in gcc. This is what the kernel's `module_init` alias writes with `__copy(init_module)`. A name nothing declared, an argument that is not a name and the wrong number of arguments are errors in gcc's words.
+- `__attribute__((alloc_size(n)))` and `alloc_size(n, m)` are implemented (#2499). From `-O1` up, `__builtin_object_size` of a pointer into what a call to the function returned is the argument it names, or the product of the two, less any constant offset, and `__builtin_dynamic_object_size` answers with the argument itself when it is not a constant. At `-O0` every answer is unknown, as in gcc. The checks on the numbers are gcc's `-Wattributes` warnings, and `__has_attribute(alloc_size)` is now 1.
+
 ### Fixed
 
 - `rucc --fetch` installs the kernel header tree on macOS and on Windows. The uapi headers have pairs whose names differ only in case, like `xt_CONNMARK.h` and `xt_connmark.h`, and a filesystem that does not tell case apart keeps one file for both, which the manifest check took for a broken archive. A pair that kept one of its two files now passes, and the fetch names the headers an include can no longer reach.

@@ -823,18 +823,21 @@ impl Unit<'_> {
         global.droppable = global.linkage == IrLinkage::Internal
             && state != Definition::Declared
             && !node.flags.contains(DeclFlags::RETAINED);
+        global.retain = node.flags.contains(DeclFlags::RETAIN);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal
         // one is not the linker's to merge, and one the program put in a section of its own is in
         // that section, which is gcc's answer too. And one written `nocommon` is the program saying
-        // this object is not to be merged whatever the command line says.
+        // this object is not to be merged whatever the command line says, and one written
+        // `retain` goes in a section of its own, which gcc gives it rather than merging it.
         if self.common
             && !node.flags.contains(DeclFlags::NO_COMMON)
             && state == Definition::Tentative
             && global.linkage == IrLinkage::External
             && global.tls.is_none()
             && global.section.is_none()
+            && !global.retain
         {
             global.linkage = IrLinkage::Common;
         }
@@ -1006,6 +1009,10 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::RETAINED) {
             func.attrs.set |= AttrSet::USED;
         }
+        // And `retain`, which asks the linker to keep it too. See [`AttrSet::RETAIN`].
+        if node.flags.contains(DeclFlags::RETAIN) {
+            func.attrs.set |= AttrSet::RETAIN;
+        }
         // What a function said about zeroing registers on the way out, which overrides the
         // command line for its body.
         for (said, kept) in [
@@ -1022,6 +1029,12 @@ impl Unit<'_> {
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
         func.section = self.section_of(decl, true);
+        // A claim about what a call to it returns, which travels on the declaration for the reason
+        // `noreturn` does: `malloc` is only ever declared here. `rucc_opt::objsize` reads it off
+        // the callee of the call an address came out of.
+        func.attrs.alloc_size = tast
+            .alloc_size(decl)
+            .map(|alloc| rucc_ir::AllocSize { size: alloc.size, count: alloc.count });
         // What a call that survives the optimizer is reported with, which the driver reads once
         // the optimizer is done. A declaration is the usual carrier, since the function is one
         // nothing should ever call.

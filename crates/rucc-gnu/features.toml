@@ -670,11 +670,10 @@ notes = "Keeps a name visible when `-fwhole-program` or link-time optimization w
 name = "retain"
 kind = "attribute"
 gcc_version = "11.0"
-status = "partial"
-answer = "error"
+status = "implemented"
 used_by = ["linux"]
-tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to"]
-notes = "The compiler keeps the definition. The `SHF_GNU_RETAIN` section flag that asks the linker to keep it as well is not written yet."
+tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to", "rucc::a_retained_definition_is_in_a_section_of_its_own_marked_r", "rucc::a_retained_section_has_the_flag_in_the_object"]
+notes = "The compiler keeps the definition and the linker is asked to as well. It goes in a section of its own marked `SHF_GNU_RETAIN`, which `--gc-sections` does not take away: the one it would have gone in under `-ffunction-sections` or `-fdata-sections`, or the one the program named, with `R` added to the flags, as gcc 16 writes it. A tentative definition so marked is a zeroed one in `.bss.` and its name rather than a common symbol. Only ELF has the flag."
 
 [[feature]]
 name = "visibility"
@@ -914,19 +913,19 @@ notes = "Leaves a local out of `-ftrivial-auto-var-init`, so it holds whatever w
 name = "copy"
 kind = "attribute"
 gcc_version = "9.0"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux"]
-tests = []
-notes = "Copies the attributes of another declaration onto this one. The kernel writes it on the aliases `module_init` makes and falls back to nothing when `__has_attribute` says no, which is the answer it gets."
+tests = ["rucc::a_copy_takes_the_section_alignment_and_used_and_not_the_linkage", "tests/accept/a-copy-of-a-name-nothing-declared.c", "tests/accept/a-copy-with-two-arguments.c"]
+notes = "Copies onto a declaration what gcc 16 copies from the one named: the section, the alignment, `used` and `retain`, `noreturn` and `returns_twice`, and the inlining and code generation flags such as `noinline`, `cold` and `hot`. What is about the name rather than the thing stays behind, as in gcc: `weak`, `visibility`, `alias`, `deprecated`, `always_inline` and `gnu_inline`. What the declaration writes itself stands over what it copies. The argument has to be a name declared above; gcc also takes an expression and copies from its type, which nobody writes and which is refused here. The kernel writes it on the aliases `module_init` makes."
 
 [[feature]]
 name = "alloc_size"
 kind = "attribute"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 used_by = ["linux", "glibc"]
-tests = []
-notes = "Tells `__builtin_object_size` how big the object a call returns is. It is accepted and not read, so the size of such an object is unknown, which is the safe answer, and `__has_attribute` says no."
+tests = ["rucc-opt::what_an_allocator_gave_back_is_what_its_alloc_size_says", "rucc-ir::an_alloc_size_comes_back_byte_for_byte", "rucc::an_alloc_size_answers_the_object_size_of_what_the_call_returned", "tests/accept/an-alloc-size-past-the-parameters.c"]
+notes = "Tells `__builtin_object_size` how big the object a call returns is, as the product of the one or two arguments it names. As in gcc 16, the answer comes from `-O1` up and only through a variable the result was put in, since the operand of the builtin is not evaluated, and at `-O0` it is not known. With constant arguments both builtins answer the constant, less any constant offset on the pointer. `__builtin_dynamic_object_size` over a call whose arguments are not constants is answered at run time from those arguments where they are as wide as `size_t`, which `malloc` and `kmalloc` are, and the address is the result with constant offsets on it; anything else is not known, which is the safe answer. Bad arguments are dropped with gcc's warnings."
 
 [[feature]]
 name = "cdecl"

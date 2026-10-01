@@ -556,7 +556,8 @@ pub enum ExprKind {
     ObjectSize {
         /// The address, which is lowered for its value and read through by nothing.
         address: ExprId,
-        /// Which of the four questions, from zero to three.
+        /// Which of the four questions, from zero to three, with four added when it was asked
+        /// with `__builtin_dynamic_object_size`, whose answer may be worked out at run time.
         kind: u8,
     },
     /// `__builtin_constant_p(x)` where `x` is not a constant as written but may be one once the

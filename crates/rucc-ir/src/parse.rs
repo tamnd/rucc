@@ -38,7 +38,7 @@ use rucc_diag::Span;
 use rucc_target::{Convention, Slot, TargetInfo};
 use rucc_tuple::TargetTuple;
 
-use crate::attrs::{AttrSet, Attrs, FpContract};
+use crate::attrs::{AllocSize, AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
     Abi, AsmInfo, Block, BlockCall, CallInfo, Drains, Hint, Imm, Inst, InstData, MemInfo, Meta,
@@ -338,6 +338,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "constant" => global.constant = true,
                 "droppable" => global.droppable = true,
                 "section" => global.section = Some(self.symbol_from_string()?),
+                "retain" => global.retain = true,
                 other => return self.fail(format!("a global has no `{other}`")),
             }
         }
@@ -607,6 +608,18 @@ impl<'a, 'n> Parser<'a, 'n> {
                         Some(contract) => attrs.fp_contract = contract,
                         None => return self.fail(format!("`{value}` is not a contraction")),
                     },
+                    "alloc_size" | "alloc_count" => {
+                        let Some(number) = value.parse::<u8>().ok().filter(|&n| n > 0) else {
+                            return self.fail(format!("`{value}` is not an argument number"));
+                        };
+                        let alloc =
+                            attrs.alloc_size.get_or_insert(AllocSize { size: 0, count: None });
+                        if word == "alloc_size" {
+                            alloc.size = number;
+                        } else {
+                            alloc.count = Some(number);
+                        }
+                    }
                     other => return self.fail(format!("`{other}` takes no value")),
                 }
             } else {
@@ -620,6 +633,9 @@ impl<'a, 'n> Parser<'a, 'n> {
             }
         }
         self.expect(")")?;
+        if attrs.alloc_size.is_some_and(|alloc| alloc.size == 0) {
+            return self.fail("`alloc_count` without the `alloc_size` it multiplies");
+        }
         Ok(attrs)
     }
 
@@ -860,14 +876,15 @@ impl<'a, 'n> Parser<'a, 'n> {
                 PendingExtra::Depth(depth)
             }
             // `object_size %0, kind 1`. The address, and then which of the four questions is asked
-            // about it, written with a name in front the way a locality is.
+            // about it, written with a name in front the way a locality is. Four more than that
+            // is the same question asked by `__builtin_dynamic_object_size`.
             ExtraKind::Question => {
                 args = self.value_list()?;
                 self.expect(",")?;
                 self.expect("kind")?;
                 let word = self.word();
-                let Some(kind) = word.parse::<u8>().ok().filter(|&kind| kind <= 3) else {
-                    return self.fail(format!("`{word}` is not a kind from 0 to 3"));
+                let Some(kind) = word.parse::<u8>().ok().filter(|&kind| kind <= 7) else {
+                    return self.fail(format!("`{word}` is not a kind from 0 to 7"));
                 };
                 PendingExtra::Question(kind)
             }
@@ -2007,6 +2024,22 @@ block0(%0: i32):
         assert_eq!(round_trip(&text), text);
         let bad = text.replace("lanes [3, 2, 1, 0]", "lanes [3, 2, 1, 16]");
         assert_eq!(error(&bad), "line 10: a shuffle takes one to 8 lanes each below sixteen");
+    }
+
+    /// The arguments `alloc_size` names, as two keys counted from one, and a count with no size
+    /// to multiply turned down.
+    #[test]
+    fn an_alloc_size_comes_back_byte_for_byte() {
+        let text = format!(
+            "{HEADER}
+func @kmalloc(i64, i32) -> ptr, linkage(external), attrs(nounwind, alloc_size=1);
+
+func @calloc(i64, i64) -> ptr, linkage(external), attrs(alloc_size=1, alloc_count=2);
+"
+        );
+        assert_eq!(round_trip(&text), text);
+        let bad = text.replace("alloc_size=1, alloc_count=2", "alloc_count=2");
+        assert_eq!(error(&bad), "line 8: `alloc_count` without the `alloc_size` it multiplies");
     }
 
     #[test]
