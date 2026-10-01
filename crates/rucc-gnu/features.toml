@@ -317,10 +317,11 @@ notes = "`__extension__`, which suppresses pedantic diagnostics for one expressi
 name = "nested_functions"
 kind = "extension"
 gcc_version = "2.0"
-status = "rejected"
+status = "implemented"
+value = "0"
 used_by = []
-tests = []
-notes = "The settled exception from spec/06-lexer-and-parser.md. They need an executable trampoline on the stack, which no hardened target allows. `-fnested-functions` says exactly this."
+tests = ["rucc-sema::a_function_definition_inside_a_function_is_checked_and_called_by_name"]
+notes = "GNU's nested functions, with the static chain in a register of its own and a trampoline made on the heap by libgcc the way gcc 14 and later make one under `-ftrampoline-impl=heap`, so the stack stays unexecutable. ELF targets on x86-64 and AArch64 only, and not under `-ffixed-x18`. A jump out of a nested function to a label of the function around it is refused. gcc 16 answers 0 for this name, as it does for every name it does not know, so `__has_extension` answers 0 here too although the thing itself works."
 
 # Attributes, from section 13.4. `answer = \"error\"` marks the ones whose silent ignoring
 # changes semantics rather than performance.

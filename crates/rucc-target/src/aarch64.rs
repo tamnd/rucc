@@ -755,7 +755,12 @@ static FP_ORDER: [PhysReg; 32] = [
 
 /// Where an AAPCS64 call puts things on Linux and every other platform that uses it unchanged, per
 /// `spec/12-abi-and-runtime.md` section 12.3.
-pub static AAPCS64: CallRegs = aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaList::Aapcs);
+///
+/// The static chain of a nested function travels in `x18`, which is where gcc puts it and where
+/// the trampolines in libgcc load it, and which this compiler never hands to a value. Apple and
+/// Windows keep `x18` for themselves, so the two below have no chain and no nested functions.
+pub static AAPCS64: CallRegs =
+    CallRegs { chain: Some(X18), ..aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaList::Aapcs) };
 
 /// Where a call puts things on Apple's platforms.
 ///
@@ -830,6 +835,7 @@ const fn aapcs64(
         push: 16,
         link: Some(LR),
         sret: Some(X8),
+        chain: None,
         list,
         dwarf: &AARCH64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,

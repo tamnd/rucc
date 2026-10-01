@@ -34,9 +34,9 @@
 //! // The armoured spelling is the same question.
 //! assert_eq!(rucc_gnu::lookup(Kind::Attribute, "__packed__").map(|f| f.name), Some("packed"));
 //!
-//! // Nested functions are refused rather than pending, and the table says which.
+//! // Nested functions are done, and the operators still answer what gcc answers for the name.
 //! let nested = rucc_gnu::lookup(Kind::Extension, "nested_functions").unwrap();
-//! assert_eq!(nested.status, Status::Rejected);
+//! assert_eq!(nested.status, Status::Implemented);
 //! ```
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
@@ -73,7 +73,7 @@ pub enum Status {
     Partial,
     /// Done, with a test named against it.
     Implemented,
-    /// Will not be done, and the row says why. `nested_functions` is the example.
+    /// Will not be done, and the row says why.
     Rejected,
 }
 
@@ -497,10 +497,14 @@ mod tests {
     }
 
     #[test]
-    fn nested_functions_are_rejected_rather_than_pending() {
+    fn nested_functions_are_implemented_and_answer_what_gcc_answers() {
         let nested = lookup(Kind::Extension, "nested_functions").expect("in the table");
-        assert_eq!(nested.status, Status::Rejected);
-        assert!(!nested.notes.is_empty(), "a rejection has to say why");
+        assert_eq!(nested.status, Status::Implemented);
+        assert_eq!(
+            has_extension("nested_functions", Target::new("x86_64", "linux")),
+            0,
+            "gcc 16 answers 0 for the name"
+        );
     }
 
     #[test]

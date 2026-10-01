@@ -33,9 +33,9 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Alias, AliasKind, AttrSet, Builder, DataList, Datum, Dll, Extra, FpContract, Func, Global, Imm,
-    InstData, Linkage as IrLinkage, Meta, Module, Opcode, Reloc, Signature, SymbolRef, TlsModel,
-    Type, Visibility as IrVisibility,
+    Abi, Alias, AliasKind, AttrSet, Builder, DataList, Datum, Dll, Extra, FpContract, Func, Global,
+    Imm, InstData, Linkage as IrLinkage, Meta, Module, Opcode, Param, Reloc, Signature, SymbolRef,
+    TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
@@ -49,6 +49,7 @@ use crate::abi::{self, Plan};
 use crate::aliasing;
 use crate::body;
 use crate::directives;
+use crate::nest::{self, Nest};
 use crate::reach;
 use crate::repr;
 
@@ -251,6 +252,13 @@ pub struct Context<'a> {
     /// is decided here, as one `alloca` for all of them, which is a thing every pass after it
     /// already reads correctly. The rules are on `Body::declare`.
     pub share: bool,
+    /// Whether `x18` is kept for something else on AArch64, which is `-ffixed-x18`.
+    ///
+    /// The kernel keeps its shadow call stack there. Nothing here ever hands `x18` to a value, so
+    /// the flag changes nothing about an ordinary function, but a nested function's static chain
+    /// travels in it, and a nested function under the flag is refused rather than allowed to
+    /// write over whatever the build keeps there.
+    pub fixed_x18: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -281,6 +289,7 @@ impl fmt::Debug for Context<'_> {
             .field("no_builtin", &self.no_builtin)
             .field("auto_init", &self.auto_init)
             .field("share", &self.share)
+            .field("fixed_x18", &self.fixed_x18)
             .finish_non_exhaustive()
     }
 }
@@ -354,6 +363,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         no_builtin,
         auto_init,
         share,
+        fixed_x18,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -381,6 +391,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         no_builtin,
         auto_init,
         share,
+        fixed_x18,
         read,
         module,
         diagnostics: Vec::new(),
@@ -396,6 +407,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         renamed: Map::default(),
         reachable,
         named,
+        nest: Nest::default(),
     };
     unit.run();
     Lowered { module: unit.module, diagnostics: unit.diagnostics }
@@ -445,6 +457,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) auto_init: AutoInit,
     /// Whether locals in blocks that never overlap may share a slot. See [`Context::share`].
     pub(crate) share: bool,
+    /// Whether `x18` is kept for something else. See [`Context::fixed_x18`].
+    fixed_x18: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
@@ -509,6 +523,8 @@ pub(crate) struct Unit<'a> {
     /// What an expression in something reached names, which is what a use of a name is. Only a
     /// weakref asks, since whether its target stays weak is whether anything uses it by name.
     named: Set<DeclId>,
+    /// The nested functions met so far and what each of them reaches. See [`crate::nest`].
+    pub(crate) nest: Nest,
 }
 
 // The debug is by hand and short: a translation unit is not something anybody wants printed as
@@ -913,7 +929,27 @@ impl Unit<'_> {
         } else {
             self.plan(ty, &[], span)
         };
-        let Some(plan) = plan else { return };
+        let Some(mut plan) = plan else { return };
+        // A nested function takes its static chain after everything the program wrote, which is
+        // what keeps every other parameter where the plan put it. See [`crate::nest`].
+        let frame = self.nest.frame(decl).filter(|frame| frame.nested).cloned();
+        if let Some(frame) = &frame {
+            if !self.chains(span) {
+                return;
+            }
+            plan.signature.params.push(Param::with_abi(Type::PTR, Abi::Chain));
+            // One written without a prototype is given a variadic signature like any other,
+            // which a nested function cannot have and does not need, since the checking has
+            // turned down one that really is. Its calls are changed to match. See
+            // [`crate::nest`].
+            plan.signature.variadic = false;
+            // The trampoline is the only thing that reaches the function when every direct call
+            // to it has been inlined, and nothing in the module can see the trampoline, so the
+            // function is kept whatever the optimizer makes of the calls.
+            if frame.escapes {
+                self.trampoline_target(name);
+            }
+        }
 
         let mut func = Func::new(name, plan.signature.clone());
         // The name the source spelled, where an assembler name says the symbol is not it. A
@@ -1034,7 +1070,7 @@ impl Unit<'_> {
         // `used`, and the other attributes that keep a definition nothing in the file calls, so
         // that nothing after this takes the body away. The kernel's `asm-offsets.c` writes every
         // offset from `static void __used common(void)`, which no one calls.
-        if node.flags.contains(DeclFlags::RETAINED) {
+        if node.flags.contains(DeclFlags::RETAINED) || frame.as_ref().is_some_and(|f| f.escapes) {
             func.attrs.set |= AttrSet::USED;
         }
         // And `retain`, which asks the linker to keep it too. See [`AttrSet::RETAIN`].
@@ -1125,6 +1161,55 @@ impl Unit<'_> {
             }
         }
         self.place_func(func);
+    }
+
+    /// Whether a nested function can be built for this target, saying why not when it cannot.
+    ///
+    /// What it needs is a register for the static chain that nothing else is using, which is
+    /// [`rucc_target::CallRegs::chain`], and libgcc's heap trampolines, which are on every system
+    /// whose objects are ELF. Apple and Windows keep the register AArch64 would use, and on x86-64
+    /// Windows passes its arguments somewhere else. `-ffixed-x18` keeps the register for the
+    /// kernel's shadow call stack.
+    fn chains(&mut self, span: Span) -> bool {
+        let chain = self.target.call_regs.and_then(|regs| regs.chain);
+        let why = match chain {
+            None => {
+                Some("the calling convention of this target has no register for the static chain")
+            }
+            Some(_) if self.target.object_format != ObjectFormat::Elf => {
+                Some("the heap trampolines it is called through are libgcc's, which is ELF only")
+            }
+            Some(_) if self.fixed_x18 && self.target.tuple.arch() == rucc_tuple::Arch::Aarch64 => {
+                Some("its static chain travels in x18, which -ffixed-x18 keeps for something else")
+            }
+            Some(_) => None,
+        };
+        let Some(why) = why else { return true };
+        // Once per file, since every nested function in it would say the same thing.
+        if !self.nest.refused {
+            self.nest.refused = true;
+            self.diagnostics.push(
+                Diagnostic::error("a nested function cannot be built for this target", span)
+                    .with_code("E0519")
+                    .note(why, span),
+            );
+        }
+        false
+    }
+
+    /// The stub a nested function's trampoline is pointed at, on a machine that needs one, put in
+    /// the module as assembly at file scope with a declaration of its name beside it so that the
+    /// address taken of it is the address of something in this file.
+    fn trampoline_target(&mut self, function: Symbol) {
+        if self.target.tuple.arch() != rucc_tuple::Arch::X86_64 {
+            return;
+        }
+        let spelled = self.names.resolve(function).to_string();
+        self.module.add_file_asm(nest::stub(&spelled));
+        let stub = self.names.intern(&nest::stub_name(&spelled));
+        let mut declared = Func::new(stub, Signature::new());
+        declared.linkage = IrLinkage::Internal;
+        self.place_func(declared);
     }
 
     /// Puts a function in the module under a name something may already be under.

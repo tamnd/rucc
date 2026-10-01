@@ -186,6 +186,7 @@ pub static SYSV: CallRegs = CallRegs {
     // The address of a result returned through memory is the first word of the argument area,
     // where the first argument would have gone.
     sret: None,
+    chain: None,
     list: crate::VaList::CharPointer,
     dwarf: &X86_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,

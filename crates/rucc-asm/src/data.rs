@@ -1018,8 +1018,7 @@ mod tests {
             let mut alias = IrAlias::new(names.intern(&format!("b{index}")), target);
             alias.linkage = linkage;
             module.add_alias(alias);
-            let written =
-                aliases(&module, &names, ObjectFormat::Elf).expect("a module of aliases");
+            let written = aliases(&module, &names, ObjectFormat::Elf).expect("a module of aliases");
             assert_eq!(written[index].binding, binding, "{linkage:?}");
             assert_eq!(written[index].target, "a", "{linkage:?}");
         }
@@ -1036,7 +1035,10 @@ mod tests {
         memcpy.kind = AliasKind::IFunc;
         module.add_alias(memcpy);
         let written = aliases(&module, &names, ObjectFormat::Elf).expect("an ifunc on ELF");
-        assert_eq!((written[0].name.as_str(), written[0].target.as_str()), ("memcpy", "pick_memcpy"));
+        assert_eq!(
+            (written[0].name.as_str(), written[0].target.as_str()),
+            ("memcpy", "pick_memcpy")
+        );
         assert!(written[0].ifunc);
         for format in [ObjectFormat::Coff, ObjectFormat::MachO] {
             let error = aliases(&module, &names, format).expect_err("no ifunc type");

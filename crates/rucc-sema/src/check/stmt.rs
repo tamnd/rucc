@@ -89,6 +89,10 @@ pub(in crate::check) struct Body {
     func_name: [Option<StrId>; FUNCTION_NAMES.len()],
     /// The labels of the function, by the name they were written with.
     labels: Map<Symbol, Labelled>,
+    /// The labels a nested function inside this one used and did not define, which may be labels
+    /// of this function, and so a jump out of the nested one that is not supported, or labels of
+    /// nobody that are reported like any other when this function is closed.
+    outer: Vec<Labelled>,
     /// What the enclosing blocks bound the names of their `__label__` declarations to, so that a
     /// block-local label can be undone when the block ends.
     shadowed: Vec<(Symbol, Option<Labelled>)>,
@@ -359,6 +363,7 @@ impl Checker<'_> {
             emitted: func.emitted,
             func_name: [None; FUNCTION_NAMES.len()],
             labels: Map::default(),
+            outer: Vec::new(),
             shadowed: Vec::new(),
             blocks: Vec::new(),
             switches: Vec::new(),
@@ -437,6 +442,11 @@ impl Checker<'_> {
     }
 
     /// Closes a body, reporting the labels that were used and never defined.
+    ///
+    /// A nested function's labels are not reported when it closes, since one of them may be a
+    /// label of a function around it that is defined further down. They go to the function it is
+    /// in, and that one reports each as a jump out of a nested function if it defines the label
+    /// and passes it on otherwise.
     pub(in crate::check) fn close_body(&mut self, previous: Option<Body>) {
         let Some(mut body) = mem::replace(&mut self.body, previous) else {
             return;
@@ -445,10 +455,39 @@ impl Checker<'_> {
         // Sorted, because a map has no order and a compiler whose diagnostics come out in a
         // different order on two runs of the same input is one nobody can write a test against.
         let mut undefined: Vec<Labelled> =
-            body.labels.into_values().filter(|label| label.defined.is_none()).collect();
+            body.labels.values().copied().filter(|label| label.defined.is_none()).collect();
+        for label in mem::take(&mut body.outer) {
+            let name = self.tast[label.id].name;
+            match body.labels.get(&name) {
+                Some(here) if here.defined.is_some() => self.nonlocal_goto(label),
+                _ => undefined.push(label),
+            }
+        }
         undefined.sort_by_key(|label| label.at.lo);
-        for label in undefined {
-            self.undefined_label(label);
+        match &mut self.body {
+            // A label the enclosing function already knows is one of its own, either declared
+            // with `__label__` or met already, so the jump is reported now, while a block-local
+            // label is still in scope to be found. Any other waits for the enclosing function to
+            // end, since it may be defined further down.
+            Some(_) => {
+                for label in undefined {
+                    let name = self.tast[label.id].name;
+                    let known = self
+                        .body
+                        .as_ref()
+                        .is_some_and(|enclosing| enclosing.labels.contains_key(&name));
+                    match (known, &mut self.body) {
+                        (true, _) => self.nonlocal_goto(label),
+                        (false, Some(enclosing)) => enclosing.outer.push(label),
+                        (false, None) => {}
+                    }
+                }
+            }
+            None => {
+                for label in undefined {
+                    self.undefined_label(label);
+                }
+            }
         }
 
         // Where each `goto` lands, which is the one thing about one that cannot be answered
@@ -935,6 +974,23 @@ impl Checker<'_> {
         self.report(
             Diagnostic::error(format!("label '{spelled}' used but not defined"), label.at)
                 .with_code("E0629"),
+        );
+    }
+
+    /// The diagnostic for a label of an enclosing function used in a nested one, which is a jump
+    /// out of the nested function GNU allows and this compiler does not do.
+    fn nonlocal_goto(&mut self, label: Labelled) {
+        let name = self.tast[label.id].name;
+        let spelled = self.text(name).to_owned();
+        let note = "a jump out of a nested function has to unwind the frames between it and the \
+                    label, which this compiler does not do";
+        self.report(
+            Diagnostic::error(
+                format!("label '{spelled}' is in the enclosing function, not this nested one"),
+                label.at,
+            )
+            .with_code("E0796")
+            .note(note, label.at),
         );
     }
 

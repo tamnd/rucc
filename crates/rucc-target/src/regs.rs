@@ -552,6 +552,17 @@ pub struct CallRegs {
     /// start at `x0`. SysV and Windows x64 pass it where the first argument would have gone and
     /// move the rest along by one.
     pub sret: Option<PhysReg>,
+    /// The register the static chain of a GNU nested function travels in, or `None` on a
+    /// convention rucc has no nested functions on.
+    ///
+    /// gcc passes the chain in `r10` on x86-64, and rucc keeps `r10` and `r11` back from the
+    /// allocator as the scratch registers everything after allocation writes through. So the
+    /// chain travels in `rax` between two functions rucc compiled, which is free at a call on
+    /// SysV unless the callee is variadic, and a nested function never is. What reaches a
+    /// nested function through a pointer arrives the way gcc's trampolines deliver it, in `r10`,
+    /// and a two instruction stub in front of the function moves it to `rax` before anything
+    /// can use `r10`.
+    pub chain: Option<PhysReg>,
     /// What a `va_list` is on this convention, which is what a variadic callee builds and walks.
     ///
     /// The same answer [`crate::TargetInfo::va_list`] gives the front end, kept here as well since
@@ -1114,6 +1125,7 @@ mod tests {
             push: 8,
             link: None,
             sret: None,
+            chain: None,
             list: if shared { crate::VaList::CharPointer } else { crate::VaList::SysV },
             // Empty, which is all a convention made up for a test of argument placement needs to
             // say about a question it never asks.

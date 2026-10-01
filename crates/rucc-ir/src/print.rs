@@ -503,6 +503,7 @@ impl<'a> Printer<'a> {
                 write!(self.out, " byval({size}, align {align}{drains})")
             }
             Abi::Sret { size, align } => write!(self.out, " sret({size}, align {align})"),
+            Abi::Chain => write!(self.out, " chain"),
         };
     }
 

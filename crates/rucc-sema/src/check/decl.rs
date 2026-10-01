@@ -237,26 +237,12 @@ impl Checker<'_> {
             // not work out, and the parser has already said so.
             _ => return None,
         };
-        // GNU's nested function, a definition inside a block. `spec/13-gnu-compat.md` section 13.2
-        // settles this one: a call to a nested function goes through a trampoline written on the
-        // stack, and a stack that can be executed is not something to add to a compiler being
-        // written now. The row in `features.toml` says the same. It is turned down here rather
-        // than left to the lowering, which had no name to give one and built a module with two
-        // symbols named `nested` out of a file that had two of them.
-        //
-        // The declaration is kept, without the body, so that the calls below it resolve. One error
-        // for the definition reads better than that error and one more for every call under it.
+        // GNU's nested function, a definition inside a block. `spec/13-gnu-compat.md` section 13.3
+        // has the design. It is an ordinary definition here with no linkage, which is what tells
+        // the lowering it is one and keeps a second one of the same name in another function from
+        // being the same function, and its body is checked inside the body it is written in, so
+        // that the names of the enclosing function are in scope in it the way a block's are.
         let nested = !self.scopes.at_file_scope();
-        if nested {
-            let note = "a nested function is called through a trampoline written on the stack, \
-                        which no target that enforces an unexecutable stack allows, so this \
-                        compiler does not have them and will not";
-            self.report(
-                Diagnostic::error("a function definition inside a function", span)
-                    .with_code("E0676")
-                    .note(note, span),
-            );
-        }
         // A definition is a declarator with a function type, so it is never the plain identifier
         // a deduced type needs, and the deduction never gets as far as an initializer to deduce
         // from. gcc says the same thing about it as about `auto *p = q;`.
@@ -287,6 +273,10 @@ impl Checker<'_> {
             return None;
         }
         let (linkage, duration) = self.placement(&specs, DeclKind::Function, name, false, span);
+        let linkage = if nested { Linkage::None } else { linkage };
+        if nested {
+            self.nested_variadic(ty, span);
+        }
         let alignment = match specs.align {
             Some(align) => self.alignment(align, ty, DeclKind::Function, name, span),
             None => None,
@@ -312,7 +302,7 @@ impl Checker<'_> {
             kind: DeclKind::Function,
             linkage,
             duration,
-            state: if nested { Definition::Declared } else { Definition::Defined },
+            state: Definition::Defined,
             initialized: false,
             alignment,
             constant: false,
@@ -418,9 +408,6 @@ impl Checker<'_> {
         self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
         self.annotate_decl(id, &[specs.attrs]);
         self.read_advice(id, &[specs.attrs]);
-        if nested {
-            return Some(id);
-        }
         // Read after the merge, because a declaration above the definition has a say in whether
         // the definition is emitted and the merge is what has settled it.
         let emitted = self.tast[id].inline.emits();
@@ -488,6 +475,25 @@ impl Checker<'_> {
         let TypeKind::Function(signature) = self.types.kind(canonical) else { return None };
         let signature = self.types.signature(signature);
         (signature.prototyped && !signature.variadic).then(|| signature.params.clone())
+    }
+
+    /// Refuses a nested function that takes arguments past its named ones.
+    ///
+    /// The static chain is passed after every argument, which a callee reading `...` has no way to
+    /// find, since where the named arguments stop is all it knows. gcc gets away with it because
+    /// its chain has a register of its own on every target, and here it is a parameter like the
+    /// others that the conventions place after the last one.
+    fn nested_variadic(&mut self, ty: TypeId, span: Span) {
+        let variadic = match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Function(signature) => self.types.signature(signature).variadic,
+            _ => false,
+        };
+        if variadic {
+            self.report(
+                Diagnostic::error("a nested function cannot take a variable argument list", span)
+                    .with_code("E0797"),
+            );
+        }
     }
 
     /// The body of a function definition, in a scope holding its parameters, and the parameters
@@ -4213,7 +4219,7 @@ mod tests {
     }
 
     #[test]
-    fn a_function_definition_inside_a_function_is_refused_and_the_name_still_declared() {
+    fn a_function_definition_inside_a_function_is_checked_and_called_by_name() {
         let mut f = Fixture::new();
         let empty = f.block(&[]);
         let specs = f.builtin(BuiltinSet::VOID);
@@ -4226,22 +4232,14 @@ mod tests {
         let decl = f.define(specs, "f", &[function()], body);
 
         let mut c = f.checker();
-        c.check_decl(decl);
+        let list = c.check_decl(decl);
+        let outer = only(&c, list);
 
-        // The second message is the note, and it is here so that a rewrite of it that leaves the
-        // continuation of a line in the text is a test failure rather than something a reader of
-        // the output notices later.
-        assert_eq!(
-            messages(&c),
-            [
-                "a function definition inside a function",
-                "a nested function is called through a trampoline written on the stack, which no \
-                 target that enforces an unexecutable stack allows, so this compiler does not \
-                 have them and will not"
-            ],
-            "the mention of 'g' under the definition has to resolve, so that one definition is \
-             one error"
-        );
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        // The nested one is in the body as a definition of its own, with no linkage, which is
+        // what the lowering reads to tell it from a declaration of a function defined elsewhere.
+        let dumped = dump(&c, outer);
+        assert!(dumped.contains("decl #1 g : void(void) function defined"), "{dumped}");
     }
 
     /// `void f(a) char a; {}`, which takes its parameter type from the declaration under the
