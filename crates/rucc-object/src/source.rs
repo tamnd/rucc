@@ -61,6 +61,11 @@ pub struct Part {
     /// and the section group it is in on ELF, where `.section name,"axG",@progbits,symbol,comdat`
     /// says the same. [`None`] for every other section and on Mach-O.
     pub group: Option<Group>,
+    /// The name whose section this one goes with, on ELF, which is what the `o` flag and the
+    /// operand after the type say. The linker keeps or drops the two together and lays this one out
+    /// in the order of the other, which is what a record of where a patcher's room is in front of
+    /// a function needs. [`None`] for every other section.
+    pub link: Option<String>,
 }
 
 /// A section the linker keeps one copy of, which is what the third and fourth operands of
@@ -567,6 +572,9 @@ pub fn assembled_described(
                 if part.group.is_some() {
                     sh_flags.0 |= elf::SHF_GROUP.0;
                 }
+                if part.link.is_some() {
+                    sh_flags.0 |= elf::SHF_LINK_ORDER.0;
+                }
             }
             obj.section_mut(id).flags = flags;
         }
@@ -798,8 +806,53 @@ pub fn assembled_described(
             entry_size(&mut bytes, &part.name, part.shape.merge);
         }
         together_groups(&mut bytes, &together);
+        linked(&mut bytes, input, &defined)?;
     }
     Ok(bytes)
+}
+
+/// Write the section each `o` section goes with into its `sh_link`, which the writer underneath has
+/// no field for. See [`crate::elf::link`], which does the same for the records the compiler writes
+/// itself.
+///
+/// What the source named is a symbol, and the section is the one the symbol is in, or a section of
+/// that name when no symbol has it, which is what gas takes as well. Two sections may share a name
+/// here, so a part's header is found by how many parts of the same name come before it, which is
+/// the order the writer puts them in.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for a name that is in no section of the file, which gas refuses too: a
+/// section that goes with nothing is one a linker reads as an error.
+fn linked(bytes: &mut [u8], input: &Assembled, defined: &Map<&str, &Name>) -> Result<(), Error> {
+    if input.parts.iter().all(|part| part.link.is_none()) {
+        return Ok(());
+    }
+    let headers = crate::elf::Headers::read(bytes);
+    let index = |part: usize| {
+        let name = &input.parts[part].name;
+        let nth = input.parts[..part].iter().filter(|other| other.name == *name).count();
+        headers.list.iter().enumerate().filter(|(_, header)| header.name == *name).nth(nth)
+    };
+    let mut writes = Vec::new();
+    for (at, part) in input.parts.iter().enumerate() {
+        let Some(link) = &part.link else { continue };
+        let target = match defined.get(link.as_str()).map(|name| name.at) {
+            Some(Held::In { part, .. }) => Some(part),
+            _ => input.parts.iter().position(|other| other.name == *link),
+        };
+        let Some(target) = target.and_then(index) else {
+            let why = format!("section '{}' goes with '{link}', which is in no section", part.name);
+            return Err(Error::Refused { why });
+        };
+        let (_, header) = index(at).expect("a header for every section");
+        let target = u32::try_from(target.0).expect("a file with this many sections in it");
+        writes.push((header.at + headers.link(), target));
+    }
+    for (at, target) in writes {
+        bytes[at..at + 4].copy_from_slice(&target.to_le_bytes());
+    }
+    Ok(())
 }
 
 /// Write how long an entry of a mergeable section is into its header, which the linker needs and
@@ -950,6 +1003,7 @@ mod tests {
             shape: Shape::of(name),
             relocs: Vec::new(),
             group: None,
+            link: None,
         }
     }
 
@@ -2062,5 +2116,63 @@ mod tests {
         let group = find(".group");
         let at = group.sh_offset(endian) as usize;
         assert_eq!(&bytes[at..at + 4], &[0; 4], "a group that is not a COMDAT says so");
+    }
+
+    /// Two records of the same name, each going with the text of the function it is about. The
+    /// linker refuses to put a section that goes with something beside one of the same name that
+    /// does not, so both have to say it, and each has to say the right section.
+    #[test]
+    fn a_section_that_goes_with_a_name_points_at_the_section_the_name_is_in() {
+        let record = |link: &str| Part {
+            shape: Shape { write: true, ..Shape::of("__patchable_function_entries") },
+            link: Some(link.to_owned()),
+            ..part("__patchable_function_entries", vec![0; 8])
+        };
+        let parts = vec![
+            part(".text", vec![0xc3]),
+            part(".init.text", vec![0xc3]),
+            record("f"),
+            record("g"),
+        ];
+        let names = vec![
+            Name { at: Held::In { part: 1, offset: 0 }, ..at("f", 0, Sort::Func, Binding::Global) },
+            at("g", 0, Sort::Func, Binding::Global),
+        ];
+        let bytes = assembled(&Assembled { parts, names, subsections: false }, &target())
+            .expect("an object");
+        let header = elf::FileHeader64::<Endianness>::parse(&bytes[..]).expect("a header");
+        let endian = header.endian().expect("an endianness");
+        let sections = header.sections(endian, &bytes[..]).expect("the sections");
+        let index = |name: &str| {
+            sections
+                .iter()
+                .position(|section| sections.section_name(endian, section) == Ok(name.as_bytes()))
+                .expect("the section") as u32
+        };
+        let records: Vec<_> = sections
+            .iter()
+            .filter(|section| {
+                sections.section_name(endian, section) == Ok(&b"__patchable_function_entries"[..])
+            })
+            .collect();
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            assert!(
+                record.sh_flags(endian).contains(elf::SHF_LINK_ORDER),
+                "a record that goes with nothing"
+            );
+        }
+        assert_eq!(records[0].sh_link(endian), index(".init.text"));
+        assert_eq!(records[1].sh_link(endian), index(".text"));
+    }
+
+    #[test]
+    fn a_section_that_goes_with_a_name_in_no_section_is_refused() {
+        let record = Part {
+            link: Some("nowhere".to_owned()),
+            ..part("__patchable_function_entries", vec![0; 8])
+        };
+        let input = Assembled { parts: vec![record], names: Vec::new(), subsections: false };
+        assert!(assembled(&input, &target()).is_err());
     }
 }
