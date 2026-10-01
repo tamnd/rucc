@@ -1002,6 +1002,7 @@ pub fn compile_recording(
         .iter()
         .filter(|&&(local, _)| share.shared(local).is_none())
         .filter_map(|&(local, decl)| Some((decl, frame.from_frame_base(local)?)))
+        .chain(stack.passed.iter().filter_map(|&(decl, up)| Some((decl, i32::try_from(up).ok()?))))
         .collect();
     let framed: Vec<(u32, i32, &[rucc_regalloc::live::Range])> = stack
         .declared

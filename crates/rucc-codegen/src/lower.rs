@@ -971,6 +971,13 @@ pub struct Stack {
     /// Shorter than the list above rather than the same length, because most of what a function
     /// keeps in its frame is memory an expression wanted somewhere to put.
     pub declared: Vec<(usize, u32)>,
+    /// Which declarations the front end left where the caller put their bytes, as the declaration
+    /// and how far up the caller's argument area the bytes are.
+    ///
+    /// A structure passed by value in the argument area is used where it arrived and has no local
+    /// of its own, so it is not in the list above. The distance is from the bottom of the argument
+    /// area, which is the call frame address a debugger counts from.
+    pub passed: Vec<(u32, u32)>,
     /// Which instruction computes the address of a piece of memory whose size the function works
     /// out while it runs, which is what a variable length array is.
     ///
@@ -7060,6 +7067,12 @@ impl<'a> Lowering<'a> {
             self.varargs = Some(Varargs::Pointer { incoming });
         }
         self.stack.arguments.extend(arrived.stack);
+        for &(index, up) in &arrived.bytes {
+            let Some(&param) = params.get(index) else { continue };
+            for decl in self.source.param_decls(param) {
+                self.stack.passed.push((decl, up));
+            }
+        }
         Ok(())
     }
 
