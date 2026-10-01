@@ -73,6 +73,32 @@ enum Action {
     Pop(Option<Symbol>),
 }
 
+/// The pragmas gcc 13 takes without a word under `-Wunknown-pragmas` that this one has nothing to
+/// do with, besides the ones read here. `once`, `push_macro` and `pop_macro` never get this far,
+/// since the preprocessor answers them.
+const PRAGMAS: &[&str] =
+    &["endregion", "message", "redefine_extname", "region", "scalar_storage_order", "weak"];
+
+/// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility` and
+/// `diagnostic.rs` reads `diagnostic`. gcc calls `novector` and any other word unknown.
+const GCC_PRAGMAS: &[&str] = &[
+    "dependency",
+    "diagnostic",
+    "error",
+    "ivdep",
+    "optimize",
+    "pch_preprocess",
+    "poison",
+    "pop_options",
+    "push_options",
+    "reset_options",
+    "system_header",
+    "target",
+    "unroll",
+    "visibility",
+    "warning",
+];
+
 impl Parser<'_> {
     /// What `#pragma pack` is in effect at the cursor, reading whatever lines it has walked past.
     pub(crate) fn pack_in_effect(&mut self) -> Option<u32> {
@@ -110,15 +136,27 @@ impl Parser<'_> {
         self.read_packs(self.cursor.index() + 1);
     }
 
-    /// One `#pragma` line, which is ignored unless it is a `pack`, a `comment` or a
-    /// `GCC visibility`.
+    /// One `#pragma` line. A `pack` is read here, a `comment`, `GCC visibility` and
+    /// `GCC diagnostic` elsewhere, the other pragmas gcc knows are taken without a word, and
+    /// anything else is ignored with gcc's warning under `-Wunknown-pragmas`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
-        let Some(first) = line.first() else { return };
-        match first.ident().map(|name| self.cx.interner.resolve(name)) {
-            Some("pack") => {}
-            Some("comment") => return self.comment_line(&line[1..], span),
-            Some("GCC") => return self.visibility_line(&line[1..], span),
-            _ => return,
+        let words = [0, 1].map(|at| {
+            line.get(at).and_then(|token| token.ident()).map(|name| self.cx.interner.resolve(name))
+        });
+        match words {
+            [Some("pack"), _] => {}
+            [Some("comment"), _] => return self.comment_line(&line[1..], span),
+            [Some("GCC"), Some(word)] if GCC_PRAGMAS.contains(&word) => {
+                return self.visibility_line(&line[1..], span);
+            }
+            [Some(word), _] if PRAGMAS.contains(&word) => return,
+            [Some("STDC"), Some("FLOAT_CONST_DECIMAL64")] => return,
+            [first, second] => {
+                // gcc names the line by its first two words, whatever follows them.
+                let line = format!("#pragma {} {}", first.unwrap_or(""), second.unwrap_or(""));
+                let what = format!("ignoring `{}`", line.trim_end());
+                return self.warn("E0745", what, span);
+            }
         }
         let mut rest = &line[1..];
         if !eat_punct(&mut rest, "(") {

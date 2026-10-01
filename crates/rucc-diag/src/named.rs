@@ -106,15 +106,17 @@ const PEDWARNS: &[&str] = &[
 /// The options gcc leaves off until something asks for them, each with the group that turns it
 /// on. Sorted by option.
 ///
-/// The format checks are the ones here. `-Wformat` turns on all four, `-Wall` turns on
-/// `-Wformat`, and so does `-Wformat=` with any level but nought, which is gcc 16's reading. A
-/// name turned off by itself stays off whatever group is asked for later, which is how gcc reads
-/// `-Wno-format-extra-args -Wall`. `-Wall` turns on nothing else yet, which is #485.
+/// The format checks are here, and `-Wunknown-pragmas`, which is its own group. `-Wformat` turns
+/// on all four format checks, `-Wall` turns on `-Wformat`, and so does `-Wformat=` with any level
+/// but nought, which is gcc 16's reading. A name turned off by itself stays off whatever group is
+/// asked for later, which is how gcc reads `-Wno-format-extra-args -Wall`. `-Wall` turns on
+/// nothing else yet, which is #485.
 const QUIET: &[(&str, &str)] = &[
     ("format", "format"),
     ("format-contains-nul", "format"),
     ("format-extra-args", "format"),
     ("format-zero-length", "format"),
+    ("unknown-pragmas", "unknown-pragmas"),
 ];
 
 /// The gcc option that controls the warning with this code, if it has one.
@@ -388,6 +390,22 @@ mod tests {
         assert!(!named.promoted(&warning("E0513"), false));
         assert!(PEDWARNS.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(PEDWARNS.iter().all(|name| OPTIONS.iter().any(|&(_, known)| known == *name)));
+    }
+
+    /// An unknown pragma says nothing until `-Wall` or `-Wunknown-pragmas` asks, as in gcc, and
+    /// `-Wno-unknown-pragmas` after `-Wall` takes it back.
+    #[test]
+    fn an_unknown_pragma_is_warned_about_only_when_asked() {
+        let unknown = warning("E0745");
+        let mut named = Named::default();
+        assert!(named.silenced(&unknown));
+        named.flag("all");
+        assert!(!named.silenced(&unknown));
+        named.flag("no-unknown-pragmas");
+        assert!(named.silenced(&unknown));
+        let mut named = Named::default();
+        named.flag("unknown-pragmas");
+        assert!(!named.silenced(&unknown));
     }
 
     #[test]

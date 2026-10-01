@@ -31,18 +31,18 @@ impl Parser<'_> {
     /// One `#pragma comment` line, with the word `comment` taken off.
     pub(crate) fn comment_line(&mut self, mut rest: &[Token], span: Span) {
         if !eat_punct(&mut rest, "(") {
-            self.warn("E0745", "missing `(` after `#pragma comment` - ignored", span);
+            self.warn("E0798", "missing `(` after `#pragma comment` - ignored", span);
             return;
         }
         let Some(kind) = rest.first().and_then(|token| token.ident()) else {
-            self.warn("E0745", "malformed `#pragma comment` - ignored", span);
+            self.warn("E0798", "malformed `#pragma comment` - ignored", span);
             return;
         };
         let kind = self.cx.interner.resolve(kind).to_owned();
         rest = &rest[1..];
         let text = if eat_punct(&mut rest, ",") {
             let Some(text) = self.comment_text(&mut rest) else {
-                self.warn("E0745", "`#pragma comment` wants a string after the comma", span);
+                self.warn("E0798", "`#pragma comment` wants a string after the comma", span);
                 return;
             };
             Some(text)
@@ -50,7 +50,7 @@ impl Parser<'_> {
             None
         };
         if !eat_punct(&mut rest, ")") || !rest.is_empty() {
-            self.warn("E0745", "malformed `#pragma comment` - ignored", span);
+            self.warn("E0798", "malformed `#pragma comment` - ignored", span);
             return;
         }
         match (kind.as_str(), text) {
@@ -58,12 +58,12 @@ impl Parser<'_> {
             ("linker", Some(text)) => self.comments.push(Comment::Linker(text)),
             ("lib" | "linker", None) => {
                 let what = format!("`#pragma comment({kind})` wants a string - ignored");
-                self.warn("E0745", what, span);
+                self.warn("E0798", what, span);
             }
             ("compiler" | "exestr" | "user", _) => {}
             _ => {
                 let what = format!("unknown kind `{kind}` in `#pragma comment` - ignored");
-                self.warn("E0745", what, span);
+                self.warn("E0798", what, span);
             }
         }
     }

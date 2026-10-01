@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-Wunknown-pragmas` is implemented and is on under `-Wall`, as in gcc 13 (E0745). A pragma gcc does not know is ignored with "ignoring `#pragma omp parallel`", named by its first two words the way gcc names it, and every `STDC` pragma but `FLOAT_CONST_DECIMAL64` is one, as there. The pragmas gcc knows and this compiler has nothing to do with yet, such as `GCC poison`, `GCC optimize`, `weak` and `region`, are taken without a word. Before, every unknown pragma was dropped without one under any flags. A malformed `#pragma GCC visibility` or `#pragma comment` line is now warned about as `-Wpragmas` (E0798), which is where gcc puts the first, rather than under the code `-Wunknown-pragmas` now answers to, so it is still said by default.
+
 ## 0.18.9
 
 A patch release for the kernel nightly. Every x86_64 tinyconfig row from 5.10 to 6.18 broke on something in a shared header: an `asm` input tied to an output by name, `%P` on a memory operand, `aligned` given an enumerator, `call *pv_ops+16`, a `BUILD_BUG` behind a small external function gcc inlines, and on 5.10 no `stdarg.h` under `-nostdinc`. All of those are fixed. Besides them, this release adds `#pragma GCC diagnostic`, the `adce` and `reassoc` passes, and gcc's placement of `__func__` and of functions only cold code calls.
