@@ -582,7 +582,8 @@ fn settle(
         };
         let large = match kind {
             Kind::Asks => answered_size(&module[callee]),
-            _ => size(&module[callee]),
+            Kind::Hinted => folded_size(&module[callee], Set::default()),
+            Kind::Always | Kind::Once => size(&module[callee]),
         };
         if large > most {
             stats.missed(why(InlineFailure::TooLarge));
@@ -658,13 +659,25 @@ fn asked(func: &Func) -> Vec<usize> {
 fn answered_size(func: &Func) -> usize {
     let Some(entry) = func.entry() else { return size(func) };
     let asked = asked(func);
-    let mut known: Set<Value> = func[entry]
+    let known = func[entry]
         .params
         .iter()
         .enumerate()
         .filter(|(at, _)| asked.contains(at))
         .map(|(_, &value)| value)
         .collect();
+    folded_size(func, known)
+}
+
+/// How many instructions a body has that are still work once what only depends on constants and
+/// on the values in `known` has folded away.
+///
+/// gcc weighs a callee declared `inline` by its body after the early passes cleaned it up, and
+/// this pass runs before any of that. A `this_cpu_read` in a body is a switch over four sizes with
+/// a load in each arm and a `do { } while (0)` around it when this pass sees it, and one load once
+/// the size is folded, so counting it as written made `alloc_pages_node` in the kernel three times
+/// the limit where gcc inlines it everywhere.
+fn folded_size(func: &Func, mut known: Set<Value>) -> usize {
     let mut work = 0;
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -672,9 +685,11 @@ fn answered_size(func: &Func) -> usize {
             let args = &func[data.args];
             let free = match data.opcode {
                 // A jump is gone once the blocks either side of it are one, and a hint that a
-                // block cannot be reached is no code at all.
+                // block cannot be reached is no code at all. The address of a global is an
+                // operand of whatever uses it.
                 Opcode::IConst
                 | Opcode::FConst
+                | Opcode::GlobalAddr
                 | Opcode::IsConstant
                 | Opcode::Jump
                 | Opcode::UnreachableHint => true,
@@ -695,7 +710,9 @@ fn answered_size(func: &Func) -> usize {
                 | Opcode::Ctpop
                 | Opcode::ICmp
                 | Opcode::Select => args.iter().all(|arg| known.contains(arg)),
-                Opcode::BrIf => args.first().is_some_and(|arg| known.contains(arg)),
+                Opcode::BrIf | Opcode::Switch => {
+                    args.first().is_some_and(|arg| known.contains(arg))
+                }
                 _ => false,
             };
             if free {
@@ -2155,8 +2172,47 @@ block0(%0: i32):
     /// One that is larger than the limit stays a call.
     #[test]
     fn a_function_declared_inline_over_the_limit_is_left_alone() {
-        let out = inlined_under(HINTED, Some(2));
+        let out = inlined_under(HINTED, Some(1));
         assert!(out.contains("call @bump"), "{out}");
+    }
+
+    /// What only works out a constant is not counted against it, since it folds away before gcc
+    /// would have measured the body. This is the size switch a `this_cpu_read` comes to, with the
+    /// size already a constant, and it is two instructions of work, the load and the return, not ten.
+    #[test]
+    fn what_folds_away_is_not_counted_against_a_function_declared_inline() {
+        let body = r#"
+func @node(i32) -> i32, linkage(external), attrs(inline_hint) {
+block0(%0: i32):
+    %1 = iconst.i64 1
+    %2 = iconst.i32 2
+    %3 = zext.i64 %2
+    %4 = shl %1, %3
+    switch %4, block1, [4 => block2]
+
+block1:
+    jump block3(%0)
+
+block2:
+    %5 = global_addr @numa_node
+    %6 = load.i32 %5, align 4
+    jump block3(%6)
+
+block3(%7: i32):
+    return %7
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @node(%0) : (i32) -> i32
+    return %1
+}
+"#;
+        let out = inlined_under(body, Some(1));
+        assert!(out.contains("call @node"), "{out}");
+        let out = inlined_under(body, Some(2));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @node"), "{out}");
     }
 
     /// A `static` function nobody declared `inline`, called from one place.
