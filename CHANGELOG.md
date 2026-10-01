@@ -23,6 +23,7 @@ A patch release for the kernel nightly. Every x86_64 tinyconfig row from 5.10 to
 
 ### Fixed
 
+- A `goto` in a nested function to a label of the function around it that was not declared with `__label__` now says "label 'out' used but not defined", as gcc does, since only a `__label__` label can be reached from a nested function (#2613). It used to say the jump out of the nested function was not supported (E0796), which is still the message when the label was declared with `__label__`.
 - -print-file-name=include prints a real directory holding the headers rucc ships, written to the cache the first time it is asked for, instead of the bare word. Kernels before 5.15 build with -nostdinc -isystem on that directory and took no stdarg.h from anywhere.
 - A function whose body is no larger than a call to it is inlined at every call from -O1 up, whatever its linkage, as long as its body is the one that runs, and its out of line copy is kept for other files. gcc does the same, and 5.15 and 6.1 rely on it to fold the BUILD_BUG behind shmem_is_huge in mm/shmem.c away.
 - The assembler takes `call *pv_ops+16` and `jmp *8` on x86-64: a call or jump through a name or number with no registers is through that absolute address, written sign extended as gas does. It was taken on i386 only, and the kernel's paravirt calls before 6.5 stopped there.
