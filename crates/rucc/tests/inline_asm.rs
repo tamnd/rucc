@@ -994,6 +994,23 @@ fn a_template_kept_as_text_spells_a_constant_and_a_name_the_way_gcc_does() {
 }
 
 #[test]
+fn a_true_bool_constant_is_spelled_one() {
+    // The kernel's `arch_static_branch` writes `.quad %c0 + %c1 - .` with a `bool` branch. A one
+    // bit true read as signed is `-1`, which put every likely branch's jump table entry one byte
+    // before its key, and the kernel wrote over the key after it when it set up the table.
+    let source = "struct k { int x; long t; } key;\n\
+                  static inline __attribute__((always_inline)) _Bool br(struct k *const k, const _Bool b) {\n\
+                  asm goto (\".pushsection __jt,\\\"aw\\\"\\n.quad %c0 + %c1 - .\\n.popsection\" \
+                  : : \"i\" (k), \"i\" (b) : : yes);\n return 0;\nyes:\n return 1;\n}\n\
+                  int f(void) { return br(&key, 1); }\n\
+                  int g(void) { return br(&key, 0); }\n";
+    let text = asm("bool-one", source);
+    assert!(text.contains("key + 1 - ."), "{text}");
+    assert!(text.contains("key + 0 - ."), "{text}");
+    assert!(!text.contains("key + -1"), "{text}");
+}
+
+#[test]
 fn a_template_kept_as_text_spells_a_register_operand_as_the_register_it_was_given() {
     // The jump with no condition is what keeps it as text. The input and the output are in
     // registers the allocator chose, which it only chose after the text was written down, so each
