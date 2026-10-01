@@ -83,6 +83,10 @@ const OPTIONS: &[(&str, &str)] = &[
 /// thrown away, a `#warning`, a shift count out of range, a reserved constructor priority. The
 /// list is of the ones that are promoted rather than the ones that are not, so that a warning
 /// added to the table later stays a warning under `-pedantic-errors` until somebody checks.
+///
+/// `old-style-definition` is a pedwarn in C23 and an ordinary warning before it, where it is off
+/// unless asked for. This compiler only raises it in C23, so the one entry is right for every
+/// warning it gives under that name.
 const PEDWARNS: &[&str] = &[
     "compare-distinct-pointer-types",
     "declaration-after-statement",
@@ -92,6 +96,7 @@ const PEDWARNS: &[&str] = &[
     "incompatible-pointer-types",
     "int-conversion",
     "long-long",
+    "old-style-definition",
     "pedantic",
     "pointer-arith",
     "pointer-sign",

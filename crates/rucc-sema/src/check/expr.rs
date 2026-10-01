@@ -1205,6 +1205,13 @@ impl Checker<'_> {
                 return self.poison(span);
             }
         }
+        if let Some(name) = self.register_object(operand) {
+            self.report(
+                Diagnostic::error(format!("address of register variable '{name}' requested"), span)
+                    .with_code("E0506"),
+            );
+            return self.poison(span);
+        }
         // A scalar stored in the reverse byte order has no address a program can use. The bytes
         // are there and they are in the other order, so a pointer to them is a pointer to a value
         // of that type that is not the value the member holds, and every read through it would be
@@ -1222,6 +1229,23 @@ impl Checker<'_> {
         let ty = self.types.pointer(self.tast[operand].ty);
         let node = ExprKind::Unary { op: UnaryOp::AddrOf, operand };
         self.tast.expr(Expr::new(node, ty, Category::Rvalue), span)
+    }
+
+    /// The name of the `register` object `operand` is, or is a member of, if it is one.
+    ///
+    /// A member of a structure is as much in a register as the structure is, so the walk goes
+    /// down through `.` and stops at anything else, which is how `p->x` is left alone: that
+    /// member is wherever `p` points, whatever `p` itself was declared as.
+    fn register_object(&self, operand: ExprId) -> Option<String> {
+        let mut object = operand;
+        while let ExprKind::Member { base, .. } = self.tast[object].kind {
+            object = base;
+        }
+        let ExprKind::Decl(decl) = self.tast[object].kind else { return None };
+        if !self.registers.contains(&decl) {
+            return None;
+        }
+        Some(self.tast[decl].name.map_or("", |name| self.text(name)).to_owned())
     }
 
     /// `++operand` and the three others, which are one rule with two spellings of the word.

@@ -575,6 +575,18 @@ impl Checker<'_> {
                 self.unevaluated += 1;
                 let node = self.expr(expr);
                 self.unevaluated -= 1;
+                // A bit-field's type is not the type of anything a declaration could make, since
+                // the width is not part of it, so 6.7.2.5p2 rules it out the way 6.5.3.4p1 rules
+                // out `sizeof` of one. gcc says `typeof` in every spelling, `__typeof__` and
+                // `typeof_unqual` included, and the declared type is kept so that what follows
+                // is still checked.
+                if self.tast[node].category == crate::expr::Category::Bitfield {
+                    let span = self.tast.expr_span(node);
+                    self.report(
+                        Diagnostic::error("'typeof' applied to a bit-field".to_string(), span)
+                            .with_code("E0570"),
+                    );
+                }
                 self.tast[node].ty
             }
             TypeofArg::Type(name) => self.type_name(name),
@@ -1137,6 +1149,32 @@ impl Checker<'_> {
         })
     }
 
+    /// Whether a parameter of a prototype was declared with a storage class it may not have.
+    ///
+    /// `register` is the only one 6.7.6.3p2 allows, and `_Thread_local` counts as one of the
+    /// others here, since a parameter has automatic storage and cannot have any other. gcc says
+    /// the same thing for every one of them, `typedef` included, and calls a parameter with no
+    /// name an unnamed one. The type is still built and the parameter still declared, so the body
+    /// is checked as if the storage class had not been written.
+    fn check_parameter_storage(
+        &mut self,
+        specs: ast::DeclSpecsId,
+        name: Option<Symbol>,
+        span: Span,
+    ) {
+        let written = &self.ast[specs];
+        if matches!(written.storage, None | Some(ast::StorageClass::Register))
+            && !written.thread_local
+        {
+            return;
+        }
+        let message = match name {
+            Some(name) => format!("storage class specified for parameter '{}'", self.text(name)),
+            None => "storage class specified for unnamed parameter".to_string(),
+        };
+        self.report(Diagnostic::error(message, span).with_code("E0682"));
+    }
+
     /// The parameter types of a prototype, adjusted the way a parameter is.
     fn prototype(&mut self, params: ast::ParamList) -> Vec<TypeId> {
         let ast = self.ast;
@@ -1162,6 +1200,9 @@ impl Checker<'_> {
             let declarator = ast[param.declarator];
             let span = if declarator.name.is_some() { declarator.name_span } else { param.span };
             self.check_void_parameter(ty, declarator.name, index, span);
+            if let Some(specs) = param.specs {
+                self.check_parameter_storage(specs, declarator.name, span);
+            }
 
             // The type the function has and the type the object has are two different types,
             // and the difference is the qualifiers. `void f(const int x)` is compatible with
@@ -1206,7 +1247,14 @@ impl Checker<'_> {
                     );
                     self.unnamed_object(object, span)
                 }
-                Some(name) => self.declare_object(name, object, span),
+                Some(name) => {
+                    let decl = self.declare_object(name, object, span);
+                    let written = param.specs.and_then(|specs| self.ast[specs].storage);
+                    if written == Some(ast::StorageClass::Register) {
+                        self.registers.insert(decl);
+                    }
+                    decl
+                }
                 // C23 6.7.7.4p1 lets a definition leave a parameter unnamed, which gcc has taken
                 // for far longer than that. The object is passed either way and the list is what
                 // says what the function takes and in what order, so a declaration goes in for

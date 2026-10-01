@@ -342,6 +342,14 @@ pub struct Checker<'a> {
     /// made to the one the definition settled on, so the name is found here once the block
     /// that declared it is gone.
     pub(in crate::check) out_of_sight: rucc_base::hash::Map<Symbol, DeclId>,
+    /// The objects in a block, parameters among them, that were declared `register`.
+    ///
+    /// 6.5.3.2p1 says the operand of `&` may not be one, and gcc refuses it with the object's
+    /// name. Nothing else about such an object is different here, since where an object lives is
+    /// the register allocator's decision whatever the source said, so this is the one place the
+    /// keyword is remembered. A global register variable is not in it: that is the GNU extension
+    /// with its own rules, in `declared_asm`.
+    pub(in crate::check) registers: rucc_base::hash::Set<DeclId>,
 }
 
 impl<'a> Checker<'a> {
@@ -368,6 +376,7 @@ impl<'a> Checker<'a> {
             not_taken: 0,
             answered_late: rucc_base::hash::Set::default(),
             out_of_sight: rucc_base::hash::Map::default(),
+            registers: rucc_base::hash::Set::default(),
         };
         checker.declare_type_names();
         checker

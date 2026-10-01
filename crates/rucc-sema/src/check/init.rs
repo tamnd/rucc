@@ -73,6 +73,7 @@ use crate::decl::{
     Decl, DeclFlags, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitEntry,
     InitList, Linkage, Startup, StorageDuration,
 };
+use crate::eval;
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::{Address, Base, Const};
 
@@ -722,6 +723,10 @@ impl<'a> Checker<'a> {
 
     /// A value at a place, converted to what is there.
     fn store_scalar(&mut self, w: &mut Walk, place: Place, value: ExprId, span: Span) {
+        if w.constant && !self.constexpr_integer(place.ty, value, span) {
+            w.poisoned = true;
+            return;
+        }
         let value = self.assign_to(place.ty, value, span, Target::Initialization);
         if self.is_poisoned(value) {
             w.poisoned = true;
@@ -731,6 +736,54 @@ impl<'a> Checker<'a> {
             self.constancy(w, place.ty, value, span);
         }
         w.store(place, value);
+    }
+
+    /// Whether a value may initialize an integer member of a `constexpr` object, saying why not
+    /// when it may not.
+    ///
+    /// C23 6.7.1p5 asks two things of it, and gcc words them apart. The value has to be an
+    /// integer constant expression before it is converted, so `constexpr int x = 1.0;` is refused
+    /// even though one point nought converts to one exactly, and so is a read of a `const int`
+    /// that is not itself `constexpr`. And the converted value has to be the same number, which
+    /// is a stricter rule than `-Woverflow`'s: `constexpr unsigned u = -1;` changes the value
+    /// and is refused, and so is `constexpr bool b = 2;`, since `bool` holds only nought and
+    /// one. A target that is not an integer is left to the rules for its own kind.
+    ///
+    /// `"ab"[1]` is a constant to the loose folding and not an integer constant expression, so
+    /// it gets the second wording, and so does `1.0`. A read of a plain `int` gets neither here.
+    fn constexpr_integer(&mut self, target: TypeId, value: ExprId, span: Span) -> bool {
+        if self.is_poisoned(value) {
+            return true;
+        }
+        let is_bool = matches!(eval::bare(&self.types, target), TypeKind::Bool);
+        let Some(info) = eval::int_shape(&self.types, target, self.cx.target) else {
+            return true;
+        };
+        let source = self.tast[value].ty;
+        let folded = if rucc_types::is_integer(&self.types, source) {
+            self.eval_integer(value).ok()
+        } else {
+            None
+        };
+        let Some(folded) = folded else {
+            // Something that is no constant at all, a read of an object that is not `const` or
+            // an address, is the ordinary complaint, and gcc gives that one first. It is left to
+            // `constancy`, which says it after the conversion the way it does for any static
+            // object.
+            if !matches!(self.eval_initializer(value), Ok(Const::Int(_) | Const::Float(_))) {
+                return true;
+            }
+            let what = "'constexpr' integer initializer is not an integer constant expression";
+            self.report(Diagnostic::error(what, span).with_code("E0646"));
+            return false;
+        };
+        let holds = if is_bool { matches!(folded, 0 | 1) } else { info.holds(folded) };
+        if !holds {
+            let what = "'constexpr' initializer not representable in type of object";
+            self.report(Diagnostic::error(what, span).with_code("E0646"));
+            return false;
+        }
+        true
     }
 
     /// What an expression names with the lvalue conversion taken off, if it has one on.
@@ -2447,7 +2500,7 @@ decl #1 p : int * object external static defined
         c.check_decl(named);
         assert_eq!(
             messages(&c),
-            ["initializer element is not constant"],
+            ["'constexpr' integer initializer is not an integer constant expression"],
             "a 'constexpr' object is not that place: it wants an integer constant expression, \
              and gcc refuses the same line written that way"
         );
