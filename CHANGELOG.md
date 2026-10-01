@@ -21,6 +21,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Closing a loop's leaked values walks the dominator tree once per value rather than climbing it from every block, so lib/overflow_kunit.c builds in seconds instead of ten minutes.
 - A `static` object that nothing names once the optimizer is done is no longer emitted, so the functions only it pointed at go too. The kernel's device mapper passes `&dm_dax_ops` to an `alloc_dax` stub that is empty without DAX, and the table kept three functions that call the undefined `dax_get_private`.
 - The value range walk no longer counts a dominating block that only jumps on against its depth, so a test above a run of empty blocks still narrows the value below them. The kernel's `scoped_seqlock_read` in `do_io_accounting` and `thread_group_cputime` kept a call to `__scoped_seqlock_bug` that the linker could not resolve.
 - The assembler keeps a section with the `o` flag apart for each name it goes with and writes `SHF_LINK_ORDER` and `sh_link` for it, the way gas does. Before, every `__patchable_function_entries` record in a file of assembly went into one plain section, and ld refused to link it beside the records rucc writes straight into an object.
