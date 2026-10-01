@@ -4487,6 +4487,13 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
     Ok(out)
 }
 
+/// Writes what a printing action answers to stdout. A reader that stops early closes the pipe, as
+/// kbuild's `$(CC) --version | head -n 1` does, and that is not a failure: `print!` would panic
+/// there and leave a backtrace in the build log.
+fn emit(text: &str) {
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+}
+
 /// Runs the driver and returns the process exit code.
 ///
 /// `args` excludes the program name. Output goes to `stdout` and errors to `stderr`, which
@@ -4494,29 +4501,29 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
 pub fn run(args: &[String]) -> i32 {
     match parse_args(args) {
         Ok(Action::Help) => {
-            print!("{USAGE}");
+            emit(USAGE);
             0
         }
         Ok(Action::Print(line)) => {
-            println!("{line}");
+            emit(&format!("{line}\n"));
             0
         }
         Ok(Action::PrintConfig(opts)) => {
-            print!("{}", print_config(&opts));
+            emit(&print_config(&opts));
             0
         }
         Ok(Action::PrintPipeline(opts)) => {
-            print!("{}", print_pipeline(&opts));
+            emit(&print_pipeline(&opts));
             0
         }
         Ok(Action::PrintPlan { opts, plan, link }) => {
-            print!("{}", plan.render());
+            emit(&plan.render());
             // The line as it would be typed, which is the half of `-###` that section 4.3 says
             // arrives with the link. It is printed even when the linker is not on this machine,
             // because what a build wants from `-###` is what the compiler would do.
             if let Some(job) = &plan.link {
                 match link_line(&opts, &link, job) {
-                    Ok(line) => println!("{line}"),
+                    Ok(line) => emit(&format!("{line}\n")),
                     Err(why) => {
                         let mut stderr = std::io::stderr().lock();
                         let _ = writeln!(stderr, "rucc: error: {why}");

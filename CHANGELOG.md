@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `#pragma GCC diagnostic` is honoured (`push`, `pop`, `ignored`, `warning` and `error`, also through `_Pragma`). A warning is decided by where it is, as in gcc 13, so a deprecated call between `push`, `ignored "-Wdeprecated-declarations"` and `pop` says nothing, `error` makes it an error, and `warning` keeps it a warning under `-Werror`. A line in a header holds for what follows its `#include`, and a `pop` with nothing pushed goes back to the command line. A line gcc cannot read gets gcc's `-Wpragmas` warning (E0798), and `ignored_attributes` is read and does nothing. Before, every one of these lines was dropped, so code that silenced a warning around one call still warned there.
 
+### Fixed
+
+- A printing option such as `--version` or `--help` whose reader closes the pipe early, as kbuild's `$(CC) --version | head -n 1` does, no longer panics with a backtrace on stderr. The rest of the output is dropped and rucc exits 0.
+
 ## 0.18.8
 
 A patch release that gets the release gate passing again, and the first one with i686 Windows. Under `-fsafety`, a program that defines its own `memcpy`, `memset` or `memmove` keeps its calls to them, so the bytes they copy are marked as written and are no longer reported as a violation. C now compiles to i386 COFF for `i686-w64-windows-gnu` and `i686-pc-windows-msvc`, with `__stdcall` and `__fastcall`, and dead store elimination no longer gives a 32-bit target a 64-bit offset.
