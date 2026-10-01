@@ -345,10 +345,14 @@ pub fn entry(
             ));
             continue;
         }
-        let at = match (abi, conv.sret) {
+        let at = match (abi, conv.sret, conv.chain) {
             // The address a result goes back through, on a convention with a register of its own
             // for it, which takes no position from the arguments after it.
-            (Abi::Sret { .. }, Some(sret)) => Where::Reg(sret),
+            (Abi::Sret { .. }, Some(sret), _) => Where::Reg(sret),
+            // The static chain of a nested function, which has a register of its own and takes
+            // no position either. The front end only writes one on a convention that has
+            // somewhere for it, per `CallRegs::chain`.
+            (Abi::Chain, _, Some(chain)) => Where::Reg(chain),
             _ if ty.is_float() => places.float(float_bytes(ty)),
             _ => places.integer(int_bytes(ty, conv)),
         };
@@ -735,6 +739,11 @@ pub fn call(
         // has one, and is not an argument position, the same as on the other side in [`entry`].
         if let (Abi::Sret { .. }, Some(sret)) = (abi, conv.sret) {
             passed.push((reg, sret, class_of(ty, conv)));
+            continue;
+        }
+        // And the static chain of a nested function, which is the same kind of thing.
+        if let (Abi::Chain, Some(chain)) = (abi, conv.chain) {
+            passed.push((reg, chain, class_of(ty, conv)));
             continue;
         }
         // Apple's AArch64 puts every argument past the named ones in memory, a word or more each,

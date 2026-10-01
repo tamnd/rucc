@@ -568,6 +568,10 @@ impl<'a, 'n> Parser<'a, 'n> {
                 self.word();
                 Abi::Zext
             }
+            "chain" => {
+                self.word();
+                Abi::Chain
+            }
             word @ ("byval" | "sret") => {
                 let indirect = word == "byval";
                 self.word();

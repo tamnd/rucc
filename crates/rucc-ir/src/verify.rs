@@ -331,6 +331,16 @@ impl<'a> Verifier<'a> {
                 Abi::Sret { .. } if !signature.returns.is_empty() => {
                     self.error("a signature returning through sret returns nothing else");
                 }
+                Abi::Chain if index + 1 != signature.params.len() => {
+                    // The chain of a nested function comes after everything a C caller names,
+                    // so the parameters in front of it are where they would be without it.
+                    self.error("chain is the last parameter and this one is not");
+                }
+                Abi::Chain if signature.variadic => {
+                    // On SysV the register the chain travels in is the one that says how many
+                    // vector registers a variadic call used, so the two cannot meet.
+                    self.error("a variadic signature cannot take a chain");
+                }
                 _ => {}
             }
         }
@@ -378,8 +388,8 @@ impl<'a> Verifier<'a> {
         }
         for (index, &abi) in varargs.iter().enumerate() {
             let at = format!("argument {}", named + index + 1);
-            if matches!(abi, Abi::Sret { .. }) {
-                self.error(format!("{at} is an sret and only a parameter can be one"));
+            if matches!(abi, Abi::Sret { .. } | Abi::Chain) {
+                self.error(format!("{at} is an sret or a chain and only a parameter can be one"));
                 continue;
             }
             self.abi(&at, &Param { ty: arg(index + named), abi });
@@ -403,6 +413,11 @@ impl<'a> Verifier<'a> {
         }
         match param.abi {
             Abi::Plain => {}
+            Abi::Chain => {
+                if !param.ty.is_ptr() {
+                    self.error(format!("{at} is a chain and {} is not a pointer", param.ty));
+                }
+            }
             Abi::Sext | Abi::Zext => {
                 if !param.ty.is_int() || param.ty.is_vector() {
                     self.error(format!("{at} is extended and {} is not an integer", param.ty));
@@ -2785,7 +2800,7 @@ block2:
         );
         assert_eq!(
             only(&text),
-            "@f block0 call: argument 2 is an sret and only a parameter can be one"
+            "@f block0 call: argument 2 is an sret or a chain and only a parameter can be one"
         );
     }
 

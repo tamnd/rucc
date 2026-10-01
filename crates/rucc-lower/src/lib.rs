@@ -32,6 +32,7 @@ mod aliasing;
 mod bits;
 mod body;
 mod directives;
+mod nest;
 mod reach;
 mod repr;
 mod restrict;

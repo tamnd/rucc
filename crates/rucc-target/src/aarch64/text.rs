@@ -32,12 +32,12 @@ use crate::aarch64::encode::{
 use crate::aarch64::read::system_field;
 use crate::named;
 
+use Arg::Doubles;
 use Arg::{
     At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Mem, Near,
     Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Teb, Thread, Through, TlsPage,
     TlsSlot, TprelHi, TprelLo, Vector,
 };
-use Arg::Doubles;
 use Scalar::{D, Q, S};
 use Width::{W, X};
 

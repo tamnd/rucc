@@ -2401,6 +2401,10 @@ pub struct Options {
     /// nothing about any other diagnostic, and it does not say to compile something different: a
     /// program it accepts is compiled the way the rule it broke says it means.
     pub permissive: bool,
+    /// Whether `-ffixed-x18` was given, which keeps `x18` for something outside the program on
+    /// AArch64. Nothing here ever gives `x18` to a value, so the one thing it changes is that a
+    /// nested function, whose static chain travels in `x18`, cannot be built.
+    pub fixed_x18: bool,
     /// Whether the whole unit is under GNU's reading of `inline` rather than C's, which is
     /// `-fgnu89-inline`.
     ///
@@ -2755,6 +2759,7 @@ impl Options {
             trigraphs: false,
             pedantic: false,
             permissive: false,
+            fixed_x18: false,
             gnu89_inline: false,
             strict_flex_arrays: 0,
             visibility: Visibility::default(),

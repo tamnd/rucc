@@ -75,6 +75,16 @@ pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&
     if sret {
         return Some("the function gives its answer back through memory it was handed");
     }
+    // A static chain travels in a register the tail call sequence knows nothing about, and the
+    // functions that pass or take one are nested functions and the functions around them, which
+    // are not ones worth teaching it to.
+    let chained = func
+        .signatures()
+        .chain(std::iter::once(func.signature()))
+        .any(|signature| signature.params.iter().any(|param| param.abi == Abi::Chain));
+    if chained {
+        return Some("the function passes or takes the static chain of a nested function");
+    }
     for block in func.blocks() {
         for inst in func.insts(block) {
             match func[inst].opcode {

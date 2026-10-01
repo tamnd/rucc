@@ -784,6 +784,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 if let kbuild::Answer::Refused(why, issue) = row.answer {
                     return Err(err(kbuild::refusal(arg, why, issue)));
                 }
+                // The one row with something to remember: `x18` is the static chain of a nested
+                // function, which the lowering refuses to build once it has been promised away.
+                if arg == "-ffixed-x18" {
+                    opts.fixed_x18 = true;
+                }
             }
             "--version" => version = true,
             // The sysroot fetch, which is weighed after the loop rather than acted on here, because
@@ -1285,18 +1290,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.ms_dll_runtime = dll;
                 link.crt = if dll { rucc_sysroot::Crt::Dll } else { rucc_sysroot::Crt::Static };
             }
-            // spec/13-gnu-compat.md section 13.3 promises this flag an error that says why rather
-            // than the unknown option one, because a build reaching for it is asking for a feature
-            // and deserves to be told it is not coming rather than told the spelling is wrong.
-            // The negative form is what this compiler does anyway, so it is taken and dropped.
-            "-fnested-functions" => {
-                return Err(err(
-                    "nested functions are not supported: a call to one goes through a trampoline \
-                     written on the stack, which no target that enforces an unexecutable stack \
-                     allows",
-                ));
-            }
-            "-fno-nested-functions" => {}
+            // Apple's clang spelling for GNU's nested functions, which are always on in GNU C and
+            // here, so both forms are taken and dropped. See spec/13-gnu-compat.md section 13.3.
+            "-fnested-functions" | "-fno-nested-functions" => {}
             // Which of the two links the output is for, which is a real difference and not a
             // description of what happens anyway. Everything here is position independent either
             // way, and what these decide is whether a name may be one another object defines or
@@ -5188,9 +5184,8 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_nested_functions_is_told_why_it_is_not_coming() {
-        let e = parse_args(&args(&["-fnested-functions", "a.c"])).unwrap_err();
-        assert!(e.message.contains("trampoline"), "{}", e.message);
+    fn asking_for_nested_functions_is_taken() {
+        assert!(parse_args(&args(&["-fnested-functions", "a.c"])).is_ok());
         assert!(parse_args(&args(&["-fno-nested-functions", "a.c"])).is_ok());
     }
 

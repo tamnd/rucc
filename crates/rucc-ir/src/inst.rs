@@ -747,6 +747,15 @@ pub enum Abi {
         /// What the space is aligned to.
         align: u32,
     },
+    /// The static chain of a GNU nested function: the address the function reaches the
+    /// variables of the function it is written in through.
+    ///
+    /// It is a pointer that travels in a register of its own, the way an [`Abi::Sret`] does on
+    /// a convention with a register for that, and it takes no argument position from anything
+    /// around it. It is always the last parameter, so the parameters a C caller sees are the
+    /// ones in front of it in the same positions they would have without it. Which register it
+    /// is is the target's `chain`, and a target with none cannot take a signature carrying one.
+    Chain,
 }
 
 impl Abi {

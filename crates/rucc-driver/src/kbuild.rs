@@ -232,7 +232,7 @@ pub(crate) const TABLE: &[Row] = &[
         same(
             "-ffixed-x18",
             "x18 is never given to a value on any AArch64 target here, since Apple and Windows \
-             reserve it",
+             reserve it, and a nested function, whose static chain is x18, is refused under it",
         ),
     ),
     only(A64, same("-mlittle-endian", "every AArch64 target here is little endian")),

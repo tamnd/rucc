@@ -43,6 +43,12 @@
 //! is recorded as having had its address taken, because the dynamic linker is going to call it and
 //! no edge here says so.
 //!
+//! A function marked `used` is recorded the same way, since the mark says something this module
+//! cannot see refers to it. The case that made it matter is a GNU nested function whose address is
+//! taken on x86-64: the trampoline libgcc builds jumps to a stub written as assembly at file scope,
+//! and the stub jumps to the function, so the only call that passes it arguments other than the
+//! ones the direct calls pass is one no body here contains.
+//!
 //! # Trusting a body, which is section 34.1's gate
 //!
 //! "Every fact derived from a function body is conditional on the body being the one that runs."
@@ -83,7 +89,7 @@
 
 use rucc_base::Symbol;
 use rucc_base::hash::Map;
-use rucc_ir::{AliasKind, Datum, Extra, Func, FuncId, Inst, Linkage, Module, Opcode, Pic};
+use rucc_ir::{AliasKind, AttrSet, Datum, Extra, Func, FuncId, Inst, Linkage, Module, Opcode, Pic};
 
 /// One name in a [`CallGraph`].
 ///
@@ -152,6 +158,9 @@ impl CallGraph {
             // A declaration reaches whatever the definition somewhere else reaches, and so does a
             // definition this link is allowed to replace. Both are the unknown.
             graph.entries[at].unknown = body.is_none();
+            if func.attrs.set.contains(AttrSet::USED) {
+                graph.entries[at].address_taken = true;
+            }
         }
         // Aliases next, and before the bodies are read, so that a call to an alias finds the node
         // rather than making a second one for the same name.
@@ -688,6 +697,22 @@ mod tests {
         assert_eq!(graph.calls(f), [], "nothing here names what is at the other end");
         assert!(graph.reaches_unknown(f));
         assert!(graph.address_taken(node(&graph, &mut names, "g")));
+    }
+
+    #[test]
+    fn a_function_marked_used_has_had_its_address_taken() {
+        // Something outside the bodies refers to it, assembly at file scope being the usual one, so
+        // a pass that rewrote it for the calls this module makes would break that one.
+        let (mut names, mut module) = blank();
+        let mut func = Func::new(names.intern("stubbed"), Signature::new());
+        func.attrs.set |= rucc_ir::AttrSet::USED;
+        let block = func.create_block();
+        Builder::new(&mut func, block).ret(&[]);
+        module.add_func(func);
+        calling(&mut names, &mut module, "plain", &[]);
+        let graph = CallGraph::of(&module, Pic::Executable);
+        assert!(graph.address_taken(node(&graph, &mut names, "stubbed")));
+        assert!(!graph.address_taken(node(&graph, &mut names, "plain")));
     }
 
     #[test]
