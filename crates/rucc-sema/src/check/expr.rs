@@ -475,6 +475,13 @@ impl Checker<'_> {
         self.constant(Const::Int(0), ty, span)
     }
 
+    /// Whether a value is `nullptr` as written, which is the one constant here with a pointer
+    /// type. See [`Checker::nullptr`] for why it has that type.
+    fn is_nullptr(&self, value: ExprId) -> bool {
+        matches!(self.tast[value].kind, ExprKind::Const(_))
+            && is_pointer(&self.types, self.tast[value].ty)
+    }
+
     /// `base[index]`, where either operand may be the pointer.
     fn subscript(&mut self, base: ast::ExprId, index: ast::ExprId, span: Span) -> ExprId {
         let base = self.expr(base);
@@ -1969,7 +1976,11 @@ impl Checker<'_> {
                 return self.conv().to_type(value, target);
             }
         }
-        if is_integer(&self.types, target) && is_pointer(&self.types, source) {
+        // `nullptr` is not a pointer to C23, it is the one value of `nullptr_t`, and 6.5.16.1
+        // lets it go to a pointer or a `bool` and nowhere else. gcc refuses it outright rather
+        // than with the `-Wint-conversion` it gives a pointer, so it goes on to the refusal below.
+        let nullptr = self.is_nullptr(value);
+        if is_integer(&self.types, target) && is_pointer(&self.types, source) && !nullptr {
             self.bad_conversion(target, source, "integer from pointer", span, to);
             return self.conv().to_type(value, target);
         }
@@ -1995,9 +2006,14 @@ impl Checker<'_> {
             );
             return self.poison(span);
         }
+        // gcc spells the type of `nullptr` the way it was made, since there is no keyword for
+        // it and `nullptr_t` is only a typedef in a header.
+        let spelled = |this: &Self, source| {
+            if nullptr { "typeof (nullptr)".to_owned() } else { this.spell(source) }
+        };
         let message = match to {
             Target::Assignment => {
-                let (target, source) = (self.spell(target), self.spell(source));
+                let (target, source) = (self.spell(target), spelled(self, source));
                 format!("incompatible types when assigning to type '{target}' from type '{source}'")
             }
             Target::Argument { index, function } => {
@@ -2012,13 +2028,13 @@ impl Checker<'_> {
                 "invalid initializer".to_owned()
             }
             Target::Initialization => {
-                let (target, source) = (self.spell(target), self.spell(source));
+                let (target, source) = (self.spell(target), spelled(self, source));
                 format!(
                     "incompatible types when initializing type '{target}' using type '{source}'"
                 )
             }
             Target::Return => {
-                let (target, source) = (self.spell(target), self.spell(source));
+                let (target, source) = (self.spell(target), spelled(self, source));
                 format!(
                     "incompatible types when returning type '{source}' but '{target}' was expected"
                 )

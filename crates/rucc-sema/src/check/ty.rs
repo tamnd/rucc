@@ -297,13 +297,13 @@ impl Checker<'_> {
                     self.basic_type(basic.scalar, basic.complexity, span)
                 }
                 None => {
-                    self.report(
-                        Diagnostic::error(
-                            "two or more data types in declaration specifiers".to_string(),
-                            span,
-                        )
-                        .with_code("E0525"),
-                    );
+                    let message = match builtin.clash() {
+                        Some((one, other)) => {
+                            format!("both '{one}' and '{other}' in declaration specifiers")
+                        }
+                        None => "two or more data types in declaration specifiers".to_string(),
+                    };
+                    self.report(Diagnostic::error(message, span).with_code("E0525"));
                     self.int()
                 }
             },
@@ -2013,13 +2013,21 @@ mod tests {
     fn keywords_that_name_no_type_between_them_are_one_message_and_not_one_per_keyword() {
         let mut fixture = Fixture::new();
         // `short double`, which gcc reports once at the specifier list rather than at the
-        // keyword, because the keyword that was wrong depends on which one was meant.
+        // keyword, because the keyword that was wrong depends on which one was meant. It names
+        // the pair, since `short` changes a type rather than naming one.
         let specs = fixture.keywords(&[BuiltinSet::SHORT, BuiltinSet::DOUBLE]);
         let plain = fixture.declarator(Some("x"), &[]);
 
         let mut checker = fixture.checker();
         let ty = checker.declared_type(specs, plain);
         assert_eq!(spelled(&checker, ty), "int");
+        assert_eq!(message(&checker), "both 'short' and 'double' in declaration specifiers");
+
+        // Two keywords that each name a type are the other message.
+        let specs = fixture.keywords(&[BuiltinSet::INT, BuiltinSet::CHAR]);
+        let plain = fixture.declarator(Some("y"), &[]);
+        let mut checker = fixture.checker();
+        checker.declared_type(specs, plain);
         assert_eq!(message(&checker), "two or more data types in declaration specifiers");
     }
 
@@ -2693,7 +2701,7 @@ mod tests {
 
         let mut checker = fixture.checker();
         checker.declared_type(specs, plain);
-        assert_eq!(messages(&checker), ["two or more data types in declaration specifiers"]);
+        assert_eq!(messages(&checker), ["both 'long' and '_BitInt' in declaration specifiers"]);
     }
 
     #[test]
