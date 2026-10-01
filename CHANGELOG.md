@@ -15,7 +15,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
-- With `-fcf-protection=branch`, a label whose address only a static table holds now starts with `endbr64`, as in gcc. The kernel's BPF interpreter jumps through such a table, and objtool warned about each of its 253 entries. The defconfig build is down from 259 objtool warnings to 3.
+- A local whose address is taken inside a block, and which becomes plain values once calls are inlined, is split into values again. The `lifetime_end` marker added for sharing stack slots counted as a use the scalar replacement did not know, so the local stayed in memory. In the kernel this kept `scoped_seqlock_read` from folding its state, which left calls to `__scoped_seqlock_bug` in `thread_group_cputime` and `do_io_accounting`, and the defconfig link failed.
+- With `-fcf-protection=branch`, a label whose address only a static table holds now starts with `endbr64`, as in gcc. The kernel's BPF interpreter jumps through such a table, and objtool warned about each entry that pointed at a label. The defconfig build is down from 259 objtool warnings to 3.
 
 ## 0.18.6
 

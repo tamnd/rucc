@@ -357,6 +357,9 @@ struct Plan {
     uses: Vec<(Inst, Use)>,
     /// Every `ptr_add` into it, which go once nothing reads them.
     derived: Vec<Inst>,
+    /// Every `lifetime_end` of it, which go with it, since a local in values has no bytes in the
+    /// frame for anything to share.
+    ends: Vec<Inst>,
 }
 
 /// What one use of an address into the local turned out to be.
@@ -364,6 +367,8 @@ enum Found {
     /// Another address into it, this far in.
     Derived(Value, u64),
     Use(Use),
+    /// The end of its lifetime, which says nothing about its bytes.
+    End,
 }
 
 /// The plan for one local, or nothing where its address escapes, or why it has to stay.
@@ -387,6 +392,7 @@ fn plan(
     let mut offsets: Map<Value, u64> = Map::from_iter([(base, 0)]);
     let mut uses = Vec::new();
     let mut derived = Vec::new();
+    let mut ends = Vec::new();
     // Reverse postorder puts every definition in front of its uses, so an address is known by the
     // time anything reads it.
     readers.catch_up(func);
@@ -404,11 +410,12 @@ fn plan(
                 derived.push(inst);
             }
             Some(Found::Use(found)) => uses.push((inst, found)),
+            Some(Found::End) => ends.push(inst),
             None => return Ok(None),
         }
     }
     let pieces = pieces(&uses, target)?;
-    Ok(Some(Plan { alloca, pieces, uses, derived }))
+    Ok(Some(Plan { alloca, pieces, uses, derived, ends }))
 }
 
 /// Every instruction that might name an address into the local, in reverse postorder and in order
@@ -523,6 +530,7 @@ fn access(
             }
             Found::Use(Use::Store { at: start, size: width, ty, value })
         }
+        (Opcode::LifetimeEnd, &[address]) if at(address).is_some() => Found::End,
         (Opcode::Memset | Opcode::Memcpy | Opcode::Memmove, _) if !volatile => {
             let Some(found) = bulk(func, inst, offsets, size) else {
                 return Ok(None);
@@ -900,6 +908,9 @@ impl<'a> Rewrite<'a> {
 
         substitute(func, &forward, readers);
         for &(inst, _) in &self.plan.uses {
+            func.remove_inst(inst);
+        }
+        for &inst in &self.plan.ends {
             func.remove_inst(inst);
         }
         for &inst in self.plan.derived.iter().rev() {
@@ -1357,6 +1368,28 @@ block3:
         }
         assert_eq!(count_of(func, Opcode::LShr), 1);
         assert_eq!(count_of(func, Opcode::Trunc), 2);
+    }
+
+    #[test]
+    fn the_end_of_a_local_s_lifetime_goes_with_the_local() {
+        // The shape of the kernel's `scoped_seqlock_read`, whose state is a local declared in a
+        // `for` that only becomes a value once the end of its lifetime does not hold it in memory.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    %2 = load.i32 %1, align 4
+    lifetime_end %1
+    return %2
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        for opcode in [Opcode::Alloca, Opcode::Load, Opcode::Store, Opcode::LifetimeEnd] {
+            assert_eq!(count_of(func, opcode), 0, "{} is left", opcode.name());
+        }
     }
 
     #[test]
