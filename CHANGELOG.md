@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `rucc --dlltool -m i386` writes an import library without `-k` too (#2072). The program still links against the decorated name, `_f@8` for a stdcall `f@8` in the `.def` file, so a declaration that leaves out the `@N` is a link error. Without `-k` the DLL is asked for `f@8`, which is what a DLL gcc linked without `--kill-at` exports. With `-k` it is asked for `f`, as before. `rucc-stub` has the choice as `coff::write_as` with `Decoration::Kept` or `Decoration::Cut`. Each import member is byte for byte the one `llvm-dlltool` 18 writes for the same command line.
+
 ### Changed
 
 - A value range is merged straight into its own three pairs when its intervals are already in order, rather than through lists made to be sorted, which takes about 2.6% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2669).
