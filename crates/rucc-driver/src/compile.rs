@@ -9083,6 +9083,36 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("call @strlen("), "{text}");
     }
 
+    /// The plain names fold the same way, which is how a program that includes `string.h` writes
+    /// them. LTP's `TST_KCONFIG_INIT` puts `strlen` of a literal in a static array, and gcc takes
+    /// it with builtins on. `-fno-builtin-strlen` turns it back into a call, and a `strlen` the
+    /// program declared with some other shape is that program's own.
+    #[test]
+    fn the_plain_string_functions_fold_too_unless_the_program_took_the_name() {
+        let header = concat!(
+            "typedef unsigned long size_t;\n",
+            "size_t strlen(const char *s);\n",
+            "int strcmp(const char *a, const char *b);\n",
+        );
+        let text = ir(&format!(
+            "{header}struct v {{ char id[8]; size_t n; }};\n\
+             struct v a[] = {{ {{ \"AB\", strlen(\"AB\") }} }};\n\
+             int c = strcmp(\"b\", \"a\") > 0;\n"
+        ));
+        assert!(text.contains("global @c : i32 = 1,"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let body = format!("{header}size_t f(void) {{ return strlen(\"ab\"); }}\n");
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        assert!(!run(&opts, &body).text().contains("call @strlen("), "builtins on");
+        opts.no_builtin = vec!["strlen".to_owned()];
+        assert!(run(&opts, &body).text().contains("call @strlen("), "-fno-builtin-strlen");
+
+        let own = ir("int strlen(const char *s);\nint f(void) { return strlen(\"ab\"); }\n");
+        assert!(own.contains("call @strlen("), "{own}");
+    }
+
     /// A sign builtin is a mask over the bits, and is not a call.
     ///
     /// `fabs` and `copysign` are in the math library rather than the C one, so a program that

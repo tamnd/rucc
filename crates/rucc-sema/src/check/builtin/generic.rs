@@ -243,9 +243,11 @@ impl Checker<'_> {
     ) -> Option<ExprId> {
         let spelled = self.text(name);
         // Every name here starts with two underscores and every other called name in the program
-        // reaches this too. The test costs a byte and saves the search.
+        // reaches this too. The test costs a byte and saves the search. The two string functions
+        // `string.h` declares under their plain names fold here as well, before the callee is
+        // looked up, and are in `check/builtin/constant.rs` beside their prefixed spellings.
         if !spelled.starts_with("__") {
-            return None;
+            return self.constant_library_call(name, args, span);
         }
         // MSVC's intrinsics, which the SDK's `intrin.h` declares and which are the intrinsics all
         // the same, so they come before the question of whether the program declared the name. In
