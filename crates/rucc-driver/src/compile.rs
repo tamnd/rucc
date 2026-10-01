@@ -10183,12 +10183,15 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
-    fn an_object_of_no_size_at_all_has_an_image_with_nothing_in_it() {
+    fn an_object_of_no_size_at_all_has_an_image_of_no_zeros() {
         // A zero length array, which gcc allows and real code uses as the tail of a structure.
-        // The image is there and holds nothing, which is not the global that has no image at
-        // all, and the IR reader used to stop on the empty one.
-        let text = ir("unsigned char foo[1][0];\n");
-        assert!(text.contains("global @foo : bytes 0 = {}, align 1"), "{text}");
+        // The image is there and is no zeros, which is not the global that has no image at all,
+        // and it is what puts the object in `.bss` as gcc does rather than in `.data`.
+        let text = ir("unsigned char foo[1][0];\nstatic struct k {} key = {};\nvoid *p = &key;\n");
+        assert!(text.contains("global @foo : bytes 0 = { zero 0 }, align 1"), "{text}");
+        assert!(text.contains("global @key : bytes 0 = { zero 0 }, align 1"), "{text}");
+        let mut names = Interner::new();
+        assert!(rucc_ir::parse(&text, &mut names).is_ok(), "the IR reader takes it back");
     }
 
     #[test]

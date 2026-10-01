@@ -1683,6 +1683,9 @@ impl Unit<'_> {
     ) -> (DataList, u64) {
         let Some(init) = init else { return (self.zeros(size), size) };
         let (data, at) = self.pieces(init, size, span);
+        if data.is_empty() {
+            return (self.zeros(at), at);
+        }
         (self.module.push_data(&data), at)
     }
 
@@ -2053,10 +2056,12 @@ impl Unit<'_> {
     }
 
     /// An image of nothing but zeros, which is what a tentative definition has.
+    ///
+    /// Even when there are none. An empty struct is an object of no bytes, and an image of no
+    /// zeros is what sends it to `.bss` with gcc rather than to `.data`, where an image of nothing
+    /// sends it. The kernel's `static struct lock_class_key __key` is one when lockdep is off, and
+    /// in `.data` it lands on the same address as the next object, which modpost then names it by.
     fn zeros(&mut self, size: u64) -> DataList {
-        if size == 0 {
-            return DataList::EMPTY;
-        }
         self.module.push_data(&[Datum::Zero(size)])
     }
 
