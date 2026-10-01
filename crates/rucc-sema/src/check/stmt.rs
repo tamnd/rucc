@@ -1031,9 +1031,12 @@ impl Checker<'_> {
     /// the numbering `%0` counts in.
     fn asm(&mut self, id: ast::AsmId, span: Span) -> Stmt {
         let node = self.ast[id];
-        let outputs = self.asm_operands(node.outputs, 0, true);
+        let outputs = self.asm_operands(node.outputs, 0, true, &[]);
         let first_input = self.ast[node.outputs].len();
-        let inputs = self.asm_operands(node.inputs, first_input, false);
+        let named: Vec<(Symbol, usize)> = (0..first_input)
+            .filter_map(|index| self.tast[outputs][index].name.map(|name| (name, index)))
+            .collect();
+        let inputs = self.asm_operands(node.inputs, first_input, false, &named);
 
         let mut clobbers = Vec::with_capacity(self.ast[node.clobbers].len());
         for index in 0..self.ast[node.clobbers].len() {
@@ -1081,20 +1084,30 @@ impl Checker<'_> {
         list: ast::AsmOperandList,
         first: usize,
         output: bool,
+        named: &[(Symbol, usize)],
     ) -> AsmOperandList {
         let mut operands = Vec::with_capacity(self.ast[list].len());
         for index in 0..self.ast[list].len() {
             let operand = self.ast[list][index];
-            let operand = self.asm_operand(operand, first + index, output);
+            let operand = self.asm_operand(operand, first + index, output, named);
             operands.push(operand);
         }
         self.tast.add_asm_operands(&operands)
     }
 
     /// One operand, checked against what its constraint says it is.
-    fn asm_operand(&mut self, operand: ast::AsmOperand, number: usize, output: bool) -> AsmOperand {
+    fn asm_operand(
+        &mut self,
+        operand: ast::AsmOperand,
+        number: usize,
+        output: bool,
+        named: &[(Symbol, usize)],
+    ) -> AsmOperand {
         let span = operand.span;
-        let constraint = self.asm_string(operand.constraint, span);
+        let mut constraint = self.asm_string(operand.constraint, span);
+        if !output && spelling(&self.tast[constraint]).contains('[') {
+            constraint = self.asm_matching(constraint, named, span);
+        }
         let text = spelling(&self.tast[constraint]);
         let value = self.expr(operand.value);
         let ty = self.tast[value].ty;
@@ -1156,6 +1169,54 @@ impl Checker<'_> {
         // and a variable into its value.
         let value = if output || memory || record { value } else { self.value(value) };
         AsmOperand { name: operand.name, constraint, value, memory }
+    }
+
+    /// An input's constraint with the output it is tied to by name, `"[sum]"`, tied to it by
+    /// number instead.
+    ///
+    /// That is the same tie as `"0"` written without counting, and the kernel's
+    /// `csum_ipv6_magic` writes it. The template has its names replaced by numbers here and
+    /// the constraints get the same, so nothing past this pass has a name to look up. What is
+    /// inside braces is a register's name and is left alone.
+    fn asm_matching(&mut self, constraint: StrId, named: &[(Symbol, usize)], span: Span) -> StrId {
+        let literal = self.tast[constraint].clone();
+        let text = spelling(&literal);
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        let mut inside = false;
+        while let Some(ch) = rest.chars().next() {
+            rest = &rest[ch.len_utf8()..];
+            match ch {
+                '{' => inside = true,
+                '}' => inside = false,
+                '[' if !inside => {
+                    if let Some((name, after)) = rest.split_once(']') {
+                        rest = after;
+                        let found = named.iter().find(|&&(known, _)| self.text(known) == name);
+                        match found {
+                            Some(&(_, number)) => out.push_str(&number.to_string()),
+                            None => {
+                                self.report(
+                                    Diagnostic::error(
+                                        format!("undefined named operand '{name}'"),
+                                        span,
+                                    )
+                                    .with_code("E0660"),
+                                );
+                                out.push('[');
+                                out.push_str(name);
+                                out.push(']');
+                            }
+                        }
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            out.push(ch);
+        }
+        let elements = out.chars().map(|ch| ch as u32).collect();
+        self.tast.add_string(StringLiteral { elements, ..literal })
     }
 
     /// One of the strings of an assembly statement, copied into the typed tree.

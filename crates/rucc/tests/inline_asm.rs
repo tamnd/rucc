@@ -96,6 +96,30 @@ fn a_value_passed_through_a_tied_pair_comes_back_unchanged() {
 }
 
 #[test]
+fn an_input_tied_to_an_output_by_name_shares_its_register() {
+    // `"[sum]"` as an input constraint is the same tie as `"0"`, written without counting. The
+    // kernel's `csum_ipv6_magic` ties its running sum this way, and the name used to reach the
+    // backend as a constraint it could not place. An unknown name is gcc's error.
+    let text = asm(
+        "tied-by-name",
+        concat!(
+            "unsigned long f(const unsigned long *a, unsigned long rest) {\n",
+            "  unsigned long sum;\n",
+            "  asm (\"addq (%[a]),%[sum]\" : [sum] \"=r\" (sum) : \"[sum]\" (rest), [a] \"r\" (a));\n",
+            "  return sum;\n",
+            "}\n",
+        ),
+    );
+    let body = body(&text, "f");
+    assert!(body.contains("addq\t(%r"), "{body}");
+    let (ok, _, said) = run(
+        "tied-to-nothing",
+        "int f(int x) { asm (\"\" : [y] \"=r\" (x) : \"[z]\" (x)); return x; }\n",
+    );
+    assert!(!ok && said.contains("undefined named operand 'z'"), "{said}");
+}
+
+#[test]
 fn an_output_written_plus_says_the_same_thing_in_one_operand() {
     let text = asm("plus", "int f(int x) { asm (\"\" : \"+r\" (x)); return x; }\n");
     let body = body(&text, "f");
