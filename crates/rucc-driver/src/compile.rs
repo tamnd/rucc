@@ -10520,6 +10520,22 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn an_alignment_attribute_takes_an_enumerator() {
+        // A lone identifier in an attribute stays an identifier, since `format(printf, 1, 2)`
+        // names something no scope has. `aligned(A)` with `A` an enumerator was refused as not a
+        // constant for that reason, and the kernel's blake2s selftest aligns a buffer this way
+        // with an enumerator declared in the loop around it.
+        let text = ir(concat!(
+            "enum { A = 32 };\n",
+            "char b[4] __attribute__((aligned(A)));\n",
+            "int g(void) { enum { L = 64 }; char c[4] __attribute__((aligned(L))); ",
+            "return __alignof__(c); }\n",
+        ));
+        assert!(text.contains("align 32"), "{text}");
+        assert!(text.contains("alloca, size 4, align 64"), "{text}");
+    }
+
+    #[test]
     fn the_address_of_a_compound_literal_asks_for_the_object_it_points_at() {
         // Nothing declares a compound literal, so the reference is the only thing that can ask
         // for it to be emitted. The image named `.Lanon.0` and the module defined no such
