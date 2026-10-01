@@ -374,7 +374,12 @@ impl Checker<'_> {
     }
 
     /// Says that a typedef name marked `deprecated` was used, which gcc gives no note.
-    pub(in crate::check) fn heed_deprecated_typedef(&mut self, name: Symbol, ty: TypeId, span: Span) {
+    pub(in crate::check) fn heed_deprecated_typedef(
+        &mut self,
+        name: Symbol,
+        ty: TypeId,
+        span: Span,
+    ) {
         if let Some(message) = self.advice.typedefs.get(&(name, ty)).cloned() {
             self.say_deprecated(name, message, span, None);
         }
