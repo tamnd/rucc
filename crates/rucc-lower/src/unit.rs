@@ -976,6 +976,15 @@ impl Unit<'_> {
         // and for a plain `inline` from `-O1` up. The IR will not have both of the first two, so a
         // name that said both gets the one gcc keeps, which is `always_inline` after a warning that
         // the other was ignored, and either of them says more than the keyword does.
+        //
+        // `optimize ("O0")` is the IR's `optnone`, which also keeps it out of the inliner both
+        // ways. The IR will not have that with `always_inline` either, and a name that said both
+        // is inlined, since the promise a caller was made is the one that has to be kept.
+        if node.flags.contains(DeclFlags::OPTIMIZE_NONE)
+            && !node.flags.contains(DeclFlags::ALWAYS_INLINE)
+        {
+            func.attrs.set |= AttrSet::OPTNONE;
+        }
         if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
             func.attrs.set |= AttrSet::ALWAYS_INLINE;
         } else if node.flags.contains(DeclFlags::NOINLINE) {

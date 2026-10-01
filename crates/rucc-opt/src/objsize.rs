@@ -48,8 +48,8 @@
 //! here and only the checker ever answers it.
 
 use rucc_ir::{
-    AllocSize, Def, Extra, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode, Pic,
-    SymbolRef, Type, Value,
+    AllocSize, AttrSet, Def, Extra, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
+    Pic, SymbolRef, Type, Value,
 };
 
 use crate::Cfg;
@@ -61,7 +61,9 @@ const DEPTH: u32 = 16;
 
 /// Answers every `object_size` in the module and says how many there were.
 ///
-/// `look` is false at `-O0`, where every question is answered as not known.
+/// `look` is false at `-O0`, where every question is answered as not known. A function that
+/// `optimize ("O0")` holds to that level is answered the same way whatever `look` is, since gcc
+/// reads the level off the function the question is in.
 pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
     let mut answered = 0;
     for id in module.funcs().collect::<Vec<FuncId>>() {
@@ -72,6 +74,7 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
         if asked.is_empty() {
             continue;
         }
+        let look = look && !module[id].attrs.set.contains(AttrSet::OPTNONE);
         let answers: Vec<(Inst, Answer)> = {
             let func = &module[id];
             let walk = Walk { module, func, cfg: &Cfg::new(func), pic };

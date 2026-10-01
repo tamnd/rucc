@@ -1513,6 +1513,13 @@ impl Checker<'_> {
                             "no-stack-protector" => {
                                 flags = flags.then(DeclFlags::NO_STACK_PROTECTOR);
                             }
+                            // `-O0` for this one function, which is the level a function can be
+                            // held to on its own: the passes that run at `-O0` are a subset of
+                            // the ones at every other level, so the pipeline can leave the rest
+                            // out for one body without anything else in the unit noticing. A
+                            // higher level than the unit's would mean running passes the unit
+                            // never asked for, and those levels are accepted and ignored.
+                            "O0" => flags |= DeclFlags::OPTIMIZE_NONE,
                             _ => {}
                         }
                     }
@@ -1587,6 +1594,14 @@ impl Checker<'_> {
         for &arg in &ast[attr.args] {
             let AttrArg::Expr(expr) = arg else { continue };
             let checked = self.expr(expr);
+            // A number is a level, `optimize(0)` being `optimize("O0")` to gcc, so it is read as
+            // the option it stands for and the caller only has one spelling to match.
+            if !matches!(self.tast[checked].kind, ExprKind::Str(_)) {
+                if let Ok(level) = self.eval_integer(checked) {
+                    options.push(format!("O{level}"));
+                }
+                continue;
+            }
             let ExprKind::Str(id) = self.tast[checked].kind else { continue };
             let literal = &self.tast[id];
             if literal.encoding != Encoding::Plain {
