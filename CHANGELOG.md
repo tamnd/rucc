@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A function whose body is no larger than a call to it is inlined at every call from -O1 up, whatever its linkage, as long as its body is the one that runs, and its out of line copy is kept for other files. gcc does the same, and 5.15 and 6.1 rely on it to fold the BUILD_BUG behind shmem_is_huge in mm/shmem.c away.
 - The assembler takes `call *pv_ops+16` and `jmp *8` on x86-64: a call or jump through a name or number with no registers is through that absolute address, written sign extended as gas does. It was taken on i386 only, and the kernel's paravirt calls before 6.5 stopped there.
 - `%P` on a memory operand of an `asm` prints the operand as it is, as gcc does. The kernel's alternatives before 6.8 write `prefetchw %P0`, `clflush %P0` and `movl %0, %P1` against `"m"` operands, and the modifier was refused, which stopped `fs/inode.c`, `mm/page_alloc.c`, `mm/vmscan.c`, `arch/x86/mm/fault.c` and the APIC code on 5.15 to 6.6.
 - `aligned` and `constructor` take an enumerator as their number, `aligned(A)`. A lone identifier in an attribute stays an identifier, and these two refused it as not a constant. The kernel's `lib/crypto/blake2s-selftest.c` aligns a buffer this way on 6.1 to 6.12.
