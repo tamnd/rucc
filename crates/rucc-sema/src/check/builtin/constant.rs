@@ -39,8 +39,12 @@ use rucc_diag::Span;
 use rucc_lex::Encoding;
 use rucc_types::{FloatKind, float_format};
 
+use rucc_types::TypeKind;
+
 use crate::check::Checker;
+use crate::decl::{DeclKind, Linkage};
 use crate::expr::ExprId;
+use crate::scope::Binding;
 use crate::tast::Const;
 
 /// What one name answers.
@@ -101,6 +105,9 @@ const TABLE: &[(&str, Answer)] = &[
     ("__builtin_strcmp", Answer::Compare),
 ];
 
+/// The plain names that are answered here too, which are the ones `string.h` declares.
+const LIBRARY: &[(&str, Answer)] = &[("strlen", Answer::Length), ("strcmp", Answer::Compare)];
+
 impl Checker<'_> {
     /// Answers a call to one of these, if the name is one and the arguments are written out.
     pub(super) fn constant_builtin_call(
@@ -116,6 +123,59 @@ impl Checker<'_> {
                 return None;
             }
         }
+        self.constant_answer(answer, args, span)
+    }
+
+    /// Answers a call to `strlen` or `strcmp` under its plain name, if the arguments are written
+    /// out and the name still means the library function.
+    ///
+    /// A program reaches these through `string.h`, which in glibc spells neither prefixed name,
+    /// and gcc folds them all the same: `.n = strlen("AB")` in a static array is accepted there
+    /// with builtins on and refused with `-fno-builtin`. LTP's `TST_KCONFIG_INIT` is written that
+    /// way. The declaration has to be the library's in shape too, an external function with a
+    /// prototype that returns what the library one returns and takes as many arguments, since a
+    /// program that declared its own `strlen` meant that one.
+    pub(super) fn constant_library_call(
+        &mut self,
+        name: Symbol,
+        args: ast::ExprList,
+        span: Span,
+    ) -> Option<ExprId> {
+        let spelled = self.text(name);
+        let &(_, answer) = LIBRARY.iter().find(|(row, _)| *row == spelled)?;
+        if !self.cx.means_the_library(spelled) {
+            return None;
+        }
+        let Some(Binding::Decl(decl)) = self.scopes.lookup(name) else { return None };
+        let decl = &self.tast[decl];
+        if decl.kind != DeclKind::Function || decl.linkage != Linkage::External {
+            return None;
+        }
+        let TypeKind::Function(id) = self.types.kind(self.types.canonical(decl.ty)) else {
+            return None;
+        };
+        let signature = self.types.signature(id);
+        let ret = match answer {
+            Answer::Length => self.size_type(),
+            _ => self.int(),
+        };
+        if !signature.prototyped
+            || signature.variadic
+            || signature.params.len() != answer.arity()
+            || self.types.canonical(signature.ret) != self.types.canonical(ret)
+        {
+            return None;
+        }
+        self.constant_answer(answer, args, span)
+    }
+
+    /// The answer itself, once the name has been found to be one of these.
+    fn constant_answer(
+        &mut self,
+        answer: Answer,
+        args: ast::ExprList,
+        span: Span,
+    ) -> Option<ExprId> {
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
         if written.len() != answer.arity() {
             // A call with the wrong number of arguments is a mistake, and the ordinary path is

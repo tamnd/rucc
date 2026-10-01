@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `strlen` and `strcmp` under their plain names fold when handed string literals, as their `__builtin_` spellings already did, so `.n = strlen("AB")` in a static initializer is a constant again. LTP's `TST_KCONFIG_INIT` is written that way, and libltp did not compile. `-fno-builtin` and `-fno-builtin-strlen` keep the call, and a `strlen` the program declared with another shape is left alone.
 - A printing option such as `--version` or `--help` whose reader closes the pipe early, as kbuild's `$(CC) --version | head -n 1` does, no longer panics with a backtrace on stderr. The rest of the output is dropped and rucc exits 0.
 
 ## 0.18.8
