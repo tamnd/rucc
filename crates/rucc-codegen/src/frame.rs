@@ -255,7 +255,7 @@ pub struct Layout<'a> {
     ///
     /// The registers a call may destroy are saved as well when the body writes them, and every one
     /// of them is saved when the body calls anything, since the call is what writes them and it is
-    /// in the function's list of operands as writing them. See [`saved`].
+    /// in the function's list of operands as writing them. See `saved`.
     pub saves_all: bool,
     /// The registers the function's value comes back in, which a frame that [`Layout::saves_all`]
     /// leaves alone: putting them back would hand the caller what it had in them rather than the

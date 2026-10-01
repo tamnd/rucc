@@ -475,7 +475,7 @@ pub enum Sort {
     /// That makes it a name nothing in this file may be worked out against, because the place it
     /// marks is not where a call to it goes. A reference to one stays a relocation against the
     /// name even when the name is local and in the same section, where any other name would have
-    /// been turned into the section and an offset. See [`moved`].
+    /// been turned into the section and an offset. See `moved`.
     Ifunc,
     /// `.file`, which names the source this was assembled from rather than anything in it.
     ///

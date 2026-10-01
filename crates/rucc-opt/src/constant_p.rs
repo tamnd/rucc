@@ -43,6 +43,7 @@
 //! lowers the instruction.
 
 use rucc_base::hash::Map;
+use rucc_cost::heuristics::CONSTANT_P_LOAD_DEPTH;
 use rucc_ir::{
     AttrSet, Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Value,
 };
@@ -175,7 +176,7 @@ fn reads_memory(func: &Func, inst: Inst) -> bool {
         if func[from].opcode == Opcode::Load {
             return true;
         }
-        if depth < 8 {
+        if depth < CONSTANT_P_LOAD_DEPTH {
             work.extend(func[func[from].args].iter().map(|&arg| (arg, depth + 1)));
         }
     }

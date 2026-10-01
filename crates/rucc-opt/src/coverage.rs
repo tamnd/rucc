@@ -92,7 +92,7 @@ impl Coverage {
     /// Whether the record has the checksum gcc 12 put after the stamp.
     #[must_use]
     pub fn checksum(&self) -> bool {
-        self.gnuc.0 >= 12
+        self.gnuc.0 >= 12 // not a threshold: gcc 12 is the release that added the checksum.
     }
 }
 
@@ -634,7 +634,7 @@ pub fn note(
     cwd: &str,
     place: &mut dyn FnMut(Span) -> Option<(String, u32, u32)>,
 ) -> Vec<u8> {
-    let words = coverage.gnuc.0 < 13;
+    let words = coverage.gnuc.0 < 13; // not a threshold: gcc 13 is where the lengths became bytes.
     let mut out = Note { bytes: Vec::new(), words };
     out.word(0x6763_6e6f);
     out.word(coverage.version());

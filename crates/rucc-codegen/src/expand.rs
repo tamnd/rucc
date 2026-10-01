@@ -196,7 +196,7 @@ fn indivisible(ty: Type, info: MemInfo, word: u32) -> bool {
 ///
 /// On a machine whose words are four bytes a `double` is wider than any integer register, so the
 /// integer that spells one is two words and the exchange goes through a slot in the frame. See
-/// [`spilled_constant`] and [`spilled_negate`].
+/// `spilled_constant` and `spilled_negate`.
 pub fn floats(func: &mut Func, word: u32) {
     // The conversions first, because what one of them writes has float constants in it and those
     // are the next walk's to spell.
@@ -1227,7 +1227,7 @@ pub const UNROLL: usize = 32;
 /// bytes and cover an odd tail with one more word that overlaps the one before it, as gcc does.
 /// Where it may, a call to `memcpy` or `memset` of a small constant size is taken apart here too,
 /// which catches the sizes that were only constant once a function was inlined, unless the unit
-/// said those names are not the library's. See [`small`].
+/// said those names are not the library's. See `small`.
 pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     if unaligned && !func.attrs.set.contains(AttrSet::NO_BUILTIN) {
@@ -1244,7 +1244,7 @@ pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool) {
     }
 }
 
-/// The most bytes a call to `memcpy` or `memset` may name for [`small`] to write it as moves.
+/// The most bytes a call to `memcpy` or `memset` may name for `small` to write it as moves.
 ///
 /// Eight words on x86-64. gcc 16.2.0 with `-mno-sse`, which is how the kernel is built, writes
 /// the moves up to about there and a call or a string instruction above it, and a call costs less
