@@ -175,7 +175,7 @@ fn listing(
     output: Output,
     marks: bool,
 ) -> Result<String, Error> {
-    let Output { sections, property, isa } = output;
+    let Output { sections, property, isa, ident } = output;
     let arch = target.tuple.arch();
     if !matches!(arch, Arch::X86_64 | Arch::X86 | Arch::Aarch64) {
         return Err(Error::Machine { triple: target.tuple.to_string() });
@@ -239,7 +239,7 @@ fn listing(
             let _ = writeln!(writer.out, "\t.ascii\t\"{option}\"");
         }
     }
-    writer.directives.end(&mut writer.out, property);
+    writer.directives.end(&mut writer.out, property, ident);
     Ok(writer.out)
 }
 

@@ -567,12 +567,16 @@ impl Directives {
     /// What is said once, after every function.
     ///
     /// `property` is what the file says it was built to have checked, which is written on the one
-    /// format that has somewhere to put it and is nothing on the other two.
-    pub fn end(self, out: &mut String, property: Property) {
+    /// format that has somewhere to put it and is nothing on the other two, and so is `ident`,
+    /// which is what made the file and goes where gcc writes its own.
+    pub fn end(self, out: &mut String, property: Property, ident: Option<&str>) {
         match self {
             Directives::Elf => {
                 if property.any() {
                     self.property(out, property);
+                }
+                if let Some(ident) = ident {
+                    let _ = writeln!(out, "\t.ident\t\"{ident}\"");
                 }
                 // Without this the stack is executable, which is not a default anybody chose.
                 out.push_str("\t.section\t.note.GNU-stack,\"\",@progbits\n");
@@ -927,7 +931,7 @@ mod tests {
         // The absence of this is what makes it executable, so the test is that it is there
         // rather than that it is spelled a particular way.
         let mut out = String::new();
-        Directives::Elf.end(&mut out, Property::default());
+        Directives::Elf.end(&mut out, Property::default(), None);
         assert!(out.contains(".note.GNU-stack"), "{out}");
         assert!(!out.contains(".note.gnu.property"), "nothing was asked to be checked");
     }
@@ -941,7 +945,7 @@ mod tests {
     #[test]
     fn an_elf_file_says_what_it_was_built_to_have_checked() {
         let mut out = String::new();
-        Directives::Elf.end(&mut out, Property { features: Property::IBT });
+        Directives::Elf.end(&mut out, Property { features: Property::IBT }, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(
             lines,
@@ -977,7 +981,7 @@ mod tests {
                 "",
             );
             directives.close(&mut out, "f");
-            directives.end(&mut out, Property::default());
+            directives.end(&mut out, Property::default(), None);
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");
         }
     }

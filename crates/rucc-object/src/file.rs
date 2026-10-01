@@ -365,7 +365,7 @@ pub fn write(
     output: Output,
     info: &Info,
 ) -> Result<Vec<u8>, Error> {
-    let Output { sections, property, .. } = output;
+    let Output { sections, property, ident, .. } = output;
     let Some((flavour, machine)) = written(target) else {
         return Err(Error::Format { triple: target.tuple.to_string() });
     };
@@ -905,6 +905,13 @@ pub fn write(
     // out otherwise rather than written as a zero, because a linker treats a missing note and a
     // note with no bits in it the same way and gcc writes nothing.
     flavour.property(&mut obj, property);
+
+    // The string gas makes of gcc's `.ident`, with the zero byte gas puts in front of the first.
+    if let Some(ident) = ident.filter(|_| flavour == Flavour::Elf) {
+        let id = obj.add_section(Vec::new(), b".comment".to_vec(), SectionKind::OtherString);
+        let bytes = [&[0][..], ident.as_bytes(), &[0]].concat();
+        obj.append_section_data(id, &bytes, 1);
+    }
 
     // Written rather than left out, because a linker that does not find it in every input marks
     // the stack executable, on the format that has one.
