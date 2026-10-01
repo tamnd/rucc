@@ -123,6 +123,15 @@ pub struct Invocation<'a> {
     pub unicode: bool,
     /// `-fms-runtime-lib=`, which is `/MT` or `/MD`. Only a line for the MSVC environment reads it.
     pub crt: Crt,
+    /// gcc's runtime directory for a mingw-w64 target, when the tree the line is against has one.
+    ///
+    /// That is a tree somebody named rather than one this compiler fetched, laid out the way MSYS2
+    /// lays out `/ucrt64`, with gcc's own files under `lib/gcc/<arch>-w64-mingw32/<version>`. Its
+    /// `crtbegin.o` goes after the start file and its `crtend.o` at the very end, the places gcc
+    /// puts them, and the directory is searched after the tree's `lib` so that a `-lgcc` finds the
+    /// one beside them. [`LinkLine::mingw`] leaves both files off a fetched tree, which has no gcc
+    /// in it, and nothing on any other target reads this. tamnd/rucc#2573.
+    pub gcc: Option<&'a Path>,
 }
 
 /// A target, or a combination of a target and a mode, that has no line here.
@@ -496,8 +505,13 @@ fn sysroot_flag(sysroot: &Sysroot) -> String {
 fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     let mut args = Vec::new();
     let mut line = LinkLine::for_target(sysroot, options.mode, options.builtins);
+    let gcc = options.gcc.filter(|_| is_mingw(sysroot.target()));
     if libc(sysroot.target()) == Libc::Import {
         windows_flags(&mut line, options);
+    }
+    if let Some(gcc) = gcc {
+        line.start.push(gcc.join("crtbegin.o"));
+        line.end.push(gcc.join("crtend.o"));
     }
     if !options.no_startfiles {
         args.extend(shown(&line.start));
@@ -510,6 +524,9 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
         args.push(format!("-L{}", dir.display()));
     }
     args.push(format!("-L{}", sysroot.lib().display()));
+    if let Some(gcc) = gcc {
+        args.push(format!("-L{}", gcc.display()));
+    }
     // And the stubs after the sysroot's own files, so that `-lm` finds the one the driver wrote.
     // Only for a libc that is a stub and only where they are somewhere else, which is a sysroot in
     // the cache: a tree the user named keeps its libraries in one place and a second `-L` to it
@@ -534,6 +551,11 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     }
 
     args
+}
+
+/// Whether this is a mingw-w64 target, the only one whose line takes gcc's runtime directory.
+fn is_mingw(target: TargetTuple) -> bool {
+    target.object_format() == ObjectFormat::Coff && target.env() == Env::Gnu
 }
 
 /// What `-municode` and `-mwindows` change about a mingw-w64 line.
