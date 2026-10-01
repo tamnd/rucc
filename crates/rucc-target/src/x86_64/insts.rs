@@ -2506,8 +2506,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fabs", UnaryX87),
     // A zero pushed and the top thrown away, which together clear the x87 stack in front of a
     // `ret`. Nothing but that writes either. See `rucc_codegen::zero`.
-    ("fldz", PushX87),
-    ("fstp_top", PopX87),
+    ("fldz", Nop),
+    ("fstp_top", Nop),
     // Comparing two of them, which is ten opcodes for the reason the vector comparisons are ten:
     // the machine gives four answers and a C program asks sixteen questions, eight of which are
     // one flag and two of which are a flag and the bit that says the comparison meant anything.
