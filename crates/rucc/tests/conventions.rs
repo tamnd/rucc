@@ -151,6 +151,30 @@ fn an_ms_abi_function_on_linux_saves_what_a_plain_callee_may_write() {
     }
 }
 
+/// The same function under `-mno-sse` saves `rsi` and `rdi` and none of the vector registers, as
+/// gcc does: it has nothing in one to lose, and the kernel's EFI stub, whose `efi_pe_entry` is one
+/// of these, is checked for having no vector instruction in it.
+#[test]
+fn an_ms_abi_function_without_vector_registers_saves_none_of_them() {
+    let path = fixture(
+        "linux-no-sse",
+        "void plain(void);\n\
+         __attribute__((ms_abi)) long keeps(long a) { plain(); return a; }\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={LINUX}"))
+        .args(["-O2", "-mno-sse", "-S", "-o", "-"])
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let keeps = body(&text, "keeps");
+    assert!(has(&keeps, &["pushq", "%rsi"]), "rsi is not saved: {keeps:#?}");
+    assert!(!keeps.iter().any(|line| line.contains("xmm")), "{keeps:#?}");
+}
+
 /// A plain function on Linux with nothing live across the call has nothing to save, which is the
 /// contrast that shows the saves above come from the convention.
 #[test]

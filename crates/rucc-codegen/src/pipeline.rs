@@ -830,6 +830,7 @@ pub fn compile_recording(
         // stays a leaf. gcc leaves it alone too.
         leaf: base.leaf && guard.is_none() && profile != Profile::Late,
         saves_all,
+        vectors,
         // What comes back comes back in the general purpose registers, since a function that
         // saves everything has had the other files taken away above, and one register to a value
         // in the order the convention hands them out.

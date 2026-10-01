@@ -268,6 +268,12 @@ pub struct Layout<'a> {
     /// rather than `ret`, after taking the error code off the stack when there is one. See
     /// [`Frame::interrupt`].
     pub interrupt: Option<bool>,
+    /// Whether the function may use the vector registers at all, which `-mno-sse` and
+    /// `-mgeneral-regs-only` say it may not. One that may not saves none of them, even the ones its
+    /// convention keeps and a call in it destroys: nothing of its own is in one to lose, and the
+    /// save would itself be a vector instruction in code built to have none. gcc saves none either,
+    /// which is what an `ms_abi` function in the kernel's EFI stub shows.
+    pub vectors: bool,
 }
 
 impl<'a> Layout<'a> {
@@ -295,6 +301,7 @@ impl<'a> Layout<'a> {
             saves_all: false,
             returned: &[],
             interrupt: None,
+            vectors: true,
         }
     }
 }
@@ -889,8 +896,12 @@ fn saved(
     if conv.unwind_codes && layout.pairs {
         adjacent(&mut saved_int, conv.int_saved, kept);
     }
-    let saved_sse =
-        conv.sse_saved.iter().copied().filter(|&at| wanted(conv.sse_class, at)).collect();
+    let saved_sse = conv
+        .sse_saved
+        .iter()
+        .copied()
+        .filter(|&at| layout.vectors && wanted(conv.sse_class, at))
+        .collect();
     (saved_int, saved_sse)
 }
 
