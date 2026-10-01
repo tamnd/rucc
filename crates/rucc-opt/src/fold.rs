@@ -196,7 +196,11 @@ pub fn addresses(module: &mut Module) -> usize {
                     continue;
                 }
                 let &[lhs, rhs] = &func[data.args] else { continue };
-                let null = |value| cast(func, value).is_some_and(|(imm, _)| imm.unsigned() == 0);
+                let null = |value| {
+                    cast(func, value)
+                        .or_else(|| constant(func, value))
+                        .is_some_and(|(imm, _)| imm.unsigned() == 0)
+                };
                 let defined = |value| named(func, value).is_some_and(|name| defined(module, name));
                 if (defined(lhs) && null(rhs)) || (null(lhs) && defined(rhs)) {
                     let ty = func[result_of(func, inst)].ty;
@@ -274,7 +278,11 @@ fn round_trip(func: &Func, pointer: Value, ty: Type) -> Option<Imm> {
 /// it is inlined, and that only builds once the comparison is a number.
 fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<Imm> {
     let (first, second) = (*args.first()?, *args.get(1)?);
-    let null = |value| cast(func, value).is_some_and(|(imm, _)| imm.unsigned() == 0);
+    let null = |value| {
+        cast(func, value)
+            .or_else(|| constant(func, value))
+            .is_some_and(|(imm, _)| imm.unsigned() == 0)
+    };
     if (on_stack(func, first) && null(second)) || (null(first) && on_stack(func, second)) {
         return match pred {
             IntPred::Eq => Some(Imm::int(0, ty)),
@@ -302,10 +310,16 @@ fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<
     }
 }
 
-/// Whether this value is the address of a stack slot.
+/// Whether this value is the address of a stack slot, as a pointer or as the integer the lowering
+/// casts it to, which is as wide as an address. The kernel's `test_bit` asks
+/// `(uintptr_t)(addr) != (uintptr_t)NULL` of a local bitmap.
 fn on_stack(func: &Func, value: Value) -> bool {
     let Def::Result { inst, .. } = func[value].def else { return false };
-    func[inst].opcode == Opcode::Alloca
+    match func[inst].opcode {
+        Opcode::Alloca => true,
+        Opcode::PtrToInt => func[func[inst].args].first().is_some_and(|&from| on_stack(func, from)),
+        _ => false,
+    }
 }
 
 /// The single result of an instruction that folded.
@@ -348,7 +362,10 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             to_integer(value, ty, data.opcode == Opcode::FPToSI)
         }
         Opcode::PtrToInt => round_trip(func, *args.first()?, ty),
-        Opcode::ICmp if func[*args.first()?].ty.is_ptr() => {
+        Opcode::ICmp
+            if func[*args.first()?].ty.is_ptr()
+                || args.iter().any(|&value| on_stack(func, value)) =>
+        {
             let Extra::IntPred(pred) = data.extra else { return None };
             same_address(func, pred, args, ty)
         }

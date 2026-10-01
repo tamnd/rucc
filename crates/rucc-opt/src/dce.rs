@@ -206,7 +206,7 @@ enum Verdict {
 /// happens whether or not anybody wanted the value. An atomic load is part of an order other
 /// threads can see, at every strength and not only at the fence-like ones, and there is no reason
 /// to argue about the weak end of that until something is waiting on the answer.
-fn reads_only(func: &Func, inst: Inst) -> bool {
+pub(crate) fn reads_only(func: &Func, inst: Inst) -> bool {
     let data = &func[inst];
     if data.opcode != Opcode::Load || data.flags.contains(Flags::VOLATILE) {
         return false;

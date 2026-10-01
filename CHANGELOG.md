@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - An object of no bytes, such as an empty struct or a zero length array, now goes in `.bss` as with gcc rather than in `.data`. The kernel's `static struct lock_class_key __key` is one with lockdep off, and in `.data` it shared an address with `smp_ops`, so modpost reported section mismatches against `__key`.
+- `__builtin_constant_p` about what a pointer points at, or about the address of a local, is no longer answered zero by the front end. It is left for the optimizer, which now folds a local's address compared with zero in integer form and forwards a store to a load once the answers merged the blocks between them, and the read in the operand is taken out with the question so `-O0` never follows the pointer. The kernel's lib/test_bitmap.c builds.
 - A function that is only declared but marked hidden or protected, including under `#pragma GCC visibility push(hidden)`, is now reached directly under `-fPIE` rather than through the global offset table. The kernel's compressed loader asserts it has no `.got` and failed to link.
 
 ## 0.18.5
