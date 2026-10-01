@@ -786,13 +786,17 @@ pub fn assembled_described(
     for chunk in &info.chunks {
         let section = named[chunk.name.as_str()];
         for reloc in &chunk.relocs {
+            // The debug information names a function by its C name, and on i386 COFF the listing
+            // gave it the underscore every C name has there.
+            let spelled =
+                if pe32 { crate::coff::decorate(&reloc.symbol) } else { reloc.symbol.clone() };
             let (symbol, addend) = match named.get(reloc.symbol.as_str()) {
                 Some(&id) => (obj.section_symbol(id), reloc.addend),
-                None => match defined.get(reloc.symbol.as_str()).map(|name| name.at) {
+                None => match defined.get(spelled.as_str()).map(|name| name.at) {
                     Some(Held::In { part, offset }) => {
                         (obj.section_symbol(made[part]), reloc.addend + offset as i64)
                     }
-                    _ => match symbols.get(&reloc.symbol) {
+                    _ => match symbols.get(&spelled) {
                         Some(&symbol) => (symbol, reloc.addend),
                         None => {
                             let why = format!(
