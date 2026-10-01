@@ -10466,6 +10466,22 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_cast_to_a_union_in_a_static_initializer_is_the_member_it_went_into() {
+        // GNU's cast to a union builds a literal of the union holding the value, and that literal
+        // is the value itself rather than a read of an object, so lowering did not see it as a
+        // literal at all and refused it with E0519. LTP's `semctl01` fills a static table with
+        // `(union semun) &buf` and `(union semun) 2`, and a failure there stopped the build of
+        // every test after it in the directory loop.
+        let text = ir(concat!(
+            "union u { int v; int *p; };\n",
+            "static int g;\n",
+            "struct t { int n; union u m; } a[] = { { 1, (union u) &g }, { 2, (union u) 5 } };\n",
+        ));
+        assert!(text.contains("addr.8 @g"), "{text}");
+        assert!(text.contains("i32 5"), "{text}");
+    }
+
+    #[test]
     fn the_address_of_a_compound_literal_asks_for_the_object_it_points_at() {
         // Nothing declares a compound literal, so the reference is the only thing that can ask
         // for it to be emitted. The image named `.Lanon.0` and the module defined no such

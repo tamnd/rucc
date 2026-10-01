@@ -2127,9 +2127,16 @@ impl Unit<'_> {
     /// read of a literal. A literal whose address is taken is not a read and is not this: that
     /// one folds to an address and goes in as a relocation, with the object it points at emitted
     /// on its own.
+    ///
+    /// GNU's cast to a union is the one literal that arrives without the read. The front end
+    /// builds `(union semun) &buf` as a literal holding the value in the member of its type, and
+    /// that literal is already the value rather than an object to be read, which is how LTP's
+    /// `semctl01` fills a static table.
     fn literal_read(&self, value: ExprId) -> Option<DeclId> {
-        let ExprKind::Convert { kind: Conversion::Lvalue, operand } = self.tast[value].kind else {
-            return None;
+        let operand = match self.tast[value].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            ExprKind::CompoundLiteral(_) => value,
+            _ => return None,
         };
         match self.tast[operand].kind {
             ExprKind::CompoundLiteral(decl) => Some(decl),
