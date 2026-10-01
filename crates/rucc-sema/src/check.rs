@@ -73,6 +73,7 @@ mod attr;
 mod builtin;
 mod decl;
 mod expr;
+mod format;
 mod init;
 mod stmt;
 mod ty;

@@ -770,10 +770,10 @@ notes = "The kernel turns a link failure into a compile-time message with it, so
 name = "format"
 kind = "attribute"
 gcc_version = "2.0"
-status = "partial"
+status = "implemented"
 used_by = ["linux", "glibc", "systemd", "curl", "ffmpeg"]
-tests = ["rucc-driver::format_takes_the_archetypes_gcc_knows_on_the_target"]
-notes = "The archetype is checked against the ones gcc knows on the target, and nothing else is: a call is not compared against its format string, which is what the attribute is for and is one of the few warnings that finds real bugs. `__has_attribute` answers no until it does."
+tests = ["rucc-driver::format_takes_the_archetypes_gcc_knows_on_the_target", "rucc::the_format_checks_are_quiet_until_wall_or_wformat_asks_for_them", "rucc::a_printf_format_is_checked_against_its_arguments_in_gcc_s_words", "rucc::a_scanf_format_is_checked_against_the_pointers_it_writes_through", "rucc::a_format_attribute_and_format_arg_are_followed_the_way_gcc_follows_them"]
+notes = "The archetype is checked against the ones gcc knows on the target, and a call to a function marked `printf`, `scanf` or `strftime`, or their `gnu_` names, has its literal format read against its promoted arguments under `-Wformat`, in gcc 16's words and under its four option names, as do the C library's own families without the attribute. Off until `-Wformat` or `-Wall`, as in gcc. The `ms_` archetypes, `strfmon` and what `-Wformat=2` adds are not read."
 
 [[feature]]
 name = "format_arg"
@@ -781,8 +781,8 @@ kind = "attribute"
 gcc_version = "2.0"
 status = "implemented"
 used_by = ["glibc"]
-tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "Says the function returns a format string made from its argument, and is only read by the format check that follows a call through it. That check is not done here, see the `format` row, so there is nothing for it to feed and taking it is the whole of it."
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word", "rucc::a_format_attribute_and_format_arg_are_followed_the_way_gcc_follows_them"]
+notes = "Says the function returns a format string made from its argument, and the format check follows a call through it to the literal it was handed, which is how a translation from `gettext` is checked."
 
 [[feature]]
 name = "nonnull"
@@ -815,10 +815,10 @@ notes = "A call whose value an expression statement, the clauses of a `for` or t
 name = "sentinel"
 kind = "attribute"
 gcc_version = "4.0"
-status = "partial"
+status = "implemented"
 used_by = ["glibc"]
-tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "Taken, and `-Wformat` is not given for a call whose variable arguments do not end in a null pointer. The warning is the whole of the attribute, so the row is partial. `__has_attribute` answers no until the warning is given, and what glibc writes behind it compiles the same either way."
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word", "rucc::a_call_without_its_sentinel_is_said_under_wall"]
+notes = "A variadic call whose last argument, or the one `sentinel(n)` puts before it, is not a null pointer is said under `-Wformat`, as gcc files it, and so is one with too few variable arguments to hold it. `0` is not a null pointer here, since it is an `int`. `execl`, `execlp` and `execle` have it without the attribute, as in gcc."
 
 [[feature]]
 name = "access"
@@ -878,10 +878,10 @@ notes = "On a typedef or a record. An access through the type, or to a member of
 name = "designated_init"
 kind = "attribute"
 gcc_version = "5.1"
-status = "partial"
+status = "implemented"
 used_by = ["linux"]
-tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "Taken on a record, and `-Wdesignated-init` is not given for a positional initializer of one. The warning is the whole of the attribute, so the row is partial. `__has_attribute` answers no until the warning is given, and the kernel writes it on its operation tables through `__designated_init`, which compiles the same without it."
+tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word", "rucc::a_designated_init_structure_given_a_value_by_position_is_said_by_default"]
+notes = "A value an initializer list gives a member of a marked structure by position is said at the value, by default and under `-Wdesignated-init`, in gcc's words, `{0}` included and `{}` not. The kernel writes it on its operation tables through `__designated_init`."
 
 [[feature]]
 name = "nocommon"

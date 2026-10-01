@@ -574,7 +574,14 @@ impl<'a> Checker<'a> {
                     split(steps)
                 }
                 None => match self.advance(kind, next) {
-                    Some(index) => (index, Vec::new(), 1),
+                    Some(index) => {
+                        // A value given by position, which a `designated_init` structure asks
+                        // to be told about. In `check/advice.rs`.
+                        if let Kind::Record { record, union: false } = kind {
+                            self.heed_designated(record, item.span);
+                        }
+                        (index, Vec::new(), 1)
+                    }
                     None => {
                         if !braced {
                             break;

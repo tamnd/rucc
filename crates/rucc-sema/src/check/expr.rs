@@ -718,6 +718,11 @@ impl Checker<'_> {
             };
             args.push(arg);
         }
+        // What `format` and `sentinel` ask to have said about the arguments, which is read from
+        // them once they are promoted, since the promoted type is the one the callee reads. In
+        // `check/format.rs` and `check/advice.rs`.
+        self.heed_format(callee, &signature.params, &args, span);
+        self.heed_sentinel(callee, &signature, &args, span);
         // The two hint builtins, whose value is the first argument they were handed and whose
         // remaining arguments are a hint nothing reads yet. In `check/builtin/expect.rs`, with why
         // they are answered here rather than before the call is checked like the families that

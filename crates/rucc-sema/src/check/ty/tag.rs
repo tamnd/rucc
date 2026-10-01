@@ -334,6 +334,11 @@ impl Checker<'_> {
         if self.may_alias(attrs) {
             self.types.make_may_alias(id);
         }
+        // Only a structure, since a union's one member is the only one there is to name, and gcc
+        // refuses the attribute anywhere else, which is not this compiler's to repeat.
+        if kind == RecordKind::Struct && self.designated_init(attrs) {
+            self.mark_designated(id);
+        }
     }
 
     /// `transparent_union` on a union, checked against the union it was written on.
