@@ -48,6 +48,15 @@ impl Fixture {
     }
 
     fn parse(&mut self, src: &str) -> Parsed {
+        self.parse_with(src, false)
+    }
+
+    /// The same under `-pedantic`.
+    fn parse_pedantic(&mut self, src: &str) -> Parsed {
+        self.parse_with(src, true)
+    }
+
+    fn parse_with(&mut self, src: &str, pedantic: bool) -> Parsed {
         let (pp, diagnostics) = tokenize(src.as_bytes(), 0, Options::new(), &mut self.interner);
         assert!(diagnostics.is_empty(), "the scanner disliked the source: {src}");
         let cx = Convert {
@@ -60,7 +69,7 @@ impl Fixture {
         };
         let (tokens, diagnostics) = convert(&pp, &cx);
         assert!(diagnostics.is_empty(), "phase 7 disliked the source: {src}");
-        parse(&tokens, Context::new(&self.interner, self.std))
+        parse(&tokens, Context { pedantic, ..Context::new(&self.interner, self.std) })
     }
 }
 
@@ -720,12 +729,50 @@ fn a_declaration_in_a_for_header_needs_c99() {
     let mut fixture = Fixture::new(Std::C89);
     let out = fixture.parse("void f(void) { for (int i = 0; i < 4; i++) ; }");
     let said: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
-    assert_eq!(said, vec!["`for` loop initial declarations are only allowed in C99 or C11 mode"]);
+    assert_eq!(said, vec!["'for' loop initial declarations are only allowed in C99 or C11 mode"]);
     let stmts = body_of(&out, only_decl(&out));
     assert!(matches!(stmts[0], Stmt::For { init: ForInit::Decl(_), .. }));
 
     let mut fixture = Fixture::new(Std::C99);
     let out = fixture.parse("void f(void) { for (int i = 0; i < 4; i++) ; }");
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+}
+
+/// `long long` is C99, and under `-pedantic` gcc says so in C90 and gnu89 alike, at the second
+/// `long`. `__extension__` in front of the declaration quiets it, which is how glibc's headers
+/// use the type in every dialect, and it quiets it only for the declaration it is in front of.
+#[test]
+fn long_long_is_a_c99_type_under_pedantic() {
+    let message = "ISO C90 does not support 'long long'";
+    let said = |out: &Parsed| -> Vec<String> {
+        out.diagnostics.iter().map(|d| d.message.clone()).collect()
+    };
+    let mut fixture = Fixture::new(Std::C89);
+    let out = fixture.parse_pedantic("long long a; unsigned long long int b;");
+    assert_eq!(said(&out), vec![message, message]);
+    assert!(fixture.parse("long long a;").diagnostics.is_empty(), "only under -pedantic");
+    let out = fixture.parse_pedantic("__extension__ long long a; long long b;");
+    assert_eq!(said(&out), vec![message], "the second declaration has no __extension__");
+    let out = fixture.parse_pedantic("int a = __extension__ (long long)1; long b;");
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    let out = Fixture::new(Std::C99).parse_pedantic("long long a;");
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+}
+
+/// A declaration after a statement is C99 as well. gcc complains once for each run of
+/// declarations that follows a statement, at the first of them, and a label is a statement.
+#[test]
+fn a_declaration_after_a_statement_is_c99_under_pedantic() {
+    let message = "ISO C90 forbids mixed declarations and code";
+    let mut fixture = Fixture::new(Std::C89);
+    let src = "void f(void) { int a; a = 1; int b; int c; b = 2; int d; l: ; int e; }";
+    let out = fixture.parse_pedantic(src);
+    let said: Vec<&str> = out.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(said, vec![message, message, message]);
+    let out = fixture.parse_pedantic("void f(void) { int a; int b; a = b = 1; }");
+    assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    assert!(fixture.parse(src).diagnostics.is_empty(), "only under -pedantic");
+    let out = Fixture::new(Std::C99).parse_pedantic(src);
     assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
 }
 

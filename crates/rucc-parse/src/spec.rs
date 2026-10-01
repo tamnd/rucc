@@ -555,6 +555,9 @@ impl Parser<'_> {
         let mut named = false;
         // The `auto` keywords, whose meaning the rest of the list decides.
         let mut autos = Autos { count: 0, span: start };
+        // An `__extension__` in the list is in effect until the list ends, and only then, so
+        // the count it raised is put back here whatever happened in between.
+        let outer = self.extension;
 
         loop {
             let token = self.cursor.current();
@@ -590,6 +593,7 @@ impl Parser<'_> {
             }
         }
 
+        self.extension = outer;
         if !builtin.is_none() {
             specs.ty = TypeSpec::Builtin(builtin);
         }
@@ -704,7 +708,15 @@ impl Parser<'_> {
                 _ => builtin.add(set),
             };
             match added {
-                Ok(next) => *builtin = next,
+                Ok(next) => {
+                    // At the second `long`, which is where gcc puts the caret. `__int64` is two
+                    // of them in one keyword, and it is Microsoft's rather than C90's to answer
+                    // for, so only the keyword C99 added is talked about.
+                    if word == Keyword::Long && next.longs == 2 {
+                        self.pedantic_c90("E0808", "ISO C90 does not support 'long long'", span);
+                    }
+                    *builtin = next;
+                }
                 Err(BuiltinError::Duplicate) => {
                     self.error("E0406", format!("duplicate `{}`", word.as_str()), span);
                 }
@@ -737,11 +749,12 @@ impl Parser<'_> {
             // `-pedantic` says nothing about it. It specifies nothing and contributes nothing to
             // the type, and it belongs here rather than in front of the list because that is
             // where glibc writes it: every declaration in its headers that mentions `long long`
-            // begins with one, and a parser that stops at it stops at `stdlib.h`. Suppressing the
-            // warnings waits on `-pedantic` being wired through, which is the same place the
-            // expression form of the keyword is waiting.
+            // begins with one, and a parser that stops at it stops at `stdlib.h`. It quiets what
+            // `pedantic_c90` would say until the list ends, which is what keeps `long long` in
+            // those headers from being an error under `-std=c89 -pedantic-errors`.
             Keyword::Extension => {
                 self.cursor.bump();
+                self.extension += 1;
             }
             Keyword::ThreadLocal => {
                 self.cursor.bump();

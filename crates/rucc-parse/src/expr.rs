@@ -235,7 +235,9 @@ impl Parser<'_> {
                 Keyword::Alignof | Keyword::GnuAlignof => return self.alignof_expr(),
                 Keyword::Extension => {
                     self.cursor.bump();
+                    self.extension += 1;
                     let operand = self.cast_expr();
+                    self.extension -= 1;
                     let span = start.to(self.ast.expr_span(operand));
                     return self.add_expr(Expr::Extension(operand), span);
                 }
