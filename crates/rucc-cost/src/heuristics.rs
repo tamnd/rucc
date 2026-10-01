@@ -321,6 +321,13 @@ pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
 /// to this for each of them and itself together.
 pub const INLINE_EARLY_INSNS: u32 = 6;
 
+/// How much a call to a function nobody declared `inline` may grow its caller and still be
+/// inlined, per section 33.6.
+///
+/// GCC's `max-inline-insns-auto` at `-O2`, where `-finline-small-functions` is on. A growth as
+/// large as this is refused.
+pub const INLINE_INSNS_AUTO: u32 = 15;
+
 /// The largest body a `static` function called from one place may have and still be inlined there,
 /// per section 33.1.
 ///
@@ -918,6 +925,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "33.6",
         gcc: "max-inline-insns-single at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_AUTO",
+        value: 15,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-auto",
         provenance: Provenance::Gcc,
     },
     Constant {

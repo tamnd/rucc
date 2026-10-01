@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `-Wunknown-pragmas` is implemented and is on under `-Wall`, as in gcc 13 (E0745). A pragma gcc does not know is ignored with "ignoring `#pragma omp parallel`", named by its first two words the way gcc names it, and every `STDC` pragma but `FLOAT_CONST_DECIMAL64` is one, as there. The pragmas gcc knows and this compiler has nothing to do with yet, such as `GCC poison`, `GCC optimize`, `weak` and `region`, are taken without a word. Before, every unknown pragma was dropped without one under any flags. A malformed `#pragma GCC visibility` or `#pragma comment` line is now warned about as `-Wpragmas` (E0798), which is where gcc puts the first, rather than under the code `-Wunknown-pragmas` now answers to, so it is still said by default.
+- `-finline-small-functions` is implemented and is on at `-O2` and `-O3`, as in gcc. A call to a function nobody declared `inline` is copied into the caller when the copy grows it by less than gcc's `max-inline-insns-auto`, which is 15, and `-fno-inline-small-functions` turns it off. The body is weighed the way gcc weighs it: a switch is two for each label and an `asm` is one for each line of its template, or one at most when it is written `asm inline`, which the IR now records. In the x86-64 defconfig kernel the objects and tables that differ from gcc's go from 982 to 956.
 
 ## 0.18.9
 

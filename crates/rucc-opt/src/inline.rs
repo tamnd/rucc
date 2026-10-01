@@ -90,13 +90,13 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
     INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_EARLY_INSNS,
-    INLINE_FRAME_GROWTH, INLINE_FRAME_GROWTH_CONSERVE, INLINE_LARGE_FRAME,
+    INLINE_FRAME_GROWTH, INLINE_FRAME_GROWTH_CONSERVE, INLINE_INSNS_AUTO, INLINE_LARGE_FRAME,
     INLINE_LARGE_FRAME_CONSERVE,
 };
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
-    Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode,
-    Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
+    Flags, Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module,
+    Opcode, Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
 use rucc_target::{Isa, TargetInfo};
 
@@ -114,6 +114,10 @@ pub const NAME: &str = "inline";
 /// of this step alone. Not the name of a pass.
 pub const ONCE: &str = "inline-functions-called-once";
 
+/// What `-finline-small-functions` and its `-fno-` form toggle, which is the half that takes a
+/// small function nobody declared `inline`. Not the name of a pass.
+pub const SMALL: &str = "inline-small-functions";
+
 const INLINED: &str = "always_inline call inlined";
 
 const HINT_INLINED: &str = "inline call inlined";
@@ -123,6 +127,8 @@ const ONCE_INLINED: &str = "call to a static function called once inlined";
 const ASKS_INLINED: &str = "call passing a constant __builtin_constant_p asks about inlined";
 
 const SMALL_INLINED: &str = "call to a function no larger than the call inlined";
+
+const AUTO_INLINED: &str = "call to a small function inlined";
 
 /// Which of the two reasons a function is inlined for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +157,13 @@ enum Kind {
     /// `shmem_is_huge`, which with transparent huge pages off is a non-`static` function returning
     /// false, and the build only links when that call is folded away.
     Small,
+    /// A function nobody declared `inline` whose copy grows the caller by less than
+    /// `max-inline-insns-auto`, which is gcc's `-finline-small-functions`, on from `-O2`.
+    ///
+    /// The kernel is where it shows. A `static` helper like `reserve_space` in fs/nfs/nfs4xdr.c,
+    /// three lines around a `BUG_ON`, is copied into each of its callers by gcc, and each copy is
+    /// an entry in `__bug_table` that the object has under gcc and not without it.
+    Auto,
 }
 
 /// Why a call to an `always_inline` function was not inlined.
@@ -313,6 +326,7 @@ pub fn run(
     growth: Growth,
     share: bool,
     pic: Pic,
+    auto: bool,
 ) -> Vec<(FuncId, Stats)> {
     let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
     let wanted: Map<Symbol, (FuncId, Kind)> = module
@@ -343,6 +357,8 @@ pub fn run(
                 Kind::Asks
             } else if small(func) && trusted(func, pic) {
                 Kind::Small
+            } else if auto && trusted(func, pic) {
+                Kind::Auto
             } else {
                 return None;
             };
@@ -376,7 +392,7 @@ pub fn run(
             let name = func.name;
             let gone = match kind {
                 Kind::Once => true,
-                Kind::Always | Kind::Hinted | Kind::Asks | Kind::Small => {
+                Kind::Always | Kind::Hinted | Kind::Asks | Kind::Small | Kind::Auto => {
                     func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
                 }
             };
@@ -424,7 +440,7 @@ fn settle_operands(func: &mut Func) {
         let at = func.add_imm(imm);
         let data = &mut func[def];
         data.opcode = Opcode::IConst;
-        data.flags = rucc_ir::Flags::NONE;
+        data.flags = Flags::NONE;
         data.args = ValueList::EMPTY;
         data.extra = Extra::Imm(at);
     }
@@ -609,7 +625,7 @@ fn settle(
     for (_, call, callee, kind) in calls {
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
-            Kind::Hinted | Kind::Asks | Kind::Small => failure.hint(),
+            Kind::Hinted | Kind::Asks | Kind::Small | Kind::Auto => failure.hint(),
             Kind::Once => failure.once(),
         };
         if callee == id || state.get(&callee) == Some(&State::Settling) {
@@ -644,6 +660,9 @@ fn settle(
             Kind::Hinted | Kind::Asks => how.limit,
             Kind::Once => INLINE_CALLED_ONCE_INSNS as usize,
             Kind::Small => 2 + module[id][module[id][call].args].len(),
+            // gcc's limit is on the growth, the body less the call it replaces, and a growth as
+            // large as the limit is refused.
+            Kind::Auto => INLINE_INSNS_AUTO as usize + module[id][module[id][call].args].len(),
         };
         let mut large = match kind {
             Kind::Asks => {
@@ -653,6 +672,13 @@ fn settle(
                 &module[callee],
                 Set::default(),
                 passed(&module[id], call, &module[callee]),
+                None,
+            ),
+            Kind::Auto => folded_size(
+                &module[callee],
+                Set::default(),
+                passed(&module[id], call, &module[callee]),
+                Some(how.names),
             ),
             Kind::Always | Kind::Once | Kind::Small => size(&module[callee]),
         };
@@ -660,17 +686,18 @@ fn settle(
         // The estimate above does not follow a constant through a block parameter or answer a
         // `__builtin_constant_p` about anything but a parameter, so where it would refuse, the
         // copy is made and cleaned up the way it would be once inlined, and that is measured.
-        if matches!(kind, Kind::Hinted | Kind::Asks)
+        if matches!(kind, Kind::Hinted | Kind::Asks | Kind::Auto)
             && (large > most || cold_call && grows(&module[id], call, &module[callee], large, how))
         {
             let values = passed(&module[id], call, &module[callee]);
-            large = large.min(specialized_size(&module[callee], &values));
+            let weighed = (kind == Kind::Auto).then_some(how.names);
+            large = large.min(specialized_size(&module[callee], &values, weighed));
         }
         if large > most {
             stats.missed(why(InlineFailure::TooLarge));
             continue;
         }
-        if matches!(kind, Kind::Hinted | Kind::Asks)
+        if matches!(kind, Kind::Hinted | Kind::Asks | Kind::Auto)
             && cold_call
             && grows(&module[id], call, &module[callee], large, how)
         {
@@ -698,6 +725,7 @@ fn settle(
                     Kind::Once => ONCE_INLINED,
                     Kind::Asks => ASKS_INLINED,
                     Kind::Small => SMALL_INLINED,
+                    Kind::Auto => AUTO_INLINED,
                 });
             }
             Err(failure) => stats.missed(why(failure)),
@@ -755,7 +783,7 @@ fn answered_size(func: &Func, values: Map<Value, (Imm, Type)>) -> usize {
         .filter(|(at, _)| asked.contains(at))
         .map(|(_, &value)| value)
         .collect();
-    folded_size(func, known, values)
+    folded_size(func, known, values, None)
 }
 
 /// The callee's parameters this call passes a constant for, with the constant, which is what
@@ -783,7 +811,11 @@ fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
 /// knows applied on top, and a `__builtin_constant_p` it cannot answer yet counts as the arm that
 /// is taken once the answer is no. `efi_enabled` asks it about a bit number and then about the
 /// address of a field, and only a real fold sees the second one come out true.
-fn specialized_size(callee: &Func, values: &Map<Value, (Imm, Type)>) -> usize {
+fn specialized_size(
+    callee: &Func,
+    values: &Map<Value, (Imm, Type)>,
+    weighed: Option<&Interner>,
+) -> usize {
     use crate::Pass;
     let mut copy = callee.clone();
     let Some(first) = copy.entry().and_then(|entry| copy.insts(entry).next()) else {
@@ -817,7 +849,7 @@ fn specialized_size(callee: &Func, values: &Map<Value, (Imm, Type)>) -> usize {
             an.clear();
         }
     }
-    folded_size(&copy, Set::default(), Map::default())
+    folded_size(&copy, Set::default(), Map::default(), weighed)
 }
 
 /// How many instructions a body has that are still work once what only depends on constants and
@@ -831,7 +863,12 @@ fn specialized_size(callee: &Func, values: &Map<Value, (Imm, Type)>) -> usize {
 ///
 /// What is known with its number in `values` goes further: a branch on it takes one arm, and the
 /// arms it does not take are not counted at all, as they are gone from the copy once it folds.
-fn folded_size(func: &Func, mut known: Set<Value>, mut values: Map<Value, (Imm, Type)>) -> usize {
+fn folded_size(
+    func: &Func,
+    mut known: Set<Value>,
+    mut values: Map<Value, (Imm, Type)>,
+    weighed: Option<&Interner>,
+) -> usize {
     known.extend(values.keys().copied());
     // Who reads each value and as which operand, for what is part of the instruction reading it
     // once there is code: an address a load or a store takes, the index it scales, and the
@@ -970,11 +1007,55 @@ fn folded_size(func: &Func, mut known: Set<Value>, mut values: Map<Value, (Imm, 
                 _ => false,
             };
             if !costless {
-                work += 1;
+                work += weighed.map_or(1, |names| weight(func, inst, names));
             }
         }
     }
     work
+}
+
+/// What gcc's `estimate_num_insns` charges for an instruction when it weighs a body by size, for
+/// the two kinds where that is not one.
+///
+/// A switch is two for each label, the default included and a run of cases that go to the same
+/// place counted once, since gcc expects a compare and a branch for each. An `asm` is one for each
+/// line of its template, a `;` ending a line as much as a newline does, and one at most when it is
+/// written `asm inline`, which is what the kernel writes for the ones that only add to a section.
+/// `nl80211_chan_width_to_mhz` in net/wireless/chan.c is a switch of ten labels and two such
+/// annotations, which is thirty one to gcc and too large to copy without being asked.
+fn weight(func: &Func, inst: Inst, names: &Interner) -> usize {
+    let data = &func[inst];
+    match (data.opcode, data.extra) {
+        (Opcode::Switch, Extra::Switch(at)) => {
+            let info = func[at];
+            let targets = &func[info.targets];
+            let mut cases: Vec<(u128, Block)> = func[info.cases]
+                .iter()
+                .zip(targets.iter().skip(1))
+                .map(|(value, target)| (value.bits(), target.block))
+                .collect();
+            cases.sort_unstable();
+            let runs = cases
+                .iter()
+                .enumerate()
+                .filter(|&(at, &(value, block))| {
+                    at == 0 || cases[at - 1] != (value.wrapping_sub(1), block)
+                })
+                .count();
+            2 * (runs + 1)
+        }
+        (Opcode::InlineAsm, Extra::Asm(at)) => {
+            let template = names.resolve(func[at].template);
+            let lines = if template.is_empty() {
+                0
+            } else {
+                1 + template.chars().filter(|&c| c == '\n' || c == ';').count()
+            };
+            let lines = if data.flags.contains(Flags::INLINE) { lines.min(1) } else { lines };
+            lines.max(1)
+        }
+        _ => 1,
+    }
 }
 
 /// How far [`passes_asked`] looks through arithmetic over constants for an argument that works out
@@ -2100,7 +2181,8 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
                 Isa::baseline(),
                 Growth::DEFAULT,
                 false,
-                Pic::Executable
+                Pic::Executable,
+                false,
             )
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
@@ -2158,6 +2240,7 @@ block0(%0: i32):
                 Growth::DEFAULT,
                 share,
                 Pic::Executable,
+                false,
             );
             if let Err(errors) = rucc_ir::verify(&module, &names) {
                 panic!("the inliner left invalid IR, {errors:?}");
@@ -2427,6 +2510,7 @@ block0(%0: i32):
             Growth::DEFAULT,
             false,
             Pic::Executable,
+            false,
         );
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
@@ -2800,6 +2884,7 @@ block0(%0: i32):
                 Growth::CONSERVE,
                 false,
                 Pic::Executable,
+                false,
             );
             rucc_ir::print(&module, &names)
         };

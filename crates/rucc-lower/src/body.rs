@@ -2752,7 +2752,11 @@ impl<'u> Body<'_, 'u> {
         let calls: Vec<BlockCall> = blocks.iter().map(|&block| BlockCall::to(block)).collect();
         let targets = self.func.push_block_calls(&calls);
         let info = AsmInfo { template, constraints, clobbers, targets };
-        let flags = if node.quals.has(AsmQuals::VOLATILE) { Flags::VOLATILE } else { Flags::NONE };
+        let mut flags =
+            if node.quals.has(AsmQuals::VOLATILE) { Flags::VOLATILE } else { Flags::NONE };
+        if node.quals.has(AsmQuals::INLINE) {
+            flags = flags.union(Flags::INLINE);
+        }
         if space.contains(Flags::SEG_FS.union(Flags::SEG_GS)) {
             self.unsupported("an `asm` with operands in memory in two address spaces", span);
         }

@@ -1262,7 +1262,7 @@ int f(int *p) {
 /// answer is folded into the exit status, so a wrong one says which it was.
 const GOTO_SHAPES: &str = r#"
 static int freed;
-static void done(int *p) { freed += *p; }
+__attribute__((noinline)) static void done(int *p) { freed += *p; }
 __attribute__((noinline)) int out(int x) {
     int v;
     asm goto("testl %1, %1\n\tmovl $7, %0\n\tjz %l2" : "=r"(v) : "r"(x) : : zero);

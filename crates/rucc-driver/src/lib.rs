@@ -2203,10 +2203,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-inline-functions-called-once" => {
                 opts.passes.push((rucc_opt::inline::ONCE.to_owned(), false));
             }
-            "-finline-functions"
-            | "-fno-inline-functions"
-            | "-finline-small-functions"
-            | "-fno-inline-small-functions" => {}
+            // And the half that takes a small function nobody declared `inline`, which gcc has on
+            // from `-O2`.
+            "-finline-small-functions" => {
+                opts.passes.push((rucc_opt::inline::SMALL.to_owned(), true));
+            }
+            "-fno-inline-small-functions" => {
+                opts.passes.push((rucc_opt::inline::SMALL.to_owned(), false));
+            }
+            "-finline-functions" | "-fno-inline-functions" => {}
             "-foptimize-strlen" | "-fno-optimize-strlen" => {}
             "-fira-share-spill-slots" | "-fno-ira-share-spill-slots" => {}
             // Where a function starts, which is a thing this compiler already decides and so is a

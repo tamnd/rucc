@@ -140,7 +140,7 @@ int main(void) {
 #[test]
 fn what_an_inline_definition_reaches_is_emitted_with_it() {
     let source = "\
-static int helper(int x) {
+__attribute__((noinline)) static int helper(int x) {
     return x + 1;
 }
 
@@ -153,8 +153,8 @@ int main(void) {
 }
 ";
     let text = asm("reaches", "-O2", source);
-    // `helper` is called twice, since a `static` function called from one place is inlined there
-    // and not emitted at all.
+    // `helper` is `noinline`, since gcc and this compiler both copy a body this small into each
+    // caller and then emit nothing for it.
     // The copy is a body like any other and the names in it are references like any other, so the
     // `static` function it calls has to be emitted too. Walking the file without reaching through
     // one of these would leave the copy calling a name this object does not define, which is the
