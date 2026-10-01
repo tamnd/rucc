@@ -290,6 +290,9 @@ fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<
             _ => None,
         };
     }
+    if let Some(answer) = apart(func, pred, first, second) {
+        return Some(Imm::int(i128::from(answer), ty));
+    }
     let (lhs, from) = cast(func, *args.first()?)?;
     let (rhs, other) = cast(func, *args.get(1)?)?;
     if from != other {
@@ -308,6 +311,76 @@ fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<
         IntPred::Ne => Some(Imm::int(i128::from(!same), ty)),
         _ => None,
     }
+}
+
+/// How two addresses into one object compare, when both are a constant distance into it.
+///
+/// The object is one name or one stack slot, and the distances are what was added to its address
+/// on the way here. Two places in one object are in the order of their distances, and the
+/// comparison of them only needs the distances, since an object and the place just past its end
+/// never straddle the end of the address space. Only unsigned orders and equality are answered: an
+/// address compared as signed can cross from positive to negative in the middle of an object, and a
+/// kernel address usually does sit up there. A distance outside 0 to 2^31 is left alone too, since
+/// it is not inside any object that size and its address is anybody's guess.
+///
+/// `mm/ksm.c` writes `BUILD_BUG_ON (STABLE_NODE_DUP_HEAD <= &migrate_nodes)`, where the first is
+/// `&migrate_nodes.prev` cast, and that only builds once the comparison is a number.
+fn apart(func: &Func, pred: IntPred, first: Value, second: Value) -> Option<bool> {
+    let (base, lhs) = offset(func, first)?;
+    let (other, rhs) = offset(func, second)?;
+    let inside = |at: i128| (0..=1 << 31).contains(&at);
+    if base != other || !inside(lhs) || !inside(rhs) {
+        return None;
+    }
+    match pred {
+        IntPred::Eq => Some(lhs == rhs),
+        IntPred::Ne => Some(lhs != rhs),
+        IntPred::Ult => Some(lhs < rhs),
+        IntPred::Ule => Some(lhs <= rhs),
+        IntPred::Ugt => Some(lhs > rhs),
+        IntPred::Uge => Some(lhs >= rhs),
+        _ => None,
+    }
+}
+
+/// The object an address points into, and how far into it the address is, as a pointer or as the
+/// integer the lowering casts it to.
+fn offset(func: &Func, mut value: Value) -> Option<(Object, i128)> {
+    let mut by = 0_i128;
+    // A chain this long is not something the lowering writes, and the bound keeps a cycle through
+    // block parameters, which this never follows anyway, from being a question at all.
+    for _ in 0..16 {
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        let data = &func[inst];
+        match data.opcode {
+            Opcode::GlobalAddr => {
+                let Extra::Symbol(name) = data.extra else { return None };
+                return Some((Object::Named(name), by));
+            }
+            Opcode::Alloca => return Some((Object::Slot(inst), by)),
+            Opcode::PtrAdd => {
+                let &[base, step] = &func[data.args] else { return None };
+                let (step, ty) = constant(func, step)?;
+                by = by.checked_add(step.signed(ty))?;
+                value = base;
+            }
+            Opcode::PtrToInt => value = *func[data.args].first()?,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// What [`offset`] measures from.
+///
+/// A name rather than the instruction that took its address, since a function takes the address of
+/// one global as many times as it writes it and every one of those is the same place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Object {
+    /// A function or a global, defined here or not.
+    Named(Symbol),
+    /// One stack slot.
+    Slot(Inst),
 }
 
 /// Whether this value is the address of a stack slot, as a pointer or as the integer the lowering
@@ -364,7 +437,9 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
         Opcode::PtrToInt => round_trip(func, *args.first()?, ty),
         Opcode::ICmp
             if func[*args.first()?].ty.is_ptr()
-                || args.iter().any(|&value| on_stack(func, value)) =>
+                || args
+                    .iter()
+                    .any(|&value| on_stack(func, value) || offset(func, value).is_some()) =>
         {
             let Extra::IntPred(pred) = data.extra else { return None };
             same_address(func, pred, args, ty)
