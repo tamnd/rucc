@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.9
+
+A patch release for the kernel nightly. Every x86_64 tinyconfig row from 5.10 to 6.18 broke on something in a shared header: an `asm` input tied to an output by name, `%P` on a memory operand, `aligned` given an enumerator, `call *pv_ops+16`, a `BUILD_BUG` behind a small external function gcc inlines, and on 5.10 no `stdarg.h` under `-nostdinc`. All of those are fixed. Besides them, this release adds `#pragma GCC diagnostic`, the `adce` and `reassoc` passes, and gcc's placement of `__func__` and of functions only cold code calls.
+
 ### Added
 
 - `#pragma GCC diagnostic` is honoured (`push`, `pop`, `ignored`, `warning` and `error`, also through `_Pragma`). A warning is decided by where it is, as in gcc 13, so a deprecated call between `push`, `ignored "-Wdeprecated-declarations"` and `pop` says nothing, `error` makes it an error, and `warning` keeps it a warning under `-Werror`. A line in a header holds for what follows its `#include`, and a `pop` with nothing pushed goes back to the command line. A line gcc cannot read gets gcc's `-Wpragmas` warning (E0798), and `ignored_attributes` is read and does nothing. Before, every one of these lines was dropped, so code that silenced a warning around one call still warned there.
