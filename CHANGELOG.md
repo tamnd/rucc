@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `%P` on a memory operand of an `asm` prints the operand as it is, as gcc does. The kernel's alternatives before 6.8 write `prefetchw %P0`, `clflush %P0` and `movl %0, %P1` against `"m"` operands, and the modifier was refused, which stopped `fs/inode.c`, `mm/page_alloc.c`, `mm/vmscan.c`, `arch/x86/mm/fault.c` and the APIC code on 5.15 to 6.6.
 - `aligned` and `constructor` take an enumerator as their number, `aligned(A)`. A lone identifier in an attribute stays an identifier, and these two refused it as not a constant. The kernel's `lib/crypto/blake2s-selftest.c` aligns a buffer this way on 6.1 to 6.12.
 - An `asm` input can be tied to an output by name, `"[sum]"`, as well as by number. The name used to reach the backend as a constraint it could not place, which stopped `csum_ipv6_magic` in `arch/x86/lib/csum-wrappers_64.c` on 6.1 to 6.18 with E0653.
 - A function or object declared with `extern` linkage in a block is now the same declaration as one made at file scope after the block closes. The call in the block used to go out with the block's unprototyped signature while the definition had another, and the IR verifier refused it with E0652. LTP's `inode01` and `inode02` stopped there.

@@ -186,6 +186,23 @@ fn an_operand_in_memory_the_template_names_as_a_register_is_refused() {
 }
 
 #[test]
+fn a_p_on_an_operand_in_memory_is_the_operand_as_it_is() {
+    // The kernel's alternatives before 6.8 write `prefetchw %P0` and `.byte 0x66; clflush %P0`
+    // against an `"m"` operand. gcc prints the operand as it would bare, less the `(%rip)` of a
+    // constant address, and the modifier used to be refused here.
+    let text = asm(
+        "p-on-memory",
+        concat!(
+            "char g;\n",
+            "void a(const char *x) { asm volatile (\"prefetchw %P0\" : : \"m\" (*x)); }\n",
+            "void b(void) { asm volatile (\"prefetchw %P0\" : : \"m\" (g)); }\n",
+        ),
+    );
+    assert!(body(&text, "a").contains("prefetchw (%r"), "{text}");
+    assert!(body(&text, "b").contains("prefetchw g(%rip)"), "{text}");
+}
+
+#[test]
 fn an_address_handed_in_with_p_is_the_register_it_is_in() {
     // tcc's `tests/tcctest.c`, word for word apart from the type. `%P1` is the operand without the
     // punctuation gcc would put round a constant, and a register has none, so it is `%1`.
