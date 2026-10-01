@@ -154,6 +154,10 @@ pub static HAND: &[(Opcode, &str)] = &[
     // the four instructions it is comes out of a number in the builtin's arguments, and a pattern
     // matches on an opcode and a type and could not see it.
     (Opcode::Prefetch, "`crate::lower`, as one of the four `prefetch` instructions"),
+    // Lanes, built here for the prefetch's reason: which lane is a number beside the instruction.
+    (Opcode::ExtractLane, "`crate::lower`, as a `pshufd` and a move out of the vector file"),
+    (Opcode::InsertLane, "`crate::lower`, as a move into the vector file and a merge"),
+    (Opcode::Shuffle, "`crate::lower`, as one `pshufd`"),
     // Stopping, which is built here because it computes nothing for a rule to have a pattern for
     // and because what makes it right is the operating system rather than any bitvector.
     (Opcode::Trap, "`crate::lower`, as the `ud2` the program stops on"),

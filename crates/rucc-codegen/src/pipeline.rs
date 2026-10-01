@@ -1959,6 +1959,56 @@ mod tests {
         assert!(text.contains("$xmm"), "{text}");
     }
 
+    /// Lanes read, replaced and put in another order, which is a `pshufd` and the moves between the
+    /// two files and nothing through memory but the loads and stores the program asked for.
+    #[test]
+    fn a_lane_is_moved_inside_the_vector_register() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, Type::PTR]);
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 16,
+            align: 16,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let i32x4 = Type::vector(Type::int(32), 4);
+        let i64x2 = Type::vector(Type::int(64), 2);
+        let x = build.load(i32x4, args[0], info, ir::Flags::default());
+        let s = build.shuffle(x, ir::Shuffle::new(&[1, 2, 3, 0]).expect("four lanes"));
+        let e = build.extract_lane(s, 2);
+        let t = build.insert_lane(s, e, 3);
+        let u = build.insert_lane(t, e, 0);
+        build.store(u, args[0], info, ir::Flags::default());
+        let p = build.load(i64x2, args[1], info, ir::Flags::default());
+        let q = build.extract_lane(p, 1);
+        let r = build.insert_lane(p, q, 0);
+        let w = build.insert_lane(r, q, 1);
+        let b = build.unary(Opcode::Bitcast, w, i32x4);
+        build.store(b, args[1], info, ir::Flags::default());
+        build.ret(&[]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every lane has a lowering");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        for inst in [
+            "x64.pshufd_ri",
+            "x64.movd_from_xmm",
+            "x64.movd_to_xmm",
+            "x64.movss_rr",
+            "x64.movq_from_xmm",
+            "x64.movq_to_xmm",
+            "x64.movsd_rr",
+            "x64.punpcklqdq_rr",
+        ] {
+            assert!(text.contains(inst), "{inst} in {text}");
+        }
+    }
+
     /// The same journey at the format the machine only moves, which is the whole of what it can do
     /// with one: in from memory, back out to memory, in and out of a register, and back to the
     /// caller.

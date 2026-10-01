@@ -183,7 +183,7 @@ fn plain(form: Form) -> Timing {
         // number this family has had since it stopped having separate adders and multipliers.
         // Divides are overridden in `slow`.
         AluVec => (4, Unit::Float),
-        MoveVec => (1, Unit::Float),
+        MoveVec | ShuffleVec => (1, Unit::Float),
         LoadVec => (1 + LOAD, Unit::Load),
         StoreVec => (1, Unit::Store),
         // The conversions, which are the slowest instructions on this side that are not divides:
@@ -275,6 +275,10 @@ fn slow(name: &str, form: Form) -> Option<Timing> {
         "paddd" | "paddq" | "psubd" | "psubq" | "pand" | "por" | "pxor" => {
             Some(Timing { latency: 1, unit: Unit::Float })
         }
+        // Moving lanes around inside the vector unit, which is one cycle on the shuffle port. The
+        // scalar moves share a stem with their loads, so only the register to register ones.
+        "punpcklqdq" => Some(Timing { latency: 1, unit: Unit::Float }),
+        "movss" | "movsd" if form == Form::AluVec => Some(Timing { latency: 1, unit: Unit::Float }),
         _ => None,
     }
 }

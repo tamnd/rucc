@@ -1884,6 +1884,29 @@ impl<'a> Lowering<'a> {
                     self.hint(inst)?;
                     continue;
                 }
+                // A lane read, replaced or moved, written by name for the prefetch's reason: which
+                // lane is a number beside the instruction and a pattern matches on an opcode and a
+                // type. What each one is on this machine is a `pshufd` with that number in its
+                // byte and the move between the files the lane needs.
+                Opcode::ExtractLane | Opcode::InsertLane | Opcode::Shuffle
+                    if !self.on_aarch64() =>
+                {
+                    self.lanes(inst)?;
+                    continue;
+                }
+                // The same sixteen bytes seen as another shape of vector, which is no instruction:
+                // both are in one vector register and the lanes are only how the next instruction
+                // reads it.
+                Opcode::Bitcast if !self.on_aarch64() && self.reshaped(inst) => {
+                    let [arg] = self.source[self.source[inst].args] else {
+                        return Err(self.unsupported(inst));
+                    };
+                    let result =
+                        self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+                    let reg = self.reg_of(arg)?;
+                    self.regs[result.index()] = Some(reg);
+                    continue;
+                }
                 // Stopping, written by name for the first half of the barrier's reason: it
                 // computes nothing, so there is no term for a rule to replace, and what makes it
                 // right is what the operating system does with the fault rather than anything a
@@ -4303,6 +4326,130 @@ impl<'a> Lowering<'a> {
             .mem(mir::Mem::at(mir::Operand::read(base, self.gpr)))
             .finish();
         Ok(())
+    }
+
+    /// Whether a bitcast is between two shapes of integer vector that fill the same register.
+    fn reshaped(&self, inst: Inst) -> bool {
+        let data = &self.source[inst];
+        let (Some(&arg), Some(result)) = (self.source[data.args].first(), data.first_result) else {
+            return false;
+        };
+        let whole = |ty: Type| crate::term::vector_slot(ty).is_some();
+        whole(self.source[arg].ty) && whole(self.source[result].ty)
+    }
+
+    /// One `extractlane`, `insertlane` or `shuffle` on a vector of four `int` or two `long`.
+    ///
+    /// Everything here is built around `pshufd`, which writes each of the four lanes of one
+    /// register with whichever lane of another its byte names. A lane is read by bringing it down
+    /// to lane zero and moving that across to a general purpose register, which is what gcc 16.2.0
+    /// writes for `_mm_cvtsi128_si32` after `_mm_shuffle_epi32`. A lane is replaced by moving the
+    /// value into a vector register and merging its low lane in: `movss` and `movsd` take the low
+    /// lane of their second operand and keep the rest of the first, and `punpcklqdq` puts the low
+    /// half of the second in the high half of the first. An `int` lane other than zero is swapped
+    /// down to zero for the merge and back up after it, since the swap is its own inverse.
+    fn lanes(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let opcode = data.opcode;
+        let extra = data.extra;
+        let args: Vec<Value> = self.source[data.args].to_vec();
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let from = self.source[*args.first().ok_or_else(|| self.unsupported(inst))?].ty;
+        let quad = match crate::term::vector_slot(from) {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err(self.unsupported(inst)),
+        };
+        let sse = self.conv.sse_class;
+        let gpr = self.gpr;
+        let span = self.source.span(inst);
+        let block = self.at.expect("a block is being filled");
+        let shuffled = |this: &mut Self, source: mir::Reg, picks: [u8; 4]| {
+            let into = this.out.new_vreg(sse);
+            this.out.set_width(into, 16);
+            this.pshufd(inst, into, source, picks);
+            into
+        };
+        let vector = self.reg_of(args[0])?;
+        match (opcode, extra) {
+            (Opcode::ExtractLane, Extra::Lane(lane)) => {
+                let low = if lane == 0 {
+                    vector
+                } else if quad {
+                    shuffled(self, vector, [2, 3, 2, 3])
+                } else {
+                    shuffled(self, vector, [lane, lane, lane, lane])
+                };
+                let into = self.new_reg(result);
+                let moved = self.named(if quad { "movq_from_xmm" } else { "movd_from_xmm" });
+                self.out.build(block, moved).at(span).def(into, gpr).uses(low, sse).finish();
+            }
+            (Opcode::InsertLane, Extra::Lane(lane)) => {
+                let &[_, value] = &args[..] else { return Err(self.unsupported(inst)) };
+                let scalar = self.reg_of(value)?;
+                let across = self.out.new_vreg(sse);
+                self.out.set_width(across, 16);
+                let moved = self.named(if quad { "movq_to_xmm" } else { "movd_to_xmm" });
+                self.out.build(block, moved).at(span).def(across, sse).uses(scalar, gpr).finish();
+                let merge = |this: &mut Self, name: &str, into: mir::Reg, low: mir::Reg| {
+                    let opcode = this.named(name);
+                    this.out
+                        .build(block, opcode)
+                        .at(span)
+                        .def(into, sse)
+                        .uses(low, sse)
+                        .uses(across, sse)
+                        .finish();
+                };
+                let into = self.new_reg(result);
+                match (quad, lane) {
+                    (true, 0) => merge(self, "movsd_rr", into, vector),
+                    (true, _) => merge(self, "punpcklqdq_rr", into, vector),
+                    (false, 0) => merge(self, "movss_rr", into, vector),
+                    (false, _) => {
+                        let mut swap = [0, 1, 2, 3];
+                        swap.swap(0, usize::from(lane & 3));
+                        let down = shuffled(self, vector, swap);
+                        let merged = self.out.new_vreg(sse);
+                        self.out.set_width(merged, 16);
+                        merge(self, "movss_rr", merged, down);
+                        self.pshufd(inst, into, merged, swap);
+                    }
+                }
+            }
+            (Opcode::Shuffle, Extra::Shuffle(shuffle)) => {
+                if self.source[result].ty != from {
+                    return Err(self.unsupported(inst));
+                }
+                let picks = if quad {
+                    let (low, high) = (shuffle.lane(0), shuffle.lane(1));
+                    [2 * low, 2 * low + 1, 2 * high, 2 * high + 1]
+                } else {
+                    [shuffle.lane(0), shuffle.lane(1), shuffle.lane(2), shuffle.lane(3)]
+                };
+                let shuffled = shuffled(self, vector, picks);
+                self.regs[result.index()] = Some(shuffled);
+            }
+            _ => return Err(self.unsupported(inst)),
+        }
+        Ok(())
+    }
+
+    /// A `pshufd` of `source` into `into`, whose lane `at` is the lane of `source` that `picks[at]`
+    /// names.
+    fn pshufd(&mut self, inst: Inst, into: mir::Reg, source: mir::Reg, picks: [u8; 4]) {
+        let byte =
+            picks.iter().enumerate().map(|(at, &pick)| i64::from(pick & 3) << (2 * at)).sum();
+        let sse = self.conv.sse_class;
+        let block = self.at.expect("a block is being filled");
+        let opcode = self.named("pshufd_ri");
+        self.out
+            .build(block, opcode)
+            .at(self.source.span(inst))
+            .def(into, sse)
+            .uses(source, sse)
+            .imm(byte)
+            .finish();
     }
 
     /// One compare and exchange, which is the instruction every other atomic on this machine is
