@@ -20,12 +20,13 @@
 //! yet, and a demonstration that only ever ran on the easy ones would be worth less.
 
 use rucc_abi::abis::{
-    AAPCS64, DESCRIBED, I386_MINGW, I386_MSVC, I386_SYSV, SYSV_AMD64, WIN64, WINDOWS_ARM64,
+    AAPCS64, DESCRIBED, I386_MINGW, I386_MINGW_FASTCALL, I386_MINGW_STDCALL, I386_MSVC,
+    I386_MSVC_FASTCALL, I386_MSVC_STDCALL, I386_SYSV, SYSV_AMD64, WIN64, WINDOWS_ARM64,
     for_convention, for_target,
 };
 use rucc_abi::{
-    AbiDescription, Arg, Banks, Convention, Format, Narrow, Pass, ReturnPointer, Rule, Scalar,
-    Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
+    AbiDescription, Arg, Banks, Cleanup, Convention, Format, Narrow, Pass, ReturnPointer, Rule,
+    Scalar, Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
 };
 use rucc_tuple::{TARGETS, TargetEntry};
 
@@ -248,6 +249,74 @@ fn the_other_x86_64_convention_is_the_other_description_and_nothing_else_has_one
     assert!(for_convention(arm, Convention::Ms).is_none());
 }
 
+#[test]
+fn thirty_two_bit_windows_has_stdcall_and_fastcall_and_nothing_else_does() {
+    let parse = |triple: &str| triple.parse().expect("a row in the target table");
+    let (mingw, msvc, linux) = (
+        parse("i686-pc-windows-gnu"),
+        parse("i686-pc-windows-msvc"),
+        parse("i686-unknown-linux-gnu"),
+    );
+    for target in [mingw, msvc] {
+        assert_eq!(Convention::asked(target, "stdcall"), Some(Convention::Stdcall));
+        assert_eq!(Convention::asked(target, "fastcall"), Some(Convention::Fastcall));
+        assert_eq!(Convention::asked(target, "cdecl"), Some(Convention::Target));
+        assert_eq!(Convention::asked(target, "ms_abi"), None);
+    }
+    assert_eq!(Convention::asked(linux, "stdcall"), None);
+    let x86_64 = parse("x86_64-pc-windows-gnu");
+    assert_eq!(Convention::asked(x86_64, "stdcall"), None);
+    assert!(for_convention(linux, Convention::Stdcall).is_none());
+    assert!(for_convention(x86_64, Convention::Fastcall).is_none());
+    let described = |target, convention| for_convention(target, convention).expect("described");
+    assert!(std::ptr::eq(described(mingw, Convention::Stdcall), &I386_MINGW_STDCALL));
+    assert!(std::ptr::eq(described(mingw, Convention::Fastcall), &I386_MINGW_FASTCALL));
+    assert!(std::ptr::eq(described(msvc, Convention::Stdcall), &I386_MSVC_STDCALL));
+    assert!(std::ptr::eq(described(msvc, Convention::Fastcall), &I386_MSVC_FASTCALL));
+    // The callee cleans up on both and on nothing else, and what comes back where is cdecl's.
+    for abi in DESCRIBED {
+        let pops =
+            [&I386_MINGW_STDCALL, &I386_MINGW_FASTCALL, &I386_MSVC_STDCALL, &I386_MSVC_FASTCALL]
+                .iter()
+                .any(|callee| std::ptr::eq(*callee, *abi));
+        let cleanup = if pops { Cleanup::Callee } else { Cleanup::Caller };
+        assert_eq!(abi.cleanup, cleanup, "{}", abi.name);
+    }
+    assert_eq!(I386_MINGW_STDCALL.returns, I386_MINGW.returns);
+    assert_eq!(I386_MSVC_FASTCALL.returns, I386_MSVC.returns);
+    assert!(Convention::Stdcall.callee_pops() && Convention::Fastcall.callee_pops());
+    assert!(!Convention::Target.callee_pops() && !Convention::Ms.callee_pops());
+}
+
+#[test]
+fn fastcall_has_two_registers_and_a_wide_argument_spends_them() {
+    let int = Arg::Scalar(Scalar::integer(4));
+    let long_long = Arg::Scalar(Scalar::integer(8));
+    let double = Arg::Scalar(Scalar::float(Format::Double, 8));
+    // `f(int, int, int)`: ecx, edx and the stack.
+    let mut call = I386_MINGW_FASTCALL.call();
+    assert_eq!(call.integer_left(), 2);
+    assert_eq!(call.argument(&int), Pass::Direct);
+    assert_eq!(call.argument(&int), Pass::Direct);
+    assert_eq!(call.integer_left(), 0);
+    // `f(double, int)`: the `double` is on the stack and the `int` still gets ecx.
+    let mut call = I386_MINGW_FASTCALL.call();
+    assert_eq!(call.argument(&double), Pass::Direct);
+    assert_eq!(call.integer_left(), 2);
+    // `f(long long, int)`: both on the stack, which is where gcc puts them.
+    let mut call = I386_MINGW_FASTCALL.call();
+    assert_eq!(call.argument(&long_long), Pass::Direct);
+    assert_eq!(call.integer_left(), 0);
+    // `f(struct { int }, int)`: the structure is on the stack and takes the registers with it.
+    let one = pieces(&[Scalar::integer(4)]);
+    let mut call = I386_MINGW_FASTCALL.call();
+    assert_eq!(call.argument(&Arg::Aggregate(record(&one))), Pass::Memory);
+    assert_eq!(call.integer_left(), 0);
+    // cdecl and stdcall have no registers to spend in the first place.
+    assert_eq!(I386_MINGW_STDCALL.call().integer_left(), 0);
+    assert_eq!(I386_MINGW.call().integer_left(), 0);
+}
+
 /// The s390x ELF ABI, written here rather than in `src/`.
 ///
 /// Five general purpose argument registers, r2 to r6, and four floating point ones. An aggregate
@@ -277,6 +346,7 @@ static S390X_ELF: AbiDescription = AbiDescription {
         wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -291,6 +361,7 @@ static S390X_ELF: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 #[test]

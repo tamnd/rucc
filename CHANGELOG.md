@@ -7,9 +7,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `--target=i686-w64-windows-gnu` and `--target=i686-pc-windows-msvc` compile C to i386 COFF objects that link with i686-w64-mingw32-gcc and run (#2247). Calls are cdecl, a C name gets the leading underscore, a structure of 1, 2, 4 or 8 bytes comes back in registers (a lone `float` or `double` one too under MSVC), a large frame calls `___chkstk_ms` or `__chkstk`, and the preprocessor defines `_X86_` and `_M_IX86` the way gcc and MSVC do. Test programs covering structure returns, varargs, `qsort`, `setjmp`, VLAs, 64-bit arithmetic and math print the same under wine as when built with mingw gcc, at -O0, -O1 and -O2.
+- `__stdcall` and `__fastcall` are implemented for `i686-w64-windows-gnu` and `i686-pc-windows-msvc` (#2247), so a program can call the Win32 API and hand it callbacks. The callee pops its arguments with `ret $N`, fastcall passes the first two integer arguments of 4 bytes or less in ecx and edx, and the names come out as `_f@N` and `@f@N`, as gcc writes them. `__attribute__((stdcall))`, `fastcall` and `cdecl` are read there, two different conventions on one function are an error, and a variadic function stays cdecl. A program with stdcall and fastcall functions and callbacks into kernel32 and user32 prints the same under wine as when built with mingw gcc, at -O0, -O1 and -O2.
 
 ### Fixed
 
+- Shortening a `memset` in dead store elimination no longer adds a 64-bit offset to the pointer on a 32-bit target, which i686 Linux and i686 Windows then refused at -O2 with "no rule lowers `iconst.i64`". The offset now has the width of a pointer.
 - Under `-fsafety`, a program that defines its own `memcpy`, `memset` or `memmove` no longer has a small constant call to it written as moves. The moves skipped the instrumented body, so the bytes copied were never marked as written and the next read of them was reported as a violation. This was the `a-program-that-defines-memcpy-itself` case the release gate failed on since v0.18.1.
 
 ## 0.18.7

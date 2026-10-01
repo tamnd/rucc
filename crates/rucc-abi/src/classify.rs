@@ -211,6 +211,12 @@ impl Call {
             return Pass::Direct;
         }
         let want = registers(scalar.size, integer_width);
+        // An integer too wide for one register on `fastcall`, which goes in the argument area and
+        // leaves no register for anything after it.
+        if scalars.wide_integer_in_memory && matches!(scalar.kind, Kind::Integer) && want > 1 {
+            self.integer = 0;
+            return Pass::Direct;
+        }
         // A floating point argument of a variadic function where only one bank is read, which is
         // its bits in general purpose registers, a register's worth at a time.
         if self.integers_only && scalar.is_float() {
@@ -308,6 +314,12 @@ impl Call {
         let slots = match rule.then {
             Travel::Ignore => return Some(Pass::Ignore),
             Travel::InMemory => return Some(Pass::Memory),
+            Travel::InMemoryAndDrain if !returning => {
+                self.integer = 0;
+                self.float = 0;
+                return Some(Pass::Memory);
+            }
+            Travel::InMemoryAndDrain => return Some(Pass::Memory),
             Travel::ByReference => {
                 // As an argument the address is one more argument. As a return value it is
                 // whichever register this ABI reserves for the purpose, and on AAPCS64 that is

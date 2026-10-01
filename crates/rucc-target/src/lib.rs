@@ -64,7 +64,8 @@ pub mod x86;
 pub mod x86_64;
 
 pub use crate::abi::{
-    AbiDescription, Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, Variadic,
+    AbiDescription, Arg, Call, Cleanup, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot,
+    Variadic,
 };
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};

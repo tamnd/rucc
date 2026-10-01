@@ -38,7 +38,8 @@ use rucc_abi::abis;
 
 #[doc(inline)]
 pub use rucc_abi::{
-    AbiDescription, Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, Variadic,
+    AbiDescription, Arg, Call, Cleanup, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot,
+    Variadic,
 };
 
 use crate::TargetInfo;

@@ -67,10 +67,12 @@ fn body<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     for line in lines.by_ref() {
         let trimmed = line.trim();
-        // The next function starts at a label in the first column that is not a local one.
+        // The next function starts at a label in the first column that is not a local one, which
+        // is `.L` on ELF and `L` on i386 COFF.
         if !line.starts_with(char::is_whitespace)
             && trimmed.ends_with(':')
             && !trimmed.starts_with('.')
+            && !trimmed.starts_with('L')
         {
             break;
         }
@@ -351,4 +353,59 @@ fn off_x86_64_and_off_a_function_they_are_ignored_with_a_warning() {
     let (ok, said) = diagnose("object", LINUX, "__attribute__((ms_abi)) int k;\n");
     assert!(ok, "{said}");
     assert!(said.contains("'ms_abi' attribute only applies to function types"), "{said}");
+}
+
+/// 32-bit Windows, where `stdcall` and `fastcall` are conventions of their own.
+const WINDOWS_32: &str = "i686-w64-windows-gnu";
+
+/// `stdcall` and `fastcall` on 32-bit Windows, as i686-w64-mingw32-gcc has them: the callee takes
+/// its arguments off with `ret $n`, `fastcall` passes the first two small integers in `ecx` and
+/// `edx`, and each name carries the bytes of its arguments, `_s@8` and `@f@12`. A variadic one is
+/// plain cdecl, name and all.
+#[test]
+fn stdcall_and_fastcall_pop_their_arguments_and_say_so_in_the_name() {
+    let text = asm(
+        "i686-conventions",
+        WINDOWS_32,
+        "__attribute__((stdcall, noinline)) int s(int a, int b) { return a - b; }\n\
+         __attribute__((fastcall, noinline)) int f(int a, int b, int c) { return a - b - c; }\n\
+         __attribute__((stdcall, noinline)) int v(int n, ...) { return n; }\n\
+         __attribute__((fastcall, noinline)) long long w(long long a, int b) { return a + b; }\n\
+         int g(void) { return s(1, 2) + f(3, 4, 5) + v(6) + (int)w(7, 8); }\n",
+    );
+    let s = body(&text, "_s@8");
+    assert!(has(&s, &["ret", "$8"]), "{s:?}\n{text}");
+    let f = body(&text, "@f@12");
+    assert!(has(&f, &["ret", "$4"]), "{f:?}\n{text}");
+    assert!(has(&f, &["%ecx"]) && has(&f, &["%edx"]), "{f:?}");
+    let v = body(&text, "_v");
+    assert!(v.contains(&"ret") && !has(&v, &["ret", "$"]), "{v:?}\n{text}");
+    // A `long long` on the stack takes both registers with it, so `b` is on the stack too.
+    let w = body(&text, "@w@12");
+    assert!(has(&w, &["ret", "$12"]), "{w:?}\n{text}");
+    let g = body(&text, "_g");
+    for callee in ["_s@8", "@f@12", "_v", "@w@12"] {
+        assert!(has(&g, &["call", callee]), "{callee}: {g:?}");
+    }
+    assert!(has(&g, &["$3", "%ecx"]) && has(&g, &["$4", "%edx"]), "{g:?}");
+    // The stack pointer goes back down right after each call that took its arguments with it,
+    // before a result can be stored anywhere the frame reaches through it.
+    for (callee, bytes) in [("_s@8", "$8"), ("@f@12", "$4"), ("@w@12", "$12")] {
+        let at = g.iter().position(|line| line.contains("call") && line.contains(callee));
+        let next = at.and_then(|at| g.get(at + 1)).copied().unwrap_or_default();
+        assert!(next.starts_with("subl") && next.contains(bytes), "{callee}: {g:?}");
+    }
+}
+
+/// Two of the three on one function is gcc's error, and on 32-bit Linux they are not this
+/// compiler's conventions and are left as they are.
+#[test]
+fn two_32_bit_conventions_on_one_function_are_refused() {
+    let (ok, said) =
+        diagnose("i686-both", WINDOWS_32, "__attribute__((stdcall, fastcall)) int f(int);\n");
+    assert!(!ok, "{said}");
+    assert!(said.contains("'stdcall' and 'fastcall' attributes are not compatible"), "{said}");
+    let (ok, said) =
+        diagnose("i686-cdecl", WINDOWS_32, "__attribute__((cdecl)) int f(int);\nint f(int);\n");
+    assert!(ok && said.is_empty(), "{said}");
 }

@@ -100,7 +100,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{Abi, Drains, Param, Type};
 use rucc_mir as mir;
-use rucc_target::{CallRegs, Constraint, PhysReg, Places, RegClass, Variadic, Where};
+use rucc_target::{CallRegs, Cleanup, Constraint, PhysReg, Places, RegClass, Variadic, Where};
 
 use crate::capability;
 use crate::varargs::Area;
@@ -594,6 +594,14 @@ pub struct Made {
     /// thirty two bytes for the callee to spill its register arguments into whether it uses them
     /// or not, and that reservation is this.
     pub outgoing: u32,
+    /// How many bytes of argument area the arguments of this call took, which is what a callee
+    /// whose convention cleans up takes off the stack as it returns.
+    pub area: u32,
+    /// The results of a call whose callee takes its arguments off the stack, as the register each
+    /// is in, the register it came back in, its class and its type. The call does not define them,
+    /// and [`pin`] does once the stack pointer is back where the frame keeps it. Empty for every
+    /// other call.
+    pub late: Vec<(mir::Reg, PhysReg, RegClass, Type)>,
 }
 
 /// Which of a call's values could not be passed, and why.
@@ -900,11 +908,24 @@ pub fn call(
     // The definitions first and the reads after, which is the order every operand vector in the
     // machine IR is in and the order `rucc_mir::defs` counts.
     let mut operands = Vec::with_capacity(args.len() + conv.int_order.len() + 2);
+    // A callee that takes its arguments off the stack as it returns leaves the stack pointer
+    // higher than this frame keeps it, and the caller puts it back with an instruction after the
+    // call. Nothing can read the frame through the stack pointer before that, and a result the
+    // allocator spilled the moment the call defined it would be stored through it. So the call
+    // only destroys the registers the result is in, and [`pin`] says they hold it once the stack
+    // pointer is back.
+    let pops = conv.abi.cleanup == Cleanup::Callee && !variadic && places.size() > 0;
+    let mut late = Vec::new();
     let results: Vec<mir::Reg> = comes_back
         .iter()
-        .map(|&(at, class)| {
+        .zip(returns)
+        .map(|(&(at, class), &ty)| {
             let reg = out.new_vreg(class);
-            operands.push(mir::Operand::write(reg, class).with(Constraint::Fixed(at)));
+            if pops {
+                late.push((reg, at, class, ty));
+            } else {
+                operands.push(mir::Operand::write(reg, class).with(Constraint::Fixed(at)));
+            }
             reg
         })
         .collect();
@@ -913,6 +934,7 @@ pub fn call(
     let spoken_for = |class: RegClass| -> Vec<PhysReg> {
         comes_back
             .iter()
+            .filter(|_| !pops)
             .filter(|&&(_, at)| at == class)
             .map(|&(reg, _)| reg)
             .chain(counted.filter(|_| class == conv.int_class))
@@ -968,7 +990,32 @@ pub fn call(
         build = build.operand(operand);
     }
     build.finish();
-    Ok(Made { results, outgoing: places.size().max(nested) })
+    Ok(Made { results, outgoing: places.size().max(nested), area: places.size(), late })
+}
+
+/// Says the registers a call's result came back in hold it, for a call [`Made::late`] is not
+/// empty for, once the instruction that puts the stack pointer back has been built.
+///
+/// The instruction is the one a parameter arrives through, which writes nothing and tells the
+/// allocator the register holds a value from here on. The call destroyed those registers and
+/// nothing between it and this touches them, so what the callee left in them is still there.
+///
+/// # Panics
+///
+/// If a result has a type no parameter could arrive as, which [`call`] has already refused.
+pub fn pin(
+    out: &mut mir::Func,
+    block: mir::Block,
+    made: &Made,
+    insts: &Insts,
+    names: &mut Interner,
+) {
+    for &(reg, at, class, ty) in &made.late {
+        let head = (insts.arg)(ty).expect("a type a call already brought back");
+        let opcode = mir::Opcode::new(names.intern(head));
+        let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(at));
+        out.build(block, opcode).operand(operand).finish();
+    }
 }
 
 /// One object whose bytes go into the argument area by a call to the runtime.

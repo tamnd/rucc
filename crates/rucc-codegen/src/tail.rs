@@ -182,8 +182,14 @@ fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
     // vector registers as the SysV callee left them, which its caller counted on it keeping, and
     // the arguments would be in the other registers besides. gcc makes no sibling call across
     // the difference either.
+    //
+    // Nor is one whose callee takes the arguments off the stack, which is i386 `stdcall` and
+    // `fastcall`. The callee returns with `ret $n` for its own arguments, where this function's
+    // caller wants this function's taken off, and the two are the same number only by chance.
     let callee = &func[info.signature];
-    callee.convention == func.signature().convention && callee.returns == func.signature().returns
+    callee.convention == func.signature().convention
+        && !callee.convention.callee_pops()
+        && callee.returns == func.signature().returns
 }
 
 /// Turns each [`Tail`] that can be into the epilogue and a jump, and says how many it turned.

@@ -42,7 +42,7 @@ use rucc_sema::{
     Eval, ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration,
     StrId, Tast, Version, Visibility,
 };
-use rucc_target::{ObjectFormat, TargetInfo};
+use rucc_target::{Convention, ObjectFormat, TargetInfo};
 use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
 
 use crate::abi::{self, Plan};
@@ -2446,7 +2446,9 @@ impl Unit<'_> {
         }
         if node.linkage != Linkage::None {
             let Some(name) = node.name else { return self.names.intern(".Lanon") };
-            return self.library_name(name).unwrap_or(name);
+            let ty = node.ty;
+            let symbol = self.library_name(name).unwrap_or(name);
+            return self.decorated(ty, symbol);
         }
         if let Some(&symbol) = self.statics.get(&decl) {
             return symbol;
@@ -2460,6 +2462,47 @@ impl Unit<'_> {
         let symbol = self.names.intern(&format!("{base}.{}", self.statics.len()));
         self.statics.insert(decl, symbol);
         symbol
+    }
+
+    /// The name a function of that type is known by in the object file on 32-bit Windows, which
+    /// for a `stdcall` function is its name with `@` and the bytes of its arguments after it and
+    /// for a `fastcall` one the same with another `@` in front.
+    ///
+    /// The count is every parameter the declaration names, each taken up to a word, and not the
+    /// address a structure comes back through. It is what the argument area holds, less that
+    /// address, and the registers `fastcall` passes the first two in are counted as though they
+    /// were not registers. That is gcc's and Microsoft's number both, so `_Sleep@4` and
+    /// `@f@12` are what a library built by either has in it. The underscore every C name gets on
+    /// this target is added by the object writer, which is why `stdcall` has none here.
+    ///
+    /// Everything else, a variadic function included since the front end never gives one either
+    /// convention, is the name as it was.
+    fn decorated(&mut self, ty: TypeId, symbol: Symbol) -> Symbol {
+        if self.target.object_format != ObjectFormat::Coff
+            || self.target.tuple.arch() != rucc_tuple::Arch::X86
+        {
+            return symbol;
+        }
+        let TypeKind::Function(id) = self.types.kind(self.types.canonical(ty)) else {
+            return symbol;
+        };
+        let signature = self.types.signature(id);
+        let front = match signature.convention {
+            Convention::Stdcall => "",
+            Convention::Fastcall => "@",
+            _ => return symbol,
+        };
+        if signature.variadic {
+            return symbol;
+        }
+        let word = u64::from(self.target.pointer_width / 8);
+        let bytes: u64 = signature
+            .params
+            .iter()
+            .map(|&param| repr::size_of(self.types, self.target, param).next_multiple_of(word))
+            .sum();
+        let name = self.names.resolve(symbol).to_string();
+        self.names.intern(&format!("{front}{name}@{bytes}"))
     }
 
     /// Emits the global for an object with static storage duration declared inside a function.

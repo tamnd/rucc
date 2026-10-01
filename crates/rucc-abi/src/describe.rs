@@ -75,6 +75,8 @@ pub struct AbiDescription {
     pub stack_args: StackArgs,
     /// What an integer narrower than an `int` has above it in the register it travels in.
     pub narrow: Narrow,
+    /// Who takes the arguments in the argument area off the stack once the call is over.
+    pub cleanup: Cleanup,
 }
 
 impl AbiDescription {
@@ -180,6 +182,14 @@ pub struct Scalars {
     /// everything else that size. `None` everywhere else, including on the ABIs where a wide
     /// integer is not by reference to begin with.
     pub wide_integer_returns_in: Option<Format>,
+    /// Whether an integer wider than one register goes in the argument area whatever registers
+    /// are left, and spends the ones that are.
+    ///
+    /// True for i386 `fastcall`, whose two registers hold an integer of four bytes or fewer and
+    /// nothing wider: a `long long` is on the stack, and an `int` after it is on the stack too
+    /// rather than in ecx. gcc and Microsoft's compiler agree on both halves. False everywhere
+    /// else, where a wide integer takes registers when there are enough of them.
+    pub wide_integer_in_memory: bool,
 }
 
 /// Where the address of a return value that comes back in memory travels.
@@ -262,6 +272,22 @@ pub enum StackArgs {
     /// Darwin arm64. Getting this wrong produces functions whose ninth argument onward is
     /// garbage, on Darwin only, which is `spec/cross-compile/06-abis.md` section 6.3's first row.
     Packed,
+}
+
+/// Who takes the arguments in the argument area off the stack once the call is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cleanup {
+    /// The caller, which is every convention a target calls its own. The callee returns with a
+    /// plain `ret` and whatever the caller put in the argument area is still there after it.
+    Caller,
+    /// The callee, which returns with `ret $n` and leaves the stack pointer `n` bytes higher than
+    /// the caller had it at the call.
+    ///
+    /// i386 `stdcall` and `fastcall`, which is what most of the Windows API is declared with, and
+    /// the reason a variadic function cannot be either: only the caller knows how many bytes it
+    /// pushed. `n` counts the argument area and nothing in a register, so it is the address of a
+    /// returned structure as well when that is on the stack and not when `fastcall` has it in ecx.
+    Callee,
 }
 
 /// One rule: what an aggregate has to look like, how it travels if it does, and what happens
@@ -391,6 +417,12 @@ pub enum Travel {
     ByReference,
     /// As the object's own bytes in the argument area.
     InMemory,
+    /// As the object's own bytes in the argument area, with every register left spent, so an
+    /// argument after it that would have fit in one is in the argument area as well.
+    ///
+    /// i386 `fastcall`, where a structure of any size is on the stack and the `int` after it does
+    /// not get the ecx the structure did not use.
+    InMemoryAndDrain,
 }
 
 /// What happens when the registers a rule wanted are not there.

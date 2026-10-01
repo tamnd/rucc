@@ -813,7 +813,8 @@ pub struct Signature {
     /// Whether it takes arguments beyond the ones named.
     pub variadic: bool,
     /// The calling convention a call with this signature and a function with it use, which is
-    /// the target's own unless `ms_abi` or `sysv_abi` asked for the other one on x86-64.
+    /// the target's own unless `ms_abi` or `sysv_abi` asked for the other one on x86-64, or
+    /// `stdcall` or `fastcall` asked for one of those on 32-bit Windows.
     ///
     /// It is on the signature rather than on the function because a call through a pointer has
     /// no function to read it off, only the signature it names, and a call is where the

@@ -133,6 +133,17 @@ pub fn read_with(
     // again, with each label where the last pass put it, until the places stop moving. That has no
     // such guarantee, so it is given a number of passes and a file that is still moving after them
     // is refused rather than read for ever.
+    // i386 COFF has `@` in names, `_Sleep@4` and `@f@8`, and no `@` suffixes to confuse them with,
+    // where everything below reads an `@` as the start of one. So the names are read with the
+    // `@` spelled some other way and given it back at the end.
+    let decorated = arch == Arch::X86 && format == ObjectFormat::Coff && text.contains('@');
+    let spelled;
+    let text = if decorated {
+        spelled = at_signs_out(text);
+        spelled.as_str()
+    } else {
+        text
+    };
     let mut long = Set::default();
     let mut guesses = Map::default();
     let mut moving = 0;
@@ -154,6 +165,7 @@ pub fn read_with(
         };
         reader.run(text)?;
         match reader.finish()? {
+            Ok(done) if decorated => return Ok(at_signs_back(done)),
             Ok(done) => return Ok(done),
             Err(again) => {
                 if again.grow.is_empty() {
@@ -171,6 +183,67 @@ pub fn read_with(
             }
         }
     }
+}
+
+/// What an `@` in a name on i386 COFF is read as, which is a run of characters a name may hold and
+/// none that a compiler or a person writes in one.
+const AT_SIGN: &str = "__rucc_at__";
+
+/// The file with every `@` outside a string spelled [`AT_SIGN`].
+///
+/// Only a string keeps its own, since an `@` there is a byte of data rather than a part of a
+/// name, and a comment is left alone as well because nothing reads it.
+fn at_signs_out(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut comment = false;
+    for ch in text.chars() {
+        match ch {
+            '\n' => {
+                comment = false;
+                quoted = false;
+            }
+            _ if comment => {}
+            '\\' if quoted => {
+                escaped = !escaped;
+                out.push(ch);
+                continue;
+            }
+            '"' if !escaped => quoted = !quoted,
+            '#' if !quoted => comment = true,
+            '@' if !quoted => {
+                out.push_str(AT_SIGN);
+                continue;
+            }
+            _ => {}
+        }
+        escaped = false;
+        out.push(ch);
+    }
+    out
+}
+
+/// A file read with [`at_signs_out`], with its names given their `@` back.
+fn at_signs_back(mut done: Assembled) -> Assembled {
+    let back = |name: &mut String| {
+        if name.contains(AT_SIGN) {
+            *name = name.replace(AT_SIGN, "@");
+        }
+    };
+    for part in &mut done.parts {
+        back(&mut part.name);
+        for reloc in &mut part.relocs {
+            back(&mut reloc.symbol);
+        }
+        if let Some(group) = &mut part.group {
+            back(&mut group.symbol);
+        }
+    }
+    for name in &mut done.names {
+        back(&mut name.name);
+    }
+    done
 }
 
 /// How many times the file is laid out again because a count depended on where a label ended up,
@@ -6040,6 +6113,35 @@ g:
             Err(trouble) => trouble.why,
         };
         assert!(why.contains("defines no symbol"), "{why}");
+    }
+
+    /// What gcc writes for `stdcall` and `fastcall` on i686 Windows, where the `@` is part of the
+    /// name: a definition, a call, a load through a DLL's pointer, an address in data and a
+    /// COMDAT named after one. A string keeps its `@` as a byte.
+    #[test]
+    fn an_at_sign_on_i386_coff_is_part_of_the_name() {
+        let text = "\t.section\t.text$_f@4,\"xr\"\n\t.linkonce\tdiscard\n\t.globl\t_f@4\n\
+                    _f@4:\n\tret\t$4\n\t.text\n\t.globl\t@g@8\n@g@8:\n\tcall\t_h@12\n\
+                    \tmovl\t__imp__Sleep@4, %eax\n\tpushl\t$_f@4\n\tret\t$8\n\
+                    \t.data\n\t.long\t@g@8\n\t.ascii\t\"a@b\"\t# c@d\n";
+        let done = match read_as(text, Arch::X86, ObjectFormat::Coff) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let names: Vec<&str> = done.names.iter().map(|name| name.name.as_str()).collect();
+        for name in ["_f@4", "@g@8", "_h@12", "__imp__Sleep@4"] {
+            assert!(names.contains(&name), "{name} in {names:?}");
+        }
+        let comdat = done.parts.iter().find(|part| part.name == ".text$_f@4").unwrap();
+        assert_eq!(comdat.group.as_ref().unwrap().symbol, "_f@4");
+        let text = done.parts.iter().find(|part| part.name == ".text").unwrap();
+        let called: Vec<&str> = text.relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
+        assert_eq!(called, ["_h@12", "__imp__Sleep@4", "_f@4"]);
+        let data = done.parts.iter().find(|part| part.name == ".data").unwrap();
+        assert_eq!(data.relocs[0].symbol, "@g@8");
+        assert_eq!(&data.bytes[4..], b"a@b");
+        // And nowhere else, where an `@` still says how a name is reached.
+        assert!(read_as("\tcall\t_h@12\n", Arch::X86, ObjectFormat::Elf).is_err());
     }
 
     /// What gcc writes for a Windows function with a frame pointer, read into the same record the

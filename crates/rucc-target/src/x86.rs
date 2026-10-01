@@ -35,6 +35,7 @@ use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
 use crate::x86_64::{Form, Kind, Mode, encoding_in, form, written};
+use rucc_abi::Convention;
 
 /// The general purpose registers.
 pub const GPR: RegClass = RegClass::new(0);
@@ -230,8 +231,32 @@ pub static MINGW32: CallRegs = CallRegs {
     // The C name. It is `___chkstk_ms` in the object, with the underscore every C name gets here,
     // and that is the same symbol libgcc defines for x86-64 where no underscore is added.
     chkstk: Some(Chkstk { name: "__chkstk_ms", size: EAX, shift: 0, moves: false }),
+    conventions: Conventions(&MINGW32_CONVENTIONS),
     ..SYSV
 };
+
+/// The two registers `fastcall` passes the first two small integers in, in order.
+static FASTCALL_INT_ARGS: [PhysReg; 2] = [ECX, EDX];
+
+/// A function declared `stdcall` under mingw-w64, which is most of the Windows API.
+///
+/// [`MINGW32`]'s registers exactly. The difference is the callee taking the argument area off the
+/// stack, and that is the ABI half's to say, in [`rucc_abi::abis::I386_MINGW_STDCALL`].
+pub static MINGW32_STDCALL: CallRegs =
+    CallRegs { abi: &rucc_abi::abis::I386_MINGW_STDCALL, ..MINGW32 };
+
+/// A function declared `fastcall` under mingw-w64: [`MINGW32_STDCALL`] with the first two
+/// integers of a word or less in `ecx` and `edx`.
+pub static MINGW32_FASTCALL: CallRegs =
+    CallRegs { abi: &rucc_abi::abis::I386_MINGW_FASTCALL, int_args: &FASTCALL_INT_ARGS, ..MINGW32 };
+
+/// The conventions a function on i686 Windows under mingw-w64 may have: cdecl, which is its own,
+/// and the two whose callee pops.
+static MINGW32_CONVENTIONS: [(Convention, &CallRegs); 3] = [
+    (Convention::Target, &MINGW32),
+    (Convention::Stdcall, &MINGW32_STDCALL),
+    (Convention::Fastcall, &MINGW32_FASTCALL),
+];
 
 /// Where an i686 Windows call puts things under Microsoft's runtime.
 ///
@@ -242,8 +267,24 @@ pub static MINGW32: CallRegs = CallRegs {
 pub static MSVC32: CallRegs = CallRegs {
     abi: &rucc_abi::abis::I386_MSVC,
     chkstk: Some(Chkstk { name: "_chkstk", size: EAX, shift: 0, moves: true }),
+    conventions: Conventions(&MSVC32_CONVENTIONS),
     ..MINGW32
 };
+
+/// A function declared `stdcall` under Microsoft's runtime.
+pub static MSVC32_STDCALL: CallRegs =
+    CallRegs { abi: &rucc_abi::abis::I386_MSVC_STDCALL, ..MSVC32 };
+
+/// A function declared `fastcall` under Microsoft's runtime.
+pub static MSVC32_FASTCALL: CallRegs =
+    CallRegs { abi: &rucc_abi::abis::I386_MSVC_FASTCALL, int_args: &FASTCALL_INT_ARGS, ..MSVC32 };
+
+/// [`MINGW32_CONVENTIONS`] under Microsoft's runtime.
+static MSVC32_CONVENTIONS: [(Convention, &CallRegs); 3] = [
+    (Convention::Target, &MSVC32),
+    (Convention::Stdcall, &MSVC32_STDCALL),
+    (Convention::Fastcall, &MSVC32_FASTCALL),
+];
 
 // Aligned vector moves for the reason `crate::x86_64` gives. The frame keeps its sixteen byte
 // alignment here too, which [`SYSV`] says the psABI promises.
@@ -508,6 +549,29 @@ mod tests {
         assert_eq!((mingw.name, mingw.size, mingw.moves), ("__chkstk_ms", EAX, false));
         let msvc = MSVC32.chkstk.expect("Microsoft's routine");
         assert_eq!((msvc.name, msvc.size, msvc.moves), ("_chkstk", EAX, true));
+    }
+
+    #[test]
+    fn windows_has_stdcall_and_fastcall_and_only_fastcall_has_registers() {
+        for (regs, stdcall, fastcall) in [
+            (&MINGW32, &MINGW32_STDCALL, &MINGW32_FASTCALL),
+            (&MSVC32, &MSVC32_STDCALL, &MSVC32_FASTCALL),
+        ] {
+            assert!(std::ptr::eq(regs.under(Convention::Target).expect("cdecl"), regs));
+            let under_stdcall = regs.under(Convention::Stdcall).expect("stdcall");
+            let under_fastcall = regs.under(Convention::Fastcall).expect("fastcall");
+            assert!(std::ptr::eq(under_stdcall, stdcall));
+            assert!(std::ptr::eq(under_fastcall, fastcall));
+            // A function of one convention calling one of another finds the same list from there.
+            assert!(std::ptr::eq(stdcall.under(Convention::Target).expect("cdecl"), regs));
+            assert!(stdcall.int_args.is_empty());
+            assert_eq!(fastcall.int_args, [ECX, EDX]);
+            assert_eq!(stdcall.abi.cleanup, rucc_abi::Cleanup::Callee);
+            assert_eq!(fastcall.abi.cleanup, rucc_abi::Cleanup::Callee);
+            assert_eq!(regs.abi.cleanup, rucc_abi::Cleanup::Caller);
+            assert_eq!(fastcall.chkstk, regs.chkstk);
+        }
+        assert!(SYSV.under(Convention::Stdcall).is_none(), "Linux ignores the attribute");
     }
 
     #[test]

@@ -501,22 +501,27 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
             continue;
         }
         let scalars = conv.abi.scalars;
-        let mut ahead = places.clone();
-        // AAPCS64 starts the pair at an even register, and a filler takes the odd one it skips.
-        let skipped = (scalars.wide_integer_starts_even && ahead.integers() % 2 == 1)
-            .then(|| ahead.integer(step));
-        if let (low @ Where::Reg(_), high @ Where::Reg(_)) =
-            (ahead.integer(step), ahead.integer(step))
-        {
-            places = ahead;
-            if let Some(at) = skipped {
-                meant.push((Slot::Filler(word.ty), word, at));
+        // i386 `fastcall` has registers for an integer of one word and never a pair of them, so
+        // a wide one goes straight to the argument area and spends what was left on the way.
+        if !scalars.wide_integer_in_memory {
+            let mut ahead = places.clone();
+            // AAPCS64 starts the pair at an even register, and a filler takes the odd one it
+            // skips.
+            let skipped = (scalars.wide_integer_starts_even && ahead.integers() % 2 == 1)
+                .then(|| ahead.integer(step));
+            if let (low @ Where::Reg(_), high @ Where::Reg(_)) =
+                (ahead.integer(step), ahead.integer(step))
+            {
+                places = ahead;
+                if let Some(at) = skipped {
+                    meant.push((Slot::Filler(word.ty), word, at));
+                }
+                meant.push((Slot::Low(index), word, low));
+                meant.push((Slot::High(index), word, high));
+                continue;
             }
-            meant.push((Slot::Low(index), word, low));
-            meant.push((Slot::High(index), word, high));
-            continue;
         }
-        if scalars.wide_integer_drains {
+        if scalars.wide_integer_drains || scalars.wide_integer_in_memory {
             places.drain_integers();
         }
         let Where::Stack(at) = places.scalar(width.bytes()) else { return None };
