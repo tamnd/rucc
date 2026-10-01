@@ -348,7 +348,8 @@ impl Checker<'_> {
             // `__fortify_function` in front of the definition, which is here.
             inlining: self
                 .inlining(specs.attrs)
-                .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
+                .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
+                | self.handler(&[specs.attrs], ty, self.is_naked(specs.attrs)),
             // The specifiers only, for the reason `noreturn` above reads them only. What a
             // definition says here is almost always `dllexport`, and `__declspec` is written in
             // front of the declaration, which is where the specifiers are.
@@ -397,9 +398,15 @@ impl Checker<'_> {
         }
         // The specifiers only, for the reason `noreturn` above reads them only. This is where a
         // program picking its fastest path at run time writes it, on the definition of the path.
-        if let Some(isa) = self.targeted(&[specs.attrs]) {
+        let targeted = self.targeted(&[specs.attrs]);
+        if let Some((isa, _)) = targeted {
             self.tast.record_target(id, isa);
         }
+        // After the merge, since a handler is usually declared as one in a header and defined
+        // without saying so again, and after the `target` attribute, since that is the usual
+        // way of building one without the registers it would not save.
+        let (isa, x87) = targeted.unwrap_or((self.cx.isa, self.cx.x87));
+        self.handler_registers(self.tast[id].flags, ty, isa, x87, span);
         // The specifiers only, for the reason `noreturn` above reads them only.
         self.record_notices(id, &[specs.attrs], DeclKind::Function);
         self.annotate_decl(id, &[specs.attrs]);
@@ -769,7 +776,12 @@ impl Checker<'_> {
             inlining: self
                 .inlining(specs.attrs)
                 .then(self.inlining(item.attrs))
-                .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE)),
+                .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
+                | self.handler(
+                    &[specs.attrs, item.attrs],
+                    ty,
+                    self.is_naked(specs.attrs) || self.is_naked(item.attrs),
+                ),
             // Both places, for the reason `noreturn` above reads both. `__declspec` is written
             // in front and the attribute spelling is as often written after the declarator.
             dll: self.dll(specs.attrs) | self.dll(item.attrs),
@@ -823,7 +835,7 @@ impl Checker<'_> {
         // Both places, for the reason `noreturn` above reads both. gcc says nothing about the
         // attribute on an object beyond that it is ignored, and it is not read there at all.
         if kind == DeclKind::Function {
-            if let Some(isa) = self.targeted(&[specs.attrs, item.attrs]) {
+            if let Some((isa, _)) = self.targeted(&[specs.attrs, item.attrs]) {
                 self.tast.record_target(id, isa);
             }
         }

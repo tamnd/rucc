@@ -178,6 +178,15 @@ impl AttrSet {
     pub const ZERO_ALL: Self = Self(1 << 24);
     /// Only the registers arguments are passed in are zeroed, from the choices ending in `-arg`.
     pub const ZERO_ARG: Self = Self(1 << 25);
+    /// `__attribute__((interrupt))` on x86-64. The processor calls the function with its own frame
+    /// on the stack, and an error code under it when the function takes two parameters, so every
+    /// register it touches is saved, its parameters are found in that frame, and it goes back with
+    /// `iretq`. Never inlined and never a tail call, since neither leaves anything to go back from.
+    pub const INTERRUPT: Self = Self(1 << 26);
+    /// `__attribute__((no_caller_saved_registers))` on x86-64. Every general purpose register the
+    /// function writes is put back, the ones a call may destroy included, except the ones its value
+    /// comes back in.
+    pub const SAVES_ALL: Self = Self(1 << 27);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -291,6 +300,8 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::ZERO_USED, "zero_used"),
     (AttrSet::ZERO_ALL, "zero_all"),
     (AttrSet::ZERO_ARG, "zero_arg"),
+    (AttrSet::INTERRUPT, "interrupt"),
+    (AttrSet::SAVES_ALL, "saves_all"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

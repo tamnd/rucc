@@ -249,6 +249,25 @@ pub struct Layout<'a> {
     /// How many bytes of its arguments the function takes off the stack as it returns. See
     /// [`Frame::popped`].
     pub popped: u32,
+    /// Whether the function puts back every general purpose register it writes rather than only
+    /// the ones the convention says a callee keeps, which is what `__attribute__((interrupt))` and
+    /// `__attribute__((no_caller_saved_registers))` ask for.
+    ///
+    /// The registers a call may destroy are saved as well when the body writes them, and every one
+    /// of them is saved when the body calls anything, since the call is what writes them and it is
+    /// in the function's list of operands as writing them. See [`saved`].
+    pub saves_all: bool,
+    /// The registers the function's value comes back in, which a frame that [`Layout::saves_all`]
+    /// leaves alone: putting them back would hand the caller what it had in them rather than the
+    /// answer. Nothing for a function returning nothing, which is every interrupt handler.
+    pub returned: &'a [PhysReg],
+    /// Whether the function is an interrupt handler, and whether the processor pushed an error
+    /// code under the frame it calls it with, which is a handler written with two parameters.
+    ///
+    /// `None` for every other function. A handler goes back with the return from an interrupt
+    /// rather than `ret`, after taking the error code off the stack when there is one. See
+    /// [`Frame::interrupt`].
+    pub interrupt: Option<bool>,
 }
 
 impl<'a> Layout<'a> {
@@ -273,6 +292,9 @@ impl<'a> Layout<'a> {
             share: None,
             home: 0,
             popped: 0,
+            saves_all: false,
+            returned: &[],
+            interrupt: None,
         }
     }
 }
@@ -298,6 +320,8 @@ pub struct Frame {
     usage: u32,
     home: u32,
     popped: u32,
+    interrupt: Option<bool>,
+    clears: bool,
 }
 
 impl Frame {
@@ -550,6 +574,8 @@ impl Frame {
             usage,
             home: layout.home,
             popped: layout.popped,
+            interrupt: layout.interrupt,
+            clears: layout.interrupt.is_some() && !layout.leaf,
         }
     }
 
@@ -703,6 +729,26 @@ impl Frame {
         self.naked
     }
 
+    /// Whether this is an interrupt handler's frame, and whether the processor pushed an error code
+    /// under it, which the epilogue takes off the stack before the return from the interrupt.
+    #[must_use]
+    pub fn interrupt(&self) -> Option<bool> {
+        self.interrupt
+    }
+
+    /// Whether the prologue clears the direction flag, which is what an interrupt handler that
+    /// calls anything does.
+    ///
+    /// The convention says the flag is clear at every call and at every return, so a function may
+    /// run a string instruction without clearing it first. The code an interrupt stopped is under
+    /// no such obligation at the instruction it was stopped at, so a handler that is about to call
+    /// a function has to make the promise true itself. One that calls nothing runs no code it did
+    /// not write and leaves the flag alone, which is what gcc does too.
+    #[must_use]
+    pub fn clears(&self) -> bool {
+        self.clears
+    }
+
     /// How many bytes the prologue takes before it saves anything, to home the argument registers
     /// into, which is sixty four in a variadic function on Windows on AArch64 and nothing anywhere
     /// else.
@@ -822,6 +868,22 @@ fn saved(
         .filter(|&at| wanted(conv.int_class, at))
         .filter(|&at| kept(at))
         .collect();
+    // And in a function that owes back everything, the ones a call may destroy after them, in the
+    // order the allocator hands them out. A call in the body is in the list of operands as writing
+    // every one of those, so a function that calls anything saves all of them, which is what gcc
+    // does too. The registers the value comes back in are left out, since putting them back would
+    // throw the answer away.
+    if layout.saves_all {
+        let more: Vec<PhysReg> = conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|at| !saved_int.contains(at) && !layout.returned.contains(at))
+            .filter(|&at| wanted(conv.int_class, at))
+            .filter(|&at| kept(at) && at != conv.stack_pointer)
+            .collect();
+        saved_int.extend(more);
+    }
     // Each pair two registers next to each other, where the unwind codes can only name such a
     // pair, by saving the register between two that are not. See `CallRegs::unwind_codes`.
     if conv.unwind_codes && layout.pairs {

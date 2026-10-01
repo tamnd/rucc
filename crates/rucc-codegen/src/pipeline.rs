@@ -290,6 +290,20 @@ impl Machine {
         }
     }
 
+    /// The same machine as an x86 interrupt handler sees it, with an error code below its frame
+    /// or without one. See [`rucc_target::CallRegs::interrupted`] for what changes.
+    #[must_use]
+    pub fn interrupted(&self, code: bool) -> Self {
+        let conv = self.conv.interrupted(code);
+        if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
+            Self::aarch64(conv)
+        } else if std::ptr::eq(self.selector, &select::x86::SELECTOR) {
+            Self::x86(conv)
+        } else {
+            Self::x86_64(conv)
+        }
+    }
+
     /// The machine a target describes, or `None` when no backend in this crate covers it.
     ///
     /// [`TargetInfo`] already carries the convention, because the front end needs it to lay a
@@ -602,6 +616,23 @@ pub fn compile_recording(
             &foreign
         }
     };
+    // An x86 interrupt handler is compiled against the convention the processor rather than a
+    // caller hands it, which differs in where its frame starts and in having no red zone, and the
+    // answer here is whether one more word, the error code, sits under that frame. A handler
+    // takes it when it was written with two parameters. Everything else about the function keeps
+    // its convention, and a handler owes back every register it writes, which is `saves_all`.
+    let interrupt = (source.attrs.set.contains(ir::AttrSet::INTERRUPT)
+        && machine.insts.iret.is_some())
+    .then(|| source.signature().params.len() == 2);
+    let saves_all = interrupt.is_some() || source.attrs.set.contains(ir::AttrSet::SAVES_ALL);
+    let interrupted;
+    let machine = match interrupt {
+        Some(code) => {
+            interrupted = machine.interrupted(code);
+            &interrupted
+        }
+        None => machine,
+    };
     // Everything the machine has no rule for, rewritten into things it has, as one group rather
     // than as a dozen lines here. What is in the group and what the order between its members is
     // for are both in `crate::lowering`, which is where a new lowering is added.
@@ -632,14 +663,24 @@ pub fn compile_recording(
     // Last thing before selection, because a `tail_call` ends its block and every lowering above
     // is written against blocks that end the way the middle end left them. Only on a machine that
     // can jump to a name, since the call stays a call on one that cannot.
-    if flags.sibling && machine.insts.away.is_some() {
+    // Not in a function that owes back every register either. A jump to another function hands
+    // that function the registers to write as it likes, and what this one promised is that none
+    // of them would be different when it returns, so the call stays a call and the registers are
+    // put back after it. An interrupt handler also returns with `iretq`, which a jump would skip.
+    if flags.sibling && machine.insts.away.is_some() && !saves_all {
         tail::mark(source, names, elsewhere);
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
     // Before selection, which would otherwise pick a register the command line said is not there.
     // Read after the lowerings above, since a value one of them makes is a value in the function.
-    lower::off_registers(source, flags.vector, flags.x87, flags.x87_return)?;
+    // A function that owes back every register owes back the vector registers and the x87 stack
+    // too, and saving those is a thing gcc does not do either: it refuses such a function when its
+    // target has them, which the front end does for this one. What is left is the target that has
+    // none, or a function with nothing in it that needs one, and taking both away here is what
+    // keeps a value from reaching for them all the same.
+    let vectors = flags.vector && !saves_all;
+    lower::off_registers(source, vectors, flags.x87 && !saves_all, flags.x87_return)?;
     let lowered =
         lower::func_for(source, names, machine.selector, machine.conv, elsewhere, flags.debug)?;
     recording.fired.merge(&lowered.fired);
@@ -655,7 +696,7 @@ pub fn compile_recording(
     // this is what says so if one ever starts.
     let vector =
         |number| func.class_of(rucc_mir::Reg::virtual_reg(number)) == Some(machine.conv.sse_class);
-    if !flags.vector && (0..func.vregs()).filter_map(|n| u32::try_from(n).ok()).any(vector) {
+    if !vectors && (0..func.vregs()).filter_map(|n| u32::try_from(n).ok()).any(vector) {
         return Err(Unsupported::Registers { inst: None, ty: None, off: lower::Off::Vector });
     }
     // The one thing a frame that grows while it runs cannot be asked for, which is a refusal rather
@@ -768,7 +809,10 @@ pub fn compile_recording(
         // stack pointer takes no bytes off it, so the frame comes out empty and a function that
         // wanted somewhere to keep something would be told it asked for nothing. Taking the red
         // zone away makes every local show up as bytes, and bytes are what gets refused.
-        red_zone: flags.red_zone && !naked,
+        //
+        // Nor in an interrupt handler, whose convention says there is none for the reason
+        // [`rucc_target::CallRegs::interrupted`] gives.
+        red_zone: flags.red_zone && !naked && interrupt.is_none(),
         // Two registers to a push on a machine with an instruction for it, which is `stp` on
         // AArch64, and one at a time on x86-64, which has none.
         pairs: machine.insts.pair.is_some(),
@@ -785,6 +829,15 @@ pub fn compile_recording(
         // this function has not put anything in yet, and a leaf that keeps its locals down there
         // stays a leaf. gcc leaves it alone too.
         leaf: base.leaf && guard.is_none() && profile != Profile::Late,
+        saves_all,
+        // What comes back comes back in the general purpose registers, since a function that
+        // saves everything has had the other files taken away above, and one register to a value
+        // in the order the convention hands them out.
+        returned: {
+            let returns = machine.conv.int_returns;
+            &returns[..source.signature().returns.len().min(returns.len())]
+        },
+        interrupt,
         ..base
     };
 

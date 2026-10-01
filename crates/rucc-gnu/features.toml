@@ -595,11 +595,11 @@ notes = "x86-64 and AArch64. Replaces `-fzero-call-used-regs=` for one function.
 name = "no_caller_saved_registers"
 kind = "attribute"
 gcc_version = "7.0"
-status = "unimplemented"
+status = "implemented"
 answer = "error"
 used_by = ["linux"]
-tests = []
-notes = "Refused with E0753 rather than ignored, since dropping it is wrong code. `tests/accept/a-function-that-saves-every-register.c` checks that."
+tests = ["rucc::a_function_that_saves_every_register_puts_back_what_it_writes", "rucc::a_function_that_saves_every_register_and_calls_saves_every_caller_saved_one"]
+notes = "x86-64 only, as with gcc, and refused with E0753 on every other target rather than ignored. The function saves every general purpose register it writes, the ones a callee may usually write included, except the one its value comes back in, and a call in it saves all of them since the callee may write any. No tail call is made out of one. The vector registers and the x87 stack are not saved, which is gcc's answer too: a function of this kind that would use one is refused with E0786 unless `-mgeneral-regs-only` or a `target` attribute took them away."
 
 [[feature]]
 name = "target"
@@ -632,11 +632,11 @@ notes = "Only `no-strict-aliasing` and `no-stack-protector` are honoured, spelle
 name = "interrupt"
 kind = "attribute"
 gcc_version = "4.3"
-status = "unimplemented"
+status = "implemented"
 answer = "error"
 used_by = ["linux"]
-tests = []
-notes = "Refused with E0753 rather than ignored, since dropping it is wrong code. `tests/accept/an-interrupt-handler.c` checks that."
+tests = ["rucc::an_interrupt_handler_returns_with_iretq", "rucc::an_interrupt_handler_with_an_error_code_takes_it_off_before_returning", "rucc::an_interrupt_handler_that_calls_clears_the_direction_flag", "rucc::an_interrupt_handler_is_checked_the_way_gcc_checks_it", "rucc::an_interrupt_handler_is_refused_on_a_target_without_one"]
+notes = "x86-64 only, as with gcc, and refused with E0753 on every other target rather than ignored. The handler takes a pointer to the interrupt frame and optionally a word sized integer error code, returns `void`, saves every register it writes, has no red zone, clears the direction flag before it calls anything and returns with `iretq`, taking the error code off the stack first when it had one. A wrong signature, `naked` on one and a direct call to one are E0785 with gcc's wording, and one that would use the vector registers or the x87 stack is E0786, as gcc's sorry is."
 
 [[feature]]
 name = "used"

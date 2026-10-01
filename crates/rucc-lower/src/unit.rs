@@ -934,6 +934,14 @@ impl Unit<'_> {
         if naked {
             func.attrs.set |= AttrSet::NAKED;
         }
+        // Facts about the body as well, written in the same places, and read by the code generator
+        // for what is saved around the body and how it goes back. See `rucc_codegen::frame`.
+        if node.flags.contains(DeclFlags::INTERRUPT) {
+            func.attrs.set |= AttrSet::INTERRUPT;
+        }
+        if node.flags.contains(DeclFlags::SAVES_ALL) {
+            func.attrs.set |= AttrSet::SAVES_ALL;
+        }
         // Also a fact about the body, read by the frame when `-pg` asks for a hook in every
         // function but this one.
         if untraced {

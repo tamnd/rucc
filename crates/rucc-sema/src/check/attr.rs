@@ -258,8 +258,13 @@ impl Checker<'_> {
             let Some(row) = rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) else {
                 continue;
             };
+            // The two attributes about saving the machine are implemented for x86-64 alone, so
+            // everywhere else they are what the row would have said before they were. See
+            // [`Self::handler`].
+            let elsewhere = matches!(row.name, "interrupt" | "no_caller_saved_registers")
+                && self.cx.target.tuple.arch().as_str() != "x86_64";
             if row.answer != Answer::Error
-                || matches!(row.status, Status::Implemented | Status::Partial)
+                || (matches!(row.status, Status::Implemented | Status::Partial) && !elsewhere)
             {
                 continue;
             }
@@ -1145,6 +1150,158 @@ impl Checker<'_> {
         })
     }
 
+    /// What the attribute lists say about how much of the machine the function puts back, as
+    /// [`DeclFlags::INTERRUPT`] and [`DeclFlags::SAVES_ALL`], with gcc's checks of where they
+    /// were written.
+    ///
+    /// `__attribute__((interrupt))` and `__attribute__((no_caller_saved_registers))`, under the
+    /// namespace test [`Self::never_returns`] is under and through the same unarmouring. Only
+    /// x86-64 reads them, and on every other target this leaves them alone for
+    /// [`Self::refuse_unimplemented_attributes`] to refuse, since a handler compiled as an ordinary
+    /// function returns with the wrong instruction.
+    ///
+    /// On something that is not a function either is gcc's warning and nothing else. On a function,
+    /// `interrupt` asks for the signature the processor calls a handler with, which gcc checks
+    /// on every declaration in the order this does: a pointer to the frame it pushed first, an
+    /// optional error code the width of a register second, nothing else, and no value back. A
+    /// naked handler is refused as well, because the attribute's whole job is the prologue and the
+    /// epilogue `naked` says not to write. `naked` is whether the same declaration said that.
+    pub(in crate::check) fn handler(
+        &mut self,
+        lists: &[AttrList],
+        ty: TypeId,
+        naked: bool,
+    ) -> DeclFlags {
+        if self.cx.target.tuple.arch().as_str() != "x86_64" {
+            return DeclFlags::NONE;
+        }
+        let ast = self.ast;
+        let mut flags = DeclFlags::NONE;
+        for &list in lists {
+            for &attr in &ast[list] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                    continue;
+                }
+                let (name, flag) = match self.gnu_name(&attr) {
+                    "interrupt" => ("interrupt", DeclFlags::INTERRUPT),
+                    "no_caller_saved_registers" => {
+                        ("no_caller_saved_registers", DeclFlags::SAVES_ALL)
+                    }
+                    _ => continue,
+                };
+                let TypeKind::Function(function) = self.types.kind(self.types.canonical(ty)) else {
+                    self.not_a_function(name, attr.span);
+                    continue;
+                };
+                if flag == DeclFlags::INTERRUPT {
+                    self.interrupt_signature(function, naked, attr.span);
+                }
+                flags |= flag;
+            }
+        }
+        flags
+    }
+
+    /// gcc's checks of the signature of a function written `__attribute__((interrupt))`, in gcc's
+    /// order and gcc's words.
+    ///
+    /// The processor pushes a frame and calls the handler with nothing in a register, so what the
+    /// handler takes is where that frame is and, for the exceptions that push one, the error code
+    /// under it. The code is a word wide, so the second parameter is a 64 bit integer, signed or
+    /// not; gcc names `unsigned long int` because that is what it suggests writing, and an
+    /// enumeration or a `_Bool` is not an integer type in its sense. An unprototyped declaration
+    /// takes nothing, which is the third complaint.
+    fn interrupt_signature(&mut self, function: FunctionId, naked: bool, span: Span) {
+        let signature = self.types.signature(function).clone();
+        if let Some(&frame) = signature.params.first() {
+            if !rucc_types::is_pointer(&self.types, frame) {
+                let what = "interrupt service routine should have a pointer as the first argument";
+                self.report(Diagnostic::error(what, span).with_code("E0785"));
+            }
+        }
+        if let Some(&code) = signature.params.get(1) {
+            let word = matches!(
+                self.types.kind(self.types.canonical(code)),
+                TypeKind::Int(
+                    IntKind::Long | IntKind::ULong | IntKind::LongLong | IntKind::ULongLong
+                )
+            );
+            if !word {
+                let what = "interrupt service routine should have 'unsigned long int' as the second argument";
+                self.report(Diagnostic::error(what, span).with_code("E0785"));
+            }
+        }
+        if signature.params.is_empty() || signature.params.len() > 2 {
+            let what = "interrupt service routine can only have a pointer argument and an optional \
+                        integer argument";
+            self.report(Diagnostic::error(what, span).with_code("E0785"));
+        }
+        if !rucc_types::is_void(&self.types, signature.ret) {
+            let what = "interrupt service routine must return 'void'";
+            self.report(Diagnostic::error(what, span).with_code("E0785"));
+        }
+        if naked {
+            let what = "interrupt and naked attributes are not compatible";
+            self.report(Diagnostic::error(what, span).with_code("E0785"));
+        }
+    }
+
+    /// Refuses the definition of a function that saves the general purpose registers it touches
+    /// and nothing else, when it is built for registers it does not save.
+    ///
+    /// An interrupt handler and a `no_caller_saved_registers` function promise to give back every
+    /// register they were handed as it was, and what this compiler puts back is the general
+    /// purpose ones. A body that may reach for a vector register or the x87 stack could break that
+    /// promise without anything in the source saying so, which is why gcc says sorry for one unless
+    /// the function is built without them, by `-mgeneral-regs-only` or a `target` attribute saying
+    /// `general-regs-only`. Its words, naming the first of the three the function may still use,
+    /// and calling a handler that takes an error code an exception service routine. `isa` and
+    /// `x87` are what the function is built for, its own `target` attribute included.
+    ///
+    /// The order the three are asked in is gcc's, which is not the same for the two attributes. A
+    /// handler names SSE first. A `no_caller_saved_registers` function names MMX first and then the
+    /// x87 stack, and gcc does not ask about SSE for it at all, because it saves the vector
+    /// registers of one of those in its prologue. This compiler does not, so it asks about SSE last
+    /// and in the same words, which is a refusal gcc does not make, and only on a command line that
+    /// took MMX and the x87 stack away and left SSE, which is not one the kernel uses.
+    pub(in crate::check) fn handler_registers(
+        &mut self,
+        flags: DeclFlags,
+        ty: TypeId,
+        isa: Isa,
+        x87: bool,
+        span: Span,
+    ) {
+        let interrupt = flags.contains(DeclFlags::INTERRUPT);
+        if !interrupt && !flags.contains(DeclFlags::SAVES_ALL) {
+            return;
+        }
+        let has = |name: &str| rucc_target::Feature::named(name).is_some_and(|it| isa.has(it));
+        let (sse, mmx) = (has("sse"), has("mmx"));
+        let used = match (interrupt, sse, mmx, x87) {
+            (true, true, _, _) => "SSE",
+            (_, _, true, _) => "MMX/3Dnow",
+            (_, _, _, true) => "80387",
+            (false, true, _, _) => "SSE",
+            _ => return,
+        };
+        let what = if interrupt {
+            let exception = match self.types.kind(self.types.canonical(ty)) {
+                TypeKind::Function(function) => self.types.signature(function).params.len() == 2,
+                _ => false,
+            };
+            let kind = if exception { "exception" } else { "interrupt" };
+            format!("{used} instructions aren't allowed in an {kind} service routine")
+        } else {
+            format!(
+                "{used} instructions aren't allowed in a function with the \
+                 'no_caller_saved_registers' attribute"
+            )
+        };
+        let help = "build it with '-mgeneral-regs-only' or '__attribute__((target(\"general-regs-only\")))'";
+        self.report(Diagnostic::error(what, span).with_code("E0786").help(help, span));
+    }
+
     /// Whether an attribute list says a call to this function may come back more than once.
     ///
     /// `__attribute__((returns_twice))`, under the namespace test [`Self::never_returns`] is under
@@ -1305,7 +1462,11 @@ impl Checker<'_> {
     /// function with `target("+crc")` call the intrinsics in `<arm_acle.h>`. Nothing in them is
     /// refused, since none of them was before. Every other target has strings of its own and
     /// nothing here reads them.
-    pub(in crate::check) fn targeted(&mut self, lists: &[AttrList]) -> Option<Isa> {
+    ///
+    /// The `bool` beside the extensions is whether the function may use the x87 stack, which is
+    /// the unit's answer unless an x86-64 string said `80387`, `no-80387` or `general-regs-only`.
+    /// See [`Target::x87`].
+    pub(in crate::check) fn targeted(&mut self, lists: &[AttrList]) -> Option<(Isa, bool)> {
         let x86 = match self.cx.target.tuple.arch().as_str() {
             "x86_64" => true,
             "aarch64" => false,
@@ -1351,7 +1512,13 @@ impl Checker<'_> {
                 }
             }
         }
-        (said && !refused).then(|| if x86 { target.over(self.cx.isa) } else { arm })
+        (said && !refused).then(|| {
+            if x86 {
+                (target.over(self.cx.isa), target.x87(self.cx.x87))
+            } else {
+                (arm, self.cx.x87)
+            }
+        })
     }
 
     /// What an attribute list promises a call to this function does.

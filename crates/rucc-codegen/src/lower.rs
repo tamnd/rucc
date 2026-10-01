@@ -6802,6 +6802,10 @@ impl<'a> Lowering<'a> {
     /// finishes an `alloca`.
     fn arrive(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let params = self.source[block].params.clone();
+        if self.source.attrs.set.contains(AttrSet::INTERRUPT) {
+            self.arrive_interrupted(out, &params);
+            return Ok(());
+        }
         // The type of each is the block's answer and what the ABI asks of it is the signature's,
         // and the two lists are the same list: a parameter the classification turned into a
         // pointer is a pointer in the block too. A block with more parameters than the signature
@@ -6870,6 +6874,36 @@ impl<'a> Lowering<'a> {
         }
         self.stack.arguments.extend(arrived.stack);
         Ok(())
+    }
+
+    /// The parameters of an x86 interrupt handler, which no register brought.
+    ///
+    /// What the processor pushes before it jumps to a handler is the interrupt frame, five words
+    /// that start with the address to go back to, and for some exceptions one more word below it
+    /// with an error code in it. The first parameter is the address of the frame and the optional
+    /// second one is the error code, so both are found in memory just under the bottom of where an
+    /// ordinary function's stack arguments would be. The convention [`crate::pipeline`] swaps in
+    /// for a handler counts the error code as part of its return address, which puts that bottom
+    /// sixteen bytes above the entry stack pointer when there is a code and eight when there is not.
+    /// Either way the frame starts eight bytes under it and the code sixteen bytes under it.
+    ///
+    /// So the first is a `lea` and the second a load, and both wait on the same list a parameter
+    /// the registers ran out before waits on, at a distance of nothing, because [`crate::finish`]
+    /// adds where the caller's area is to the displacement written here and that is the same sum.
+    fn arrive_interrupted(&mut self, out: mir::Block, params: &[Value]) {
+        let gpr = self.conv.int_class;
+        let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), gpr);
+        let lea = self.named(self.selector.frame.lea);
+        let load = (self.selector.abi.load)(Type::int(64)).expect("a load of a whole register");
+        let load = mir::Opcode::new(self.names.intern(load));
+        for (index, &param) in params.iter().enumerate().take(2) {
+            let reg = self.out.new_vreg(gpr);
+            let (opcode, disp) = if index == 0 { (lea, -8) } else { (load, -16) };
+            let mem = mir::Mem { disp, ..mir::Mem::at(sp) };
+            let made = self.out.build(out, opcode).def(reg, gpr).mem(mem).finish();
+            self.stack.arguments.push((made, 0));
+            self.regs[param.index()] = Some(reg);
+        }
     }
 
     /// The prologue of a variadic function, which is every argument register it was handed written

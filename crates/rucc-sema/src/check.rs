@@ -127,6 +127,11 @@ pub struct Context<'a> {
     /// attribute adds, and a call to an `always_inline` function built for more than its caller
     /// is refused, the way gcc refuses it. See `check/attr.rs`.
     pub isa: Isa,
+    /// Whether the unit may use the x87 stack, which `-mno-80387` and `-mgeneral-regs-only` turn
+    /// off. Kept apart from [`Context::isa`] because it is not an extension, and read only by the
+    /// check that an `interrupt` handler touches no register it does not save. See
+    /// `check/attr.rs`.
+    pub x87: bool,
 }
 
 impl<'a> Context<'a> {
@@ -149,6 +154,7 @@ impl<'a> Context<'a> {
             ms_extensions: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
+            x87: true,
         }
     }
 

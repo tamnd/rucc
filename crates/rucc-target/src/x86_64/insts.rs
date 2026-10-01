@@ -2229,6 +2229,13 @@ pub static INSTS: &[(&str, Form)] = &[
     // A return that takes that many bytes of arguments with it, which only i386 writes: its
     // callee takes the address a result goes back through off the stack.
     ("ret_pop", RetPop),
+    // The return from an interrupt, which a function written `__attribute__((interrupt))` ends
+    // with and nothing else produces. Its own name rather than `ret`'s, so the passes that send a
+    // `ret` through a thunk leave it alone. See `FrameInsts::iret`.
+    ("iret", Ret),
+    // The direction flag cleared, which an interrupt handler's prologue writes before it calls
+    // anything and nothing else produces.
+    ("cld", Nop),
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
     ("mfence", Barrier),
@@ -2559,7 +2566,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 765);
+        assert_eq!(described, 767);
     }
 
     #[test]

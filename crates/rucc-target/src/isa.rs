@@ -613,6 +613,11 @@ pub struct Target {
     default: bool,
     /// How many options were read, which `default` needs to be alone among.
     options: usize,
+    /// What the list said about the x87 stack, which `80387` and `no-80387` say directly and
+    /// `general-regs-only` says along with the two vector extensions, and nothing when it said
+    /// nothing. It is not an extension in an [`Isa`], because the command line keeps it apart as
+    /// well, and the one reader is the check an `interrupt` handler is under. See [`Target::x87`].
+    x87: Option<bool>,
 }
 
 /// Why a `target` attribute string was refused, which is one of gcc's three messages for it.
@@ -647,6 +652,9 @@ impl fmt::Display for TargetRefusal {
 /// its name and whether a `no-` may stand in front of it. They choose how code is tuned or how
 /// floating point is done, which this compiler has one answer to, so each is accepted and has no
 /// effect.
+///
+/// `80387` and `general-regs-only` are read for one thing before they get here, which is what they
+/// say about the x87 stack and, for the second, the two vector extensions. See [`Target::option`].
 const PLAIN_OPTIONS: &[(&str, bool)] = &[
     ("80387", true),
     ("fancy-math-387", true),
@@ -704,11 +712,24 @@ impl Target {
             return self.valued(option, key, value, negated);
         }
         if let Some(&(_, negatable)) = PLAIN_OPTIONS.iter().find(|(known, _)| *known == name) {
-            return if negated && !negatable {
-                Err(TargetRefusal::Negated(name.to_owned()))
-            } else {
-                Ok(())
-            };
+            if negated && !negatable {
+                return Err(TargetRefusal::Negated(name.to_owned()));
+            }
+            // Nothing but the general purpose registers is what `-mgeneral-regs-only` is on the
+            // command line: no MMX, no SSE and nothing after it, and no x87 stack. gcc reads the
+            // attribute the same way, and an `interrupt` handler is where it matters, since a
+            // handler that may touch a register it does not save is one gcc refuses.
+            match name {
+                "80387" => self.x87 = Some(!negated),
+                "general-regs-only" => {
+                    self.x87 = Some(false);
+                    for off in ["no-mmx", "no-sse"] {
+                        self.choices.read(off).expect("both are extensions this knows");
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
         }
         self.choices.read(option).map_err(|_| TargetRefusal::Unknown(option.to_owned()))
     }
@@ -752,6 +773,16 @@ impl Target {
     pub fn over(&self, unit: Isa) -> Isa {
         let base = self.arch.map_or(unit, |arch| arch.union(unit));
         self.choices.over(base)
+    }
+
+    /// Whether the function may use the x87 stack, given whether the rest of the unit may.
+    ///
+    /// The last of `80387`, `no-80387` and `general-regs-only` in the list decides, and a list
+    /// naming none of them leaves the unit's answer, which `-mno-80387` and `-mgeneral-regs-only`
+    /// on the command line decide.
+    #[must_use]
+    pub fn x87(&self, unit: bool) -> bool {
+        self.x87.unwrap_or(unit)
     }
 }
 
@@ -966,8 +997,32 @@ mod tests {
         assert!(attribute(&["arch=x86-64-v2"], base).unwrap().covers(v2));
         assert_eq!(attribute(&["arch=haswell,no-avx"], base).unwrap(), base);
         let plain = "tune=generic,fpmath=sse+387,prefer-vector-width=256,cld,no-cld,80387,\
-                     general-regs-only,no-arch=x86-64,mwait";
+                     no-arch=x86-64,mwait";
         assert_eq!(attribute(&[plain], base).unwrap(), base.union(Isa::of(&["mwait"])));
+    }
+
+    /// `general-regs-only` is the command line's `-mgeneral-regs-only` for one function: no MMX,
+    /// no SSE and nothing built over it, and no x87 stack, which `80387` and `no-80387` say
+    /// alone. The last one written wins, and a list naming none of them keeps the unit's answer.
+    #[test]
+    fn an_attribute_saying_general_registers_only_turns_off_the_vectors_and_the_x87_stack() {
+        let base = Isa::baseline();
+        let mut target = Target::new();
+        target.read("general-regs-only").unwrap();
+        let isa = target.over(base);
+        for name in ["mmx", "sse", "sse2"] {
+            assert!(!isa.has(Feature::named(name).unwrap()), "{name}");
+        }
+        assert!(!target.x87(true));
+        target.read("80387").unwrap();
+        assert!(target.x87(false));
+        let mut target = Target::new();
+        target.read("no-80387").unwrap();
+        assert!(!target.x87(true));
+        assert_eq!(target.over(base), base);
+        let mut target = Target::new();
+        target.read("popcnt").unwrap();
+        assert!(target.x87(true) && !target.x87(false));
     }
 
     #[test]
