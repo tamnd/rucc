@@ -765,6 +765,9 @@ pub struct Profile {
     /// The `.gcda` file the counters of this unit are written to, which the driver fills in for
     /// each job from the object's name, the working directory and `-fprofile-dir=`.
     pub counts: Option<String>,
+    /// Whether the graph the counters are on is written to a `.gcno` file beside the object, from
+    /// `-ftest-coverage`.
+    pub notes: bool,
 }
 
 /// Which functions get a stack protector, which is what the `-fstack-protector` family asks.

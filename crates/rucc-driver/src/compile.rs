@@ -134,6 +134,9 @@ pub struct Compiled {
     /// and is gone once it returns. Empty when the flag was not given and for every compilation
     /// that stopped before the back end.
     pub stack_usage: String,
+    /// The `.gcno` file `-ftest-coverage` asked for, already written out, for the same reason the
+    /// `.su` file is. Empty when there is none to write.
+    pub note: Vec<u8>,
 }
 
 /// The intermediate text a compilation went through, kept when `-save-temps` asked for it.
@@ -326,6 +329,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Zero when nothing instruments, which is the truthful summary of a file built without
     // `-fsafety`: no checks went in, so none is standing, and every call it makes is unmodelled.
     let mut instrumented = Instrumented::default();
+    let mut counted = Vec::new();
     if !parse_failed {
         let mut checker = Checker::new(
             &parsed.ast,
@@ -478,6 +482,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     &mut sess.interner,
                                     &sess.target,
                                     opts,
+                                    &mut counted,
                                 )
                             })
                             .map(|done| instrumented = done)
@@ -608,6 +613,23 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     } else {
         String::new()
     };
+    let note = match &opts.profile_data.counts {
+        Some(counts) if opts.profile_data.notes && errors == 0 => {
+            let cwd = std::env::current_dir().unwrap_or_default().display().to_string();
+            let mut place = |span: Span| {
+                let at = (!span.is_dummy()).then(|| sess.sources.presumed(span.lo)).flatten()?;
+                Some((at.name.to_owned(), at.line, at.column))
+            };
+            rucc_opt::coverage::note(
+                &coverage(opts, &sess.target, counts),
+                &counted,
+                &sess.interner,
+                &cwd,
+                &mut place,
+            )
+        }
+        _ => Vec::new(),
+    };
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
     clock.passes(passes);
@@ -625,6 +647,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         temps,
         timing,
         stack_usage,
+        note,
     }
 }
 
@@ -691,6 +714,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         temps: Temps::default(),
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),
+        note: Vec::new(),
     }
 }
 
@@ -748,26 +772,11 @@ fn instrument(
     names: &mut Interner,
     target: &TargetInfo,
     opts: &Options,
+    counted: &mut Vec<rucc_opt::coverage::Counted>,
 ) -> Result<Instrumented, Vec<Diagnostic>> {
     // First, so that the counters see the program as written and none of the checks below.
-    if let Some(counts) = opts.profile_data.counts.as_ref().filter(|_| opts.profile_data.arcs) {
-        let (ctor, dtor) = match target.object_format {
-            rucc_target::ObjectFormat::Elf => {
-                (Some(".init_array.00101"), Some(".fini_array.00101"))
-            }
-            rucc_target::ObjectFormat::Coff => (Some(".CRT$XCU"), None),
-            rucc_target::ObjectFormat::MachO => {
-                (Some("__DATA,__mod_init_func,mod_init_funcs"), None)
-            }
-            rucc_target::ObjectFormat::Wasm => (None, None),
-        };
-        let coverage = rucc_opt::coverage::Coverage {
-            counts: counts.clone(),
-            gnuc: (opts.gnuc.major, opts.gnuc.minor),
-            ctor: ctor.map(str::to_owned),
-            dtor: dtor.map(str::to_owned),
-        };
-        rucc_opt::coverage::run(module, names, &coverage);
+    if let Some(counts) = &opts.profile_data.counts {
+        *counted = rucc_opt::coverage::run(module, names, &coverage(opts, target, counts));
         if let Err(errors) = rucc_ir::verify(module, names) {
             return Err(errors
                 .iter()
@@ -801,6 +810,24 @@ fn instrument(
             .iter()
             .map(|e| internal(&format!("invalid IR after check insertion, {e}")))
             .collect()),
+    }
+}
+
+/// What `-fprofile-arcs` and `-ftest-coverage` are told about the unit, from the line and the
+/// target, the `.gcda` name being the driver's.
+fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::coverage::Coverage {
+    let (ctor, dtor) = match target.object_format {
+        rucc_target::ObjectFormat::Elf => (Some(".init_array.00101"), Some(".fini_array.00101")),
+        rucc_target::ObjectFormat::Coff => (Some(".CRT$XCU"), None),
+        rucc_target::ObjectFormat::MachO => (Some("__DATA,__mod_init_func,mod_init_funcs"), None),
+        rucc_target::ObjectFormat::Wasm => (None, None),
+    };
+    rucc_opt::coverage::Coverage {
+        counts: counts.to_owned(),
+        count: opts.profile_data.arcs,
+        gnuc: (opts.gnuc.major, opts.gnuc.minor),
+        ctor: ctor.map(str::to_owned),
+        dtor: dtor.map(str::to_owned),
     }
 }
 
@@ -2045,6 +2072,7 @@ fn failure(message: String) -> Compiled {
         temps: Temps::default(),
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),
+        note: Vec::new(),
     }
 }
 

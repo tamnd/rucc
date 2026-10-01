@@ -334,6 +334,11 @@ pub struct Job {
     /// The same auxiliary base as `stack_usage` with `.gcda` on the end, as the path is written
     /// into the object; the driver makes it absolute before the compile sees it.
     pub counts: Option<String>,
+    /// Where the graph of the counters goes, from `-ftest-coverage`, or `None`.
+    ///
+    /// The same auxiliary base again, with `.gcno` on the end, and left as it is since it is a
+    /// file this compilation writes rather than one it names for a program to write later.
+    pub note: Option<String>,
 }
 
 impl Job {
@@ -741,6 +746,7 @@ impl Plan {
                     aux_base: None,
                     stack_usage: None,
                     counts: None,
+                    note: None,
                 });
                 continue;
             }
@@ -764,6 +770,7 @@ impl Plan {
                     aux_base: None,
                     stack_usage: None,
                     counts: None,
+                    note: None,
                 });
                 continue;
             };
@@ -850,7 +857,10 @@ impl Plan {
                 let named = output.filter(|o| *o != "-");
                 format!("{}.su", aux_base(opts, &input.path, named, collecting || syntax, alone))
             });
-            let counts = (opts.profile_data.arcs
+            // With `-ftest-coverage` alone as well, since the note carries the stamp the record would
+            // and the two are made from this name.
+            let counted = opts.profile_data.arcs || opts.profile_data.notes;
+            let counts = (counted
                 && backed
                 && !syntax
                 && kind != InputKind::Ir
@@ -859,6 +869,10 @@ impl Plan {
                 let named = output.filter(|o| *o != "-");
                 format!("{}.gcda", aux_base(opts, &input.path, named, collecting, alone))
             });
+            let note = counts
+                .as_ref()
+                .filter(|_| opts.profile_data.notes)
+                .map(|counts| format!("{}.gcno", counts.strip_suffix(".gcda").unwrap_or(counts)));
             jobs.push(Job {
                 input: input.path.clone(),
                 kind,
@@ -867,6 +881,7 @@ impl Plan {
                 aux_base: aux,
                 stack_usage,
                 counts,
+                note,
             });
         }
 

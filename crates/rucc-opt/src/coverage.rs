@@ -30,6 +30,7 @@
 //! them.
 
 use rucc_base::{Idx, Interner, Symbol};
+use rucc_diag::Span;
 use rucc_ir::{
     AttrSet, Block, BlockCall, Datum, Extra, Func, FuncId, Global, Imm, Inst, InstData, Linkage,
     MemInfo, MemOrder, Module, Opcode, Reloc, Restrict, Signature, Type, Value,
@@ -40,6 +41,9 @@ use rucc_ir::{
 pub struct Coverage {
     /// The `.gcda` file the counts are written to, as the record holds it.
     pub counts: String,
+    /// Whether the counters go in, which is `-fprofile-arcs`. Without it there is only the graph,
+    /// for a `.gcno` file from `-ftest-coverage` alone.
+    pub count: bool,
     /// The gcc version the unit claims to be built by, as `__GNUC__` and `__GNUC_MINOR__`. The
     /// record's layout and its version word follow it, because the runtime reading the record was
     /// built for the same version the headers were told about. The kernel's `gcc_4_7.c` picks its
@@ -77,6 +81,14 @@ impl Coverage {
         }
     }
 
+    /// The number the record and the `.gcno` file share, which is how gcov knows the counts it
+    /// reads are for the graph it read. A hash of where the counts go, so that a build that does
+    /// not change does not change it either.
+    #[must_use]
+    pub fn stamp(&self) -> u32 {
+        crc32(self.counts.as_bytes(), 0)
+    }
+
     /// Whether the record has the checksum gcc 12 put after the stamp.
     #[must_use]
     pub fn checksum(&self) -> bool {
@@ -100,6 +112,8 @@ pub struct Counted {
     pub lineno_checksum: u32,
     /// A hash of the shape of its graph, which the `.gcno` file repeats too.
     pub cfg_checksum: u32,
+    /// The graph the counters were put on, which is what the `.gcno` file describes.
+    pub graph: Graph,
 }
 
 /// Puts counters in every function this module defines and the record and constructor beside
@@ -123,19 +137,68 @@ pub fn run(module: &mut Module, names: &mut Interner, coverage: &Coverage) -> Ve
         if module.lookup(array).is_some() {
             continue;
         }
-        let (count, cfg_checksum) = instrument(&mut module[id], array);
+        let (count, cfg_checksum, graph) = instrument(&mut module[id], array, coverage.count);
         let ident = u32::try_from(counted.len() + 1).unwrap_or(u32::MAX);
+        let lineno_checksum = crc32(spelled.as_bytes(), 0);
+        counted.push(Counted {
+            func: name,
+            array,
+            count,
+            ident,
+            lineno_checksum,
+            cfg_checksum,
+            graph,
+        });
+        if !coverage.count {
+            continue;
+        }
         let mut global = Global::new(array, 8 * u64::from(count), 8);
         global.linkage = Linkage::Internal;
         global.init = Some(module.push_data(&[Datum::Zero(8 * u64::from(count))]));
         module.add_global(global);
-        let lineno_checksum = crc32(spelled.as_bytes(), 0);
-        counted.push(Counted { func: name, array, count, ident, lineno_checksum, cfg_checksum });
     }
-    if !counted.is_empty() {
+    if coverage.count && !counted.is_empty() {
         record(module, names, coverage, &counted);
     }
     counted
+}
+
+/// The graph of one function as gcov reads it from the `.gcno` file.
+///
+/// The nodes are gcc's: the entry node is 0, the exit node is 1, and the blocks follow in layout
+/// order from 2. The arcs are in the order their counters were handed out, which is the order gcov
+/// hands the counts back to the arcs off the tree, so the two files agree without either saying
+/// which counter is which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Graph {
+    /// How many nodes, the entry and exit nodes included.
+    pub blocks: u32,
+    /// Every arc, grouped by where it leaves from.
+    pub arcs: Vec<Arc>,
+    /// Where each block's instructions came from, in order, for the blocks that have any.
+    pub spans: Vec<(u32, Vec<Span>)>,
+    /// Where the function's name is written, which is where gcov says it starts.
+    pub named: Span,
+}
+
+/// One arc of a [`Graph`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arc {
+    /// The node it leaves.
+    pub from: u32,
+    /// The node it goes to.
+    pub to: u32,
+    /// [`Arc::TREE`], [`Arc::FAKE`] and [`Arc::FALL`], as gcc spells them in the file.
+    pub flags: u32,
+}
+
+impl Arc {
+    /// On the spanning tree, so it has no counter and its count is worked out from the others.
+    pub const TREE: u32 = 1;
+    /// Into the exit node from a block that never returns, which no branch takes.
+    pub const FAKE: u32 = 2;
+    /// To the next block in layout order.
+    pub const FALL: u32 = 4;
 }
 
 /// A node of the graph the tree is built over.
@@ -172,14 +235,39 @@ struct Edge {
     calls: Vec<Idx<BlockCall>>,
 }
 
-/// Counts the edges of one function, and says how many counters it took and a hash of its graph.
-fn instrument(func: &mut Func, array: Symbol) -> (u32, u32) {
+/// Counts the edges of one function, and says how many counters it took, a hash of its graph and
+/// the graph.
+fn instrument(func: &mut Func, array: Symbol, bumps: bool) -> (u32, u32, Graph) {
     // A node for each block, numbered in layout order from two, after the entry and exit nodes.
     let blocks: Vec<Block> = func.blocks().collect();
     let mut node = vec![usize::MAX; blocks.iter().map(|b| b.index() + 1).max().unwrap_or(0)];
     for (n, block) in blocks.iter().enumerate() {
         node[block.index()] = n + 2;
     }
+    // Before any increment goes in, though those take the span of what they sit in front of, so
+    // that a block of its own on an edge does not turn up as a block the file never heard of.
+    let spans = blocks
+        .iter()
+        .enumerate()
+        .map(|(n, &block)| {
+            // A jump that starts before the rest of the block carries the span of the statement
+            // around it and is no line of its own: the jump out of the arm of an `if` would
+            // otherwise put the condition's line in a block that runs less often than the
+            // condition does, and gcov would mark the line as partly run. A `break`, `continue` or
+            // `goto` starts where it is written, which is a line gcc counts.
+            let all =
+                func.insts(block).map(|inst| (func[inst].opcode == Opcode::Jump, func.span(inst)));
+            let all = all.filter(|(_, s)| !s.is_dummy()).collect::<Vec<_>>();
+            let first = all.iter().filter(|(jump, _)| !jump).map(|(_, s)| s.lo).min();
+            let seen = all
+                .into_iter()
+                .filter(|&(jump, s)| !jump || first.is_none_or(|first| s.lo >= first))
+                .map(|(_, s)| s)
+                .collect::<Vec<_>>();
+            (u32::try_from(n + 2).unwrap_or(u32::MAX), seen)
+        })
+        .filter(|(_, seen)| !seen.is_empty())
+        .collect();
     let mut edges = vec![Edge { from: ENTRY, to: 2, kind: Kind::Enter, calls: Vec::new() }];
     for &block in &blocks {
         let Some(term) = func.terminator(block) else { continue };
@@ -234,6 +322,30 @@ fn instrument(func: &mut Func, array: Symbol) -> (u32, u32) {
             checksum = crc32(&u32::try_from(end).unwrap_or(u32::MAX).to_le_bytes(), checksum);
         }
     }
+    let arcs = edges
+        .iter()
+        .enumerate()
+        .map(|(i, edge)| {
+            let mut flags = 0;
+            if tree[i] || edge.from < 2 {
+                flags |= Arc::TREE;
+            }
+            if edge.to == EXIT && edge.kind == Kind::Fixed {
+                flags |= Arc::FAKE;
+            }
+            if edge.from == ENTRY || (edge.to == edge.from + 1 && edge.to != EXIT) {
+                flags |= Arc::FALL;
+            }
+            let node = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            Arc { from: node(edge.from), to: node(edge.to), flags }
+        })
+        .collect();
+    let graph = Graph {
+        blocks: u32::try_from(blocks.len() + 2).unwrap_or(u32::MAX),
+        arcs,
+        spans,
+        named: func.named,
+    };
     let mut count = 0_u32;
     for (i, edge) in edges.iter().enumerate() {
         // The edge out of the entry node is always on the tree, being the first one it takes
@@ -243,6 +355,9 @@ fn instrument(func: &mut Func, array: Symbol) -> (u32, u32) {
         }
         let slot = u64::from(count);
         count += 1;
+        if !bumps {
+            continue;
+        }
         let source = blocks[edge.from - 2];
         let term =
             func.terminator(source).expect("a block with an edge out of it ends in a branch");
@@ -260,7 +375,7 @@ fn instrument(func: &mut Func, array: Symbol) -> (u32, u32) {
             }
         }
     }
-    (count, checksum)
+    (count, checksum, graph)
 }
 
 /// Joins the sets two nodes are in, and says whether they were apart.
@@ -436,7 +551,7 @@ fn record(module: &mut Module, names: &mut Interner, coverage: &Coverage, counte
     global.constant = true;
     global.init = Some(module.push_data(&[Datum::Bytes(bytes)]));
     module.add_global(global);
-    let stamp = crc32(coverage.counts.as_bytes(), 0);
+    let stamp = coverage.stamp();
     let merge = declare(
         module,
         names,
@@ -497,6 +612,144 @@ fn record(module: &mut Module, names: &mut Interner, coverage: &Coverage, counte
     entry_in(module, names, dtor, section, pointer);
 }
 
+/// The `.gcno` file for the functions [`run`] counted, which is what `-ftest-coverage` writes.
+///
+/// The layout is gcc 13's, which gcc 15 still writes: a header of the magic, the version word, the
+/// stamp, a checksum of zero, the working directory and a flag saying a line can be partly run,
+/// then for each function a record naming it and where it is, the number of nodes, the arcs out of
+/// each node and the lines each block holds. Every record is a tag and a length in bytes. A string
+/// is its length with the terminator and then its bytes, except that gcc 12 counted the length in
+/// words and padded the bytes to one. A claim older than 12 gets 12's layout, since the records
+/// before it were counted in words as well and nothing here reads them.
+///
+/// `place` says which file, line and column a span is at, which only the driver knows.
+#[must_use]
+pub fn note(
+    coverage: &Coverage,
+    counted: &[Counted],
+    names: &Interner,
+    cwd: &str,
+    place: &mut dyn FnMut(Span) -> Option<(String, u32, u32)>,
+) -> Vec<u8> {
+    let words = coverage.gnuc.0 < 13;
+    let mut out = Note { bytes: Vec::new(), words };
+    out.word(0x6763_6e6f);
+    out.word(coverage.version());
+    out.word(coverage.stamp());
+    out.word(0);
+    out.string(Some(cwd));
+    out.word(1);
+    for function in counted {
+        let graph = &function.graph;
+        let start = place(graph.named);
+        let (file, line, column) = start.clone().unwrap_or_default();
+        // gcc's end is the closing brace, and the last place anything in the body came from is
+        // the nearest this has to it.
+        let end = graph
+            .spans
+            .iter()
+            .flat_map(|(_, spans)| spans)
+            .filter_map(|&span| place(span))
+            .filter(|(at, _, _)| *at == file)
+            .map(|(_, line, column)| (line, column))
+            .max()
+            .unwrap_or((line, column));
+        out.record(0x0100_0000, |out| {
+            out.word(function.ident);
+            out.word(function.lineno_checksum);
+            out.word(function.cfg_checksum);
+            out.string(Some(names.resolve(function.func)));
+            out.word(0);
+            out.string(Some(&file));
+            out.word(line);
+            out.word(column);
+            out.word(end.0);
+            out.word(end.1);
+        });
+        out.record(0x0141_0000, |out| out.word(graph.blocks));
+        for group in graph.arcs.chunk_by(|a, b| a.from == b.from) {
+            out.record(0x0143_0000, |out| {
+                out.word(group[0].from);
+                for arc in group {
+                    out.word(arc.to);
+                    out.word(arc.flags);
+                }
+            });
+        }
+        for (block, spans) in &graph.spans {
+            // The first block holds the line the function starts on as well, as in gcc, which is
+            // what puts a count beside the line with the name on it.
+            let first = (*block == 2).then(|| start.clone()).flatten();
+            let mut lines: Vec<(String, u32)> = Vec::new();
+            for (file, line, _) in first.into_iter().chain(spans.iter().filter_map(|&s| place(s))) {
+                if lines.last().is_none_or(|last| last.0 != file || last.1 != line) {
+                    lines.push((file, line));
+                }
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            out.record(0x0145_0000, |out| {
+                out.word(*block);
+                let mut current: Option<&str> = None;
+                for (file, line) in &lines {
+                    if current != Some(file.as_str()) {
+                        out.word(0);
+                        out.string(Some(file));
+                        current = Some(file);
+                    }
+                    out.word(*line);
+                }
+                out.word(0);
+                out.string(None);
+            });
+        }
+    }
+    out.bytes
+}
+
+/// A `.gcno` file as it is written.
+struct Note {
+    /// What is written so far.
+    bytes: Vec<u8>,
+    /// Whether lengths are counted in words, which is how gcc wrote them before 13.
+    words: bool,
+}
+
+impl Note {
+    /// A 32-bit number, in the byte order of the machine gcov runs on, which is the one the
+    /// compiler ran on in every build gcc supports.
+    fn word(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+
+    /// A string with its length in front, or the length zero for none.
+    fn string(&mut self, text: Option<&str>) {
+        let Some(text) = text else { return self.word(0) };
+        let length = u32::try_from(text.len() + 1).unwrap_or(u32::MAX);
+        if self.words {
+            self.word(length.div_ceil(4));
+            self.bytes.extend_from_slice(text.as_bytes());
+            let padded = self.bytes.len() + 1;
+            self.bytes.resize(padded.next_multiple_of(4), 0);
+        } else {
+            self.word(length);
+            self.bytes.extend_from_slice(text.as_bytes());
+            self.bytes.push(0);
+        }
+    }
+
+    /// A tag and its length in bytes, and then whatever `body` writes.
+    fn record(&mut self, tag: u32, body: impl FnOnce(&mut Self)) {
+        self.word(tag);
+        let at = self.bytes.len();
+        self.word(0);
+        body(self);
+        let length = u32::try_from(self.bytes.len() - at - 4).unwrap_or(u32::MAX);
+        self.bytes[at..at + 4].copy_from_slice(&length.to_ne_bytes());
+    }
+}
+
 /// What takes the address of a name.
 fn address(name: Symbol) -> InstData {
     InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) }
@@ -542,7 +795,13 @@ mod tests {
     use super::*;
 
     fn claiming(major: u32, minor: u32) -> Coverage {
-        Coverage { counts: "a.gcda".to_owned(), gnuc: (major, minor), ctor: None, dtor: None }
+        Coverage {
+            counts: "a.gcda".to_owned(),
+            count: true,
+            gnuc: (major, minor),
+            ctor: None,
+            dtor: None,
+        }
     }
 
     #[test]
@@ -563,6 +822,27 @@ mod tests {
         assert_eq!(claiming(9, 4).counters(), 9);
         assert!(claiming(12, 1).checksum());
         assert!(!claiming(11, 4).checksum());
+    }
+
+    #[test]
+    fn a_string_in_the_note_is_counted_in_bytes_from_gcc_13_and_in_words_before() {
+        let mut note = Note { bytes: Vec::new(), words: false };
+        note.string(Some("a.c"));
+        note.string(None);
+        let word = |bytes: &[u8]| u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(note.bytes.len(), 12);
+        assert_eq!(word(&note.bytes), 4);
+        assert_eq!(&note.bytes[4..8], b"a.c\0");
+        assert_eq!(word(&note.bytes[8..]), 0);
+        let mut note = Note { bytes: Vec::new(), words: true };
+        note.string(Some("main"));
+        assert_eq!(note.bytes.len(), 12);
+        assert_eq!(word(&note.bytes), 2);
+        assert_eq!(&note.bytes[4..], b"main\0\0\0\0");
+        // A record's length is in bytes and is filled in once its body is written.
+        let mut note = Note { bytes: Vec::new(), words: false };
+        note.record(0x0141_0000, |note| note.word(5));
+        assert_eq!(word(&note.bytes[4..]), 4);
     }
 
     #[test]
