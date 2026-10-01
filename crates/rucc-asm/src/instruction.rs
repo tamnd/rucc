@@ -1170,12 +1170,12 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
     // A jump or a call through a register or through memory, which is the same operand as any
     // other and a different instruction from a jump to a name. The star is how AT&T says which.
     if let Some(rest) = text.strip_prefix('*') {
-        // On i386 the place may be a bare name, `call *foo@GOT` being a call through a slot of the
-        // table at a fixed address, which is an address with no registers like any other there.
+        // The place may be a bare name, which is an address with no registers like any other.
+        // On i386 `call *foo@GOT` is a call through a slot of the table at a fixed address, and
+        // the kernel's paravirt calls before 6.5 are `call *pv_ops+16`, which gas writes as an
+        // absolute address on x86-64 as well.
         let mut inner = operand(rest.trim(), mode)?;
-        if mode == Mode::Bits32 {
-            outright(&mut inner, mode);
-        }
+        outright(&mut inner, mode);
         return match inner {
             it @ (Operand::Reg(_, _) | Operand::Mem(_, _)) => Ok(it),
             _ => Err(format!("'{text}' goes through something that is not a place")),
@@ -1914,6 +1914,10 @@ mod tests {
     fn a_bare_number_is_an_address_outright() {
         assert_eq!(bytes("movq %rax, 0"), [0x48, 0x89, 0x04, 0x25, 0, 0, 0, 0]);
         assert_eq!(bytes("movl %eax, 8"), [0x89, 0x04, 0x25, 0x08, 0, 0, 0]);
+        // Behind the star of a call or a jump as well, which is how the kernel's paravirt calls
+        // before 6.5 go through `pv_ops`.
+        assert_eq!(bytes("call *16"), [0xff, 0x14, 0x25, 0x10, 0, 0, 0]);
+        assert_eq!(bytes("jmp *8"), [0xff, 0x24, 0x25, 0x08, 0, 0, 0]);
     }
 
     #[test]
