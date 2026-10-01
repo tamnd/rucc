@@ -946,7 +946,7 @@ status = "implemented"
 targets = ["x86-64"]
 used_by = ["mingw-w64"]
 tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does, which is tamnd/rucc#2534."
 
 [[feature]]
 name = "fastcall"
@@ -956,7 +956,7 @@ status = "implemented"
 targets = ["x86-64"]
 used_by = ["mingw-w64"]
 tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does, which is tamnd/rucc#2534."
 
 [[feature]]
 name = "thiscall"
@@ -966,7 +966,7 @@ status = "implemented"
 targets = ["x86-64"]
 used_by = ["mingw-w64"]
 tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does, which is tamnd/rucc#2534."
 
 [[feature]]
 name = "regparm"
@@ -976,7 +976,7 @@ status = "implemented"
 targets = ["x86-64"]
 used_by = ["mingw-w64"]
 tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does, which is tamnd/rucc#2534."
 
 [[feature]]
 name = "vectorcall"
