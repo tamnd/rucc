@@ -225,9 +225,15 @@ impl Elsewhere {
         if pic == Pic::Absolute && copies && format == ObjectFormat::Elf {
             return Self::default();
         }
+        // A declared function marked hidden or protected is promised to be in this image, so the
+        // distance to it is one the linker has. The kernel's compressed loader is built `-fPIE`
+        // under `#pragma GCC visibility push(hidden)` and its link script asserts there is no
+        // `.got`, which a slot for `boot_page_fault` breaks. A weak one may still be nothing.
         let funcs = module.funcs().filter(|&id| {
             let func = &module[id];
-            func.is_declaration() || pic.replaceable(func.linkage, func.visibility)
+            (func.is_declaration()
+                && (func.visibility == Visibility::Default || func.linkage == Linkage::Weak))
+                || pic.replaceable(func.linkage, func.visibility)
         });
         // A weak variable nothing here defines is the one variable the copying above does not
         // cover, since there may be no definition anywhere to copy and then its address is null. The
@@ -472,6 +478,24 @@ mod tests {
         let module = module(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(elsewhere.holds(names.intern("exit")));
+    }
+
+    /// Hidden is a promise that the definition is in this image, which is what the kernel's
+    /// compressed loader relies on to link with no `.got`. A weak one may be nothing at all.
+    #[test]
+    fn a_hidden_function_this_file_only_declares_is_not_unless_it_is_weak() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut near = Func::new(names.intern("near"), Signature::new());
+        near.visibility = Visibility::Hidden;
+        module.add_func(near);
+        let mut maybe = Func::new(names.intern("maybe"), Signature::new());
+        maybe.visibility = Visibility::Hidden;
+        maybe.linkage = Linkage::Weak;
+        module.add_func(maybe);
+        let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
+        assert!(!elsewhere.holds(names.intern("near")));
+        assert!(elsewhere.holds(names.intern("maybe")));
     }
 
     #[test]
