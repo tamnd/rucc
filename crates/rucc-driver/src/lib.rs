@@ -3245,6 +3245,18 @@ fn report(done: &install::Installed, what: &str, say: &impl Fn(&str)) {
             ));
         }
     }
+    if !done.folded.is_empty() {
+        say(&format!(
+            "this filesystem does not tell case apart, so {} the file of a name that differs \
+             only in case, and an include of it reads that file: {}",
+            if done.folded.len() == 1 {
+                "one header was written over by"
+            } else {
+                "these headers were written over by"
+            },
+            done.folded.join(", ")
+        ));
+    }
     say(&format!("the {what}'s record digests to {}", done.digest));
 }
 
