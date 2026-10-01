@@ -1028,14 +1028,16 @@ impl Unit<'_> {
             func.attrs.set |= AttrSet::RETAIN;
         }
         // What a function said about zeroing registers on the way out, which overrides the
-        // command line for its body.
+        // command line for its body. Skip and the vector registers share a bit on the declaration,
+        // which the two questions tell apart, and have one each here.
         for (said, kept) in [
-            (DeclFlags::ZERO_SKIP, AttrSet::ZERO_SKIP),
-            (DeclFlags::ZERO_USED, AttrSet::ZERO_USED),
-            (DeclFlags::ZERO_ALL, AttrSet::ZERO_ALL),
-            (DeclFlags::ZERO_ARG, AttrSet::ZERO_ARG),
+            (node.flags.zero_skip(), AttrSet::ZERO_SKIP),
+            (node.flags.contains(DeclFlags::ZERO_USED), AttrSet::ZERO_USED),
+            (node.flags.contains(DeclFlags::ZERO_ALL), AttrSet::ZERO_ALL),
+            (node.flags.contains(DeclFlags::ZERO_ARG), AttrSet::ZERO_ARG),
+            (node.flags.zero_wide(), AttrSet::ZERO_WIDE),
         ] {
-            if node.flags.contains(said) {
+            if said {
                 func.attrs.set |= kept;
             }
         }

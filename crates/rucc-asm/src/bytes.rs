@@ -671,9 +671,11 @@ impl Assembler<'_> {
                         Value::Reg(self.phys(operands[usize::from(at)], spelled)?, Width::Byte)
                     }
                     Arg::High(at) => Value::High(self.phys(operands[usize::from(at)], spelled)?),
-                    // The only register named outright on this machine is the high half of the
-                    // first one, which an eight bit remainder comes back in.
-                    Arg::Named(_) => Value::High(RAX),
+                    // A register named outright is the high half of the first one, which an
+                    // eight bit remainder comes back in, or one of the registers only AVX-512
+                    // has, which nothing is allocated to and which only the zeroing in front of a
+                    // `ret` names: the top sixteen vector registers whole, and the eight masks.
+                    Arg::Named(name) => named(name),
                     // A depth on the x87 stack, which carries nothing across because there is
                     // nothing to carry: the depth is in the opcode byte the mnemonic picks, so
                     // what the encoder needs from here is that an argument was there at all.
@@ -925,6 +927,21 @@ pub(crate) fn slot(bytes: &[u8], mode: Mode) -> Reference {
         (false, _) => Reference::GotKept,
         (true, true) => Reference::Got,
         (true, false) => Reference::GotBare,
+    }
+}
+
+/// The value a register an instruction names outright is, which is `ah` unless it is one of the
+/// registers only AVX-512 has. See [`Arg::Named`].
+fn named(name: &str) -> Value {
+    let number = |prefix: &str| name.strip_prefix(prefix).and_then(|it| it.parse::<u8>().ok());
+    if let Some(number) = number("zmm") {
+        Value::Vector(number, x86_64::Length::Zmm)
+    } else if let Some(number) = number("xmm") {
+        Value::Vector(number, x86_64::Length::Xmm)
+    } else if let Some(number) = number("k") {
+        Value::Mask(number)
+    } else {
+        Value::High(RAX)
     }
 }
 

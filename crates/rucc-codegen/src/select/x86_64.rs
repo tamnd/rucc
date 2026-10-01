@@ -562,6 +562,22 @@ mod tests {
     /// call is still the rule that picked it, and the thunk is only where the branch is sent.
     const THUNKS: &[&str] = &["call_thunk", "call_thunk_cs", "jmp_thunk", "jmp_thunk_cs", "int3"];
 
+    /// The registers cleared in front of a `ret` under `-fzero-call-used-regs=` and the
+    /// `zero_call_used_regs` attribute.
+    ///
+    /// Exempt for the reason [`THUNKS`] is: the pass that writes them runs after the allocator and
+    /// puts them in front of a `ret` a frame already wrote, so no term is ever answered with one.
+    /// See `crate::zero`.
+    const ZEROING: &[&str] = &[
+        "vxorps_rr",
+        "vzeroall",
+        "zero_zmm_high",
+        "zero_xmm_high",
+        "zero_masks",
+        "fldz",
+        "fstp_top",
+    ];
+
     /// The instructions only the i386 frame and selector name. They are in the shared description
     /// because the two machines share one, and no x86-64 rule selects them.
     ///
@@ -1026,7 +1042,8 @@ mod tests {
             if AWAY.contains(&opcode) || MEMORY.contains(&opcode) || STRING.contains(&opcode) {
                 continue;
             }
-            if TEMPLATED.contains(&opcode) || THUNKS.contains(&opcode) {
+            if TEMPLATED.contains(&opcode) || THUNKS.contains(&opcode) || ZEROING.contains(&opcode)
+            {
                 continue;
             }
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {

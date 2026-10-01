@@ -211,6 +211,9 @@ impl AttrSet {
     pub const ZERO_ALL: Self = Self(1 << 24);
     /// Only the registers arguments are passed in are zeroed, from the choices ending in `-arg`.
     pub const ZERO_ARG: Self = Self(1 << 25);
+    /// The vector registers and the x87 stack are zeroed as well as the general purpose
+    /// registers, from the four `zero_call_used_regs` choices without `-gpr` in them.
+    pub const ZERO_WIDE: Self = Self(1 << 30);
     /// `__attribute__((interrupt))` on x86-64. The processor calls the function with its own frame
     /// on the stack, and an error code under it when the function takes two parameters, so every
     /// register it touches is saved, its parameters are found in that frame, and it goes back with
@@ -340,6 +343,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::ZERO_USED, "zero_used"),
     (AttrSet::ZERO_ALL, "zero_all"),
     (AttrSet::ZERO_ARG, "zero_arg"),
+    (AttrSet::ZERO_WIDE, "zero_wide"),
     (AttrSet::INTERRUPT, "interrupt"),
     (AttrSet::SAVES_ALL, "saves_all"),
     (AttrSet::RETAIN, "retain"),

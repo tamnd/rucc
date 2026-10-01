@@ -319,6 +319,59 @@ static STACK_AGAINST: [Arg; 2] = [Stack(1), Stack(0)];
 // The top on its own, which is what a pop that throws its value away names.
 static STACK_TOP: [Arg; 1] = [Stack(0)];
 
+// The registers AVX-512 added past the sixteen the register file has, which are the top sixteen
+// vector registers, by their `zmm` and their `xmm` names, and the eight masks. Nothing is ever allocated to one of them, so the only
+// thing that names them is the zeroing in front of a `ret` that `-fzero-call-used-regs=all` asks
+// for, and it names them outright, three times each, since gcc clears one by xoring it with
+// itself. See `rucc_codegen::zero`.
+macro_rules! named_thrice {
+    ($($name:ident = $register:literal),* $(,)?) => {
+        $(static $name: [Arg; 3] = [Named($register), Named($register), Named($register)];)*
+    };
+}
+named_thrice!(
+    ZMM16 = "zmm16",
+    ZMM17 = "zmm17",
+    ZMM18 = "zmm18",
+    ZMM19 = "zmm19",
+    ZMM20 = "zmm20",
+    ZMM21 = "zmm21",
+    ZMM22 = "zmm22",
+    ZMM23 = "zmm23",
+    ZMM24 = "zmm24",
+    ZMM25 = "zmm25",
+    ZMM26 = "zmm26",
+    ZMM27 = "zmm27",
+    ZMM28 = "zmm28",
+    ZMM29 = "zmm29",
+    ZMM30 = "zmm30",
+    ZMM31 = "zmm31",
+    K0 = "k0",
+    K1 = "k1",
+    K2 = "k2",
+    K3 = "k3",
+    K4 = "k4",
+    K5 = "k5",
+    K6 = "k6",
+    K7 = "k7",
+    XMM16 = "xmm16",
+    XMM17 = "xmm17",
+    XMM18 = "xmm18",
+    XMM19 = "xmm19",
+    XMM20 = "xmm20",
+    XMM21 = "xmm21",
+    XMM22 = "xmm22",
+    XMM23 = "xmm23",
+    XMM24 = "xmm24",
+    XMM25 = "xmm25",
+    XMM26 = "xmm26",
+    XMM27 = "xmm27",
+    XMM28 = "xmm28",
+    XMM29 = "xmm29",
+    XMM30 = "xmm30",
+    XMM31 = "xmm31",
+);
+
 // The other multiplicand, which is the one register a widening multiply names. Everything else it
 // touches is a fixed register the opcode carries as an operand, and it sits at the same index as a
 // division's divisor because the three operands in front of it are the same three: two answers and
@@ -1078,6 +1131,69 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ret_pop", &[spell("ret", &[Imm])]),
     ("iret", &[spell("iretq", &[])]),
     ("cld", &[spell("cld", &[])]),
+    // The vector registers cleared in front of a `ret`, which `-fzero-call-used-regs=` and the
+    // `zero_call_used_regs` attribute ask for and nothing else writes. The VEX forms are what a
+    // unit that may use AVX gets, since they clear the upper half of the `ymm` register too, and
+    // the last two are the registers only AVX-512 has. See `rucc_codegen::zero`.
+    ("vxorps_rr", &[spell("vxorps", &[Xmm(2), Xmm(1), Xmm(0)])]),
+    ("vzeroall", &[spell("vzeroall", &[])]),
+    (
+        "zero_zmm_high",
+        &[
+            spell("vpxord", &ZMM16),
+            spell("vpxord", &ZMM17),
+            spell("vpxord", &ZMM18),
+            spell("vpxord", &ZMM19),
+            spell("vpxord", &ZMM20),
+            spell("vpxord", &ZMM21),
+            spell("vpxord", &ZMM22),
+            spell("vpxord", &ZMM23),
+            spell("vpxord", &ZMM24),
+            spell("vpxord", &ZMM25),
+            spell("vpxord", &ZMM26),
+            spell("vpxord", &ZMM27),
+            spell("vpxord", &ZMM28),
+            spell("vpxord", &ZMM29),
+            spell("vpxord", &ZMM30),
+            spell("vpxord", &ZMM31),
+        ],
+    ),
+    // The same sixteen when AVX-512VL can name their low 128 bits, which is how gcc writes them
+    // then. Writing an `xmm` register with an EVEX instruction clears the rest of it as well.
+    (
+        "zero_xmm_high",
+        &[
+            spell("vxorps", &XMM16),
+            spell("vxorps", &XMM17),
+            spell("vxorps", &XMM18),
+            spell("vxorps", &XMM19),
+            spell("vxorps", &XMM20),
+            spell("vxorps", &XMM21),
+            spell("vxorps", &XMM22),
+            spell("vxorps", &XMM23),
+            spell("vxorps", &XMM24),
+            spell("vxorps", &XMM25),
+            spell("vxorps", &XMM26),
+            spell("vxorps", &XMM27),
+            spell("vxorps", &XMM28),
+            spell("vxorps", &XMM29),
+            spell("vxorps", &XMM30),
+            spell("vxorps", &XMM31),
+        ],
+    ),
+    (
+        "zero_masks",
+        &[
+            spell("kxorw", &K0),
+            spell("kxorw", &K1),
+            spell("kxorw", &K2),
+            spell("kxorw", &K3),
+            spell("kxorw", &K4),
+            spell("kxorw", &K5),
+            spell("kxorw", &K6),
+            spell("kxorw", &K7),
+        ],
+    ),
     ("mfence", &[spell("mfence", &[])]),
     // The four hints. One operand each and it is the address, the way `fldcw` above has one and it
     // is the address, and no width in the mnemonic because a hint is about a line rather than about
@@ -1358,6 +1474,12 @@ static TEXT: &[(&str, &[Written])] = &[
     // needs to know what format the bits are in.
     ("fchs", &[spell("fchs", &[])]),
     ("fabs", &[spell("fabs", &[])]),
+    // A zero pushed and the top thrown away, which is the whole of how the x87 stack is cleared
+    // in front of a `ret`: as many of the first as there are registers to clear, which fills each
+    // with a zero, and then as many of the second, which leaves the stack as empty as it was.
+    // Nothing else writes either. See `rucc_codegen::zero`.
+    ("fldz", &[spell("fldz", &[])]),
+    ("fstp_top", &[spell("fstp", &STACK_TOP)]),
     // Comparing two of them, which is the comparison, the pop that gets the second operand off the
     // stack, and the byte that reads the flags. Three instructions for the reason the vector
     // comparisons above are two: what passes between them is the flags, and the flags are not
@@ -1518,6 +1640,13 @@ pub fn machine(mnemonic: &str, args: &[Shape]) -> Option<&'static str> {
         // a frame by hand to serialize the processor. It stays text, as it was before the
         // compiler had a name for it.
         if name == "iret" {
+            continue;
+        }
+        // The zeroing in front of a `ret`, which says nothing about the registers it writes,
+        // because the only thing that writes one does so after the allocator is done. A template
+        // writing `vzeroall` or `fldz` writes a register the compiler has to be told about, so it
+        // stays text with its clobbers. See `rucc_codegen::zero`.
+        if matches!(name, "vzeroall" | "fldz" | "fstp_top" | "vxorps_rr") {
             continue;
         }
         // The high half on its own is the multiply that keeps both halves under another name,

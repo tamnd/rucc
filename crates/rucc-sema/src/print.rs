@@ -211,14 +211,14 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::UNINITIALIZED) {
             head.push_str(" uninitialized");
         }
-        if node.flags.contains(DeclFlags::ZERO_SKIP) {
+        if node.flags.zero_skip() {
             head.push_str(" zero_call_used_regs(skip)");
         }
-        for (flag, choice) in [(DeclFlags::ZERO_USED, "used-gpr"), (DeclFlags::ZERO_ALL, "all-gpr")]
-        {
+        for (flag, choice) in [(DeclFlags::ZERO_USED, "used"), (DeclFlags::ZERO_ALL, "all")] {
             if node.flags.contains(flag) {
+                let gpr = if node.flags.zero_wide() { "" } else { "-gpr" };
                 let arg = if node.flags.contains(DeclFlags::ZERO_ARG) { "-arg" } else { "" };
-                head.push_str(&format!(" zero_call_used_regs({choice}{arg})"));
+                head.push_str(&format!(" zero_call_used_regs({choice}{gpr}{arg})"));
             }
         }
         // Written under the name the attribute was written under rather than the name of the

@@ -1,9 +1,9 @@
 //! `-fzero-call-used-regs=` and the `zero_call_used_regs` attribute, end to end.
 //!
-//! Design: `spec/04-driver-and-cli.md` section 4.12, and tamnd/rucc#2281.
+//! Design: `spec/04-driver-and-cli.md` section 4.12, tamnd/rucc#2281 and tamnd/rucc#2335.
 //!
 //! What is compared is the run of clearing instructions in front of each `ret`, against what gcc
-//! 13 writes for the same function. The rest of the body is this compiler's own and is not the
+//! 16 writes for the same function on x86-64 and gcc 13 on AArch64. The rest of the body is this compiler's own and is not the
 //! same as gcc's, so the functions here are ones where both put their values in the same
 //! registers.
 
@@ -151,22 +151,164 @@ fn the_registers_are_cleared_before_the_return_thunk() {
     assert_eq!(cleared(&text, "f"), ["esi", "edi"], "{text}");
 }
 
-#[test]
-fn a_choice_that_clears_the_vector_registers_is_refused_with_its_issue() {
-    let dir = std::env::temp_dir().join(format!("rucc-zero-{}-vector", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
-    let path = dir.join("one.c");
-    let source = "__attribute__((zero_call_used_regs(\"used\"))) long u(long a) { return a; }\n";
-    std::fs::write(&path, source).expect("the fixture can be written");
-    let run = |flags: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_rucc"))
-            .args(["--target=x86_64-unknown-linux-gnu", "-nostdinc", "-S", "-o", "-"])
-            .args(flags)
-            .output()
-            .expect("the compiler is built before its own tests run")
+/// The epilogue of one function, from the first clearing instruction to the one before the last:
+/// every line that clears a register, a vector register, a mask or the x87 stack, in order.
+fn epilogue(text: &str, name: &str) -> Vec<String> {
+    let body = body(text, name);
+    let clears = |line: &&String| {
+        let x86 = ["xorl %", "pxor %", "vxorps %", "vpxord %", "kxorw %", "fldz", "fstp %st(0)"];
+        x86.iter().any(|start| line.starts_with(start))
+            || line == &"vzeroall"
+            || line.starts_with("movi v") && line.ends_with(".2d, #0")
+            || line.starts_with("mov x") && line.ends_with(", #0")
     };
-    let out = run(&[path.to_str().expect("a temporary path is text")]);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("tamnd/rucc#2335"));
+    let mut found: Vec<String> =
+        body[..body.len() - 1].iter().rev().take_while(clears).cloned().collect();
+    found.reverse();
+    found
+}
+
+/// The functions gcc 16 was asked about, each with what it does with floating point.
+const WIDE: &str = "\
+double hd(double);
+long f(long a, long b) { return a * b + 3; }
+double d(double a, double b) { return a * b; }
+long mix(long a, double b) { return a + (long)b; }
+long double q(long double a, long double b) { return a * b; }
+long double ld(long double a) { return a; }
+int qi(long double a) { return (int)a; }
+double k(double a) { return hd(a) + 1.0; }
+";
+
+/// `n` copies of `line`.
+fn times(n: usize, line: &str) -> Vec<String> {
+    vec![line.to_string(); n]
+}
+
+/// The x87 stack cleared but for `kept` registers, as gcc writes it.
+fn x87(kept: usize) -> Vec<String> {
+    let mut lines = times(8 - kept, "fldz");
+    lines.extend(times(8 - kept, "fstp %st(0)"));
+    lines
+}
+
+fn strings(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| line.to_string()).collect()
+}
+
+/// `used` clears the vector registers the body wrote and did not return, and the whole x87 stack
+/// when the body put something on it, but never what a call clobbered.
+#[test]
+fn used_clears_the_vector_registers_and_the_x87_stack_like_gcc_16() {
+    let text = asm("x86_64", "wide-used", &["-fzero-call-used-regs=used"], WIDE);
+    assert_eq!(epilogue(&text, "f"), ["xorl %esi, %esi", "xorl %edi, %edi"], "{text}");
+    assert_eq!(epilogue(&text, "d"), ["pxor %xmm1, %xmm1"], "{text}");
+    assert_eq!(epilogue(&text, "q"), x87(1), "{text}");
+    assert_eq!(epilogue(&text, "ld"), Vec::<String>::new(), "{text}");
+    // What else the two bodies use is their own, but the x87 stack is cleared whole.
+    assert_eq!(epilogue(&text, "qi")[..16], x87(0), "{text}");
+    let text = asm("x86_64", "wide-used-arg", &["-fzero-call-used-regs=used-arg"], WIDE);
+    assert_eq!(epilogue(&text, "d"), ["pxor %xmm1, %xmm1"], "{text}");
+    assert_eq!(epilogue(&text, "q"), Vec::<String>::new(), "{text}");
+}
+
+/// `all` clears the x87 stack first and then every register a call may clobber, in gcc's order.
+#[test]
+fn all_clears_every_register_in_the_order_gcc_16_does() {
+    let gprs = ["eax", "edx", "ecx", "esi", "edi", "r8d", "r9d", "r10d", "r11d"];
+    let every = |skip: &str, kept: usize| {
+        let mut lines = x87(kept);
+        for (at, gpr) in gprs.iter().enumerate() {
+            if *gpr != skip {
+                lines.push(format!("xorl %{gpr}, %{gpr}"));
+            }
+            let vectors = match at {
+                4 => 0..8,
+                8 => 8..16,
+                _ => 0..0,
+            };
+            for n in vectors.filter(|n| skip != format!("xmm{n}")) {
+                lines.push(format!("pxor %xmm{n}, %xmm{n}"));
+            }
+        }
+        lines
+    };
+    let text = asm("x86_64", "wide-all", &["-fzero-call-used-regs=all"], WIDE);
+    assert_eq!(epilogue(&text, "f"), every("eax", 0), "{text}");
+    assert_eq!(epilogue(&text, "d"), every("xmm0", 0), "{text}");
+    assert_eq!(epilogue(&text, "q"), every("", 1), "{text}");
+
+    let text = asm("x86_64", "wide-all-arg", &["-fzero-call-used-regs=all-arg"], WIDE);
+    let mut arg = strings(&["xorl %edx, %edx", "xorl %ecx, %ecx"]);
+    arg.extend(strings(&["xorl %esi, %esi", "xorl %edi, %edi"]));
+    arg.extend((0..8).map(|n| format!("pxor %xmm{n}, %xmm{n}")));
+    arg.extend(strings(&["xorl %r8d, %r8d", "xorl %r9d, %r9d"]));
+    assert_eq!(epilogue(&text, "f"), arg, "{text}");
+}
+
+/// With AVX the vector registers go all at once with `vzeroall` when none is returned, and
+/// AVX-512 adds the upper sixteen and the mask registers. The listing is gcc 16's for the same
+/// `-march=`.
+#[test]
+fn all_uses_vzeroall_and_clears_the_avx_512_registers_like_gcc_16() {
+    let flags = ["-fzero-call-used-regs=all", "-march=x86-64-v3"];
+    let text = asm("x86_64", "wide-avx", &flags, WIDE);
+    let mut f = strings(&["vzeroall"]);
+    f.extend(x87(0));
+    let rest = ["edx", "ecx", "esi", "edi", "r8d", "r9d", "r10d", "r11d"];
+    f.extend(rest.iter().map(|r| format!("xorl %{r}, %{r}")));
+    assert_eq!(epilogue(&text, "f"), f, "{text}");
+    let d = epilogue(&text, "d");
+    assert!(d.contains(&"vxorps %xmm1, %xmm1, %xmm1".to_string()), "{text}");
+    assert!(!d.iter().any(|line| line.contains("xmm0") || line == "vzeroall"), "{text}");
+
+    let flags = ["-fzero-call-used-regs=all", "-march=x86-64-v4"];
+    let text = asm("x86_64", "wide-avx512", &flags, WIDE);
+    let mut f = strings(&["vzeroall"]);
+    f.extend((16..32).map(|n| format!("vxorps %xmm{n}, %xmm{n}, %xmm{n}")));
+    f.extend(x87(0));
+    f.extend(rest.iter().map(|r| format!("xorl %{r}, %{r}")));
+    f.extend((0..8).map(|n| format!("kxorw %k{n}, %k{n}, %k{n}")));
+    assert_eq!(epilogue(&text, "f"), f, "{text}");
+}
+
+/// Without the x87 unit or the vector registers there is nothing of theirs to clear.
+#[test]
+fn a_unit_without_the_registers_does_not_clear_them() {
+    let source = "long f(long a, long b) { return a * b + 3; }\n";
+    let flags = ["-fzero-call-used-regs=all", "-mgeneral-regs-only"];
+    let text = asm("x86_64", "gpr-only", &flags, source);
+    let rest = ["edx", "ecx", "esi", "edi", "r8d", "r9d", "r10d", "r11d"];
+    let gprs: Vec<String> = rest.iter().map(|r| format!("xorl %{r}, %{r}")).collect();
+    assert_eq!(epilogue(&text, "f"), gprs, "{text}");
+}
+
+/// AArch64 clears `v0` to `v7` and `v16` to `v31` after the general purpose registers, and never
+/// the callee saved `v8` to `v15`.
+#[test]
+fn all_clears_the_vector_registers_on_aarch64_like_gcc() {
+    let text = asm("aarch64", "wide-used", &["-fzero-call-used-regs=used"], WIDE);
+    assert_eq!(epilogue(&text, "d"), ["movi v1.2d, #0"], "{text}");
+    let text = asm("aarch64", "wide-all", &["-fzero-call-used-regs=all"], WIDE);
+    let mut f: Vec<String> = (1..18).map(|n| format!("mov x{n}, #0")).collect();
+    f.extend((0..8).chain(16..32).map(|n| format!("movi v{n}.2d, #0")));
+    assert_eq!(epilogue(&text, "f"), f, "{text}");
+    let text = asm("aarch64", "wide-all-arg", &["-fzero-call-used-regs=all-arg"], WIDE);
+    let mut f: Vec<String> = (1..8).map(|n| format!("mov x{n}, #0")).collect();
+    f.extend((0..8).map(|n| format!("movi v{n}.2d, #0")));
+    assert_eq!(epilogue(&text, "f"), f, "{text}");
+}
+
+/// Every choice gcc 16 has is taken, so `__has_attribute` can answer as gcc does.
+#[test]
+fn every_choice_of_the_attribute_is_taken() {
+    let mut source = String::new();
+    for (at, choice) in ["used", "used-arg", "all", "all-arg"].iter().enumerate() {
+        source.push_str(&format!(
+            "__attribute__((zero_call_used_regs(\"{choice}\"))) long u{at}(long a) {{ return a; }}\n"
+        ));
+    }
+    let text = asm("x86_64", "every", &[], &source);
+    assert_eq!(epilogue(&text, "u0"), ["xorl %edi, %edi"], "{text}");
+    assert!(epilogue(&text, "u2").contains(&"pxor %xmm15, %xmm15".to_string()), "{text}");
 }
