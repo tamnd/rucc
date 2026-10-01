@@ -27,6 +27,7 @@
 //! staging directory is inside the cache so that the rename is a rename and not a copy, because
 //! the two paths are on one filesystem by construction.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -64,6 +65,9 @@ pub struct Installed {
     pub files: usize,
     /// What the destination held before this.
     pub before: Before,
+    /// The recorded files the filesystem could not keep apart from another one whose name differs
+    /// only in case, and which a compile cannot reach. Empty on a filesystem that keeps case.
+    pub folded: Vec<String>,
 }
 
 /// Check a file against the hash it is supposed to have.
@@ -194,12 +198,13 @@ fn install_staged(
         .iter()
         .map(|input| (input.path.as_str(), input.sha256.as_str()))
         .collect();
-    check(staging, &recorded).map_err(|why| err(format!("{}: {why}", archive.display())))?;
+    let folded =
+        check(staging, &recorded).map_err(|why| err(format!("{}: {why}", archive.display())))?;
 
     let digest = manifest.digest();
     let root = Sysroot::in_cache(cache, target).root().to_path_buf();
     let before = swap(staging, &root, &digest, existing(&root))?;
-    Ok(Installed { root, digest, files: recorded.len(), before })
+    Ok(Installed { root, digest, files: recorded.len(), before, folded })
 }
 
 /// The kernel tree's install, with the staging directory already made and cleaned up by the
@@ -216,12 +221,13 @@ fn install_kernel_staged(
 
     let recorded: Vec<(&str, &str)> =
         manifest.files().iter().map(|file| (file.path.as_str(), file.sha256.as_str())).collect();
-    check(staging, &recorded).map_err(|why| err(format!("{}: {why}", archive.display())))?;
+    let folded =
+        check(staging, &recorded).map_err(|why| err(format!("{}: {why}", archive.display())))?;
 
     let digest = manifest.digest();
     let root = Kernel::in_cache(cache);
     let before = swap(staging, &root, &digest, existing_kernel(&root))?;
-    Ok(Installed { root, digest, files: recorded.len(), before })
+    Ok(Installed { root, digest, files: recorded.len(), before, folded })
 }
 
 /// Where this install does its work.
@@ -257,7 +263,8 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), CliError> {
     Err(err(format!("`tar` could not unpack {}{detail}", archive.display())))
 }
 
-/// Check a tree against a record and the record against the tree.
+/// Check a tree against a record and the record against the tree, and say which recorded files
+/// the filesystem folded into another.
 ///
 /// The record is the path and the sha256 of every file, which is the part a sysroot's manifest and
 /// the kernel tree's have in common.
@@ -266,13 +273,33 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), CliError> {
 /// either the wrong artifact or a broken producer, and which of the two it is shows in how many
 /// files disagree, so a report that stopped at the first one would hide the thing that tells them
 /// apart.
-fn check(tree: &Path, files: &[(&str, &str)]) -> Result<(), String> {
+///
+/// The kernel's uapi headers have pairs whose names differ only in case, `xt_CONNMARK.h` and
+/// `xt_connmark.h` among them, and the default filesystem on macOS and Windows keeps one file for
+/// both. That is the host and not the artifact, so a pair the tree holds one file for passes when
+/// the file is one of the two the record names, and the other name comes back to be reported.
+fn check(tree: &Path, files: &[(&str, &str)]) -> Result<Vec<String>, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut recorded: Vec<&str> = Vec::new();
+    let mut folded: Vec<String> = Vec::new();
+
+    let mut found = Vec::new();
+    walk(tree, String::new(), &mut found).map_err(|why| format!("{}: {why}", tree.display()))?;
+    found.sort_unstable();
+    let present = |path: &str| found.binary_search_by(|other| other.as_str().cmp(path)).is_ok();
+
+    let mut cases: BTreeMap<String, Vec<(&str, &str)>> = BTreeMap::new();
+    for &(path, sha256) in files {
+        cases.entry(path.to_lowercase()).or_default().push((path, sha256));
+    }
 
     for &(path, sha256) in files {
         recorded.push(path);
-        let at = match relative(tree, path) {
+        let pair = &cases[&path.to_lowercase()];
+        let merged = pair.len() > 1 && !pair.iter().all(|&(name, _)| present(name));
+        // Through the name the tree kept, which is the one a compile on this host opens.
+        let kept = pair.iter().map(|&(name, _)| name).find(|&name| present(name));
+        let at = match relative(tree, if merged { kept.unwrap_or(path) } else { path }) {
             Ok(at) => at,
             Err(why) => {
                 problems.push(why);
@@ -282,10 +309,14 @@ fn check(tree: &Path, files: &[(&str, &str)]) -> Result<(), String> {
         match fs::read(&at) {
             Ok(bytes) => {
                 let found = sha256::hex(&bytes);
-                if found != sha256 {
-                    problems
-                        .push(format!("{path} has sha256 {found} where the record says {sha256}"));
+                if found == sha256 {
+                    continue;
                 }
+                if merged && pair.iter().any(|&(_, other)| other == found) {
+                    folded.push(path.to_owned());
+                    continue;
+                }
+                problems.push(format!("{path} has sha256 {found} where the record says {sha256}"));
             }
             Err(why) if why.kind() == io::ErrorKind::NotFound => {
                 problems.push(format!("{path} is in the record and not in the archive"));
@@ -294,8 +325,6 @@ fn check(tree: &Path, files: &[(&str, &str)]) -> Result<(), String> {
         }
     }
 
-    let mut found = Vec::new();
-    walk(tree, String::new(), &mut found).map_err(|why| format!("{}: {why}", tree.display()))?;
     recorded.sort_unstable();
     for path in &found {
         // The manifest is the record and is not a line in itself, which is the one file in a
@@ -309,7 +338,8 @@ fn check(tree: &Path, files: &[(&str, &str)]) -> Result<(), String> {
     }
 
     if problems.is_empty() {
-        return Ok(());
+        folded.sort();
+        return Ok(folded);
     }
     problems.sort();
     let first = &problems[0];
@@ -919,11 +949,29 @@ mod tests {
         let manifest = manifest_for(FILES);
         let recorded: Vec<(&str, &str)> =
             manifest.inputs().iter().map(|i| (i.path.as_str(), i.sha256.as_str())).collect();
-        assert_eq!(check(&tree.0, &recorded), Ok(()));
+        assert_eq!(check(&tree.0, &recorded), Ok(Vec::new()));
         // An empty directory is not a file and is not a disagreement, which is what a tree that
         // went through `tar` on one host and not another looks like.
         std::fs::create_dir_all(tree.0.join("lib/empty")).expect("a directory");
-        assert_eq!(check(&tree.0, &recorded), Ok(()));
+        assert_eq!(check(&tree.0, &recorded), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_pair_the_filesystem_keeps_one_file_for_passes_and_is_reported() {
+        // What `tar` leaves on macOS for the kernel's `xt_CONNMARK.h` and `xt_connmark.h`, written
+        // as one file so that the test means the same on a filesystem that keeps case.
+        let tree = Tree::new("folded");
+        tree.write("include/xt_connmark.h", "struct real;\n");
+        tree.write("manifest", "rucc sysroot manifest 3\n");
+        let real = sha256::hex(b"struct real;\n");
+        let stub = sha256::hex(b"#include <xt_connmark.h>\n");
+        let recorded = [("include/xt_CONNMARK.h", stub.as_str()), ("include/xt_connmark.h", &real)];
+        assert_eq!(check(&tree.0, &recorded), Ok(vec!["include/xt_CONNMARK.h".to_owned()]));
+
+        // A file that is neither of the two is still a disagreement.
+        tree.write("include/xt_connmark.h", "struct other;\n");
+        let why = check(&tree.0, &recorded).expect_err("neither file");
+        assert!(why.contains("has sha256") && why.contains("1 more files disagree"), "{why}");
     }
 
     #[test]
@@ -935,6 +983,7 @@ mod tests {
             digest: "0".repeat(64),
             files: 3,
             before: Before::Nothing,
+            folded: Vec::new(),
         };
         assert_eq!(made.files, 3);
         assert_eq!(made.before, Before::Nothing);
