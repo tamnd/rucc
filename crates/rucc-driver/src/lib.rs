@@ -262,7 +262,7 @@ options:
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
-  -fprofile-use[=<path>] -fprofile-dir=<dir> -fprofile-arcs   read, and counted for gcov
+  -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
@@ -1812,13 +1812,22 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.profile_data.arcs = false;
                 link.gcov = false;
             }
+            // The graph the counters are on, written to a `.gcno` beside the object for gcov to
+            // read the `.gcda` against. `--coverage` is both of these, and `-lgcov` on the link.
+            "-ftest-coverage" => opts.profile_data.notes = true,
+            "-fno-test-coverage" => opts.profile_data.notes = false,
+            "--coverage" => {
+                opts.profile_data.arcs = true;
+                opts.profile_data.notes = true;
+                link.gcov = true;
+            }
             // The rest of the writing half, which is refused rather than taken and is the same line
             // `-gsplit-dwarf` falls on the far side of. Ignoring these means a file a build declared
-            // as an output never appears: `-ftest-coverage` writes a `.gcno` beside the object and
-            // `-fprofile-generate` adds value counters to the arcs, and a two stage build that got
-            // neither would go on to optimize against counts that are not there and report coverage
-            // of nothing, with nothing along the way saying so.
-            "--coverage" | "-fcondition-coverage" | "-fpath-coverage" | "-fprofile-generate" => {
+            // as an output never appears: `-fprofile-generate` adds value counters to the arcs and
+            // the other two count conditions and paths, and a two stage build that got none of
+            // them would go on to optimize against counts that are not there and report coverage of
+            // nothing, with nothing along the way saying so.
+            "-fcondition-coverage" | "-fpath-coverage" | "-fprofile-generate" => {
                 return Err(err(format!(
                     "{arg}: this compiler does not instrument for profiling, and a build that \
                      expects the counts a run of the instrumented program writes would optimize \
@@ -1830,13 +1839,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     "{arg}: this compiler does not instrument for profiling, and a build that \
                      expects the counts a run of the instrumented program writes would optimize \
                      against nothing on its second pass, see spec/04-driver-and-cli.md"
-                )));
-            }
-            "-ftest-coverage" => {
-                return Err(err(format!(
-                    "{arg}: this compiler writes no `.gcno` file beside the object, and a build \
-                     that expects one would wait for a file that never arrives, see \
-                     spec/04-driver-and-cli.md"
                 )));
             }
             // The rest of the family describes instrumentation that is refused above, so what is
@@ -1863,7 +1865,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
             }
             "-fprofile-values" | "-fno-profile-values" | "-fprofile-info-section" => {}
-            "-fno-test-coverage" | "-fno-profile-generate" => {}
+            "-fno-profile-generate" => {}
             _ if arg.starts_with("-fprofile-filter-files=")
                 || arg.starts_with("-fprofile-exclude-files=")
                 || arg.starts_with("-fprofile-note=") => {}
@@ -3637,6 +3639,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         // Before it as well, because gcc leaves an empty report for a file that did not compile
         // and a build that looks for one beside every object should find one.
         failed |= !write_stack_usage(job, &result.stack_usage, &mut stderr);
+        failed |= !write_note(job, &result.note, &mut stderr);
         if result.failed() {
             failed = true;
             continue;
@@ -3790,6 +3793,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             }
             failed |= !write_temps(job, &result.temps, &mut stderr);
             failed |= !write_stack_usage(job, &result.stack_usage, &mut stderr);
+            failed |= !write_note(job, &result.note, &mut stderr);
             if result.failed() {
                 failed = true;
                 continue;
@@ -3955,6 +3959,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             }
             failed |= !write_temps(plan_job, &result.temps, &mut stderr);
             failed |= !write_stack_usage(plan_job, &result.stack_usage, &mut stderr);
+            failed |= !write_note(plan_job, &result.note, &mut stderr);
             if result.failed() {
                 failed = true;
                 continue;
@@ -4205,6 +4210,17 @@ fn counted<'a>(opts: &'a Options, job: &Job) -> std::borrow::Cow<'a, Options> {
     let mut opts = opts.clone();
     opts.profile_data.counts = Some(path);
     std::borrow::Cow::Owned(opts)
+}
+
+/// Writes the `.gcno` file `-ftest-coverage` asked for, unless the compilation stopped before
+/// there was a graph to describe, which gcc leaves no file for either.
+fn write_note(job: &Job, bytes: &[u8], stderr: &mut impl std::io::Write) -> bool {
+    let Some(path) = job.note.as_ref().filter(|_| !bytes.is_empty()) else { return true };
+    if let Err(e) = std::fs::write(path, bytes) {
+        let _ = writeln!(stderr, "rucc: error: {path}: {e}");
+        return false;
+    }
+    true
 }
 
 fn write_stack_usage(job: &Job, text: &str, stderr: &mut impl std::io::Write) -> bool {
@@ -7425,20 +7441,25 @@ mod tests {
         for writing in [
             "-fprofile-generate",
             "-fprofile-generate=/build/profiles",
-            "--coverage",
             "-fcondition-coverage",
             "-fpath-coverage",
         ] {
             let failed = refused(&[writing, "-c", "a.c"]);
             assert!(failed.contains("instrument"), "{writing}: {failed}");
         }
-        assert!(refused(&["-ftest-coverage", "-c", "a.c"]).contains(".gcno"), "it names the file");
 
-        // The negative spellings of the refused half are what already happens, so they are taken.
-        for taken in ["-fno-profile-generate", "-fno-test-coverage"] {
-            let (opts, _) = compile(&[taken, "-c", "a.c"]);
-            assert!(!opts.profile_data.requested, "{taken} asks for nothing");
-        }
+        // The note, and `--coverage`, which is both and the library.
+        let (opts, _) = compile(&["-ftest-coverage", "-c", "a.c"]);
+        assert!(opts.profile_data.notes && !opts.profile_data.arcs);
+        let (opts, _) = compile(&["-ftest-coverage", "-fno-test-coverage", "-c", "a.c"]);
+        assert!(!opts.profile_data.notes);
+        let (opts, _) = compile(&["--coverage", "-c", "a.c"]);
+        assert!(opts.profile_data.notes && opts.profile_data.arcs);
+        assert!(linking(&["--coverage", "a.c"]).0.gcov);
+
+        // The negative spelling of the refused half is what already happens, so it is taken.
+        let (opts, _) = compile(&["-fno-profile-generate", "-c", "a.c"]);
+        assert!(!opts.profile_data.requested, "it asks for nothing");
 
         // And the flags that describe the instrumentation that is refused above, which are checked
         // and dropped. Checked because a typo is worth finding here rather than on the day the

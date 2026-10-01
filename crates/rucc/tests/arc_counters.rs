@@ -144,3 +144,46 @@ fn turning_the_counters_back_off_gives_the_object_nobody_asked_for() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The 32-bit words of a `.gcno` file from where it starts, in the order the host wrote them.
+fn words(bytes: &[u8]) -> Vec<u32> {
+    bytes.chunks_exact(4).map(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]])).collect()
+}
+
+#[test]
+fn coverage_writes_the_note_beside_the_object_and_test_coverage_alone_counts_nothing() {
+    let dir = dir("notes");
+    std::fs::create_dir_all(dir.join("out")).expect("a directory can be made");
+    std::fs::write(dir.join("a.c"), "int f(int x) {\n  return x ? 1 : 2;\n}\n")
+        .expect("the fixture can be written");
+    let target = "--target=x86_64-unknown-linux-gnu";
+    let (ok, said) =
+        run(&dir, &[target, "-fgnuc-version=13.3", "--coverage", "-c", "a.c", "-o", "out/x.o"]);
+    assert!(ok, "{said}");
+    let note = std::fs::read(dir.join("out/x.gcno")).expect("the note is beside the object");
+    // The magic, gcc 13.3's version word, the stamp, a checksum of zero, and then the working
+    // directory as a length in bytes and the bytes, which is what gcov 13 reads.
+    let head = words(&note[..20]);
+    assert_eq!(head[0], 0x6763_6e6f);
+    assert_eq!(head[1].to_be_bytes(), *b"B33*");
+    assert_eq!(head[3], 0);
+    let cwd = dir.display().to_string();
+    assert_eq!(head[4] as usize, cwd.len() + 1);
+    assert_eq!(&note[20..20 + cwd.len()], cwd.as_bytes());
+    // The function's record, by its name and the file it is in.
+    for name in [&b"f\0"[..], b"a.c\0"] {
+        assert!(note.windows(name.len()).any(|w| w == name), "the note names {name:?}");
+    }
+    // The stamp is the one the record in the object holds, which is how gcov pairs them.
+    let object = std::fs::read(dir.join("out/x.o")).expect("the object was written");
+    assert!(object.windows(4).any(|w| w == head[2].to_ne_bytes()), "the stamps differ");
+
+    // The graph without the counters.
+    let (ok, said) = run(&dir, &[target, "-ftest-coverage", "-c", "a.c", "-o", "out/y.o"]);
+    assert!(ok, "{said}");
+    assert!(dir.join("out/y.gcno").exists(), "no note");
+    let object = std::fs::read(dir.join("out/y.o")).expect("the object was written");
+    let init = b"__gcov_init";
+    assert!(!object.windows(init.len()).any(|w| w == init), "nothing is counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}

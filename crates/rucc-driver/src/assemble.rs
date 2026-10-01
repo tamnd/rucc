@@ -104,5 +104,6 @@ fn done(
         temps,
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),
+        note: Vec::new(),
     }
 }

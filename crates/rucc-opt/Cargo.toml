@@ -28,16 +28,14 @@ rucc-abi = { workspace = true }
 rucc-base = { workspace = true }
 rucc-cost = { workspace = true }
 rucc-ir = { workspace = true }
+# For the spans `coverage` keeps of every block it counts, which the driver turns into the lines of
+# the `.gcno` file.
+rucc-diag = { workspace = true }
 rucc-session = { workspace = true }
 rucc-target = { workspace = true }
 
 # The rule compiler, which turns `rules/*.rules` into the table `src/rules` includes. A build
 # dependency and never an ordinary one, per spec/18-package-layout.md section 18.2: it is build
 # tooling, it is outside the layer stack, and nothing it holds is in the compiler that ships.
-# `rucc-diag` for the spans a test gives the instructions it builds, to see where the inliner puts
-# the lines of what it copies.
-[dev-dependencies]
-rucc-diag = { workspace = true }
-
 [build-dependencies]
 rucc-rules = { workspace = true }

@@ -60,16 +60,14 @@ const TAKEN: [&str; 20] = [
     "-fprofile-note=a.gcno",
 ];
 
-/// Every spelling that is refused, with the word the refusal has to contain. The first five ask
-/// for an instrumented program and the last writes a file beside the object. `-fprofile-arcs` is
-/// not here because it is done, see `arc_counters.rs`.
-const REFUSED: [(&str, &str); 6] = [
+/// Every spelling that is refused, with the word the refusal has to contain. Each asks for an
+/// instrumented program. `-fprofile-arcs`, `-ftest-coverage` and `--coverage` are not here
+/// because they are done, see `arc_counters.rs`.
+const REFUSED: [(&str, &str); 4] = [
     ("-fprofile-generate", "instrument"),
     ("-fprofile-generate=counts", "instrument"),
-    ("--coverage", "instrument"),
     ("-fcondition-coverage", "instrument"),
     ("-fpath-coverage", "instrument"),
-    ("-ftest-coverage", ".gcno"),
 ];
 
 /// A directory of this test's own, with the source already in it.
@@ -126,8 +124,7 @@ fn asking_to_write_one_is_refused_and_writes_no_object_and_no_file() {
         assert!(!dir.join("never.o").exists(), "{spelling} wrote an object anyway");
     }
 
-    // Nothing in the family writes the coverage note this compiler was asked for and refused,
-    // which is the file the refusal is about.
+    // Nothing refused writes a coverage note or counts either.
     let left: Vec<_> = std::fs::read_dir(&dir)
         .expect("the fixture is there")
         .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
