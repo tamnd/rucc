@@ -151,7 +151,7 @@
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
-use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Start, Value, ValueList};
+use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, Value, ValueList};
 
 use crate::frontier::Frontiers;
 use crate::header_copy::{clone_into, repeatable};
@@ -726,33 +726,93 @@ pub fn decided_towards(
     ways.iter().any(|&(before, at)| {
         before != block
             && from(before)
-            && goes(func, &edges, term, bind(func, block, at), before, arm, 4)
+            && goes(func, &edges, term, bind(func, block, at), (before, at), arm, 4)
     })
 }
 
-/// Whether `term` goes to `arm` under `subst`, or under it as some way into `from` carries on.
+/// Whether `term` goes to `arm` under `subst` once control has come along `way`, or as some way
+/// into the block that edge leaves carries on.
+///
+/// Two things can decide it. One is a value `subst` binds, as above. The other is the branch at the
+/// end of the block the edge leaves, which says its condition was true or false, so a test of the
+/// same condition is decided. That is `for (i = 0; i < n; i++) if (...) break; if (i < n) ...`,
+/// where the way out of the loop that did not break already knows `i < n` is false.
 fn goes(
     func: &Func,
     edges: &Edges,
     term: Inst,
     subst: Bindings,
-    from: Block,
+    way: (Block, Idx<BlockCall>),
     arm: Block,
     depth: u32,
 ) -> bool {
     if let Some(call) = taken(func, term, &subst) {
         return call.block == arm;
     }
+    let (from, at) = way;
+    if let Some(call) = implied(func, term, &subst, from, at) {
+        return call.block == arm;
+    }
     let only_jumps = func.insts(from).all(|inst| func[inst].opcode == Opcode::Jump);
-    if depth == 0 || !only_jumps || func[from].params.is_empty() {
+    if depth == 0 || !only_jumps {
         return false;
     }
     let Some(ways) = edges.get(&from) else { return false };
     ways.iter().any(|&(before, at)| {
         let inner = bind(func, from, at);
         let next = subst.iter().map(|(&param, &v)| (param, inner.get(&v).copied().unwrap_or(v)));
-        before != from && goes(func, edges, term, next.collect(), before, arm, depth - 1)
+        before != from && goes(func, edges, term, next.collect(), (before, at), arm, depth - 1)
     })
+}
+
+/// Where `term`, a `br_if`, goes when control came along edge `at` out of `from` and `from` ends
+/// in a `br_if` on the same condition, which that edge says the value of.
+fn implied(
+    func: &Func,
+    term: Inst,
+    subst: &Bindings,
+    from: Block,
+    at: Idx<BlockCall>,
+) -> Option<BlockCall> {
+    let before = func.terminator(from)?;
+    if func[term].opcode != Opcode::BrIf || func[before].opcode != Opcode::BrIf {
+        return None;
+    }
+    let Extra::Targets(out) = func[before].extra else { return None };
+    let [yes, no] = func[out] else { return None };
+    if yes.block == no.block {
+        return None;
+    }
+    let held = func.target_list(before).iter().position(|it| it == at)? == 0;
+    let known = *func[func[before].args].first()?;
+    let asked = *func[func[term].args].first()?;
+    let asked = subst.get(&asked).copied().unwrap_or(asked);
+    if !same_test(func, asked, known, subst) {
+        return None;
+    }
+    let Extra::Targets(targets) = func[term].extra else { return None };
+    func[targets].get(usize::from(!held)).copied()
+}
+
+/// Whether two conditions are one, either the same value or the same comparison of the same two
+/// values once `subst` has said what the first one's operands stand for.
+fn same_test(func: &Func, asked: Value, known: Value, subst: &Bindings) -> bool {
+    if asked == known {
+        return true;
+    }
+    let (Def::Result { inst: a, .. }, Def::Result { inst: k, .. }) =
+        (func[asked].def, func[known].def)
+    else {
+        return false;
+    };
+    if func[a].opcode != Opcode::ICmp || func[k].opcode != Opcode::ICmp {
+        return false;
+    }
+    if func[a].extra != func[k].extra {
+        return false;
+    }
+    let ours = func[func[a].args].iter().map(|v| subst.get(v).copied().unwrap_or(*v));
+    ours.eq(func[func[k].args].iter().copied())
 }
 
 /// Every block that defines a value read from somewhere other than itself.
@@ -980,6 +1040,48 @@ mod tests {
 
         assert!(super::decided_towards(&func, join, yes, |_| true));
         assert!(super::decided_towards(&func, join, no, |_| true));
+    }
+
+    /// `if (i < n)` after a loop, reached from the loop's own exit test `i < n` through a block
+    /// that only jumps on. The exit was taken when the test was false, so the join goes to its
+    /// false arm. A way in from a branch on something else decides nothing.
+    #[test]
+    fn a_way_out_of_a_branch_on_the_same_test_says_which_arm() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let i = func.append_param(entry, Type::int(32));
+        let n = func.append_param(entry, Type::int(32));
+        let other = func.append_param(entry, Type::int(1));
+        let exit = func.create_block();
+        let side = func.create_block();
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        let yes = func.create_block();
+        let no = func.create_block();
+        let looped = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let test = build.icmp(IntPred::Slt, i, n);
+        build.br_if(test, looped, &[], exit, &[]);
+        let mut build = Builder::new(&mut func, looped);
+        build.br_if(other, side, &[], join, &[i]);
+        let mut build = Builder::new(&mut func, side);
+        build.ret(&[]);
+        let mut build = Builder::new(&mut func, exit);
+        build.jump(join, &[i]);
+        let mut build = Builder::new(&mut func, join);
+        let again = build.icmp(IntPred::Slt, param, n);
+        build.br_if(again, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        assert!(super::decided_towards(&func, join, no, |block| block == exit));
+        assert!(!super::decided_towards(&func, join, yes, |block| block == exit));
+        assert!(!super::decided_towards(&func, join, yes, |block| block == looped));
+        assert!(!super::decided_towards(&func, join, no, |block| block == looped));
     }
 
     #[test]

@@ -26,7 +26,9 @@
 //!    the threader copies `dput(self)` onto that path, where it then falls into `pr_err` every
 //!    time it runs. When gcc splits the function it keeps any block a way into which might run,
 //!    which that one now is, so `pr_err` stays where the function is. What steps 2 and 3 made
-//!    cold only because of such a block is not cold either.
+//!    cold only because of such a block is not cold either. A way in can also decide the branch
+//!    by coming out of a test of the same condition, as the way out of `for (i = 0; i < n; i++)`
+//!    does for an `if (i < n) ... else pr_err(...)` after the loop.
 //!
 //! The entry block is never cold, whatever the steps say. A function needs a first part, and a
 //! function all of whose paths are cold is one gcc moves whole rather than splits.
