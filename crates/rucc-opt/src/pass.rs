@@ -128,6 +128,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::unroll::Unroll,
     &crate::loop_delete::LoopDelete,
     &crate::rangetest::RangeTest,
+    &crate::loop_idiom::LoopIdiom,
     &crate::split::Split,
     &crate::nests::Nests,
     &crate::ivopts::Ivopts,
