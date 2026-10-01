@@ -32,7 +32,7 @@ use crate::frame::{ClassMoves, FrameInsts, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{
-    CallRegs, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
+    CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
 use crate::x86_64::{Form, Kind, Mode, encoding_in, form, written};
 
@@ -206,6 +206,44 @@ pub static SYSV: CallRegs = CallRegs {
 /// which is exactly why the psABI chose it: a function that loaded the table's address keeps it
 /// through every call it makes.
 pub static SYSV_PIC: CallRegs = CallRegs { int_order: &SYSV_PIC_INT_ORDER, ..SYSV };
+
+/// Where an i686 Windows call puts things under mingw-w64, which is cdecl as gcc writes it for
+/// `i686-w64-mingw32`.
+///
+/// The registers are [`SYSV`]'s. Every argument is in the argument area, a result comes back in
+/// `eax`, `edx:eax` or `st0`, `ebx`, `esi`, `edi` and `ebp` survive a call and no vector register
+/// does. What differs is written in the ABI half, [`rucc_abi::abis::I386_MINGW`]: a structure of
+/// one, two, four or eight bytes comes back in registers, and the caller pops the address of a
+/// result returned through memory.
+///
+/// Sixteen byte alignment at a call is what gcc for this target keeps and assumes, and a vector it
+/// spills lands on a sixteen byte boundary of a frame it never realigns, so a function of this
+/// compiler can count on the same when a gcc function calls it.
+///
+/// There is no canary and no profiling hook for the reasons [`crate::x86_64::WIN64`] gives, and a
+/// frame larger than a page is reached through mingw's routine for it, which leaves the stack
+/// pointer where it was, as it does on x86-64.
+pub static MINGW32: CallRegs = CallRegs {
+    abi: &rucc_abi::abis::I386_MINGW,
+    guard: None,
+    trace: None,
+    // The C name. It is `___chkstk_ms` in the object, with the underscore every C name gets here,
+    // and that is the same symbol libgcc defines for x86-64 where no underscore is added.
+    chkstk: Some(Chkstk { name: "__chkstk_ms", size: EAX, shift: 0, moves: false }),
+    ..SYSV
+};
+
+/// Where an i686 Windows call puts things under Microsoft's runtime.
+///
+/// [`MINGW32`] with Microsoft's ABI, whose one difference is a structure holding a lone `float`
+/// or `double`, and Microsoft's routine for a large frame. That routine is `__chkstk` in the object
+/// and it is not mingw's with another name: on this machine it moves the stack pointer down by the
+/// size itself, so the frame is taken by the call and nothing is subtracted after it.
+pub static MSVC32: CallRegs = CallRegs {
+    abi: &rucc_abi::abis::I386_MSVC,
+    chkstk: Some(Chkstk { name: "_chkstk", size: EAX, shift: 0, moves: true }),
+    ..MINGW32
+};
 
 // Aligned vector moves for the reason `crate::x86_64` gives. The frame keeps its sixteen byte
 // alignment here too, which [`SYSV`] says the psABI promises.
@@ -450,6 +488,26 @@ mod tests {
         assert_eq!(SYSV.return_pointer_popped(), 4);
         let callers_pop = CallRegs { abi: &rucc_abi::abis::WIN64, ..SYSV };
         assert_eq!(callers_pop.return_pointer_popped(), 0, "a plain ret where the caller pops");
+    }
+
+    #[test]
+    fn windows_is_cdecl_over_the_same_registers_with_its_own_abi_and_probe() {
+        for (regs, abi) in
+            [(&MINGW32, &rucc_abi::abis::I386_MINGW), (&MSVC32, &rucc_abi::abis::I386_MSVC)]
+        {
+            assert!(std::ptr::eq(regs.abi, abi), "{}", abi.name);
+            assert_eq!(regs.return_pointer_popped(), 0, "{}: the caller pops it", abi.name);
+            assert!(regs.int_args.is_empty() && regs.sse_args.is_empty(), "{}", abi.name);
+            assert_eq!(regs.int_returns, SYSV.int_returns, "{}", abi.name);
+            assert_eq!(regs.x87_returns, SYSV.x87_returns, "{}", abi.name);
+            assert_eq!(regs.int_saved, SYSV.int_saved, "{}", abi.name);
+            assert_eq!(regs.stack_align, 16, "{}", abi.name);
+            assert!(regs.guard.is_none() && regs.trace.is_none(), "{}", abi.name);
+        }
+        let mingw = MINGW32.chkstk.expect("mingw's routine");
+        assert_eq!((mingw.name, mingw.size, mingw.moves), ("__chkstk_ms", EAX, false));
+        let msvc = MSVC32.chkstk.expect("Microsoft's routine");
+        assert_eq!((msvc.name, msvc.size, msvc.moves), ("_chkstk", EAX, true));
     }
 
     #[test]

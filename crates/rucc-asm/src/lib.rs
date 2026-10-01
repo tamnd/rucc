@@ -77,7 +77,7 @@ use rucc_target::{TargetInfo, x86_64};
 #[must_use]
 pub fn kept(funcs: &[Func], names: &Interner, target: &TargetInfo) -> bool {
     let wanted = format!("x64.{}", x86_64::TEMPLATE);
-    let directives = Directives::of(target.object_format);
+    let directives = Directives::for_target(target);
     funcs.iter().any(|func| {
         func.blocks().any(|block| {
             func.insts(block).any(|inst| {

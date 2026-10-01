@@ -1043,12 +1043,12 @@ impl TargetInfo {
             (tuple::Arch::Aarch64, tuple::Os::Windows, _) => Some(&aarch64::WINDOWS),
             (tuple::Arch::Aarch64, os, _) if os.is_darwin() => Some(&aarch64::DARWIN),
             (tuple::Arch::Aarch64, _, _) => Some(&aarch64::AAPCS64),
-            // Not on Windows yet, because `rucc_abi::abis::for_target` declines i686 Windows: its
-            // cdecl has these registers and its stdcall and fastcall do not, and the registers here
-            // have to be the register half of an ABI that is written down. Position independent
-            // code wants [`x86::SYSV_PIC`], which is the code generator's to pick, since whether
-            // code is position independent is a flag and not the target.
-            (tuple::Arch::X86, tuple::Os::Windows, _) => None,
+            // Windows is cdecl over the same registers, with an ABI of its own for each runtime
+            // and a routine of its own for a large frame. Position independent code wants
+            // [`x86::SYSV_PIC`], which is the code generator's to pick, since whether code is
+            // position independent is a flag and not the target.
+            (tuple::Arch::X86, tuple::Os::Windows, tuple::Env::Msvc) => Some(&x86::MSVC32),
+            (tuple::Arch::X86, tuple::Os::Windows, _) => Some(&x86::MINGW32),
             (tuple::Arch::X86, _, _) => Some(&x86::SYSV),
             _ => None,
         };
@@ -1635,7 +1635,9 @@ mod tests {
         assert!(std::ptr::eq(i386.call_regs.expect("i386 SysV"), &x86::SYSV));
         let i686_windows = of("i686-pc-windows-gnu");
         assert_eq!(i686_windows.regs.len(x86::GPR), 8);
-        assert!(i686_windows.call_regs.is_none(), "its registers wait on the i386 Windows backend");
+        assert!(std::ptr::eq(i686_windows.call_regs.expect("mingw"), &x86::MINGW32));
+        let i686_msvc = of("i686-pc-windows-msvc");
+        assert!(std::ptr::eq(i686_msvc.call_regs.expect("msvc"), &x86::MSVC32));
         let riscv = of("riscv64-unknown-linux-gnu");
         assert!(riscv.regs.is_empty());
         assert!(riscv.call_regs.is_none());

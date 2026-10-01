@@ -1344,9 +1344,10 @@ fn generate(
             // A build that asked for debug information gets a label in front of every instruction,
             // and where the reader placed those is the row the encoder would have recorded.
             //
-            // Every unit for AArch64 goes this way for now. The listing is already written from
-            // the encoder's own tables, so reading it back is the encoder run over the same values,
-            // and it is one path to get right rather than two.
+            // Every unit for AArch64 and for 32-bit x86 goes this way for now. The listing is
+            // already written from the encoder's own tables, so reading it back is the encoder run
+            // over the same values, and it is one path to get right rather than two. The direct
+            // encoder is x86-64's alone.
             //
             // A function the program put in a section of its own comes this way as well, and so
             // does one written `retain`, which is given a section of its own. The object writer
@@ -1354,11 +1355,11 @@ fn generate(
             // section is already said, so it is the one place the answer has to be right rather
             // than two. A function split in two is placed code as well, since its cold part is in
             // `.text.unlikely`.
-            let aarch64 = target.tuple.arch() == Arch::Aarch64;
+            let listed = target.tuple.arch() != Arch::X86_64;
             let placed_code = funcs
                 .iter()
                 .any(|func| func.section.is_some() || func.retain || func.cold.is_some());
-            if aarch64 || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
+            if listed || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and
                 // `.cfi_lsda`, writes the table in `.gcc_except_table`, and the reader keeps both.
@@ -1373,8 +1374,8 @@ fn generate(
                 };
                 let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
                     .map_err(|trouble| {
-                        let what = if aarch64 {
-                            "a unit for aarch64"
+                        let what = if listed {
+                            "a unit for this machine"
                         } else if placed_code {
                             "a function in a section the program named"
                         } else if globals.kept() {
@@ -1475,13 +1476,14 @@ fn placed(
     };
     let mut text = rucc_object::Text::default();
     let mut lines = Vec::with_capacity(funcs.len());
-    // The name the listing gave each function, which on Mach-O has the underscore in front. The
-    // debug information keeps the C name, and the object writer puts the underscore back on when
-    // it looks one up.
-    let symbol = rucc_asm::Directives::of(target.object_format).symbol();
+    // The name the listing gave each function, which on Mach-O and on i386 COFF has the underscore
+    // in front. The debug information keeps the C name, and the object writer puts the underscore
+    // back on when it looks one up.
+    let directives = rucc_asm::Directives::for_target(target);
     for (which, func) in funcs.iter().enumerate() {
         let name = names.resolve(func.name);
-        let Some((part, start)) = offset(&format!("{symbol}{name}")) else {
+        let spelled = directives.spell(name);
+        let Some((part, start)) = offset(&spelled) else {
             return Err(format!("the listing has no label for the function '{name}'"));
         };
         let mut rows = Vec::with_capacity(func.inst_count() + 1);
@@ -1503,7 +1505,7 @@ fn placed(
         }
         // What `.size` said, or on a format without it, how far the label after the last
         // instruction is from the front.
-        let size = at.get(format!("{symbol}{name}").as_str()).map_or(0, |name| name.size);
+        let size = at.get(spelled.as_str()).map_or(0, |name| name.size);
         let len = match offset(&rucc_asm::mark_end(target, which)) {
             Some((held, end)) if size == 0 && held == part && end >= start => end - start,
             _ => size,

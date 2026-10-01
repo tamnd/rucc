@@ -366,6 +366,10 @@ pub struct Chkstk {
     /// ARM64, where the routine counts in units of sixteen bytes and the frame is taken with the
     /// register shifted back by [`crate::FrameInsts::scaled`].
     pub shift: u8,
+    /// Whether the routine takes the frame itself, moving the stack pointer down by the size before
+    /// it comes back. Only Microsoft's i386 one does, and a caller of that one subtracts nothing
+    /// afterwards. Every other routine leaves the stack pointer where it found it.
+    pub moves: bool,
 }
 
 /// Which registers a calling convention gives which job.

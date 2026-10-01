@@ -147,7 +147,7 @@ pub fn print_marked(
 /// it is in and the instruction.
 #[must_use]
 pub fn mark(target: &TargetInfo, func: usize, inst: Inst) -> String {
-    spell_mark(Directives::of(target.object_format), func, inst)
+    spell_mark(Directives::for_target(target), func, inst)
 }
 
 /// The label [`print_marked`] puts after the last instruction of the function with this place in
@@ -157,7 +157,7 @@ pub fn mark(target: &TargetInfo, func: usize, inst: Inst) -> String {
 /// directive, and how far this label is from the function's own symbol is the same length there.
 #[must_use]
 pub fn mark_end(target: &TargetInfo, func: usize) -> String {
-    format!("{}rucc_end{func}", Directives::of(target.object_format).local())
+    format!("{}rucc_end{func}", Directives::for_target(target).local())
 }
 
 fn spell_mark(directives: Directives, func: usize, inst: Inst) -> String {
@@ -180,7 +180,7 @@ fn listing(
     if !matches!(arch, Arch::X86_64 | Arch::X86 | Arch::Aarch64) {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
-    let directives = Directives::of(target.object_format);
+    let directives = Directives::for_target(target);
     let mut writer = Writer {
         arch,
         names,
@@ -188,7 +188,9 @@ fn listing(
         // Apple's assembler reads the same directives gas does and so does the reader here, which
         // makes the DWARF table ld64 turns into its own. COFF's are other directives, the `.seh_`
         // ones, and they are asked for below instead.
-        unwind: unwind && directives != Directives::Coff,
+        // Neither on i386 COFF, where Windows keeps no table of how to unwind a frame and gcc's
+        // `.cfi_` directives would only be read and thrown away.
+        unwind: unwind && !directives.coff(),
         seh: target.call_regs.filter(|_| unwind && directives == Directives::Coff),
         out: String::new(),
         labels: Vec::new(),
@@ -822,7 +824,7 @@ impl Writer<'_> {
             // Written the way the template that asked for it wrote it, which is the one spelling
             // an assembler reading this back would give the same relocation to.
             Piece::Away { symbol, addend } => {
-                let name = format!("{}{symbol}", self.directives.symbol());
+                let name = self.directives.spell(symbol);
                 match addend {
                     0 => {
                         let _ = writeln!(self.out, "\t.long\t{name} - .");
@@ -835,7 +837,7 @@ impl Writer<'_> {
             }
             Piece::Addr { symbol, addend, bytes } => {
                 let directive = if *bytes == 8 { ".quad" } else { ".long" };
-                let name = format!("{}{symbol}", self.directives.symbol());
+                let name = self.directives.spell(symbol);
                 match addend {
                     0 => {
                         let _ = writeln!(self.out, "\t{directive}\t{name}");
@@ -850,8 +852,8 @@ impl Writer<'_> {
             // works out itself when both labels are in one section.
             Piece::Apart { to, from, addend, bytes } => {
                 let directive = width(usize::from(*bytes)).unwrap_or(".long");
-                let prefix = self.directives.symbol();
-                let _ = write!(self.out, "\t{directive}\t{prefix}{to}-{prefix}{from}");
+                let (to, from) = (self.directives.spell(to), self.directives.spell(from));
+                let _ = write!(self.out, "\t{directive}\t{to}-{from}");
                 let _ = match addend.signum() {
                     1 => writeln!(self.out, "+{addend}"),
                     -1 => writeln!(self.out, "-{}", addend.unsigned_abs()),
@@ -880,7 +882,7 @@ impl Writer<'_> {
     ) -> Result<String, Error> {
         let spelling = match self.directives {
             Directives::MachO => aarch64::Spelling::Apple,
-            Directives::Elf | Directives::Coff => aarch64::Spelling::Gnu,
+            Directives::Elf | Directives::Coff | Directives::CoffI386 => aarch64::Spelling::Gnu,
         };
         let at = a64::Context {
             names: self.names,
@@ -1011,7 +1013,7 @@ impl Writer<'_> {
                 opcode: spelled.to_owned(),
                 why: "it jumps to a block, which only the whole listing can name".to_owned(),
             })?;
-            let prefix = self.directives.symbol();
+            let directives = self.directives;
             let word = self.word();
             let reg = |at: usize, width: char| {
                 let Some(operand) = operands.get(at) else { return String::from("?") };
@@ -1027,8 +1029,7 @@ impl Writer<'_> {
                 };
                 if bare { named.to_owned() } else { format!("%{named}") }
             };
-            let filled =
-                x86_64::template_filled(&text, &mem, |name| format!("{prefix}{name}"), reg);
+            let filled = x86_64::template_filled(&text, &mem, |name| directives.spell(name), reg);
             for line in filled.lines() {
                 let _ = writeln!(self.out, "\t{}", line.trim_start());
             }
@@ -1093,9 +1094,7 @@ impl Writer<'_> {
                         None => "0".to_owned(),
                     },
                     Arg::Symbol => match data.symbol {
-                        Some(symbol) => {
-                            format!("{}{}", self.directives.symbol(), self.names.resolve(symbol))
-                        }
+                        Some(symbol) => self.directives.spell(self.names.resolve(symbol)),
                         None => "0".to_owned(),
                     },
                     // Where a conditional jump goes is the first arm, because the block layout
@@ -1174,7 +1173,7 @@ impl Writer<'_> {
             let _ = write!(out, "%{}:", segment.name());
         }
         if let Some(symbol) = amode.symbol {
-            let _ = write!(out, "{}{}", self.directives.symbol(), self.names.resolve(symbol));
+            let _ = write!(out, "{}", self.directives.spell(self.names.resolve(symbol)));
             // The slot rather than the thing, which the assembler is told by the suffix and not by
             // the instruction: the two are the same `movq` and differ only in what goes in the
             // four bytes, so there is nowhere else to say it. The third one is a slot as well, and

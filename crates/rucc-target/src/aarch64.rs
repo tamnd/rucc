@@ -785,7 +785,7 @@ pub static DARWIN: CallRegs =
 /// units of sixteen bytes and leaves it there for the subtraction that takes the frame.
 pub static WINDOWS: CallRegs = CallRegs {
     home: 64,
-    chkstk: Some(Chkstk { name: "__chkstk", size: x(15), shift: 4 }),
+    chkstk: Some(Chkstk { name: "__chkstk", size: x(15), shift: 4, moves: false }),
     unwind_codes: true,
     ..aapcs64(&rucc_abi::abis::WINDOWS_ARM64, 0, crate::VaList::CharPointer)
 };

@@ -82,6 +82,7 @@ mod source;
 mod zlib;
 mod zstd;
 
+pub use crate::coff::decorate;
 pub use crate::file::{Error, defines, write};
 pub use crate::section::{
     Alias, Apart, Array, Binding, Chunk, Compress, Data, EXCEPT_TABLE, Export, Extent, FUNC_ALIGN,

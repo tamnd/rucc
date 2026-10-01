@@ -746,6 +746,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             if triple.arch == Arch::X86_64 && target.pointer_width == 64 {
                 d.flag("__SEH__");
             }
+            // The processor as the Windows headers ask about it. `malloc.h`, `winnt.h` and the
+            // interlocked functions branch on `_X86_` rather than on `__i386__`, and
+            // i686-w64-mingw32-gcc defines it.
+            if triple.arch == Arch::X86 {
+                d.flag("_X86_");
+            }
             // The family of C runtimes mingw-w64 targets, which is Microsoft's whichever DLL it
             // is, so gcc defines this for a UCRT toolchain as well as a msvcrt one. Which of the
             // two the headers are for is not a predefine: the sysroot's `_mingw.h` sets
@@ -811,7 +817,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // and that stringifies `__USER_LABEL_PREFIX__`, so a compiler that leaves it undefined
     // does not get an error, it gets the name of the macro as the string and renames the
     // function.
-    d.set("__USER_LABEL_PREFIX__", if triple.os == Os::Darwin { "_" } else { "" });
+    // COFF on i386 is the other one that kept it, as part of what cdecl is there.
+    let underscored =
+        triple.os == Os::Darwin || (triple.os == Os::Windows && triple.arch == Arch::X86);
+    d.set("__USER_LABEL_PREFIX__", if underscored { "_" } else { "" });
     // Its counterpart, what the assembler puts in front of a register name. Empty on every
     // target here, since all three assemble in a syntax that does not mark registers, and
     // defined anyway for the same reason as the line above: it is used inside a stringize.
@@ -905,8 +914,7 @@ fn windows_spellings(d: &mut Defs, opts: &Predef) {
 /// items that no GNU attribute spells. `__SEH__` is gcc's and says the exception tables are
 /// there, which on this row they are not.
 ///
-/// `_MT` and `_DLL` follow the runtime `-fms-runtime-lib=` chose, and `_M_IX86` waits on a
-/// 32-bit row.
+/// `_MT` and `_DLL` follow the runtime `-fms-runtime-lib=` chose.
 fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
     d.flag("_WIN32");
     if target.pointer_width == 64 {
@@ -920,7 +928,10 @@ fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
             d.set("_M_AMD64", "100");
         }
         Arch::Aarch64 => d.flag("_M_ARM64"),
-        Arch::Riscv64 | Arch::X86 => {}
+        // The same count for 32-bit x86, where 600 is the Pentium Pro and what clang and
+        // Microsoft's compiler both say today.
+        Arch::X86 => d.set("_M_IX86", "600"),
+        Arch::Riscv64 => {}
     }
     d.set("_MSC_VER", &opts.msc.msc_ver().to_string());
     d.set("_MSC_FULL_VER", &opts.msc.msc_full_ver().to_string());
@@ -1915,8 +1926,10 @@ mod tests {
         {
             assert!(has(&set_for(triple), "#define __USER_LABEL_PREFIX__ "), "{triple}");
         }
-        // Mach-O keeps the underscore that ELF dropped.
+        // Mach-O keeps the underscore that ELF dropped, and so does i386 Windows.
         assert!(has(&set_for("aarch64-apple-darwin"), "#define __USER_LABEL_PREFIX__ _"));
+        assert!(has(&set_for("i686-w64-windows-gnu"), "#define __USER_LABEL_PREFIX__ _"));
+        assert!(has(&set_for("x86_64-w64-windows-gnu"), "#define __USER_LABEL_PREFIX__ "));
     }
 
     /// `-ffast-math` as gcc 16 spells it on x86-64 Linux: one macro per licence, the finite promise
@@ -2605,14 +2618,12 @@ mod tests {
         // `_WIN64` is about the pointer rather than the processor, and i686-w64-mingw32-gcc
         // defines neither it nor `__MINGW64__`, nor `__SEH__`, since the unwind records this
         // compiler writes are the sixty four bit format and a thirty two bit Windows unwinds
-        // some other way. The target is made by hand because the three field triple has no
-        // 32-bit row yet, so `i686-windows-gnu` predefines nothing at all and there is no other
-        // way to reach this arm.
-        let mut target = TargetInfo::new("x86_64-pc-windows-gnu".parse().expect("a triple"));
-        target.pointer_width = 32;
-        let windows = built_in(&target, &Predef::new());
+        // some other way. It does define `_X86_`, which the headers read for the processor.
+        let windows = set_for_tuple("i686-w64-windows-gnu");
         assert!(has(&windows, "#define _WIN32 1"));
         assert!(has(&windows, "#define __MINGW32__ 1"));
+        assert!(has(&windows, "#define _X86_ 1"));
+        assert!(!has(&set_for("x86_64-pc-windows-gnu"), "#define _X86_ 1"));
         for name in ["_WIN64", "__WIN64", "__WIN64__", "__MINGW64__", "__SEH__", "WIN64"] {
             assert!(!has(&windows, &format!("#define {name} 1")), "{name} on a 32 bit target");
         }
@@ -2653,9 +2664,14 @@ mod tests {
             "_cdecl",
             "__declspec(x)",
             "_M_ARM64",
+            "_M_IX86",
         ] {
             assert!(!msvc.contains(&format!("#define {name} ")), "{name} on msvc");
         }
+        let msvc32 = set_for_tuple("i686-pc-windows-msvc");
+        assert!(has(&msvc32, "#define _M_IX86 600"));
+        assert!(!has(&msvc32, "#define _WIN64 1"));
+        assert!(!has(&msvc32, "#define _X86_ 1"), "the mingw spelling is not Microsoft's");
     }
 
     #[test]

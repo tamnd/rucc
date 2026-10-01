@@ -58,6 +58,7 @@ fn machine(program: &Path, flags: &[&str]) -> u16 {
     u16::from_le_bytes([bytes[18], bytes[19]])
 }
 
+const EM_386: u16 = 3;
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
 
@@ -86,15 +87,13 @@ fn a_target_written_on_the_command_line_wins_over_the_name() {
     done(&gcc);
 }
 
-/// There is no i686 back end yet, so the name has to be refused with the target it implied. What
-/// must not happen is a 64 bit object for the host, which kbuild would take and link into a 32 bit
-/// image.
+/// The name implies the 32-bit target, and the object is a 32-bit one. What must not happen is a
+/// 64 bit object for the host, which kbuild would take and link into a 32 bit image.
 #[test]
-fn i686_linux_gnu_gcc_is_refused_with_its_target_named() {
+fn i686_linux_gnu_gcc_builds_for_i386() {
     let gcc = link("i686-linux-gnu-gcc");
-    let out = run(&gcc, &["-x", "c", "-c", "-", "-o", "/dev/null"], "int x;\n");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("i686-linux-gnu"), "{stderr}");
+    let out = run(&gcc, &["-dumpmachine"], "");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "i686-unknown-linux-gnu");
+    assert_eq!(machine(&gcc, &[]), EM_386);
     done(&gcc);
 }
