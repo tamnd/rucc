@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.7
+
+A patch release on the way to building the Linux kernel with the same sections gcc gives it. It adds `-freorder-blocks-and-partition`, so a block that calls a `cold` function goes in `.text.unlikely` as `foo.cold` the way gcc picks it, and `-freorder-functions`, so a `cold` function goes there whole. A label only a static table points at gets `endbr64`, which takes the defconfig objtool warnings from 259 to 3, and a link failure on `__scoped_seqlock_bug` is fixed. A function declared `inline` is measured by what is left once constants fold, so `alloc_pages_node` is inlined as in gcc. It also has `target_clones`, `optimize ("wrapv")`, `optimize ("no-tree-loop-distribute-patterns")`, GNU nested functions and a faster spill choice.
+
 ### Added
 
 - `-freorder-functions` is implemented and is on from `-O2`, as in gcc. A function written `cold` that the program did not put in a section of its own goes in `.text.unlikely`, or `.text.unlikely.` and its name under `-ffunction-sections`. In the kernel this is every `__cold` function, such as `io_flush_timeouts`.
