@@ -194,13 +194,13 @@ pub enum Error {
         /// The object format that has no writing of one here, as its own name.
         format: &'static str,
     },
-    /// An ifunc, which is not a mistake and not written yet.
+    /// An ifunc on a format that has no symbol type for one, which is everything but ELF.
     ///
     /// The other thing an alias in the IR can be, and a different job from a second name for
     /// something: the symbol is resolved once at program start by calling a function in this
-    /// object, which wants a symbol type of its own and a relocation of its own. One is refused
-    /// rather than written as an ordinary alias that would go to the resolver instead of to what
-    /// the resolver picked.
+    /// object, which ELF says with `STT_GNU_IFUNC`. COFF and Mach-O have no such type, and one is
+    /// refused there rather than written as an ordinary alias that would go to the resolver
+    /// instead of to what the resolver picked.
     IFunc {
         /// The name it defines, as the C program spelled it.
         name: String,
@@ -251,7 +251,7 @@ impl fmt::Display for Error {
                 write!(f, "'{name}' is thread-local, which is not written on {format} yet")
             }
             Error::IFunc { name } => {
-                write!(f, "'{name}' is an ifunc, which this compiler does not write yet")
+                write!(f, "'{name}' is an ifunc, which this compiler writes only for ELF")
             }
             Error::Frame { func, why } => {
                 write!(f, "'{func}' has {why}, which no unwind table here can describe")

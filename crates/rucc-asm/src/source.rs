@@ -2372,6 +2372,9 @@ impl Reader {
             "object" | "gnu_unique_object" => Sort::Object,
             "tls_object" | "tls" => Sort::Thread,
             "notype" | "" => Sort::Untyped,
+            // An ifunc, which gcc writes for `ifunc` and `target_clones`. Only ELF has the type,
+            // and the object writer refuses it on anything else.
+            "gnu_indirect_function" => Sort::Ifunc,
             other => {
                 let what = format!("'{other}' is not a symbol type this compiler writes");
                 return Err(self.bad(&what));
@@ -3620,8 +3623,13 @@ impl Reader {
         else {
             return self.reduce(sum);
         };
+        // An ifunc is kept whatever its binding and whatever the reference is, because the place
+        // the name marks is its resolver and the distance to that is not where a call to it goes.
+        // gas leaves every reference to one to the linker, which makes a stub that goes through
+        // the slot the resolver's answer is put in.
         let kept = self.known.get(name).is_some_and(|&sym| {
-            (self.syms[sym].binding == Binding::Weak
+            (self.syms[sym].sort == Sort::Ifunc
+                || self.syms[sym].binding == Binding::Weak
                 || !jump && self.syms[sym].binding == Binding::Global)
                 && matches!(self.syms[sym].at, Held::In { .. })
         });
@@ -6325,6 +6333,22 @@ g:
         );
         let plain = assembled("movdqa %xmm0, 16(%rsp)\nlea 704(%rdi), %rsi\nsub $64, %rsi\n");
         assert_eq!(bytes(&set, ".text"), bytes(&plain, ".text"));
+    }
+
+    /// gcc's listing of a `static` function with `target_clones` puts the resolver, the callers
+    /// and the ifunc's `.set` in one section, all local. Any other name would then be a distance
+    /// worked out here, and a call would run the resolver. Every reference to an ifunc stays a
+    /// relocation against its name instead, a jump included, which is what gas writes.
+    #[test]
+    fn every_reference_to_an_ifunc_is_left_to_the_linker() {
+        let out = assembled(
+            ".text\nf.resolver:\n\tret\ncaller:\n\tcall f\n\tjmp f\n\tleaq f(%rip), %rax\n\
+             .data\n\t.quad f\n.type f, @gnu_indirect_function\n.set f,f.resolver\n",
+        );
+        assert_eq!(name(&out, "f").sort, Sort::Ifunc);
+        assert_eq!(name(&out, "f").binding, Binding::Local);
+        let named = out.parts.iter().flat_map(|part| &part.relocs).filter(|r| r.symbol == "f");
+        assert_eq!(named.count(), 4);
     }
 
     #[test]

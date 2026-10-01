@@ -245,13 +245,15 @@ impl Flavour {
     pub(crate) fn sort(self, sort: crate::source::Sort, binding: Binding) -> SymbolKind {
         if self == Flavour::MachO {
             return match sort {
-                crate::source::Sort::Func => SymbolKind::Text,
+                crate::source::Sort::Func | crate::source::Sort::Ifunc => SymbolKind::Text,
                 crate::source::Sort::File => SymbolKind::File,
                 _ => SymbolKind::Data,
             };
         }
         match sort {
-            crate::source::Sort::Func => SymbolKind::Text,
+            // An indirect function is text as far as the writer underneath goes, and the type it
+            // writes for one is put right afterwards. See [`elf::indirect`].
+            crate::source::Sort::Func | crate::source::Sort::Ifunc => SymbolKind::Text,
             crate::source::Sort::Object => SymbolKind::Data,
             crate::source::Sort::Thread => SymbolKind::Tls,
             crate::source::Sort::File => SymbolKind::File,
@@ -633,6 +635,13 @@ pub fn write(
             flags: SymbolFlags::None,
         });
         flavour.see(&mut obj, id, alias.binding, alias.visibility);
+        if alias.ifunc {
+            if flavour != Flavour::Elf {
+                let why = format!("'{}' is an indirect function, which only ELF has", alias.name);
+                return Err(Error::Refused { why });
+            }
+            elf::indirect(&mut obj, id);
+        }
         symbols.insert(alias.name.clone(), id);
     }
 
@@ -2603,6 +2612,7 @@ mod tests {
             target: "a".to_owned(),
             binding: Binding::Global,
             visibility: Visibility::Default,
+            ifunc: false,
         }];
         let bytes = write(
             &Text::default(),
@@ -2635,6 +2645,7 @@ mod tests {
             target: "f".to_owned(),
             binding: Binding::Weak,
             visibility: Visibility::Default,
+            ifunc: false,
         }];
         let bytes = write(
             &text,
@@ -2654,6 +2665,70 @@ mod tests {
         assert!(g.is_weak(), "so that a program may define the name itself instead");
     }
 
+    /// An ifunc is the alias whose type is its own: `STT_GNU_IFUNC`, with the binding the alias
+    /// was given, at the resolver's address. A `static` one is a local symbol of the same type,
+    /// which is what gas writes for gcc's listing of a `static` function with `target_clones`.
+    #[test]
+    fn an_ifunc_is_a_symbol_of_its_own_type_at_the_resolver() {
+        let text = calling("puts");
+        for (binding, bind) in [
+            (Binding::Global, elf::STB_GLOBAL),
+            (Binding::Weak, elf::STB_WEAK),
+            (Binding::Local, elf::STB_LOCAL),
+        ] {
+            let aliases = [Alias {
+                name: "g".to_owned(),
+                target: "f".to_owned(),
+                binding,
+                visibility: Visibility::Default,
+                ifunc: true,
+            }];
+            let bytes = write(
+                &text,
+                &Data::default(),
+                &aliases,
+                &target(),
+                Output::default(),
+                &Info::default(),
+            )
+            .expect("an object");
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let f = file.symbols().find(|s| s.name() == Ok("f")).expect("the resolver");
+            let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the ifunc");
+            assert_eq!((g.address(), g.section_index()), (f.address(), f.section_index()));
+            let SymbolFlags::Elf { st_info, .. } = g.flags() else {
+                panic!("an ELF symbol");
+            };
+            assert_eq!(st_info, bind | elf::STT_GNU_IFUNC, "{binding:?}");
+            let object::File::Elf64(elf) = &file else { panic!("a 64 bit ELF file") };
+            let os_abi = elf.elf_header().e_ident.os_abi;
+            assert_eq!(os_abi, elf::ELFOSABI_GNU, "gas marks a file with an ifunc in it as GNU");
+        }
+    }
+
+    /// The other formats have no symbol type for one, and an ordinary name would be a call to the
+    /// resolver, so the writer says so.
+    #[test]
+    fn an_ifunc_is_refused_on_a_format_without_the_type() {
+        let aliases = [Alias {
+            name: "g".to_owned(),
+            target: "f".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            ifunc: true,
+        }];
+        let error = write(
+            &calling("puts"),
+            &Data::default(),
+            &aliases,
+            &windows(),
+            Output::default(),
+            &Info::default(),
+        )
+        .expect_err("no ifunc on COFF");
+        assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    }
+
     /// The front end is what reports this as a program's mistake, so one arriving here is a bug
     /// in this compiler and is said so rather than written as an undefined symbol.
     #[test]
@@ -2663,6 +2738,7 @@ mod tests {
             target: "a".to_owned(),
             binding: Binding::Global,
             visibility: Visibility::Default,
+            ifunc: false,
         }];
         let error = write(
             &Text::default(),
@@ -2722,6 +2798,7 @@ mod tests {
             target: "f".to_owned(),
             binding: Binding::Global,
             visibility: Visibility::Default,
+            ifunc: false,
         }];
 
         let names = defines(&text, &data, &aliases, &target()).expect("a list");
@@ -3252,6 +3329,7 @@ mod tests {
             target: "f".to_owned(),
             binding: Binding::Global,
             visibility: Visibility::Default,
+            ifunc: false,
         }];
         let target = i386_windows();
         let bytes = write(&text, &data, &aliases, &target, Output::default(), &Info::default())

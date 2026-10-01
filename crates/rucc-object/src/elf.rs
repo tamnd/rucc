@@ -193,6 +193,27 @@ pub(crate) fn see(obj: &mut Writer<'_>, id: SymbolId, binding: Binding, visibili
     }
 }
 
+/// Make a symbol that has just been added an indirect function, `STT_GNU_IFUNC`, keeping the
+/// binding the writer underneath worked out for it.
+///
+/// The writer has no kind of its own for one, so the symbol is added as text and the type field
+/// of `st_info` is written over here. The binding is the other half of the same byte and is left
+/// as it was found, which is local for a `static` resolver's name and global or weak otherwise.
+///
+/// The type is a GNU extension, and a file holding one says so in its header: gas writes
+/// `ELFOSABI_GNU` there rather than `ELFOSABI_NONE` once a symbol of the type is in it, and
+/// `readelf` only names the type `IFUNC` in a file that does. The flags beside it are kept.
+pub(crate) fn indirect(obj: &mut Writer<'_>, id: SymbolId) {
+    if let SymbolFlags::Elf { st_info, .. } = obj.symbol_flags_mut(id) {
+        *st_info = st_info.st_bind() | elf::STT_GNU_IFUNC;
+    }
+    let (abi_version, e_flags) = match obj.flags {
+        object::FileFlags::Elf { abi_version, e_flags, .. } => (abi_version, e_flags),
+        _ => (0, elf::FileFlags(0)),
+    };
+    obj.flags = object::FileFlags::Elf { os_abi: elf::ELFOSABI_GNU, abi_version, e_flags };
+}
+
 /// The type and flags a section of function addresses the startup code calls has.
 ///
 /// A section of the ordinary type under one of those names is gathered by the linker in the same

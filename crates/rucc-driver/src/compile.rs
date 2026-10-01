@@ -1275,7 +1275,7 @@ fn generate(
                         .map(|name| names.resolve(name).to_owned()),
                 );
             }
-            (globals, rucc_asm::aliases(module, names).map_err(refused)?)
+            (globals, rucc_asm::aliases(module, names, target.object_format).map_err(refused)?)
         }
         _ => (rucc_asm::Globals::default(), Vec::new()),
     };
