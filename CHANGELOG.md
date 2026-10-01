@@ -27,6 +27,7 @@ A patch release on the way to building the Linux kernel. It adds gcov coverage: 
 ### Fixed
 
 - A function in the `.gcno` file now ends at its closing brace, as in gcc, rather than at the last statement in it.
+- The release workflow's tag check passes again. Two doc comments linked to private items, a word width in the range test was read as a threshold, and two weakref tests wrote their fixtures to the same directory and could remove each other's file.
 - A string literal on ELF now goes in `.rodata.str1.1`, flagged for the linker to merge, rather than in `.rodata`, which is where gcc puts one. On x86 a literal of 31 bytes or more is aligned to a word and goes in `.rodata.str1.8` (`.rodata.str1.4` on i386) unless optimizing for size, as gcc aligns it. A wide literal and one with a zero inside it stay in `.rodata`.
 - An ELF object now says what made it in `.comment`, as gcc's does, and a listing ends with the `.ident` that puts it there. `-fno-ident` leaves it out, where it used to be taken and ignored. The assembler writes `.ident` into `.comment` the way gas does rather than passing over it.
 - An ELF object now always has `.text`, `.data` and `.bss`, empty or not, as gas makes all three. A file of assembly gets a `.note.GNU-stack` only when it wrote one or `-Wa,--noexecstack` asked, which is also what gas does. Both showed in the kernel's section comparison against gcc.

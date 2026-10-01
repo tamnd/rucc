@@ -323,7 +323,8 @@ impl Group {
         let outside = complement(&self.set, top);
         let (lo, hi) = (self.set[0].0, self.set[self.set.len() - 1].1);
         let fewest = self.set.len().min(outside.len());
-        if fewest >= RANGE_TEST_BIT_INTERVALS && hi - lo < 64 && self.compares as usize > fewest {
+        let one_word = hi - lo < 64; // not a threshold: one bit for each number in a `u64`.
+        if fewest >= RANGE_TEST_BIT_INTERVALS && one_word && self.compares as usize > fewest {
             let mut word = 0u64;
             for &(from, to) in &self.set {
                 for number in from..=to {

@@ -1010,7 +1010,7 @@ fn beyond(text: &Text, data: &Data) -> Result<(), Error> {
 ///
 /// The names are the ones in the file, which is the C name on every format and machine this writes
 /// except COFF for i386, where it has an underscore in front. That is why this asks about the target
-/// it otherwise would not have to. See [`Flavour::spell`].
+/// it otherwise would not have to. See `Flavour::spell`.
 ///
 /// Order is the functions, then the variables, then the aliases, each in the order the module held
 /// them, which is the order [`write()`] adds the symbols in. A `static` is left out: it is a name the
