@@ -603,8 +603,13 @@ fn identity(func: &Func, inst: Inst, address: u32) -> Option<(Rewrite, &'static 
             [Piece::App { head, arity: 1 }, Piece::Var { index, .. }]
                 if head.starts_with("value.") =>
             {
+                // Only a value of the result's own type. A `ptr_add` is matched as an add at the
+                // address width, so `add 0 x` finds `x` in `null + x`, and `x` is an integer where
+                // every reader wants a pointer. lib/test_bitmap.c writes through a null bitmap.
                 match found.bindings.get(*index) {
-                    Some(&Term::Reg(value)) => Rewrite::Value(value),
+                    Some(&Term::Reg(value)) if func[value].ty == func[result].ty => {
+                        Rewrite::Value(value)
+                    }
                     _ => continue,
                 }
             }
@@ -623,6 +628,10 @@ fn identity(func: &Func, inst: Inst, address: u32) -> Option<(Rewrite, &'static 
                 // Something built under the instruction is built at the width its head names,
                 // which is a scalar, so the rule is not one about a vector whatever it matched.
                 Some(rewrite) if nests(&rewrite) && func[result].ty.is_vector() => continue,
+                // Nor one that would rewrite a `ptr_add`. What it writes is an integer
+                // instruction, and swapping `null + x` round to `x + null` makes an add that says
+                // it produces a pointer out of a pointer on the right.
+                Some(_) if func[inst].opcode == Opcode::PtrAdd => continue,
                 Some(rewrite) => rewrite,
                 // Any other shape, which no rule in the file has. A test below says so, because a
                 // rule that fell through here would be a rule that never fires and nothing would
