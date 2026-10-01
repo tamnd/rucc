@@ -26,6 +26,7 @@ struct Row {
     library: String,
     answer: String,
     value: String,
+    targets: Vec<String>,
     used_by: Vec<String>,
     tests: Vec<String>,
     notes: String,
@@ -47,6 +48,13 @@ const STATUSES: &[(&str, &str)] = &[
 ];
 
 const ANSWERS: &[(&str, &str)] = &[("warn", "Answer::Warn"), ("error", "Answer::Error")];
+
+const PLACES: &[(&str, &str)] = &[
+    ("x86-64", "Place::X86_64"),
+    ("x86", "Place::X86"),
+    ("aarch64", "Place::Aarch64"),
+    ("windows", "Place::Windows"),
+];
 
 fn main() {
     println!("cargo::rerun-if-changed=features.toml");
@@ -85,6 +93,7 @@ fn parse(text: &str) -> Vec<Row> {
                 library: String::new(),
                 answer: String::new(),
                 value: String::new(),
+                targets: Vec::new(),
                 used_by: Vec::new(),
                 tests: Vec::new(),
                 notes: String::new(),
@@ -109,6 +118,7 @@ fn parse(text: &str) -> Vec<Row> {
             "answer" => row.answer = string(value, line),
             "value" => row.value = string(value, line),
             "notes" => row.notes = string(value, line),
+            "targets" => row.targets = array(value, line),
             "used_by" => row.used_by = array(value, line),
             "tests" => row.tests = array(value, line),
             other => panic!("features.toml:{line}: unknown field `{other}`"),
@@ -186,6 +196,15 @@ fn check(rows: &[Row]) {
             }
             if row.signature.is_empty() {
                 panic!("features.toml:{line}: `{name}` has a library and no signature to call it");
+            }
+        }
+        for place in &row.targets {
+            if pick(PLACES, place).is_none() {
+                panic!(
+                    "features.toml:{line}: `{name}` names the target `{place}`, which is not one \
+                     of {}",
+                    names(PLACES)
+                );
             }
         }
         if !row.value.is_empty() {
@@ -336,6 +355,8 @@ fn render(mut rows: Vec<Row>) -> String {
         out.push_str(&format!("        library: {},\n", quote(&row.library)));
         out.push_str(&format!("        answer: {answer},\n"));
         out.push_str(&format!("        value: {value},\n"));
+        let places: Vec<&str> = row.targets.iter().filter_map(|t| pick(PLACES, t)).collect();
+        out.push_str(&format!("        targets: &[{}],\n", places.join(", ")));
         out.push_str(&format!("        used_by: &{},\n", list(&row.used_by)));
         out.push_str(&format!("        tests: &{},\n", list(&row.tests)));
         out.push_str(&format!("        notes: {},\n", quote(&row.notes)));

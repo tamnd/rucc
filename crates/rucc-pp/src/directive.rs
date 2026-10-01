@@ -103,16 +103,14 @@ pub struct LineDirective {
 /// translation unit and the definitions a header makes are visible after it.
 #[derive(Debug, Default)]
 pub struct Preprocessor {
-    /// Whether the target has a second calling convention for `ms_abi` or `sysv_abi` to pick,
-    /// which is x86-64 alone. The table answers for the attributes as this compiler has them, and
-    /// on any other target gcc warns that they are ignored, so `__has_attribute` answers nought
-    /// for them there. Set by [`Preprocessor::predefine`], which is where the target arrives.
-    second_convention: bool,
-    /// Whether the target is AArch64, the only one `__builtin_sponentry` is there on. mingw-w64's
-    /// `<setjmp.h>` asks `__has_builtin` for it and passes it to `_setjmp` if the answer is yes,
-    /// and sema refuses it anywhere else, so the answer has to be no off AArch64. Set by
-    /// [`Preprocessor::predefine`].
-    aarch64: bool,
+    /// The target as the GNU matrix sees it, which is what the `__has_*` operators ask with.
+    ///
+    /// Some of gcc's answers are the target's: the 32-bit conventions and `ms_struct` are there
+    /// on x86 alone, `dllimport` on Windows alone, and `__builtin_sponentry` on AArch64 alone,
+    /// which mingw-w64's `<setjmp.h>` asks about before passing it to `_setjmp`. The rows say
+    /// where, and this says where we are. Set by [`Preprocessor::predefine`], which is where the
+    /// target arrives, and a target that is none of those places until then.
+    places: rucc_gnu::Target,
     /// Whether `__pragma(...)` is Microsoft's pragma operator here rather than an identifier,
     /// which it is where clang has Microsoft extensions on: the `*-windows-msvc` rows unless
     /// `-fno-ms-extensions` said otherwise, and any row under `-fms-extensions`. Set by
@@ -227,8 +225,8 @@ impl Preprocessor {
         opts: &Predef,
         cx: &mut Context<'_>,
     ) -> Result<(), SourceMapFull> {
-        self.second_convention = target.tuple.arch().as_str() == "x86_64";
-        self.aarch64 = target.tuple.arch().as_str() == "aarch64";
+        self.places =
+            rucc_gnu::Target::new(target.tuple.arch().as_str(), target.tuple.os().as_str());
         let msvc = Triple::from_tuple(target.tuple)
             .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
         self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
@@ -1285,22 +1283,16 @@ impl Preprocessor {
                 if scoped && scope.is_some() && !gnu {
                     return 0;
                 }
+                let places = self.places;
                 match kind {
-                    // The two conventions are attributes of x86-64 only, however the table
-                    // answers, since gcc ignores both anywhere else.
-                    Kind::Attribute
-                        if !self.second_convention
-                            && matches!(rucc_gnu::unarmour(name), "ms_abi" | "sysv_abi") =>
-                    {
-                        0
+                    Kind::Attribute | Kind::CAttribute if gnu => {
+                        rucc_gnu::has_gnu_attribute(name, places)
                     }
-                    Kind::Attribute | Kind::CAttribute if gnu => rucc_gnu::has_gnu_attribute(name),
-                    Kind::Attribute => rucc_gnu::has_attribute(name),
-                    Kind::CAttribute => rucc_gnu::has_c_attribute(name),
-                    Kind::Builtin if !self.aarch64 && name == "__builtin_sponentry" => 0,
-                    Kind::Builtin => rucc_gnu::has_builtin(name),
-                    Kind::Feature => rucc_gnu::has_feature(name),
-                    Kind::Extension => rucc_gnu::has_extension(name),
+                    Kind::Attribute => rucc_gnu::has_attribute(name, places),
+                    Kind::CAttribute => rucc_gnu::has_c_attribute(name, places),
+                    Kind::Builtin => rucc_gnu::has_builtin(name, places),
+                    Kind::Feature => rucc_gnu::has_feature(name, places),
+                    Kind::Extension => rucc_gnu::has_extension(name, places),
                 }
             }
         }
@@ -3309,15 +3301,39 @@ mod tests {
         assert_eq!(clean("#ifdef __has_attribute\nyes\n#endif\n"), "yes");
     }
 
-    /// The two conventions are there on x86-64 and not anywhere else, whatever the table says,
-    /// since gcc ignores both on every other target.
+    /// The two conventions are there on x86 and not anywhere else, as gcc 16 answers, which is
+    /// yes with `-m32` as well even though it ignores both there with a warning, as this does.
     #[test]
-    fn the_calling_convention_attributes_are_there_on_x86_64_alone() {
+    fn the_calling_convention_attributes_are_there_on_x86_alone() {
         let asked = "__has_attribute(ms_abi) __has_attribute(__sysv_abi__)\n";
         for (triple, answer) in [
             ("x86_64-unknown-linux-gnu", "1 1"),
             ("x86_64-w64-windows-gnu", "1 1"),
+            ("i686-unknown-linux-gnu", "1 1"),
             ("aarch64-unknown-linux-gnu", "0 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// gcc 16's answers for the 32-bit conventions, `ms_struct` and the DLL attributes, which
+    /// depend on the target: measured on x86-64 Linux, with `-m32`, with mingw-w64 gcc and with
+    /// AArch64 gcc. The conventions on 32-bit x86 are the one place this is no where gcc says
+    /// yes, because there they change the call and this compiler does not change it yet.
+    #[test]
+    fn the_answers_for_the_x86_and_windows_attributes_are_the_targets() {
+        let asked = "__has_attribute(stdcall) __has_attribute(__cdecl__) \
+                     __has_c_attribute(gnu::fastcall) __has_attribute(ms_struct) \
+                     __has_attribute(gcc_struct) __has_attribute(dllimport) \
+                     __has_attribute(selectany) __has_attribute(vectorcall)\n";
+        for (triple, answer) in [
+            ("x86_64-unknown-linux-gnu", "1 1 1 1 1 0 0 0"),
+            ("x86_64-w64-windows-gnu", "1 1 1 1 1 1 1 0"),
+            ("i686-unknown-linux-gnu", "0 1 0 1 1 0 0 0"),
+            ("aarch64-unknown-linux-gnu", "0 0 0 0 0 0 0 0"),
+            ("aarch64-w64-windows-gnu", "0 0 0 1 1 1 1 0"),
         ] {
             let mut run = Run::new();
             run.predefine(triple, &Predef::new());

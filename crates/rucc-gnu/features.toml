@@ -15,6 +15,7 @@
 #   status       unimplemented, partial, implemented or rejected
 #   answer       what to answer when the status is not `implemented`, see below
 #   value        what `__has_c_attribute` returns, which the standard fixes per attribute
+#   targets      x86-64, x86, aarch64 or windows, where a row answers only on some targets
 #   used_by      projects known to need it, from the corpus in spec/15-testing.md
 #   tests        the tests that prove the status, named as `crate::test` or as a file path
 #   notes        anything a reader needs that the fields above do not say
@@ -387,8 +388,9 @@ name = "ms_abi"
 kind = "attribute"
 gcc_version = "4.4"
 status = "implemented"
+targets = ["x86-64", "x86"]
 used_by = ["edk2", "gnu-efi", "wine"]
-tests = ["rucc-types::two_conventions_are_two_incompatible_types", "rucc-pp::the_calling_convention_attributes_are_there_on_x86_64_alone", "rucc/tests/conventions.rs", "tests/exec/linux/ms_abi.c"]
+tests = ["rucc-types::two_conventions_are_two_incompatible_types", "rucc-pp::the_calling_convention_attributes_are_there_on_x86_alone", "rucc/tests/conventions.rs", "tests/exec/linux/ms_abi.c"]
 notes = "A function of the Windows x64 convention on an x86-64 target that is not Windows, which is what `EFIAPI` is on Linux. It is part of the function type, as it is to gcc: written in the specifiers, after the declarator or beside the star of a pointer, and kept through a typedef, so `typedef EFI_STATUS (EFIAPI *F)(...)` is a pointer to an `ms_abi` function. A declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer. On Windows it names the target's own convention and changes nothing. A call and a definition use the Windows registers, shadow space and preserved set, and a function of the one calling a function of the other keeps what the callee does not. Calling a variadic one works. Defining one is refused with `E0741`, since its body would need the Windows `va_list`. On a target other than x86-64 it is ignored with a warning and `__has_attribute` answers nought."
 
 [[feature]]
@@ -396,8 +398,9 @@ name = "sysv_abi"
 kind = "attribute"
 gcc_version = "4.4"
 status = "implemented"
+targets = ["x86-64", "x86"]
 used_by = ["wine"]
-tests = ["rucc-types::two_conventions_are_two_incompatible_types", "rucc-pp::the_calling_convention_attributes_are_there_on_x86_64_alone", "rucc/tests/conventions.rs", "tests/exec/windows/sysv_abi.c"]
+tests = ["rucc-types::two_conventions_are_two_incompatible_types", "rucc-pp::the_calling_convention_attributes_are_there_on_x86_alone", "rucc/tests/conventions.rs", "tests/exec/windows/sysv_abi.c"]
 notes = "The mirror of `ms_abi`: a function of the System V convention on Windows, read and kept the same way. On x86-64 targets other than Windows it names the target's own convention and changes nothing. Writing it with `ms_abi` on the same declaration is refused with `E0740`, in gcc's words. A variadic definition is refused with `E0741`. The unwind record is still written for one, which gcc leaves out, since a function of either convention on Windows is unwound by the same reader."
 
 [[feature]]
@@ -929,46 +932,51 @@ notes = "Tells `__builtin_object_size` how big the object a call returns is. It 
 name = "cdecl"
 kind = "attribute"
 gcc_version = "2.95"
-status = "partial"
+status = "implemented"
+targets = ["x86-64", "x86"]
 used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
+tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. On 32-bit x86 it names the convention every function has already, so taking it and doing nothing is the whole implementation. `__has_attribute` answers yes on every x86 target, as gcc 16 does, and no on the others, where gcc does not know the name."
 
 [[feature]]
 name = "stdcall"
 kind = "attribute"
 gcc_version = "2.95"
-status = "partial"
+status = "implemented"
+targets = ["x86-64"]
 used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
+tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
 
 [[feature]]
 name = "fastcall"
 kind = "attribute"
 gcc_version = "3.4"
-status = "partial"
+status = "implemented"
+targets = ["x86-64"]
 used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
+tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
 
 [[feature]]
 name = "thiscall"
 kind = "attribute"
 gcc_version = "4.6"
-status = "partial"
+status = "implemented"
+targets = ["x86-64"]
 used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
+tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
 
 [[feature]]
 name = "regparm"
 kind = "attribute"
 gcc_version = "2.95"
-status = "partial"
+status = "implemented"
+targets = ["x86-64"]
 used_by = ["mingw-w64"]
-tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows"]
-notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does. `__has_attribute` still answers no, because gcc's answer depends on the target and this table has none, so the preprocessor would have to be the one to say which."
+tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Read by the checker, which drops it with gcc's warning on x86-64 outside Windows and quietly on Windows, as gcc does, since a 64-bit program has one convention and the headers write these for the sake of the 32-bit build. `__has_attribute` answers yes on x86-64 and no everywhere else. gcc 16 answers yes on 32-bit x86 as well, where the attribute changes how the call is made, and this compiler does not make the call that way yet, so the row names x86-64 alone until it does."
 
 [[feature]]
 name = "vectorcall"
@@ -983,46 +991,51 @@ notes = "Clang's and Microsoft's rather than gcc's, which does not know it. Read
 name = "ms_struct"
 kind = "attribute"
 gcc_version = "3.4"
-status = "partial"
+status = "implemented"
+targets = ["x86-64", "x86", "windows"]
 used_by = ["mingw-w64"]
-tests = ["rucc-driver::ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record"]
-notes = "Lays the bit-fields of one record out the way Microsoft's compiler does, on x86 and on Windows, which is where gcc takes it. `__has_attribute` answers no because the answer depends on the target and this table has none."
+tests = ["rucc-driver::ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Lays the bit-fields of one record out the way Microsoft's compiler does, on x86 and on Windows, which is where gcc takes it. `__has_attribute` answers yes on those targets and no on the others, which is gcc 16's answer on x86-64 Linux and with `-m32` and mingw-w64 gcc's and AArch64 gcc's."
 
 [[feature]]
 name = "gcc_struct"
 kind = "attribute"
 gcc_version = "3.4"
-status = "partial"
+status = "implemented"
+targets = ["x86-64", "x86", "windows"]
 used_by = ["mingw-w64"]
-tests = ["rucc-driver::ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record"]
-notes = "The other half of `ms_struct`, and answered no for the same reason."
+tests = ["rucc-driver::ms_struct_and_gcc_struct_choose_the_bit_field_rule_for_one_record", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "The other half of `ms_struct`, and answered on the same targets."
 
 [[feature]]
 name = "dllimport"
 kind = "attribute"
 gcc_version = "3.1"
-status = "partial"
+status = "implemented"
+targets = ["windows"]
 used_by = ["mingw-w64"]
-tests = ["rucc-sema::dllimport_and_dllexport_written_as_attributes_are_kept", "rucc::a_call_to_a_dllimport_function_goes_through_its_import_pointer"]
-notes = "Read on every target, as gcc and clang read it, and acted on only in a COFF object. `__has_attribute` answers no because gcc answers yes only where there are DLLs and this table has no target."
+tests = ["rucc-sema::dllimport_and_dllexport_written_as_attributes_are_kept", "rucc::a_call_to_a_dllimport_function_goes_through_its_import_pointer", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Read on every target, as gcc and clang read it, and acted on only in a COFF object. `__has_attribute` answers yes only on Windows, which is where gcc has it, since an ELF or Mach-O target has no DLLs to import from."
 
 [[feature]]
 name = "dllexport"
 kind = "attribute"
 gcc_version = "3.1"
-status = "partial"
+status = "implemented"
+targets = ["windows"]
 used_by = ["mingw-w64"]
-tests = ["rucc-sema::dllimport_and_dllexport_written_as_attributes_are_kept"]
-notes = "The other half of `dllimport`, and answered no for the same reason."
+tests = ["rucc-sema::dllimport_and_dllexport_written_as_attributes_are_kept", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "The other half of `dllimport`, and answered on Windows alone for the same reason."
 
 [[feature]]
 name = "selectany"
 kind = "attribute"
 gcc_version = "3.4"
-status = "partial"
+status = "implemented"
+targets = ["windows"]
 used_by = ["mingw-w64"]
-tests = ["rucc::a_selectany_definition_is_one_the_link_may_find_elsewhere_too"]
-notes = "Makes a definition one the link may find in several objects, on Windows. Answered no for the reason `dllimport` is."
+tests = ["rucc::a_selectany_definition_is_one_the_link_may_find_elsewhere_too", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
+notes = "Makes a definition one the link may find in several objects, on Windows. Answered yes on Windows alone, as `dllimport` is."
 
 # The C23 standard attributes, which `__has_c_attribute` answers with the number the standard
 # gives them rather than with 1.
@@ -1393,6 +1406,7 @@ name = "__builtin_sponentry"
 kind = "builtin"
 gcc_version = "none"
 status = "implemented"
+targets = ["aarch64"]
 signature = "void *(void)"
 used_by = ["mingw-w64"]
 tests = ["rucc-driver::sponentry_is_the_stack_pointer_the_function_was_entered_with"]
