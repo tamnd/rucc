@@ -5472,8 +5472,12 @@ impl<'a> Lowering<'a> {
                 }
                 if operand.memory && hole != Some(index) {
                     let at = use_of[index].map(|at| first_use + at).ok_or_else(refused)?;
+                    // `%P` on memory is the operand as it is, which is how the kernel's
+                    // alternatives write `prefetchw %P0` and `clflush %P0`. gcc drops the
+                    // `(%rip)` from a constant address under it, and an address in a register
+                    // has none to drop.
                     match modifier {
-                        None => {}
+                        None | Some('P') => {}
                         Some('H') => text.push('8'),
                         Some(_) => return Err(refused()),
                     }
@@ -5487,7 +5491,7 @@ impl<'a> Lowering<'a> {
                     // `%H` is the word eight bytes on, for the high half of a sixteen byte
                     // object.
                     match modifier {
-                        None => text.push_str(x86_64::TEMPLATE_MEM),
+                        None | Some('P') => text.push_str(x86_64::TEMPLATE_MEM),
                         Some('H') => text.push_str(&x86_64::template_mem_at(8)),
                         Some(_) => return Err(refused()),
                     }
