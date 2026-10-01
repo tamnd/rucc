@@ -606,7 +606,7 @@ impl Checker<'_> {
         let ExprKind::Decl(decl) = self.tast[operand].kind else { return };
         if self.tast[decl].flags.contains(DeclFlags::INTERRUPT) {
             let what = "interrupt service routine cannot be called directly";
-            self.report(Diagnostic::error(what, span).with_code("E0785"));
+            self.report(Diagnostic::error(what, span).with_code("E0791"));
         }
     }
 

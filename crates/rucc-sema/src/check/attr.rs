@@ -1216,7 +1216,7 @@ impl Checker<'_> {
         if let Some(&frame) = signature.params.first() {
             if !rucc_types::is_pointer(&self.types, frame) {
                 let what = "interrupt service routine should have a pointer as the first argument";
-                self.report(Diagnostic::error(what, span).with_code("E0785"));
+                self.report(Diagnostic::error(what, span).with_code("E0791"));
             }
         }
         if let Some(&code) = signature.params.get(1) {
@@ -1228,21 +1228,21 @@ impl Checker<'_> {
             );
             if !word {
                 let what = "interrupt service routine should have 'unsigned long int' as the second argument";
-                self.report(Diagnostic::error(what, span).with_code("E0785"));
+                self.report(Diagnostic::error(what, span).with_code("E0791"));
             }
         }
         if signature.params.is_empty() || signature.params.len() > 2 {
             let what = "interrupt service routine can only have a pointer argument and an optional \
                         integer argument";
-            self.report(Diagnostic::error(what, span).with_code("E0785"));
+            self.report(Diagnostic::error(what, span).with_code("E0791"));
         }
         if !rucc_types::is_void(&self.types, signature.ret) {
             let what = "interrupt service routine must return 'void'";
-            self.report(Diagnostic::error(what, span).with_code("E0785"));
+            self.report(Diagnostic::error(what, span).with_code("E0791"));
         }
         if naked {
             let what = "interrupt and naked attributes are not compatible";
-            self.report(Diagnostic::error(what, span).with_code("E0785"));
+            self.report(Diagnostic::error(what, span).with_code("E0791"));
         }
     }
 
@@ -1299,7 +1299,7 @@ impl Checker<'_> {
             )
         };
         let help = "build it with '-mgeneral-regs-only' or '__attribute__((target(\"general-regs-only\")))'";
-        self.report(Diagnostic::error(what, span).with_code("E0786").help(help, span));
+        self.report(Diagnostic::error(what, span).with_code("E0792").help(help, span));
     }
 
     /// Whether an attribute list says a call to this function may come back more than once.
