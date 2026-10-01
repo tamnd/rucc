@@ -1197,11 +1197,25 @@ fn generate(
     let copies = target.tuple.arch() == Arch::X86_64;
     let elsewhere = Elsewhere::of(module, replaceable(target, opts), target.object_format, copies);
 
+    // A function written `cold` goes in `.text.unlikely` with the cold parts of the others, which
+    // is gcc's `default_function_section`. Only on ELF, whose section names are the ones gcc
+    // writes, and only for a function the program did not put somewhere itself.
+    let heat = target.tuple.os().object_format() == Some(ObjectFormat::Elf)
+        && opts.reorder_functions.unwrap_or_else(|| opts.opt_level.schedules());
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
+        }
+        let func = &mut module[id];
+        if heat && func.section.is_none() && func.attrs.set.contains(rucc_ir::AttrSet::COLD) {
+            let section = if opts.function_sections {
+                format!(".text.unlikely.{}", names.resolve(func.name))
+            } else {
+                ".text.unlikely".to_owned()
+            };
+            func.section = Some(names.intern(&section));
         }
         match pipeline::compile_recording(
             &mut module[id],
@@ -4553,6 +4567,40 @@ decl #0 x : int object external static defined
             let whole = run(&opts, source).text().to_owned();
             assert!(!whole.contains(".cold"), "{whole}");
         }
+    }
+
+    /// A function written `cold` goes in `.text.unlikely` from `-O2`, or `.text.unlikely.f` under
+    /// `-ffunction-sections`, and the function after it goes back to `.text`. Not at `-O1`, not
+    /// when the command line said no, and not when the program named a section itself.
+    #[test]
+    fn a_function_written_cold_goes_in_text_unlikely() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let source = "__attribute__((cold)) int f(int x) { return x + 1; }\n\
+                      int g(int x) { return f(x) * 2; }\n";
+        let text = run(&opts, source).text().to_owned();
+        let unlikely = text.find("\t.section\t.text.unlikely,\"ax\",@progbits\n").expect(&text);
+        let f = text.find("\nf:").expect(&text);
+        let g = text.find("\ng:").expect(&text);
+        assert!(unlikely < f && f < g && text[f..g].contains("\n\t.text\n"), "{text}");
+        opts.function_sections = true;
+        let text = run(&opts, source).text().to_owned();
+        assert!(text.contains("\t.section\t.text.unlikely.f,\"ax\",@progbits\n"), "{text}");
+        opts.function_sections = false;
+        for (level, asked) in
+            [(rucc_session::OptLevel::O1, None), (rucc_session::OptLevel::O2, Some(false))]
+        {
+            opts.opt_level = level;
+            opts.reorder_functions = asked;
+            let text = run(&opts, source).text().to_owned();
+            assert!(!text.contains(".text.unlikely"), "{text}");
+        }
+        opts.opt_level = rucc_session::OptLevel::O2;
+        opts.reorder_functions = None;
+        let placed = "__attribute__((cold, section(\".foo\"))) int f(int x) { return x; }\n";
+        let text = run(&opts, placed).text().to_owned();
+        assert!(text.contains(".foo") && !text.contains(".text.unlikely"), "{text}");
     }
 
     /// tamnd/rucc#2277. With the vector registers taken away a function with a `double` in it is
