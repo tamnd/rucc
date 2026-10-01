@@ -51,8 +51,8 @@
 use rucc_tuple::{Arch, Env, Os, TargetTuple};
 
 use crate::describe::{
-    AbiDescription, Banks, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel,
-    Variadic,
+    AbiDescription, Banks, Cleanup, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test,
+    Travel, Variadic,
 };
 use crate::shape::Format;
 
@@ -76,6 +76,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
         wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -95,6 +96,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 /// The shared part of [`AAPCS64`] and [`DARWIN_ARM64`].
@@ -111,6 +113,7 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
         wide_integer_drains: true,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -130,6 +133,7 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 /// AAPCS64: AArch64 everywhere but Darwin and Windows.
@@ -177,6 +181,7 @@ pub static DARWIN_ARM64: AbiDescription = AbiDescription {
     variadic: Variadic::AlwaysMemory,
     stack_args: StackArgs::Packed,
     narrow: Narrow::ToInt,
+    cleanup: Cleanup::Caller,
     ..AAPCS64_BASE
 };
 
@@ -233,6 +238,7 @@ pub static WIN64: AbiDescription = AbiDescription {
         wide_integer_drains: false,
         wide_is_by_reference: true,
         wide_integer_returns_in: Some(Format::Quad),
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -258,6 +264,7 @@ pub static WIN64: AbiDescription = AbiDescription {
     variadic: Variadic::BothBanks,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 /// The RISC-V LP64D psABI.
@@ -283,6 +290,7 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
         wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -303,6 +311,7 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 /// The i386 System V psABI: 32-bit x86 on Linux and the other ELF systems.
@@ -342,6 +351,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
         wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -359,6 +369,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 /// i686 Windows as mingw-w64 has it, with gcc or clang.
@@ -387,6 +398,7 @@ pub static I386_MINGW: AbiDescription = AbiDescription {
         wide_integer_drains: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -402,6 +414,7 @@ pub static I386_MINGW: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    cleanup: Cleanup::Caller,
 };
 
 /// i686 Windows as Microsoft's compiler has it, and clang for `i686-pc-windows-msvc`.
@@ -419,6 +432,59 @@ pub static I386_MSVC: AbiDescription = AbiDescription {
     ..I386_MINGW
 };
 
+/// i686 Windows `stdcall` as mingw-w64 has it, which is how nearly all of the Windows API is
+/// declared: `WINAPI`, `CALLBACK` and `APIENTRY` are each this.
+///
+/// [`I386_MINGW`] in every way but one. The arguments are where cdecl puts them and the value
+/// comes back where cdecl brings it back, and it is the callee that takes the argument area off
+/// the stack, with `ret $n`. The address a structure comes back through is on the stack like any
+/// other argument and is counted in `n` with them.
+///
+/// A variadic function cannot be one, since only its caller knows how many bytes it pushed, and
+/// gcc makes a variadic `stdcall` function cdecl without a word. So does this compiler, in the
+/// front end, which is why this description never sees one.
+pub static I386_MINGW_STDCALL: AbiDescription =
+    AbiDescription { name: "i386 Windows stdcall (mingw)", cleanup: Cleanup::Callee, ..I386_MINGW };
+
+/// i686 Windows `fastcall` as mingw-w64 has it.
+///
+/// [`I386_MINGW_STDCALL`] with two registers. The first two arguments that are integers or
+/// pointers of four bytes or fewer are in ecx and edx, and everything else is on the stack where
+/// cdecl would put it. What keeps it from being a two register bank like any other is what
+/// happens around the things that do not fit: a `double` is on the stack and the integer after it
+/// still gets the next register, while a `long long` or a structure of any size is on the stack
+/// and takes the registers that were left with it, so the integer after one of those is on the
+/// stack too. That is what gcc does and what Microsoft's compiler does, measured with
+/// i686-w64-mingw32-gcc. The address a structure comes back through is the first argument and so
+/// is in ecx, and it is not counted in the `ret $n`.
+pub static I386_MINGW_FASTCALL: AbiDescription = AbiDescription {
+    name: "i386 Windows fastcall (mingw)",
+    banks: Banks { integer: 2, ..I386_MINGW.banks },
+    scalars: Scalars { wide_integer_in_memory: true, ..I386_MINGW.scalars },
+    arguments: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::Anything, Travel::InMemoryAndDrain),
+    ],
+    cleanup: Cleanup::Callee,
+    ..I386_MINGW
+};
+
+/// i686 Windows `stdcall` as Microsoft's compiler has it, which is [`I386_MINGW_STDCALL`] with
+/// the return rules of [`I386_MSVC`].
+pub static I386_MSVC_STDCALL: AbiDescription = AbiDescription {
+    name: "i386 Windows stdcall (MSVC)",
+    returns: I386_MSVC.returns,
+    ..I386_MINGW_STDCALL
+};
+
+/// i686 Windows `fastcall` as Microsoft's compiler has it, which is [`I386_MINGW_FASTCALL`] with
+/// the return rules of [`I386_MSVC`].
+pub static I386_MSVC_FASTCALL: AbiDescription = AbiDescription {
+    name: "i386 Windows fastcall (MSVC)",
+    returns: I386_MSVC.returns,
+    ..I386_MINGW_FASTCALL
+};
+
 /// Which calling convention one function is defined and called with.
 ///
 /// A target has one convention, and nearly every function in a program is defined and called with
@@ -433,6 +499,11 @@ pub static I386_MSVC: AbiDescription = AbiDescription {
 /// end writes `ms_abi` on a Windows target as [`Convention::Target`], which is what makes the
 /// attribute change nothing there, not even which function type a declaration has: every header
 /// mingw-w64 ships spells its own convention out on some declaration and not on the next.
+///
+/// 32-bit Windows is the other machine with more than one, and there it is the rule rather than
+/// the exception: cdecl is the target's own, and `stdcall` and `fastcall` are what the Windows API
+/// and a good deal of the code written against it declare. `cdecl` written out is the target's
+/// own again, the same way `ms_abi` is on Windows x64.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Convention {
     /// Whatever the target follows, which is what a function without either attribute has.
@@ -442,6 +513,10 @@ pub enum Convention {
     Ms,
     /// SysV AMD64, on an x86-64 target that is Windows.
     Sysv,
+    /// `stdcall` on 32-bit Windows: cdecl's arguments with the callee taking them off the stack.
+    Stdcall,
+    /// `fastcall` on 32-bit Windows: `stdcall` with the first two small integers in ecx and edx.
+    Fastcall,
 }
 
 impl Convention {
@@ -453,6 +528,8 @@ impl Convention {
             Self::Target => None,
             Self::Ms => Some("ms_abi"),
             Self::Sysv => Some("sysv_abi"),
+            Self::Stdcall => Some("stdcall"),
+            Self::Fastcall => Some("fastcall"),
         }
     }
 
@@ -461,25 +538,34 @@ impl Convention {
     ///
     /// The one the target already follows comes back as [`Convention::Target`], which is the
     /// whole of the normalising the paragraph on the type promises. Only x86-64 has the pair, and
-    /// gcc knows neither name anywhere else.
+    /// gcc knows neither name anywhere else. `stdcall`, `fastcall` and `cdecl` are answered on
+    /// 32-bit Windows, the one target here that has them.
     #[must_use]
     pub fn asked(target: TargetTuple, name: &str) -> Option<Self> {
-        if target.arch() != Arch::X86_64 {
-            return None;
-        }
         let windows = target.os() == Os::Windows;
-        match name {
-            "ms_abi" if windows => Some(Self::Target),
-            "ms_abi" => Some(Self::Ms),
-            "sysv_abi" if windows => Some(Self::Sysv),
-            "sysv_abi" => Some(Self::Target),
+        match (target.arch(), name) {
+            (Arch::X86_64, "ms_abi") if windows => Some(Self::Target),
+            (Arch::X86_64, "ms_abi") => Some(Self::Ms),
+            (Arch::X86_64, "sysv_abi") if windows => Some(Self::Sysv),
+            (Arch::X86_64, "sysv_abi") => Some(Self::Target),
+            (Arch::X86, "stdcall") if windows => Some(Self::Stdcall),
+            (Arch::X86, "fastcall") if windows => Some(Self::Fastcall),
+            (Arch::X86, "cdecl") if windows => Some(Self::Target),
             _ => None,
         }
+    }
+
+    /// Whether this is one of the 32-bit Windows conventions whose callee takes the arguments
+    /// off the stack, which is also what decorates a function's name with how many bytes that is.
+    #[must_use]
+    pub const fn callee_pops(self) -> bool {
+        matches!(self, Self::Stdcall | Self::Fastcall)
     }
 }
 
 /// The ABI a function of that convention follows on this target, which is [`for_target`] for the
-/// target's own and the other description on x86-64 for the other one.
+/// target's own, the other description on x86-64 for the other one, and the `stdcall` or
+/// `fastcall` description of the same runtime on 32-bit Windows.
 ///
 /// Only the passing half of the ABI changes. What a type is stays the target's, so a `long double`
 /// is still the eighty bit x87 format in sixteen bytes in an `ms_abi` function on Linux, and the
@@ -494,6 +580,15 @@ pub fn for_convention(
         (Convention::Target, _) => for_target(target),
         (Convention::Ms, Arch::X86_64) => Some(&WIN64),
         (Convention::Sysv, Arch::X86_64) => Some(&SYSV_AMD64),
+        (Convention::Stdcall | Convention::Fastcall, Arch::X86) if target.os() == Os::Windows => {
+            let msvc = target.env() == Env::Msvc;
+            Some(match (convention, msvc) {
+                (Convention::Stdcall, false) => &I386_MINGW_STDCALL,
+                (Convention::Stdcall, true) => &I386_MSVC_STDCALL,
+                (_, false) => &I386_MINGW_FASTCALL,
+                (_, true) => &I386_MSVC_FASTCALL,
+            })
+        }
         _ => None,
     }
 }
@@ -509,6 +604,10 @@ pub static DESCRIBED: &[&AbiDescription] = &[
     &I386_SYSV,
     &I386_MINGW,
     &I386_MSVC,
+    &I386_MINGW_STDCALL,
+    &I386_MINGW_FASTCALL,
+    &I386_MSVC_STDCALL,
+    &I386_MSVC_FASTCALL,
 ];
 
 /// The ABI this target follows, and [`None`] for one whose ABI is not described yet.

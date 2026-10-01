@@ -107,6 +107,11 @@ impl Pass for Dse {
                 }
             }
         }
+        // The distance a narrowed fill moves its address by is an integer as wide as an address,
+        // since a wider one is a value a 32-bit target has no instruction to add. Sixty four when
+        // there is no module to ask.
+        let bits = an.outside().pointer_bytes().map_or(64, |bytes| bytes * 8);
+        let bits = u32::try_from(bits).expect("an address narrower than four billion bits");
         for (inst, fate) in fates {
             if !fuel.take() {
                 // Out of fuel stops the edits and not the looking, so the count of what could have
@@ -120,7 +125,7 @@ impl Pass for Dse {
                     stats.optimized(REMOVED);
                 }
                 Fate::Trim { skip, size } => {
-                    trim(func, inst, skip, size);
+                    trim(func, inst, skip, size, bits);
                     stats.optimized(TRIMMED);
                 }
                 Fate::Kept | Fate::TooFar => {}
@@ -355,7 +360,7 @@ fn hull(so_far: Option<(i128, i128)>, (lo, hi): (i128, i128)) -> (i128, i128) {
 ///
 /// Both of a copy's addresses move by the same amount and a fill's one address does, and the
 /// alignment is what is left of the old one at the new start.
-fn trim(func: &mut Func, inst: Inst, skip: i64, size: u64) {
+fn trim(func: &mut Func, inst: Inst, skip: i64, size: u64, bits: u32) {
     let data = func[inst];
     let Extra::Mem(mem) = data.extra else { return };
     let info = func[mem];
@@ -364,7 +369,7 @@ fn trim(func: &mut Func, inst: Inst, skip: i64, size: u64) {
     let moved = if data.opcode == Opcode::Memset { 1 } else { 2 };
     let mut align = info.align;
     if skip != 0 {
-        let ty = Type::int(64);
+        let ty = Type::int(bits);
         let imm = func.add_imm(Imm::int(i128::from(skip), ty.lane()));
         let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
         let by = emit(func, inst, data, ty);
@@ -520,6 +525,41 @@ block0(%0: ptr):
         assert!(out.contains("size 8, align 8"), "{out}");
         assert!(out.contains("iconst.i64 8"), "eight bytes in, {out}");
         assert!(!out.contains("size 16"), "{out}");
+    }
+
+    /// On a 32-bit target the distance is a 32-bit integer, since a 64-bit one is a value i386
+    /// has no instruction to add to an address.
+    #[test]
+    fn a_fill_narrowed_on_a_32_bit_target_moves_its_address_by_a_32_bit_distance() {
+        let head = r#"; ModuleID = 't.c'
+; format 0
+target triple = "i686-unknown-linux-gnu"
+target datalayout = "e-p:32:32-i64:32-f80:128-S128"
+"#;
+        let body = r#"
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 16, align 4
+    %2 = iconst.i32 7
+    store %2 -> %0, align 4
+    return
+}
+"#;
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&format!("{head}{body}"), &mut names).expect("it parses");
+        // What says how wide an address is, which a module the driver hands the pass always has.
+        let outside = std::sync::Arc::new(crate::Outside::of(&module));
+        let id = module.funcs().next().expect("one function");
+        let mut an = crate::machine::fixtures::analyses().about(outside);
+        Dse.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}");
+        }
+        let out = rucc_ir::print(&module, &names);
+        assert!(out.contains("size 12, align 4"), "{out}");
+        assert!(out.contains("iconst.i32 4"), "four bytes in, {out}");
+        assert!(!out.contains("iconst.i64"), "{out}");
     }
 
     /// A store both arms of a branch overwrite is dead, and one only one arm overwrites is not.

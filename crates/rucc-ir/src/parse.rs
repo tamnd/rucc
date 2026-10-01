@@ -519,6 +519,10 @@ impl<'a, 'n> Parser<'a, 'n> {
             signature.convention = Convention::Ms;
         } else if self.eat("sysv_abi") {
             signature.convention = Convention::Sysv;
+        } else if self.eat("stdcall") {
+            signature.convention = Convention::Stdcall;
+        } else if self.eat("fastcall") {
+            signature.convention = Convention::Fastcall;
         }
         self.expect("(")?;
         if !self.eat(")") {

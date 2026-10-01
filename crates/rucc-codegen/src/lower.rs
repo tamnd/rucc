@@ -87,8 +87,8 @@ use rucc_ir::{
 use rucc_mir as mir;
 use rucc_target::template::{template_name, template_reg};
 use rucc_target::{
-    Address, CallRegs, Constraint, Convention, OperandDesc, PhysReg, RegClass, Role, VaList,
-    Variadic,
+    Address, CallRegs, Cleanup, Constraint, Convention, OperandDesc, PhysReg, RegClass, Role,
+    VaList, Variadic,
 };
 use rucc_target::{aarch64, x86_64};
 
@@ -2144,7 +2144,13 @@ impl<'a> Lowering<'a> {
         // A callee that took the address its result went through off the stack left the stack
         // pointer that much higher than the outgoing area this frame keeps under it, so it goes
         // back down before anything else reads from or writes to that area.
-        let popped = if returned_through { conv.return_pointer_popped() } else { 0 };
+        // A callee whose convention cleans up took the whole argument area with it, which is
+        // i386 `stdcall` and `fastcall`, and that is the same thing on a larger scale.
+        let popped = match conv.abi.cleanup {
+            Cleanup::Callee if !variadic => made.area,
+            _ if returned_through => conv.return_pointer_popped(),
+            _ => 0,
+        };
         if popped > 0 {
             let sub = self.named(self.selector.frame.sub);
             let class = self.conv.int_class;
@@ -2156,6 +2162,7 @@ impl<'a> Lowering<'a> {
                 .imm(i64::from(popped))
                 .finish();
         }
+        abi::pin(&mut self.out, block, &made, self.selector.abi, self.names);
         // An eighty bit value came back on the x87 stack, and the one thing that has to happen
         // before anything else touches that stack is taking it off. So the `fstp` goes here, in
         // front of everything the block does next, and after it the value is in its slot and is
@@ -7072,6 +7079,13 @@ impl<'a> Lowering<'a> {
             for decl in self.source.param_decls(param) {
                 self.stack.passed.push((decl, up));
             }
+        }
+        // A function whose convention has the callee clean up takes its whole argument area off
+        // the stack on the way out, which is `ret $n` for i386 `stdcall` and `fastcall`. The front
+        // end never gives a variadic function one of those, and the check is here all the same
+        // because only the caller of one of those knows how much it pushed.
+        if self.conv.abi.cleanup == Cleanup::Callee && !variadic {
+            self.stack.popped = arrived.beyond;
         }
         Ok(())
     }

@@ -72,8 +72,8 @@ pub mod shape;
 pub use abis::Convention;
 pub use classify::Call;
 pub use describe::{
-    AbiDescription, Banks, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test, Travel,
-    Variadic,
+    AbiDescription, Banks, Cleanup, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test,
+    Travel, Variadic,
 };
 pub use layout::{BitfieldOrder, DataLayout, FloatType};
 pub use shape::{Arg, Format, Kind, Pass, Piece, Scalar, Shape, Slot};

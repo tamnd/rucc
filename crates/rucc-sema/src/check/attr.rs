@@ -1812,9 +1812,10 @@ impl Checker<'_> {
     ///
     /// Three things are said. `ms_abi` or `sysv_abi` on a target other than x86-64 is ignored with
     /// a warning, since there is no second convention there to pick. One of each in the same list
-    /// is refused, as gcc refuses it, because a function cannot be both. And `stdcall`, `cdecl`,
-    /// `fastcall`, `thiscall`, `regparm` and `vectorcall` are ignored with a warning anywhere but
-    /// Windows. The same name twice is the one convention asked for twice, which is no conflict.
+    /// is refused, as gcc refuses it, because a function cannot be both, and the same goes for two
+    /// of `stdcall`, `fastcall` and `cdecl` on 32-bit Windows, where those are conventions. And
+    /// `stdcall`, `cdecl`, `fastcall`, `thiscall`, `regparm` and `vectorcall` are ignored with a
+    /// warning on x86-64 outside Windows. The same name twice is the one convention asked for twice, which is no conflict.
     fn convention_in(&mut self, attrs: AttrList) -> Option<(Convention, String, Span)> {
         let written = self.ast[attrs].to_vec();
         let tuple = self.cx.target.tuple;
@@ -1841,6 +1842,21 @@ impl Checker<'_> {
                         Some((_, first, _)) if *first != name => {
                             let what = "'ms_abi' and 'sysv_abi' attributes are not compatible";
                             let refused = Diagnostic::error(what.to_string(), attr.span);
+                            self.report(refused.with_code("E0740"));
+                        }
+                        Some(_) => {}
+                        None => asked = Some((convention, name, attr.span)),
+                    }
+                }
+                // The three 32-bit Windows has, where each is a convention of its own and `cdecl`
+                // is the target's. Two different ones in a list are refused as gcc refuses them.
+                "stdcall" | "cdecl" | "fastcall" if Convention::asked(tuple, &name).is_some() => {
+                    let convention = Convention::asked(tuple, &name).unwrap_or_default();
+                    match &asked {
+                        Some((_, first, _)) if *first != name => {
+                            let what =
+                                format!("'{first}' and '{name}' attributes are not compatible");
+                            let refused = Diagnostic::error(what, attr.span);
                             self.report(refused.with_code("E0740"));
                         }
                         Some(_) => {}
@@ -1927,8 +1943,18 @@ impl Checker<'_> {
     }
 
     /// The same function type under another convention.
+    ///
+    /// A variadic function asked to be `stdcall` or `fastcall` stays the target's own, which is
+    /// what gcc makes of it without a word: the callee cannot take off the stack what only the
+    /// caller knows it pushed.
     fn function_under(&mut self, function: FunctionId, convention: Convention) -> TypeId {
-        let signature = FunctionType { convention, ..self.types.signature(function).clone() };
+        let current = self.types.signature(function);
+        let convention = if convention.callee_pops() && current.variadic {
+            Convention::Target
+        } else {
+            convention
+        };
+        let signature = FunctionType { convention, ..current.clone() };
         self.types.function(signature)
     }
 
