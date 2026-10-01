@@ -228,6 +228,9 @@ impl<'a> Printer<'a> {
         if global.constant {
             self.out.push_str(", constant");
         }
+        if global.droppable {
+            self.out.push_str(", droppable");
+        }
         self.section(global.section);
         self.out.push('\n');
     }

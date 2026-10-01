@@ -816,6 +816,13 @@ impl Unit<'_> {
         global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
         global.constant = repr::is_read_only(self.types, ty);
         global.section = self.section_of(decl, false);
+        // A `static` object is the optimizer's to take away once nothing names it, which is what
+        // gcc does, unless an attribute asked for it to be kept. The kernel's table of operations
+        // for a feature it was built without is one: the call that took its address was to a stub
+        // that ignores it, and the functions the table names call what the kernel never defined.
+        global.droppable = global.linkage == IrLinkage::Internal
+            && state != Definition::Declared
+            && !node.flags.contains(DeclFlags::RETAINED);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal

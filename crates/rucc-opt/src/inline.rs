@@ -94,8 +94,8 @@ use rucc_cost::heuristics::{
 };
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
-    Float, Func, FuncId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode, Restrict,
-    Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
+    Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module, Opcode,
+    Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
 use rucc_target::{Isa, TargetInfo};
 
@@ -1672,9 +1672,28 @@ fn targets(
 /// sixty four bit only kernel defines that. So the question is asked again once the passes are
 /// done, and asked again after each answer, since a function taken away may have been the last
 /// caller of another. A function that calls itself is still a caller, so one of those stays.
+///
+/// A `static` object goes the same way, which is what lets a function go that only a table names.
+/// The kernel's device mapper hands `&dm_dax_ops` to an `alloc_dax` that is an empty stub when DAX
+/// is not built, so once the stub is inlined nothing names the table, and the three functions it
+/// points at call `dax_get_private`, which nothing defines. Only an object marked droppable goes,
+/// and it becomes a declaration rather than leaving the module, as a function does.
 pub fn drop_unreferenced(module: &mut Module) {
     loop {
         let (calls, elsewhere) = references(module);
+        let unread: Vec<GlobalId> = module
+            .globals()
+            .filter(|&id| {
+                let global = &module[id];
+                global.droppable && !global.is_declaration() && !elsewhere.contains(&global.name)
+            })
+            .collect();
+        for &id in &unread {
+            let global = &mut module[id];
+            global.init = None;
+            global.linkage = Linkage::External;
+            global.droppable = false;
+        }
         let gone: Vec<FuncId> = module
             .funcs()
             .filter(|&id| {
@@ -1686,7 +1705,7 @@ pub fn drop_unreferenced(module: &mut Module) {
                     && !elsewhere.contains(&func.name)
             })
             .collect();
-        if gone.is_empty() {
+        if gone.is_empty() && unread.is_empty() {
             return;
         }
         for id in gone {
