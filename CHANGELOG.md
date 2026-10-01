@@ -46,6 +46,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An i386 `q` asm input whose value is kept on the stack, such as the kernel's `writeb` in the i915 driver's `gen5_write8`, is read straight into a register with a low byte instead of through `esi`, where `movb %sil` is not an instruction i386 has.
 - The i386 assembler wraps a displacement up to four gigabytes either way in the four bytes of an address, so `-0xC0000000(%edi)` in head_32.S is the address gas writes instead of an error.
 - The assembler reads an address that is arithmetic starting with a bracket, such as `%fs:(gdt_page + (26 * 8)) + 4` in the i386 kernel's `CHECK_AND_APPLY_ESPFIX`, as a displacement instead of refusing it.
+- Padding in i386 code is the no-ops gas writes there: `nop`, `xchg %ax,%ax` and the `lea` of `%esi` into itself up to eight bytes, with a jump over a run of 24 bytes or more, rather than x86-64's `nopl` forms, which the oldest processors of the family do not have. An object rucc assembles for i686 now has the same bytes as gas's where an alignment falls, and so does an x86-64 file after `.code32` (#2247).
 
 ### Fixed
 

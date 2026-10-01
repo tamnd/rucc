@@ -38,7 +38,7 @@ use rucc_object::{
 };
 use rucc_target::aarch64::{self, AAPCS64};
 use rucc_target::x86;
-use rucc_target::x86_64::{Mode, SYSV, Width, gpr_named, nops};
+use rucc_target::x86_64::{Mode, SYSV, Width, gpr_named, nops_in};
 use rucc_target::{CallRegs, ObjectFormat};
 use rucc_tuple::Arch;
 
@@ -719,6 +719,12 @@ impl Reader {
         out
     }
 
+    /// The mode the next instruction is read in: what `.code32` or `.code64` last said, and
+    /// otherwise the one the file's machine runs in.
+    fn mode(&self) -> Mode {
+        self.code.unwrap_or(if self.i386 { Mode::Bits32 } else { Mode::Bits64 })
+    }
+
     /// One instruction, as the bytes of it.
     ///
     /// What an instruction is is [`crate::instruction`]'s business and what it refers to is this
@@ -737,7 +743,7 @@ impl Reader {
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
-        let mode = self.code.unwrap_or(if self.i386 { Mode::Bits32 } else { Mode::Bits64 });
+        let mode = self.mode();
         let mut written = match self.sixteen {
             Some(gcc) => crate::sixteen::one_in16(word, &args, gcc),
             None => crate::instruction::one_in(word, &args, mode),
@@ -1754,6 +1760,7 @@ impl Reader {
         let mut order: Vec<(usize, u64, usize)> =
             self.subs.iter().map(|(&sub, &(parent, number))| (parent, number, sub)).collect();
         order.sort_unstable();
+        let mode = self.mode();
         let mut moved: Map<usize, (usize, u64)> = Map::default();
         for (parent, _, sub) in order {
             let taken = std::mem::take(&mut self.parts[sub].bytes);
@@ -1770,7 +1777,7 @@ impl Reader {
                         whole.bytes.extend_from_slice(&A64_NOP.to_le_bytes());
                     }
                 } else if exec {
-                    nops(need, &mut whole.bytes);
+                    nops_in(mode, need, &mut whole.bytes);
                 } else {
                     whole.bytes.resize(whole.bytes.len() + need, 0);
                 }
@@ -2434,7 +2441,8 @@ impl Reader {
             // Not one byte at a time, which is what gas does as well: the padding in front of a
             // loop is fallen into, and a few long nops are fewer instructions than many short ones.
             // On AArch64 the no-op is a word, and padding that is not a whole number of words is
-            // zeros up to the next one, which nothing can be walking through.
+            // zeros up to the next one, which nothing can be walking through. Thirty two bit code
+            // has no-ops of its own, which `nops_in` knows.
             None if exec && self.aarch64 => {
                 let mut bytes = vec![0u8; (need % 4) as usize];
                 for _ in 0..need / 4 {
@@ -2448,7 +2456,7 @@ impl Reader {
                 if self.sixteen.is_some() {
                     crate::sixteen::nops(need, &mut bytes);
                 } else {
-                    nops(need, &mut bytes);
+                    nops_in(self.mode(), need, &mut bytes);
                 }
                 self.put(&bytes)
             }
@@ -5359,6 +5367,22 @@ _tls$tlv$init:
         assert_eq!(bytes(&other, ".text"), vec![0xc3, 0xcc, 0xcc, 0xcc, 0xc3]);
         let data = assembled("\t.data\n\t.byte 1\n\t.align 4, 0x90\n");
         assert_eq!(bytes(&data, ".data"), vec![1, 0x90, 0x90, 0x90]);
+    }
+
+    /// i386 code is padded with the `lea` forms gas writes there, not x86-64's `nopl`, and so is
+    /// x86-64 code after `.code32`.
+    #[test]
+    fn padding_in_thirty_two_bit_code_is_what_gas_writes_for_i386() {
+        let out = read("\t.text\n\tret\n\t.p2align 4\n\tret\n", Arch::X86).unwrap();
+        let text = bytes(&out, ".text");
+        assert_eq!(text.len(), 17);
+        assert_eq!(text[1..16], [0x2e, 0x8d, 0xb4, 0x26, 0, 0, 0, 0, 0x8d, 0xb4, 0x26, 0, 0, 0, 0]);
+        let out = read("\t.text\n\tret\n\t.p2align 2\n\tret\n", Arch::X86).unwrap();
+        assert_eq!(bytes(&out, ".text"), [0xc3, 0x8d, 0x76, 0x00, 0xc3]);
+        let code32 = assembled("\t.text\n\t.code32\n\tret\n\t.p2align 2\n\tret\n");
+        assert_eq!(bytes(&code32, ".text"), [0xc3, 0x8d, 0x76, 0x00, 0xc3]);
+        let long = assembled("\t.text\n\tret\n\t.p2align 2\n\tret\n");
+        assert_eq!(bytes(&long, ".text"), [0xc3, 0x0f, 0x1f, 0x00, 0xc3]);
     }
 
     #[test]

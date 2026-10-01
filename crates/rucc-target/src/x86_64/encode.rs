@@ -5077,10 +5077,59 @@ const NOPS: [&[u8]; 11] = [
 /// before it falls into. The longest is eleven bytes, and a longer run is as many of those as fit
 /// and then one for what is left, which is the order gas writes them in.
 pub fn nops(count: usize, out: &mut Vec<u8>) {
+    nops_in(Mode::Bits64, count, out);
+}
+
+/// The instructions that do nothing in thirty two bit code, one for each length from one byte to
+/// eight.
+///
+/// What gas writes for i386 when it is told nothing about the processor, which is how gcc runs it:
+/// `nop`, `xchg %ax,%ax`, and then `lea` of `%esi` into itself through an address it never reads,
+/// grown by a displacement, an index of `%eiz` and a `cs` prefix until the eight byte one is
+/// `cs lea 0(%esi,%eiz,1),%esi`. The `nopl` forms of [`NOPS`] are not used because the first
+/// processors of the family do not have them.
+const NOPS_32: [&[u8]; 8] = [
+    &[0x90],
+    &[0x66, 0x90],
+    &[0x8d, 0x76, 0x00],
+    &[0x8d, 0x74, 0x26, 0x00],
+    &[0x2e, 0x8d, 0x74, 0x26, 0x00],
+    &[0x8d, 0xb6, 0x00, 0x00, 0x00, 0x00],
+    &[0x8d, 0xb4, 0x26, 0x00, 0x00, 0x00, 0x00],
+    &[0x2e, 0x8d, 0xb4, 0x26, 0x00, 0x00, 0x00, 0x00],
+];
+
+/// The shortest run of thirty two bit padding gas jumps over rather than walks through, which is
+/// three of the longest [`NOPS_32`].
+const JUMPED_32: usize = 3 * NOPS_32.len();
+
+/// [`nops`] for code of the given mode.
+///
+/// In thirty two bit mode a run of [`JUMPED_32`] bytes or more starts with a jump to its end, two
+/// bytes while the distance fits in one and five after that, and the rest is the same no-ops, as
+/// gas 2.42 writes it.
+pub fn nops_in(mode: Mode, count: usize, out: &mut Vec<u8>) {
+    let table: &[&[u8]] = match mode {
+        Mode::Bits64 => &NOPS,
+        Mode::Bits32 => &NOPS_32,
+    };
     let mut left = count;
+    if mode == Mode::Bits32 && left >= JUMPED_32 {
+        match u8::try_from(left - 2).ok().filter(|&over| over <= 0x7f) {
+            Some(over) => {
+                out.extend_from_slice(&[0xeb, over]);
+                left -= 2;
+            }
+            None => {
+                out.push(0xe9);
+                out.extend_from_slice(&u32::try_from(left - 5).unwrap_or(u32::MAX).to_le_bytes());
+                left -= 5;
+            }
+        }
+    }
     while left > 0 {
-        let take = left.min(NOPS.len());
-        out.extend_from_slice(NOPS[take - 1]);
+        let take = left.min(table.len());
+        out.extend_from_slice(table[take - 1]);
         left -= take;
     }
 }
@@ -6078,6 +6127,40 @@ mod tests {
         let mut out = Vec::new();
         nops(13, &mut out);
         assert_eq!(out[11..], [0x66, 0x90], "eleven bytes and then two");
+    }
+
+    /// What gas 2.42 writes with `--32` in front of a `ret` for each length of padding.
+    #[test]
+    fn thirty_two_bit_padding_is_the_lea_forms_gas_writes_and_a_long_run_is_jumped() {
+        let hex = |count: usize| {
+            let mut out = Vec::new();
+            nops_in(Mode::Bits32, count, &mut out);
+            assert_eq!(out.len(), count, "{count} bytes of padding");
+            out.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(hex(1), "90");
+        assert_eq!(hex(2), "66 90");
+        assert_eq!(hex(3), "8d 76 00");
+        assert_eq!(hex(5), "2e 8d 74 26 00");
+        assert_eq!(hex(7), "8d b4 26 00 00 00 00");
+        assert_eq!(hex(8), "2e 8d b4 26 00 00 00 00");
+        assert_eq!(hex(11), "2e 8d b4 26 00 00 00 00 8d 76 00");
+        assert_eq!(hex(15), "2e 8d b4 26 00 00 00 00 8d b4 26 00 00 00 00");
+        assert_eq!(hex(23), "2e 8d b4 26 00 00 00 00 2e 8d b4 26 00 00 00 00 8d b4 26 00 00 00 00");
+        assert!(hex(24).starts_with("eb 16 2e 8d b4 26"), "{}", hex(24));
+        assert!(hex(30).starts_with("eb 1c "), "{}", hex(30));
+        assert!(hex(129).starts_with("eb 7f "), "{}", hex(129));
+        assert!(hex(130).starts_with("e9 7d 00 00 00 2e "), "{}", hex(130));
+        assert!(hex(200).starts_with("e9 c3 00 00 00 "), "{}", hex(200));
+        for count in 0..=300 {
+            hex(count);
+        }
+        // Sixty four bit code is what it was.
+        let mut long = Vec::new();
+        nops_in(Mode::Bits64, 30, &mut long);
+        let mut plain = Vec::new();
+        nops(30, &mut plain);
+        assert_eq!(long, plain);
     }
 
     /// A vector register named at a length, which is what the AVX-512 rows take.
