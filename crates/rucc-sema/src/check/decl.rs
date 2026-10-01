@@ -93,9 +93,9 @@ struct Declared {
     twice: bool,
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
-    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::NO_INSTRUMENT`],
-    /// [`DeclFlags::NO_STACK_PROTECTOR`], [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`],
-    /// [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
+    /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`],
+    /// [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_STACK_PROTECTOR`],
+    /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
     /// [`DeclFlags::UNINITIALIZED`] and the four `ZERO_` bits and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
@@ -1424,6 +1424,7 @@ impl Checker<'_> {
                 DeclFlags::RETAIN,
                 DeclFlags::NOINLINE,
                 DeclFlags::NO_STRICT_ALIASING,
+                DeclFlags::OPTIMIZE_NONE,
                 DeclFlags::NO_INSTRUMENT,
                 DeclFlags::COLD,
                 DeclFlags::HOT,

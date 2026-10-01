@@ -280,7 +280,7 @@ impl DeclFlags {
     pub const NOINLINE: Self = Self(1 << 7);
 
     /// `__attribute__((optimize ("no-strict-aliasing")))` was written on a declaration of this
-    /// name, the one part of `optimize` that is honoured.
+    /// name, one of the three parts of `optimize` that are honoured.
     ///
     /// It matters once a body can be inlined: without it an access in the body carries the node
     /// for its type, and in the caller that lets a load of an `int` move past a store through a
@@ -444,6 +444,12 @@ impl DeclFlags {
     /// `--gc-sections` keeps it even when nothing refers to it. Always set with
     /// [`Self::RETAINED`], which is the half the compiler reads, and merged the way that one is.
     pub const RETAIN: Self = Self(1 << 29);
+
+    /// `__attribute__((optimize ("O0")))`, or `optimize (0)`, was written on a declaration of
+    /// this name, which holds the body to the passes `-O0` runs whatever level the unit is built
+    /// at. It is the IR's `optnone`, so nothing is inlined into the body or out of it either.
+    /// Merged the way [`Self::NO_STRICT_ALIASING`] is.
+    pub const OPTIMIZE_NONE: Self = Self(1 << 30);
 
     /// Whether every bit of `other` is set here.
     #[must_use]

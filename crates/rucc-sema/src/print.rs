@@ -187,6 +187,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_STRICT_ALIASING) {
             head.push_str(" no_strict_aliasing");
         }
+        if node.flags.contains(DeclFlags::OPTIMIZE_NONE) {
+            head.push_str(" optimize_none");
+        }
         if node.flags.contains(DeclFlags::NO_INSTRUMENT) {
             head.push_str(" no_instrument_function");
         }

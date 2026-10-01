@@ -15,7 +15,7 @@
 //! something.
 
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Extra, Func, FuncId, Inst, Linkage, Module, Opcode, Value};
+use rucc_ir::{AttrSet, Extra, Func, FuncId, Inst, Linkage, Module, Opcode, Value};
 
 use crate::CallGraph;
 
@@ -36,6 +36,11 @@ pub fn closed(module: &Module, graph: &CallGraph) -> Vec<FuncId> {
         let Some(id) = graph.trusted_body(node) else { continue };
         let func = &module[id];
         if func.linkage != Linkage::Internal || func.signature().variadic {
+            continue;
+        }
+        // `optimize ("O0")` holds the body to what that level does to it, and no level that low
+        // puts a constant in for a parameter or takes one out.
+        if func.attrs.set.contains(AttrSet::OPTNONE) {
             continue;
         }
         let Some(entry) = func.entry() else { continue };

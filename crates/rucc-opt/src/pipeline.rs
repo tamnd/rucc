@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
-use rucc_ir::{Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
+use rucc_ir::{AttrSet, Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
 use rucc_session::OptLevel;
 use rucc_target::{Isa, TargetInfo};
 
@@ -936,7 +936,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     }
     // First of all and whatever the pass list says, because the instruction is a question the
     // front end left for the IR and nothing after this is allowed to see one. The walk is skipped
-    // at `-O0`, which answers every question as not known, the way gcc does at that level.
+    // at `-O0`, which answers every question as not known, the way gcc does at that level, and
+    // for every function `optimize ("O0")` holds to that level whatever this one is.
     objsize::answer(module, opts.interposition, opts.level != OptLevel::O0);
     // Right behind it, and for the same kind of reason: `BUILD_BUG_ON (fn == NULL)` is a call to a
     // function declared `error` that has to be gone by the end, and whether `fn` has a body is a
@@ -1161,6 +1162,15 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             if module[id].is_declaration() {
                 continue;
             }
+            // A function `optimize ("O0")` holds to `-O0` is given the passes that level runs and
+            // no others, whatever the unit was built at. The `-O0` list is a subset of every
+            // other one, so what is left out for it is only ever something a level added on top,
+            // and nothing at the lower level depends on it. `constant-p` is the one pass a
+            // higher level adds that has to happen, and its answer for a held function is
+            // written at the end with the level's zero. A gate still has the last word, so
+            // `-fenable-<pass>=<function>` can put one back while somebody is looking at it.
+            let held = module[id].attrs.set.contains(AttrSet::OPTNONE);
+            let default = default && (!held || O0.contains(&name));
             if !opts.gates.allows(name, default, id.raw(), names.resolve(module[id].name)) {
                 // No remark either. A pass that did not run on a function has nothing to say
                 // about it, and a record saying it found nothing would read as a pass that
@@ -1236,7 +1246,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     }
     // Whatever a list without `constant-p` in it, or a gate that kept the pass off a function,
     // left standing. Nothing below the optimizer lowers the instruction, so the answer is written
-    // here, and it is the one the pass would have given.
+    // here, and it is the one the pass would have given. A function held to `-O0` is answered
+    // the way that level answers, which is zero for every question.
     constant_p::answer(module, true);
     // The propagation again, now that every body has been through the passes. The first sweep
     // ran before any of them, so it read each argument as the front end wrote it, where gcc's

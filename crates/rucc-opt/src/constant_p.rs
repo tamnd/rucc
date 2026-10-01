@@ -43,7 +43,9 @@
 //! lowers the instruction.
 
 use rucc_base::hash::Map;
-use rucc_ir::{Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Value};
+use rucc_ir::{
+    AttrSet, Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Value,
+};
 
 use crate::load::LoadForward;
 use crate::prune::Prune;
@@ -226,9 +228,12 @@ fn choose(func: &mut Func) -> Stats {
 pub fn answer(module: &mut Module, look: bool) -> usize {
     let mut answered = 0;
     for id in module.funcs().collect::<Vec<FuncId>>() {
+        // A function `optimize ("O0")` holds to that level is answered the way the level
+        // answers, whatever the unit is built at.
+        let held = module[id].attrs.set.contains(AttrSet::OPTNONE);
         if !module[id].is_declaration() {
-            answered +=
-                settle(&mut module[id], if look { Answering::Every } else { Answering::Zero });
+            let answering = if look && !held { Answering::Every } else { Answering::Zero };
+            answered += settle(&mut module[id], answering);
         }
     }
     answered

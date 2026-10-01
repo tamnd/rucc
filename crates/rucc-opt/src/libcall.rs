@@ -581,7 +581,9 @@ pub fn fold(
         // walk over its instructions that allocates nothing. The two tables below are a vector and
         // a predecessor list per block, which is a cost worth not paying over a module whose
         // functions print nothing.
+        // Nor in a body `optimize ("O0")` holds to that level, which is not one gcc folds at.
         if module[id].is_declaration()
+            || module[id].attrs.set.contains(AttrSet::OPTNONE)
             || library.contains(&module[id].name)
             || !mentions(&module[id], names, &standard)
         {
