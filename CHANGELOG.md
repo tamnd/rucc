@@ -6,7 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
-- `-freorder-blocks-and-partition` is implemented for x86-64 ELF and is on at `-O2` and `-O3`, as in gcc. A block that calls a function written `cold`, and the blocks only it leads to or only lead to it, go in `.text.unlikely` as `foo.cold` with an unwind record of its own that opens in the state the hot part was in. The cold blocks are picked the way gcc's `determine_unlikely_bbs` picks them. A function with a section of its own, a landing pad, or debug information is left whole. This is where 1092 of the 1132 kernel objects with a `.text.unlikely` got it under gcc.
+- `-freorder-blocks-and-partition` is implemented for x86-64 ELF and is on at `-O2` and `-O3`, as in gcc. A block that calls a function written `cold`, and the blocks only it leads to or only lead to it, go in `.text.unlikely` as `foo.cold` with an unwind record of its own that opens in the state the hot part was in. The cold blocks are picked the way gcc's `determine_unlikely_bbs` picks them. A cold block that gcc's later jump threading would put a way that runs in front of, as in `dput(self); if (ret) pr_err(...)` with `ret` known on one path, stays where the function is, as gcc keeps it there. A function with a section of its own, a landing pad, or debug information is left whole. This is where 1092 of the 1132 kernel objects with a `.text.unlikely` got it under gcc.
 
 ### Changed
 
