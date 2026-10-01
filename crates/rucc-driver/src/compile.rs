@@ -10507,6 +10507,8 @@ struct big twice(struct big b) { return grow(grow(b)); }
         // `printf` has no parameter there to say it on, so the call says it instead. The one
         // that fits in registers says nothing, because travelling as the registers it fits in
         // is what an argument does when nothing says otherwise.
+        // `b` itself arrived in the argument area, so the call hands on the caller's bytes,
+        // `%0`, without a copy in between.
         let text = ir("\
 struct big { double v[8]; };
 struct pair { int a, b; };
@@ -10514,7 +10516,7 @@ int p(const char *, ...);
 int f(struct big b, struct pair q) { return p(\"\", 1, b, q); }
 ");
         assert!(
-            text.contains("call @p(%4, %5, %2 byval(64, align 8), %6) : (ptr, ...) -> i32"),
+            text.contains("call @p(%3, %4, %0 byval(64, align 8), %5) : (ptr, ...) -> i32"),
             "{text}"
         );
     }
