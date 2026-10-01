@@ -756,11 +756,15 @@ mod tests {
     ///
     /// Still seventy six when they went from sixteen bits to thirty two for `no_stack_protector`,
     /// the seventeenth, because the two bytes the wider field took were padding already.
+    ///
+    /// Eighty when they went from thirty two bits to sixty four for `optimize ("wrapv")`, the
+    /// thirty third. The field wants eight byte alignment now, so the node does too, and four
+    /// bytes of the growth are padding at the end. The thirty bits past the two it took are free.
     #[test]
     fn the_nodes_are_the_size_they_are_meant_to_be() {
         assert_eq!(size_of::<Expr>(), 24);
         assert_eq!(size_of::<Stmt>(), 24);
-        assert_eq!(size_of::<Decl>(), 76);
+        assert_eq!(size_of::<Decl>(), 80);
         assert_eq!(size_of::<Case>(), 48);
     }
 

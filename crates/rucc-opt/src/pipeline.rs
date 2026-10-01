@@ -1188,8 +1188,12 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
                 // looked.
                 continue;
             }
-            // The loop inside `memset` itself is the one loop that must not become a call to it.
-            if name == loop_idiom::NAME && loop_idiom::writes_itself(names.resolve(module[id].name))
+            // The loop inside `memset` itself is the one loop that must not become a call to it,
+            // and a function that said `optimize ("no-tree-loop-distribute-patterns")` is one
+            // that said so under another name.
+            if name == loop_idiom::NAME
+                && (loop_idiom::writes_itself(names.resolve(module[id].name))
+                    || module[id].attrs.set.contains(AttrSet::NO_LOOP_IDIOM))
             {
                 continue;
             }

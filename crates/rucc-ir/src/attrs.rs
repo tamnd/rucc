@@ -230,6 +230,10 @@ impl AttrSet {
     /// No arc counters go in the function under `-fprofile-arcs`, from
     /// `__attribute__((no_profile_instrument_function))`.
     pub const NO_PROFILE: Self = Self(1 << 29);
+    /// No loop in the function becomes a call to `memset`, `memcpy` or `memmove`, from
+    /// `__attribute__((optimize ("no-tree-loop-distribute-patterns")))`. A body inlined into
+    /// another passes it on, since the loop it brings is still the one that asked.
+    pub const NO_LOOP_IDIOM: Self = Self(1 << 31);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -348,6 +352,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::SAVES_ALL, "saves_all"),
     (AttrSet::RETAIN, "retain"),
     (AttrSet::NO_PROFILE, "no_profile"),
+    (AttrSet::NO_LOOP_IDIOM, "no_loop_idiom"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

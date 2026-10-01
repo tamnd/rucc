@@ -190,6 +190,12 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::OPTIMIZE_NONE) {
             head.push_str(" optimize_none");
         }
+        if node.flags.contains(DeclFlags::WRAPV) {
+            head.push_str(" wrapv");
+        }
+        if node.flags.contains(DeclFlags::NO_LOOP_IDIOM) {
+            head.push_str(" no_loop_idiom");
+        }
         if node.flags.contains(DeclFlags::NO_INSTRUMENT) {
             head.push_str(" no_instrument_function");
         }

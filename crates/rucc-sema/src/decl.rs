@@ -183,7 +183,7 @@ pub struct Decl {
 /// away. The constants below are written the way the fields were so the step is the only
 /// difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DeclFlags(u32);
+pub struct DeclFlags(u64);
 
 impl DeclFlags {
     /// Nothing written.
@@ -280,7 +280,7 @@ impl DeclFlags {
     pub const NOINLINE: Self = Self(1 << 7);
 
     /// `__attribute__((optimize ("no-strict-aliasing")))` was written on a declaration of this
-    /// name, one of the three parts of `optimize` that are honoured.
+    /// name, one of the parts of `optimize` that are honoured.
     ///
     /// It matters once a body can be inlined: without it an access in the body carries the node
     /// for its type, and in the caller that lets a load of an `int` move past a store through a
@@ -464,6 +464,25 @@ impl DeclFlags {
     /// of `-fprofile-arcs` out of the function. The kernel's `noinstr` says it on code that runs
     /// before the counters can be written to. Merged the way [`Self::NO_INSTRUMENT`] is.
     pub const NO_PROFILE: Self = Self(1 << 31);
+
+    /// `__attribute__((optimize ("wrapv")))` was written on a declaration of this name, so signed
+    /// arithmetic in the body wraps the way it does in a unit built with `-fwrapv`.
+    ///
+    /// The first bit past the thirty two the set had until it needed this one. It is read where
+    /// the walk chooses the flags on an instruction, so a body that wraps keeps wrapping once it
+    /// is inlined into one that does not, which is the reason it is on the tree at all rather
+    /// than a fact about the command line. Merged the way [`Self::NO_STRICT_ALIASING`] is.
+    pub const WRAPV: Self = Self(1 << 32);
+
+    /// `__attribute__((optimize ("no-tree-loop-distribute-patterns")))` was written on a
+    /// declaration of this name, so no loop in the body becomes a call to `memset`, `memcpy` or
+    /// `memmove`.
+    ///
+    /// The kernel and every freestanding C library write it on their own `memset`, under a name
+    /// the pipeline does not recognise as the routine itself, where a loop that turned into a call
+    /// to `memset` would be a call to the function it is in. Merged the way
+    /// [`Self::NO_STRICT_ALIASING`] is.
+    pub const NO_LOOP_IDIOM: Self = Self(1 << 33);
 
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
