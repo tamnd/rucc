@@ -347,6 +347,9 @@ struct Reader {
     values: Map<String, i64>,
     /// `.size`, the same way.
     sizes: Vec<(usize, Sum, usize)>,
+    /// The names set to exactly another name, with that name's entry. gas gives one the other's
+    /// type and size, so `.set alias, real` on a function is a second function and not a bare label.
+    copies: Vec<(usize, String)>,
     /// Which entry a name that has been set means from here on. A file may set one name as many
     /// times as it likes, and each use means the value it had where the use was written, so a
     /// second setting is a second entry and this says which one is current.
@@ -851,6 +854,12 @@ impl Reader {
             Some(value) => self.values.insert(name.to_owned(), value),
             None => self.values.remove(name),
         };
+        if let [Term { coeff: 1, what: What::Symbol(target) }] = sum.terms.as_slice() {
+            if sum.constant == 0 {
+                let target = self.current.get(target).unwrap_or(target).clone();
+                self.copies.push((sym, target));
+            }
+        }
         self.setting.insert(sym, self.sets.len());
         self.sets.push((sym, sum, self.line));
         Ok(())
@@ -2765,6 +2774,7 @@ impl Reader {
             }
         }
         self.resolve_sizes()?;
+        self.copy_attributes();
         let grow = self.too_far()?;
         if !grow.is_empty() || !held {
             let line = self.guessed.first().map_or(self.line, |(_, _, line)| *line);
@@ -3073,6 +3083,21 @@ impl Reader {
             self.syms[sym].size = size;
         }
         Ok(())
+    }
+
+    /// The type and size a name set to another name takes from it, where it was not given its own.
+    fn copy_attributes(&mut self) {
+        for (sym, target) in std::mem::take(&mut self.copies) {
+            let Some(&target) = self.known.get(&target) else { continue };
+            let (sort, size) = (self.syms[target].sort, self.syms[target].size);
+            let alias = &mut self.syms[sym];
+            if alias.sort == Sort::Untyped {
+                alias.sort = sort;
+            }
+            if alias.size == 0 {
+                alias.size = size;
+            }
+        }
     }
 
     /// The places whose bytes name something.
@@ -5215,6 +5240,18 @@ _tls$tlv$init:
              table_end - table\n",
         );
         assert_eq!(name(&out, "width").at, Held::Absolute(12));
+    }
+
+    #[test]
+    fn a_name_set_to_a_function_is_a_function_of_the_same_size() {
+        // How gcc writes `__attribute__((alias))`, and what objtool goes by: the kernel's syscall
+        // stubs are aliases, and one that came out a bare label got no `__pfx_` in front of it.
+        let out = assembled(
+            "\t.text\n\t.type f, @function\nf:\n\t.byte 0,0,0\n\t.size f, .-f\n\t.globl g\n\t.set \
+             g,f\n\t.set h, f+1\n",
+        );
+        assert_eq!((name(&out, "g").sort, name(&out, "g").size), (Sort::Func, 3));
+        assert_eq!((name(&out, "h").sort, name(&out, "h").size), (Sort::Untyped, 0));
     }
 
     #[test]
