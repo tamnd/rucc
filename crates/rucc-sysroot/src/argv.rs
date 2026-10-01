@@ -1170,6 +1170,43 @@ mod tests {
         assert_eq!(args[entry + 1], "DllMainCRTStartup", "{args:?}");
     }
 
+    /// What Postgres's `meson.build` hands the linker on MinGW, behind `-Wl,`, for `postgres.exe`
+    /// and for a DLL: lld's MinGW driver reads every one of these words itself, so the line passes
+    /// them through as written, in the order written and after the objects. Ours go first, so the
+    /// `--stack` Postgres asks for is the last one on the line and the one lld keeps.
+    /// tamnd/rucc#1993.
+    #[test]
+    fn the_mingw_link_flags_postgres_writes_reach_the_linker_as_written_and_last() {
+        let words = [
+            "--allow-multiple-definition",
+            "--disable-auto-import",
+            "--stack",
+            "4194304",
+            "--export-all-symbols",
+            "--out-implib=libpostgres.exe.a",
+        ];
+        let mut inputs = vec![Item::File(Path::new("main.o").to_path_buf())];
+        inputs.extend(words.iter().map(|word| Item::Linker((*word).to_owned())));
+        for mode in [LinkMode::Dynamic, LinkMode::Shared] {
+            let options = Invocation {
+                inputs: &inputs,
+                output: Some(Path::new("postgres.exe")),
+                mode,
+                ..Invocation::default()
+            };
+            let spelling = "x86_64-windows-gnu";
+            let args = argv(target(spelling), &sysroot(spelling), &options).expect("a line");
+            let at = args
+                .windows(words.len())
+                .position(|run| run == &words[..])
+                .unwrap_or_else(|| panic!("{mode:?} {args:?}"));
+            let object = args.iter().position(|arg| arg == "main.o").expect("the object");
+            assert!(object < at, "{mode:?} {args:?}");
+            let last = args.iter().rposition(|arg| arg == "--stack").expect("a stack size");
+            assert_eq!(args[last + 1], "4194304", "{mode:?} {args:?}");
+        }
+    }
+
     #[test]
     fn a_static_windows_link_is_not_refused_because_the_crt_there_is_a_dll_on_every_machine() {
         // The difference between an import library and a stub shared object that shows up on the
