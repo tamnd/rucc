@@ -34,7 +34,7 @@ impl Parser<'_> {
         }
         rest = &rest[1..];
         let Some(action) = rest.first().and_then(|token| token.ident()) else {
-            self.warn("E0745", "missing `push` or `pop` after `#pragma GCC visibility`", span);
+            self.warn("E0798", "missing `push` or `pop` after `#pragma GCC visibility`", span);
             return;
         };
         rest = &rest[1..];
@@ -42,7 +42,7 @@ impl Parser<'_> {
             "pop" => {
                 if self.packs.visibility.pop().is_none() {
                     let what = "no matching push for `#pragma GCC visibility pop`";
-                    self.warn("E0745", what, span);
+                    self.warn("E0798", what, span);
                 }
             }
             "push" => {
@@ -62,13 +62,13 @@ impl Parser<'_> {
                     Some(pushed) => self.packs.visibility.push(pushed),
                     None => {
                         let what = "malformed `#pragma GCC visibility push`";
-                        self.warn("E0745", what, span);
+                        self.warn("E0798", what, span);
                     }
                 }
             }
             _ => {
                 let what = "missing `push` or `pop` after `#pragma GCC visibility`";
-                self.warn("E0745", what, span);
+                self.warn("E0798", what, span);
             }
         }
     }
