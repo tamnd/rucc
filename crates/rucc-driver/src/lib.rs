@@ -676,6 +676,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // libc version and `Triple` has nowhere to put it. It decides `__GLIBC_MINOR__` and nothing
     // else today, and `None` is a command line that named no target, which is this machine.
     let mut pinned: Option<TargetTuple> = None;
+    // `-m64`, `-m32` or `-m16`, the last of them on the line.
+    let mut word: Option<&str> = None;
     let mut min_version: Option<rucc_tuple::Version> = None;
     // The first flag that only an Apple linker understands, for the refusal after the loop when the
     // target is not Apple, and what `-arch` asked for, which is checked against the target there.
@@ -2509,24 +2511,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      spec/04-driver-and-cli.md section 4.11 for the ones it does"
                 )));
             }
-            // The word size, which is a statement about the target and is taken as one. A build
-            // that says the size the target already has is saying nothing, and one that says the
-            // other size is asking for a target this compiler does not have, which it is told
-            // rather than being given the wrong one.
-            "-m64" | "-m32" | "-mx32" => {
-                let want: u32 = match arg {
-                    "-m64" => 64,
-                    _ => 32,
-                };
-                let have = rucc_target::TargetInfo::new(opts.target).pointer_width;
-                if have != want {
-                    return Err(err(format!(
-                        "{arg} asks for a {want} bit target and {} is {have} bit, use \
-                         --target= to name the one you mean",
-                        opts.target
-                    )));
-                }
-            }
+            // The word size, which is a statement about the target and is taken as one. It is
+            // weighed after the loop, because `--target=` may come after it and the last one of
+            // each is the one that counts.
+            "-m64" | "-m32" | "-m16" | "-mx32" => word = Some(arg),
             // One extension of the x86-64 instruction set, on or off, which is `-msse4.2` and its
             // relatives. Only the ones this compiler has the intrinsics for may be turned on for a
             // whole unit, because what turning one on does here is define the macro, and a macro
@@ -2685,6 +2673,44 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 return Err(err(format!("unknown option `{arg}`")));
             }
             _ => inputs.push(Input { path: arg.to_owned(), forced, role: Role::File }),
+        }
+    }
+
+    // The word size against the target. On x86 the other size is the other machine, as it is for
+    // gcc built for either: `-m32` on x86-64 is i686 and `-m64` on i686 is x86-64, with the same
+    // operating system and runtime. `-m16` is the 32 bit machine assembled as `.code16gcc`, which
+    // is how the kernel builds its real mode code. Anywhere else the other size is a target this
+    // compiler does not have, which it is told rather than being given the wrong one.
+    if let Some(word) = word {
+        use rucc_target::Arch;
+        let arch = match (word, opts.target.arch) {
+            ("-m64", Arch::X86_64 | Arch::X86) => Some(Arch::X86_64),
+            ("-m32" | "-m16", Arch::X86_64 | Arch::X86) => Some(Arch::X86),
+            _ => None,
+        };
+        match arch {
+            Some(arch) => {
+                if arch != opts.target.arch {
+                    opts.target.arch = arch;
+                    // A tuple that names the other machine no longer describes this one.
+                    pinned = None;
+                }
+                opts.sixteen = word == "-m16";
+            }
+            None if word == "-m16" => {
+                return Err(err(format!("-m16 is for x86, and {} is not", opts.target)));
+            }
+            None => {
+                let want = if word == "-m64" { 64 } else { 32 };
+                let have = rucc_target::TargetInfo::new(opts.target).pointer_width;
+                if have != want {
+                    return Err(err(format!(
+                        "{word} asks for a {want} bit target and {} is {have} bit, use \
+                         --target= to name the one you mean",
+                        opts.target
+                    )));
+                }
+            }
         }
     }
 
@@ -7330,7 +7356,7 @@ mod tests {
         assert!(refused(&["-gdwarf-3", "-c", "a.c"]).contains("DWARF 4 and 5"));
         // The word size the target does not have, which is a target this compiler was not asked
         // for rather than a flag it does not know.
-        let no32 = refused(&["--target=x86_64-unknown-linux-gnu", "-m32", "-c", "a.c"]);
+        let no32 = refused(&["--target=aarch64-unknown-linux-gnu", "-m32", "-c", "a.c"]);
         assert!(no32.contains("32 bit target"), "{no32}");
     }
 
@@ -7628,6 +7654,26 @@ mod tests {
         assert_eq!(opts.target.to_string(), "x86_64-unknown-linux-gnu");
         let wrong = refused(&["--target=x86_64-unknown-linux-gnu", "-mabi=ms", "-c", "a.c"]);
         assert!(wrong.contains("sysv convention"), "{wrong}");
+    }
+
+    /// On x86 the word size picks the machine, as it does for gcc built for either, and the last
+    /// `-m` and the last `--target=` count wherever they are on the line.
+    #[test]
+    fn the_word_size_picks_the_x86_machine() {
+        let x86 = |line: &[&str]| {
+            let (opts, _) = compile(&[line, &["-c", "a.c"]].concat());
+            (opts.target.to_string(), opts.sixteen)
+        };
+        let i686 = "i686-unknown-linux-gnu".to_owned();
+        let x86_64 = "x86_64-unknown-linux-gnu".to_owned();
+        assert_eq!(x86(&["--target=x86_64-unknown-linux-gnu", "-m32"]), (i686.clone(), false));
+        assert_eq!(x86(&["-m32", "--target=x86_64-unknown-linux-gnu"]), (i686.clone(), false));
+        assert_eq!(x86(&["--target=x86_64-unknown-linux-gnu", "-m16"]), (i686.clone(), true));
+        assert_eq!(x86(&["--target=i686-unknown-linux-gnu", "-m64"]), (x86_64.clone(), false));
+        assert_eq!(x86(&["--target=x86_64-unknown-linux-gnu", "-m16", "-m64"]), (x86_64, false));
+        assert_eq!(x86(&["--target=i686-unknown-linux-gnu", "-m32"]), (i686, false));
+        let arm = refused(&["--target=aarch64-unknown-linux-gnu", "-m16", "-c", "a.c"]);
+        assert!(arm.contains("-m16 is for x86"), "{arm}");
     }
 
     /// Whether a unit built with that command line has the extension called `name`.
