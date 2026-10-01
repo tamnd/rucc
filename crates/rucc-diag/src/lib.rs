@@ -23,7 +23,7 @@ mod named;
 mod source;
 
 pub use crate::errors::{DEFAULT_ERROR_LIMIT, Errors};
-pub use crate::named::{Named, option_of};
+pub use crate::named::{DiagnosticPragma, Named, PragmaKind, Scoped, option_of};
 pub use crate::source::{
     FileId, Loc, PresumedLoc, SourceBytes, SourceFile, SourceMap, SourceMapFull, dropped,
 };

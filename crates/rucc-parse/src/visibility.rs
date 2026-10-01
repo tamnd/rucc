@@ -23,11 +23,14 @@ impl Parser<'_> {
         self.packs.visibility.last().copied()
     }
 
-    /// One `#pragma GCC ...` line with the `GCC` taken off, of which only `visibility` is read.
+    /// One `#pragma GCC ...` line with the `GCC` taken off, of which `visibility` is read here
+    /// and `diagnostic` in `diagnostic.rs`.
     pub(crate) fn visibility_line(&mut self, mut rest: &[Token], span: Span) {
         let Some(word) = rest.first().and_then(|token| token.ident()) else { return };
-        if self.cx.interner.resolve(word) != "visibility" {
-            return;
+        match self.cx.interner.resolve(word) {
+            "visibility" => {}
+            "diagnostic" => return self.diagnostic_line(&rest[1..], span),
+            _ => return,
         }
         rest = &rest[1..];
         let Some(action) = rest.first().and_then(|token| token.ident()) else {

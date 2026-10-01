@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Diagnostic, Severity};
+use crate::{BytePos, Diagnostic, Severity, SourceMap};
 
 /// Each warning code and the gcc option that controls it, without the `-W`, sorted by code.
 const OPTIONS: &[(&str, &str)] = &[
@@ -66,6 +66,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0789", "format"),
     ("E0790", "designated-init"),
     ("E0794", "attributes"),
+    ("E0798", "pragmas"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -211,12 +212,147 @@ impl Named {
     fn name(&self, diag: &Diagnostic) -> Option<&'static str> {
         diag.code.and_then(option_of)
     }
+
+    /// Applies what one `#pragma GCC diagnostic` line says about the option `name`, given
+    /// without its `-W`.
+    ///
+    /// Each kind is the flag gcc treats it as: `ignored` is `-Wno-`, `error` is `-Werror=`, and
+    /// `warning` is the option on with `-Wno-error=`, which is what keeps it a warning under
+    /// `-Werror`.
+    fn pragma(&mut self, kind: PragmaKind, name: &str) {
+        match kind {
+            PragmaKind::Ignored => self.flag(&format!("no-{name}")),
+            PragmaKind::Warning => {
+                self.flag(name);
+                self.flag(&format!("no-error={name}"));
+            }
+            PragmaKind::Error => self.flag(&format!("error={name}")),
+        }
+    }
+}
+
+/// What a `#pragma GCC diagnostic` line does to the option it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PragmaKind {
+    /// `ignored`, as `-Wno-` would.
+    Ignored,
+    /// `warning`, a warning even under `-Werror`.
+    Warning,
+    /// `error`, as `-Werror=` would.
+    Error,
+}
+
+/// One `#pragma GCC diagnostic` line, as the parser read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticPragma {
+    /// `push`, which keeps what is in effect to go back to.
+    Push,
+    /// `pop`, which goes back to what the last `push` kept, or to the command line when nothing
+    /// was pushed.
+    Pop,
+    /// `ignored`, `warning` or `error`, with the option it names, without the `-W`.
+    Set(PragmaKind, String),
+}
+
+/// What is in effect at each point of a unit, as its `#pragma GCC diagnostic` lines change it.
+///
+/// gcc decides a warning by where it is, not by when it is raised: a warning about a value
+/// thrown away is raised once the function body has been read, and the pragma that counts is
+/// the one in effect at the call. So each line is kept with where it was written, and a warning
+/// is looked up by its own position. A token that came out of a macro is placed at the
+/// expansion, which is also where gcc looks. Positions are compared in the order the unit was
+/// read, so a line in a header holds for what follows its `#include`.
+#[derive(Debug, Clone)]
+pub struct Scoped<'a> {
+    /// Where everything is, which says which of two positions was read first.
+    sources: &'a SourceMap,
+    /// What the command line said, which holds before the first line.
+    base: Named,
+    /// What holds from each point on, in the order they were read.
+    changes: Vec<(Vec<BytePos>, Named)>,
+}
+
+impl<'a> Scoped<'a> {
+    /// What holds where, starting from what the command line said and applying the lines in
+    /// the order they were written.
+    pub fn new(
+        base: &Named,
+        lines: &[(BytePos, DiagnosticPragma)],
+        sources: &'a SourceMap,
+    ) -> Scoped<'a> {
+        let mut current = base.clone();
+        let mut pushed: Vec<Named> = Vec::new();
+        let mut changes = Vec::with_capacity(lines.len());
+        for (at, line) in lines {
+            match line {
+                DiagnosticPragma::Push => {
+                    pushed.push(current.clone());
+                    continue;
+                }
+                DiagnosticPragma::Pop => current = pushed.pop().unwrap_or_else(|| base.clone()),
+                DiagnosticPragma::Set(kind, name) => current.pragma(*kind, name),
+            }
+            changes.push((sources.reading_order(*at), current.clone()));
+        }
+        Scoped { sources, base: base.clone(), changes }
+    }
+
+    /// What is in effect at `pos`. A position nothing can be placed at, such as a diagnostic
+    /// about the whole unit, gets what the command line said.
+    pub fn at(&self, pos: BytePos) -> &Named {
+        if pos == BytePos::MAX || self.changes.is_empty() {
+            return &self.base;
+        }
+        let order = self.sources.reading_order(pos);
+        let after = self.changes.partition_point(|(at, _)| *at <= order);
+        match after.checked_sub(1) {
+            Some(last) => &self.changes[last].1,
+            None => &self.base,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Span;
+
+    fn warning_at(code: &'static str, at: BytePos) -> Diagnostic {
+        Diagnostic::warning("'f' is deprecated".to_owned(), Span::empty_at(at)).with_code(code)
+    }
+
+    /// The lines of gcc 13's own test of the pragma, measured with `-Werror`: `ignored` holds
+    /// until the `pop`, `error` and `warning` override `-Werror` either way, and a `pop` with
+    /// nothing pushed goes back to the command line.
+    #[test]
+    fn a_diagnostic_pragma_holds_from_where_it_is_written_to_where_it_is_popped() {
+        let set = |kind, name: &str| DiagnosticPragma::Set(kind, name.to_owned());
+        let lines = [
+            (10, DiagnosticPragma::Push),
+            (20, set(PragmaKind::Ignored, "deprecated-declarations")),
+            (30, DiagnosticPragma::Pop),
+            (40, set(PragmaKind::Warning, "deprecated-declarations")),
+            (50, DiagnosticPragma::Pop),
+            (60, set(PragmaKind::Error, "deprecated-declarations")),
+        ];
+        let mut base = Named::default();
+        base.flag("no-unused-result");
+        let mut sources = SourceMap::new();
+        sources.add("p.c", vec![b'\n'; 100]).unwrap();
+        let scoped = Scoped::new(&base, &lines, &sources);
+        let deprecated = |at| warning_at("E0770", at);
+        assert!(!scoped.at(5).silenced(&deprecated(5)));
+        assert!(!scoped.at(15).silenced(&deprecated(15)));
+        assert!(scoped.at(25).silenced(&deprecated(25)));
+        assert!(!scoped.at(35).silenced(&deprecated(35)));
+        assert!(scoped.at(35).promoted(&deprecated(35), true));
+        assert!(!scoped.at(45).promoted(&deprecated(45), true));
+        assert!(scoped.at(55).promoted(&deprecated(55), true));
+        assert!(scoped.at(65).promoted(&deprecated(65), false));
+        // The command line still holds for everything the lines did not name.
+        assert!(scoped.at(65).silenced(&warning_at("E0771", 65)));
+        assert!(scoped.at(BytePos::MAX).silenced(&warning_at("E0771", BytePos::MAX)));
+    }
 
     fn warning(code: &'static str) -> Diagnostic {
         Diagnostic::warning("pointer targets differ in signedness".to_owned(), Span::DUMMY)

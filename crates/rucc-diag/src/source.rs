@@ -548,6 +548,17 @@ impl SourceMap {
         stack
     }
 
+    /// Where `pos` falls in the order the unit was read: the `#include` that led to it from the
+    /// outermost in, then `pos` itself. Comparing two of these says which was read first, which
+    /// comparing the positions does not, since a header's bytes are placed after the whole of
+    /// the file that includes it.
+    pub fn reading_order(&self, pos: BytePos) -> Vec<BytePos> {
+        let mut order: Vec<BytePos> =
+            self.include_stack(pos).iter().rev().map(|from| from.lo).collect();
+        order.push(pos);
+        order
+    }
+
     /// How much of the coordinate space is used, which is where the next file will start.
     pub fn used(&self) -> BytePos {
         self.next
@@ -718,6 +729,12 @@ mod tests {
         assert_eq!(map.lookup(stack[0].lo).unwrap().file, a);
         assert_eq!(map.lookup(stack[1].lo).unwrap().file, main);
         assert!(map.include_stack(outer.lo).is_empty());
+        // Read in the order of the text, not of the positions: the header comes after the
+        // `#include` that brought it in and before whatever follows that line.
+        let header = map.reading_order(map.file(b).start);
+        assert!(map.reading_order(outer.lo) < header);
+        assert!(header < map.reading_order(map.file(main).start + 15));
+        assert!(header > map.reading_order(map.file(a).start));
     }
 
     #[test]
