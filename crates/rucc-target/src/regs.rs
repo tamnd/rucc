@@ -702,6 +702,25 @@ impl CallRegs {
         made(CallRegs { stack_align: bytes, ..*self })
     }
 
+    /// The same convention as an x86 interrupt handler sees it, which is what a function with
+    /// gcc's `interrupt` attribute is compiled against.
+    ///
+    /// The processor rather than a call is what arrives at one of these, and what it pushes is an
+    /// interrupt frame rather than a return address. Two things about that matter to the frame
+    /// laid out under it. For the exceptions that come with an error code there is one word more
+    /// below the frame, which the handler takes off again before its `iretq`, so with `code` the
+    /// word is counted as part of what the return address takes and every offset into the frame
+    /// comes out sixteen bytes above the entry stack pointer rather than eight. And the code that
+    /// was interrupted may have been using the bytes below its stack pointer when it was stopped,
+    /// since nothing told it a push was coming, so there is no red zone to keep locals in.
+    ///
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see [`made`].
+    #[must_use]
+    pub fn interrupted(&'static self, code: bool) -> &'static CallRegs {
+        let return_address = self.return_address + if code { self.word } else { 0 };
+        made(CallRegs { return_address, red_zone: 0, ..*self })
+    }
+
     /// The same convention with no vector register carrying an argument, which is what a
     /// function compiled under `-mno-sse` or `-mgeneral-regs-only` sees.
     ///

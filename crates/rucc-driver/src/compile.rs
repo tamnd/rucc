@@ -347,6 +347,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 ms_extensions: sess.ms_extensions(),
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,
+                x87: opts.x87,
             },
         );
         checker.check_unit();

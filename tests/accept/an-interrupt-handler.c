@@ -1,8 +1,10 @@
-/* reject: all */
-/* message: 'interrupt' attribute is not supported */
-/* An interrupt handler returns with `iret` and saves every register it touches. Compiled as an
-   ordinary function it returns with `ret` and clobbers what the interrupted code was using, which
-   links, runs and breaks the machine later, so it is refused rather than dropped. */
+/* accept: all */
+/* An interrupt handler returns with `iretq` and saves every register it touches. Built without the
+   vector registers and the x87 stack, which it would have no way to put back, it compiles the way
+   gcc compiles it. */
 
 struct frame;
-__attribute__((interrupt)) void handler(struct frame *frame) { (void)frame; }
+__attribute__((interrupt, target("general-regs-only"))) void handler(struct frame *frame)
+{
+    (void)frame;
+}

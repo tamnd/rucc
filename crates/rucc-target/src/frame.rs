@@ -174,6 +174,18 @@ pub struct FrameInsts {
     /// Returns to the caller and takes the immediate's count of bytes of arguments off the stack
     /// as it goes, which is `ret $4` on i386. Whether a function uses it is up to the ABI, which says whether the callee or the caller pops.
     pub ret_pop: Option<&'static str>,
+    /// Returns from an interrupt, popping the frame the processor pushed when it took one, which
+    /// is `iretq` on x86-64 and what a function written `__attribute__((interrupt))` ends with.
+    /// `None` on a machine where this compiler has no such function.
+    ///
+    /// An opcode of its own rather than a spelling of [`FrameInsts::ret`], because the passes that
+    /// rewrite returns under `-mfunction-return=` and `-mharden-sls=` look for that name, and a
+    /// handler's return is not a `ret` they may send through a thunk.
+    pub iret: Option<&'static str>,
+    /// Clears the direction flag, which is `cld` on x86-64. An interrupt handler writes it before
+    /// it calls anything, since the code it interrupted may have left the flag set and every
+    /// function it calls is entitled to find it clear. `None` where [`FrameInsts::iret`] is.
+    pub clear_direction: Option<&'static str>,
     /// Compares two general purpose registers and writes whether they differ into a third.
     ///
     /// The stack protector's check is the only thing that asks for this, and it is here rather

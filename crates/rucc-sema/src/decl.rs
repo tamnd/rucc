@@ -419,6 +419,26 @@ impl DeclFlags {
     /// are one name.
     pub const WEAKREF: Self = Self(1 << 26);
 
+    /// `__attribute__((interrupt))` was written, so the function is an x86 interrupt or exception
+    /// handler: the processor calls it rather than a program, with a frame of its own on the stack
+    /// and sometimes an error code under it, and it goes back with `iretq` rather than `ret`.
+    ///
+    /// Such a function saves every register it touches, since whatever it interrupted owns all of
+    /// them, and nothing may call it directly, which is refused where the call is checked. Only
+    /// x86-64 has it here, and on every other target the attribute is still refused as one whose
+    /// absence would change what the program does. Merged the way [`Self::NORETURN`] is, since a
+    /// prototype in a header saying it is a handler is the usual place to read that from.
+    pub const INTERRUPT: Self = Self(1 << 27);
+
+    /// `__attribute__((no_caller_saved_registers))` was written, so the function puts back every
+    /// general purpose register it writes, the ones a call may destroy as well as the ones it may
+    /// not, except the ones its value comes back in.
+    ///
+    /// What a kernel writes on a function called from somewhere that cannot afford to save
+    /// anything around the call, an interrupt entry being the usual one. x86-64 only, merged the
+    /// way [`Self::INTERRUPT`] is.
+    pub const SAVES_ALL: Self = Self(1 << 28);
+
     /// Whether every bit of `other` is set here.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {

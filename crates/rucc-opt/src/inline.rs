@@ -296,7 +296,9 @@ pub fn run(
             let kind = if set.contains(AttrSet::ALWAYS_INLINE) {
                 Kind::Always
             } else if limit.is_none()
-                || set.without(AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED) != set
+                || set.without(
+                    AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED | AttrSet::INTERRUPT,
+                ) != set
             {
                 return None;
             } else if func.linkage == Linkage::Internal

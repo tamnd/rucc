@@ -1076,6 +1076,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("pop_32", &[spell("popl", &[Reg(0, Long)])]),
     ("ret", &[spell("ret", &[])]),
     ("ret_pop", &[spell("ret", &[Imm])]),
+    ("iret", &[spell("iretq", &[])]),
+    ("cld", &[spell("cld", &[])]),
     ("mfence", &[spell("mfence", &[])]),
     // The four hints. One operand each and it is the address, the way `fldcw` above has one and it
     // is the address, and no width in the mnemonic because a hint is about a line rather than about
@@ -1509,6 +1511,13 @@ pub fn machine(mnemonic: &str, args: &[Shape]) -> Option<&'static str> {
             continue;
         }
         if !names_every_operand(name, only.args) {
+            continue;
+        }
+        // The return from an interrupt ends the function it is in, and a template writing one is
+        // doing something with the stack the compiler cannot follow, such as the kernel building
+        // a frame by hand to serialize the processor. It stays text, as it was before the
+        // compiler had a name for it.
+        if name == "iret" {
             continue;
         }
         // The high half on its own is the multiply that keeps both halves under another name,

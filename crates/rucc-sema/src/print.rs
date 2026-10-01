@@ -157,6 +157,12 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NAKED) {
             head.push_str(" naked");
         }
+        if node.flags.contains(DeclFlags::INTERRUPT) {
+            head.push_str(" interrupt");
+        }
+        if node.flags.contains(DeclFlags::SAVES_ALL) {
+            head.push_str(" saves-all");
+        }
         if node.flags.contains(DeclFlags::COLD) {
             head.push_str(" cold");
         }

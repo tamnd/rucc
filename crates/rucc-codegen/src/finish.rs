@@ -779,13 +779,23 @@ impl Writer<'_> {
             out.extend(read);
             out.push(self.store(self.conv.int_class, into, at));
         }
+        // And the direction flag an interrupt handler clears before it calls anything, after the
+        // saves since the flag is not a register they put back. It moves nothing, so it describes
+        // nothing either. See [`Frame::clears`].
+        if let (true, Some(name)) = (frame.clears(), self.insts.clear_direction) {
+            let opcode = self.opcode(name);
+            let inst = self.func.build_loose(opcode).finish();
+            out.push(inst);
+            quiet.push(inst);
+        }
         // The rules the body runs under, kept so that each epilogue can put them back rather than
         // leaving the next block reading whatever the last one ended on. See `epilogue`.
         //
         // Nothing is kept in a function whose whole prologue is the pieces that describe nothing.
-        // See `quiet` above.
+        // See `quiet` above. The `cld` of an interrupt handler is one of those pieces that comes
+        // last rather than first, so what is asked is whether anything at all described something.
         if let Some(&last) = out.last() {
-            if !quiet.contains(&last) {
+            if out.iter().any(|inst| !quiet.contains(inst)) {
                 self.row(last, CfiOp::RememberState);
             }
         }
@@ -1339,7 +1349,22 @@ impl Writer<'_> {
         // A function that takes some of its arguments with it says how many bytes on the `ret`,
         // which is i386 System V giving back the address its result went through. The count comes
         // from the ABI, so a target whose caller pops that address gets a plain `ret`.
+        //
+        // An interrupt handler goes back with the return from an interrupt instead, which takes
+        // the whole frame the processor pushed off the stack. The error code under that frame is
+        // a word it does not know about, so a handler that was handed one takes it off first.
+        if let (Some(true), Some(_)) = (frame.interrupt(), self.insts.iret) {
+            let add = self.opcode(self.insts.add);
+            let inst = self.arith(add, i64::from(self.conv.word));
+            out.push(inst);
+            let left = offset(self.conv.return_address) - offset(self.conv.word);
+            self.row(inst, CfiOp::DefCfaOffset(left));
+        }
         let inst = match (frame.popped(), self.insts.ret_pop) {
+            _ if frame.interrupt().is_some() && self.insts.iret.is_some() => {
+                let iret = self.opcode(self.insts.iret.expect("checked just above"));
+                self.func.build_loose(iret).finish()
+            }
             (popped @ 1.., Some(name)) => {
                 let ret = self.opcode(name);
                 self.func.build_loose(ret).imm(i64::from(popped)).finish()

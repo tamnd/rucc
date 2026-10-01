@@ -220,6 +220,8 @@ pub static FRAME: FrameInsts = FrameInsts {
     sum: "add_rr_64",
     ret: "ret",
     ret_pop: None,
+    iret: Some("iret"),
+    clear_direction: Some("cld"),
     differ: "cmp_set_ne_64",
     above: "cmp_set_a_64",
     away: Some("jmp_away"),

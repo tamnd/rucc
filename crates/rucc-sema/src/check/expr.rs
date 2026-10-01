@@ -591,6 +591,25 @@ impl Checker<'_> {
         self.finish_call(callee, function, checked, span)
     }
 
+    /// Refuses a call that names an `interrupt` handler, which gcc refuses in the same words.
+    ///
+    /// Only the processor calls a handler, with the frame it pushed on the stack and no return
+    /// address of the kind `call` leaves, and the handler goes back with `iretq`, which pops that
+    /// frame. Called like a function it would pop the caller's stack instead. A call through a
+    /// pointer is not refused, because gcc does not refuse it either: nothing there says what the
+    /// pointer points at, and installing a handler in a table is done with its address.
+    fn check_interrupt_call(&mut self, callee: ExprId, span: Span) {
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = self.tast[callee].kind
+        else {
+            return;
+        };
+        let ExprKind::Decl(decl) = self.tast[operand].kind else { return };
+        if self.tast[decl].flags.contains(DeclFlags::INTERRUPT) {
+            let what = "interrupt service routine cannot be called directly";
+            self.report(Diagnostic::error(what, span).with_code("E0785"));
+        }
+    }
+
     /// Refuses a call that names an `always_inline` function built for extensions its caller is
     /// not built for, which gcc refuses in the same words.
     ///
@@ -672,6 +691,7 @@ impl Checker<'_> {
             return self.poison(span);
         };
         self.check_inlined_target(callee, span);
+        self.check_interrupt_call(callee, span);
 
         if signature.prototyped {
             let (wanted, given) = (signature.params.len(), checked.len());

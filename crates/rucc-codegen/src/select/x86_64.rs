@@ -757,6 +757,10 @@ mod tests {
         "or_mi_8",
         "endbr64",
         "nop",
+        // The return from an interrupt an interrupt handler's epilogue ends with, and the clear
+        // of the direction flag its prologue writes when it calls anything.
+        "iret",
+        "cld",
     ];
 
     /// The instructions that reach the x87 stack, which are selected but not from here.
@@ -886,6 +890,9 @@ mod tests {
         // reason.
         written.extend(frame.landing);
         written.extend(frame.pad);
+        // And the two an interrupt handler's frame writes, options for the same reason again.
+        written.extend(frame.iret);
+        written.extend(frame.clear_direction);
         // What is left after the ones a rule already reaches, which are the loads and the stores of
         // both register files, since those are the same instructions a program's own reads and
         // writes of memory are. The vector pair joined them with the rules for a quad float, and a
