@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.5
+
+A patch release on the way to building the Linux kernel. It has the fixes from a second sweep of `allmodconfig`: `e` and `Z` asm constraints, EVEX moves on `zmm` registers, the packed float logic ops in crypto/xor.c, gcc's scheduler flags, pointers to arrays of unknown length in landlock, several `BUILD_BUG_ON` checks the optimizer now settles, a simplify bug on a null base pointer, and lib/overflow_kunit.c, which no longer takes ten minutes. It also adds i386 COFF output, `weakref`, `<stdckdint.h>` and a range test pass.
+
 ### Changed
 
 - Sharing frame slots skips ahead through a cell's list of pieces rather than stepping one at a time when it asks whether a local or a spill slot clashes with it, which takes about 9% off an optimized build of jtckdint (#2502).
