@@ -31,7 +31,7 @@
 //! over is read at the end of the unit, which is where a line after the last record lands.
 
 use rucc_base::Symbol;
-use rucc_diag::Span;
+use rucc_diag::{Diagnostic, Severity, Span};
 use rucc_lex::{Token, TokenKind};
 
 use crate::parser::Parser;
@@ -77,7 +77,7 @@ enum Action {
 /// do with, besides the ones read here. `once`, `push_macro` and `pop_macro` never get this far,
 /// since the preprocessor answers them.
 const PRAGMAS: &[&str] =
-    &["endregion", "message", "redefine_extname", "region", "scalar_storage_order", "weak"];
+    &["endregion", "redefine_extname", "region", "scalar_storage_order", "weak"];
 
 /// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility` and
 /// `diagnostic.rs` reads `diagnostic`. gcc calls `novector` and any other word unknown.
@@ -136,8 +136,36 @@ impl Parser<'_> {
         self.read_packs(self.cursor.index() + 1);
     }
 
-    /// One `#pragma` line. A `pack` is read here, a `comment`, `GCC visibility` and
-    /// `GCC diagnostic` elsewhere, the other pragmas gcc knows are taken without a word, and
+    /// `#pragma message "text"`, with or without parentheses around the strings, which says the
+    /// text as a note the way gcc 13 does, `-w` or not. A line with no string gets gcc's
+    /// `-Wpragmas` warning instead, and one with something after the text gets that warning and
+    /// the note.
+    fn message_line(&mut self, line: &[Token]) {
+        let word = line[0].span;
+        let mut rest = &line[1..];
+        let parenthesised = eat_punct(&mut rest, "(");
+        let mut text = String::new();
+        let mut any = false;
+        while let Some(piece) = self.comment_text(&mut rest) {
+            text.push_str(&piece);
+            any = true;
+        }
+        if !any {
+            self.warn("E0798", "expected a string after `#pragma message`", word);
+            return;
+        }
+        if parenthesised {
+            eat_punct(&mut rest, ")");
+        }
+        if let Some(junk) = rest.first() {
+            self.warn("E0798", "junk at end of `#pragma message`", junk.span);
+        }
+        let note = format!("`#pragma message: {text}`");
+        self.errors.push(Diagnostic::new(Severity::Note, note, word));
+    }
+
+    /// One `#pragma` line. A `pack` and a `message` are read here, a `comment`,
+    /// `GCC visibility` and `GCC diagnostic` elsewhere, the other pragmas gcc knows are taken without a word, and
     /// anything else is ignored with gcc's warning under `-Wunknown-pragmas`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
         let words = [0, 1].map(|at| {
@@ -146,6 +174,7 @@ impl Parser<'_> {
         match words {
             [Some("pack"), _] => {}
             [Some("comment"), _] => return self.comment_line(&line[1..], span),
+            [Some("message"), _] => return self.message_line(line),
             [Some("GCC"), Some(word)] if GCC_PRAGMAS.contains(&word) => {
                 return self.visibility_line(&line[1..], span);
             }

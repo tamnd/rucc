@@ -119,6 +119,11 @@ const QUIET: &[(&str, &str)] = &[
     ("unknown-pragmas", "unknown-pragmas"),
 ];
 
+/// The warnings that answer to no option and are not pedantic either, so `-pedantic-errors`
+/// leaves them warnings, as gcc 13 does: `#pragma once` in the main file, and the text of a
+/// `#pragma GCC warning`.
+const PLAIN: &[&str] = &["W0332", "W0335"];
+
 /// The gcc option that controls the warning with this code, if it has one.
 pub fn option_of(code: &str) -> Option<&'static str> {
     OPTIONS.binary_search_by(|&(known, _)| known.cmp(code)).ok().map(|at| OPTIONS[at].1)
@@ -215,7 +220,10 @@ impl Named {
             None => {
                 warnings_are_errors
                     || (self.pedantic_errors
-                        && name.is_none_or(|name| PEDWARNS.binary_search(&name).is_ok()))
+                        && match name {
+                            Some(name) => PEDWARNS.binary_search(&name).is_ok(),
+                            None => !diag.code.is_some_and(|code| PLAIN.contains(&code)),
+                        })
             }
         }
     }
@@ -388,6 +396,9 @@ mod tests {
         assert!(named.promoted(&warning("E0770"), false));
         named.flag("no-error=int-conversion");
         assert!(!named.promoted(&warning("E0513"), false));
+        assert!(!named.promoted(&warning("W0332"), false));
+        assert!(!named.promoted(&warning("W0335"), false));
+        assert!(named.promoted(&warning("W0335"), true));
         assert!(PEDWARNS.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(PEDWARNS.iter().all(|name| OPTIONS.iter().any(|&(_, known)| known == *name)));
     }

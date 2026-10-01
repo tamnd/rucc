@@ -13,13 +13,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `-Wunknown-pragmas` is implemented and is on under `-Wall`, as in gcc 13 (E0745). A pragma gcc does not know is ignored with "ignoring `#pragma omp parallel`", named by its first two words the way gcc names it, and every `STDC` pragma but `FLOAT_CONST_DECIMAL64` is one, as there. The pragmas gcc knows and this compiler has nothing to do with yet, such as `GCC poison`, `GCC optimize`, `weak` and `region`, are taken without a word. Before, every unknown pragma was dropped without one under any flags. A malformed `#pragma GCC visibility` or `#pragma comment` line is now warned about as `-Wpragmas` (E0798), which is where gcc puts the first, rather than under the code `-Wunknown-pragmas` now answers to, so it is still said by default.
 - `-finline-small-functions` is implemented and is on at `-O2` and `-O3`, as in gcc. A call to a function nobody declared `inline` is copied into the caller when the copy grows it by less than gcc's `max-inline-insns-auto`, which is 15, and `-fno-inline-small-functions` turns it off. The body is weighed the way gcc weighs it: a switch is two for each label and an `asm` is one for each line of its template, or one at most when it is written `asm inline`, which the IR now records. In the x86-64 defconfig kernel the objects and tables that differ from gcc's go from 982 to 956.
-### Added
-
 - The assembler reads `.code16` and `.code16gcc`, the real mode code under `arch/x86/realmode`. For 6.12's realmode `.S` files, and for gcc's `-m16` output for its C files, it writes the same bytes and relocations gas does: the operand and address size prefixes turned round, an address that is only a name in two bytes with `R_386_16`, jumps and calls in two bytes with `R_386_PC16` when the target is elsewhere, and gas's sixteen bit padding. `imul $n, %reg` is also read as the three operand form.
+- `#pragma GCC warning "text"` and `#pragma GCC error "text"` are said, as gcc 13 says them (W0335 and E0810), written as a line or through `_Pragma`, which is how glibc's `__glibc_macro_warning` warns about a deprecated macro. The warning answers to no option, so `-Wno-cpp` leaves it, while `-w` drops it and `-Werror` makes it an error. Anything but a plain string literal is gcc's "invalid `#pragma GCC warning` directive" (E0672). Both are kept out of `-E` output. `#pragma message` says its text as a note, as gcc does. Before, all three were ignored, so a `#pragma GCC error` did not stop the build.
 
 ### Fixed
 
 - A vector of eight or sixteen bytes crosses a call on x86-64 in one xmm register, as the System V psABI says and as gcc does, rather than in general purpose registers lane by lane, so a function built by rucc and a caller built by gcc agree about a `__m128` or a `vector_size(8)` argument and result, including one inside a structure or passed through `...` (#1140).
+- `-pedantic-errors` no longer makes an error of `#pragma once` in the main file, which gcc 13 leaves a warning since it answers to no option and is not pedantic.
 
 ## 0.18.9
 
