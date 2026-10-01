@@ -19,7 +19,7 @@ include!(concat!(env!("OUT_DIR"), "/i386.rs"));
 /// The x86-64 selector at thirty two bits: an address is computed with `leal` and read with
 /// `movl`, the thread pointer is the word at `%gs:0`, and a jump table's cell is already as wide
 /// as an address, so reading one is a plain load. The scratch registers are `esi` and `edi`, for
-/// the reason [`crate::pipeline::X86_SCRATCH`] gives.
+/// the reason `crate::pipeline::X86_SCRATCH` gives.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
     shapes: &rucc_target::x86::MACHINE,

@@ -40,7 +40,7 @@
 //! `__builtin_dynamic_object_size` sets a third bit on the kind, and where the walk finds no
 //! constant for one of those, an address that is an allocator's result with constant offsets on it
 //! is answered with the size the call asked for, multiplied out and less the offset in front of the
-//! question, as gcc 16 answers it from `-O1` up. See [`Walk::running`] for which shapes.
+//! question, as gcc 16 answers it from `-O1` up. See `Walk::running` for which shapes.
 //!
 //! The closest member, which is the low bit of the kind, is not something the IR remembers. The
 //! whole object is an answer no smaller than the member for the largest, so the first kind's answer
@@ -96,7 +96,7 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
                         Some(known) => Answer::Known(i128::from(known)),
                         // Only the dynamic spelling may be answered with something worked out
                         // while the program runs, and only where the walk found no constant.
-                        None if look && dynamic && kind != 3 => func[inst]
+                        None if look && dynamic && kind != SMALLEST_MEMBER => func[inst]
                             .results()
                             .next()
                             .and_then(|result| walk.running(address, func[result].ty, DEPTH))
@@ -122,6 +122,9 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
 /// The bit above the two of the kind that says the question was asked with
 /// `__builtin_dynamic_object_size`, which may be answered with a value worked out at run time.
 const DYNAMIC: u8 = 4;
+
+/// The fourth kind, the smallest answer for the closest member, which the walk cannot give.
+const SMALLEST_MEMBER: u8 = 3;
 
 /// What one question is answered with.
 enum Answer {

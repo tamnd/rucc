@@ -1034,7 +1034,7 @@ pub struct Stack {
     /// How many bytes of its arguments the function takes off the stack as it returns, which is
     /// the four of the address a result goes back through where the ABI has the callee pop it,
     /// as i386 System V does, and nothing anywhere else. See
-    /// [`rucc_abi::ReturnPointer::FirstArgumentPopped`].
+    /// `rucc_abi::ReturnPointer::FirstArgumentPopped`.
     pub popped: u32,
 }
 

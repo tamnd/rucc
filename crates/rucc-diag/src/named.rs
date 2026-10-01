@@ -190,7 +190,7 @@ impl Named {
 
     /// Whether this is a warning to report as an error, given whether `-Werror` was passed.
     ///
-    /// Under `-pedantic-errors` a warning is promoted when its option is one of the [`PEDWARNS`],
+    /// Under `-pedantic-errors` a warning is promoted when its option is one of the `PEDWARNS`,
     /// and also when it answers to no option at all, since the warnings with no bracket after
     /// them are the pedantic ones this compiler raises without naming.
     pub fn promoted(&self, diag: &Diagnostic, warnings_are_errors: bool) -> bool {

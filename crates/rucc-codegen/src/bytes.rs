@@ -3,7 +3,7 @@
 //! x86-64 can name the low byte of every general purpose register. i386 can name it for `eax`,
 //! `ecx`, `edx` and `ebx` only, because the encodings that reach `sil` and `dil` on x86-64 are the
 //! ones a REX prefix makes, and there is no REX prefix here. The allocator is never asked for
-//! either register, since [`crate::pipeline::X86_SCRATCH`] holds both back, but a reload of a
+//! either register, since `crate::pipeline::X86_SCRATCH` holds both back, but a reload of a
 //! spilled value lands in one of them, and when the instruction reading or writing that value names
 //! its low byte there is nothing an assembler can write.
 //!

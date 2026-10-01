@@ -683,10 +683,6 @@ pub const ALLOCATOR_DEGRADATION_PERCENT: u32 = 10;
 /// and the walk would end there anyway.
 pub const DSE_WALK_LIMIT: u32 = 256;
 
-/// Section 40.12's table, in its order, so a report can print it and a test can check it.
-///
-/// The point of having the list as data is that "which of our heuristics are guesses" becomes a
-/// question with an answer, rather than a question that needs somebody to read every pass.
 /// How many intervals a set of values compared against has to be before a bit test is written for
 /// it rather than a comparison per interval, per section 19.4.
 ///
@@ -694,6 +690,18 @@ pub const DSE_WALK_LIMIT: u32 = 256;
 /// comparisons and an `or`, which is no more than the window comparison and the shift of a bit test.
 pub const RANGE_TEST_BIT_INTERVALS: usize = 3;
 
+/// How many steps back from the operand of `__builtin_constant_p` the optimizer looks for a load
+/// before it decides the operand was not read from memory, per section 20.
+///
+/// Eight, which covers an address worked out from a pointer, an offset and a cast or two, the shape
+/// a dereference has by the time it reaches the question. Past that the walk is following a value
+/// built from many others, and those were not a dereference the kernel wrote in the source.
+pub const CONSTANT_P_LOAD_DEPTH: usize = 8;
+
+/// Section 40.12's table, in its order, so a report can print it and a test can check it.
+///
+/// The point of having the list as data is that "which of our heuristics are guesses" becomes a
+/// question with an answer, rather than a question that needs somebody to read every pass.
 pub const ALL: &[Constant] = &[
     Constant {
         name: "BRANCH_COST_FOR_SIZE",
@@ -1204,6 +1212,14 @@ pub const ALL: &[Constant] = &[
         value: 3,
         unit: "intervals",
         document: "19.4",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "CONSTANT_P_LOAD_DEPTH",
+        value: 8,
+        unit: "steps",
+        document: "20",
         gcc: "",
         provenance: Provenance::Chosen,
     },
