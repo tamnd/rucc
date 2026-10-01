@@ -1836,18 +1836,21 @@ mod tests {
                 target: "a".to_owned(),
                 binding: Binding::Global,
                 visibility: Visibility::Default,
+                ifunc: false,
             },
             Alias {
                 name: "c".to_owned(),
                 target: "a".to_owned(),
                 binding: Binding::Weak,
                 visibility: Visibility::Default,
+                ifunc: false,
             },
             Alias {
                 name: "d".to_owned(),
                 target: "a".to_owned(),
                 binding: Binding::Local,
                 visibility: Visibility::Default,
+                ifunc: false,
             },
         ];
         let vars = vec![var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])])];
@@ -1871,6 +1874,32 @@ mod tests {
         // Four bytes of image and not sixteen, since three more names for one variable are three
         // more names and not three more variables.
         assert_eq!(text.matches(".long\t1").count(), 1, "{text}");
+    }
+
+    /// An ifunc is the one alias that says a type, between the binding and the `.set`, which is
+    /// where gcc 16 writes it for a function with `target_clones`.
+    #[test]
+    fn an_ifunc_says_its_type_before_it_is_set() {
+        let names = Interner::new();
+        let aliases = [Alias {
+            name: "f".to_owned(),
+            target: "f.resolver".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            ifunc: true,
+        }];
+        let text = print(
+            &[],
+            &Globals::default(),
+            &aliases,
+            &names,
+            &target(Os::Linux),
+            true,
+            Output::default(),
+        )
+        .expect("a machine with a writer");
+        let want = "\t.globl\tf\n\t.type\tf, @gnu_indirect_function\n\t.set\tf,f.resolver\n";
+        assert!(text.contains(want), "{text}");
     }
 
     #[test]

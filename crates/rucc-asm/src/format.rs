@@ -543,6 +543,11 @@ impl Directives {
     /// A name with an `@` in it is a symbol version, which gas will not take in `.set` or
     /// `.globl`. It is written back as the `.symver` it came from, which binds it the way the
     /// name it stands for is bound.
+    ///
+    /// An ifunc is the one alias that does say a type, `@gnu_indirect_function`, between the
+    /// binding and the `.set`, which is where gcc writes it. Without it the name would be a plain
+    /// second name for the resolver and a call to it would run the resolver. Only ELF gets one
+    /// this far, see [`crate::aliases`].
     pub fn alias(self, out: &mut String, alias: &Alias) {
         let symbol = self.symbol();
         if alias.name.contains('@') {
@@ -551,6 +556,9 @@ impl Directives {
         }
         self.bind(out, &alias.name, alias.binding);
         self.seen(out, &alias.name, alias.binding, alias.visibility);
+        if alias.ifunc {
+            let _ = writeln!(out, "\t.type\t{}, @gnu_indirect_function", alias.name);
+        }
         let _ = writeln!(out, "\t.set\t{symbol}{},{symbol}{}", alias.name, alias.target);
     }
 

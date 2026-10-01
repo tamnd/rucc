@@ -34,9 +34,11 @@
 //! written a different way and both are refused by name rather than written out as an ordinary
 //! variable that every thread would share.
 //!
-//! An ifunc, which is the other thing an alias in the IR can be. It is resolved once at program
-//! start by calling a function in the same object, which wants a symbol type and a relocation
-//! neither half of this writes yet.
+//! An ifunc on a format that is not ELF. An ifunc is the other thing an alias in the IR can be: a
+//! name the dynamic loader resolves once at program start by calling a function in the same
+//! object, which ELF says with a symbol type of its own, `STT_GNU_IFUNC`. Neither COFF nor Mach-O
+//! has the type, and an ordinary second name there would reach the resolver rather than what the
+//! resolver picked.
 
 use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
@@ -392,14 +394,19 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
 ///
 /// # Errors
 ///
-/// [`Error::IFunc`] for an ifunc, which is the other thing this shape of the IR carries and is a
-/// program this compiler is behind on rather than a mistake. See [`Error`].
-pub fn aliases(module: &Module, names: &Interner) -> Result<Vec<Alias>, Error> {
+/// [`Error::IFunc`] for an ifunc on a format other than ELF, which is the only one with a symbol
+/// type for it. See [`Error`].
+pub fn aliases(
+    module: &Module,
+    names: &Interner,
+    format: ObjectFormat,
+) -> Result<Vec<Alias>, Error> {
     let mut out = Vec::new();
     for id in module.aliases() {
         let alias = &module[id];
         let name = names.resolve(alias.name).to_owned();
-        if alias.kind != AliasKind::Alias {
+        let ifunc = alias.kind == AliasKind::IFunc;
+        if ifunc && format != ObjectFormat::Elf {
             return Err(Error::IFunc { name });
         }
         out.push(Alias {
@@ -407,6 +414,7 @@ pub fn aliases(module: &Module, names: &Interner) -> Result<Vec<Alias>, Error> {
             target: names.resolve(alias.target).to_owned(),
             binding: binding(alias.linkage),
             visibility: visibility(alias.visibility),
+            ifunc,
         });
     }
     Ok(out)
@@ -1010,23 +1018,30 @@ mod tests {
             let mut alias = IrAlias::new(names.intern(&format!("b{index}")), target);
             alias.linkage = linkage;
             module.add_alias(alias);
-            let written = aliases(&module, &names).expect("a module of aliases");
+            let written =
+                aliases(&module, &names, ObjectFormat::Elf).expect("a module of aliases");
             assert_eq!(written[index].binding, binding, "{linkage:?}");
             assert_eq!(written[index].target, "a", "{linkage:?}");
         }
     }
 
     /// A different job from a second name for something, and the wrong answer would be an alias
-    /// pointing at the resolver rather than at what the resolver picks.
+    /// pointing at the resolver rather than at what the resolver picks. ELF has a symbol type for
+    /// it and gets one marked as an ifunc; the formats without the type refuse it.
     #[test]
-    fn an_ifunc_is_refused_rather_than_written_as_an_ordinary_second_name() {
+    fn an_ifunc_is_marked_on_elf_and_refused_where_there_is_no_type_for_it() {
         let mut names = Interner::new();
         let mut module = module(&mut names);
         let mut memcpy = IrAlias::new(names.intern("memcpy"), names.intern("pick_memcpy"));
         memcpy.kind = AliasKind::IFunc;
         module.add_alias(memcpy);
-        let error = aliases(&module, &names).expect_err("an ifunc");
-        assert_eq!(error, Error::IFunc { name: "memcpy".to_owned() });
+        let written = aliases(&module, &names, ObjectFormat::Elf).expect("an ifunc on ELF");
+        assert_eq!((written[0].name.as_str(), written[0].target.as_str()), ("memcpy", "pick_memcpy"));
+        assert!(written[0].ifunc);
+        for format in [ObjectFormat::Coff, ObjectFormat::MachO] {
+            let error = aliases(&module, &names, format).expect_err("no ifunc type");
+            assert_eq!(error, Error::IFunc { name: "memcpy".to_owned() }, "{format:?}");
+        }
     }
 
     /// The two sections a thread gets a copy of, told apart the way `.data` and `.bss` are.

@@ -468,6 +468,15 @@ pub enum Sort {
     Object,
     /// `@tls_object`. A thread-local variable, which a linker checks relocations against.
     Thread,
+    /// `@gnu_indirect_function`, ELF's `STT_GNU_IFUNC`. The name is at a resolver rather than at
+    /// the function: the dynamic loader calls what is there once, before anything else can, and
+    /// the address it hands back is what every call and every pointer to the name then reaches.
+    ///
+    /// That makes it a name nothing in this file may be worked out against, because the place it
+    /// marks is not where a call to it goes. A reference to one stays a relocation against the
+    /// name even when the name is local and in the same section, where any other name would have
+    /// been turned into the section and an offset. See [`moved`].
+    Ifunc,
     /// `.file`, which names the source this was assembled from rather than anything in it.
     ///
     /// Not a thing `.type` can say, and here because it is a symbol and there is nowhere else for
@@ -651,6 +660,17 @@ pub fn assembled_described(
             flags: SymbolFlags::None,
         });
         flavour.see(&mut obj, id, name.binding, name.visibility);
+        if name.sort == Sort::Ifunc {
+            // Only ELF has the type. COFF and Mach-O reach a function chosen at load time through
+            // a pointer the program fills in itself, which is a different program rather than a
+            // different symbol, so a listing asking for one there is refused rather than written
+            // as the ordinary function it is not.
+            if flavour != Flavour::Elf {
+                let why = format!("'{}' is an indirect function, which only ELF has", name.name);
+                return Err(Error::Refused { why });
+            }
+            crate::elf::indirect(&mut obj, id);
+        }
         // The writer underneath records a common symbol as `STT_COMMON` and gas records the same
         // symbol as `STT_OBJECT`. Both are a request for storage and a linker reads either, and the
         // one gas writes is written here, because an object that says the same thing a different
@@ -902,6 +922,12 @@ fn moved(
     use crate::section::Reference;
     let name = defined.get(reloc.symbol.as_str())?;
     let Held::In { part, offset } = name.at else { return None };
+    // A reference to an indirect function is to whatever its resolver picks, and the place the
+    // name marks is the resolver. The section and an offset would be the resolver itself, so the
+    // name stays, which is what gas leaves for one too.
+    if name.sort == Sort::Ifunc {
+        return None;
+    }
     if pe32 && unseen(name, pe32) {
         return Some((part, offset));
     }

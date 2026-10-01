@@ -490,6 +490,11 @@ pub struct Alias {
     /// How far outside a shared library holding this the new name reaches, which is its own
     /// answer for the same reason the binding is: the attribute is written on the alias.
     pub visibility: Visibility,
+    /// Whether the new name is an indirect function, `STT_GNU_IFUNC`, rather than a second name
+    /// for the target. The target is then a resolver, which the dynamic loader calls once and
+    /// whose answer is the address every call to the new name reaches. ELF is the only format with
+    /// the type, and a writer for another one refuses it rather than write an ordinary name.
+    pub ifunc: bool,
 }
 
 /// One global variable, laid out.
