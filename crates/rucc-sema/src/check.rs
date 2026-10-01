@@ -71,6 +71,7 @@ mod advice;
 mod annotate;
 mod attr;
 mod builtin;
+mod clones;
 mod decl;
 mod expr;
 mod format;

@@ -26,7 +26,7 @@ use rucc_types::{TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
-use crate::expr::{Expr, ExprId, ExprList};
+use crate::expr::{CpuObject, Expr, ExprId, ExprList};
 use crate::stmt::{Case, CaseId, Stmt, StmtId, StmtList};
 
 /// A folded constant, in the value table.
@@ -166,6 +166,28 @@ pub struct Label {
     pub stmt: Option<StmtId>,
 }
 
+/// One version of a function that `__attribute__((target_clones(...)))` asked to have built, which
+/// is one of the names in the attribute's strings.
+///
+/// gcc builds the body once for each name, as a local function called the function's name, a dot
+/// and the suffix, and makes the function's own name an indirect function whose resolver asks
+/// libgcc what the processor has and picks the first version, in gcc's order, that it can run. The
+/// versions are kept in that order with `default` last, so the resolver is written by walking the
+/// list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    /// What goes after the dot in the version's name, which is the name as written with every
+    /// `=`, `-` and `.` made an underscore: `avx2`, `sse4_2`, `arch_x86_64_v3` and `default`.
+    pub suffix: String,
+    /// The extensions the version is built for, which is the unit's set with what the name adds,
+    /// and nothing for `default`, which is built for the unit.
+    pub isa: Option<Isa>,
+    /// Where libgcc keeps the bit saying the processor can run the version, as the object, the word
+    /// of it and the bit in the word, which is what `__builtin_cpu_supports` of the same name
+    /// reads. Nothing for `default`, which is what the resolver falls back to.
+    pub test: Option<(CpuObject, u8, u8)>,
+}
+
 /// One typed translation unit.
 #[derive(Default)]
 pub struct Tast {
@@ -183,6 +205,7 @@ pub struct Tast {
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     targets: Vec<(DeclId, Isa)>,
+    versions: Vec<(DeclId, Vec<Version>)>,
     sections: Map<DeclId, StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
     defined_at: Map<DeclId, Span>,
@@ -417,6 +440,26 @@ impl Tast {
         if self.target(decl).is_none() {
             self.targets.push((decl, isa));
         }
+    }
+
+    /// Records the versions `__attribute__((target_clones(...)))` asked a function to be built in,
+    /// in the order the resolver tries them, with `default` last.
+    ///
+    /// A list beside the tree for the reason [`Tast::record_target`] is one. Unlike the `target`
+    /// attribute, the last declaration to say something stands, even over the definition's list,
+    /// because that is what gcc 16 builds.
+    pub fn record_versions(&mut self, decl: DeclId, versions: Vec<Version>) {
+        match self.versions.iter_mut().find(|(at, _)| *at == decl) {
+            Some(slot) => slot.1 = versions,
+            None => self.versions.push((decl, versions)),
+        }
+    }
+
+    /// The versions a `target_clones` attribute asked this function to be built in, and nothing
+    /// for a function built once, which is almost every function.
+    #[must_use]
+    pub fn versions(&self, decl: DeclId) -> Option<&[Version]> {
+        self.versions.iter().find(|(at, _)| *at == decl).map(|(_, versions)| &versions[..])
     }
 
     /// Records the section `__attribute__((section(...)))` put a function or an object in.

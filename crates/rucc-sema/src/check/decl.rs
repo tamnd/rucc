@@ -393,7 +393,13 @@ impl Checker<'_> {
         }
         // The specifiers only, for the reason `noreturn` above reads them only. This is where a
         // program picking its fastest path at run time writes it, on the definition of the path.
-        let targeted = self.targeted(&[specs.attrs]);
+        // A cloned function is built once for each version, and its `target` attribute, which
+        // gcc drops with a warning, says nothing.
+        let cloned = self.cloned(&[specs.attrs], DeclKind::Function);
+        let targeted = if cloned.is_some() { None } else { self.targeted(&[specs.attrs]) };
+        if let Some(versions) = cloned {
+            self.tast.record_versions(id, versions);
+        }
         if let Some((isa, _)) = targeted {
             self.tast.record_target(id, isa);
         }
@@ -853,7 +859,10 @@ impl Checker<'_> {
         }
         // Both places, for the reason `noreturn` above reads both. gcc says nothing about the
         // attribute on an object beyond that it is ignored, and it is not read there at all.
-        if kind == DeclKind::Function {
+        let cloned = self.cloned(&[specs.attrs, item.attrs], kind);
+        if let Some(versions) = cloned {
+            self.tast.record_versions(id, versions);
+        } else if kind == DeclKind::Function {
             if let Some((isa, _)) = self.targeted(&[specs.attrs, item.attrs]) {
                 self.tast.record_target(id, isa);
             }

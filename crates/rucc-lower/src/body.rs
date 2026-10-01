@@ -321,7 +321,7 @@ fn signed_in_memory(ty: Type) -> bool {
 
 /// An access that names no type, for the reads and writes of a value's own bytes where the type the
 /// bytes are read as is not the type they were written as.
-fn untyped(align: u32) -> MemInfo {
+pub(crate) fn untyped(align: u32) -> MemInfo {
     MemInfo {
         size: 0,
         align,

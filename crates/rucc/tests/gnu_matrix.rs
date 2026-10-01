@@ -408,7 +408,6 @@ fn the_hints_gcc_answers_yes_for_are_taken_without_a_word() {
          __attribute__((access(read_only, 1, 2))) int sum(const int *, int);\n\
          __attribute__((assume_aligned(16))) void *aligned(void);\n\
          __attribute__((flatten)) int all(void) { return sum(0, 0); }\n\
-         __attribute__((target_clones(\"default\", \"avx2\"))) int cloned(int x) { return x; }\n\
          __attribute__((sentinel)) void list(const char *, ...);\n\
          struct __attribute__((designated_init)) point { int x, y; };\n\
          struct point origin = { .x = 0, .y = 0 };\n",
