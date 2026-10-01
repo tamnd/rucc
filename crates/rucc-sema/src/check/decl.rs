@@ -94,7 +94,7 @@ struct Declared {
     /// What this declaration said about inlining it and about what is written around its body, as
     /// [`DeclFlags::ALWAYS_INLINE`], [`DeclFlags::NOINLINE`], [`DeclFlags::DECLARED_INLINE`],
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`],
-    /// [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_STACK_PROTECTOR`],
+    /// [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
     /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
     /// [`DeclFlags::UNINITIALIZED`] and the four `ZERO_` bits and nothing else.
     inlining: DeclFlags,
@@ -1426,6 +1426,7 @@ impl Checker<'_> {
                 DeclFlags::NO_STRICT_ALIASING,
                 DeclFlags::OPTIMIZE_NONE,
                 DeclFlags::NO_INSTRUMENT,
+                DeclFlags::NO_PROFILE,
                 DeclFlags::COLD,
                 DeclFlags::HOT,
                 DeclFlags::NO_STACK_PROTECTOR,

@@ -870,6 +870,7 @@ impl Unit<'_> {
         let noreturn = node.flags.contains(DeclFlags::NORETURN);
         let naked = node.flags.contains(DeclFlags::NAKED);
         let untraced = node.flags.contains(DeclFlags::NO_INSTRUMENT);
+        let unprofiled = node.flags.contains(DeclFlags::NO_PROFILE);
         let twice = node.flags.contains(DeclFlags::RETURNS_TWICE);
         let effects = node.effects;
         let startup = node.startup;
@@ -949,6 +950,10 @@ impl Unit<'_> {
         // function but this one.
         if untraced {
             func.attrs.set |= AttrSet::NO_INSTRUMENT;
+        }
+        // Read by the coverage pass, which puts no counters in it.
+        if unprofiled {
+            func.attrs.set |= AttrSet::NO_PROFILE;
         }
         // A claim about what a call to it does, like `noreturn`, and it has to travel for the same
         // reason: `sigsetjmp` is only ever declared here, and the frame of whoever calls it is

@@ -262,7 +262,7 @@ options:
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
-  -fprofile-use[=<path>] -fprofile-dir=<dir>   read too, where -fprofile-generate is refused
+  -fprofile-use[=<path>] -fprofile-dir=<dir> -fprofile-arcs   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
@@ -1801,20 +1801,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-profile-correction" => opts.profile_data.correction = false,
             "-fprofile-partial-training" => opts.profile_data.partial_training = true,
             "-fno-profile-partial-training" => opts.profile_data.partial_training = false,
-            // Writing the counts rather than reading them, which is refused rather than taken and
-            // is the same line `-gsplit-dwarf` falls on the far side of. Ignoring these means a
-            // file a build declared as an output never appears: the instrumented program writes a
-            // `.gcda` as it exits and `-ftest-coverage` writes a `.gcno` beside the object, and a
-            // two stage build that got neither would go on to optimize against no counts at all
-            // and report coverage of nothing, with nothing along the way saying so. The objects
-            // say the rest: gcc's `-fprofile-generate` object holds 375 bytes of code where a
-            // plain one holds 71, and 296 bytes of counters that a plain one does not have, so
-            // this is a flag that changes the output rather than a hint about speed.
-            "-fprofile-arcs"
-            | "--coverage"
-            | "-fcondition-coverage"
-            | "-fpath-coverage"
-            | "-fprofile-generate" => {
+            // Arc counters in every function and a record that hands them to `__gcov_init`, which
+            // is what the kernel's `GCOV_PROFILE` builds with. `-lgcov` goes on the link, as gcc
+            // puts it there. See `rucc_opt::coverage`.
+            "-fprofile-arcs" => {
+                opts.profile_data.arcs = true;
+                link.gcov = true;
+            }
+            "-fno-profile-arcs" => {
+                opts.profile_data.arcs = false;
+                link.gcov = false;
+            }
+            // The rest of the writing half, which is refused rather than taken and is the same line
+            // `-gsplit-dwarf` falls on the far side of. Ignoring these means a file a build declared
+            // as an output never appears: `-ftest-coverage` writes a `.gcno` beside the object and
+            // `-fprofile-generate` adds value counters to the arcs, and a two stage build that got
+            // neither would go on to optimize against counts that are not there and report coverage
+            // of nothing, with nothing along the way saying so.
+            "--coverage" | "-fcondition-coverage" | "-fpath-coverage" | "-fprofile-generate" => {
                 return Err(err(format!(
                     "{arg}: this compiler does not instrument for profiling, and a build that \
                      expects the counts a run of the instrumented program writes would optimize \
@@ -1859,7 +1863,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
             }
             "-fprofile-values" | "-fno-profile-values" | "-fprofile-info-section" => {}
-            "-fno-test-coverage" | "-fno-profile-arcs" | "-fno-profile-generate" => {}
+            "-fno-test-coverage" | "-fno-profile-generate" => {}
             _ if arg.starts_with("-fprofile-filter-files=")
                 || arg.starts_with("-fprofile-exclude-files=")
                 || arg.starts_with("-fprofile-note=") => {}
@@ -3612,7 +3616,7 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         } else if job.kind == InputKind::Ir {
             compile_ir(opts, &job.input, &fs)
         } else {
-            compile(opts, &job.input, &fs)
+            compile(&counted(opts, job), &job.input, &fs)
         };
         if opts.time {
             say_time(&job.input, started.elapsed(), &mut stderr);
@@ -3769,7 +3773,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             } else if job.kind == InputKind::Ir {
                 compile_ir(opts, &job.input, &fs)
             } else {
-                compile(opts, &job.input, &fs)
+                compile(&counted(opts, job), &job.input, &fs)
             };
             if opts.time {
                 say_time(&job.input, started.elapsed(), &mut stderr);
@@ -3934,7 +3938,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             } else if plan_job.kind == InputKind::Ir {
                 compile_ir(opts, &plan_job.input, &fs)
             } else {
-                compile(opts, &plan_job.input, &fs)
+                compile(&counted(opts, plan_job), &plan_job.input, &fs)
             };
             if opts.time {
                 say_time(&plan_job.input, started.elapsed(), &mut stderr);
@@ -4180,6 +4184,28 @@ fn write_temps(job: &Job, temps: &Temps, stderr: &mut impl std::io::Write) -> bo
 /// Written even when it is empty, because gcc writes an empty `.su` for a file with no functions,
 /// for `-fsyntax-only` and for a file that did not compile, and a tool that looks for one beside
 /// every object should find one.
+/// The options one job compiles with, which are the line's own unless `-fprofile-arcs` gave the
+/// job a `.gcda` to name.
+///
+/// The name goes into the object, so it is made absolute here the way gcc makes it: against the
+/// working directory, or with `-fprofile-dir=` the whole path with its slashes turned to `#` under
+/// that directory, so that two objects of one name in different places keep apart.
+fn counted<'a>(opts: &'a Options, job: &Job) -> std::borrow::Cow<'a, Options> {
+    let Some(counts) = &job.counts else { return std::borrow::Cow::Borrowed(opts) };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let full = cwd.join(counts);
+    let path = match &opts.profile_data.dir {
+        Some(dir) => {
+            let dir = cwd.join(dir);
+            dir.join(full.display().to_string().replace('/', "#")).display().to_string()
+        }
+        None => full.display().to_string(),
+    };
+    let mut opts = opts.clone();
+    opts.profile_data.counts = Some(path);
+    std::borrow::Cow::Owned(opts)
+}
+
 fn write_stack_usage(job: &Job, text: &str, stderr: &mut impl std::io::Write) -> bool {
     let Some(path) = &job.stack_usage else { return true };
     if let Err(e) = std::fs::write(path, text) {
@@ -7383,13 +7409,20 @@ mod tests {
         assert!(opts.profile_data.correction);
         assert!(opts.profile_data.partial_training);
 
-        // Writing one, which is refused by name. The first four instrument the program and the
-        // last writes a file beside the object, and a build that got neither and no message would
-        // go on to optimize against counts that were never gathered.
+        // Arc counters, which are done, and the last of the two spellings wins.
+        let (opts, _) = compile(&["-fprofile-arcs", "-c", "a.c"]);
+        assert!(opts.profile_data.arcs);
+        assert!(linking(&["-fprofile-arcs", "a.c"]).0.gcov);
+        let (opts, _) = compile(&["-fprofile-arcs", "-fno-profile-arcs", "-c", "a.c"]);
+        assert!(!opts.profile_data.arcs);
+        assert!(!linking(&["-fprofile-arcs", "-fno-profile-arcs", "a.c"]).0.gcov);
+
+        // The rest of the writing half, which is refused by name. These instrument the program
+        // further and the last writes a file beside the object, and a build that got neither and
+        // no message would go on to optimize against counts that were never gathered.
         for writing in [
             "-fprofile-generate",
             "-fprofile-generate=/build/profiles",
-            "-fprofile-arcs",
             "--coverage",
             "-fcondition-coverage",
             "-fpath-coverage",
@@ -7400,7 +7433,7 @@ mod tests {
         assert!(refused(&["-ftest-coverage", "-c", "a.c"]).contains(".gcno"), "it names the file");
 
         // The negative spellings of the refused half are what already happens, so they are taken.
-        for taken in ["-fno-profile-generate", "-fno-profile-arcs", "-fno-test-coverage"] {
+        for taken in ["-fno-profile-generate", "-fno-test-coverage"] {
             let (opts, _) = compile(&[taken, "-c", "a.c"]);
             assert!(!opts.profile_data.requested, "{taken} asks for nothing");
         }

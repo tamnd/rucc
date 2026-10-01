@@ -543,8 +543,8 @@ kind = "attribute"
 gcc_version = "7.0"
 status = "implemented"
 used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Takes a function out of the counters `-fprofile-arcs` and `--coverage` add. This compiler refuses those flags rather than instrumenting, so no function is ever instrumented and the attribute has nothing left to take out."
+tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them", "arc_counters::a_counted_program_hands_its_counts_to_gcov_init"]
+notes = "Takes a function out of the counters `-fprofile-arcs` adds, which is what the runtime that reads them needs or it counts itself."
 
 [[feature]]
 name = "no_stack_protector"

@@ -473,7 +473,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             }
                         } else if let Err(complaints) = clock
                             .time("instrument", || {
-                                instrument(&mut lowered.module, &mut sess.interner, opts)
+                                instrument(
+                                    &mut lowered.module,
+                                    &mut sess.interner,
+                                    &sess.target,
+                                    opts,
+                                )
                             })
                             .map(|done| instrumented = done)
                         {
@@ -741,8 +746,35 @@ fn linker_options(comments: &[rucc_parse::Comment], target: &TargetInfo) -> Vec<
 fn instrument(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
+    target: &TargetInfo,
     opts: &Options,
 ) -> Result<Instrumented, Vec<Diagnostic>> {
+    // First, so that the counters see the program as written and none of the checks below.
+    if let Some(counts) = opts.profile_data.counts.as_ref().filter(|_| opts.profile_data.arcs) {
+        let (ctor, dtor) = match target.object_format {
+            rucc_target::ObjectFormat::Elf => {
+                (Some(".init_array.00101"), Some(".fini_array.00101"))
+            }
+            rucc_target::ObjectFormat::Coff => (Some(".CRT$XCU"), None),
+            rucc_target::ObjectFormat::MachO => {
+                (Some("__DATA,__mod_init_func,mod_init_funcs"), None)
+            }
+            rucc_target::ObjectFormat::Wasm => (None, None),
+        };
+        let coverage = rucc_opt::coverage::Coverage {
+            counts: counts.clone(),
+            gnuc: (opts.gnuc.major, opts.gnuc.minor),
+            ctor: ctor.map(str::to_owned),
+            dtor: dtor.map(str::to_owned),
+        };
+        rucc_opt::coverage::run(module, names, &coverage);
+        if let Err(errors) = rucc_ir::verify(module, names) {
+            return Err(errors
+                .iter()
+                .map(|e| internal(&format!("invalid IR after the arc counters, {e}")))
+                .collect());
+        }
+    }
     if !opts.safety.instruments() {
         return Ok(Instrumented::default());
     }
