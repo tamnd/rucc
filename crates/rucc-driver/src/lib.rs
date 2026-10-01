@@ -7035,6 +7035,45 @@ mod tests {
         );
     }
 
+    /// The MinGW link flags Postgres's `meson.build` writes on the compiler line, which are all
+    /// behind `-Wl,` and all words for lld's MinGW driver, reach the link as those words, with
+    /// `--stack,N` split in two and `--out-implib=` left whole. tamnd/rucc#1993.
+    #[test]
+    fn the_mingw_link_flags_postgres_writes_reach_the_linker() {
+        let (_, plan) = linking(&[
+            "--target=x86_64-w64-mingw32",
+            "a.c",
+            "-Wl,--allow-multiple-definition",
+            "-Wl,--disable-auto-import",
+            "-Wl,--stack,4194304",
+            "-Wl,--export-all-symbols",
+            "-Wl,--out-implib=libpostgres.exe.a",
+            "-o",
+            "postgres.exe",
+        ]);
+        let link = plan.link.expect("expected a link step");
+        let words: Vec<&str> = link
+            .inputs
+            .iter()
+            .filter_map(|item| match item {
+                link::Item::Linker(word) => Some(word.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "--allow-multiple-definition",
+                "--disable-auto-import",
+                "--stack",
+                "4194304",
+                "--export-all-symbols",
+                "--out-implib=libpostgres.exe.a",
+            ]
+        );
+        assert_eq!(link.output, "postgres.exe");
+    }
+
     /// The Darwin link flags Postgres writes on the compiler line, from `Makefile.shlib`,
     /// `Makefile.darwin` and `meson.build`, each taken with its argument in the order written.
     /// tamnd/rucc#2010.
