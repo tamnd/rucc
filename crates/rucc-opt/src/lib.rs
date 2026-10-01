@@ -100,6 +100,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-opt/0.18.8")]
 
+pub mod adce;
 pub mod alias;
 pub mod analysis;
 pub mod callgraph;

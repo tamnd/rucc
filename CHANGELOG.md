@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `#pragma GCC diagnostic` is honoured (`push`, `pop`, `ignored`, `warning` and `error`, also through `_Pragma`). A warning is decided by where it is, as in gcc 13, so a deprecated call between `push`, `ignored "-Wdeprecated-declarations"` and `pop` says nothing, `error` makes it an error, and `warning` keeps it a warning under `-Werror`. A line in a header holds for what follows its `#include`, and a `pop` with nothing pushed goes back to the command line. A line gcc cannot read gets gcc's `-Wpragmas` warning (E0798), and `ignored_attributes` is read and does nothing. Before, every one of these lines was dropped, so code that silenced a warning around one call still warned there.
+- A new pass, `adce`, runs last at `-O2`, `-O3` and `-Os` and removes what nothing necessary depends on, branches and block parameters included (#2354). A branch no store, call or return is control dependent on becomes a jump to where its arms meet, so the test left in front of a deleted loop goes with it.
 
 ### Changed
 
