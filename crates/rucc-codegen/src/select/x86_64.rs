@@ -761,6 +761,15 @@ mod tests {
         // of the direction flag its prologue writes when it calls anything.
         "iret",
         "cld",
+        // The registers cleared in front of a `ret` under `-fzero-call-used-regs=`, which the
+        // pass that does it writes after the allocator and nothing selects. See `crate::zero`.
+        "vxorps_rr",
+        "vzeroall",
+        "zero_zmm_high",
+        "zero_xmm_high",
+        "zero_masks",
+        "fldz",
+        "fstp_top",
     ];
 
     /// The instructions that reach the x87 stack, which are selected but not from here.

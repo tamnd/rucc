@@ -303,6 +303,7 @@ fd000921	str d1, [x9, #16]	str_f64
 1e204041	fmov s1, s2	fmov_rr_f32
 1e604041	fmov d1, d2	fmov_rr_f64
 4ea21c41	mov v1.16b, v2.16b	mov_rr_f128
+6f00e401	movi v1.2d, #0	movi_zero
 1e624041	fcvt s1, d2	fcvt_f64_f32
 1e22c041	fcvt d1, s2	fcvt_f32_f64
 1e220041	scvtf s1, w2	scvtf_32_f32

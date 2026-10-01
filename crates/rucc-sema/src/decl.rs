@@ -385,6 +385,15 @@ impl DeclFlags {
     /// nothing whatever `-fzero-call-used-regs=` asked for.
     pub const ZERO_SKIP: Self = Self(1 << 20);
 
+    /// `zero_call_used_regs` asked for the vector registers and the x87 stack to be zeroed as
+    /// well as the general purpose registers, from the four choices without `-gpr` in them.
+    ///
+    /// It is the same bit as [`Self::ZERO_SKIP`], because the thirty two bits ran out and the two
+    /// never describe the same choice: skip is set on its own, and this only ever with
+    /// [`Self::ZERO_USED`] or [`Self::ZERO_ALL`]. So the bit means skip when neither of those is
+    /// set and this when one is, which is what [`Self::zero_skip`] and [`Self::zero_wide`] read.
+    pub const ZERO_WIDE: Self = Self(1 << 20);
+
     /// `zero_call_used_regs` asked for the registers the body used to be zeroed before it returns,
     /// from `used-gpr` or `used-gpr-arg`.
     pub const ZERO_USED: Self = Self(1 << 21);
@@ -455,6 +464,24 @@ impl DeclFlags {
     /// of `-fprofile-arcs` out of the function. The kernel's `noinstr` says it on code that runs
     /// before the counters can be written to. Merged the way [`Self::NO_INSTRUMENT`] is.
     pub const NO_PROFILE: Self = Self(1 << 31);
+
+    /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
+    /// more than the one bit.
+    #[must_use]
+    pub const fn zero_skip(self) -> bool {
+        self.contains(Self::ZERO_SKIP) && !self.zero_chosen()
+    }
+
+    /// Whether `zero_call_used_regs` asked for the vector registers too. See [`Self::ZERO_WIDE`].
+    #[must_use]
+    pub const fn zero_wide(self) -> bool {
+        self.contains(Self::ZERO_WIDE) && self.zero_chosen()
+    }
+
+    /// Whether a `zero_call_used_regs` choice that zeroes anything was written.
+    const fn zero_chosen(self) -> bool {
+        self.contains(Self::ZERO_USED) || self.contains(Self::ZERO_ALL)
+    }
 
     /// Whether every bit of `other` is set here.
     #[must_use]

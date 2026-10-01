@@ -2301,20 +2301,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 guard_symbol = Some(name);
             }
-            // The general register choices, on the two back ends that clear them. The four that
-            // clear the vector registers too are refused by the kbuild table before this.
+            // Every one of gcc's choices, on the two back ends that clear registers. The four
+            // without `-gpr` in them clear the vector registers and the x87 stack as well.
             _ if arg.starts_with("-fzero-call-used-regs=") => {
                 let choice = &arg["-fzero-call-used-regs=".len()..];
                 opts.zero_regs = match choice {
                     "skip" => None,
-                    "used-gpr" => Some((false, false)),
-                    "used-gpr-arg" => Some((false, true)),
-                    "all-gpr" => Some((true, false)),
-                    "all-gpr-arg" => Some((true, true)),
+                    "used-gpr" => Some((false, false, false)),
+                    "used-gpr-arg" => Some((false, true, false)),
+                    "all-gpr" => Some((true, false, false)),
+                    "all-gpr-arg" => Some((true, true, false)),
+                    "used" => Some((false, false, true)),
+                    "used-arg" => Some((false, true, true)),
+                    "all" => Some((true, false, true)),
+                    "all-arg" => Some((true, true, true)),
                     _ => {
                         return Err(err(format!(
-                            "{arg}: the choices are skip, used-gpr, used-gpr-arg, all-gpr and \
-                             all-gpr-arg"
+                            "{arg}: the choices are skip, used-gpr, used-gpr-arg, all-gpr, \
+                             all-gpr-arg, used, used-arg, all and all-arg"
                         )));
                     }
                 };
@@ -8696,34 +8700,36 @@ mod tests {
     }
 
     #[test]
-    fn the_general_register_choices_of_zero_call_used_regs_are_read() {
+    fn every_choice_of_zero_call_used_regs_is_read() {
         let zero = |target: &str, flags: &[&str]| {
             compile(&[&[target, "-c", "a.c"], flags].concat()).0.zero_regs
         };
         for target in [KERNEL_X86, KERNEL_ARM64] {
             assert_eq!(zero(target, &[]), None);
-            assert_eq!(zero(target, &["-fzero-call-used-regs=used-gpr"]), Some((false, false)));
-            assert_eq!(zero(target, &["-fzero-call-used-regs=used-gpr-arg"]), Some((false, true)));
-            assert_eq!(zero(target, &["-fzero-call-used-regs=all-gpr"]), Some((true, false)));
-            assert_eq!(zero(target, &["-fzero-call-used-regs=all-gpr-arg"]), Some((true, true)));
-            let back = ["-fzero-call-used-regs=all-gpr", "-fzero-call-used-regs=skip"];
+            for (choice, read) in [
+                ("used-gpr", (false, false, false)),
+                ("used-gpr-arg", (false, true, false)),
+                ("all-gpr", (true, false, false)),
+                ("all-gpr-arg", (true, true, false)),
+                ("used", (false, false, true)),
+                ("used-arg", (false, true, true)),
+                ("all", (true, false, true)),
+                ("all-arg", (true, true, true)),
+            ] {
+                let flag = format!("-fzero-call-used-regs={choice}");
+                assert_eq!(zero(target, &[&flag]), Some(read), "{flag}");
+            }
+            let back = ["-fzero-call-used-regs=all", "-fzero-call-used-regs=skip"];
             assert_eq!(zero(target, &back), None);
         }
         let wrong = refused(&[KERNEL_X86, "-fzero-call-used-regs=some", "-c", "a.c"]);
-        assert!(wrong.contains("all-gpr-arg"), "{wrong}");
+        assert!(wrong.contains("all-arg"), "{wrong}");
     }
 
     /// The flags kbuild passes that this compiler cannot honor yet, each refused with the issue
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
-        for (flag, issue) in
-            [("-fzero-call-used-regs=used", 2335), ("-fzero-call-used-regs=all-arg", 2335)]
-        {
-            let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
-            assert!(failed.starts_with(flag), "the flag is named: {failed}");
-            assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
-        }
         for (flag, issue) in [
             ("-mbranch-protection=pac-ret+bti", 2286),
             ("-msign-return-address=non-leaf", 2286),

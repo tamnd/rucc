@@ -106,7 +106,12 @@ impl Kind {
     #[must_use]
     pub fn of(arg: Arg) -> Self {
         match arg {
-            Arg::Reg(_, _) | Arg::Low(_) | Arg::High(_) | Arg::Named(_) | Arg::Through => Kind::Reg,
+            Arg::Reg(_, _) | Arg::Low(_) | Arg::High(_) | Arg::Through => Kind::Reg,
+            // A register named outright is `ah` but for the registers only AVX-512 has, which the
+            // zeroing in front of a `ret` names since nothing is ever allocated to one of them.
+            Arg::Named(name) if name.starts_with("zmm") || name.starts_with("xmm") => Kind::Vec,
+            Arg::Named(name) if name.starts_with('k') => Kind::Mask,
+            Arg::Named(_) => Kind::Reg,
             Arg::Xmm(_) => Kind::Vec,
             Arg::Stack(_) => Kind::Stack,
             Arg::Mem => Kind::Mem,
@@ -3373,6 +3378,13 @@ static ENCODINGS: &[Encoding] = &[
         vex: Some(Vex { map: Map::Escape, vvvv: Some(1), long: true }),
         ..vexed("kaddb", &KKK, Word, &[0x4A], pair(0, 2))
     },
+    // The exclusive or of two masks, which is how a mask is cleared: the zeroing in front of a
+    // `ret` that `-fzero-call-used-regs=all` asks for writes `kxorw %kN, %kN, %kN` for each of the
+    // eight, as gcc does. The same prefix as the add, with no mandatory prefix for the word width.
+    Encoding {
+        vex: Some(Vex { map: Map::Escape, vvvv: Some(1), long: true }),
+        ..vexed("kxorw", &KKK, Long, &[0x47], pair(0, 2))
+    },
     // AVX and AVX2, which have no EVEX form and are written with a VEX prefix whose one length
     // bit the registers named decide. Each size is the mandatory prefix, and the ones with a wide
     // bit say so the way a legacy row does.
@@ -3390,7 +3402,16 @@ static ENCODINGS: &[Encoding] = &[
     avx("vorps", &MVV, Long, Map::Escape, &[0x56], Some(1), pair(0, 2)),
     avx("vorpd", &VVV, Word, Map::Escape, &[0x56], Some(1), pair(0, 2)),
     avx("vorpd", &MVV, Word, Map::Escape, &[0x56], Some(1), pair(0, 2)),
-    avx("vxorps", &VVV, Long, Map::Escape, &[0x57], Some(1), pair(0, 2)),
+    // AVX-512 has a form of its own, which `-fzero-call-used-regs=all` writes to clear `xmm16` to
+    // `xmm31` as gcc does. The VEX form is still the one written whenever it can be, as gas does.
+    evex(
+        "vxorps",
+        &VVV,
+        Long,
+        &[0x57],
+        pair(0, 2),
+        Evex::new(Map::Escape, false).third(1).or_vex(false),
+    ),
     avx("vxorps", &MVV, Long, Map::Escape, &[0x57], Some(1), pair(0, 2)),
     avx("vxorpd", &VVV, Word, Map::Escape, &[0x57], Some(1), pair(0, 2)),
     avx("vxorpd", &MVV, Word, Map::Escape, &[0x57], Some(1), pair(0, 2)),
@@ -6161,6 +6182,26 @@ mod tests {
         assert_eq!(hex("kmovq", &[quad(R13), Value::Mask(7)]), "c4 c1 fb 92 fd");
         assert_eq!(hex("kmovq", &[Value::Mask(1), quad(RAX)]), "c4 e1 fb 93 c1");
         assert_eq!(hex("kmovq", &[Value::Mask(3), quad(R9)]), "c4 61 fb 93 cb");
+    }
+
+    /// A mask cleared by xoring it with itself, which is what `-fzero-call-used-regs=all` writes
+    /// for each of the eight in front of a `ret` on a machine with AVX-512. The bytes are the ones
+    /// the GNU assembler writes for the same line.
+    #[test]
+    fn a_mask_register_is_cleared_with_kxorw() {
+        let k = Value::Mask;
+        assert_eq!(hex("kxorw", &[k(0), k(0), k(0)]), "c5 fc 47 c0");
+        assert_eq!(hex("kxorw", &[k(7), k(7), k(7)]), "c5 c4 47 ff");
+    }
+
+    /// The upper sixteen vector registers are cleared with the EVEX form of `vxorps` when the
+    /// unit has AVX-512VL, and the rest still with the VEX form, the bytes being gas's.
+    #[test]
+    fn vxorps_reaches_the_upper_sixteen_registers_with_evex() {
+        assert_eq!(hex("vxorps", &[x(16), x(16), x(16)]), "62 a1 7c 00 57 c0");
+        assert_eq!(hex("vxorps", &[x(31), x(31), x(31)]), "62 01 04 00 57 ff");
+        assert_eq!(hex("vxorps", &[x(1), x(1), x(1)]), "c5 f0 57 c9");
+        assert_eq!(hex("vpxord", &[z(16), z(16), z(16)]), "62 a1 7d 40 ef c0");
     }
 
     /// crypto/xor.c xors a block into a `ymm` register with `vxorps`, and the other three

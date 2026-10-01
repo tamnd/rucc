@@ -586,10 +586,10 @@ notes = "A canary under any `-fstack-protector` flag whatever the function's loc
 name = "zero_call_used_regs"
 kind = "attribute"
 gcc_version = "11.0"
-status = "partial"
+status = "implemented"
 used_by = ["linux"]
-tests = ["rucc::a_function_that_names_a_choice_gets_that_choice"]
-notes = "x86-64 and AArch64. Replaces `-fzero-call-used-regs=` for one function. skip, used-gpr, used-gpr-arg, all-gpr and all-gpr-arg are done, and the four choices that clear the vector registers as well are refused until tamnd/rucc#2335."
+tests = ["rucc::a_function_that_names_a_choice_gets_that_choice", "rucc::every_choice_of_the_attribute_is_taken", "rucc::used_clears_the_vector_registers_and_the_x87_stack_like_gcc_16", "rucc::all_clears_every_register_in_the_order_gcc_16_does", "rucc::all_uses_vzeroall_and_clears_the_avx_512_registers_like_gcc_16", "rucc::all_clears_the_vector_registers_on_aarch64_like_gcc"]
+notes = "x86-64 and AArch64. Replaces `-fzero-call-used-regs=` for one function, and every choice gcc 16 has is taken. The choices without `-gpr` clear the vector registers too, with `pxor`, `vxorps`, or `vzeroall` when all sixteen go, and on x86-64 `used` and `all` clear the x87 stack with `fldz` and `fstp`, as gcc 16 does. With AVX-512 `all` clears `zmm16` to `zmm31` and the mask registers as well. On AArch64 the vector registers are `v0` to `v7` and `v16` to `v31`; `x18` stays the platform's, and the SVE registers are not cleared, since rucc has no SVE."
 
 [[feature]]
 name = "no_caller_saved_registers"

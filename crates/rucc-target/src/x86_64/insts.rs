@@ -2236,6 +2236,17 @@ pub static INSTS: &[(&str, Form)] = &[
     // The direction flag cleared, which an interrupt handler's prologue writes before it calls
     // anything and nothing else produces.
     ("cld", Nop),
+    // The vector registers cleared in front of a `ret`, which `-fzero-call-used-regs=` and the
+    // `zero_call_used_regs` attribute ask for and nothing else produces. One register at a time
+    // with the VEX xor, every register this machine has below sixteen at once, and the registers
+    // only AVX-512 has, which no operand can name since nothing is allocated to them. The last
+    // three write registers they do not say they write, which is safe only because the one thing
+    // that writes them does so after the allocator, straight in front of the `ret`.
+    ("vxorps_rr", AluVec),
+    ("vzeroall", Nop),
+    ("zero_zmm_high", Nop),
+    ("zero_xmm_high", Nop),
+    ("zero_masks", Nop),
     // The barrier, which is the whole of what an ordering costs on this machine. `crate::expand`
     // in the code generator says why one instruction covers every ordering there is.
     ("mfence", Barrier),
@@ -2493,6 +2504,10 @@ pub static INSTS: &[(&str, Form)] = &[
     // and that is true of a number, of an infinity and of a NaN alike.
     ("fchs", UnaryX87),
     ("fabs", UnaryX87),
+    // A zero pushed and the top thrown away, which together clear the x87 stack in front of a
+    // `ret`. Nothing but that writes either. See `rucc_codegen::zero`.
+    ("fldz", PushX87),
+    ("fstp_top", PopX87),
     // Comparing two of them, which is ten opcodes for the reason the vector comparisons are ten:
     // the machine gives four answers and a C program asks sixteen questions, eight of which are
     // one flag and two of which are a flag and the bit that says the comparison meant anything.
@@ -2566,7 +2581,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 767);
+        assert_eq!(described, 774);
     }
 
     #[test]

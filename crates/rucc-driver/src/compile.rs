@@ -1044,7 +1044,10 @@ fn generate(
         vector: opts.vector,
         x87: opts.x87,
         x87_return: opts.x87_return,
-        zero: opts.zero_regs.map(|(all, arg)| rucc_codegen::zero::Zeroing { all, arg }),
+        zero: opts
+            .zero_regs
+            .map(|(all, arg, wide)| rucc_codegen::zero::Zeroing { all, arg, wide }),
+        zero_extension: zero_extension(opts.isa),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         speculation: opts.speculation,
@@ -1363,6 +1366,27 @@ fn generate(
             Ok(Artifact::Object { bytes, defines })
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
+    }
+}
+
+/// The last extension the unit may use of the ones that change how `-fzero-call-used-regs=`
+/// clears a vector register, which is what gcc reads too: `vxorps` and `vzeroall` with AVX, and
+/// the registers only AVX-512F has besides. The unit's answer and not a function's, since the
+/// zeroing is asked for of a unit, and an extension a `target` attribute turns on for one function
+/// is not one the code generator reaches for. Nothing on a machine other than x86-64 reads it.
+fn zero_extension(isa: rucc_target::Isa) -> rucc_codegen::zero::Extension {
+    use rucc_codegen::zero::Extension;
+    let has = |name| rucc_target::Feature::named(name).is_some_and(|it| isa.has(it));
+    // gcc names the upper sixteen vector registers by their `xmm` names with `vxorps` when it can,
+    // which takes AVX-512VL for the register and AVX-512DQ for the instruction.
+    if has("avx512vl") && has("avx512dq") {
+        Extension::Avx512Vl
+    } else if has("avx512f") {
+        Extension::Avx512
+    } else if has("avx") {
+        Extension::Avx
+    } else {
+        Extension::Sse
     }
 }
 

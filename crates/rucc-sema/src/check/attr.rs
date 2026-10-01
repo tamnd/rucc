@@ -1553,12 +1553,10 @@ impl Checker<'_> {
         flags
     }
 
-    /// The bits one `zero_call_used_regs` sets, reporting a choice gcc does not have and the four
-    /// that zero the vector registers as well, which are not done yet.
+    /// The bits one `zero_call_used_regs` sets, reporting a choice gcc does not have.
     ///
-    /// Refused rather than read as the choice without the vector registers, because a function
-    /// written this way is asking for less to be left behind and zeroing fewer registers than it
-    /// asked for would be a quiet way of not doing that.
+    /// The four choices without `-gpr` in them are the four with it and [`DeclFlags::ZERO_WIDE`],
+    /// which clears the vector registers and the x87 stack as well.
     fn zero_choice(&mut self, attr: Attribute) -> DeclFlags {
         let choice = self.optimize_options(attr);
         match choice.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -1567,14 +1565,10 @@ impl Checker<'_> {
             ["used-gpr-arg"] => DeclFlags::ZERO_USED | DeclFlags::ZERO_ARG,
             ["all-gpr"] => DeclFlags::ZERO_ALL,
             ["all-gpr-arg"] => DeclFlags::ZERO_ALL | DeclFlags::ZERO_ARG,
-            [vector @ ("used" | "used-arg" | "all" | "all-arg")] => {
-                let what = format!(
-                    "zero_call_used_regs(\"{vector}\") also zeroes the vector registers, which is \
-                     not supported yet (tamnd/rucc#2335)"
-                );
-                self.report(Diagnostic::error(what, attr.span).with_code("E0688"));
-                DeclFlags::NONE
-            }
+            ["used"] => DeclFlags::ZERO_USED | DeclFlags::ZERO_WIDE,
+            ["used-arg"] => DeclFlags::ZERO_USED | DeclFlags::ZERO_ARG | DeclFlags::ZERO_WIDE,
+            ["all"] => DeclFlags::ZERO_ALL | DeclFlags::ZERO_WIDE,
+            ["all-arg"] => DeclFlags::ZERO_ALL | DeclFlags::ZERO_ARG | DeclFlags::ZERO_WIDE,
             _ => {
                 let what = format!(
                     "unrecognized 'zero_call_used_regs' attribute argument '{}'",

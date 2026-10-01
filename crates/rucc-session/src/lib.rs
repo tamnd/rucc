@@ -2103,8 +2103,10 @@ pub struct Options {
     pub guard: Option<rucc_target::Guard>,
     /// Which registers every `ret` clears first, from `-fzero-call-used-regs=`. `None` is `skip`,
     /// and otherwise the first is whether it is every register a call may clobber rather than the
-    /// ones the function used and the second is whether it is only the argument registers.
-    pub zero_regs: Option<(bool, bool)>,
+    /// ones the function used, the second is whether it is only the argument registers, and the
+    /// third is whether the vector registers and the x87 stack are cleared as well as the general
+    /// purpose ones, which is the choices without `-gpr` in them.
+    pub zero_regs: Option<(bool, bool, bool)>,
     /// Which extensions of the instruction set the unit is built for, from `-march=` and the `-m`
     /// flags that name one, such as `-msse4.2`.
     ///

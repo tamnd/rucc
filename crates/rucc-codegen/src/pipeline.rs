@@ -35,6 +35,7 @@ use rucc_target::{
 };
 use rucc_tuple::Arch;
 
+use crate::abi;
 use crate::bits;
 use crate::bytes;
 use crate::choice;
@@ -476,6 +477,9 @@ pub struct Flags {
     /// Which registers `-fzero-call-used-regs=` has every `ret` clear, `None` for `skip`, which a
     /// function's `zero_call_used_regs` attribute replaces for that function. See [`crate::zero`].
     pub zero: Option<Zeroing>,
+    /// The last of the extensions that change how the zeroing above clears a vector register
+    /// that the unit may use, which is AVX or AVX-512F on x86-64. See [`crate::zero::Extension`].
+    pub zero_extension: zero::Extension,
 }
 
 impl Default for Flags {
@@ -512,6 +516,7 @@ impl Default for Flags {
             x87: true,
             x87_return: true,
             zero: None,
+            zero_extension: zero::Extension::Sse,
         }
     }
 }
@@ -1106,7 +1111,17 @@ pub fn compile_recording(
 
     // After the tail calls, because a `ret` a tail call replaced leaves through the callee's, and
     // before the mitigations, which may turn a `ret` into a jump.
-    zero::apply(&mut func, zeroing, machine.shapes, &machine.file, names);
+    // What the function may have left in a register other than a general purpose one, which the
+    // choices without `-gpr` clear too. A `long double` it gives back on the x87 stack is in a
+    // register that is not cleared, the way one in `rax` is not.
+    let types: Vec<ir::Type> = source.signature().returns.iter().map(|ret| ret.ty).collect();
+    let files = zero::Files {
+        vector: vectors,
+        extension: flags.zero_extension,
+        x87: flags.x87 && !saves_all,
+        x87_returned: if abi::back_on_x87(&types) { types.len() } else { 0 },
+    };
+    zero::apply(&mut func, zeroing, files, machine.shapes, &machine.file, names);
 
     // After the tail jumps, because a `ret` that became a jump to a callee is a direct jump and no
     // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
@@ -1128,12 +1143,13 @@ pub fn compile_recording(
 /// anything, and what `-fzero-call-used-regs=` said if not.
 fn zeroing(command: Option<Zeroing>, set: ir::AttrSet) -> Option<Zeroing> {
     let arg = set.contains(ir::AttrSet::ZERO_ARG);
+    let wide = set.contains(ir::AttrSet::ZERO_WIDE);
     if set.contains(ir::AttrSet::ZERO_SKIP) {
         None
     } else if set.contains(ir::AttrSet::ZERO_ALL) {
-        Some(Zeroing { all: true, arg })
+        Some(Zeroing { all: true, arg, wide })
     } else if set.contains(ir::AttrSet::ZERO_USED) {
-        Some(Zeroing { all: false, arg })
+        Some(Zeroing { all: false, arg, wide })
     } else {
         command
     }

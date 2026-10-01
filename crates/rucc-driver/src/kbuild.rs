@@ -56,8 +56,6 @@ const A64: Arch = Arch::Aarch64;
 
 const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
                      at an offset from sp_el0 is part of that work";
-const VECTOR: &str = "only the general registers are cleared on return, and this choice clears \
-                      the vector registers as well";
 const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
                                  landing pad";
 
@@ -146,12 +144,6 @@ pub(crate) const TABLE: &[Row] = &[
          this compiler does",
         None,
     ),
-    // The choices that clear the vector registers as well. The general ones are read by the
-    // driver.
-    refused("-fzero-call-used-regs=used", VECTOR, Some(2335)),
-    refused("-fzero-call-used-regs=used-arg", VECTOR, Some(2335)),
-    refused("-fzero-call-used-regs=all", VECTOR, Some(2335)),
-    refused("-fzero-call-used-regs=all-arg", VECTOR, Some(2335)),
     refused(
         "-fplugin=*",
         "a gcc plugin is a shared object built against gcc's own internals, which this compiler \
@@ -302,8 +294,10 @@ mod tests {
     #[test]
     fn the_default_spelling_is_found_before_its_family() {
         let answer = |arg| row(arg, Arch::X86_64).map(|row| row.answer);
-        assert!(matches!(answer("-fzero-call-used-regs=all"), Some(Answer::Refused(..))));
+        assert!(matches!(answer("-fstack-check=specific"), Some(Answer::Refused(..))));
         assert!(row("-ftrivial-auto-var-init=zero", Arch::X86_64).is_none());
+        // Every choice is read by the driver now, the ones that clear the vector registers too.
+        assert!(row("-fzero-call-used-regs=all", Arch::X86_64).is_none());
         assert!(row("-fzero-call-used-regs=used-gpr", Arch::X86_64).is_none());
     }
 

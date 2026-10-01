@@ -630,6 +630,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fmov_rr_f32", FMove),
     ("fmov_rr_f64", FMove),
     ("mov_rr_f128", FMove),
+    // A vector register cleared in front of a `ret` under `-fzero-call-used-regs=`, and nothing
+    // else. See `rucc_codegen::zero`.
+    ("movi_zero", FMove),
     // Between the two floating point widths.
     ("fcvt_f64_f32", FConvert),
     ("fcvt_f32_f64", FConvert),

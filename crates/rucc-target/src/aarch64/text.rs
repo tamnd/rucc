@@ -37,6 +37,7 @@ use Arg::{
     Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Teb, Thread, Through, TlsPage,
     TlsSlot, TprelHi, TprelLo, Vector,
 };
+use Arg::Doubles;
 use Scalar::{D, Q, S};
 use Width::{W, X};
 
@@ -49,6 +50,9 @@ pub enum Arg {
     Fp(u8, Scalar),
     /// All sixteen bytes of the register in the other file the operand at that index was given.
     Vector(u8),
+    /// The same sixteen bytes as two eight byte lanes, `v0.2d`, which is how gcc writes the
+    /// `movi` that clears a vector register in front of a `ret` under `-fzero-call-used-regs=`.
+    Doubles(u8),
     /// The instruction's constant.
     Imm,
     /// A constant that is part of the opcode rather than of the instruction.
@@ -584,6 +588,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fmov_rr_f32", &[spell("fmov", &[Fp(0, S), Fp(1, S)])]),
     ("fmov_rr_f64", &[spell("fmov", &[Fp(0, D), Fp(1, D)])]),
     ("mov_rr_f128", &[spell("mov", &[Vector(0), Vector(1)])]),
+    // A vector register cleared in front of a `ret`, which `-fzero-call-used-regs=` asks for and
+    // nothing else writes. The register is read as well as written as far as the form says, which
+    // costs nothing, since the one thing writing it does so after the allocator.
+    ("movi_zero", &[spell("movi", &[Doubles(0), Lit(0)])]),
     // Between the two floating point widths.
     ("fcvt_f64_f32", &[spell("fcvt", &[Fp(0, S), Fp(1, D)])]),
     ("fcvt_f32_f64", &[spell("fcvt", &[Fp(0, D), Fp(1, S)])]),
@@ -1016,7 +1024,7 @@ pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
                 Reg(at, width) if at == operand => width.bits(),
                 GotSlot(at) | TlsSlot(at) | LowSlot(at) | At(at) if at == operand => 64,
                 Scaled(base, index) if base == operand || index == operand => 64,
-                Fp(at, _) | Vector(at) if at == operand => return None,
+                Fp(at, _) | Vector(at) | Doubles(at) if at == operand => return None,
                 _ => continue,
             };
             found = Some(found.map_or(bits, |had: u32| had.max(bits)));
@@ -1069,6 +1077,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Reg(at, width) => gpr(width, reg(at)?),
         Fp(at, scalar) => Value::Fp(scalar, reg(at)?),
         Vector(at) => Value::Vector(Arrangement::B16, reg(at)?),
+        Doubles(at) => Value::Vector(Arrangement::D2, reg(at)?),
         Imm => Value::Imm(with.imm),
         Lit(imm) => Value::Imm(imm),
         Arg::Shift(shift, amount) => Value::Shift(shift, amount),
@@ -1157,7 +1166,7 @@ mod tests {
                             }
                             continue;
                         }
-                        Fp(at, _) | Vector(at) => (at, FPR),
+                        Fp(at, _) | Vector(at) | Doubles(at) => (at, FPR),
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
                             continue;
