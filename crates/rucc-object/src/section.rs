@@ -906,6 +906,10 @@ pub enum Reference {
     /// meant is what lets each writer answer for itself rather than one of them be quietly four
     /// out.
     Away,
+    /// How far the thing is from the end of two bytes holding the answer, which is a jump or a call
+    /// in sixteen bit code to somewhere in another section. `R_386_PC16` on ELF, and nothing on
+    /// the other formats, which have no sixteen bit code to write it for.
+    Short,
     /// The same distance written into eight bytes, which is `.quad target - .`. The kernel's jump
     /// label table says where each key is that way on x86-64, and the key is in another section
     /// from the table, so it is a relocation. `R_X86_64_PC64` on ELF.

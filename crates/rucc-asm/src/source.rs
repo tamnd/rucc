@@ -497,6 +497,9 @@ struct Reader {
     /// own. The kernel's la57toggle.S switches to thirty two bits for the code it copies below
     /// four gigabytes, in the middle of an x86-64 file.
     code: Option<Mode>,
+    /// Whether `.code16` or `.code16gcc` is the mode instead, which is thirty two bit code with the
+    /// defaults turned round (see [`crate::sixteen`]), and if so whether it was the gcc one.
+    sixteen: Option<bool>,
     /// Whether the file is for Mach-O, where a section is named by its segment as well.
     macho: bool,
     /// Whether the file is for COFF, whose `.section` flags are letters of their own.
@@ -723,8 +726,11 @@ impl Reader {
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
         let mode = self.code.unwrap_or(if self.i386 { Mode::Bits32 } else { Mode::Bits64 });
-        let mut written =
-            crate::instruction::one_in(word, &args, mode).map_err(|why| self.bad(&why))?;
+        let mut written = match self.sixteen {
+            Some(gcc) => crate::sixteen::one_in16(word, &args, gcc),
+            None => crate::instruction::one_in(word, &args, mode),
+        }
+        .map_err(|why| self.bad(&why))?;
         // `jmp .+10` has been given its short form already, where the distance is known.
         let mut branch = None;
         let short = crate::instruction::short(&written).filter(|_| written.holes[0].name != ".");
@@ -1615,6 +1621,11 @@ impl Reader {
             | "att_syntax" | "intel_syntax" => {}
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
+                self.sixteen = None;
+            }
+            "code16" | "code16gcc" if !self.aarch64 => {
+                self.code = Some(Mode::Bits32);
+                self.sixteen = Some(word == "code16gcc");
             }
             // gas takes every name it does not know to be defined elsewhere, so `.extern` says
             // nothing it would not have assumed anyway.
@@ -2416,7 +2427,12 @@ impl Reader {
             }
             None if exec => {
                 let mut bytes = Vec::new();
-                nops(usize::try_from(need).unwrap_or(usize::MAX), &mut bytes);
+                let need = usize::try_from(need).unwrap_or(usize::MAX);
+                if self.sixteen.is_some() {
+                    crate::sixteen::nops(need, &mut bytes);
+                } else {
+                    nops(need, &mut bytes);
+                }
                 self.put(&bytes)
             }
             None => self.pad(need, 0),
@@ -3531,9 +3547,13 @@ impl Reader {
                     }
                     // Four bytes or eight, and eight only from a directive, since no instruction
                     // counts eight bytes of distance. `.quad key - .` is how the kernel's jump
-                    // label table says where each key is.
+                    // label table says where each key is. Two is a jump or a call in sixteen bit
+                    // code.
                     let wide = fixup.width == 8 && fixup.reach == Reach::Near;
-                    if fixup.width != 4 && !wide {
+                    let short = fixup.width == 2
+                        && self.i386
+                        && matches!(fixup.reach, Reach::Branch | Reach::Plain);
+                    if fixup.width != 4 && !wide && !short {
                         return Err(bad(format!(
                             "a distance written into {} bytes, and four and eight are the only \
                              widths a relocation says one at",
@@ -3563,6 +3583,8 @@ impl Reader {
                         self.front(fixup.width, line)?
                     } else if wide {
                         Reference::AwayWide
+                    } else if short {
+                        Reference::Short
                     } else if fixup.reach == Reach::Branch && !near {
                         Reference::Call
                     } else {
@@ -3570,7 +3592,7 @@ impl Reader {
                     };
                     // The same distance said the other way, for the format that wants it apart
                     // from the addend rather than folded into it. See `rucc_object::Reloc`.
-                    let after = (offset - fixup.at as i64 - 4).max(0);
+                    let after = (offset - fixup.at as i64 - i64::from(fixup.width)).max(0);
                     (name.clone(), kind, addend, after as u8)
                 }
                 [Left { coeff: 1, what: What::Here { .. }, .. }] => {
@@ -4678,7 +4700,7 @@ fn rank(byte: u8) -> Option<u8> {
 ///
 /// Every place in the instruction that names something is after the prefixes, so each of them moves
 /// along by the byte.
-fn prefixed(written: &mut crate::instruction::Written, byte: u8) -> Result<(), String> {
+pub(crate) fn prefixed(written: &mut crate::instruction::Written, byte: u8) -> Result<(), String> {
     let mine = rank(byte).unwrap_or(0);
     let mut at = 0;
     while let Some(theirs) = written.bytes.get(at).and_then(|&had| rank(had)) {
@@ -6600,6 +6622,34 @@ g:
                 (6, "puts", Reference::Data, -4),
                 (11, "puts", Reference::Data, -4),
                 (16, "puts", Reference::Call, -4),
+            ]
+        );
+    }
+
+    /// Real mode code in the middle of an i386 file, the way the kernel's trampoline writes it. The
+    /// bytes and the relocations are the ones gas writes for the same lines: no operand size prefix
+    /// on a sixteen bit move and one on a thirty two bit one, an address in two bytes, a jump that
+    /// counts two bytes to somewhere in another object, and the padding gas uses in this mode. What
+    /// is added to each name goes into the bytes when the object is written, so they are zero here.
+    #[test]
+    fn code16_turns_the_prefixes_round_until_code32() {
+        let read = i386(
+            "\t.text\n\t.code16\na:\tmovw $0x1000, %ax\n\tmovl %eax, b\n\tjne a\n\tjmp away\n\
+             \tlgdtl b\n\t.balign 8\nb:\t.long 0\n\t.code32\n\tmovl $1, %eax\n",
+        );
+        assert_eq!(
+            bytes(&read, ".text"),
+            [
+                0xb8, 0x00, 0x10, 0x66, 0xa3, 0, 0, 0x75, 0xf7, 0xe9, 0, 0, 0x66, 0x0f, 0x01, 0x16,
+                0, 0, 0x2e, 0x8d, 0xb4, 0x00, 0x00, 0x90, 0, 0, 0, 0, 0xb8, 1, 0, 0, 0
+            ]
+        );
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (5, "b", Reference::Address { bytes: 2 }, 0),
+                (10, "away", Reference::Short, -2),
+                (16, "b", Reference::Address { bytes: 2 }, 0),
             ]
         );
     }

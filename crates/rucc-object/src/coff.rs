@@ -60,7 +60,7 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         // put the difference in because this format keeps the addend in the bytes themselves.
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
         Reference::GotBare | Reference::GotKept | Reference::Field(_) => return None,
-        Reference::Away | Reference::AwayWide => return None,
+        Reference::Away | Reference::AwayWide | Reference::Short => return None,
         // The ways i386 reaches the global offset table and thread-local storage on ELF, which is
         // not something this machine or this format has.
         Reference::GotOffset
@@ -127,7 +127,7 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
         Reference::Data | Reference::Away => pe::IMAGE_REL_ARM64_REL32,
         Reference::Call | Reference::Got | Reference::GotBare | Reference::GotKept => return None,
         Reference::Thread | Reference::Address { .. } | Reference::Signed => return None,
-        Reference::AwayWide => return None,
+        Reference::AwayWide | Reference::Short => return None,
         Reference::GotOffset
         | Reference::GotFront
         | Reference::Slot
@@ -167,7 +167,7 @@ pub(crate) fn i386(reference: Reference) -> Option<pe::RelocationType> {
         Reference::Address { bytes: 2 } => pe::IMAGE_REL_I386_DIR16,
         Reference::Image => pe::IMAGE_REL_I386_DIR32NB,
         Reference::Section => pe::IMAGE_REL_I386_SECREL,
-        Reference::Address { .. } | Reference::AwayWide => return None,
+        Reference::Address { .. } | Reference::AwayWide | Reference::Short => return None,
         Reference::Got | Reference::GotBare | Reference::GotKept | Reference::Thread => {
             return None;
         }

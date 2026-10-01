@@ -50,6 +50,7 @@ mod bytes;
 mod data;
 mod format;
 mod instruction;
+mod sixteen;
 mod source;
 mod unwind;
 mod xdata;
