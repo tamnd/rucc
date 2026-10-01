@@ -1929,8 +1929,12 @@ fn output(opts: &Options, target: &TargetInfo) -> rucc_object::Output {
         },
         property: rucc_object::Property { features },
         isa: opts.isa,
+        ident: opts.ident.then_some(IDENT),
     }
 }
+
+/// What an object says made it, in the `.comment` gcc fills with its own name and version.
+const IDENT: &str = concat!("rucc ", env!("CARGO_PKG_VERSION"));
 
 /// What the object writer said, as the kind of news it is.
 ///
@@ -4396,6 +4400,18 @@ decl #0 x : int object external static defined
         assert!(result.messages[0].contains("wants more alignment"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
+    }
+
+    /// The listing says what made it, as gcc's does with `.ident`, and `-fno-ident` leaves it out.
+    #[test]
+    fn a_listing_says_what_made_it_unless_told_not_to() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        let said = run(&opts, "int one(void) { return 1; }\n");
+        assert!(said.text().contains(&format!("\t.ident\t\"{IDENT}\"\n")), "{said:?}");
+        opts.ident = false;
+        let quiet = run(&opts, "int one(void) { return 1; }\n");
+        assert!(!quiet.text().contains(".ident"), "{quiet:?}");
     }
 
     /// tamnd/rucc#2277. With the vector registers taken away a function with a `double` in it is

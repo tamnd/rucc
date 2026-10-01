@@ -1521,6 +1521,7 @@ impl Reader {
             // Said for a debugger or a reader and holding nothing a link depends on. Passed over
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
+            "ident" if self.elf() => self.ident(&args)?,
             "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "arch_extension"
             | "att_syntax" | "intel_syntax" => {}
             "code32" | "code64" if !self.aarch64 => {
@@ -2051,6 +2052,21 @@ impl Reader {
             self.before = Some(self.here);
             self.here = at;
         }
+    }
+
+    /// `.ident`, which gas writes into `.comment` as a string with a zero byte in front of the
+    /// first one, and which leaves the file in the section it was in, with the same one before it.
+    fn ident(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let (here, before) = (self.here, self.before);
+        let fresh = !self.named.contains_key(".comment");
+        let shape = Shape { bits: true, merge: 1, strings: true, ..Shape::default() };
+        self.section(".comment", shape);
+        if fresh {
+            self.put(&[0])?;
+        }
+        self.text_bytes(args, true)?;
+        (self.here, self.before) = (here, before);
+        Ok(())
     }
 
     /// `.byte`, `.long` and the rest, at the width each of them means.
@@ -5267,6 +5283,18 @@ _tls$tlv$init:
              table_end - table\n",
         );
         assert_eq!(name(&out, "width").at, Held::Absolute(12));
+    }
+
+    #[test]
+    fn an_ident_is_a_string_in_the_comment_section() {
+        let out = assembled("\t.text\n\t.ident \"one\"\n\t.ident \"two\"\n\tret\n");
+        assert_eq!(bytes(&out, ".comment"), b"\0one\0two\0");
+        assert_eq!(bytes(&out, ".text"), [0xc3]);
+        let comment = out.parts.iter().find(|part| part.name == ".comment").expect("the section");
+        assert_eq!(
+            (comment.shape.alloc, comment.shape.merge, comment.shape.strings),
+            (false, 1, true)
+        );
     }
 
     #[test]

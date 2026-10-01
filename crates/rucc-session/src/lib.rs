@@ -2506,6 +2506,9 @@ pub struct Options {
     /// Whether `-Wa,--noexecstack` was given, which gives a file of assembly the marker that says
     /// its stack is not executable when it did not write one itself.
     pub asm_noexecstack: bool,
+    /// Whether the object says what made it, which `-fno-ident` turns off. See
+    /// `rucc_object::Output::ident`.
+    pub ident: bool,
     /// The MSVC release claimed on an MSVC row, from `-fms-compatibility-version=`.
     pub msc: MscVersion,
     /// Whether an MSVC row is built against the C runtime in a DLL, which is
@@ -2762,6 +2765,7 @@ impl Options {
             gnu_as: GasVersion::default(),
             asm_fatal_warnings: false,
             asm_noexecstack: false,
+            ident: true,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
             hosted: true,

@@ -101,6 +101,9 @@ pub struct Output {
     /// it, since an assembler reading the file has to be told about an extension whose
     /// instructions are in it, and bytes need no telling.
     pub isa: rucc_target::Isa,
+    /// What the file says made it, which ELF keeps in `.comment` and gcc writes as `.ident`.
+    /// Nothing under `-fno-ident`, and nothing on the formats with no such section.
+    pub ident: Option<&'static str>,
 }
 
 /// A text section, and what the linker has to be told about it.

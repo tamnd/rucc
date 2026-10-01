@@ -2649,16 +2649,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     return Err(err(format!("unknown option `{arg}`")));
                 }
             }
+            // Whether the object says what made it, in `.comment`, as gcc's does.
+            "-fident" => opts.ident = true,
+            "-fno-ident" => opts.ident = false,
             // Flags that name something this compiler does not do and would not do differently
-            // if it did. `-fno-ident` is about a comment in the output that we do not write
-            // either way, and the others are about a way of ordering the compilation that has
+            // if it did. The first two are about a way of ordering the compilation that has
             // been GCC's only way for twenty years. `-mthreads` is mingw's, and what it links is
             // `libmingwthrd.a`, which mingw-w64 keeps as an empty archive because its CRT does the
             // thread cleanup for every program. Section 4.1 asks for the list to be short and for
             // adding to it to be deliberate, which is why it is written out here.
-            "-fno-ident"
-            | "-fident"
-            | "-funit-at-a-time"
+            "-funit-at-a-time"
             | "-fno-unit-at-a-time"
             | "-shared-libgcc"
             | "-static-libgcc"
