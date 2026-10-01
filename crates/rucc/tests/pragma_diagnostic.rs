@@ -130,15 +130,15 @@ int a(void) { return f(); }
     let out = run(&[], input);
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{said}");
-    let expected = "expected `error`, `warning`, `ignored`, `push`, `pop` or \
-                    `ignored_attributes` after `#pragma GCC diagnostic` [E0798]";
+    let kinds = "`error`, `warning`, `ignored`, `push`, `pop` or `ignored_attributes` after \
+                 `#pragma GCC diagnostic` [E0798]";
     assert_eq!(
         warnings(&said),
         [
-            expected,
-            expected,
-            "missing option after `#pragma GCC diagnostic` kind [E0798]",
-            "`deprecated-declarations` is not an option that controls warnings [E0798]",
+            format!("missing {kinds}"),
+            format!("expected {kinds}"),
+            "missing option after `#pragma GCC diagnostic` kind [E0798]".to_owned(),
+            "`deprecated-declarations` is not an option that controls warnings [E0798]".to_owned(),
         ],
         "{said}"
     );

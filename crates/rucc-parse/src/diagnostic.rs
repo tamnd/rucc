@@ -23,10 +23,10 @@ const MALFORMED: &str = "E0798";
 impl Parser<'_> {
     /// One `#pragma GCC diagnostic` line, with the `GCC diagnostic` taken off.
     pub(crate) fn diagnostic_line(&mut self, rest: &[Token], span: Span) {
-        let expected = "expected `error`, `warning`, `ignored`, `push`, `pop` or \
-                        `ignored_attributes` after `#pragma GCC diagnostic`";
+        let kinds = "`error`, `warning`, `ignored`, `push`, `pop` or `ignored_attributes` after \
+                     `#pragma GCC diagnostic`";
         let Some(&word) = rest.first() else {
-            self.warn(MALFORMED, expected, span);
+            self.warn(MALFORMED, format!("missing {kinds}"), span);
             return;
         };
         let kind = match word.ident().map(|name| self.cx.interner.resolve(name)) {
@@ -37,7 +37,7 @@ impl Parser<'_> {
             Some("warning") => PragmaKind::Warning,
             Some("error") => PragmaKind::Error,
             _ => {
-                self.warn(MALFORMED, expected, word.span);
+                self.warn(MALFORMED, format!("expected {kinds}"), word.span);
                 return;
             }
         };
