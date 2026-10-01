@@ -14,7 +14,7 @@
 //!
 //! # What is necessary
 //!
-//! An instruction [`crate::dce::removable`] says no to, which is a store, a call that is not pure,
+//! An instruction `dce::removable` says no to, which is a store, a call that is not pure,
 //! a volatile or atomic access and inline assembly. A terminator that leaves the function, which is
 //! a return, a tail call, `unreachable` and every branch this pass does not know how to move. And
 //! the terminator of every block with an edge back to a block no later in reverse postorder, which
