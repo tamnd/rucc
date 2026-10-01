@@ -314,7 +314,10 @@ impl Checker<'_> {
                 self.enum_spec(tag, enumerators, underlying, attrs, span)
             }
             TypeSpec::Typedef(name) => match self.scopes.lookup(name) {
-                Some(Binding::Typedef(ty)) => ty,
+                Some(Binding::Typedef(ty)) => {
+                    self.heed_deprecated_typedef(name, ty, span);
+                    ty
+                }
                 // The parser only writes this down for a name its own scope stack said was a
                 // type, so the two disagreeing means a declaration was checked in one and not
                 // in the other. Reported rather than assumed, since the alternative is a
@@ -685,7 +688,10 @@ impl Checker<'_> {
         };
         let Some(members) = fields else {
             return match self.tag_use(tag, tag_kind, span) {
-                TagUse::Known(ty) => ty,
+                TagUse::Known(ty) => {
+                    self.heed_deprecated_tag(tag, ty, span);
+                    ty
+                }
                 found => {
                     let id = self.types.declare_record(kind, tag);
                     let ty = self.types.record(id);
@@ -700,6 +706,7 @@ impl Checker<'_> {
         let (id, ty, again) = self.record_defined(kind, tag, tag_kind, span);
         self.built.defined.insert(ty);
         self.record_body(id, kind, members, attrs, pack, span);
+        self.read_deprecated_tag(ty, attrs, span);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,
@@ -729,7 +736,10 @@ impl Checker<'_> {
 
         let Some(list) = enumerators else {
             return match self.tag_use(tag, TagKind::Enum, span) {
-                TagUse::Known(ty) => ty,
+                TagUse::Known(ty) => {
+                    self.heed_deprecated_tag(tag, ty, span);
+                    ty
+                }
                 found => {
                     let id = self.types.declare_enum(tag);
                     // An enumeration whose representation the program wrote is complete from the
@@ -750,6 +760,7 @@ impl Checker<'_> {
         // kernel keeps `enum rw_hint` to a byte.
         let short = self.packing(attrs).packed;
         self.enum_body(id, list, underlying, short, again.is_some(), span);
+        self.read_deprecated_tag(ty, attrs, span);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,

@@ -746,8 +746,8 @@ kind = "attribute"
 gcc_version = "3.1"
 status = "implemented"
 used_by = ["glibc", "openssl", "curl"]
-tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "rucc::a_deprecated_name_can_be_used_quietly_under_the_option_that_turns_it_off"]
-notes = "A use of a function or an object marked with it is a warning in gcc's words under `-Wdeprecated-declarations`, with the message when one was given and a note at the declaration. gcc also warns at a use of a type, a tag, an enumerator or a member marked with it, and those are not said yet."
+tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "rucc::a_deprecated_name_can_be_used_quietly_under_the_option_that_turns_it_off", "rucc::a_use_of_a_deprecated_type_tag_member_or_enumerator_is_warned_about_the_way_gcc_does", "rucc::a_deprecated_member_answers_to_wno_deprecated_declarations"]
+notes = "A use of a function, an object, a typedef, a tag, a member or an enumerator marked with it is a warning in gcc's words under `-Wdeprecated-declarations`, with the message when one was given and a note at the declaration, except for a typedef, which gcc gives none."
 
 [[feature]]
 name = "warning"
@@ -1048,7 +1048,7 @@ gcc_version = "10.0"
 status = "implemented"
 value = "202311"
 used_by = []
-tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "rucc-gnu::a_c_attribute_answers_with_the_number_the_standard_gives_it"]
+tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "rucc::a_use_of_a_deprecated_type_tag_member_or_enumerator_is_warned_about_the_way_gcc_does", "rucc-gnu::a_c_attribute_answers_with_the_number_the_standard_gives_it"]
 notes = "The standard's spelling of the GNU row and read by the same code. gcc 16 answers 202311 for every C23 attribute, the date of the standard, rather than the date each one was voted in, and so does this."
 
 [[feature]]

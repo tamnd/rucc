@@ -292,6 +292,10 @@ impl Checker<'_> {
                 self.types.record_member_spelling(Spelled { record: id, member, name, of });
             }
             self.annotate_member(id, field);
+            if let Some(name) = decl.name {
+                let specs = self.ast[field.specs].attrs;
+                self.read_deprecated_member(id, name, &[field.attrs, specs], at);
+            }
             fields.push((decl, at));
         }
         self.check_flexible(kind, &mut fields);
@@ -801,13 +805,14 @@ impl Checker<'_> {
         // Nothing has been folded with the placeholder in between, since an enumerator is the
         // only thing that can refer to an earlier enumerator of the same enumeration and every
         // one of them holds a value rather than a type.
-        for &(name, value, _) in &values {
+        for (enumerator, &(name, value, span)) in ast[list].iter().zip(&values) {
             let ty = match fixed {
                 Some(ty) => ty,
                 None if value >= int_low && value <= int_high => int,
                 None => underlying,
             };
             self.scopes.declare(name, Binding::Enumerator { value, ty });
+            self.read_deprecated_enumerator(name, value, ty, enumerator.attrs, span);
         }
     }
 
