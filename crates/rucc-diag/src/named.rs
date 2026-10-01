@@ -59,6 +59,12 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0770", "deprecated-declarations"),
     ("E0771", "unused-result"),
     ("E0784", "attributes"),
+    ("E0785", "format"),
+    ("E0786", "format-extra-args"),
+    ("E0787", "format-contains-nul"),
+    ("E0788", "format-zero-length"),
+    ("E0789", "format"),
+    ("E0790", "designated-init"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -86,6 +92,20 @@ const PEDWARNS: &[&str] = &[
     "return-type",
 ];
 
+/// The options gcc leaves off until something asks for them, each with the group that turns it
+/// on. Sorted by option.
+///
+/// The format checks are the ones here. `-Wformat` turns on all four, `-Wall` turns on
+/// `-Wformat`, and so does `-Wformat=` with any level but nought, which is gcc 16's reading. A
+/// name turned off by itself stays off whatever group is asked for later, which is how gcc reads
+/// `-Wno-format-extra-args -Wall`. `-Wall` turns on nothing else yet, which is #485.
+const QUIET: &[(&str, &str)] = &[
+    ("format", "format"),
+    ("format-contains-nul", "format"),
+    ("format-extra-args", "format"),
+    ("format-zero-length", "format"),
+];
+
 /// The gcc option that controls the warning with this code, if it has one.
 pub fn option_of(code: &str) -> Option<&'static str> {
     OPTIONS.binary_search_by(|&(known, _)| known.cmp(code)).ok().map(|at| OPTIONS[at].1)
@@ -100,6 +120,11 @@ pub fn option_of(code: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Named {
     off: BTreeSet<String>,
+    /// The names turned on by a flag, which only matters for the ones in [`QUIET`].
+    on: BTreeSet<String>,
+    /// Whether `-Wall` was given, which turns on the groups it covers unless they were turned off
+    /// by name.
+    all: bool,
     errors: BTreeMap<String, bool>,
     pedantic_errors: bool,
 }
@@ -108,15 +133,29 @@ impl Named {
     /// Reads what follows `-W` in a flag. Anything that is not about one warning by name, such as
     /// `all`, is recorded the same way and simply matches no code.
     pub fn flag(&mut self, name: &str) {
+        // `-Wformat=2` is `-Wformat` and more checks this compiler does not make, and
+        // `-Wformat=0` is `-Wno-format`.
+        let name = match name.split_once('=') {
+            Some(("format", "0")) => "no-format",
+            Some(("format", _)) => "format",
+            _ => name,
+        };
         if let Some(name) = name.strip_prefix("no-error=") {
             self.errors.insert(name.to_owned(), false);
         } else if let Some(name) = name.strip_prefix("error=") {
             self.errors.insert(name.to_owned(), true);
             self.off.remove(name);
+            self.on.insert(name.to_owned());
+        } else if name == "no-all" {
+            self.all = false;
         } else if let Some(name) = name.strip_prefix("no-") {
             self.off.insert(name.to_owned());
+            self.on.remove(name);
+        } else if name == "all" {
+            self.all = true;
         } else {
             self.off.remove(name);
+            self.on.insert(name.to_owned());
         }
     }
 
@@ -133,7 +172,19 @@ impl Named {
     /// Whether this is a warning the command line turned off by name.
     pub fn silenced(&self, diag: &Diagnostic) -> bool {
         diag.severity == Severity::Warning
-            && self.name(diag).is_some_and(|name| self.off.contains(name))
+            && self.name(diag).is_some_and(|name| self.off.contains(name) || !self.asked(name))
+    }
+
+    /// Whether a warning that is off until asked for was asked for, which every other warning
+    /// is. The name has to be asked for itself or through its group, and the group must not have
+    /// been turned off, since `-Wno-format` silences `-Wformat-extra-args` along with the rest.
+    fn asked(&self, name: &str) -> bool {
+        let Ok(at) = QUIET.binary_search_by(|&(known, _)| known.cmp(name)) else { return true };
+        let group = QUIET[at].1;
+        if self.off.contains(group) {
+            return false;
+        }
+        self.on.contains(name) || self.on.contains(group) || self.all
     }
 
     /// Whether this is a warning to report as an error, given whether `-Werror` was passed.
@@ -236,6 +287,36 @@ mod tests {
         named.flag("no-all");
         assert!(named.promoted(&warning("E0001"), true));
         assert!(!named.silenced(&warning("E0001")));
+    }
+
+    /// The format checks are quiet by default and heard under `-Wall` or `-Wformat`, as in gcc
+    /// 16, and a name turned off stays off whatever group comes after it.
+    #[test]
+    fn the_format_checks_wait_to_be_asked_for() {
+        assert!(QUIET.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        let mut named = Named::default();
+        assert!(named.silenced(&warning("E0785")));
+        assert!(named.silenced(&warning("E0786")));
+        assert!(named.silenced(&warning("E0789")));
+        assert!(!named.silenced(&warning("E0790")));
+        named.flag("all");
+        assert!(!named.silenced(&warning("E0785")));
+        assert!(!named.silenced(&warning("E0786")));
+        named.flag("no-format-extra-args");
+        named.flag("all");
+        assert!(named.silenced(&warning("E0786")));
+        assert!(!named.silenced(&warning("E0785")));
+        named.flag("format=0");
+        assert!(named.silenced(&warning("E0785")));
+        assert!(named.silenced(&warning("E0788")));
+
+        let mut named = Named::default();
+        named.flag("format=2");
+        assert!(!named.silenced(&warning("E0787")));
+        let mut named = Named::default();
+        named.flag("error=format");
+        assert!(!named.silenced(&warning("E0785")));
+        assert!(named.promoted(&warning("E0785"), false));
     }
 
     #[test]

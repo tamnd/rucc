@@ -205,6 +205,181 @@ fn the_last_value_of_a_statement_expression_is_not_thrown_away_unless_the_whole_
     assert_eq!(lines_with(&got, "ignoring return value of 'u'").len(), 1, "{got}");
 }
 
+/// What the compiler said about a source it accepted, under these flags as well.
+fn said_with(what: &str, flags: &[&str], source: &str) -> String {
+    let mut all = vec!["--emit=ir"];
+    all.extend_from_slice(flags);
+    let out = compile(what, &all, source);
+    assert!(
+        out.status.success(),
+        "the compiler refused the fixture:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The `printf` calls gcc 16 has something to say about, one of each kind, beside ones it does
+/// not.
+const PRINTF: &str = "#include <stdio.h>\n\
+     #include <stddef.h>\n\
+     void f(int i, long l, double d, float g, void *v, char *s, size_t z, unsigned char *u) {\n\
+         printf(\"%ld\\n\", i);\n\
+         printf(\"%d\\n\", z);\n\
+         printf(\"%d %d\\n\", i);\n\
+         printf(\"%d\\n\", i, i);\n\
+         printf(\"%Q\\n\");\n\
+         printf(\"%s\\n\", v);\n\
+         printf(\"%*d\\n\", l, i);\n\
+         printf(\"%#d\\n\", i);\n\
+         printf(\"%lp\\n\", v);\n\
+         printf(\"%f %f %u %s %c %zu %p %m %%\\n\", d, g, i, u, s[0], z, s);\n\
+         printf(s, i);\n\
+         printf(\"\");\n\
+     }\n";
+
+#[test]
+fn the_format_checks_are_quiet_until_wall_or_wformat_asks_for_them() {
+    assert_eq!(said_with("format-quiet", &[], PRINTF), "");
+    assert_eq!(said_with("format-off", &["-Wall", "-Wno-format"], PRINTF), "");
+    let got = said_with("format-asked", &["-Wformat"], PRINTF);
+    assert_eq!(lines_with(&got, "warning:").len(), 10, "{got}");
+}
+
+#[test]
+fn a_printf_format_is_checked_against_its_arguments_in_gcc_s_words() {
+    let got = said_with("format-printf", &["-Wall"], PRINTF);
+    for line in [
+        "format '%ld' expects argument of type 'long int', but argument 2 has type 'int'",
+        // gcc says `'size_t' {aka 'long unsigned int'}` here, and this compiler keeps no node for
+        // an ordinary typedef to say the first half from.
+        "format '%d' expects argument of type 'int', but argument 2 has type 'long unsigned int'",
+        "format '%d' expects a matching 'int' argument",
+        "too many arguments for format",
+        "unknown conversion type character 'Q' in format",
+        "format '%s' expects argument of type 'char *', but argument 2 has type 'void *'",
+        "field width specifier '*' expects argument of type 'int', but argument 2 has type 'long \
+         int'",
+        "'#' flag used with '%d' gnu_printf format",
+        "use of 'l' length modifier with 'p' type character has either no effect or undefined \
+         behavior",
+        "zero-length gnu_printf format string",
+    ] {
+        assert_eq!(lines_with(&got, line).len(), 1, "{line}\n{got}");
+    }
+    // `%Q` reads nothing and was handed nothing, so nothing is left over, and the line of
+    // conversions that are all right and the format that is a variable are quiet.
+    assert_eq!(lines_with(&got, "warning:").len(), 10, "{got}");
+    assert_eq!(lines_with(&got, "[E0786]").len(), 1, "{got}");
+    assert_eq!(lines_with(&got, "[E0788]").len(), 1, "{got}");
+}
+
+#[test]
+fn a_scanf_format_is_checked_against_the_pointers_it_writes_through() {
+    let got = said_with(
+        "format-scanf",
+        &["-Wall"],
+        "#include <stdio.h>\n\
+         void f(int *i, long *l, float *g, double *d, const char *c, char *s, unsigned *u) {\n\
+             scanf(\"%d %ld %f %lf %u %d %s %5[a-z] %*d\", i, l, g, d, i, u, s, s);\n\
+             scanf(\"%ld\", i);\n\
+             scanf(\"%f\", d);\n\
+             scanf(\"%s\", c);\n\
+             scanf(\"%ms\", s);\n\
+             scanf(\"%*d\", i);\n\
+         }\n",
+    );
+    for line in [
+        "format '%ld' expects argument of type 'long int *', but argument 2 has type 'int *'",
+        "format '%f' expects argument of type 'float *', but argument 2 has type 'double *'",
+        "writing into constant object (argument 2)",
+        "format '%ms' expects argument of type 'char **', but argument 2 has type 'char *'",
+        "too many arguments for format",
+    ] {
+        assert_eq!(lines_with(&got, line).len(), 1, "{line}\n{got}");
+    }
+    assert_eq!(lines_with(&got, "warning:").len(), 5, "{got}");
+}
+
+#[test]
+fn a_format_attribute_and_format_arg_are_followed_the_way_gcc_follows_them() {
+    let got = said_with(
+        "format-attribute",
+        &["-Wall"],
+        "__attribute__((format(printf, 2, 3))) void log_to(int, const char *, ...);\n\
+         __attribute__((format(printf, 1, 0))) void vlog(const char *, __builtin_va_list);\n\
+         __attribute__((format_arg(1))) const char *tr(const char *);\n\
+         int printf(const char *, ...);\n\
+         void f(int c, long l, __builtin_va_list ap) {\n\
+             log_to(1, \"%d\\n\", l);\n\
+             vlog(\"%Q\", ap);\n\
+             vlog(\"%d\", ap);\n\
+             printf(tr(\"%s\\n\"), l);\n\
+             printf(c ? \"%d\\n\" : \"%lu\\n\", l);\n\
+             printf(\"%2$ld %1$d\\n\", c, l);\n\
+             printf(\"%3$d\\n\", c, c, c);\n\
+         }\n",
+    );
+    for line in [
+        "format '%d' expects argument of type 'int', but argument 3 has type 'long int'",
+        "unknown conversion type character 'Q' in format",
+        "format '%s' expects argument of type 'char *', but argument 2 has type 'long int'",
+        "format '%d' expects argument of type 'int', but argument 2 has type 'long int'",
+        "format argument 1 unused before used argument 3 in '$'-style format",
+        "format argument 2 unused before used argument 3 in '$'-style format",
+    ] {
+        assert_eq!(lines_with(&got, line).len(), 1, "{line}\n{got}");
+    }
+    assert_eq!(lines_with(&got, "warning:").len(), 6, "{got}");
+}
+
+#[test]
+fn a_call_without_its_sentinel_is_said_under_wall() {
+    let source = "#include <stddef.h>\n\
+         __attribute__((sentinel)) void list(const char *, ...);\n\
+         __attribute__((sentinel(1))) void pairs(const char *, ...);\n\
+         void f(char *p) {\n\
+             list(\"a\", \"b\", NULL);\n\
+             list(\"a\", (char *)0);\n\
+             list(\"a\", \"b\", 0);\n\
+             list(\"a\", p);\n\
+             list(\"a\");\n\
+             pairs(\"a\", NULL, \"b\");\n\
+             pairs(\"a\", NULL);\n\
+         }\n";
+    assert_eq!(said_with("sentinel-quiet", &[], source), "");
+    let got = said_with("sentinel", &["-Wall"], source);
+    assert_eq!(lines_with(&got, "missing sentinel in function call").len(), 2, "{got}");
+    let short = "not enough variable arguments to fit a sentinel";
+    assert_eq!(lines_with(&got, short).len(), 2, "{got}");
+    assert_eq!(lines_with(&got, "warning:").len(), 4, "{got}");
+}
+
+#[test]
+fn a_designated_init_structure_given_a_value_by_position_is_said_by_default() {
+    let got = said_with(
+        "designated-init",
+        &[],
+        "struct __attribute__((designated_init)) ops { int (*open)(void); int flags; };\n\
+         struct plain { int a, b; };\n\
+         int open_it(void);\n\
+         struct ops a = { .open = open_it, .flags = 1 };\n\
+         struct ops b = { open_it, 1 };\n\
+         struct ops c = { 0 };\n\
+         struct ops d = { };\n\
+         struct plain e = { 1, 2 };\n",
+    );
+    let line = "positional initialization of field in 'struct' declared with 'designated_init' \
+                attribute";
+    assert_eq!(lines_with(&got, line).len(), 3, "{got}");
+    assert_eq!(lines_with(&got, "warning:").len(), 3, "{got}");
+    let quiet = compile(
+        "designated-init-off",
+        &["--emit=ir", "-Wno-designated-init"],
+        "struct __attribute__((designated_init)) s { int x; };\nstruct s v = { 1 };\n",
+    );
+    assert_eq!(String::from_utf8_lossy(&quiet.stderr), "");
+}
+
 #[test]
 fn nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon() {
     let got = ir("nocommon", &["-fcommon"], "int merged;\n__attribute__((nocommon)) int alone;\n");

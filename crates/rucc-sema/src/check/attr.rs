@@ -448,8 +448,9 @@ impl Checker<'_> {
     /// well. The Darwin targets take clang's names as well as gcc's, because clang is the
     /// reference there and Apple's headers write `os_log` and `CFString`.
     ///
-    /// Nothing reads the format strings yet (#485 is where a warning group for them would go), so
-    /// an archetype this accepts is checked no further, and that is the same for all of them.
+    /// The format strings themselves are read by `check/format.rs`, under `-Wformat`, for the
+    /// `printf`, `scanf` and `strftime` archetypes and their `gnu_` names. The others are accepted
+    /// and read no further.
     pub(in crate::check) fn format_archetypes(&mut self, attrs: AttrList) {
         let written = self.ast[attrs].to_vec();
         for attr in written {

@@ -3533,11 +3533,16 @@ decl #0 x : int object external static defined
             "    __attribute__((format(gnu_strftime, 3, 0)));\n",
             "int g(const char *, ...) __attribute__((format(printf, 1, 2)));\n",
         );
+        // An archetype gcc does not know is said under `-Wformat`, which waits to be asked for.
         let mut opts = options();
+        opts.named_warnings.flag("format");
         opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+        assert_eq!(run(&options(), source).messages, Vec::<String>::new());
 
-        let linux = run(&options(), source).messages;
+        let mut asked = options();
+        asked.named_warnings.flag("format");
+        let linux = run(&asked, source).messages;
         assert_eq!(linux.len(), 3, "{linux:?}");
         assert!(
             linux[0]

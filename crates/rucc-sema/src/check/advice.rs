@@ -1,5 +1,6 @@
-//! The attributes that exist to have something said at a use: `deprecated`, `warn_unused_result`
-//! and C23's `[[nodiscard]]`.
+//! The attributes that exist to have something said at a use: `deprecated`, `warn_unused_result`,
+//! C23's `[[nodiscard]]`, `sentinel` and `designated_init`, and the reading of `format` and
+//! `format_arg`, whose checks are in `check/format.rs`.
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.4.
 //!
@@ -26,6 +27,15 @@
 //! nothing away unless the statement expression itself is thrown away. That is why the calls are
 //! kept until the body is finished rather than reported where the statement is read.
 //!
+//! * `sentinel` is said of a call to a variadic function whose last argument, or the one
+//!   `sentinel(N)` places before it, is not a null pointer: `0` is not one, because it is an
+//!   `int` and a variadic function reading a pointer reads more than was passed where the two are
+//!   different widths. `NULL` and `(char *)0` are. gcc files it under `-Wformat`, so it is off
+//!   until that or `-Wall` asks for it, and gcc's own `execl`, `execlp` and `execle` have it
+//!   without the attribute.
+//! * `designated_init` on a structure is said of each value an initializer list gives one of its
+//!   members by position, at the value, which includes `{0}` and not `{}`. It is on by default.
+//!
 //! What is not here yet: `deprecated` on a type, a tag, an enumerator or a member, all of which gcc
 //! also reports a use of. A program using one of those compiles the same and is not told.
 
@@ -34,9 +44,10 @@ use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Span};
 use rucc_gnu::{Kind, Status};
 use rucc_lex::Encoding;
-use rucc_types::is_void;
+use rucc_types::{FunctionType, RecordId, TypeKind, is_void};
 
 use crate::check::Checker;
+use crate::check::format::Format;
 use crate::decl::DeclId;
 use crate::expr::{Conversion, ExprId, ExprKind};
 use crate::stmt::Stmt;
@@ -46,6 +57,12 @@ pub(in crate::check) const DEPRECATED: &str = "E0770";
 
 /// The code of the two unused result warnings, which answer to `-Wunused-result`.
 pub(in crate::check) const UNUSED_RESULT: &str = "E0771";
+
+/// The code of the two sentinel warnings, which gcc files under `-Wformat`.
+const SENTINEL: &str = "E0789";
+
+/// The code of the `designated_init` warning, which answers to `-Wdesignated-init`.
+const DESIGNATED_INIT: &str = "E0790";
 
 /// What the declarations of a name asked to have said about a use of it.
 #[derive(Debug, Default)]
@@ -57,6 +74,14 @@ pub(in crate::check) struct Advice {
     unused_result: Set<DeclId>,
     /// The functions some declaration marked `[[nodiscard]]`, with its message.
     nodiscard: Map<DeclId, Option<String>>,
+    /// The functions some declaration marked `format`, with what the last one said.
+    pub(in crate::check) format: Map<DeclId, Format>,
+    /// The functions some declaration marked `format_arg`, with the parameter it names.
+    pub(in crate::check) format_arg: Map<DeclId, usize>,
+    /// The functions some declaration marked `sentinel`, with how far from the end it is.
+    sentinel: Map<DeclId, usize>,
+    /// The structures marked `designated_init`.
+    designated: Set<RecordId>,
 }
 
 /// The one attribute of the three an attribute is, if it is one of them.
@@ -65,6 +90,9 @@ enum Which {
     Deprecated,
     UnusedResult,
     Nodiscard,
+    Format,
+    FormatArg,
+    Sentinel,
 }
 
 impl Checker<'_> {
@@ -97,6 +125,32 @@ impl Checker<'_> {
                             *kept = message;
                         }
                     }
+                    Which::Format => {
+                        if let Some(format) = self.format_attribute(attr) {
+                            self.advice.format.insert(decl, format);
+                        }
+                    }
+                    Which::FormatArg => {
+                        let args = self.ast[attr.args].to_vec();
+                        let number = match args.as_slice() {
+                            [arg] => self.attribute_number(*arg),
+                            _ => None,
+                        };
+                        if let Some(number) = number {
+                            self.advice.format_arg.insert(decl, number);
+                        }
+                    }
+                    Which::Sentinel => {
+                        let args = self.ast[attr.args].to_vec();
+                        let position = match args.as_slice() {
+                            [] => Some(0),
+                            [arg] => self.attribute_number(*arg),
+                            _ => None,
+                        };
+                        if let Some(position) = position {
+                            self.advice.sentinel.insert(decl, position);
+                        }
+                    }
                 }
             }
         }
@@ -123,10 +177,85 @@ impl Checker<'_> {
             "deprecated" => Which::Deprecated,
             "warn_unused_result" if gnu => Which::UnusedResult,
             "nodiscard" if standard => Which::Nodiscard,
+            "format" if gnu => Which::Format,
+            "format_arg" if gnu => Which::FormatArg,
+            "sentinel" if gnu => Which::Sentinel,
             _ => return None,
         };
         let row = rucc_gnu::lookup(kind, name)?;
         matches!(row.status, Status::Implemented | Status::Partial).then_some(which)
+    }
+
+    /// Whether an attribute list on a structure says `designated_init`, read through the matrix
+    /// the way [`Self::which`] reads the others.
+    pub(in crate::check) fn designated_init(&self, attrs: AttrList) -> bool {
+        self.ast[attrs].iter().any(|attr| {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                return false;
+            }
+            if attr.syntax == AttrSyntax::Standard && attr.namespace.is_none() {
+                return false;
+            }
+            let name = rucc_gnu::unarmour(self.text(attr.name));
+            name == "designated_init"
+                && rucc_gnu::lookup(Kind::Attribute, name)
+                    .is_some_and(|row| matches!(row.status, Status::Implemented | Status::Partial))
+        })
+    }
+
+    /// Keeps that a structure was marked `designated_init`.
+    pub(in crate::check) fn mark_designated(&mut self, record: RecordId) {
+        self.advice.designated.insert(record);
+    }
+
+    /// Says that an initializer list gave a member of a `designated_init` structure its value by
+    /// position, at the value.
+    pub(in crate::check) fn heed_designated(&mut self, record: RecordId, span: Span) {
+        if !self.advice.designated.contains(&record) {
+            return;
+        }
+        let what = "positional initialization of field in 'struct' declared with \
+                    'designated_init' attribute";
+        self.report(Diagnostic::warning(what, span).with_code(DESIGNATED_INIT));
+    }
+
+    /// Says that a call to a function marked `sentinel` does not end where the attribute says
+    /// it must, in a null pointer.
+    pub(in crate::check) fn heed_sentinel(
+        &mut self,
+        callee: ExprId,
+        signature: &FunctionType,
+        args: &[ExprId],
+        span: Span,
+    ) {
+        if !signature.variadic || !signature.prototyped {
+            return;
+        }
+        let Some(decl) = self.called_decl(callee) else { return };
+        let position = match self.advice.sentinel.get(&decl) {
+            Some(&position) => position,
+            None => match self.library_function(decl) {
+                Some("execl" | "execlp") => 0,
+                Some("execle") => 1,
+                _ => return,
+            },
+        };
+        let named = signature.params.len();
+        if args.len() < named + position + 1 {
+            let what = "not enough variable arguments to fit a sentinel";
+            self.report(Diagnostic::warning(what, span).with_code(SENTINEL));
+            return;
+        }
+        let last = args[args.len() - 1 - position];
+        if self.is_poisoned(last) {
+            return;
+        }
+        let ty = self.types.canonical(self.tast[last].ty);
+        let pointer = matches!(self.types.kind(ty), TypeKind::Pointer(_));
+        if !pointer || !self.conv().is_null_pointer_constant(last) {
+            let what = "missing sentinel in function call";
+            self.report(Diagnostic::warning(what, span).with_code(SENTINEL));
+        }
     }
 
     /// The message `deprecated("...")` or `[[nodiscard("...")]]` was given, if it was given one
