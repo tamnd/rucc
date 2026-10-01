@@ -267,6 +267,9 @@ pub struct Context<'a> {
     /// travels in it, and a nested function under the flag is refused rather than allowed to
     /// write over whatever the build keeps there.
     pub fixed_x18: bool,
+    /// Whether the objects are laid out newest first, which is what gcc does when it optimizes.
+    /// See `Module::reverse_globals`.
+    pub reorder: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -299,6 +302,7 @@ impl fmt::Debug for Context<'_> {
             .field("share", &self.share)
             .field("in_place", &self.in_place)
             .field("fixed_x18", &self.fixed_x18)
+            .field("reorder", &self.reorder)
             .finish_non_exhaustive()
     }
 }
@@ -374,6 +378,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         share,
         in_place,
         fixed_x18,
+        reorder,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -403,6 +408,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         share,
         in_place,
         fixed_x18,
+        reorder,
         read,
         module,
         diagnostics: Vec::new(),
@@ -472,6 +478,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) in_place: bool,
     /// Whether `x18` is kept for something else. See [`Context::fixed_x18`].
     fixed_x18: bool,
+    /// Whether the objects are laid out newest first. See [`Context::reorder`].
+    reorder: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,
@@ -578,6 +586,7 @@ impl Unit<'_> {
     /// Every declaration the file made, in the order it made them.
     fn run(&mut self) {
         self.file_asms();
+        let written = self.module.globals().count();
         self.find_aliased();
         self.find_renamed();
         for index in 0..self.tast.top_level().len() {
@@ -602,6 +611,9 @@ impl Unit<'_> {
             self.equated(&set, span);
         }
         self.startups();
+        if self.reorder {
+            self.module.reverse_globals(written);
+        }
     }
 
     /// The `asm` written at file scope, read into the globals they define.
