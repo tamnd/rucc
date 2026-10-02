@@ -13,6 +13,8 @@ int after(int a, int b, long long c, int d) { return d; }
 __attribute__((regparm(0))) int linkage(int a, int b) { return b; }
 int listed(int n, ...) { return n; }
 struct big made(int x) { struct big b = {{x, x, x, x}}; return b; }
+struct one { int a; };
+struct one word(int x) { struct one r = {x}; return r; }
 int second(int n, ...)
 {
     __builtin_va_list ap;
@@ -123,4 +125,17 @@ fn a_count_above_three_or_a_machine_without_the_flag_is_refused() {
 fn a_variadic_function_reads_its_list_off_the_stack_under_regparm() {
     let bodies = bodies(&["-mregparm=3"]);
     assert!(body(&bodies, "second").contains("leal\t12(%esp), %eax"), "{bodies:?}");
+}
+
+/// `-freg-struct-return`, which the kernel passes beside `-mregparm=3`, brings a one word structure
+/// back in `eax` where the psABI writes it through the hidden pointer. A `pte_t` is one of those.
+#[test]
+fn a_one_word_structure_comes_back_in_eax_under_reg_struct_return() {
+    let listed = bodies(&["-mregparm=3", "-freg-struct-return"]);
+    let word = body(&listed, "word");
+    assert!(!word.contains("(%eax)") && !word.contains("ret\t$"), "{word}");
+    let big = body(&listed, "made");
+    assert!(big.contains("(%eax)"), "sixteen bytes still come back in memory: {big}");
+    let plain = bodies(&["-mregparm=3"]);
+    assert!(body(&plain, "word").contains("(%eax)"), "{plain:?}");
 }

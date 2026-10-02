@@ -2533,6 +2533,10 @@ pub struct Options {
     /// 32 bit x86 has and the driver refuses anywhere else. See
     /// [`rucc_target::TargetInfo::with_regparm`].
     pub regparm: u8,
+    /// Whether a small structure comes back in registers, from `-freg-struct-return`, which only
+    /// changes anything on i386 System V. See
+    /// [`rucc_target::TargetInfo::with_reg_struct_return`].
+    pub reg_struct_return: bool,
     /// Whether the object says what made it, which `-fno-ident` turns off. See
     /// `rucc_object::Output::ident`.
     pub ident: bool,
@@ -2797,6 +2801,7 @@ impl Options {
             asm_noexecstack: false,
             sixteen: false,
             regparm: 0,
+            reg_struct_return: false,
             ident: true,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
@@ -2893,6 +2898,9 @@ impl Session {
     /// back end.
     pub fn new(opts: Options) -> Self {
         let mut target = TargetInfo::new(opts.target);
+        if opts.reg_struct_return {
+            target = target.with_reg_struct_return(true);
+        }
         if opts.regparm > 0 {
             // A count the target cannot take was refused by the driver.
             target = target.clone().with_regparm(opts.regparm).unwrap_or(target);

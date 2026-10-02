@@ -208,17 +208,19 @@ static REGPARM_2_ARGS: [PhysReg; 2] = [EAX, EDX];
 static REGPARM_3_ARGS: [PhysReg; 3] = [EAX, EDX, ECX];
 
 /// [`SYSV`] with the first `n` words of arguments in registers, which is gcc's `regparm(n)`, with
-/// the conventions a function of it may call.
+/// the conventions a function of it may call. The first word is the plain convention the family
+/// is built on and the second the descriptions of its `regparm` counts, so that the same families
+/// are written once for `-fpcc-struct-return`, the default, and once for `-freg-struct-return`.
 macro_rules! regparm {
-    (0, $conventions:ident) => {
-        CallRegs { conventions: Conventions(&$conventions), ..SYSV }
+    ($base:ident, 0, $conventions:ident) => {
+        CallRegs { conventions: Conventions(&$conventions), ..$base }
     };
-    ($n:literal, $args:ident, $conventions:ident) => {
+    ($base:ident, $abis:ident, $n:literal, $args:ident, $conventions:ident) => {
         CallRegs {
-            abi: &rucc_abi::abis::I386_SYSV_REGPARM[$n - 1],
+            abi: &rucc_abi::abis::$abis[$n - 1],
             int_args: &$args,
             conventions: Conventions(&$conventions),
-            ..SYSV
+            ..$base
         }
     };
 }
@@ -250,44 +252,104 @@ macro_rules! family {
 
 /// The family of a unit with no `-mregparm=`, whose own convention is [`SYSV`].
 static REGPARM_0: [&CallRegs; 4] = [&SYSV, &REGPARM_0_1, &REGPARM_0_2, &REGPARM_0_3];
-static REGPARM_0_1: CallRegs = regparm!(1, REGPARM_1_ARGS, FOREIGN_0);
-static REGPARM_0_2: CallRegs = regparm!(2, REGPARM_2_ARGS, FOREIGN_0);
-static REGPARM_0_3: CallRegs = regparm!(3, REGPARM_3_ARGS, FOREIGN_0);
+static REGPARM_0_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, FOREIGN_0);
+static REGPARM_0_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, FOREIGN_0);
+static REGPARM_0_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, FOREIGN_0);
 family!(REGPARM_0, OWN_0, FOREIGN_0, &SYSV);
 
 /// The family of a unit built with `-mregparm=1`.
 static REGPARM_1: [&CallRegs; 4] = [&REGPARM_1_0, &REGPARM_1_1, &REGPARM_1_2, &REGPARM_1_3];
-static REGPARM_1_0: CallRegs = regparm!(0, FOREIGN_1);
-static REGPARM_1_1: CallRegs = regparm!(1, REGPARM_1_ARGS, OWN_1);
-static REGPARM_1_2: CallRegs = regparm!(2, REGPARM_2_ARGS, FOREIGN_1);
-static REGPARM_1_3: CallRegs = regparm!(3, REGPARM_3_ARGS, FOREIGN_1);
+static REGPARM_1_0: CallRegs = regparm!(SYSV, 0, FOREIGN_1);
+static REGPARM_1_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, OWN_1);
+static REGPARM_1_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, FOREIGN_1);
+static REGPARM_1_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, FOREIGN_1);
 family!(REGPARM_1, OWN_1, FOREIGN_1, &REGPARM_1_1);
 
 /// The family of a unit built with `-mregparm=2`.
 static REGPARM_2: [&CallRegs; 4] = [&REGPARM_2_0, &REGPARM_2_1, &REGPARM_2_2, &REGPARM_2_3];
-static REGPARM_2_0: CallRegs = regparm!(0, FOREIGN_2);
-static REGPARM_2_1: CallRegs = regparm!(1, REGPARM_1_ARGS, FOREIGN_2);
-static REGPARM_2_2: CallRegs = regparm!(2, REGPARM_2_ARGS, OWN_2);
-static REGPARM_2_3: CallRegs = regparm!(3, REGPARM_3_ARGS, FOREIGN_2);
+static REGPARM_2_0: CallRegs = regparm!(SYSV, 0, FOREIGN_2);
+static REGPARM_2_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, FOREIGN_2);
+static REGPARM_2_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, OWN_2);
+static REGPARM_2_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, FOREIGN_2);
 family!(REGPARM_2, OWN_2, FOREIGN_2, &REGPARM_2_2);
 
 /// The family of a unit built with `-mregparm=3`, which is every 32 bit x86 Linux kernel.
 static REGPARM_3: [&CallRegs; 4] = [&REGPARM_3_0, &REGPARM_3_1, &REGPARM_3_2, &REGPARM_3_3];
-static REGPARM_3_0: CallRegs = regparm!(0, FOREIGN_3);
-static REGPARM_3_1: CallRegs = regparm!(1, REGPARM_1_ARGS, FOREIGN_3);
-static REGPARM_3_2: CallRegs = regparm!(2, REGPARM_2_ARGS, FOREIGN_3);
-static REGPARM_3_3: CallRegs = regparm!(3, REGPARM_3_ARGS, OWN_3);
+static REGPARM_3_0: CallRegs = regparm!(SYSV, 0, FOREIGN_3);
+static REGPARM_3_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, FOREIGN_3);
+static REGPARM_3_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, FOREIGN_3);
+static REGPARM_3_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, OWN_3);
 family!(REGPARM_3, OWN_3, FOREIGN_3, &REGPARM_3_3);
 
-/// The convention of a unit on i386 System V built with `-mregparm=registers`, which is [`SYSV`]
+/// [`SYSV`] under `-freg-struct-return`, which returns a structure of one, two, four or eight bytes
+/// in registers. See [`rucc_abi::abis::I386_SYSV_REG_STRUCT`].
+pub static SYSV_REG: CallRegs = CallRegs {
+    abi: &rucc_abi::abis::I386_SYSV_REG_STRUCT,
+    conventions: Conventions(&REG_OWN_0),
+    ..SYSV
+};
+
+/// Under `-freg-struct-return`, the family of a unit with no `-mregparm=`, whose own convention is [`SYSV_REG`].
+static REG_STRUCT_0: [&CallRegs; 4] =
+    [&SYSV_REG, &REG_STRUCT_0_1, &REG_STRUCT_0_2, &REG_STRUCT_0_3];
+static REG_STRUCT_0_1: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 1, REGPARM_1_ARGS, REG_FOREIGN_0);
+static REG_STRUCT_0_2: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_FOREIGN_0);
+static REG_STRUCT_0_3: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_FOREIGN_0);
+family!(REG_STRUCT_0, REG_OWN_0, REG_FOREIGN_0, &SYSV_REG);
+
+/// Under `-freg-struct-return`, the family of a unit built with `-mregparm=1`.
+static REG_STRUCT_1: [&CallRegs; 4] =
+    [&REG_STRUCT_1_0, &REG_STRUCT_1_1, &REG_STRUCT_1_2, &REG_STRUCT_1_3];
+static REG_STRUCT_1_0: CallRegs = regparm!(SYSV_REG, 0, REG_FOREIGN_1);
+static REG_STRUCT_1_1: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 1, REGPARM_1_ARGS, REG_OWN_1);
+static REG_STRUCT_1_2: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_FOREIGN_1);
+static REG_STRUCT_1_3: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_FOREIGN_1);
+family!(REG_STRUCT_1, REG_OWN_1, REG_FOREIGN_1, &REG_STRUCT_1_1);
+
+/// Under `-freg-struct-return`, the family of a unit built with `-mregparm=2`.
+static REG_STRUCT_2: [&CallRegs; 4] =
+    [&REG_STRUCT_2_0, &REG_STRUCT_2_1, &REG_STRUCT_2_2, &REG_STRUCT_2_3];
+static REG_STRUCT_2_0: CallRegs = regparm!(SYSV_REG, 0, REG_FOREIGN_2);
+static REG_STRUCT_2_1: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 1, REGPARM_1_ARGS, REG_FOREIGN_2);
+static REG_STRUCT_2_2: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_OWN_2);
+static REG_STRUCT_2_3: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_FOREIGN_2);
+family!(REG_STRUCT_2, REG_OWN_2, REG_FOREIGN_2, &REG_STRUCT_2_2);
+
+/// Under `-freg-struct-return`, the family of a unit built with `-mregparm=3`, which is every 32 bit x86 Linux kernel.
+static REG_STRUCT_3: [&CallRegs; 4] =
+    [&REG_STRUCT_3_0, &REG_STRUCT_3_1, &REG_STRUCT_3_2, &REG_STRUCT_3_3];
+static REG_STRUCT_3_0: CallRegs = regparm!(SYSV_REG, 0, REG_FOREIGN_3);
+static REG_STRUCT_3_1: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 1, REGPARM_1_ARGS, REG_FOREIGN_3);
+static REG_STRUCT_3_2: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_FOREIGN_3);
+static REG_STRUCT_3_3: CallRegs =
+    regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_OWN_3);
+family!(REG_STRUCT_3, REG_OWN_3, REG_FOREIGN_3, &REG_STRUCT_3_3);
+
+/// The convention of a unit on i386 System V built with `-mregparm=registers`, and with
+/// `-freg-struct-return` when `struct_in_registers` is set, which is [`SYSV`] or [`SYSV_REG`]
 /// for none and [`None`] for more than three, which gcc refuses.
 #[must_use]
-pub fn regparm(registers: u8) -> Option<&'static CallRegs> {
-    let family = match registers {
-        0 => &REGPARM_0,
-        1 => &REGPARM_1,
-        2 => &REGPARM_2,
-        3 => &REGPARM_3,
+pub fn regparm(registers: u8, struct_in_registers: bool) -> Option<&'static CallRegs> {
+    let family = match (registers, struct_in_registers) {
+        (0, false) => &REGPARM_0,
+        (1, false) => &REGPARM_1,
+        (2, false) => &REGPARM_2,
+        (3, false) => &REGPARM_3,
+        (0, true) => &REG_STRUCT_0,
+        (1, true) => &REG_STRUCT_1,
+        (2, true) => &REG_STRUCT_2,
+        (3, true) => &REG_STRUCT_3,
         _ => return None,
     };
     Some(family[usize::from(registers)])
@@ -668,19 +730,24 @@ mod tests {
 
     #[test]
     fn each_regparm_count_finds_every_other_from_where_it_is() {
-        for own in 0..=3u8 {
-            let unit = regparm(own).expect("0 to 3 are counts");
-            assert_eq!(unit.int_args.len(), usize::from(own));
-            assert!(std::ptr::eq(unit.under(Convention::Target).expect("its own"), unit));
-            for other in (0..=3u8).filter(|&other| other != own) {
-                let there = unit.under(Convention::Regparm(other)).expect("every count");
-                assert_eq!(there.int_args, &[EAX, EDX, ECX][..usize::from(other)]);
-                // And a call back to an ordinary function from there is the unit's own again.
-                assert!(std::ptr::eq(there.under(Convention::Target).expect("own"), unit));
+        for registers in [false, true] {
+            for own in 0..=3u8 {
+                let unit = regparm(own, registers).expect("0 to 3 are counts");
+                assert_eq!(unit.int_args.len(), usize::from(own));
+                assert!(std::ptr::eq(unit.under(Convention::Target).expect("its own"), unit));
+                for other in (0..=3u8).filter(|&other| other != own) {
+                    let there = unit.under(Convention::Regparm(other)).expect("every count");
+                    assert_eq!(there.int_args, &[EAX, EDX, ECX][..usize::from(other)]);
+                    // A function of another count returns a structure the way the unit does.
+                    assert_eq!(there.abi.returns.len(), unit.abi.returns.len());
+                    // And a call back to an ordinary function from there is the unit's own again.
+                    assert!(std::ptr::eq(there.under(Convention::Target).expect("own"), unit));
+                }
             }
         }
-        assert!(std::ptr::eq(regparm(0).expect("none"), &SYSV));
-        assert!(regparm(4).is_none());
+        assert!(std::ptr::eq(regparm(0, false).expect("none"), &SYSV));
+        assert!(std::ptr::eq(regparm(0, true).expect("none"), &SYSV_REG));
+        assert!(regparm(4, false).is_none());
     }
 
     #[test]
