@@ -3046,12 +3046,10 @@ mod tests {
     #[test]
     fn a_poisoned_name_is_an_error_where_the_file_writes_it_and_not_where_a_macro_does() {
         let mut run = Run::new();
-        let text = run.go(
-            "#define OLD strcpy\n#define GONE 1\n#pragma GCC poison memcpy strcpy GONE\n\
+        let text = run.go("#define OLD strcpy\n#define GONE 1\n#pragma GCC poison memcpy strcpy GONE\n\
              #pragma GCC poison memcpy\n#pragma GCC poison 42 strcat\nOLD memcpy GONE strcat\n\
              #ifdef strcpy\n#endif\n#if 0\nmemcpy\n#endif\n\
-             _Pragma(\"GCC poison late\") late late\nlate\n",
-        );
+             _Pragma(\"GCC poison late\") late late\nlate\n");
         assert_eq!(text, "strcpy memcpy GONE strcat late late late");
         assert_eq!(
             run.messages(),
