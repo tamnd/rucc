@@ -462,7 +462,14 @@ impl Frame {
         let shifted = outgoing.next_multiple_of(align);
         let body = (top + shifted).next_multiple_of(word);
 
-        let realign = (align > conv.stack_align).then_some(align);
+        // More than a call leaves the stack pointer on, or more than a function counts on finding it
+        // on, which is less than that on i686 Windows. See [`CallRegs::trusted_align`]. A frame that
+        // grows is left to the first rule alone: it was asked to be on the call alignment so that an
+        // array it hands out is, and forcing that as well would want a second base register. So it
+        // keeps what it did before, which is to count on the call alignment.
+        let trusted = conv.trusted_align.min(conv.stack_align);
+        let realign =
+            (align > conv.stack_align || (!layout.grows && align > trusted)).then_some(align);
         // Refused by [`crate::pipeline`] before anything gets here, because the two of them together
         // want one register twice. See `Growing` above.
         assert!(

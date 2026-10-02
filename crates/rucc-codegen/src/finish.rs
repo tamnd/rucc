@@ -2038,6 +2038,36 @@ mod tests {
         );
     }
 
+    /// A convention whose callers only promise eight bytes at entry, which is how i686 Windows is
+    /// treated, realigns for a sixteen byte local and not for an eight byte one, and a frame that
+    /// grows keeps counting on the call alignment rather than wanting a second base register.
+    #[test]
+    fn a_frame_that_cannot_trust_its_entry_realigns_only_for_what_would_fault() {
+        static UNTRUSTED: CallRegs = CallRegs { trusted_align: 8, ..SYSV };
+        let realign = |local: Local, grows: bool| {
+            let (func, allocation, _) = pressure(&UNTRUSTED, 2, 4);
+            let locals = [local];
+            let base = Layout::new(&UNTRUSTED, REGS);
+            let layout = Layout { locals: &locals, leaf: false, grows, ..base };
+            Frame::of(&func, &allocation, &layout).realign()
+        };
+        assert_eq!(realign(Local { size: 16, align: 16 }, false), Some(16));
+        assert_eq!(realign(Local { size: 8, align: 8 }, false), None);
+        assert_eq!(realign(Local { size: 16, align: 16 }, true), None);
+
+        let (mut func, allocation, mut names) = pressure(&UNTRUSTED, 2, 4);
+        let locals = [Local { size: 16, align: 16 }];
+        let base = Layout::new(&UNTRUSTED, REGS);
+        let layout = Layout { locals: &locals, leaf: false, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+        assert!(added(&lines).contains(&"$rsp = x64.and_ri_64 $rsp, -16"), "{lines:?}");
+        // The same frame under the convention that trusts its entry is not realigned.
+        let (func, allocation, _) = pressure(&SYSV, 2, 4);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { locals: &locals, leaf: false, ..base };
+        assert_eq!(Frame::of(&func, &allocation, &layout).realign(), None);
+    }
+
     #[test]
     fn every_block_the_function_returns_from_gets_an_epilogue() {
         let mut names = Interner::new();

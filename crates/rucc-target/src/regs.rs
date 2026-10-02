@@ -513,6 +513,17 @@ pub struct CallRegs {
     /// fault rather than a wrong answer when a caller got this wrong. A command line can ask for
     /// another with `-mpreferred-stack-boundary=`, which is [`CallRegs::aligned_to`].
     pub stack_align: u32,
+    /// The most alignment a function counts on finding the stack pointer at when it starts, without
+    /// forcing it in its prologue. A frame that needs more than this is realigned.
+    ///
+    /// [`CallRegs::stack_align`] everywhere a caller is held to that, so the two say the same thing
+    /// and nothing changes. i686 Windows is the exception: Windows only promises four bytes there,
+    /// and a callback from a DLL Microsoft's compiler built arrives on four. It is eight rather than
+    /// four because nothing on x86 faults on an eight byte value off its alignment, which costs
+    /// only speed, while an aligned sixteen byte vector move off its alignment faults. So a frame
+    /// with a sixteen byte spill or local is realigned with `and $-16, %esp`, which is what gcc
+    /// does for mingw-w64 with SSE, and one with a `double` is not.
+    pub trusted_align: u32,
     /// How many bytes the call instruction itself pushes before the callee starts running.
     ///
     /// Eight on x86-64, where the return address is on the stack, and nothing on a machine that
@@ -721,7 +732,14 @@ impl CallRegs {
         if bytes == self.stack_align {
             return self;
         }
-        made(CallRegs { stack_align: bytes, ..*self })
+        // Where a function counts on what a call promises, it goes on doing so at the new boundary.
+        // i686 Windows counts on less, and goes on counting on that.
+        let trusted_align = if self.trusted_align == self.stack_align {
+            bytes
+        } else {
+            self.trusted_align.min(bytes)
+        };
+        made(CallRegs { stack_align: bytes, trusted_align, ..*self })
     }
 
     /// The same convention as an x86 interrupt handler sees it, which is what a function with
@@ -1129,6 +1147,7 @@ mod tests {
             shadow,
             home: 0,
             stack_align: 16,
+            trusted_align: 16,
             return_address: 8,
             word: 8,
             total_store_order: true,

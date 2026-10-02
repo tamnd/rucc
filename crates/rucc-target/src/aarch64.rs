@@ -825,6 +825,7 @@ const fn aapcs64(
         shadow: 0,
         home: 0,
         stack_align: 16,
+        trusted_align: 16,
         // A call leaves the return address in the link register, so it pushes nothing and the
         // stack pointer is aligned on entry, which is the thing x86-64's frame layout has to undo.
         return_address: 0,
